@@ -42,8 +42,10 @@ reviews:
       # tests a change carries rather than how well it is explained. A check
       # that a well-documented change fails is one people learn to merge past,
       # which costs more than the check is worth: #305 was merged with this
-      # warning unnoticed, because it sits in a collapsed block that
-      # `cr-findings.sh` does not read.
+      # warning unnoticed. `scripts/cr-findings.sh` surfaces the table now
+      # (#310), so the warning would be seen -- and seen is the problem, since
+      # what it invites is a reflex fix or a shrug, neither of which is
+      # judgement.
       #
       # The repo's actual docstring standard is enforced by review, and the
       # surrounding code shows it: these files carry long prose docstrings
