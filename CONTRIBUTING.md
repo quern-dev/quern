@@ -181,6 +181,50 @@ the copy to trust, and the one to update.
 
   If it does not match, ask for `@coderabbitai full review` rather than the plain form, which reviews forward from the last commit it saw. Measured: the plain form did cover a four-commit gap on #164. The case to distrust is a force-push, where the commit the last review covered no longer exists in the branch — re-read the marker afterwards rather than assuming.
 
+  **The marker matching is not the same as "no findings", and a green
+  CodeRabbit status is not either.** There is a third place findings live,
+  besides inline threads and review bodies: the **pre-merge checks** table in
+  the walkthrough *issue comment*. A PR can have zero reviews and zero review
+  comments and still be carrying findings there. Measured on #309 — a coverage
+  marker equal to head, `cr-findings.sh` printing two empty sections, and a
+  table reading `❌ 2` with a real out-of-scope finding in it. Running the
+  script against #306 as a control (14 reviews, 14 review comments) is what
+  established the empty output was a blind spot rather than a clean bill.
+  `scripts/cr-findings.sh` now reads that table too.
+
+  Two things make this hard to notice from the PR page. First, **CodeRabbit
+  reports through the legacy commit-status API, not check-runs**, so
+  `commits/<sha>/check-runs` — the right query for CI — never returns a
+  CodeRabbit row at all, and reading its absence as "no review" is wrong. Use
+  `commits/<sha>/status` for CodeRabbit and `check-runs` for CI; `gh pr checks`
+  merges both and shows them as one list.
+
+  Second, and worse: **that status says `success` / `Review completed` even when
+  CodeRabbit's own pre-merge checks failed.** It is a genuine, current status on
+  that exact commit — not a stale row carried from an earlier push — it simply
+  does not depend on the checks. Measured twice: #309's `72faef2` carried
+  `❌ 2` and got `success` two seconds after the table was published, and
+  #305 merged on a head with `❌ 1`. So `CodeRabbit pass` is not a statement
+  about findings.
+
+  **But treat a failing table as a question, not a wall.** Measured over the 28
+  most recently merged PRs (2026-09-25): 23 merged with a failing tally, and
+  **Docstring Coverage was failing in all 23** — against an 80% threshold
+  nothing in this repo meets. Only two carried anything else: #277 (Out of Scope
+  Changes) and #275 (Title check, *Inconclusive*). So 21 of the 23 were the
+  noise alone. A signal red on four of every five merges carries no information,
+  and that is exactly why the two real ones went unseen — one of them merged past
+  the same day by a session that correctly reported "zero open findings" from
+  every check then available to it. `cr-findings.sh` sorts Docstring Coverage
+  under its own heading rather than hiding it, because hiding it would be a
+  fourth blind spot.
+
+  Note the status column has at least three values — `⚠️ Warning`,
+  `❓ Inconclusive`, `✅ Passed`. #275 is the reason that matters: a tally of
+  `❌ 2` with only one Warning row means the other failure is spelled
+  differently, and a parser matching one spelling drops it. Treat anything that
+  is not a pass as worth reading.
+
 ## Design decisions worth knowing
 
 - **State file is the contract.** All consumers discover the server via `~/.quern/state.json`. Never hardcode ports.
@@ -434,6 +478,38 @@ looks, so the trigger is ambient rather than unlucky.
 extracted tarballs, which are not worktrees and never appear in any of the
 three. A cleanup sweep that reports "none of the worktrees are mine" can be
 true and incomplete at the same time; scratch copies want their own pass.
+
+**Nor do they find a process the removed tree left running.** Deleting a
+worktree does not stop what it started, and a `mitmdump` outlives its tree
+happily: one was found here still serving an addon from
+`quern-dev69-274-.../server/proxy/addon.py` **two days** after that directory
+ceased to exist, holding port 9301. Nothing in `worktree list`, the directory
+listing, `.git/worktrees/`, or a `quern-scratch` pass can see it, and it
+occupies a port a later session may pick.
+
+```sh
+pgrep -fl "mitmdump|swift-test|swiftpm-testing-helper"
+lsof -a -p <pid> -d cwd -Fn          # the process's cwd
+```
+
+A process whose **cwd no longer exists** is a strong orphan signal on its own,
+and it catches shell loops, which have no `-s <addon>` path to check. Two
+lessons came out of the same find, both worth more than the cleanup:
+
+- **A running process is not evidence of a live session.** A listening port
+  feels like stronger proof than a stale directory name because it is present
+  tense; it is the same creation-time hint with a PID attached. Reading one as a
+  live peer led to deferring to a session that had ended days earlier. Ask
+  `ListAgents`, which is the only signal about *now*.
+- **A monitor must not treat "I don't know" as "not yet".** A second orphan was
+  a poll loop watching two PRs, using `gh pr view` with no `--repo` — so it
+  resolved the repository from a cwd that cleanup had deleted underneath it.
+  Every query failed, every failure counted as "still open", and the loop could
+  never conclude: ~1,500 iterations over two days for PRs that had merged.
+  **Removing the worktree is what made it immortal.** So always pass `--repo`
+  rather than depending on cwd, and count consecutive failures and exit
+  non-zero — a monitor that dies complaining beats one that never returns. The
+  same rule as "a failed check must never read as a passing one", one level up.
 
 And keep the sweep narrow. Globbing `quern-*` under `/tmp` returns log files,
 `QUERN_STATE_DIR` directories and stray markdown, which reads as a pile of
