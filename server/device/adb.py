@@ -274,6 +274,112 @@ class AdbBackend:
         except DeviceError:
             return ""
 
+    async def get_device_properties(self, serial: str) -> dict[str, str]:
+        """Every `getprop` key at once, as a dict.
+
+        One `adb shell getprop` costs less than the three single-property
+        reads it replaces -- measured at 0.032s for all 924 properties on a
+        booted emulator against 0.049s for three individual calls -- because
+        the cost is the adb round trip, not the property lookup.
+
+        Returns an empty dict rather than raising: a device that cannot be
+        shelled (offline, unauthorized, mid-boot) has no properties to report,
+        and that is a normal state during enumeration rather than an error.
+        """
+        try:
+            stdout, _ = await self._run_adb_for_device(serial, "shell", "getprop")
+        except Exception:
+            logger.debug("Could not read properties from %s", serial, exc_info=True)
+            return {}
+        props: dict[str, str] = {}
+        for line in (stdout or "").splitlines():
+            # `[ro.build.tags]: [dev-keys]`
+            if not line.startswith("[") or "]: [" not in line:
+                continue
+            key, _, rest = line[1:].partition("]: [")
+            props[key] = rest.rstrip("]")
+        return props
+
+    @staticmethod
+    def classify_from_properties(props: dict[str, str]) -> DeviceType | None:
+        """Emulator or physical device, decided by what the device says it is.
+
+        The serial is a *transport address*, not a property of the device:
+        `emulator-5554` means "reached via the local emulator console on port
+        5554" and `localhost:5555` means "reached over TCP". Neither says what
+        the thing on the other end is, and classifying on the prefix made one
+        emulator answer two different types depending on which serial you used
+        (#264, #299).
+
+        Measured on a Pixel_6_Dev AVD reachable both ways at once -- every one
+        of these properties is byte-identical across the two transports, which
+        is the point:
+
+            ro.kernel.qemu             1                   1
+            ro.hardware                ranchu              ranchu
+            ro.build.characteristics   emulator            emulator
+            ro.product.model           sdk_gphone64_arm64  sdk_gphone64_arm64
+
+        and on a physical LG H932 all four are absent or unremarkable
+        (`ro.hardware=joan`, `ro.product.model=LG-H932`, no qemu keys).
+
+        Returns None when the device could not be asked, which the caller must
+        distinguish from an answer -- guessing here is what #263 is about.
+        """
+        if not props:
+            return None
+        if props.get("ro.kernel.qemu") == "1" or props.get("ro.boot.qemu") == "1":
+            return DeviceType.ANDROID_EMULATOR
+        # `ranchu` is the modern emulator machine type, `goldfish` the older
+        # one. Both are emulator-only and neither appears on a phone.
+        if props.get("ro.hardware", "") in ("ranchu", "goldfish"):
+            return DeviceType.ANDROID_EMULATOR
+        if "emulator" in props.get("ro.build.characteristics", ""):
+            return DeviceType.ANDROID_EMULATOR
+        if props.get("ro.product.model", "").startswith("sdk_"):
+            return DeviceType.ANDROID_EMULATOR
+        return DeviceType.ANDROID_DEVICE
+
+    @staticmethod
+    def is_console_serial(serial: str) -> bool:
+        """Whether this serial is the local emulator-console address.
+
+        The one thing the `emulator-` prefix genuinely does tell you. It is a
+        fact about the *connection*, and using it to decide `emu` routing is
+        correct in a way that using it to decide what the device *is* never
+        was: `emulator-5554` means "reached through the console on port 5554",
+        which is precisely the question `adb emu` cares about.
+
+        Cheap counterpart to `has_emulator_console`, which actually asks. Use
+        this to route, that to verify.
+        """
+        return serial.startswith("emulator-")
+
+    async def has_emulator_console(self, serial: str) -> bool:
+        """Whether `adb emu` commands work on *this serial*.
+
+        Deliberately a question about the transport rather than the device,
+        and the reason one `DeviceType` could never be right for both: the
+        emulator console is reachable only through the local `emulator-N`
+        serial. The same AVD reached over TCP is still an emulator in every
+        respect that matters for a certificate, and genuinely cannot answer
+        `adb emu kill` or `adb emu geo fix` under that serial.
+
+        Measured on one AVD, both transports live at once:
+
+            emulator-5554    adb emu avd name -> "Pixel_6_Dev"
+            localhost:5555   adb emu avd name -> (empty)
+
+        So `set_location` and shutdown-by-console ask this, while certificate
+        installation asks `is_rootable`, and they are allowed to disagree.
+        """
+        try:
+            stdout, _ = await self._run_adb_for_device(serial, "emu", "avd", "name")
+        except Exception:
+            return False
+        first = (stdout or "").strip().splitlines()[:1]
+        return bool(first and first[0].strip() and "error" not in first[0].lower())
+
     async def _get_emulator_name(self, serial: str) -> str:
         """Get the AVD name for an emulator."""
         try:
@@ -328,9 +434,29 @@ class AdbBackend:
                 state = DeviceState.SHUTDOWN
                 is_available = False
 
-            # Determine device type
-            is_emulator = serial.startswith("emulator-")
-            device_type = DeviceType.ANDROID_EMULATOR if is_emulator else DeviceType.ANDROID_DEVICE
+            # Ask the device what it is, rather than reading it off the
+            # transport address. `emulator-5554` and `localhost:5555` can be
+            # the same running AVD, and the prefix test called them different
+            # kinds (#264). Properties do not vary by transport; measured
+            # byte-identical across both serials of one emulator.
+            props = await self.get_device_properties(serial) if is_available else {}
+            device_type = self.classify_from_properties(props)
+            if device_type is None:
+                # Offline, unauthorized, or mid-boot: there is no shell to ask,
+                # so the address is the only evidence left. Kept explicitly as
+                # a last resort rather than as the rule, and only reachable for
+                # a device that cannot be used for anything yet anyway.
+                device_type = (
+                    DeviceType.ANDROID_EMULATOR if serial.startswith("emulator-")
+                    else DeviceType.ANDROID_DEVICE
+                )
+            is_emulator = device_type == DeviceType.ANDROID_EMULATOR
+
+            # A *transport* question, deliberately asked of the serial: the
+            # emulator console answers only through the local `emulator-N`
+            # address, so the same AVD over TCP has no AVD name to fetch even
+            # though it is every bit an emulator.
+            has_console = serial.startswith("emulator-")
 
             # Extract model from the -l output (e.g. model:Pixel_7)
             model = ""
@@ -346,7 +472,7 @@ class AdbBackend:
 
             # For emulators, always try to resolve the AVD name so we
             # can suppress the duplicate shutdown AVD entry.
-            if is_emulator:
+            if has_console:
                 avd_name = await self._get_emulator_name(serial)
                 if avd_name and avd_name != serial:
                     name = avd_name
@@ -358,13 +484,14 @@ class AdbBackend:
                     running_avd_names.add(name)
 
             if is_available:
+                # From the bulk read above rather than three more round trips.
                 if not is_emulator and not model:
-                    model = await self._get_device_property(serial, "ro.product.model")
+                    model = props.get("ro.product.model", "")
                     if model:
                         name = model
 
-                os_version = await self._get_device_property(serial, "ro.build.version.release")
-                api_level = await self._get_device_property(serial, "ro.build.version.sdk")
+                os_version = props.get("ro.build.version.release", "")
+                api_level = props.get("ro.build.version.sdk", "")
 
             runtime = f"API {api_level}" if api_level else ""
 
@@ -542,9 +669,33 @@ class AdbBackend:
         return apps
 
     async def is_rootable(self, serial: str) -> bool:
-        """Check if the device supports adb root (dev-keys build)."""
+        """Whether `adb root` can succeed on this device.
+
+        A property of the *device*, not of how it is reached, and not of
+        whether the serial starts with `emulator-`. The cert gate used to ask
+        the type instead, which made this wrong on four of the eight rows in
+        #299's matrix: a Google Play emulator was offered a system-cert
+        install it could never complete, while a genuinely rootable dev-keys
+        emulator was refused one purely for being reached over TCP.
+
+        Measured on that dev-keys AVD through both serials at once --
+        `adb root` then `id` returned `uid=0(root)` on *both*, so the refusal
+        was a false negative about the device, produced by a fact about the
+        wire.
+
+        `ro.debuggable` joins `ro.build.tags` here because either is
+        sufficient: a userdebug build reports `release-keys` yet still permits
+        `adb root`, so testing tags alone under-reports.
+        """
+        props = await self.get_device_properties(serial)
+        if props:
+            return props.get("ro.build.tags") == "dev-keys" or props.get("ro.debuggable") == "1"
+        # Could not read properties at all. Fall back to the single-property
+        # path rather than reporting "not rootable", which would be an answer
+        # rather than the absence of one.
         tags = await self._get_device_property(serial, "ro.build.tags")
-        return tags == "dev-keys"
+        debuggable = await self._get_device_property(serial, "ro.debuggable")
+        return tags == "dev-keys" or debuggable == "1"
 
     async def get_api_level(self, serial: str) -> int:
         """Get the device API level as an integer."""
@@ -1021,9 +1172,12 @@ rm -rf /data/local/tmp/tmp-ca-copy
         Note: the emulator console takes longitude first, then latitude.
         A default satellite count of 4 avoids anti-spoof heuristics that flag 0 satellites.
         """
-        if not serial.startswith("emulator-"):
+        if not self.is_console_serial(serial):
             raise DeviceError(
-                "Location simulation is only supported on Android emulators",
+                "Location simulation needs the emulator console, which is "
+                f"reachable only through an `emulator-NNNN` serial, not {serial}. "
+                "The device may well be an emulator; this connection cannot "
+                "carry `adb emu` commands.",
                 tool="adb",
             )
         await self._run_adb_for_device(

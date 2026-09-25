@@ -33,10 +33,47 @@ _logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/proxy", tags=["proxy"])
 
-# Device types that support automated cert install. Physical iOS and physical
-# Android require manual flows (Settings > VPN & Device Management for iOS,
-# system partition modification for Android) and are excluded from batch installs.
-_INSTALLABLE_CERT_TYPES = {DeviceType.SIMULATOR, DeviceType.ANDROID_EMULATOR}
+async def _can_install_cert(controller, udid: str, device_type) -> tuple[bool, str | None]:
+    """Whether quern can install a system certificate, and why not if it cannot.
+
+    The question is *rootability*, not device kind, and on Android the two do
+    not line up. Measured across #299's matrix: a Google Play emulator is
+    `ANDROID_EMULATOR` and cannot be rooted, so the old type test started an
+    install that dies partway with `adbd cannot run as root in production
+    builds`; a dev-keys emulator reached over TCP was classified
+    `ANDROID_DEVICE` and refused, though `adb root` on that very serial
+    returns `uid=0(root)`. Four of eight rows wrong, in both directions.
+
+    iOS is unchanged, because there the type *is* the capability: a simulator
+    takes a cert through `simctl keychain`, a physical device cannot be
+    automated at all.
+    """
+    if device_type == DeviceType.SIMULATOR:
+        return True, None
+    if device_type == DeviceType.DEVICE:
+        return False, (
+            "Automated cert install is not supported for physical iOS "
+            "devices. Install the cert manually: Settings > General > "
+            "VPN & Device Management > select the mitmproxy profile > "
+            "Install. Then enable trust under Settings > General > "
+            "About > Certificate Trust Settings."
+        )
+    if device_type in (DeviceType.ANDROID_EMULATOR, DeviceType.ANDROID_DEVICE):
+        if await controller.adb.is_rootable(udid):
+            return True, None
+        return False, (
+            f"{udid} is not rootable, so a system certificate cannot be "
+            "installed on it — this is a property of the build (release-keys, "
+            "not debuggable), not of whether it is an emulator. Use a Google "
+            "APIs emulator image, or trust the cert at the app level with "
+            "networkSecurityConfig. Routing the device through the proxy does "
+            "not need a certificate and works either way: POST "
+            "/api/v1/proxy/device-proxy-config with apply=true."
+        )
+    return False, (
+        f"quern does not know what kind of device {udid} is, so it cannot say "
+        "whether a certificate can be installed. List devices first."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -409,33 +446,24 @@ async def install_cert(
         # early with a clear message rather than letting it fall into a cryptic
         # simctl "Invalid device" error.
         target_type = device_type_map.get(target_udid)
-        if target_type is not None and target_type not in _INSTALLABLE_CERT_TYPES:
-            if target_type == DeviceType.DEVICE:
-                guidance = (
-                    "Automated cert install is not supported for physical iOS "
-                    "devices. Install the cert manually: Settings > General > "
-                    "VPN & Device Management > select the mitmproxy profile > "
-                    "Install. Then enable trust under Settings > General > "
-                    "About > Certificate Trust Settings."
-                )
-            else:  # ANDROID_DEVICE
-                guidance = (
-                    "Automated cert install is not supported for physical "
-                    "Android devices — system cert installation requires root "
-                    "and direct system partition modification. Use a rootable "
-                    "Google APIs emulator for HTTPS interception, or configure "
-                    "the cert at the app level via networkSecurityConfig."
-                )
-            raise HTTPException(status_code=400, detail=guidance)
+        if target_type is not None:
+            ok, guidance = await _can_install_cert(controller, target_udid, target_type)
+            if not ok:
+                raise HTTPException(status_code=400, detail=guidance)
         udids = [target_udid]
     else:
         from server.models import DeviceState
 
-        udids = [
-            d.udid for d in all_devices
-            if d.state == DeviceState.BOOTED
-            and d.device_type in _INSTALLABLE_CERT_TYPES
-        ]
+        # Rootability is a per-device probe, so the batch asks each booted
+        # candidate rather than filtering on type. One `getprop` each, and
+        # only for devices that are already booted.
+        udids = []
+        for d in all_devices:
+            if d.state != DeviceState.BOOTED:
+                continue
+            ok, _ = await _can_install_cert(controller, d.udid, d.device_type)
+            if ok:
+                udids.append(d.udid)
 
     if not udids:
         raise HTTPException(

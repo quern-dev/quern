@@ -584,6 +584,13 @@ class TestCertInstall:
             ]
         )
 
+        # Eligibility on Android is rootability, not device kind (#299), so
+        # the emulator has to say which it is rather than being assumed
+        # installable for being an emulator.
+        app.state.device_controller.adb.is_rootable = AsyncMock(
+            side_effect=lambda udid: udid == "emu-1"
+        )
+
         with patch("server.proxy.cert_manager.install_cert") as mock_install:
             mock_install.return_value = True
             response = client.post(
@@ -598,6 +605,69 @@ class TestCertInstall:
         installed_udids = {d["udid"] for d in data["devices"]}
         assert installed_udids == {"sim-1", "emu-1"}
         assert mock_install.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_cert_install_excludes_a_non_rootable_emulator(
+        self, client, auth_headers, mock_cert_path, mock_cert_state, app
+    ):
+        """The false-positive row of #299's matrix.
+
+        A Google Play image is an `ANDROID_EMULATOR` and cannot be rooted, so
+        the old type test started an install that dies partway through with
+        `adbd cannot run as root in production builds`. Being an emulator was
+        never the question.
+        """
+        app.state.device_controller.list_devices = AsyncMock(
+            return_value=[
+                DeviceInfo(
+                    udid="play-emu",
+                    name="Medium_Phone_API_36",
+                    state=DeviceState.BOOTED,
+                    device_type=DeviceType.ANDROID_EMULATOR,
+                ),
+            ]
+        )
+        app.state.device_controller.adb.is_rootable = AsyncMock(return_value=False)
+
+        with patch("server.proxy.cert_manager.install_cert") as mock_install:
+            mock_install.return_value = True
+            response = client.post(
+                "/api/v1/proxy/cert/install", json={}, headers=auth_headers,
+            )
+
+        assert response.status_code == 400
+        assert mock_install.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_cert_install_allows_a_rootable_device_on_any_transport(
+        self, client, auth_headers, mock_cert_path, mock_cert_state, app
+    ):
+        """The false-negative row, and the one that cost a working capability.
+
+        A dev-keys emulator reached over TCP was classified `ANDROID_DEVICE`
+        and refused, while `adb root` on that very serial returns
+        `uid=0(root)` -- measured on both serials of one AVD at once.
+        """
+        app.state.device_controller.list_devices = AsyncMock(
+            return_value=[
+                DeviceInfo(
+                    udid="localhost:5555",
+                    name="sdk gphone64 arm64",
+                    state=DeviceState.BOOTED,
+                    device_type=DeviceType.ANDROID_EMULATOR,
+                ),
+            ]
+        )
+        app.state.device_controller.adb.is_rootable = AsyncMock(return_value=True)
+
+        with patch("server.proxy.cert_manager.install_cert") as mock_install:
+            mock_install.return_value = True
+            response = client.post(
+                "/api/v1/proxy/cert/install", json={}, headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        assert {d["udid"] for d in response.json()["devices"]} == {"localhost:5555"}
 
     @pytest.mark.asyncio
     async def test_cert_install_explicit_physical_udid_rejected(
