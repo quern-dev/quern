@@ -84,3 +84,22 @@ States seen but not yet captured, all from `CONTRIBUTING.md`: a draft PR (no
 review, and `cr-findings.sh` reads empty, indistinguishable from "found
 nothing"), and a stacked PR whose base is not the default branch (auto review
 disabled entirely).
+
+One more, and this one the payloads here already contain. The check fetches
+`issues/<n>/comments` for the coverage marker, so a capture also picks up the
+walkthrough comment's **pre-merge checks** table — four of the five files here
+hold one, `merged-after-genuine-review` (#204) being old enough to predate the
+feature — and nothing reads it. #309
+merged with a marker equal to head, zero reviews, zero review comments, an empty
+`cr-findings.sh`, and `❌ 2` in that table, one of them a real out-of-scope
+finding. #277 and #305 are merged in the same shape and still show it.
+
+Deliberately *not* filed as a failing expectation, because the verdict was
+right: this check answers "has a review read this head", not "are there
+warnings", and gating on that table would be worse than the gap. Over the 28
+most recently merged PRs, 23 had a failing tally and Docstring Coverage was
+failing in all 23 — a gate on it would block almost every merge for a threshold
+nothing here meets. The defect was that nobody *saw* the two real findings, which is a
+reporting problem; `scripts/cr-findings.sh` now reads the table and sorts
+Docstring Coverage under its own heading. Capture a state here if that judgement
+ever needs revisiting — the evidence is already in these files.
