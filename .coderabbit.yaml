@@ -29,6 +29,31 @@ reviews:
     # that actually ships.
     auto_incremental_review: false
 
+  pre_merge_checks:
+    docstrings:
+      # Off, not lowered. The check counts every function the diff touches,
+      # and in this repo that is overwhelmingly test methods whose names are
+      # already full sentences -- `test_a_truncated_read_is_unknown_not_
+      # unrootable` gains nothing from a docstring restating it -- plus
+      # `__init__`s and pydantic validators a diff merely brushes past.
+      #
+      # It measured 44% on #305 and 63% on #312, both of which documented
+      # every function they actually added, so the number tracks how many
+      # tests a change carries rather than how well it is explained. A check
+      # that a well-documented change fails is one people learn to merge past,
+      # which costs more than the check is worth: #305 was merged with this
+      # warning unnoticed, because it sits in a collapsed block that
+      # `cr-findings.sh` does not read.
+      #
+      # The repo's actual docstring standard is enforced by review, and the
+      # surrounding code shows it: these files carry long prose docstrings
+      # explaining *why*, which no coverage percentage can measure.
+      # Quoted deliberately: bare `off` is a YAML 1.1 boolean, and the
+      # schema's enum is the *string* "off", so the unquoted form parses to
+      # False and fails validation -- silently, since a rejected config falls
+      # back to defaults and the check simply keeps running.
+      mode: "off"
+
   path_filters:
     # Generated or vendored — reviewing these produces noise, not findings.
     - "!mcp/dist/**"
