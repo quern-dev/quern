@@ -1098,7 +1098,10 @@ class DeviceInfo(BaseModel):
     os_version: str = ""
     runtime: str = ""
     is_available: bool = True
-    connection_type: str = ""  # "usb", "wifi", or "" for simulators
+    #: How quern reaches this device. iOS: "usb" or "wifi". Android:
+    #: "usb", "emulator" (the local console) or "tcp" (`adb connect`).
+    #: Empty for simulators and for devices that are not attached.
+    connection_type: str = ""
     device_family: str = ""  # "iPhone", "iPad", "Apple Watch", "Apple TV", or ""
     # True for simulators; physical devices: True when
     # reachable (tunnel not "unavailable")

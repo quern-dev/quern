@@ -1957,3 +1957,76 @@ class TestARecordedWifiProxyConfigIsVisible:
             "the config the user set up by hand is not reported back"
         )
         assert entry.get("name") is None, "a name was invented rather than omitted"
+
+
+@pytest.mark.asyncio
+class TestCertEligibilityFollowsRootabilityNotKind:
+    """The device-kind half of #299's matrix, which nothing pinned.
+
+    Dropping `ANDROID_DEVICE` from the gate -- restoring the exact
+    emulator-only behaviour this change exists to remove -- left the whole
+    suite green, because every Android case here used `ANDROID_EMULATOR`.
+    """
+
+    async def _install(self, client, auth_headers, app, device_type, rootable, udid="d1"):
+        app.state.device_controller.list_devices = AsyncMock(
+            return_value=[DeviceInfo(
+                udid=udid, name="dev", state=DeviceState.BOOTED, device_type=device_type,
+            )]
+        )
+        app.state.device_controller.adb.is_rootable = AsyncMock(return_value=rootable)
+        with patch("server.proxy.cert_manager.install_cert") as mock_install:
+            mock_install.return_value = True
+            r = client.post("/api/v1/proxy/cert/install", json={}, headers=auth_headers)
+        return r, mock_install
+
+    async def test_a_rootable_physical_android_is_eligible(
+        self, client, auth_headers, mock_cert_path, mock_cert_state, app
+    ):
+        """An `ANDROID_DEVICE` that can be rooted -- a userdebug phone, or any
+        device whose build permits `adb root`. The old gate refused it for its
+        kind; rootability is the only question that matters."""
+        r, mock_install = await self._install(
+            client, auth_headers, app, DeviceType.ANDROID_DEVICE, rootable=True,
+        )
+        assert r.status_code == 200
+        assert mock_install.call_count == 1
+
+    async def test_a_non_rootable_physical_android_is_not(
+        self, client, auth_headers, mock_cert_path, mock_cert_state, app
+    ):
+        r, mock_install = await self._install(
+            client, auth_headers, app, DeviceType.ANDROID_DEVICE, rootable=False,
+        )
+        assert r.status_code == 400
+        assert mock_install.call_count == 0
+
+    async def test_a_device_whose_build_could_not_be_read_is_not_refused_on_the_merits(
+        self, client, auth_headers, mock_cert_path, mock_cert_state, app
+    ):
+        """`is_rootable` returns None when the read failed. Saying "your build
+        is release-keys" about data that never arrived is a reason invented."""
+        r, mock_install = await self._install(
+            client, auth_headers, app, DeviceType.ANDROID_EMULATOR, rootable=None,
+        )
+        assert r.status_code == 400
+        assert mock_install.call_count == 0
+
+    async def test_an_unknown_udid_defers_rather_than_inventing_a_refusal(
+        self, client, auth_headers, mock_cert_path, mock_cert_state, app
+    ):
+        """This gate is an early, better error -- not the enforcement point.
+        `cert_manager` asks `is_rootable` for Android and fails on simctl for
+        iOS, so refusing here on "I have not listed this device" would invent
+        a restriction out of quern's own ignorance."""
+        app.state.device_controller.list_devices = AsyncMock(return_value=[])
+        app.state.device_controller._device_type = MagicMock(return_value=None)
+        with patch("server.proxy.cert_manager.install_cert") as mock_install:
+            mock_install.return_value = True
+            r = client.post(
+                "/api/v1/proxy/cert/install",
+                json={"udid": "never-listed-udid"},
+                headers=auth_headers,
+            )
+        assert r.status_code == 200
+        assert mock_install.call_count == 1

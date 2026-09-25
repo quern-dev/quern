@@ -59,8 +59,16 @@ async def _can_install_cert(controller, udid: str, device_type) -> tuple[bool, s
             "About > Certificate Trust Settings."
         )
     if device_type in (DeviceType.ANDROID_EMULATOR, DeviceType.ANDROID_DEVICE):
-        if await controller.adb.is_rootable(udid):
+        rootable = await controller.adb.is_rootable(udid)
+        if rootable:
             return True, None
+        if rootable is None:
+            return False, (
+                f"quern could not read the build properties of {udid}, so it "
+                "cannot tell whether a certificate can be installed. The "
+                "device may still be booting. This is not a refusal on the "
+                "merits -- try again once it has settled."
+            )
         return False, (
             f"{udid} is not rootable, so a system certificate cannot be "
             "installed on it — this is a property of the build (release-keys, "
@@ -70,10 +78,15 @@ async def _can_install_cert(controller, udid: str, device_type) -> tuple[bool, s
             "not need a certificate and works either way: POST "
             "/api/v1/proxy/device-proxy-config with apply=true."
         )
-    return False, (
-        f"quern does not know what kind of device {udid} is, so it cannot say "
-        "whether a certificate can be installed. List devices first."
-    )
+    # Unknown kind. Allowed through deliberately, and this is the reachable
+    # branch rather than dead code: this gate is an *early, better error*, not
+    # the enforcement point. `cert_manager` refuses on its own terms -- it
+    # asks `is_rootable` for Android and fails on simctl for iOS -- so
+    # refusing here on "I have not listed this device" would invent a
+    # restriction out of quern's own ignorance, and break a caller naming a
+    # device it knows about before any enumeration has run.
+    _logger.debug("Cert eligibility for %s is unknown; deferring to cert_manager", udid)
+    return True, None
 
 
 # ---------------------------------------------------------------------------
@@ -395,7 +408,11 @@ async def _verify_physical_device(
 async def install_cert(
     request: Request, body: CertInstallRequest | None = None,
 ) -> dict:
-    """Install mitmproxy CA certificate on simulator(s) and emulator(s).
+    """Install the mitmproxy CA certificate on eligible devices.
+
+    Eligibility is *rootability* on Android and device kind on iOS, not
+    "simulators and emulators" -- a Google Play emulator cannot take a system
+    cert and a rootable phone can (#299).
 
     Idempotent - skips devices that already have the cert installed
     unless force=True.
@@ -445,11 +462,23 @@ async def install_cert(
         # Single target — if we know its type and it's not installable, refuse
         # early with a clear message rather than letting it fall into a cryptic
         # simctl "Invalid device" error.
+        # `.get()` yields None for a udid quern has never listed, and the
+        # gate used to be skipped entirely in that case -- so an unknown or
+        # non-canonically-spelled udid went straight to the install it should
+        # have been refused. The unknown branch inside `_can_install_cert`
+        # existed for this and was unreachable from here.
+        # Two sources, because the map only holds what the last enumeration
+        # saw: a caller naming a device by a spelling `list_devices` did not
+        # return still deserves the better error. `isinstance` guards the
+        # second, so a mock or a junk value cannot pose as a device kind.
         target_type = device_type_map.get(target_udid)
-        if target_type is not None:
-            ok, guidance = await _can_install_cert(controller, target_udid, target_type)
-            if not ok:
-                raise HTTPException(status_code=400, detail=guidance)
+        if target_type is None:
+            cached = controller._device_type(target_udid)
+            if isinstance(cached, DeviceType):
+                target_type = cached
+        ok, guidance = await _can_install_cert(controller, target_udid, target_type)
+        if not ok:
+            raise HTTPException(status_code=400, detail=guidance)
         udids = [target_udid]
     else:
         from server.models import DeviceState

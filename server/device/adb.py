@@ -297,7 +297,12 @@ class AdbBackend:
             if not line.startswith("[") or "]: [" not in line:
                 continue
             key, _, rest = line[1:].partition("]: [")
-            props[key] = rest.rstrip("]")
+            # Exactly one closing bracket, not every trailing one. `rstrip`
+            # ate them all, so a value that itself ends in `]` came back
+            # truncated -- `[value]]` yielding `value`. No property on the
+            # four attached devices ends that way, so this was latent, and
+            # the test that named it used a fixture with no bracket in it.
+            props[key] = rest[:-1] if rest.endswith("]") else rest
         return props
 
     @staticmethod
@@ -366,35 +371,13 @@ class AdbBackend:
         was: `emulator-5554` means "reached through the console on port 5554",
         which is precisely the question `adb emu` cares about.
 
-        Cheap counterpart to `has_emulator_console`, which actually asks. Use
-        this to route, that to verify.
+        This is the only transport test quern needs. An earlier version of
+        this change also shipped an async `has_emulator_console` that ran
+        `adb emu avd name` to *verify* the console answers -- no code ever
+        called it. A probe nothing consults cannot be wrong, which is the same
+        unexercised-surface problem #265 shipped and had to walk back.
         """
         return serial.startswith("emulator-")
-
-    async def has_emulator_console(self, serial: str) -> bool:
-        """Whether `adb emu` commands work on *this serial*.
-
-        Deliberately a question about the transport rather than the device,
-        and the reason one `DeviceType` could never be right for both: the
-        emulator console is reachable only through the local `emulator-N`
-        serial. The same AVD reached over TCP is still an emulator in every
-        respect that matters for a certificate, and genuinely cannot answer
-        `adb emu kill` or `adb emu geo fix` under that serial.
-
-        Measured on one AVD, both transports live at once:
-
-            emulator-5554    adb emu avd name -> "Pixel_6_Dev"
-            localhost:5555   adb emu avd name -> (empty)
-
-        So `set_location` and shutdown-by-console ask this, while certificate
-        installation asks `is_rootable`, and they are allowed to disagree.
-        """
-        try:
-            stdout, _ = await self._run_adb_for_device(serial, "emu", "avd", "name")
-        except Exception:
-            return False
-        first = (stdout or "").strip().splitlines()[:1]
-        return bool(first and first[0].strip() and "error" not in first[0].lower())
 
     async def _get_emulator_name(self, serial: str) -> str:
         """Get the AVD name for an emulator."""
@@ -698,7 +681,7 @@ class AdbBackend:
                 ))
         return apps
 
-    async def is_rootable(self, serial: str) -> bool:
+    async def is_rootable(self, serial: str) -> bool | None:
         """Whether `adb root` can succeed on this device.
 
         A property of the *device*, not of how it is reached, and not of
@@ -718,13 +701,22 @@ class AdbBackend:
         `adb root`, so testing tags alone under-reports.
         """
         props = await self.get_device_properties(serial)
-        if props:
+        if "ro.build.version.sdk" in props:
             return props.get("ro.build.tags") == "dev-keys" or props.get("ro.debuggable") == "1"
-        # Could not read properties at all. Fall back to the single-property
-        # path rather than reporting "not rootable", which would be an answer
-        # rather than the absence of one.
+
+        # The same sentinel `classify_from_properties` uses, and for the same
+        # reason: `if props:` was the "emptiness alone is too weak" mistake
+        # that function spends fifteen lines rejecting, repeated here. A
+        # truncated read gave `None` there and a confident `False` here, from
+        # byte-identical input -- so a dev-keys emulator mid-boot was told its
+        # build was "release-keys, not debuggable", which is a reason invented
+        # about data that never arrived.
         tags = await self._get_device_property(serial, "ro.build.tags")
         debuggable = await self._get_device_property(serial, "ro.debuggable")
+        if not tags and not debuggable:
+            # Nothing answered either way. None, not False: the caller must be
+            # able to tell "not rootable" from "could not ask".
+            return None
         return tags == "dev-keys" or debuggable == "1"
 
     async def get_api_level(self, serial: str) -> int:

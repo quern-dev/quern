@@ -452,8 +452,10 @@ class DeviceController(DeviceControllerUI):
         """Populate device type cache if this UDID isn't known yet.
 
         Called lazily when a UDID is used that hasn't been seen via
-        list_devices(). Without this, _is_physical() defaults to simulator
-        and physical devices get routed to idb instead of WDA.
+        list_devices(). Without this the type stays unknown -- it used to
+        default to simulator (#263) -- so physical devices get routed to idb
+        instead of WDA, and operations that ask the type are refused rather
+        than dispatched.
         """
         if udid not in self._device_type_cache:
             logger.debug("Device type unknown for %s, refreshing device list...", udid[:8])

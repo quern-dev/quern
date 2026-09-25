@@ -124,15 +124,16 @@ class TestCapabilityIsAskedOfTheRightThing:
 
     async def test_dev_keys_is_rootable(self, monkeypatch):
         adb = AdbBackend()
-        monkeypatch.setattr(adb, "get_device_properties",
-                            AsyncMock(return_value={"ro.build.tags": "dev-keys"}))
+        monkeypatch.setattr(adb, "get_device_properties", AsyncMock(
+            return_value={"ro.build.version.sdk": "34", "ro.build.tags": "dev-keys"}))
         assert await adb.is_rootable("X") is True
 
     async def test_a_userdebug_build_is_rootable_despite_release_keys(self, monkeypatch):
         """`ro.debuggable` alone is sufficient; testing tags only under-reports."""
         adb = AdbBackend()
         monkeypatch.setattr(adb, "get_device_properties", AsyncMock(
-            return_value={"ro.build.tags": "release-keys", "ro.debuggable": "1"}))
+            return_value={"ro.build.version.sdk": "34",
+                          "ro.build.tags": "release-keys", "ro.debuggable": "1"}))
         assert await adb.is_rootable("X") is True
 
     async def test_a_release_build_is_not_rootable(self, monkeypatch):
@@ -152,27 +153,6 @@ class TestCapabilityIsAskedOfTheRightThing:
         assert await adb.is_rootable("emulator-5554") is True
         assert await adb.is_rootable("localhost:5555") is True
 
-    async def test_the_console_answers_on_the_console_serial(self, monkeypatch):
-        adb = AdbBackend()
-        monkeypatch.setattr(adb, "_run_adb_for_device",
-                            AsyncMock(return_value=("Pixel_6_Dev\nOK", "")))
-        assert await adb.has_emulator_console("emulator-5554") is True
-
-    async def test_the_console_does_not_answer_over_tcp(self, monkeypatch):
-        """Measured: empty output on `localhost:5555` for the same AVD. This
-        is a real incapacity, not a misclassification -- `emu kill` and
-        `emu geo fix` genuinely cannot be issued through that serial."""
-        adb = AdbBackend()
-        monkeypatch.setattr(adb, "_run_adb_for_device",
-                            AsyncMock(return_value=("", "")))
-        assert await adb.has_emulator_console("localhost:5555") is False
-
-    async def test_an_error_reply_is_not_a_console(self, monkeypatch):
-        adb = AdbBackend()
-        monkeypatch.setattr(adb, "_run_adb_for_device",
-                            AsyncMock(return_value=("error: unknown command", "")))
-        assert await adb.has_emulator_console("localhost:5555") is False
-
 
 class TestPropertiesAreReadInOneCall:
     async def test_the_getprop_dump_is_parsed(self, monkeypatch):
@@ -188,12 +168,24 @@ class TestPropertiesAreReadInOneCall:
         assert props["ro.hardware"] == "ranchu"
         assert props["persist.sys.locale"] == "en-US"
 
-    async def test_a_value_containing_brackets_survives(self, monkeypatch):
+    async def test_a_value_containing_a_comma_survives(self, monkeypatch):
         adb = AdbBackend()
         monkeypatch.setattr(adb, "_run_adb_for_device", AsyncMock(
             return_value=("[bluetooth.device.class_of_device]: [90,2,12]\n", "")))
         props = await adb.get_device_properties("X")
         assert props["bluetooth.device.class_of_device"] == "90,2,12"
+
+    async def test_a_value_ending_in_a_bracket_keeps_it(self, monkeypatch):
+        """The old name of this test said "containing brackets" while its
+        fixture was `90,2,12`, which has none -- so `rstrip("]")` and a plain
+        `[:-1]` were indistinguishable, though they differ exactly here. No
+        property on the four attached devices ends in `]`, so this is latent
+        rather than observed, which is the reason to pin it rather than not."""
+        adb = AdbBackend()
+        monkeypatch.setattr(adb, "_run_adb_for_device", AsyncMock(
+            return_value=("[some.prop]: [value]]\n", "")))
+        props = await adb.get_device_properties("X")
+        assert props["some.prop"] == "value]"
 
     async def test_a_device_that_cannot_be_shelled_yields_nothing(self, monkeypatch):
         """Not an exception: an offline device during enumeration is normal."""
@@ -399,3 +391,37 @@ class TestTransportIsRecordedInTheModel:
             "localhost:5555\tdevice product:sdk_gphone64_arm64 model:sdk_gphone64_arm64")
         assert d[0].connection_type == "tcp"
         assert d[0].device_type == DeviceType.ANDROID_EMULATOR
+
+
+class TestRootabilityCanSayItDoesNotKnow:
+    """`is_rootable` used to answer a confident `False` from a truncated read,
+    while `classify_from_properties` answered `None` from byte-identical
+    input. A dev-keys emulator mid-boot was told its build was "release-keys,
+    not debuggable" -- a reason invented about data that never arrived."""
+
+    async def test_a_truncated_read_is_unknown_not_unrootable(self, monkeypatch):
+        adb = AdbBackend()
+        truncated = {"persist.sys.locale": "en-US", "apexd.status": "ready"}
+        monkeypatch.setattr(adb, "get_device_properties",
+                            AsyncMock(return_value=truncated))
+        monkeypatch.setattr(adb, "_get_device_property", AsyncMock(return_value=""))
+
+        assert await adb.is_rootable("X") is None
+        # The sibling agrees, which is the point: same data, same verdict.
+        assert adb.classify_from_properties(truncated) is None
+
+    async def test_the_single_property_fallback_still_answers(self, monkeypatch):
+        """A bulk read can fail while individual reads work; that is a real
+        answer and must not be flattened into None."""
+        adb = AdbBackend()
+        monkeypatch.setattr(adb, "get_device_properties", AsyncMock(return_value={}))
+        monkeypatch.setattr(adb, "_get_device_property",
+                            AsyncMock(side_effect=["dev-keys", "0"]))
+        assert await adb.is_rootable("X") is True
+
+    async def test_a_definite_no_is_still_false(self, monkeypatch):
+        """The negative control: None must not swallow a real refusal."""
+        adb = AdbBackend()
+        monkeypatch.setattr(adb, "get_device_properties",
+                            AsyncMock(return_value=PHONE_PROPS))
+        assert await adb.is_rootable("X") is False
