@@ -213,6 +213,12 @@ def _effective_filter_label(
 logger = logging.getLogger(__name__)
 
 
+#: Tools whose failure means the *backend* broke, not that the device
+#: answered. Swallowing one of these turns "I could not look" into "I looked
+#: and found nothing", which downstream reads as a fact about the app.
+_BACKEND_FAILURE_TOOLS = frozenset({"sim-bridge", "idb", "wda", "u2"})
+
+
 class DeviceControllerUI:
     """Mixin providing UI inspection and interaction methods.
 
@@ -281,6 +287,39 @@ class DeviceControllerUI:
         if self._sim_bridge_ok:
             return self.sim_bridge
         return self.idb
+
+    #: Backend name per device, written by `get_ui_elements` when it selects
+    #: one. Read by the error paths that follow a read, so the label names the
+    #: backend that did the work rather than whatever is selected a moment
+    #: later. See #186.
+    _last_read_backend: dict[str, str]
+
+    def _backend_name(self, udid: str) -> str:
+        """What the backend driving this device calls itself.
+
+        Read off `_ui_backend`'s own answer rather than re-deciding, because
+        a second copy of that if-chain is a copy that drifts. It already had:
+        ten sites in this file hardcoded `tool="idb"` while the dispatcher
+        routed to four different backends, and three more chose between `wda`
+        and `idb` with sim-bridge missing from the choice entirely.
+
+        That was not cosmetic. On Xcode 27 idb is genuinely broken, so an
+        `[idb]` label on an error sim-bridge produced sent the reader to
+        debug a tool that was never involved (#186).
+        """
+        # Falls back to the active device when given None, because that is
+        # what resolution would have picked. Without it, `_is_physical(None)`
+        # defaults to simulator, so an error from a *physical* iPhone driven by
+        # WDA was labelled `sim-bridge` whenever the caller omitted the udid --
+        # which MCP callers routinely do, making the wrong label the default
+        # path. Measured: same device, same failure, `[sim-bridge]` with
+        # udid=None and `[wda]` with it spelled out.
+        #
+        # Deliberately not `await resolve_udid(...)`: this runs on error paths,
+        # and resolution can boot a device. A label is not worth that.
+        return getattr(
+            self._ui_backend(udid or self._active_udid), "TOOL_NAME", "unknown",
+        )
 
     def _is_obscured_by_home_indicator(
         self,
@@ -1381,6 +1420,13 @@ class DeviceControllerUI:
             await self._ensure_android_screen_on(resolved)
 
         backend = self._ui_backend(resolved)
+        # Recorded at the one moment it is authoritative: the read's own
+        # selection. Capturing it before the call is stale if the periodic
+        # refresh flips `_sim_bridge_ok` in between, and recomputing it when
+        # the error is built is stale the other way. Only the read knows.
+        self._last_read_backend[resolved] = getattr(
+            backend, "TOOL_NAME", "unknown",
+        )
         if mode == "flat" and hasattr(backend, "describe_all_flat"):
             raw = await backend.describe_all_flat(
                 resolved, snapshot_depth=snapshot_depth,
@@ -1472,9 +1518,16 @@ class DeviceControllerUI:
         if not any_label and not identifier and not element_type:
             raise DeviceError(
                 "At least one of label, identifier, or element_type is required",
-                tool="idb",
+                tool="quern",
             )
 
+        # Captured before the read, not when the error is built. `_sim_bridge_ok`
+        # is flipped by the periodic refresh and by `/tools`, so a read that went
+        # through sim-bridge can report its no-match as `[idb]` if the flag moved
+        # while `describe_all()` was awaiting. The refresh does not reroute the
+        # in-flight read or change its result -- only the label, which is the one
+        # thing this change exists to get right.
+        backend = self._backend_name(udid)
         elements, resolved = await self.get_ui_elements(udid)
         matches = find_element(
             elements, label=label, label_contains=label_contains,
@@ -1493,7 +1546,7 @@ class DeviceControllerUI:
                 search_desc += f", type='{element_type}'"
             raise DeviceError(
                 f"No element found matching {search_desc}",
-                tool="idb",
+                tool=self._last_read_backend.get(resolved, backend),
             )
 
         # Return first match with match_count if ambiguous
@@ -1535,20 +1588,20 @@ class DeviceControllerUI:
         if not any_label and not identifier and not element_type:
             raise DeviceError(
                 "At least one of label, identifier, or element_type is required",
-                tool="idb",
+                tool="quern",
             )
 
         if timeout > 60:
             raise DeviceError(
                 "Timeout cannot exceed 60 seconds",
-                tool="idb",
+                tool="quern",
             )
 
         if condition in (WaitCondition.VALUE_EQUALS, WaitCondition.VALUE_CONTAINS):
             if value is None:
                 raise DeviceError(
                     f"Condition '{condition}' requires a value parameter",
-                    tool="idb",
+                    tool="quern",
                 )
 
         resolved = await self.resolve_udid(udid)
@@ -1596,7 +1649,7 @@ class DeviceControllerUI:
         if not checker:
             raise DeviceError(
                 f"Unknown condition: {condition}",
-                tool="idb",
+                tool="quern",
             )
 
         # Polling loop
@@ -1803,7 +1856,7 @@ class DeviceControllerUI:
             raise DeviceError(
                 "Either label/label_contains/label_prefix or identifier "
                 "is required for tap-element",
-                tool="idb",
+                tool="quern",
             )
 
         # Android fast path: tap by native selector, skipping the full UI-tree
@@ -2598,10 +2651,19 @@ class DeviceControllerUI:
         Returns {"status": "ok", "element": {...}} once visible, or
         {"status": "not_found", ...} if it never appeared.
         """
+        # Checked before resolving a device, deliberately: rejecting bad
+        # arguments should not first go looking for hardware, and the error is
+        # about the call rather than the device.
+        #
+        # Which is why it is not labelled with a backend. It read `tool="u2"`
+        # unconditionally, so a missing argument on a physical iPhone was
+        # reported as a failure of Android's driver (#186) -- but naming the
+        # backend that *would* have run is equally untrue, because none did.
+        # `quern` follows the existing non-hardware labels like `pool`.
         if not label and not identifier:
             raise DeviceError(
                 "Either label or identifier is required for scroll-to-element",
-                tool="u2",
+                tool="quern",
             )
 
         resolved = await self.resolve_udid(udid)
@@ -2690,7 +2752,7 @@ class DeviceControllerUI:
                 f"{'unreadable' if after is None else str(len(after)) + ' after'}). "
                 "The tap may not have taken focus, or the field may be "
                 "read-only.",
-                tool="idb",
+                tool=self._backend_name(resolved),
             )
         return {"udid": resolved, "verified": True}
 
@@ -2717,10 +2779,12 @@ class DeviceControllerUI:
         # changed, and typing at stale coordinates would put the text in
         # whatever now occupies them -- which the read-back afterwards, looking
         # up the same selector, would not necessarily notice.
+        # Captured before any await, for the reason given in `get_element`.
+        backend = self._backend_name(udid)
         if self._web_overlay.get(udid):
             with contextlib.suppress(DeviceError):
                 await self.get_web_content(udid=udid)
-        elements, _ = await self.get_ui_elements(udid=udid, use_cache=False)
+        elements, read_udid = await self.get_ui_elements(udid=udid, use_cache=False)
         matches = self._matching_fields(elements, label, identifier)
         if not matches:
             raise DeviceError(
@@ -2728,7 +2792,7 @@ class DeviceControllerUI:
                 # which reads as a broken server rather than a missing field.
                 f"No element found: no text field matching "
                 f"{label or identifier!r} to type into",
-                tool="wda" if self._is_physical(udid) else "idb",
+                tool=self._last_read_backend.get(read_udid, backend),
             )
         return matches[0]
 
@@ -2744,11 +2808,33 @@ class DeviceControllerUI:
         if (target.extra_attrs or {}).get("source") in ("web-inspector", "web-probe"):
             try:
                 await self.get_web_content(udid=udid)
-            except DeviceError:
+            except DeviceError as e:
+                # Same rule as the read below, and this is its sibling four
+                # lines up -- fixed one and left the other, which is the shape
+                # this whole change is about. `get_web_content` does a native
+                # tree read before its Web Inspector handling, so a broken
+                # backend surfaces here first and would be swallowed into
+                # "unreadable".
+                if e.tool in _BACKEND_FAILURE_TOOLS:
+                    raise
                 return None
         try:
             elements, _ = await self.get_ui_elements(udid=udid, use_cache=False)
-        except DeviceError:
+        except DeviceError as e:
+            # A read that could not happen is not a read that found nothing.
+            #
+            # `None` here means "unreadable", and the caller turns that into
+            # "the tap may not have taken focus, or the field may be
+            # read-only" -- a confident misdiagnosis. That was survivable
+            # while sim-bridge raised `RuntimeError` and sailed past this
+            # handler; now that it raises `DeviceError` (#178), a dead bridge
+            # would be reported as a read-only field. Fixing one failure into
+            # a more plausible wrong answer is worse than the failure.
+            #
+            # So a backend that is broken propagates, and only a device that
+            # genuinely answered "nothing matched" reads as unreadable.
+            if e.tool in _BACKEND_FAILURE_TOOLS:
+                raise
             return None
         matches = self._matching_fields(elements, label, identifier)
         return (matches[0].value or "") if matches else None
@@ -2798,7 +2884,7 @@ class DeviceControllerUI:
             if not matches:
                 raise DeviceError(
                     f"No text field matching {label or identifier!r} to clear",
-                    tool="wda" if self._is_physical(resolved) else "idb",
+                    tool=self._backend_name(resolved),
                 )
             target = matches[0]
         else:
@@ -2810,9 +2896,9 @@ class DeviceControllerUI:
                 target = text_fields[0]
 
         if target is None or target.frame is None:
-            tool = "wda" if self._is_physical(resolved) else "idb"
             raise DeviceError(
-                "No text field found to clear", tool=tool,
+                "No text field found to clear",
+                tool=self._backend_name(resolved),
             )
 
         cx = target.frame["x"] + target.frame["width"] / 2
@@ -2853,7 +2939,7 @@ class DeviceControllerUI:
                 "keystroke, and the Web Inspector could not reach the page to "
                 "clear it directly. Reload the page, or make the web view "
                 "inspectable.",
-                tool="idb",
+                tool=self._backend_name(resolved),
             )
 
         if remaining and hasattr(backend, "delete_backwards"):

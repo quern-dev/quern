@@ -25,9 +25,14 @@ from pathlib import Path
 from server.config import CONFIG_DIR
 from server.device import ax_recovery, probing
 from server.device.tool_probe import probe_stdout
-from server.models import SimBridgeSaturatedError
+from server.models import DeviceError, SimBridgeSaturatedError
 
 logger = logging.getLogger(__name__)
+
+#: One spelling of this backend's name, shared by the manager (which raises
+#: before any backend exists) and `SimBridgeBackend.TOOL_NAME`. Two literals
+#: would let an error name a tool that no dispatcher would ever select.
+_TOOL = "sim-bridge"
 
 QUERN_BIN_DIR = CONFIG_DIR / "bin"
 BINARY_NAME = "sim-bridge"
@@ -163,9 +168,10 @@ class SimBridgeManager:
         """Lazy-compile sim-bridge if needed. Returns path to binary."""
         source = _find_source()
         if source is None:
-            raise RuntimeError(
+            raise DeviceError(
                 "sim-bridge.swift source not found. "
-                "Expected at tools/sim-bridge.swift relative to the project root."
+                "Expected at tools/sim-bridge.swift relative to the project root.",
+                tool=_TOOL,
             )
 
         # Keyed on the source's content, not its mtime. An mtime check is
@@ -186,21 +192,24 @@ class SimBridgeManager:
 
         swiftc = shutil.which("swiftc")
         if swiftc is None:
-            raise RuntimeError(
-                "swiftc not found. Install Xcode: xcode-select --install"
-            )
+            raise DeviceError("swiftc not found. Install Xcode: xcode-select --install", tool=_TOOL)
 
         QUERN_BIN_DIR.mkdir(parents=True, exist_ok=True)
         logger.info("Compiling sim-bridge: %s → %s", source, self._binary_path)
 
         proc = await asyncio.create_subprocess_exec(
             swiftc,
-            "-o", str(self._binary_path),
+            "-o",
+            str(self._binary_path),
             str(source),
-            "-framework", "Foundation",
-            "-framework", "IOSurface",
-            "-framework", "CoreGraphics",
-            "-framework", "ImageIO",
+            "-framework",
+            "Foundation",
+            "-framework",
+            "IOSurface",
+            "-framework",
+            "CoreGraphics",
+            "-framework",
+            "ImageIO",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -208,7 +217,7 @@ class SimBridgeManager:
 
         if proc.returncode != 0:
             err = stderr.decode().strip() or stdout.decode().strip()
-            raise RuntimeError(f"Failed to compile sim-bridge:\n{err}")
+            raise DeviceError(f"Failed to compile sim-bridge:\n{err}", tool=_TOOL)
 
         # After the compile, never before: a stamp written up front would mark
         # a failed build as current and skip the retry.
@@ -259,7 +268,7 @@ class SimBridgeManager:
         except TimeoutError:
             logger.error("sim-bridge did not become ready in 15s")
             await self._kill_process()
-            raise RuntimeError("sim-bridge failed to start (timeout)")
+            raise DeviceError("sim-bridge failed to start (timeout)", tool=_TOOL)
 
     async def _stdout_reader(self) -> None:
         """Background task: reads JSON lines from subprocess stdout."""
@@ -306,7 +315,7 @@ class SimBridgeManager:
                     break
                 text = line.decode(errors="replace").rstrip()
                 if text.startswith("[sim-bridge] "):
-                    text = text[len("[sim-bridge] "):]
+                    text = text[len("[sim-bridge] ") :]
                 logger.debug("sim-bridge stderr: %s", text)
         except Exception:
             logger.debug("sim-bridge stderr reader stopped", exc_info=True)
@@ -380,7 +389,7 @@ class SimBridgeManager:
         await self._ensure_process()
 
         if self._process is None or self._process.stdin is None:
-            raise RuntimeError("sim-bridge process not available")
+            raise DeviceError("sim-bridge process not available", tool=_TOOL)
 
         loop = asyncio.get_event_loop()
         self._pending_response = loop.create_future()
@@ -432,19 +441,21 @@ class SimBridgeManager:
                 task = asyncio.current_task()
                 if task is not None and task.cancelling():
                     raise
-                raise RuntimeError(
+                raise DeviceError(
                     f"sim-bridge exited while running {cmd.get('cmd')}. The command "
                     f"may have executed; do not retry a state-changing command "
-                    f"automatically. The subprocess will be restarted on next use."
+                    f"automatically. The subprocess will be restarted on next use.",
+                    tool=_TOOL,
                 ) from None
 
-            raise RuntimeError(
+            raise DeviceError(
                 f"sim-bridge command timed out: {cmd.get('cmd')}. The command was "
                 f"already sent, so it may have executed — this outcome is ambiguous "
                 f"and must not be retried automatically for a state-changing command "
                 f"(tap, type, swipe, button, home, lock, siri, volume*, applepay). "
                 f"The subprocess was restarted to prevent the late response being "
-                f"matched to the next command."
+                f"matched to the next command.",
+                tool=_TOOL,
             ) from None
 
         return result
@@ -495,6 +506,11 @@ class SimBridgeBackend:
     Implements the same interface as IdbBackend for use by controller_ui.py.
     """
 
+    #: What this backend calls itself in an error. The dispatcher reads it
+    #: off whichever backend it selected, so an error can no longer name a
+    #: tool that was never involved (#186).
+    TOOL_NAME = _TOOL
+
     def __init__(self, manager: SimBridgeManager) -> None:
         self._mgr = manager
 
@@ -506,12 +522,16 @@ class SimBridgeBackend:
         result = await self._mgr.send(cmd)
         if not result.get("ok", False):
             error = result.get("error", "unknown error")
-            raise RuntimeError(f"sim-bridge: {error}")
+            raise DeviceError(f"sim-bridge: {error}", tool=_TOOL)
         return result
 
     async def describe_all(
-        self, udid: str, *, snapshot_depth: int | None = None,
-        source_timeout: float | None = None, probe: bool = True,
+        self,
+        udid: str,
+        *,
+        snapshot_depth: int | None = None,
+        source_timeout: float | None = None,
+        probe: bool = True,
         _recovered: bool = False,
     ) -> list[dict]:
         """Return flat list of UI elements.
@@ -547,7 +567,8 @@ class SimBridgeBackend:
             if empty_containers and not probe:
                 logger.debug(
                     "[PERF] sim-bridge.describe_all: skipping %d container probe(s) "
-                    "at the caller's request", len(empty_containers),
+                    "at the caller's request",
+                    len(empty_containers),
                 )
             if empty_containers and probe:
                 logger.info(
@@ -555,8 +576,7 @@ class SimBridgeBackend:
                     len(empty_containers),
                 )
                 probe_tasks = [
-                    probing.probe_container(udid, c, self.describe_point)
-                    for c in empty_containers
+                    probing.probe_container(udid, c, self.describe_point) for c in empty_containers
                 ]
                 probe_results = await asyncio.gather(*probe_tasks)
                 probed = [el for batch in probe_results for el in batch]
@@ -572,9 +592,11 @@ class SimBridgeBackend:
             logger.info(
                 "[PERF] sim-bridge.describe_all COMPLETE: total=%.1fms "
                 "(fetch=%.1fms probe=%.1fms over %d container(s)) elements=%d",
-                (now - start) * 1000, (fetched_at - start) * 1000,
+                (now - start) * 1000,
+                (fetched_at - start) * 1000,
                 (now - fetched_at) * 1000,
-                len(empty_containers) if probe else 0, len(flat),
+                len(empty_containers) if probe else 0,
+                len(flat),
             )
 
             # An XCUITest or WDA run leaves this simulator's accessibility
@@ -589,24 +611,33 @@ class SimBridgeBackend:
             if not _recovered and ax_recovery.looks_poisoned(flat):
                 if await ax_recovery.reset_bridge(udid):
                     return await self.describe_all(
-                        udid, snapshot_depth=snapshot_depth,
-                        source_timeout=source_timeout, probe=probe,
+                        udid,
+                        snapshot_depth=snapshot_depth,
+                        source_timeout=source_timeout,
+                        probe=probe,
                         _recovered=True,
                     )
 
             return flat
 
     async def describe_all_nested(
-        self, udid: str, *, snapshot_depth: int | None = None,
+        self,
+        udid: str,
+        *,
+        snapshot_depth: int | None = None,
     ) -> list[dict]:
         """Return nested tree with children arrays preserved (no probing)."""
         async with self._mgr.admit():
             return await self._fetch_nested(udid)
 
     async def _fetch_nested(self, udid: str) -> list[dict]:
-        result = await self._send({
-            "cmd": "describe-ui", "udid": udid, "nested": True,
-        })
+        result = await self._send(
+            {
+                "cmd": "describe-ui",
+                "udid": udid,
+                "nested": True,
+            }
+        )
         tree = result.get("tree")
         if isinstance(tree, dict):
             return [tree]
@@ -615,16 +646,23 @@ class SimBridgeBackend:
         return []
 
     async def describe_all_flat(
-        self, udid: str, *, snapshot_depth: int | None = None,
+        self,
+        udid: str,
+        *,
+        snapshot_depth: int | None = None,
         source_timeout: float | None = None,
     ) -> list[dict]:
         """Same as describe_all — sim-bridge has only one tree-fetch path."""
         async with self._mgr.admit():
-            return await self.describe_all(udid, snapshot_depth=snapshot_depth,
-                                           source_timeout=source_timeout)
+            return await self.describe_all(
+                udid, snapshot_depth=snapshot_depth, source_timeout=source_timeout
+            )
 
     async def describe_point(
-        self, udid: str, x: float, y: float,
+        self,
+        udid: str,
+        x: float,
+        y: float,
     ) -> dict | None:
         """Server-side hit-test via AXPTranslator's objectAtPoint.
 
@@ -640,10 +678,15 @@ class SimBridgeBackend:
         # directly on the hit-test fast path, and that route would otherwise
         # bypass the bound entirely and queue on the lock until it times out.
         async with self._mgr.admit():
-            result = await self._mgr.send({
-                "cmd": "probe-point", "udid": udid,
-                "x": float(x), "y": float(y), "nested": False,
-            })
+            result = await self._mgr.send(
+                {
+                    "cmd": "probe-point",
+                    "udid": udid,
+                    "x": float(x),
+                    "y": float(y),
+                    "nested": False,
+                }
+            )
         if not result.get("ok"):
             return None
         tree = result.get("tree")
@@ -658,9 +701,12 @@ class SimBridgeBackend:
         await self._send({"cmd": "tap", "udid": udid, "x": x, "y": y})
 
     async def swipe(
-        self, udid: str,
-        start_x: float, start_y: float,
-        end_x: float, end_y: float,
+        self,
+        udid: str,
+        start_x: float,
+        start_y: float,
+        end_x: float,
+        end_y: float,
         duration: float = 0.3,
         hold: float = 0.0,
     ) -> None:
@@ -668,13 +714,18 @@ class SimBridgeBackend:
 
         See `doSwipe` in sim-bridge.swift for the measurements behind `hold`.
         """
-        await self._send({
-            "cmd": "swipe", "udid": udid,
-            "x1": start_x, "y1": start_y,
-            "x2": end_x, "y2": end_y,
-            "duration": duration,
-            "hold": hold,
-        })
+        await self._send(
+            {
+                "cmd": "swipe",
+                "udid": udid,
+                "x1": start_x,
+                "y1": start_y,
+                "x2": end_x,
+                "y2": end_y,
+                "duration": duration,
+                "hold": hold,
+            }
+        )
 
     async def type_text(self, udid: str, text: str) -> None:
         await self._send({"cmd": "type", "udid": udid, "text": text})
@@ -683,12 +734,19 @@ class SimBridgeBackend:
         await self._send({"cmd": "button", "udid": udid, "name": button})
 
     async def set_hardware_keyboard(self, udid: str, enabled: bool) -> None:
-        await self._send({
-            "cmd": "set-hardware-keyboard", "udid": udid, "enabled": enabled,
-        })
+        await self._send(
+            {
+                "cmd": "set-hardware-keyboard",
+                "udid": udid,
+                "enabled": enabled,
+            }
+        )
 
     async def select_all_and_delete(
-        self, udid: str, x: float, y: float,
+        self,
+        udid: str,
+        x: float,
+        y: float,
         element_type: str | None = None,
     ) -> None:
         """Select all text and delete it. Triple-tap to select, then backspace.
@@ -719,12 +777,19 @@ class SimBridgeBackend:
             await self._send({"cmd": "type", "udid": udid, "text": "\x08" * count})
 
     async def screenshot(
-        self, udid: str, quality: float = 0.8, scale: int = 1,
+        self,
+        udid: str,
+        quality: float = 0.8,
+        scale: int = 1,
     ) -> bytes:
         """Capture a screenshot via IOSurface. Returns raw JPEG bytes."""
-        result = await self._send({
-            "cmd": "screenshot", "udid": udid,
-            "quality": quality, "scale": scale,
-        })
+        result = await self._send(
+            {
+                "cmd": "screenshot",
+                "udid": udid,
+                "quality": quality,
+                "scale": scale,
+            }
+        )
         b64 = result.get("data", "")
         return base64.b64decode(b64)

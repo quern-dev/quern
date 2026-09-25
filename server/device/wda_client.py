@@ -241,6 +241,11 @@ def _parse_wda_error(resp: httpx.Response, udid: str) -> WdaError | None:
 class WdaBackend:
     """Speaks WDA's HTTP API for UI automation on physical iOS devices."""
 
+    #: What this backend calls itself in an error. The dispatcher reads it
+    #: off whichever backend it selected, so an error can no longer name a
+    #: tool that was never involved (#186).
+    TOOL_NAME = "wda"
+
     #: A WDA swipe returns once the app is idle, so a read straight after it
     #: is at rest. Measured on an iPhone 11, including at the end of a list.
     swipe_returns_at_rest = True

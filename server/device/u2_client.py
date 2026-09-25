@@ -247,6 +247,11 @@ class U2Backend:
     DeviceControllerUI can delegate to it for Android devices.
     """
 
+    #: What this backend calls itself in an error. The dispatcher reads it
+    #: off whichever backend it selected, so an error can no longer name a
+    #: tool that was never involved (#186).
+    TOOL_NAME = "u2"
+
     def __init__(self) -> None:
         self._devices: dict[str, object] = {}  # serial → u2.Device
 

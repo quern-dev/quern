@@ -59,6 +59,9 @@ class DeviceController(DeviceControllerUI):
         self.sim_bridge_manager = SimBridgeManager()
         self.sim_bridge = SimBridgeBackend(self.sim_bridge_manager)
         self._sim_bridge_ok = False
+        #: Backend name per device, written by `get_ui_elements` at the
+        #: moment it selects one. See DeviceControllerUI._last_read_backend.
+        self._last_read_backend: dict[str, str] = {}
         #: When `_sim_bridge_ok` was last established, or None if never.
         #:
         #: Latching it at startup and never re-checking is #179: Xcode 27 moved

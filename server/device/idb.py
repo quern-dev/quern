@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 class IdbBackend:
     """Manages UI inspection and interaction via idb subprocess calls."""
 
+    #: What this backend calls itself in an error. The dispatcher reads it
+    #: off whichever backend it selected, so an error can no longer name a
+    #: tool that was never involved (#186).
+    TOOL_NAME = "idb"
+
     _QUERN_COMPANION = CONFIG_DIR / "bin" / "idb_companion"
 
     #: `idb ui swipe` releases at speed, so the list flings on. The scroll
