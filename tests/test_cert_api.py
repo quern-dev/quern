@@ -831,7 +831,39 @@ class TestCertInstall:
             )
 
         assert response.status_code == 400
-        assert "Physical devices are not eligible" in response.json()["detail"]
+        detail = response.json()["detail"]
+        # Names the device it passed over and why, rather than asserting a
+        # category. "Physical devices are not eligible" stopped being true
+        # when eligibility stopped following device kind (#299) -- a rootable
+        # phone is eligible now, and a booted Google Play emulator is not.
+        assert "phys-1" in detail
+        assert "physical iOS" in detail
+        mock_install.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_the_batch_refusal_carries_the_retry_guidance(
+        self, client, auth_headers, mock_cert_path, mock_cert_state, app
+    ):
+        """A device still booting answers `is_rootable` with None, which is
+        "ask again", not "no". The batch loop used to discard that reason and
+        report a flat refusal."""
+        app.state.device_controller.list_devices = AsyncMock(
+            return_value=[DeviceInfo(
+                udid="emu-booting", name="Pixel_6_Dev",
+                state=DeviceState.BOOTED, device_type=DeviceType.ANDROID_EMULATOR,
+            )]
+        )
+        app.state.device_controller.adb.is_rootable = AsyncMock(return_value=None)
+
+        with patch("server.proxy.cert_manager.install_cert") as mock_install:
+            response = client.post(
+                "/api/v1/proxy/cert/install", json={}, headers=auth_headers,
+            )
+
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert "emu-booting" in detail
+        assert "still be booting" in detail
         mock_install.assert_not_called()
 
 

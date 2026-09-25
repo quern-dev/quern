@@ -701,16 +701,16 @@ class AdbBackend:
         `adb root`, so testing tags alone under-reports.
         """
         props = await self.get_device_properties(serial)
-        if "ro.build.version.sdk" in props:
+        if "ro.build.tags" in props or "ro.debuggable" in props:
             return props.get("ro.build.tags") == "dev-keys" or props.get("ro.debuggable") == "1"
 
-        # The same sentinel `classify_from_properties` uses, and for the same
-        # reason: `if props:` was the "emptiness alone is too weak" mistake
-        # that function spends fifteen lines rejecting, repeated here. A
-        # truncated read gave `None` there and a confident `False` here, from
-        # byte-identical input -- so a dev-keys emulator mid-boot was told its
-        # build was "release-keys, not debuggable", which is a reason invented
-        # about data that never arrived.
+        # The keys this question needs, not merely "did the read work". An
+        # earlier fix here used `ro.build.version.sdk` as the sentinel, which
+        # is right for *classification* and wrong here: a read carrying the
+        # sentinel but neither rootability key returned a confident `False`
+        # while a single-property read of the same device answered
+        # `dev-keys`. That is the same "answer invented about data that never
+        # arrived" defect this guard was added to remove, one level in.
         tags = await self._get_device_property(serial, "ro.build.tags")
         debuggable = await self._get_device_property(serial, "ro.debuggable")
         if not tags and not debuggable:

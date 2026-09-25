@@ -425,3 +425,62 @@ class TestRootabilityCanSayItDoesNotKnow:
         monkeypatch.setattr(adb, "get_device_properties",
                             AsyncMock(return_value=PHONE_PROPS))
         assert await adb.is_rootable("X") is False
+
+
+class TestRootabilityNeedsTheKeysItAsksAbout:
+    """A read can carry the sentinel and still not answer *this* question."""
+
+    async def test_sentinel_without_the_rootability_keys_falls_back(self, monkeypatch):
+        """`ro.build.version.sdk` present, `ro.build.tags` and `ro.debuggable`
+        absent. Comparing two missing values returned a confident False while
+        a single-property read of the same device said `dev-keys`."""
+        adb = AdbBackend()
+        monkeypatch.setattr(adb, "get_device_properties",
+                            AsyncMock(return_value={"ro.build.version.sdk": "34"}))
+        monkeypatch.setattr(adb, "_get_device_property",
+                            AsyncMock(side_effect=["dev-keys", "0"]))
+
+        assert await adb.is_rootable("X") is True
+
+    async def test_one_key_present_is_enough_to_answer(self, monkeypatch):
+        """`ro.debuggable` alone is a real answer and must not trigger a
+        second round of reads."""
+        adb = AdbBackend()
+        monkeypatch.setattr(adb, "get_device_properties", AsyncMock(
+            return_value={"ro.build.version.sdk": "34", "ro.debuggable": "1"}))
+        single = AsyncMock(return_value="")
+        monkeypatch.setattr(adb, "_get_device_property", single)
+
+        assert await adb.is_rootable("X") is True
+        single.assert_not_awaited()
+
+
+class TestBootWarmsTheCacheItGuardsOn:
+    """`boot` is the one device entry point that does not go through
+    `resolve_udid`, so nothing else warms the cache -- and since `_device_type`
+    stopped guessing SIMULATOR, an unwarmed cache made a valid simulator
+    unrecognised and refused."""
+
+    async def test_an_unwarmed_simulator_is_not_refused(self, monkeypatch):
+        ctrl = DeviceController()
+        ctrl.simctl.boot = AsyncMock()
+        monkeypatch.setattr(ctrl, "_restore_input_after_boot", AsyncMock())
+
+        async def warm(udid):
+            ctrl._device_type_cache[udid] = DeviceType.SIMULATOR
+
+        monkeypatch.setattr(ctrl, "_ensure_device_type_cached", warm)
+
+        assert await ctrl.boot(udid="SIM-1") == "SIM-1"
+        ctrl.simctl.boot.assert_awaited_once_with("SIM-1")
+
+    async def test_a_device_still_unknown_after_warming_is_refused(self, monkeypatch):
+        """The positive control: warming must not become a way to admit
+        anything at all."""
+        ctrl = DeviceController()
+        ctrl.simctl.boot = AsyncMock()
+        monkeypatch.setattr(ctrl, "_ensure_device_type_cached", AsyncMock())
+
+        with pytest.raises(DeviceError):
+            await ctrl.boot(udid="STILL-UNKNOWN")
+        ctrl.simctl.boot.assert_not_awaited()

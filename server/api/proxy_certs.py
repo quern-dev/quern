@@ -417,14 +417,16 @@ async def install_cert(
     Idempotent - skips devices that already have the cert installed
     unless force=True.
 
-    Physical iOS and Android devices are excluded — their cert install
-    flows are manual (iOS: Settings > VPN & Device Management; Android:
-    system partition modification) and not handled by this endpoint.
+    Eligibility is *rootability* on Android and device kind on iOS (#299).
+    Physical iOS is excluded — its flow is manual, via Settings > VPN &
+    Device Management. Android is not excluded by kind: a Google Play
+    emulator cannot take a system cert and a rootable phone can, so the
+    question asked is whether `adb root` will work, not what the device is.
 
     Resolution order when no UDID is supplied:
         1. Active device (set via resolve_device) → install on it.
-        2. Otherwise → install on all booted simulators and Android
-           emulators (physical devices are filtered out).
+        2. Otherwise → install on every booted device that is eligible,
+           naming the ones that are not and why.
 
     Args:
         body.udid: Specific device UDID. If None, follows the resolution
@@ -487,21 +489,31 @@ async def install_cert(
         # candidate rather than filtering on type. One `getprop` each, and
         # only for devices that are already booted.
         udids = []
+        skipped: list[str] = []
         for d in all_devices:
             if d.state != DeviceState.BOOTED:
                 continue
-            ok, _ = await _can_install_cert(controller, d.udid, d.device_type)
+            ok, why = await _can_install_cert(controller, d.udid, d.device_type)
             if ok:
                 udids.append(d.udid)
+            elif why:
+                skipped.append(f"{d.udid}: {why}")
 
     if not udids:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "No booted simulators or Android emulators found to install on. "
-                "Physical devices are not eligible for automated cert install."
-            ),
-        )
+        # Says which devices were considered and why each was passed over,
+        # rather than asserting a category. "No booted simulators or Android
+        # emulators found" was false the moment eligibility stopped following
+        # device kind: a booted Google Play emulator is an Android emulator
+        # and is still refused, and a rootable phone is now eligible though
+        # the old text called physical devices ineligible. The per-device
+        # reason also carries the retry guidance for a device still booting,
+        # which the batch loop used to discard.
+        detail = "No eligible devices to install on."
+        if skipped:
+            detail += " Considered:\n" + "\n".join(f"  - {s}" for s in skipped)
+        else:
+            detail += " No booted devices were found at all."
+        raise HTTPException(status_code=400, detail=detail)
 
     # Install on each device.
     #

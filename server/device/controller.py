@@ -405,9 +405,23 @@ class DeviceController(DeviceControllerUI):
         return self._device_type_cache.get(udid)
 
     def _is_physical(self, udid: str) -> bool:
+        """Whether this is a physical *iOS* device, positively known to be.
+
+        False for an unknown udid, which is a change: `_device_type` used to
+        answer `SIMULATOR` for a cache miss and this compared against `DEVICE`,
+        so an unknown device read as "not physical" for the same reason it
+        read as "a simulator" -- a guess. It is now the absence of an answer.
+        Warm with `_ensure_device_type_cached` where that distinction matters.
+        """
         return self._device_type(udid) == DeviceType.DEVICE
 
     def _is_android(self, udid: str) -> bool:
+        """Whether this is an Android device or emulator, positively known.
+
+        Both kinds, because almost every caller wants "does this go to adb?".
+        Where the two differ -- `emu kill`, `geo fix` -- the question is really
+        about the transport, and `adb.is_console_serial` answers that (#299).
+        """
         return self._device_type(udid) in (DeviceType.ANDROID_EMULATOR, DeviceType.ANDROID_DEVICE)
 
     def _require_simulator(self, udid: str, operation: str) -> None:
@@ -729,6 +743,13 @@ class DeviceController(DeviceControllerUI):
         Returns the udid that was booted.
         """
         if udid:
+            # Warm first. `boot` is the one device entry point that does not
+            # go through `resolve_udid`, so nothing else populates the cache
+            # here -- and since `_device_type` stopped guessing `SIMULATOR`
+            # (#263), an unwarmed cache made a perfectly valid simulator
+            # unrecognised and refused by the guard below. `shutdown` and
+            # `erase` are fine because they resolve first.
+            await self._ensure_device_type_cached(udid)
             if self._is_android(udid):
                 raise DeviceError(
                     "Cannot boot Android emulator by serial — use name (AVD name) instead",
