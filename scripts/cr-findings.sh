@@ -80,17 +80,25 @@ gh api "repos/$OWNER/$NAME/issues/$N/comments?per_page=100" --paginate \
 | python3 -c '
 import re, sys
 
+TALLY = re.compile(r"Pre-merge checks \| ([^<\n]*)")
+
 comments = [c for c in sys.stdin.read().split("\x00CR-COMMENT\x00") if c.strip()]
-withtable = [c for c in comments if "Pre-merge checks" in c]
+# Select on "yields a tally", not "mentions the phrase". A comment can name
+# "Pre-merge checks" in prose -- a reply about them, a quoted heading -- and
+# then the tally regex finds nothing, so indexing [-1] raises IndexError and
+# takes the whole script'"'"'s exit code with it.
+withtable = [(c, m[-1].strip()) for c in comments if (m := TALLY.findall(c))]
 if not withtable:
-    print("  (no checks table -- CodeRabbit may not have processed this PR)")
+    if any("Pre-merge checks" in c for c in comments):
+        print("  (the phrase appears but no table does -- read the comments by hand)")
+    else:
+        print("  (no checks table -- CodeRabbit may not have processed this PR)")
     raise SystemExit(0)
 if len(withtable) > 1:
     print(f"  note: {len(withtable)} comments carry a table; reading the newest")
 
 # The newest one, and everything below is parsed from it alone.
-text = withtable[-1]
-tally = re.findall(r"Pre-merge checks \| ([^<\n]*)", text)[-1].strip()
+text, tally = withtable[-1]
 print(f"  tally: {tally}")
 
 # Rows look like:  | Check name | <status> | explanation | resolution |

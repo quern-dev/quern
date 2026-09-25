@@ -51,6 +51,14 @@ NEWER = """\U0001f6a5 Pre-merge checks | ✅ 5
 | Title check | ✅ Passed | fine now |
 """
 
+# A comment that *names* the checks without carrying a table. Selecting on the
+# phrase rather than on a parseable tally made this an IndexError, which
+# `set -euo pipefail` turned into a non-zero exit for the whole script.
+PROSE_ONLY = """CodeRabbit here. I could not evaluate the Pre-merge checks for this run.
+
+No table is included in this comment.
+"""
+
 GH_STUB = """#!/bin/bash
 # Only the issue-comments call returns anything; everything else is silent, so
 # the threads and review-body sections render empty and this test is about the
@@ -76,11 +84,11 @@ def run_script(tmp_path):
     stub.write_text(GH_STUB)
     stub.chmod(0o755)
 
-    def run() -> str:
+    def run(older: str = OLDER, newer: str = NEWER) -> str:
         env = dict(os.environ)
         env["PATH"] = f"{stub_dir}{os.pathsep}{env['PATH']}"
-        env["OLDER_BODY"] = OLDER
-        env["NEWER_BODY"] = NEWER
+        env["OLDER_BODY"] = older
+        env["NEWER_BODY"] = newer
         proc = subprocess.run(
             ["bash", str(SCRIPT), "999"],
             capture_output=True, text=True, env=env, timeout=60,
@@ -114,3 +122,28 @@ class TestTheTallyAndItsRowsComeFromOneComment:
         """The pre-fix version emitted a row whose name was scraped out of the
         marker between two comments, which is how the bleed announced itself."""
         assert "CR-COMMENT" not in run_script()
+
+
+class TestACommentThatNamesTheChecksWithoutCarryingATable:
+    """Selecting comments on the phrase rather than on a parseable tally made
+    this an `IndexError`, and `set -euo pipefail` turned that into a non-zero
+    exit for the whole script -- so a PR could break the tool by mentioning
+    the checks in prose."""
+
+    def test_it_does_not_crash(self, run_script):
+        out = run_script(older=PROSE_ONLY, newer=PROSE_ONLY)
+
+        assert "Traceback" not in out, out
+        assert "IndexError" not in out, out
+
+    def test_it_says_the_phrase_appeared_without_a_table(self, run_script):
+        """Distinguishing this from "never processed" is the point: one means
+        read the page yourself, the other means there is nothing to read."""
+        assert "no table does" in run_script(older=PROSE_ONLY, newer=PROSE_ONLY)
+
+    def test_a_real_table_still_wins_over_prose(self, run_script):
+        """The prose comment must not shadow a comment that does have one."""
+        out = run_script(older=PROSE_ONLY, newer=NEWER)
+
+        assert "tally: \u2705 5" in out
+        assert "no table does" not in out
