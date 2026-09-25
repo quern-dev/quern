@@ -102,17 +102,37 @@ text, tally = withtable[-1]
 print(f"  tally: {tally}")
 
 # Rows look like:  | Check name | <status> | explanation | resolution |
-# The status column is NOT always "⚠️ Warning": "❓ Inconclusive" exists too
-# (#275 had one, and a tally of ❌ 2 with a single Warning row is the tell), and
-# matching one spelling is how a failing check goes unreported by the very tool
-# meant to surface it. So match any status and treat everything that is not a
-# pass as worth showing.
-rows = re.findall(r"\|\s*([A-Za-z][A-Za-z ]{3,40}?)\s*\|\s*([^|]*?)\s*\|([^|]*)", text)
+#
+# Neither column may be matched narrowly, and both mistakes were made here
+# first. The status is not always "⚠️ Warning" -- "❓ Inconclusive" exists too,
+# and #275 is the tell: a tally of ❌ 2 with a single Warning row. The *name*
+# is worse, because check names are user-defined: CodeRabbit allows custom ones
+# up to 50 characters, so a `[A-Za-z ]` name pattern silently drops `CI-1`,
+# and the report then looks tidy because Docstring Coverage still parsed. A
+# tool built to stop findings hiding must not hide one over a character class.
+#
+# So: take the whole cell, and treat anything that is not a pass as worth
+# showing.
+#
+# But scope the search to the checks table. The walkthrough comment holds other
+# tables -- the "Layer / File(s) | Summary" one among them -- and a cell-shaped
+# pattern run over the whole comment reports their header rows as failing
+# checks. Widening the cell without narrowing the region traded a false negative
+# for a false positive; the count cross-check below is what caught it.
+start = text.rfind("Pre-merge checks")
+region = text[start:]
+for stop in ("\u2728 Finishing Touches", "Generate docstrings", "Generate unit tests"):
+    cut = region.find(stop)
+    if cut != -1:
+        region = region[:cut]
+rows = re.findall(r"\|([^|\n]{1,60})\|([^|\n]{0,40})\|([^|\n]*)", region)
 NOISE = "docstring coverage"
 real, noise = [], []
 for name, status, why in rows:
     name, status = name.strip(), status.strip()
-    if not status or "Passed" in status or status.startswith("✅"):
+    if not name or not status:
+        continue
+    if "Passed" in status or status.startswith("\u2705"):
         continue
     if "Status" in status or set(status) <= set(": -"):   # header / separator rows
         continue
@@ -137,6 +157,15 @@ if noise:
     print("  known-noisy (fails on ~4 of every 5 merged PRs here; judge, do not reflex-fix):")
     for n, _ in noise:
         print(f"    - {n}")
-if not real and not noise and "❌" in tally:
-    print("  tally shows failures but no warning rows parsed -- read the comment by hand")
+# The count is the real guard. Widening a regex fixes the case you thought of;
+# comparing what was parsed against what the tally claims catches the next one
+# too, which is the whole complaint this script exists to make.
+declared = re.search(r"\u274c\s*(\d+)", tally)
+declared = int(declared.group(1)) if declared else 0
+parsed = len(real) + len(noise)
+if declared and parsed != declared:
+    print(f"  WARNING: tally declares {declared} failing but {parsed} row(s) "
+          f"parsed -- something was dropped; read the comment by hand")
+elif declared and not real and not noise:
+    print("  tally shows failures but no rows parsed -- read the comment by hand")
 '

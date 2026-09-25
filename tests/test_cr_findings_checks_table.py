@@ -59,6 +59,38 @@ PROSE_ONLY = """CodeRabbit here. I could not evaluate the Pre-merge checks for t
 No table is included in this comment.
 """
 
+# A custom check name with a digit and a hyphen, which a `[A-Za-z ]` name
+# pattern silently dropped -- and the report still looked tidy, because
+# Docstring Coverage parsed. CodeRabbit allows custom names up to 50 chars.
+CUSTOM_NAME = """\U0001f6a5 Pre-merge checks | \u2705 3 | \u274c 2
+
+### \u274c Failed checks (2)
+
+| Check name | Status | Explanation | Resolution |
+| :---: | :--- | :--- | :--- |
+| CI-1 | \u26a0\ufe0f Warning | a custom gate failed | look at CI |
+| Docstring Coverage | \u26a0\ufe0f Warning | 12.00% insufficient | write docstrings |
+"""
+
+# The walkthrough comment carries tables that are not the checks table. A
+# cell-shaped pattern run over the whole comment reports their header rows as
+# failing checks, which is the false positive that widening the name cell
+# introduced before the region was scoped.
+OTHER_TABLE = """\U0001f4dd Walkthrough
+
+| Layer / File(s) | Summary |
+| :--- | :--- |
+| server/api | changed a thing |
+
+\U0001f6a5 Pre-merge checks | \u2705 4 | \u274c 1
+
+### \u274c Failed checks (1)
+
+| Check name | Status | Explanation | Resolution |
+| :---: | :--- | :--- | :--- |
+| Docstring Coverage | \u26a0\ufe0f Warning | 12.00% insufficient | write docstrings |
+"""
+
 GH_STUB = """#!/bin/bash
 # Only the issue-comments call returns anything; everything else is silent, so
 # the threads and review-body sections render empty and this test is about the
@@ -147,3 +179,55 @@ class TestACommentThatNamesTheChecksWithoutCarryingATable:
 
         assert "tally: \u2705 5" in out
         assert "no table does" not in out
+
+
+class TestTheCheckNameCellIsNotAssumedToBeLettersOnly:
+    """Check names are user-defined, so a character class is the wrong tool.
+    A `[A-Za-z ]` pattern dropped `CI-1` while Docstring Coverage still parsed,
+    so the output looked orderly with a real failure missing from it."""
+
+    def test_a_name_with_a_digit_and_hyphen_is_reported(self, run_script):
+        out = run_script(older=CUSTOM_NAME, newer=CUSTOM_NAME)
+
+        assert "CI-1" in out, f"a custom check name was dropped:\n{out}"
+        assert "FAILED -- look at these" in out, out
+
+    def test_it_is_not_filed_under_the_noise_heading(self, run_script):
+        """Only Docstring Coverage is noise; a custom gate is not."""
+        out = run_script(older=CUSTOM_NAME, newer=CUSTOM_NAME)
+        failed_block = out.split("FAILED -- look at these")[1].split("known-noisy")[0]
+
+        assert "CI-1" in failed_block, out
+
+
+class TestTheParsedCountIsCheckedAgainstTheTally:
+    """The general guard. Widening a pattern fixes the case you thought of;
+    comparing parsed rows against the declared count makes the *next* gap loud
+    instead of silent -- and it is what caught the false positive below."""
+
+    def test_a_mismatch_is_reported(self, run_script):
+        """Tally declares 2, only one row is present, so one was dropped."""
+        one_row_short = CUSTOM_NAME.replace(
+            "| CI-1 | \u26a0\ufe0f Warning | a custom gate failed | look at CI |\n", "",
+        )
+
+        out = run_script(older=one_row_short, newer=one_row_short)
+
+        assert "WARNING: tally declares 2 failing but 1 row(s) parsed" in out, out
+
+    def test_no_warning_when_they_agree(self, run_script):
+        out = run_script(older=CUSTOM_NAME, newer=CUSTOM_NAME)
+
+        assert "something was dropped" not in out, out
+
+
+class TestOnlyTheChecksTableIsParsed:
+    def test_another_tables_header_is_not_reported_as_a_check(self, run_script):
+        """`Layer / File(s) | Summary` is the walkthrough's own table. Reporting
+        its header as a failing check is the false positive that widening the
+        name cell introduced."""
+        out = run_script(older=OTHER_TABLE, newer=OTHER_TABLE)
+
+        assert "Layer / File(s)" not in out, out
+        assert "FAILED -- look at these" not in out, out
+        assert "something was dropped" not in out, out
