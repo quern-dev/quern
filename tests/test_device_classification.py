@@ -37,6 +37,7 @@ EMULATOR_PROPS = {
     "ro.product.model": "sdk_gphone64_arm64",
     "ro.build.tags": "dev-keys",
     "ro.debuggable": "1",
+    "ro.build.version.sdk": "34",
 }
 
 # Captured verbatim from the physical LG H932 over USB.
@@ -46,6 +47,7 @@ PHONE_PROPS = {
     "ro.build.tags": "release-keys",
     "ro.debuggable": "0",
     "ro.build.characteristics": "default",
+    "ro.build.version.sdk": "28",
 }
 
 
@@ -60,7 +62,7 @@ class TestTheDeviceIsAskedWhatItIs:
             DeviceType.ANDROID_DEVICE
         )
 
-    @pytest.mark.parametrize("props", [
+    @pytest.mark.parametrize("signal", [
         {"ro.kernel.qemu": "1"},
         {"ro.boot.qemu": "1"},
         {"ro.hardware": "ranchu"},
@@ -69,7 +71,10 @@ class TestTheDeviceIsAskedWhatItIs:
         {"ro.build.characteristics": "nosdcard,emulator"},
         {"ro.product.model": "sdk_gphone64_arm64"},
     ])
-    def test_any_one_signal_is_enough(self, props):
+    def test_any_one_signal_is_enough(self, signal):
+        # Plus the sentinel, so this tests the signal rather than accidentally
+        # testing the did-the-read-work guard.
+        props = {"ro.build.version.sdk": "34", **signal}
         """Images vary in which of these they set, so no single property can
         be the test on its own."""
         assert AdbBackend.classify_from_properties(props) == DeviceType.ANDROID_EMULATOR
@@ -83,7 +88,8 @@ class TestTheDeviceIsAskedWhatItIs:
         """The negative control: without this, a classifier that returned
         ANDROID_EMULATOR unconditionally would pass every test above."""
         assert AdbBackend.classify_from_properties(
-            {"ro.hardware": "qcom", "ro.product.model": "Pixel 3 XL"}
+            {"ro.build.version.sdk": "34", "ro.hardware": "qcom",
+             "ro.product.model": "Pixel 3 XL"}
         ) == DeviceType.ANDROID_DEVICE
 
 
@@ -323,3 +329,73 @@ class TestARefusalSaysWhyRatherThanJustNo:
         with pytest.raises(DeviceError) as e:
             ctrl._require_simulator("Z", "Erase")
         assert "only supported on simulators" in str(e.value)
+
+
+class TestAPartialReadIsNotAnAnswer:
+    """Emptiness alone was too weak a test. A truncated `getprop` that happens
+    to omit the qemu keys would fall through to "physical device" with full
+    confidence -- a failed check reading as a passing one."""
+
+    def test_a_read_missing_the_sentinel_is_unknown(self):
+        """Every emulator signal absent, but so is `ro.build.version.sdk`, so
+        this is a broken read rather than a phone."""
+        assert AdbBackend.classify_from_properties(
+            {"persist.sys.locale": "en-US", "apexd.status": "ready"}
+        ) is None
+
+    def test_a_truncated_read_that_kept_the_model_is_still_unknown(self):
+        """The dangerous shape: enough to look like a real answer, not enough
+        to be one."""
+        assert AdbBackend.classify_from_properties(
+            {"ro.product.model": "sdk_gphone64_arm64"}
+        ) is None
+
+    def test_the_sentinel_is_present_on_real_reads(self):
+        """Both captured fixtures carry it, so requiring it costs nothing on a
+        healthy device -- the guard would be useless if it rejected real
+        output."""
+        for props in (EMULATOR_PROPS, PHONE_PROPS):
+            assert "ro.build.version.sdk" in props
+            assert AdbBackend.classify_from_properties(props) is not None
+
+
+@pytest.mark.device_discovery
+class TestTransportIsRecordedInTheModel:
+    """`DeviceInfo.connection_type` is filled in by devicectl and usbmux for
+    iOS and was left empty for Android, so transport was modelled on one
+    platform and re-derived from the serial on the other.
+
+    Marked `device_discovery` because conftest otherwise stubs every backend's
+    `list_devices` to `[]`, deliberately -- an unmarked test that called the
+    real one would enumerate the developer's actual hardware. These drive it
+    with captured `adb devices -l` output instead.
+    """
+
+    async def _list(self, monkeypatch, devices_line):
+        adb = AdbBackend()
+        monkeypatch.setattr(adb, "is_installed", lambda: True)
+        monkeypatch.setattr(adb, "_run_adb", AsyncMock(
+            return_value=(f"List of devices attached\n{devices_line}\n", "")))
+        monkeypatch.setattr(adb, "get_device_properties",
+                            AsyncMock(return_value=EMULATOR_PROPS))
+        monkeypatch.setattr(adb, "_get_emulator_name", AsyncMock(return_value=""))
+        monkeypatch.setattr(adb, "list_avds", AsyncMock(return_value=[]))
+        return await adb.list_devices()
+
+    async def test_a_usb_device_says_usb(self, monkeypatch):
+        d = await self._list(monkeypatch,
+            "8BAY0WCL7\tdevice usb:0-1.2 product:crosshatch model:Pixel_3_XL")
+        assert d[0].connection_type == "usb"
+
+    async def test_a_console_emulator_says_emulator(self, monkeypatch):
+        d = await self._list(monkeypatch,
+            "emulator-5554\tdevice product:sdk_gphone64_arm64 model:sdk_gphone64_arm64")
+        assert d[0].connection_type == "emulator"
+
+    async def test_a_tcp_attachment_says_tcp(self, monkeypatch):
+        """The case the whole change is about: an emulator over the wire is
+        neither 'usb' nor the local console."""
+        d = await self._list(monkeypatch,
+            "localhost:5555\tdevice product:sdk_gphone64_arm64 model:sdk_gphone64_arm64")
+        assert d[0].connection_type == "tcp"
+        assert d[0].device_type == DeviceType.ANDROID_EMULATOR

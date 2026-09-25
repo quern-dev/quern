@@ -304,6 +304,13 @@ class AdbBackend:
     def classify_from_properties(props: dict[str, str]) -> DeviceType | None:
         """Emulator or physical device, decided by what the device says it is.
 
+        An instance of the rule `server/lifecycle/invocation.py` already
+        states for a different subsystem -- **identity must never decide
+        capability** -- and for the same reason. There, *who called* cannot
+        answer *can I prompt*; here, *what kind of device is this* cannot
+        answer *can it be rooted*. Identity is for wording, which is exactly
+        what it is used for in `_require_simulator`'s refusals.
+
         The serial is a *transport address*, not a property of the device:
         `emulator-5554` means "reached via the local emulator console on port
         5554" and `localhost:5555` means "reached over TCP". Neither says what
@@ -325,8 +332,17 @@ class AdbBackend:
 
         Returns None when the device could not be asked, which the caller must
         distinguish from an answer -- guessing here is what #263 is about.
+
+        A *partial* read is also not an answer. Emptiness alone is too weak a
+        test: a truncated `getprop` that happens to omit the qemu keys would
+        otherwise fall through to "physical device" with full confidence,
+        which is the shape CONTRIBUTING names -- a failed check must never
+        read as a passing one. `ro.build.version.sdk` is the sentinel, present
+        on all five devices measured here (API 28 through 34, phones and
+        emulators, USB and TCP), so its absence means the read did not work
+        rather than that the device lacks it.
         """
-        if not props:
+        if not props or "ro.build.version.sdk" not in props:
             return None
         if props.get("ro.kernel.qemu") == "1" or props.get("ro.boot.qemu") == "1":
             return DeviceType.ANDROID_EMULATOR
@@ -458,6 +474,19 @@ class AdbBackend:
             # though it is every bit an emulator.
             has_console = serial.startswith("emulator-")
 
+            # The field iOS already fills in from devicectl and usbmux, and
+            # that Android left empty -- so the transport was visible in the
+            # model for one platform and had to be re-derived from the serial
+            # for the other. `adb devices -l` states it: a `usb:` token for
+            # anything on the wire, nothing for an emulator console or a
+            # `host:port` attachment.
+            if any(p.startswith("usb:") for p in parts[2:]):
+                connection_type = "usb"
+            elif has_console:
+                connection_type = "emulator"
+            else:
+                connection_type = "tcp"
+
             # Extract model from the -l output (e.g. model:Pixel_7)
             model = ""
             for part in parts[2:]:
@@ -510,6 +539,7 @@ class AdbBackend:
                 os_version=os_version,
                 runtime=runtime,
                 is_available=is_available,
+                connection_type=connection_type,
                 device_family="Android",
             ))
 
