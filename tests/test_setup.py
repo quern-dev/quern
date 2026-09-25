@@ -2758,6 +2758,43 @@ class TestTheEntryPointsParseTheirArguments:
         assert exc.value.code == 0
         assert seen == {"args": ["on"]}, f"{command} did not receive its value"
 
+    @pytest.mark.parametrize("targets", [
+        ["codex"], ["cursor", "opencode"], ["all"], [],
+    ])
+    def test_mcp_install_still_takes_its_targets(self, monkeypatch, targets):
+        """The operand guard counted `mcp-install` as taking none, so from
+        0.19.0 every target was refused before the command ran. The tests that
+        existed called `_cmd_mcp_install` directly and never saw it; this one
+        goes through `main`, which is where the refusal happened."""
+        import server.__main__ as entry
+
+        seen = {}
+        monkeypatch.setattr(entry, "_cmd_mcp_install",
+                            lambda: seen.update(argv=entry.sys.argv[2:]) or 0)
+        monkeypatch.setattr(entry.sys, "argv", ["quern", "mcp-install", *targets])
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 0
+        assert seen == {"argv": targets}, "mcp-install never ran with its targets"
+
+    def test_mcp_install_refuses_a_target_mixed_in_with_valid_ones(
+        self, monkeypatch, capsys,
+    ):
+        """Accepting targets must not reopen the silent drop: one bad word
+        among good ones installs nothing."""
+        import server.__main__ as entry
+
+        called = {}
+        monkeypatch.setattr(entry, "_cmd_mcp_install",
+                            lambda: called.update(ran=True) or 0)
+        monkeypatch.setattr(entry.sys, "argv",
+                            ["quern", "mcp-install", "codex", "cdoex"])
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 2
+        assert called == {}
+        assert "cdoex" in capsys.readouterr().err
+
     def test_argparse_does_not_swallow_a_stray_flag(self, monkeypatch, capsys):
         """The other entry point. `parse_known_args` kept the leftovers only
         for the no-subcommand case, and discarded them everywhere else."""

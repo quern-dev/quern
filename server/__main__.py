@@ -645,11 +645,16 @@ def _cmd_install_precommit_hook() -> int:
     return 0 if result.status != CheckStatus.ERROR else 1
 
 
+#: Clients `quern mcp-install` can register with. Shared with the dispatch in
+#: `main`, which has to accept these as operands before this command runs.
+MCP_INSTALL_TARGETS = ("claude-code", "claude-desktop", "opencode", "codex", "cursor")
+
+
 def _cmd_mcp_install() -> int:
     """Add quern-debug MCP server to one or more AI tool configs."""
     import argparse
 
-    ALL_TARGETS = ["claude-code", "claude-desktop", "opencode", "codex", "cursor"]
+    ALL_TARGETS = list(MCP_INSTALL_TARGETS)
 
     parser = argparse.ArgumentParser(
         prog="quern mcp-install",
@@ -727,6 +732,7 @@ def _check_args(
     *,
     allowed: tuple[str, ...] = (),
     operands: int = 0,
+    choices: tuple[str, ...] = (),
     usage: Callable[[], None] | None = None,
 ) -> list[str]:
     """Answer `-h`, refuse anything else unrecognised, return the operands.
@@ -742,6 +748,8 @@ def _check_args(
     def default_usage() -> None:
         flags = "".join(f" [{flag}]" for flag in allowed)
         args = "".join(" <value>" for _ in range(operands))
+        if choices:
+            args += f" [{'|'.join(choices)}]..."
         print(f"Usage: quern {command}{flags}{args}")
 
     show = usage or default_usage
@@ -758,7 +766,19 @@ def _check_args(
     # ran a real update, and `quern set-channel stable typo` persisted stable
     # while saying nothing about the word it did not understand. A command
     # that takes no operands says so; one that takes a value says how many.
+    #
+    # `choices` is the variadic case: any number of words from a fixed set.
+    # `mcp-install` takes its targets that way, and counting it as a
+    # zero-operand command refused every target from 0.19.0 on, leaving
+    # `quern mcp-install codex` unable to reach anything but the default.
     ops = [arg for arg in rest if not arg.startswith("-")]
+    if choices:
+        stray = [arg for arg in ops if arg not in choices]
+        if stray:
+            show()
+            print(f"unexpected argument: {stray[0]}", file=sys.stderr)
+            sys.exit(2)
+        return ops
     if len(ops) > operands:
         show()
         print(f"unexpected argument: {ops[operands]}", file=sys.stderr)
@@ -965,7 +985,7 @@ def main() -> None:
         sys.exit(run_uninstall())
 
     if len(sys.argv) >= 2 and sys.argv[1] == "mcp-install":
-        _check_args("mcp-install", sys.argv[2:])
+        _check_args("mcp-install", sys.argv[2:], choices=(*MCP_INSTALL_TARGETS, "all"))
         sys.exit(_cmd_mcp_install())
 
     if len(sys.argv) >= 2 and sys.argv[1] == "grant-full-perms":
