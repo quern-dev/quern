@@ -33,10 +33,60 @@ _logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/proxy", tags=["proxy"])
 
-# Device types that support automated cert install. Physical iOS and physical
-# Android require manual flows (Settings > VPN & Device Management for iOS,
-# system partition modification for Android) and are excluded from batch installs.
-_INSTALLABLE_CERT_TYPES = {DeviceType.SIMULATOR, DeviceType.ANDROID_EMULATOR}
+async def _can_install_cert(controller, udid: str, device_type) -> tuple[bool, str | None]:
+    """Whether quern can install a system certificate, and why not if it cannot.
+
+    The question is *rootability*, not device kind, and on Android the two do
+    not line up. Measured across #299's matrix: a Google Play emulator is
+    `ANDROID_EMULATOR` and cannot be rooted, so the old type test started an
+    install that dies partway with `adbd cannot run as root in production
+    builds`; a dev-keys emulator reached over TCP was classified
+    `ANDROID_DEVICE` and refused, though `adb root` on that very serial
+    returns `uid=0(root)`. Four of eight rows wrong, in both directions.
+
+    iOS is unchanged, because there the type *is* the capability: a simulator
+    takes a cert through `simctl keychain`, a physical device cannot be
+    automated at all.
+    """
+    if device_type == DeviceType.SIMULATOR:
+        return True, None
+    if device_type == DeviceType.DEVICE:
+        return False, (
+            "Automated cert install is not supported for physical iOS "
+            "devices. Install the cert manually: Settings > General > "
+            "VPN & Device Management > select the mitmproxy profile > "
+            "Install. Then enable trust under Settings > General > "
+            "About > Certificate Trust Settings."
+        )
+    if device_type in (DeviceType.ANDROID_EMULATOR, DeviceType.ANDROID_DEVICE):
+        rootable = await controller.adb.is_rootable(udid)
+        if rootable:
+            return True, None
+        if rootable is None:
+            return False, (
+                f"quern could not read the build properties of {udid}, so it "
+                "cannot tell whether a certificate can be installed. The "
+                "device may still be booting. This is not a refusal on the "
+                "merits -- try again once it has settled."
+            )
+        return False, (
+            f"{udid} is not rootable, so a system certificate cannot be "
+            "installed on it — this is a property of the build (release-keys, "
+            "not debuggable), not of whether it is an emulator. Use a Google "
+            "APIs emulator image, or trust the cert at the app level with "
+            "networkSecurityConfig. Routing the device through the proxy does "
+            "not need a certificate and works either way: POST "
+            "/api/v1/proxy/device-proxy-config with apply=true."
+        )
+    # Unknown kind. Allowed through deliberately, and this is the reachable
+    # branch rather than dead code: this gate is an *early, better error*, not
+    # the enforcement point. `cert_manager` refuses on its own terms -- it
+    # asks `is_rootable` for Android and fails on simctl for iOS -- so
+    # refusing here on "I have not listed this device" would invent a
+    # restriction out of quern's own ignorance, and break a caller naming a
+    # device it knows about before any enumeration has run.
+    _logger.debug("Cert eligibility for %s is unknown; deferring to cert_manager", udid)
+    return True, None
 
 
 # ---------------------------------------------------------------------------
@@ -358,19 +408,25 @@ async def _verify_physical_device(
 async def install_cert(
     request: Request, body: CertInstallRequest | None = None,
 ) -> dict:
-    """Install mitmproxy CA certificate on simulator(s) and emulator(s).
+    """Install the mitmproxy CA certificate on eligible devices.
+
+    Eligibility is *rootability* on Android and device kind on iOS, not
+    "simulators and emulators" -- a Google Play emulator cannot take a system
+    cert and a rootable phone can (#299).
 
     Idempotent - skips devices that already have the cert installed
     unless force=True.
 
-    Physical iOS and Android devices are excluded — their cert install
-    flows are manual (iOS: Settings > VPN & Device Management; Android:
-    system partition modification) and not handled by this endpoint.
+    Eligibility is *rootability* on Android and device kind on iOS (#299).
+    Physical iOS is excluded — its flow is manual, via Settings > VPN &
+    Device Management. Android is not excluded by kind: a Google Play
+    emulator cannot take a system cert and a rootable phone can, so the
+    question asked is whether `adb root` will work, not what the device is.
 
     Resolution order when no UDID is supplied:
         1. Active device (set via resolve_device) → install on it.
-        2. Otherwise → install on all booted simulators and Android
-           emulators (physical devices are filtered out).
+        2. Otherwise → install on every booted device that is eligible,
+           naming the ones that are not and why.
 
     Args:
         body.udid: Specific device UDID. If None, follows the resolution
@@ -408,43 +464,59 @@ async def install_cert(
         # Single target — if we know its type and it's not installable, refuse
         # early with a clear message rather than letting it fall into a cryptic
         # simctl "Invalid device" error.
+        # `.get()` yields None for a udid quern has never listed, and the
+        # gate used to be skipped entirely in that case -- so an unknown or
+        # non-canonically-spelled udid went straight to the install it should
+        # have been refused. The unknown branch inside `_can_install_cert`
+        # existed for this and was unreachable from here.
+        # Two sources, because the map only holds what the last enumeration
+        # saw: a caller naming a device by a spelling `list_devices` did not
+        # return still deserves the better error. `isinstance` guards the
+        # second, so a mock or a junk value cannot pose as a device kind.
         target_type = device_type_map.get(target_udid)
-        if target_type is not None and target_type not in _INSTALLABLE_CERT_TYPES:
-            if target_type == DeviceType.DEVICE:
-                guidance = (
-                    "Automated cert install is not supported for physical iOS "
-                    "devices. Install the cert manually: Settings > General > "
-                    "VPN & Device Management > select the mitmproxy profile > "
-                    "Install. Then enable trust under Settings > General > "
-                    "About > Certificate Trust Settings."
-                )
-            else:  # ANDROID_DEVICE
-                guidance = (
-                    "Automated cert install is not supported for physical "
-                    "Android devices — system cert installation requires root "
-                    "and direct system partition modification. Use a rootable "
-                    "Google APIs emulator for HTTPS interception, or configure "
-                    "the cert at the app level via networkSecurityConfig."
-                )
+        if target_type is None:
+            cached = controller._device_type(target_udid)
+            if isinstance(cached, DeviceType):
+                target_type = cached
+        ok, guidance = await _can_install_cert(controller, target_udid, target_type)
+        if not ok:
             raise HTTPException(status_code=400, detail=guidance)
         udids = [target_udid]
+        # Named on both paths so the response shape does not depend on which
+        # one ran: a single explicit target skips nothing by construction.
+        skipped = []
     else:
         from server.models import DeviceState
 
-        udids = [
-            d.udid for d in all_devices
-            if d.state == DeviceState.BOOTED
-            and d.device_type in _INSTALLABLE_CERT_TYPES
-        ]
+        # Rootability is a per-device probe, so the batch asks each booted
+        # candidate rather than filtering on type. One `getprop` each, and
+        # only for devices that are already booted.
+        udids = []
+        skipped: list[str] = []
+        for d in all_devices:
+            if d.state != DeviceState.BOOTED:
+                continue
+            ok, why = await _can_install_cert(controller, d.udid, d.device_type)
+            if ok:
+                udids.append(d.udid)
+            elif why:
+                skipped.append(f"{d.udid}: {why}")
 
     if not udids:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "No booted simulators or Android emulators found to install on. "
-                "Physical devices are not eligible for automated cert install."
-            ),
-        )
+        # Says which devices were considered and why each was passed over,
+        # rather than asserting a category. "No booted simulators or Android
+        # emulators found" was false the moment eligibility stopped following
+        # device kind: a booted Google Play emulator is an Android emulator
+        # and is still refused, and a rootable phone is now eligible though
+        # the old text called physical devices ineligible. The per-device
+        # reason also carries the retry guidance for a device still booting,
+        # which the batch loop used to discard.
+        detail = "No eligible devices to install on."
+        if skipped:
+            detail += " Considered:\n" + "\n".join(f"  - {s}" for s in skipped)
+        else:
+            detail += " No booted devices were found at all."
+        raise HTTPException(status_code=400, detail=detail)
 
     # Install on each device.
     #
@@ -489,6 +561,14 @@ async def install_cert(
         "succeeded": success_count,
         "failed": len(results) - success_count,
         "devices": results,
+        #: Booted devices the batch passed over, and why. Computed and then
+        #: dropped unless *nothing* was eligible, so a mixed batch -- one
+        #: simulator installed, one non-rootable phone skipped -- reported
+        #: unqualified success and the caller had no way to learn a device had
+        #: been left out. The docstring promised this; only the empty case
+        #: delivered it. Empty list rather than absent, so a caller can read
+        #: it without knowing which path ran.
+        "skipped": skipped,
     }
 
 

@@ -385,30 +385,91 @@ class DeviceController(DeviceControllerUI):
             for site in await collect_sites()
         ]
 
-    def _device_type(self, udid: str) -> DeviceType:
-        """Look up device type from cache. Defaults to simulator if unknown."""
-        return self._device_type_cache.get(udid, DeviceType.SIMULATOR)
+    def _device_type(self, udid: str) -> DeviceType | None:
+        """What kind of device this is, or None if quern has not been told.
+
+        `None` rather than a default, because the default was `SIMULATOR` and
+        it was a guess stated as a fact. Callers then dispatched an unknown
+        UDID -- including the empty string -- to `simctl`, which on an
+        Android-only host or the Linux target of `docs/linux-support-plan.md`
+        means a toolchain that is not installed, so "unsupported device"
+        surfaced as "xcrun not found" (#263).
+
+        It is not hypothetical. Hours after #305 shipped, `apply=true` on a
+        physically attached Pixel 3 XL was refused with "apply is only
+        supported on Android" because the cache was cold; two earlier runs had
+        passed only because something else warmed it first.
+
+        Use `_ensure_device_type_cached()` first if the answer matters.
+        """
+        return self._device_type_cache.get(udid)
 
     def _is_physical(self, udid: str) -> bool:
+        """Whether this is a physical *iOS* device, positively known to be.
+
+        False for an unknown udid, which is a change: `_device_type` used to
+        answer `SIMULATOR` for a cache miss and this compared against `DEVICE`,
+        so an unknown device read as "not physical" for the same reason it
+        read as "a simulator" -- a guess. It is now the absence of an answer.
+        Warm with `_ensure_device_type_cached` where that distinction matters.
+        """
         return self._device_type(udid) == DeviceType.DEVICE
 
     def _is_android(self, udid: str) -> bool:
+        """Whether this is an Android device or emulator, positively known.
+
+        Both kinds, because almost every caller wants "does this go to adb?".
+        Where the two differ -- `emu kill`, `geo fix` -- the question is really
+        about the transport, and `adb.is_console_serial` answers that (#299).
+        """
         return self._device_type(udid) in (DeviceType.ANDROID_EMULATOR, DeviceType.ANDROID_DEVICE)
 
     def _require_simulator(self, udid: str, operation: str) -> None:
-        """Raise DeviceError if the device is physical (operation not supported)."""
-        if self._is_physical(udid):
-            raise DeviceError(
-                f"{operation} is only supported on simulators",
-                tool="simctl",
+        """Refuse anything that is not known to be an iOS simulator.
+
+        Tests *for* `SIMULATOR` rather than *against* `DEVICE`. The old form
+        rejected only physical iOS, so both Android kinds -- and any unknown
+        UDID -- walked through a guard whose entire purpose was to stop them
+        and were handed to `simctl` with an adb serial. Verified before the
+        change: `ANDROID_DEVICE`, `ANDROID_EMULATOR` and `''` all passed.
+
+        Testing for the allowed kind means a device type added later is
+        refused by default rather than admitted by default, which is the half
+        of this that keeps being true after today (#263).
+        """
+        kind = self._device_type(udid)
+        if kind == DeviceType.SIMULATOR:
+            return
+        # The leading clause is load-bearing: `_handle_device_error` matches
+        # the literal string "only supported on simulators" to return 400, so
+        # rewording it wholesale would silently turn every one of these
+        # refusals into a 500. The detail is appended rather than substituted.
+        if kind in (DeviceType.ANDROID_DEVICE, DeviceType.ANDROID_EMULATOR):
+            detail = (
+                f" {udid} is Android, and quern has no Android equivalent for "
+                "this operation -- it is implemented through simctl, which "
+                "drives iOS simulators only."
             )
+        elif kind == DeviceType.DEVICE:
+            detail = f" {udid} is a physical iOS device."
+        else:
+            detail = (
+                f" quern does not recognise {udid or '(empty udid)'}; list "
+                "devices first so it can be identified."
+            )
+        raise DeviceError(
+            f"{operation} is only supported on simulators.{detail}",
+            tool="simctl",
+        )
 
     async def _ensure_device_type_cached(self, udid: str) -> None:
         """Populate device type cache if this UDID isn't known yet.
 
         Called lazily when a UDID is used that hasn't been seen via
-        list_devices(). Without this, _is_physical() defaults to simulator
-        and physical devices get routed to idb instead of WDA.
+        list_devices(). Without this the type stays unknown -- it used to
+        default to simulator (#263) -- so physical devices get routed to idb
+        instead of WDA, and operations that ask the type are refused rather
+        than dispatched.
         """
         if udid not in self._device_type_cache:
             logger.debug("Device type unknown for %s, refreshing device list...", udid[:8])
@@ -682,6 +743,13 @@ class DeviceController(DeviceControllerUI):
         Returns the udid that was booted.
         """
         if udid:
+            # Warm first. `boot` is the one device entry point that does not
+            # go through `resolve_udid`, so nothing else populates the cache
+            # here -- and since `_device_type` stopped guessing `SIMULATOR`
+            # (#263), an unwarmed cache made a perfectly valid simulator
+            # unrecognised and refused by the guard below. `shutdown` and
+            # `erase` are fine because they resolve first.
+            await self._ensure_device_type_cached(udid)
             if self._is_android(udid):
                 raise DeviceError(
                     "Cannot boot Android emulator by serial — use name (AVD name) instead",
@@ -792,11 +860,26 @@ class DeviceController(DeviceControllerUI):
     async def shutdown(self, udid: str) -> None:
         """Shutdown a simulator or Android emulator."""
         if self._is_android(udid):
-            if self._device_type(udid) == DeviceType.ANDROID_EMULATOR:
+            # The *console*, not the device kind. `adb emu kill` travels only
+            # over the local `emulator-NNNN` serial, so the same AVD reached
+            # over TCP cannot be killed this way even though it is every bit
+            # an emulator -- measured, `adb emu` returns empty there. Asking
+            # the type here would have started issuing console commands down a
+            # connection that cannot carry them the moment the classifier
+            # began recognising TCP-attached emulators correctly.
+            if self.adb.is_console_serial(udid):
                 await self.adb._run_adb_for_device(udid, "emu", "kill")
                 if self._active_udid == udid:
                     self._active_udid = None
                 return
+            if self._device_type(udid) == DeviceType.ANDROID_EMULATOR:
+                raise DeviceError(
+                    f"{udid} is an emulator, but it is attached over TCP and "
+                    "`adb emu kill` needs the local console serial. Shut it "
+                    "down through its `emulator-NNNN` serial, or stop the "
+                    "process hosting it.",
+                    tool="adb",
+                )
             raise DeviceError("Shutdown not supported for physical Android devices", tool="adb")
         self._require_simulator(udid, "Shutdown")
         await self.simctl.shutdown(udid)
@@ -1029,8 +1112,11 @@ class DeviceController(DeviceControllerUI):
         every frame anyway.
         """
         if self._is_android(resolved):
-            # Only wake physical devices — emulator screencap works with screen off
-            if not resolved.startswith("emulator-"):
+            # Only wake physical devices — emulator screencap works with the
+            # screen off. Asks the device type rather than the serial, so an
+            # emulator reached over TCP is not woken needlessly; the prefix
+            # test called that one physical.
+            if self._device_type(resolved) != DeviceType.ANDROID_EMULATOR:
                 await self._ensure_android_screen_on(resolved)
             return await self.adb.screenshot(resolved)
         if self._is_physical(resolved):
@@ -1159,8 +1245,18 @@ class DeviceController(DeviceControllerUI):
         return resolved
 
     async def clear_app_data(self, bundle_id: str, udid: str | None = None) -> str:
-        """Clear all app data for a simulator app. Returns the resolved udid."""
+        """Clear all app data for an app. Returns the resolved udid.
+
+        Follows the branch-on-Android-first pattern the rest of this class
+        uses, rather than falling through to a simulator guard. Inverting that
+        guard for #263 turned this from a cryptic simctl failure into a
+        confident false claim -- "only supported on simulators" about a device
+        whose `pm clear` answers `Success`.
+        """
         resolved = await self.resolve_udid(udid)
+        if self._is_android(resolved):
+            await self.adb.clear_app_data(resolved, bundle_id)
+            return resolved
         self._require_simulator(resolved, "Clear app data")
         try:
             await self.simctl.terminate_app(resolved, bundle_id)

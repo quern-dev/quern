@@ -253,6 +253,27 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
         if controller._device_type(u) == DeviceType.SIMULATOR
     ]
 
+    # Anything in neither bucket must be named, not dropped. `_device_type`
+    # answers None for a udid quern has never listed (#299) -- it used to
+    # guess `SIMULATOR` -- and `resolve_udid` does not check that a udid
+    # exists, so a typo reaches here. Falling through built nothing, left
+    # `device_results` empty, and `all([])` is True: the response reported
+    # `all_installed` alongside a summary saying the build had failed.
+    unplaced = [
+        u for u in resolved_udids
+        if u not in physical_udids and u not in simulator_udids
+    ]
+    if unplaced:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot build for {', '.join(unplaced)}: quern does not know "
+                "what kind of device this is. List devices first, or check the "
+                "udid. Android devices are not build targets for an Xcode "
+                "scheme."
+            ),
+        )
+
     derived = CONFIG_DIR / "builds" / body.scheme
     derived.mkdir(parents=True, exist_ok=True)
 

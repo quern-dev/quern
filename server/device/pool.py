@@ -295,8 +295,25 @@ class DevicePool:
             # Android emulators need the AVD name to boot; look it up from pool state
             pool_state = self._read_state()
             entry = pool_state.devices.get(udid)
-            if entry and entry.name:
+            avds = await self.controller.adb.list_avds()
+            if entry and entry.name and entry.name in avds:
                 await self.controller.adb.boot_emulator(entry.name)
+            elif entry and entry.name:
+                # The name is not an AVD. Since #299 an emulator attached over
+                # TCP classifies as `ANDROID_EMULATOR` and so reaches this
+                # branch, but its name is whatever `ro.product.model` says --
+                # `sdk_gphone64_arm64` -- because the AVD name is fetched over
+                # the console and a TCP serial has none. Booting that produced
+                # "AVD 'sdk_gphone64_arm64' not found", which blames the name
+                # rather than naming the situation.
+                raise DeviceError(
+                    f"Cannot boot {udid}: it is known by '{entry.name}', which is "
+                    "not an AVD quern can launch. An emulator attached over the "
+                    "network has no console for quern to read its AVD name from, "
+                    "and quern cannot start a process it does not host. Boot it "
+                    "where it runs, or add it by its local emulator serial.",
+                    tool="adb",
+                )
             else:
                 raise DeviceError(
                     f"Cannot boot Android device {udid[:8]} — no AVD name in pool state",

@@ -368,6 +368,7 @@ class TestCheckTools:
 class TestBoot:
     async def test_boot_by_udid(self):
         ctrl = DeviceController()
+        ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
         ctrl.simctl.boot = AsyncMock()
         udid = await ctrl.boot(udid="AAAA-1111")
         ctrl.simctl.boot.assert_called_once_with("AAAA-1111")
@@ -408,6 +409,7 @@ class TestBoot:
 class TestShutdown:
     async def test_shutdown_clears_active(self):
         ctrl = DeviceController()
+        ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
         ctrl._active_udid = "AAAA-1111"
         ctrl.simctl.shutdown = AsyncMock()
         await ctrl.shutdown("AAAA-1111")
@@ -416,6 +418,7 @@ class TestShutdown:
 
     async def test_shutdown_different_device_keeps_active(self):
         ctrl = DeviceController()
+        ctrl._device_type_cache["BBBB-2222"] = DeviceType.SIMULATOR
         ctrl._active_udid = "AAAA-1111"
         ctrl.simctl.shutdown = AsyncMock()
         await ctrl.shutdown("BBBB-2222")
@@ -860,6 +863,7 @@ class TestPressButton:
 class TestSetLocation:
     async def test_set_location_delegates_to_simctl(self):
         ctrl = DeviceController()
+        ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
         ctrl._active_udid = "AAAA-1111"
         ctrl.simctl.set_location = AsyncMock()
 
@@ -871,6 +875,7 @@ class TestSetLocation:
 class TestClearAppData:
     async def test_clear_app_data_terminates_then_clears(self):
         ctrl = DeviceController()
+        ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
         ctrl._active_udid = "AAAA-1111"
         ctrl.simctl.terminate_app = AsyncMock()
         ctrl.simctl.clear_app_data = AsyncMock()
@@ -882,6 +887,7 @@ class TestClearAppData:
 
     async def test_clear_app_data_proceeds_if_not_running(self):
         ctrl = DeviceController()
+        ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
         ctrl._active_udid = "AAAA-1111"
         ctrl.simctl.terminate_app = AsyncMock(
             side_effect=DeviceError("app not running", tool="simctl")
@@ -896,6 +902,7 @@ class TestClearAppData:
 class TestGrantPermission:
     async def test_grant_permission_delegates_to_simctl(self):
         ctrl = DeviceController()
+        ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
         ctrl._active_udid = "AAAA-1111"
         ctrl.simctl.grant_permission = AsyncMock()
 
