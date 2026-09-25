@@ -147,7 +147,7 @@ from REST paths in non-obvious ways — this reference gives you the correct map
 |----------|--------|------|
 | `set_mock` | POST | `/api/v1/proxy/mocks` |
 | `list_mocks` | GET | `/api/v1/proxy/mocks` |
-| `clear_mocks` | DELETE | `/api/v1/proxy/mocks` |
+| `clear_mocks` | DELETE | `/api/v1/proxy/mocks` (all) or `/api/v1/proxy/mocks/{rule_id}` (one — 404s if no such rule) |
 | `update_mock` | PATCH | `/api/v1/proxy/mocks/{rule_id}` |
 
 ### Proxy Intercept

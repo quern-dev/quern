@@ -264,7 +264,15 @@ async def update_mock(request: Request, rule_id: str, body: UpdateMockRequest) -
 async def delete_mock(request: Request, rule_id: str) -> dict:
     """Delete a specific mock rule."""
     adapter = _require_running_proxy(request)
-    await adapter.clear_mock(rule_id=rule_id)
+    removed = await adapter.clear_mock(rule_id=rule_id)
+    if not removed:
+        # 404, matching PATCH on the same id. Reporting "deleted" for a rule
+        # that never existed is a write that asserts something which did not
+        # happen -- the failed-check-reads-as-passing convention, applied to
+        # a write (#182).
+        raise HTTPException(
+            status_code=404, detail=f"Mock rule not found: {rule_id}",
+        )
     return {"status": "deleted", "rule_id": rule_id}
 
 
@@ -273,8 +281,9 @@ async def delete_mock(request: Request, rule_id: str) -> dict:
 async def delete_all_mocks(request: Request) -> dict:
     """Delete all mock rules."""
     adapter = _require_running_proxy(request)
-    count = len(adapter._mock_rules)
-    await adapter.clear_mock()
+    # Clearing an empty set is legitimately a success here, unlike the
+    # single-rule case: the caller asked for "none left", and none are left.
+    count = await adapter.clear_mock()
     return {"status": "deleted", "count": count}
 
 
