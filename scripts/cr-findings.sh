@@ -119,12 +119,23 @@ print(f"  tally: {tally}")
 # pattern run over the whole comment reports their header rows as failing
 # checks. Widening the cell without narrowing the region traded a false negative
 # for a false positive; the count cross-check below is what caught it.
+# End the region on a *structural* marker, never on bare label text. Check
+# names are user-supplied, so a check actually named "Generate unit tests" would
+# otherwise cut the region at its own name and drop its own row. A table cell
+# cannot contain a `<summary>` tag or start a markdown heading, so anchoring on
+# those makes the boundary independent of anything a name can say. This is the
+# fourth time in this file that matching a bare substring against
+# user-controlled text was wrong; the pattern is the lesson, not the label.
 start = text.rfind("Pre-merge checks")
 region = text[start:]
-for stop in ("\u2728 Finishing Touches", "Generate docstrings", "Generate unit tests"):
-    cut = region.find(stop)
-    if cut != -1:
-        region = region[:cut]
+END = re.compile(
+    r"(?:<summary>|^\s*#{1,6}\s*)[^<\n]*"
+    r"(?:Finishing Touches|Generate docstrings|Generate unit tests)",
+    re.MULTILINE,
+)
+end = END.search(region)
+if end:
+    region = region[:end.start()]
 rows = re.findall(r"\|([^|\n]{1,60})\|([^|\n]{0,40})\|([^|\n]*)", region)
 NOISE = "docstring coverage"
 real, noise = [], []

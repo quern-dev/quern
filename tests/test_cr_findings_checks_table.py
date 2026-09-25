@@ -91,6 +91,24 @@ OTHER_TABLE = """\U0001f4dd Walkthrough
 | Docstring Coverage | \u26a0\ufe0f Warning | 12.00% insufficient | write docstrings |
 """
 
+# A check named after one of the region's stop markers. Cutting the region on
+# bare label text let a check truncate the region at its own name and drop its
+# own row -- with only the count warning left to hint at it.
+NAME_COLLIDES_WITH_STOP_MARKER = """\U0001f6a5 Pre-merge checks | \u2705 3 | \u274c 2
+
+### \u274c Failed checks (2)
+
+| Check name | Status | Explanation | Resolution |
+| :---: | :--- | :--- | :--- |
+| Generate unit tests | \u26a0\ufe0f Warning | a custom gate with an awkward name | look at it |
+| Docstring Coverage | \u26a0\ufe0f Warning | 12.00% insufficient | write docstrings |
+
+<details>
+<summary>\u2728 Finishing Touches</summary>
+not part of the checks table
+</details>
+"""
+
 GH_STUB = """#!/bin/bash
 # Only the issue-comments call returns anything; everything else is silent, so
 # the threads and review-body sections render empty and this test is about the
@@ -231,3 +249,31 @@ class TestOnlyTheChecksTableIsParsed:
         assert "Layer / File(s)" not in out, out
         assert "FAILED -- look at these" not in out, out
         assert "something was dropped" not in out, out
+
+
+class TestTheRegionEndsOnStructureNotOnLabelText:
+    """Stop markers were matched as bare substrings, so a check named
+    `Generate unit tests` cut the region at its own name and dropped its own
+    row. A cell cannot contain a `<summary>` tag or open a markdown heading, so
+    the boundary is anchored on those instead."""
+
+    def test_a_check_named_after_a_stop_marker_is_still_reported(self, run_script):
+        out = run_script(
+            older=NAME_COLLIDES_WITH_STOP_MARKER,
+            newer=NAME_COLLIDES_WITH_STOP_MARKER,
+        )
+
+        assert "Generate unit tests" in out, (
+            f"the check truncated the region at its own name:\n{out}"
+        )
+        assert "something was dropped" not in out, out
+
+    def test_the_finishing_touches_block_is_still_excluded(self, run_script):
+        """The boundary must still do its job -- anchoring it must not widen the
+        region to the whole comment."""
+        out = run_script(
+            older=NAME_COLLIDES_WITH_STOP_MARKER,
+            newer=NAME_COLLIDES_WITH_STOP_MARKER,
+        )
+
+        assert "not part of the checks table" not in out, out
