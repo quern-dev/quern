@@ -2062,3 +2062,50 @@ class TestCertEligibilityFollowsRootabilityNotKind:
             )
         assert r.status_code == 200
         assert mock_install.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_mixed_batch_reports_what_it_skipped(
+        self, client, auth_headers, mock_cert_path, mock_cert_state, app
+    ):
+        """One eligible simulator, one non-rootable phone. The skip was
+        computed and then dropped unless *nothing* was eligible, so this
+        response read as unqualified success while a booted device had been
+        left out."""
+        app.state.device_controller.list_devices = AsyncMock(
+            return_value=[
+                DeviceInfo(udid="sim-1", name="iPhone 16", state=DeviceState.BOOTED,
+                           device_type=DeviceType.SIMULATOR),
+                DeviceInfo(udid="phone-1", name="Pixel 3 XL", state=DeviceState.BOOTED,
+                           device_type=DeviceType.ANDROID_DEVICE),
+            ]
+        )
+        app.state.device_controller.adb.is_rootable = AsyncMock(return_value=False)
+
+        with patch("server.proxy.cert_manager.install_cert") as mock_install:
+            mock_install.return_value = True
+            r = client.post("/api/v1/proxy/cert/install", json={}, headers=auth_headers)
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["succeeded"] == 1
+        assert [d["udid"] for d in body["devices"]] == ["sim-1"]
+        assert len(body["skipped"]) == 1
+        assert "phone-1" in body["skipped"][0]
+        assert "not rootable" in body["skipped"][0]
+
+    @pytest.mark.asyncio
+    async def test_an_all_eligible_batch_skips_nothing(
+        self, client, auth_headers, mock_cert_path, mock_cert_state, app
+    ):
+        """The positive control: `skipped` must not become a field that is
+        always populated."""
+        app.state.device_controller.list_devices = AsyncMock(
+            return_value=[DeviceInfo(udid="sim-1", name="iPhone 16",
+                                     state=DeviceState.BOOTED,
+                                     device_type=DeviceType.SIMULATOR)]
+        )
+        with patch("server.proxy.cert_manager.install_cert") as mock_install:
+            mock_install.return_value = True
+            r = client.post("/api/v1/proxy/cert/install", json={}, headers=auth_headers)
+
+        assert r.json()["skipped"] == []

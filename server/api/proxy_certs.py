@@ -482,6 +482,9 @@ async def install_cert(
         if not ok:
             raise HTTPException(status_code=400, detail=guidance)
         udids = [target_udid]
+        # Named on both paths so the response shape does not depend on which
+        # one ran: a single explicit target skips nothing by construction.
+        skipped = []
     else:
         from server.models import DeviceState
 
@@ -558,6 +561,14 @@ async def install_cert(
         "succeeded": success_count,
         "failed": len(results) - success_count,
         "devices": results,
+        #: Booted devices the batch passed over, and why. Computed and then
+        #: dropped unless *nothing* was eligible, so a mixed batch -- one
+        #: simulator installed, one non-rootable phone skipped -- reported
+        #: unqualified success and the caller had no way to learn a device had
+        #: been left out. The docstring promised this; only the empty case
+        #: delivered it. Empty list rather than absent, so a caller can read
+        #: it without knowing which path ran.
+        "skipped": skipped,
     }
 
 

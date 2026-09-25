@@ -484,3 +484,40 @@ class TestBootWarmsTheCacheItGuardsOn:
         with pytest.raises(DeviceError):
             await ctrl.boot(udid="STILL-UNKNOWN")
         ctrl.simctl.boot.assert_not_awaited()
+
+
+class TestANoNeedsBothKeys:
+    """`release-keys` alone says nothing about `ro.debuggable`, and a
+    userdebug build reports `release-keys` while still permitting `adb root`.
+    Answering False there blocked an install that would have worked."""
+
+    async def test_release_keys_alone_consults_the_missing_key(self, monkeypatch):
+        adb = AdbBackend()
+        monkeypatch.setattr(adb, "get_device_properties", AsyncMock(
+            return_value={"ro.build.version.sdk": "34",
+                          "ro.build.tags": "release-keys"}))
+        monkeypatch.setattr(adb, "_get_device_property",
+                            AsyncMock(side_effect=["release-keys", "1"]))
+
+        assert await adb.is_rootable("X") is True
+
+    async def test_both_keys_negative_is_a_confident_no(self, monkeypatch):
+        """The positive control: a real refusal must survive."""
+        adb = AdbBackend()
+        single = AsyncMock(return_value="")
+        monkeypatch.setattr(adb, "get_device_properties", AsyncMock(
+            return_value={"ro.build.tags": "release-keys", "ro.debuggable": "0"}))
+        monkeypatch.setattr(adb, "_get_device_property", single)
+
+        assert await adb.is_rootable("X") is False
+        single.assert_not_awaited()
+
+    async def test_positive_evidence_needs_no_sibling(self, monkeypatch):
+        adb = AdbBackend()
+        single = AsyncMock(return_value="")
+        monkeypatch.setattr(adb, "get_device_properties",
+                            AsyncMock(return_value={"ro.debuggable": "1"}))
+        monkeypatch.setattr(adb, "_get_device_property", single)
+
+        assert await adb.is_rootable("X") is True
+        single.assert_not_awaited()

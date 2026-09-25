@@ -701,8 +701,19 @@ class AdbBackend:
         `adb root`, so testing tags alone under-reports.
         """
         props = await self.get_device_properties(serial)
-        if "ro.build.tags" in props or "ro.debuggable" in props:
-            return props.get("ro.build.tags") == "dev-keys" or props.get("ro.debuggable") == "1"
+        tags, debuggable = props.get("ro.build.tags"), props.get("ro.debuggable")
+        if tags == "dev-keys" or debuggable == "1":
+            # Positive evidence is conclusive on its own -- either is
+            # sufficient for `adb root`, so a missing sibling cannot overturn
+            # a yes.
+            return True
+        if tags is not None and debuggable is not None:
+            # Both answered, both negative. The only shape a confident no can
+            # take: `release-keys` alone said nothing about `ro.debuggable`,
+            # and returning False there reported a userdebug build -- which
+            # does permit `adb root` -- as unrootable, blocking an install
+            # that would have worked.
+            return False
 
         # The keys this question needs, not merely "did the read work". An
         # earlier fix here used `ro.build.version.sdk` as the sentinel, which
