@@ -46,6 +46,11 @@ def adapter():
 
 @pytest.fixture
 def client(adapter):
+    """A TestClient whose proxy adapter is the fixture above.
+
+    `enable_proxy=False` stops `create_app` building a second, real adapter;
+    the one under test is attached afterwards.
+    """
     app = create_app(
         config=ServerConfig(api_key=KEY), enable_oslog=False,
         enable_crash=False, enable_proxy=False,
@@ -57,6 +62,7 @@ def client(adapter):
 
 class TestDeletingARuleThatNeverExisted:
     def test_it_is_a_404_not_a_deletion(self, client):
+        """The bug itself: this answered 200 for an id that was never a rule."""
         resp = client.delete(
             "/api/v1/proxy/mocks/e16d6dcc-be41-4597-8891-37f941641871",
             headers=AUTH,
@@ -68,6 +74,9 @@ class TestDeletingARuleThatNeverExisted:
         )
 
     def test_the_body_does_not_claim_a_deletion(self, client):
+        """The status code is not the only thing that lied. The body asserted
+        `"status": "deleted"`, which a caller logging the response repeats as
+        fact."""
         resp = client.delete("/api/v1/proxy/mocks/never-a-rule", headers=AUTH)
 
         assert "deleted" not in resp.text, (
@@ -108,6 +117,8 @@ class TestDeletingARuleThatDoesExist:
     test above and break deletion entirely."""
 
     def test_a_real_rule_is_deleted(self, client, adapter):
+        """Deletion still works. Returning 404 unconditionally would satisfy
+        every assertion in the class above."""
         adapter._mock_rules.append(
             {"rule_id": "real-1", "pattern": PATTERN, "response": RESPONSE},
         )
@@ -151,12 +162,16 @@ class TestClearingAllRules:
     removed from never-there."""
 
     def test_clearing_an_empty_set_is_still_a_success(self, client):
+        """Deliberately *not* symmetric with the single-rule case: the caller
+        asked for "none left", and none are left."""
         resp = client.delete("/api/v1/proxy/mocks", headers=AUTH)
 
         assert resp.status_code == 200, resp.text[:200]
         assert resp.json()["count"] == 0
 
     def test_the_count_reflects_what_was_removed(self, client, adapter):
+        """`count` is what keeps the empty case detectable without an error,
+        so it has to be the real number rather than a placeholder."""
         for i in range(3):
             adapter._mock_rules.append(
                 {"rule_id": f"r{i}", "pattern": PATTERN, "response": RESPONSE},
@@ -173,6 +188,8 @@ class TestTheAdapterReportsWhatItRemoved:
     what happened."""
 
     async def test_removing_a_known_rule_counts_one(self, adapter):
+        """The count has to be a count, not a bool -- the endpoint's 404
+        decision reads it directly."""
         adapter._mock_rules.append(
             {"rule_id": "x", "pattern": PATTERN, "response": RESPONSE},
         )
@@ -180,6 +197,8 @@ class TestTheAdapterReportsWhatItRemoved:
         assert await adapter.clear_mock(rule_id="x") == 1
 
     async def test_removing_an_unknown_rule_counts_zero(self, adapter):
+        """Zero for a miss, and the rule that *does* exist is left alone --
+        a filter on the wrong key would remove it and still return 0."""
         adapter._mock_rules.append(
             {"rule_id": "x", "pattern": PATTERN, "response": RESPONSE},
         )
