@@ -8,7 +8,7 @@ export function registerProxyTools(server: McpServer): void {
   server.registerTool("query_flows", {
     description: `Query captured HTTP flows from the network proxy. Filter by host, method, status code, and more.
 
-For physical devices, filter by client_ip to isolate that device's traffic — the recorded IP is in proxy_status cert_setup[udid].wifi_proxy_configs[ssid].client_ip. If filtering by client_ip returns nothing, check proxy_status for that device: wifi_proxy_stale:true means the proxy address on the device needs updating; a mismatched client_ip means the device got a new DHCP lease and record_device_proxy_config should be called again with the updated IP.`,
+For physical devices, filter by client_ip to isolate that device's traffic — the recorded IP is in proxy_status cert_setup[udid].wifi_proxy_configs[ssid].client_ip. If filtering by client_ip returns nothing, check proxy_status for that device: wifi_proxy_stale:true means the proxy address on the device needs updating; a mismatched client_ip means the device got a new DHCP lease and record_device_proxy_config should be called again with the updated IP. If the result has \`truncated: true\`, flows in the window were evicted from the store (it holds 5,000) before you asked, so an empty or short answer does NOT mean the request never happened; \`complete_after\` says from when the answer is whole.`,
     inputSchema: strictParams({
       host: z.string().optional().describe("Filter by hostname (single host; use hosts for multiple)"),
       hosts: z.array(z.string()).optional().describe("Filter to flows matching any of these hostnames"),
@@ -139,7 +139,7 @@ Use exclude_hosts to filter out analytics/SDK noise (Firebase, AppsFlyer, Facebo
   });
 
   server.registerTool("stop_capture_session", {
-    description: `Stop a capture session and get the flows captured during that window. Returns flows (summary or full based on session config), a by_host breakdown, total count, and duration.`,
+    description: `Stop a capture session and get the flows captured during that window. Returns flows (summary or full based on session config), a by_host breakdown, total count, and duration. \`truncated: true\` means flows from the session were evicted from the store, so the list is not everything the action caused.`,
     inputSchema: strictParams({
       session_id: z.string().describe("Session ID from start_capture_session"),
     }),
@@ -158,7 +158,7 @@ Use exclude_hosts to filter out analytics/SDK noise (Firebase, AppsFlyer, Facebo
   server.registerTool("wait_for_flow", {
     description: `Wait for an HTTP flow matching filters to appear. Blocks server-side until a match is found or timeout expires. Always returns with matched:true/false — timeouts are not errors.
 
-Use this after triggering a UI action to observe the resulting network request without polling. Auto-sets 'since' to 5 seconds before the call to catch flows that completed between the action and the wait call.`,
+Use this after triggering a UI action to observe the resulting network request without polling. Auto-sets 'since' to 5 seconds before the call to catch flows that completed between the action and the wait call. On a timeout, \`truncated: true\` means a matching flow may have arrived and been evicted before it was seen -- not that it never happened.`,
     inputSchema: strictParams({
       host: z.string().optional().describe("Filter by hostname"),
       path_contains: z
@@ -257,7 +257,7 @@ Use this after triggering a UI action to observe the resulting network request w
   });
 
   server.registerTool("get_flow_detail", {
-    description: `Get full request/response detail for a single captured HTTP flow, including headers and bodies.`,
+    description: `Get full request/response detail for a single captured HTTP flow, including headers and bodies. A 404 on an id from an earlier query may mean the flow was evicted; the error says so when the store has evicted anything.`,
     inputSchema: strictParams({
       flow_id: z.string().describe("The flow ID to retrieve"),
     }),
@@ -357,7 +357,7 @@ network_state surfaces the Mac's current Wi-Fi/network identity from a backgroun
 - last_changed_at, previous_ssid, previous_local_ip, last_change_reason: populated when the monitor detected a change since server start. Reason codes: ssid_changed, ip_changed_same_ssid, ssid_and_ip_changed.
 - recent_changes: short ring of recent change events (capped at 10).
 
-When traffic capture suddenly stops working on a physical device, check network_state alongside cert_setup[udid].wifi_proxy_stale: if last_changed_at is recent, the laptop just moved networks (or got a new DHCP lease) and the device's stored proxy_host is now wrong. Update Wi-Fi proxy on the device, then call record_device_proxy_config with the new ssid + client_ip.`,
+When traffic capture suddenly stops working on a physical device, check network_state alongside cert_setup[udid].wifi_proxy_stale: if last_changed_at is recent, the laptop just moved networks (or got a new DHCP lease) and the device's stored proxy_host is now wrong. Update Wi-Fi proxy on the device, then call record_device_proxy_config with the new ssid + client_ip. \`flow_store\` gives the flow store's capacity, intake (\`added\`), evictions and the span it still holds; \`flows_captured\` is only what survived.`,
     inputSchema: strictParams({
       include_offline: z
         .coerce.boolean()
@@ -628,7 +628,7 @@ refusal exists to prevent.`,
   server.registerTool("get_flow_summary", {
     description: `Get an LLM-optimized summary of recent HTTP traffic. Groups by host, shows errors, slow requests, and overall statistics. Supports cursor-based polling for efficient delta updates.
 
-For physical devices, pass client_ip to isolate that device's traffic — the recorded IP is in proxy_status cert_setup[udid].wifi_proxy_configs[ssid].client_ip. If no flows appear, check proxy_status: wifi_proxy_stale:true means the device proxy needs reconfiguring; a mismatched client_ip means the device's IP changed and record_device_proxy_config should be called again with the new IP.`,
+For physical devices, pass client_ip to isolate that device's traffic — the recorded IP is in proxy_status cert_setup[udid].wifi_proxy_configs[ssid].client_ip. If no flows appear, check proxy_status: wifi_proxy_stale:true means the device proxy needs reconfiguring; a mismatched client_ip means the device's IP changed and record_device_proxy_config should be called again with the new IP. If \`truncated\` is true, flows in the window were evicted and the counts may be low.`,
     inputSchema: strictParams({
       window: z
         .enum(["30s", "1m", "5m", "15m", "1h"])

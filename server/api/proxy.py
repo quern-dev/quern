@@ -216,8 +216,13 @@ async def _get_proxy_status(
     network_state_dict = monitor_state.as_dict() if monitor_state else None
 
     if adapter is None:
+        # The store outlives a stopped proxy and still answers flow queries,
+        # so what it holds and lost is reported here too. This branch used to
+        # omit even `flows_captured`, reading 0 over a store full of flows.
         return ProxyStatusResponse(
             status="stopped",
+            flows_captured=flow_store.size if flow_store else 0,
+            flow_store=flow_store.stats() if flow_store else None,
             local_capture=local_capture,
             local_ip=local_ip,
             local_ips=local_ips,
@@ -235,6 +240,7 @@ async def _get_proxy_status(
             listen_host=adapter.listen_host,
             error=adapter._error,
             flows_captured=flow_store.size if flow_store else 0,
+            flow_store=flow_store.stats() if flow_store else None,
             active_intercept=adapter._intercept_pattern,
             held_flows_count=len(adapter._held_flows),
             tls_rejections=list(adapter._tls_rejections),
@@ -257,6 +263,7 @@ async def _get_proxy_status(
             listen_host=adapter.listen_host,
             started_at=adapter.started_at,
             flows_captured=flow_store.size if flow_store else 0,
+            flow_store=flow_store.stats() if flow_store else None,
             active_intercept=adapter._intercept_pattern,
             held_flows_count=len(adapter._held_flows),
             tls_rejections=list(adapter._tls_rejections),
@@ -277,6 +284,7 @@ async def _get_proxy_status(
         port=adapter.listen_port,
         listen_host=adapter.listen_host,
         flows_captured=flow_store.size if flow_store else 0,
+        flow_store=flow_store.stats() if flow_store else None,
         local_capture=local_capture,
         local_ip=local_ip,
         local_ips=local_ips,
@@ -601,6 +609,29 @@ async def unconfigure_system(request: Request) -> SystemProxyRestoreInfo:
 # ---------------------------------------------------------------------------
 
 
+def _flow_completeness(
+    flow_store,
+    since: datetime | None,
+    *,
+    simulator_udid: str | None = None,
+    client_ip: str | None = None,
+) -> dict:
+    """`truncated` and `complete_after` for an answer drawn from the flow store.
+
+    The store evicts its oldest flows at capacity and, until #318, nothing
+    reading it could tell "no such request" from "that request was evicted".
+    Narrowed by the device the caller filtered on, so another device's
+    traffic being shed does not flag this one's.
+    """
+    through = flow_store.evicted_through(simulator_udid=simulator_udid, client_ip=client_ip)
+    return {
+        "truncated": not flow_store.is_complete_since(
+            since, simulator_udid=simulator_udid, client_ip=client_ip,
+        ),
+        "complete_after": through,
+    }
+
+
 @router.get("/flows", response_model=FlowQueryResponse)
 async def query_flows(
     request: Request,
@@ -646,6 +677,16 @@ async def query_flows(
 
     flows, total = await flow_store.query(params)
     has_more = (offset + limit) < total
+    completeness = _flow_completeness(
+        flow_store, since, simulator_udid=simulator_udid, client_ip=client_ip,
+    )
+    # A first page is the newest N flows by completion, and the store evicts
+    # in completion order, so a full first page is always whole -- older
+    # flows may be gone, but none of them could have ranked among these. The
+    # same reasoning as a full log tail; without it the default query on any
+    # busy proxy would say "truncated" every time.
+    if completeness["truncated"] and offset == 0 and len(flows) == limit:
+        completeness["truncated"] = False
 
     if detail == "summary":
         from server.models import FlowSummaryItem
@@ -665,10 +706,10 @@ async def query_flows(
             for f in flows
         ]
         return FlowQueryResponse(
-            flow_summaries=summaries, total=total, has_more=has_more,
+            flow_summaries=summaries, total=total, has_more=has_more, **completeness,
         )
 
-    return FlowQueryResponse(flows=flows, total=total, has_more=has_more)
+    return FlowQueryResponse(flows=flows, total=total, has_more=has_more, **completeness)
 
 
 @router.get("/flows/summary", response_model=FlowSummaryResponse)
@@ -701,10 +742,23 @@ async def flow_summary(
         since_ts = now - duration
         flows = await flow_store.get_since(since_ts)
 
-    return generate_flow_summary(
+    summary = generate_flow_summary(
         flows, window=window, host=host,
         simulator_udid=simulator_udid, client_ip=client_ip,
     )
+    completeness = _flow_completeness(
+        flow_store, since_ts, simulator_udid=simulator_udid, client_ip=client_ip,
+    )
+    summary.truncated = completeness["truncated"]
+    summary.complete_after = completeness["complete_after"]
+    if summary.truncated:
+        # In the prose too: it is what a reader takes in first, and counts
+        # presented as whole when they are not are the misreading at issue.
+        summary.summary = (
+            "Flows in this window were evicted before this summary, so the "
+            "counts below may be low. " + summary.summary
+        )
+    return summary
 
 
 @router.get("/flows/stream")
@@ -822,10 +876,22 @@ async def wait_for_flow(request: Request, body: WaitForFlowRequest) -> WaitForFl
 
         elapsed = time.monotonic() - start
         if elapsed >= body.timeout:
+            # A timeout is "it never came" only if the store kept everything
+            # that arrived since the wait began. On a busy proxy a matching
+            # flow can arrive and be evicted between two polls, and the wait
+            # then reported that the request never happened (#318).
+            completeness = (
+                _flow_completeness(
+                    flow_store, effective_since,
+                    simulator_udid=body.simulator_udid, client_ip=body.client_ip,
+                )
+                if flow_store is not None else {}
+            )
             return WaitForFlowResponse(
                 matched=False,
                 elapsed_seconds=round(elapsed, 3),
                 polls=polls,
+                **completeness,
             )
 
         await asyncio.sleep(body.interval)
@@ -868,7 +934,16 @@ async def get_flow(request: Request, flow_id: str) -> FlowRecord:
 
     flow = await flow_store.get(flow_id)
     if flow is None:
-        raise HTTPException(status_code=404, detail=f"Flow {flow_id} not found")
+        detail = f"Flow {flow_id} not found"
+        # Not found and evicted look the same from here; say which is possible.
+        # An id taken from an earlier query is exactly what eviction removes.
+        if flow_store.evicted:
+            detail += (
+                f". The store has evicted {flow_store.evicted} flows at its "
+                f"capacity of {flow_store.max_size}, oldest first, so this one "
+                "may have been evicted rather than never captured."
+            )
+        raise HTTPException(status_code=404, detail=detail)
     return flow
 
 

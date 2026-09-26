@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import enum
 from datetime import UTC, datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, BaseModel, Field, model_validator
 
@@ -520,7 +520,7 @@ class FlowSummaryItem(BaseModel):
     total_ms: float | None = None
 
 
-class FlowQueryResponse(BaseModel):
+class FlowQueryResponse(Completeness):
     """Response from flow query endpoint."""
 
     flows: list[FlowRecord] = []
@@ -553,7 +553,7 @@ class CaptureStopRequest(BaseModel):
     session_id: str
 
 
-class CaptureStopResponse(BaseModel):
+class CaptureStopResponse(Completeness):
     """Response from POST /api/v1/proxy/capture/stop."""
 
     session_id: str
@@ -580,7 +580,7 @@ class WaitForFlowRequest(BaseModel):
     since: UtcDatetime | None = None  # defaults to now - 5s if omitted
 
 
-class WaitForFlowResponse(BaseModel):
+class WaitForFlowResponse(Completeness):
     """Response from POST /api/v1/proxy/flows/wait."""
 
     matched: bool
@@ -808,7 +808,14 @@ class ProxyStatusResponse(BaseModel):
     port: int = 9101
     listen_host: str = "0.0.0.0"
     started_at: datetime | None = None
+    #: Flows held right now -- what survived, not what arrived. On a busy
+    #: proxy the store turns over and this stays at capacity while traffic is
+    #: lost; `flow_store` says how much.
     flows_captured: int = 0
+    #: The flow store's capacity, intake, evictions and the span it still
+    #: holds, so capture outrunning the store is visible rather than inferred
+    #: from queries coming back short (#318).
+    flow_store: dict[str, Any] | None = None
     active_filter: str | None = None
     active_intercept: str | None = None
     held_flows_count: int = 0
@@ -896,7 +903,7 @@ class SlowRequest(BaseModel):
     status_code: int | None = None
 
 
-class FlowSummaryResponse(BaseModel):
+class FlowSummaryResponse(Completeness):
     """Response from GET /api/v1/proxy/flows/summary."""
 
     window: str

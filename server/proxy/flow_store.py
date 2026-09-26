@@ -15,6 +15,16 @@ from server.models import FlowQueryParams, FlowRecord
 from server.storage.fanout import Fanout, Missed
 
 
+def _device_keys(simulator_udid: str | None, client_ip: str | None) -> list[str]:
+    """The keys a flow's device is recorded under, one per field it carries."""
+    keys = []
+    if simulator_udid:
+        keys.append(f"sim:{simulator_udid}")
+    if client_ip:
+        keys.append(f"ip:{client_ip}")
+    return keys
+
+
 class FlowStore:
     """Thread-safe in-memory store for HTTP flow records."""
 
@@ -32,6 +42,14 @@ class FlowStore:
         # exact regardless: nothing stamped after it was ever evicted.
         self._evicted = 0
         self._evicted_through: datetime | None = None
+        # The same mark per device, under the fields a query filters on, so a
+        # query for one simulator is not flagged because another device's
+        # traffic was evicted (#318). A flow is recorded under each field it
+        # carries -- a query on either will then see it.
+        self._evicted_through_by_device: dict[str, datetime] = {}
+        # New flows taken in, as opposed to updates of ones already held.
+        # `size` is what survived; this is what arrived.
+        self._added = 0
 
     @property
     def size(self) -> int:
@@ -47,12 +65,12 @@ class FlowStore:
             if flow.id in self._flows:
                 # Update existing — move to end
                 del self._flows[flow.id]
-            elif len(self._flows) >= self._max_size:
-                # Evict oldest, and remember it
-                _, gone = self._flows.popitem(last=False)
-                self._evicted += 1
-                if self._evicted_through is None or gone.timestamp > self._evicted_through:
-                    self._evicted_through = gone.timestamp
+            else:
+                self._added += 1
+                if len(self._flows) >= self._max_size:
+                    # Evict oldest, and remember it
+                    _, gone = self._flows.popitem(last=False)
+                    self._record_eviction(gone)
             self._flows[flow.id] = flow
 
         # Notify subscribers (outside lock to avoid deadlock). A slow one
@@ -64,20 +82,65 @@ class FlowStore:
     def evicted(self) -> int:
         return self._evicted
 
-    @property
-    def evicted_through(self) -> datetime | None:
-        """The newest timestamp of any evicted flow, or None if none were."""
-        return self._evicted_through
+    def _record_eviction(self, gone: FlowRecord) -> None:
+        """Note a flow leaving the store. Must be called under lock."""
+        self._evicted += 1
+        at = gone.timestamp
+        if self._evicted_through is None or at > self._evicted_through:
+            self._evicted_through = at
+        for key in _device_keys(gone.simulator_udid, gone.client_ip):
+            previous = self._evicted_through_by_device.get(key)
+            if previous is None or at > previous:
+                self._evicted_through_by_device[key] = at
 
-    def is_complete_since(self, since: datetime | None) -> bool:
+    def evicted_through(
+        self, *, simulator_udid: str | None = None, client_ip: str | None = None,
+    ) -> datetime | None:
+        """The newest timestamp of any evicted flow, or None if none were.
+
+        With `simulator_udid` or `client_ip`, only evictions of flows carrying
+        that value count -- the way the same filter narrows a query.
+        """
+        keys = _device_keys(simulator_udid, client_ip)
+        if not keys:
+            return self._evicted_through
+        stamps = [
+            self._evicted_through_by_device[k] for k in keys
+            if k in self._evicted_through_by_device
+        ]
+        return max(stamps) if stamps else None
+
+    def is_complete_since(
+        self,
+        since: datetime | None,
+        *,
+        simulator_udid: str | None = None,
+        client_ip: str | None = None,
+    ) -> bool:
         """Does the store still hold every flow stamped at or after `since`?
 
         True is a guarantee. False means a flow stamped inside the window was
         evicted, not necessarily one a given filter would have matched.
         """
-        if self._evicted_through is None:
+        through = self.evicted_through(simulator_udid=simulator_udid, client_ip=client_ip)
+        if through is None:
             return True
-        return since is not None and since > self._evicted_through
+        return since is not None and since > through
+
+    def stats(self) -> dict:
+        """What the store holds, what it has taken in, and what it lost."""
+        stamps = [f.timestamp for f in self._flows.values()]
+        return {
+            "capacity": self._max_size,
+            "size": len(self._flows),
+            "added": self._added,
+            "evicted": self._evicted,
+            "evicted_through": (
+                self._evicted_through.isoformat() if self._evicted_through else None
+            ),
+            "oldest": min(stamps).isoformat() if stamps else None,
+            "newest": max(stamps).isoformat() if stamps else None,
+        }
 
     async def get(self, flow_id: str) -> FlowRecord | None:
         """Look up a flow by ID."""
