@@ -218,29 +218,13 @@ class TestTheAdapterEmitsThem:
         assert [e.source for e in emitted] == [LogSource.CRASH]
 
     async def test_a_tag_filter_keeps_the_crash_tags(self, monkeypatch):
-        import asyncio
-        import shutil
+        from tests.test_device_clock_is_utc import FakeAdb
 
-        calls = []
+        adb = FakeAdb(monkeypatch)
+        await LogcatAdapter(serial="emulator-5554", tag_filter="MyTag:D *:S").start()
 
-        class _Proc:
-            returncode = None
-            stdout = None
-
-        async def fake_exec(*args, **kwargs):
-            calls.append(args)
-            return _Proc()
-
-        monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/adb")
-        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
-        adapter = LogcatAdapter(serial="emulator-5554", tag_filter="MyTag:D *:S")
-        monkeypatch.setattr(adapter, "_read_loop", lambda: asyncio.sleep(0))
-
-        await adapter.start()
-
-        [stream] = [c for c in calls if "logcat" in c]
         for spec in ("AndroidRuntime:E", "libc:F", "ActivityManager:E"):
-            assert spec in stream, f"a tag filter silences {spec} at the device"
+            assert spec in adb.logcat_args(), f"a tag filter silences {spec} at the device"
 
     async def test_a_crash_cut_off_by_the_stream_ending_is_emitted(self):
         emitted = await self._run(JAVA_CRASH[:1])

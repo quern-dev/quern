@@ -14,7 +14,8 @@ Android lines fell outside every "last N minutes" query, the summary and the
 trace's action intervals, and a windowed query answered "nothing here, and
 complete" after capturing thousands of lines (#255). The year also removes a
 New Year's Eve bug: the old parse assumed the current year. Both modifiers
-exist from Android 7 (API 24); quern has only been measured on API 28 and up.
+exist from Android 7 (API 24); older devices get plain `threadtime`, whose
+lines are stamped on arrival (see `_parse_line`). Measured on API 32 and 34.
 
 This adapter is on-demand — agents start/stop it when they want to capture
 Android device logs, similar to PhysicalDeviceLogAdapter for iOS devices.
@@ -59,6 +60,12 @@ LOGCAT_UTC_PATTERN = re.compile(
     r"(.*)$"                                               # message
 )
 
+#: `-v UTC` and `-v year` exist from Android 7.
+UTC_FORMAT_MIN_API = 24
+
+#: How long a freshly spawned logcat gets to reject its arguments.
+STARTUP_GRACE_S = 0.5
+
 LOGCAT_LEVEL_MAP: dict[str, LogLevel] = {
     "V": LogLevel.DEBUG,
     "D": LogLevel.DEBUG,
@@ -93,6 +100,7 @@ class LogcatAdapter(BaseSourceAdapter):
         self._process: asyncio.subprocess.Process | None = None
         self._read_task: asyncio.Task | None = None
         self._crashes = AndroidCrashDetector(device_id=device_id)
+        self.api_level: int | None = None
 
     async def start(self) -> None:
         """Spawn adb logcat from the newest line on, and begin reading output."""
@@ -110,11 +118,19 @@ class LogcatAdapter(BaseSourceAdapter):
         # quern wanted a clean start. `-T 1` gets the same clean start by
         # reading from the newest line on, leaving the buffers intact; the
         # cost is that one line from before capture comes through.
-        cmd = [
-            "adb", "-s", self.serial, "logcat",
-            "-v", "threadtime", "-v", "UTC", "-v", "year",
-            "-T", "1",
-        ]
+        #
+        # The format depends on the device. Before Android 7 logcat's `-v`
+        # takes format names only and *exits* on `UTC` or `year`, so asking
+        # for them unconditionally turned capture on those devices into a
+        # process that died at once while the start call reported success.
+        self.api_level = await self._api_level()
+        cmd = ["adb", "-s", self.serial, "logcat", "-v", "threadtime"]
+        if self.api_level is None or self.api_level >= UTC_FORMAT_MIN_API:
+            # Unknown is treated as modern: every device measured is, and if
+            # this one is not, the early-exit check below says so rather
+            # than capture silently dying.
+            cmd += ["-v", "UTC", "-v", "year"]
+        cmd += ["-T", "1"]
 
         # Add tag filter if specified (e.g. "MyTag:D *:S"), plus the tags a
         # crash is recognised from. A filterspec silences everything it does
@@ -137,6 +153,20 @@ class LogcatAdapter(BaseSourceAdapter):
         except Exception as e:
             self._error = f"Failed to start adb logcat: {e}"
             logger.error(self._error)
+            return
+
+        # A logcat that rejects its arguments exits at once, and the read loop
+        # would see only EOF -- so capture "started" and then stopped with no
+        # error anywhere, because stderr was piped and never read. Give it a
+        # moment and ask.
+        try:
+            await asyncio.wait_for(self._process.wait(), timeout=STARTUP_GRACE_S)
+        except TimeoutError:
+            pass  # still running, which is the point
+        else:
+            self._error = await self._exit_reason("exited at once")
+            logger.error(self._error)
+            self._process = None
             return
 
         self._running = True
@@ -201,6 +231,11 @@ class LogcatAdapter(BaseSourceAdapter):
                             await self.emit(crash)
                     if self._wanted(entry):
                         await self.emit(entry)
+            # The stream ended without anyone stopping it: the device went
+            # away or logcat died. That is an error to report, not "stopped".
+            if self._running:
+                self._error = await self._exit_reason("ended unexpectedly")
+                logger.error(self._error)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -216,6 +251,43 @@ class LogcatAdapter(BaseSourceAdapter):
                         await self.emit(crash)
                     except Exception:
                         logger.exception("Could not emit a pending Android crash")
+
+    async def _api_level(self) -> int | None:
+        """The device's SDK level, or None if it could not be asked.
+
+        None is not an answer and is not treated as one; the caller decides
+        what to do without it.
+        """
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "adb", "-s", self.serial, "shell", "getprop", "ro.build.version.sdk",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        except (OSError, TimeoutError):
+            if proc is not None and proc.returncode is None:
+                proc.kill()
+            return None
+        try:
+            return int(out.decode(errors="replace").strip())
+        except ValueError:
+            return None
+
+    async def _exit_reason(self, what: str) -> str:
+        """Why logcat is gone, from its exit code and whatever it said."""
+        proc = self._process
+        said = ""
+        if proc is not None and proc.stderr is not None:
+            try:
+                said = (await asyncio.wait_for(proc.stderr.read(), timeout=2)).decode(
+                    errors="replace",
+                ).strip()
+            except (OSError, TimeoutError):
+                said = ""
+        code = proc.returncode if proc is not None else None
+        return f"adb logcat {what} (exit {code}): {said or 'no output'}"
 
     def _wanted(self, entry: LogEntry) -> bool:
         """Logcat cannot filter by process, so the adapter does."""

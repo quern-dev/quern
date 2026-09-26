@@ -65,60 +65,130 @@ class TestLogcat:
         assert entry.process == "MyTag"
 
     async def test_logcat_is_asked_for_utc_with_a_year(self, monkeypatch):
-        import asyncio
-        import shutil
+        adb = FakeAdb(monkeypatch, sdk=b"34\n")
+        await LogcatAdapter(serial="emulator-5554").start()
 
-        calls = []
-
-        class _Proc:
-            returncode = None
-            stdout = None
-
-            async def communicate(self):
-                return b"", b""
-
-        async def fake_exec(*args, **kwargs):
-            calls.append(args)
-            return _Proc()
-
-        monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/adb")
-        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
-        adapter = LogcatAdapter(serial="emulator-5554")
-        monkeypatch.setattr(adapter, "_read_loop", lambda: asyncio.sleep(0))
-
-        await adapter.start()
-
-        [stream] = calls
-        assert stream[stream.index("logcat") + 1:][:6] == (
-            "-v", "threadtime", "-v", "UTC", "-v", "year",
+        assert adb.logcat_args()[:8] == (
+            "logcat", "-v", "threadtime", "-v", "UTC", "-v", "year", "-T",
         )
 
     async def test_starting_capture_does_not_clear_the_devices_logs(self, monkeypatch):
         """`logcat -c` empties the device's own buffers -- history that
         belongs to whoever else reads the device, and to the user."""
+        adb = FakeAdb(monkeypatch)
+        await LogcatAdapter(serial="emulator-5554").start()
+
+        assert not any("-c" in call for call in adb.calls), adb.calls
+        assert adb.logcat_args()[-2:] == ("-T", "1")
+
+
+class TestOldAndroid:
+    """Before Android 7, logcat's `-v` accepts format names only and exits on
+    `UTC` or `year`. Asking for them regardless made capture on those devices
+    a process that died at once, while the start call reported success."""
+
+    async def test_an_old_device_is_not_asked_for_formats_it_rejects(self, monkeypatch):
+        adb = FakeAdb(monkeypatch, sdk=b"23\n")
+        adapter = LogcatAdapter(serial="old")
+        await adapter.start()
+
+        assert "UTC" not in adb.logcat_args() and "year" not in adb.logcat_args()
+        assert adapter.api_level == 23
+        assert adapter._error is None
+
+    async def test_an_unanswered_level_is_not_mistaken_for_an_answer(self, monkeypatch):
+        """Could not ask is not "old": the modern format is used, and the
+        early-exit check below is what catches a wrong guess."""
+        adb = FakeAdb(monkeypatch, sdk=b"")
+        adapter = LogcatAdapter(serial="x")
+        await adapter.start()
+
+        assert adapter.api_level is None
+        assert "UTC" in adb.logcat_args()
+
+    async def test_a_logcat_that_exits_at_once_is_an_error_with_its_reason(self, monkeypatch):
+        FakeAdb(monkeypatch, sdk=b"", logcat_exit=255,
+                stderr=b"Invalid parameter to -v: UTC\n")
+        adapter = LogcatAdapter(serial="x")
+        await adapter.start()
+
+        assert adapter._error is not None
+        assert "Invalid parameter to -v: UTC" in adapter._error
+        assert "exit 255" in adapter._error
+        assert not adapter.is_running
+
+    async def test_a_stream_that_ends_by_itself_is_an_error_not_a_stop(self, monkeypatch):
+        """The device unplugged, or logcat died: status must read "error"."""
+        adapter = LogcatAdapter(serial="x")
+
+        class _Stdout:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise StopAsyncIteration
+
+        class _Stderr:
+            async def read(self):
+                return b"error: device 'x' not found\n"
+
+        class _Proc:
+            stdout, stderr, returncode = _Stdout(), _Stderr(), 1
+
+        adapter._process = _Proc()
+        adapter._running = True
+        await adapter._read_loop()
+
+        assert "device 'x' not found" in adapter._error
+        assert adapter.status().status == "error"
+
+
+class FakeAdb:
+    """`adb` for the adapter's two calls: getprop, then logcat."""
+
+    def __init__(self, monkeypatch, *, sdk=b"34\n", logcat_exit=None, stderr=b""):
         import asyncio
         import shutil
 
-        calls = []
+        self.calls: list[tuple] = []
+        fake = self
 
-        class _Proc:
-            returncode = None
+        class _Stream:
+            def __init__(self, data):
+                self._data = data
+
+            async def read(self):
+                return self._data
+
+        class _Getprop:
+            returncode = 0
+
+            async def communicate(self):
+                return sdk, b""
+
+        class _Logcat:
             stdout = None
 
+            def __init__(self):
+                self.stderr = _Stream(stderr)
+                self.returncode = logcat_exit
+
+            async def wait(self):
+                if logcat_exit is None:
+                    await asyncio.sleep(3600)   # a live logcat does not exit
+                return logcat_exit
+
         async def fake_exec(*args, **kwargs):
-            calls.append(args)
-            return _Proc()
+            fake.calls.append(args)
+            return _Getprop() if "getprop" in args else _Logcat()
 
         monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/adb")
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
-        adapter = LogcatAdapter(serial="emulator-5554")
-        monkeypatch.setattr(adapter, "_read_loop", lambda: asyncio.sleep(0))
+        monkeypatch.setattr(LogcatAdapter, "_read_loop", lambda self: asyncio.sleep(0))
 
-        await adapter.start()
-
-        assert not any("-c" in call for call in calls), calls
-        [stream] = calls
-        assert stream[-2:] == ("-T", "1")
+    def logcat_args(self) -> tuple:
+        [call] = [c for c in self.calls if "logcat" in c]
+        return call[call.index("logcat"):]
 
 
 class TestPhysicalIos:
