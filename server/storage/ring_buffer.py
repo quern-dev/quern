@@ -16,6 +16,7 @@ from collections.abc import Callable, Iterable
 from datetime import datetime
 
 from server.models import LogEntry, LogLevel, LogQueryParams, LogSource
+from server.storage.fanout import Fanout
 
 
 def _source_key(source: LogSource | str) -> str:
@@ -34,7 +35,7 @@ class RingBuffer:
     def __init__(self, max_size: int = 10_000) -> None:
         self._buffer: deque[LogEntry] = deque(maxlen=max_size)
         self._lock = asyncio.Lock()
-        self._subscribers: list[asyncio.Queue[LogEntry]] = []
+        self._fanout: Fanout[LogEntry] = Fanout(maxsize=1000)
         # Eviction bookkeeping. A `deque(maxlen=)` drops the oldest entry
         # without a word, so for as long as this buffer existed a query that
         # found nothing could not say whether nothing happened or everything
@@ -77,17 +78,9 @@ class RingBuffer:
             self._buffer.append(entry)
             self._appended += 1
 
-        # Notify SSE subscribers (non-blocking)
-        dead_subs: list[asyncio.Queue[LogEntry]] = []
-        for queue in self._subscribers:
-            try:
-                queue.put_nowait(entry)
-            except asyncio.QueueFull:
-                # Subscriber is too slow — drop the entry for them
-                dead_subs.append(queue)
-
-        for dead in dead_subs:
-            self._subscribers.remove(dead)
+        # Notify SSE subscribers (non-blocking). A slow one loses this entry,
+        # and the loss is counted -- see server/storage/fanout.py.
+        self._fanout.publish(entry)
 
     async def purge(self, keep: Callable[[LogEntry], bool]) -> int:
         """Remove entries that don't match the predicate. Returns count removed."""
@@ -223,16 +216,15 @@ class RingBuffer:
         Returns a queue that will receive new entries as they arrive.
         Caller must call unsubscribe() when done.
         """
-        queue: asyncio.Queue[LogEntry] = asyncio.Queue(maxsize=1000)
-        self._subscribers.append(queue)
-        return queue
+        return self._fanout.subscribe()
 
     def unsubscribe(self, queue: asyncio.Queue[LogEntry]) -> None:
         """Remove a subscription queue."""
-        try:
-            self._subscribers.remove(queue)
-        except ValueError:
-            pass
+        self._fanout.unsubscribe(queue)
+
+    def dropped(self, queue: asyncio.Queue[LogEntry]) -> int:
+        """Entries this subscriber missed because its queue was full."""
+        return self._fanout.dropped(queue)
 
     def _filter(self, params: LogQueryParams) -> list[LogEntry]:
         """Apply query filters to the buffer. Must be called under lock."""

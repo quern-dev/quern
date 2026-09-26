@@ -29,6 +29,7 @@ from server.processing.summarizer import (
     generate_summary,
     parse_cursor,
 )
+from server.storage.fanout import DropNotice
 from server.storage.ring_buffer import RingBuffer
 
 router = APIRouter(prefix="/api/v1/logs", tags=["logs"])
@@ -164,20 +165,34 @@ async def stream_logs(
         # Subscribe to all relevant buffers and merge into one queue
         merged: asyncio.Queue[LogEntry] = asyncio.Queue(maxsize=1000)
         subscriptions = [(buf, buf.subscribe()) for buf in buffers]
+        merge_dropped = 0
 
         async def forward(queue: asyncio.Queue[LogEntry]) -> None:
+            nonlocal merge_dropped
             while True:
                 entry = await queue.get()
                 try:
                     merged.put_nowait(entry)
                 except asyncio.QueueFull:
-                    pass  # Drop if merged queue is full
+                    merge_dropped += 1
 
+        def missed() -> int:
+            return merge_dropped + sum(buf.dropped(q) for buf, q in subscriptions)
+
+        notice = DropNotice()
         tasks = [asyncio.create_task(forward(q)) for _, q in subscriptions]
         try:
             while True:
                 if await request.is_disconnected():
                     break
+                # Said in the stream, as it happens. A client that falls behind
+                # loses entries at two points -- the buffer's queue for it and
+                # the merge queue here -- and both dropped silently; in practice
+                # it was the merge queue, which the forwarder above fills as fast
+                # as the buffer does. A gap the client is told about is one it
+                # can fill with `query_logs`; one it is not reads as quiet (#255).
+                if (due := notice.due(missed())) is not None:
+                    yield {"event": "dropped", "data": json.dumps(due)}
                 try:
                     entry = await asyncio.wait_for(merged.get(), timeout=15.0)
                     if matches_filter(entry):
@@ -191,6 +206,7 @@ async def stream_logs(
                         "data": json.dumps({
                             "time": datetime.now(UTC).isoformat(),
                             "buffer_size": buffers[0].size,
+                            "total_dropped": missed(),
                         }),
                     }
         finally:
@@ -378,7 +394,11 @@ async def get_errors(
         all_entries = [e for e in all_entries if e.source != LogSource.CRASH]
 
     total = len(all_entries)
-    limited = all_entries[:limit]
+    # The newest, newest first -- as `query_logs` and `tail_logs` return them.
+    # This sliced from the front of an oldest-first list, so with more errors
+    # than `limit` it kept the stale ones and cut the error that just
+    # happened: the one a caller asking "what is going wrong" came for.
+    limited = all_entries[-limit:][::-1]
 
     return LogErrorsResponse(
         entries=limited,

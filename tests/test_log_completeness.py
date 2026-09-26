@@ -164,6 +164,20 @@ class TestErrors:
         assert data["truncated"] is True
 
 
+    async def test_the_newest_errors_are_kept_when_there_are_more_than_asked(self, app):
+        """It sliced the front of an oldest-first list, so over the limit it
+        returned the stale errors and cut the one that had just happened."""
+        for i in range(4):
+            await app.state.ring_buffer.append(
+                _entry(f"error {i}", level=LogLevel.ERROR, ago_s=10 - i),
+            )
+
+        data = await _get(app, "/api/v1/logs/errors", limit=2)
+
+        assert data["total"] == 4
+        assert [e["message"] for e in data["entries"]] == ["error 3", "error 2"]
+
+
 class TestSummary:
     async def test_truncation_is_in_the_prose_as_well_as_the_field(self, app):
         """The prose is what a reader takes in first."""

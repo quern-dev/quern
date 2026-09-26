@@ -11,6 +11,7 @@ from collections import OrderedDict
 from datetime import datetime
 
 from server.models import FlowQueryParams, FlowRecord
+from server.storage.fanout import Fanout
 
 
 class FlowStore:
@@ -20,7 +21,7 @@ class FlowStore:
         self._flows: OrderedDict[str, FlowRecord] = OrderedDict()
         self._max_size = max_size
         self._lock = asyncio.Lock()
-        self._subscribers: list[asyncio.Queue[FlowRecord]] = []
+        self._fanout: Fanout[FlowRecord] = Fanout(maxsize=1000)
 
     @property
     def size(self) -> int:
@@ -41,15 +42,10 @@ class FlowStore:
                 self._flows.popitem(last=False)
             self._flows[flow.id] = flow
 
-        # Notify subscribers (outside lock to avoid deadlock)
-        dead_subs: list[asyncio.Queue[FlowRecord]] = []
-        for queue in self._subscribers:
-            try:
-                queue.put_nowait(flow)
-            except asyncio.QueueFull:
-                dead_subs.append(queue)
-        for dead in dead_subs:
-            self._subscribers.remove(dead)
+        # Notify subscribers (outside lock to avoid deadlock). A slow one
+        # loses this flow and the loss is counted, rather than the subscriber
+        # being dropped without a word -- see server/storage/fanout.py.
+        self._fanout.publish(flow)
 
     async def get(self, flow_id: str) -> FlowRecord | None:
         """Look up a flow by ID."""
@@ -85,16 +81,15 @@ class FlowStore:
         Returns a queue that will receive new flows as they arrive.
         Caller must call unsubscribe() when done.
         """
-        queue: asyncio.Queue[FlowRecord] = asyncio.Queue(maxsize=1000)
-        self._subscribers.append(queue)
-        return queue
+        return self._fanout.subscribe()
 
     def unsubscribe(self, queue: asyncio.Queue[FlowRecord]) -> None:
         """Remove a subscription queue."""
-        try:
-            self._subscribers.remove(queue)
-        except ValueError:
-            pass
+        self._fanout.unsubscribe(queue)
+
+    def dropped(self, queue: asyncio.Queue[FlowRecord]) -> int:
+        """Flows this subscriber missed because its queue was full."""
+        return self._fanout.dropped(queue)
 
     def _filter(self, params: FlowQueryParams) -> list[FlowRecord]:
         """Apply query filters. Returns newest-first. Must be called under lock."""
