@@ -95,7 +95,7 @@ class LogcatAdapter(BaseSourceAdapter):
         self._crashes = AndroidCrashDetector(device_id=device_id)
 
     async def start(self) -> None:
-        """Clear logcat buffer, then spawn adb logcat and begin reading output."""
+        """Spawn adb logcat from the newest line on, and begin reading output."""
         import shutil
 
         if not shutil.which("adb"):
@@ -103,18 +103,18 @@ class LogcatAdapter(BaseSourceAdapter):
             logger.error(self._error)
             return
 
-        # Clear existing buffer so we only get new entries
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "adb", "-s", self.serial, "logcat", "-c",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await proc.communicate()
-        except Exception:
-            pass  # Non-fatal — proceed even if clear fails
-
-        cmd = ["adb", "-s", self.serial, "logcat", "-v", "threadtime", "-v", "UTC", "-v", "year"]
+        # Start from now without destroying what came before. This used to
+        # run `logcat -c` first, which empties the *device's* log buffers --
+        # history belonging to whoever else reads that device (Android
+        # Studio, a bug report, another tool) and to the user, gone because
+        # quern wanted a clean start. `-T 1` gets the same clean start by
+        # reading from the newest line on, leaving the buffers intact; the
+        # cost is that one line from before capture comes through.
+        cmd = [
+            "adb", "-s", self.serial, "logcat",
+            "-v", "threadtime", "-v", "UTC", "-v", "year",
+            "-T", "1",
+        ]
 
         # Add tag filter if specified (e.g. "MyTag:D *:S")
         if self.tag_filter:

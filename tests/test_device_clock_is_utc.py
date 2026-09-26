@@ -88,10 +88,37 @@ class TestLogcat:
 
         await adapter.start()
 
-        stream = [c for c in calls if "-c" not in c][0]
+        [stream] = calls
         assert stream[stream.index("logcat") + 1:][:6] == (
             "-v", "threadtime", "-v", "UTC", "-v", "year",
         )
+
+    async def test_starting_capture_does_not_clear_the_devices_logs(self, monkeypatch):
+        """`logcat -c` empties the device's own buffers -- history that
+        belongs to whoever else reads the device, and to the user."""
+        import asyncio
+        import shutil
+
+        calls = []
+
+        class _Proc:
+            returncode = None
+            stdout = None
+
+        async def fake_exec(*args, **kwargs):
+            calls.append(args)
+            return _Proc()
+
+        monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/adb")
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        adapter = LogcatAdapter(serial="emulator-5554")
+        monkeypatch.setattr(adapter, "_read_loop", lambda: asyncio.sleep(0))
+
+        await adapter.start()
+
+        assert not any("-c" in call for call in calls), calls
+        [stream] = calls
+        assert stream[-2:] == ("-T", "1")
 
 
 class TestPhysicalIos:
