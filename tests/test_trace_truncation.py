@@ -315,6 +315,9 @@ class _FakeFlowStore:
     async def get_since(self, since):
         return [f for f in self._flows if f.timestamp >= since]
 
+    def is_complete_since(self, since):
+        return True  # this fake never evicts
+
 
 def _flow(i, **kw):
     from server.models import FlowRecord, FlowRequest
@@ -404,19 +407,38 @@ class TestTheTruncationProbesFireWhenTheyShould:
         assert result["action_window_truncated"] is True
 
     async def test_flows_lost_from_the_store_are_reported(self):
-        store = _FakeFlowStore([_flow(i) for i in range(10, 14)])
-        store.max_size = 4  # full
+        from server.proxy.flow_store import FlowStore
+
+        store = FlowStore(max_size=3)
+        for i in range(10, 14):          # t=10 is evicted
+            await store.add(_flow(i))
 
         result = await _call_full(ring=RingBuffer(max_size=10), flows=store, limit=100)
 
         assert result["flow_window_truncated"] is True
 
-    async def test_a_store_reaching_back_past_the_window_is_not(self):
-        """Full is not truncated. The probe has to find the true oldest, and
-        the store is in completion order rather than timestamp order — so
-        reading its first entry claimed truncation that had not happened."""
-        store = _FakeFlowStore([_flow(10), _flow(-5), _flow(11)])
-        store.max_size = 3
+    async def test_a_long_request_does_not_hide_a_newer_eviction(self):
+        """The review's reproduction. The store evicts in completion order and
+        a flow is stamped when its request started, so a long request from
+        before the window survived at the front, and the old probe -- full,
+        and oldest survivor newer than the window? -- reported nothing lost."""
+        from server.proxy.flow_store import FlowStore
+
+        store = FlowStore(max_size=3)
+        for i in (10, 11, 12):
+            await store.add(_flow(i))
+        await store.add(_flow(-600))     # started long ago, completed now; evicts t=10
+
+        result = await _call_full(ring=RingBuffer(max_size=10), flows=store, limit=100)
+
+        assert result["flow_window_truncated"] is True
+
+    async def test_full_with_nothing_evicted_is_not_truncated(self):
+        from server.proxy.flow_store import FlowStore
+
+        store = FlowStore(max_size=3)
+        for i in (10, -5, 11):
+            await store.add(_flow(i))
 
         result = await _call_full(ring=RingBuffer(max_size=10), flows=store, limit=100)
 

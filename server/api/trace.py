@@ -279,16 +279,14 @@ async def get_trace(
         flows_over_limit = len(flows) > log_limit
         if flows_over_limit:
             flows = flows[-log_limit:]
-        # The store evicts oldest-first and silently, exactly like the ring
-        # buffer, so the same probe applies: full, and nothing surviving from
-        # before the window, means the start of it is gone.
-        if flow_store.size >= flow_store.max_size:
-            everything = await flow_store.get_since(
-                datetime.min.replace(tzinfo=UTC),
-            )
-            # `min` rather than `[0]`, for the same reason.
-            if everything and min(f.timestamp for f in everything) > window_start:
-                flow_window_truncated = True
+        # From the store's own eviction record, like the log buffers. The
+        # probe that stood here -- full, and oldest survivor newer than the
+        # window -- is the one #255 discredited: the store evicts in
+        # completion order and a flow is stamped when it started, so a long
+        # request from before the window survived and hid newer evictions.
+        # Reproduced in review: a store of 3 holding t=10, 11, 12, then a flow
+        # at t=-600, evicted t=10 and reported nothing lost.
+        flow_window_truncated = not flow_store.is_complete_since(window_start)
 
     # In a thread. Attribution is pure CPU over plain data with nothing to
     # await, and it compares every flow and every log against every action --
