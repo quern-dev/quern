@@ -374,3 +374,14 @@ async def test_stats_report_the_span_by_timestamp_not_position():
     stats = buffer.stats()
     assert stats["oldest"] == (T0 + timedelta(seconds=5)).isoformat()
     assert stats["newest"] == (T0 + timedelta(seconds=30)).isoformat()
+
+
+@pytest.mark.asyncio
+async def test_a_zero_capacity_buffer_counts_what_it_cannot_hold():
+    """`--buffer-size 0` is accepted by the config. Reading `[0]` of the empty
+    deque to record the eviction raised IndexError into every adapter."""
+    buffer = RingBuffer(max_size=0)
+    await buffer.append(_at(5))
+
+    assert buffer.stats()["evicted"] == 1
+    assert not buffer.is_complete_since(T0)

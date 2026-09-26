@@ -191,6 +191,22 @@ class FakeAdb:
         return call[call.index("logcat"):]
 
 
+class TestIdevicesyslog:
+    def test_a_line_is_stamped_on_arrival_not_as_utc_in_the_current_year(self):
+        """idevicesyslog prints the device's local time with no zone and no
+        year. Read as UTC in the current year it was seven hours off in
+        Pacific time and a year off across New Year."""
+        from server.sources.syslog import SyslogAdapter
+
+        before = datetime.now(UTC)
+        entry = SyslogAdapter()._parse_line(
+            "Dec 31 23:59:59 iPhone MyApp(CoreFoundation)[1234] <Notice>: hello",
+        )
+
+        assert before <= entry.timestamp <= datetime.now(UTC)
+        assert entry.process == "MyApp"
+
+
 class TestPhysicalIos:
     """`pymobiledevice3` prints host-local time with no zone."""
 

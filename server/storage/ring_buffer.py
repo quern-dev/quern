@@ -78,7 +78,10 @@ class RingBuffer:
         """Add an entry to the buffer and notify all subscribers."""
         async with self._lock:
             if len(self._buffer) == self._buffer.maxlen:
-                self._record_eviction(self._buffer[0])
+                # With a capacity of zero (`--buffer-size 0`) the entry being
+                # appended is the one that is lost; there is no [0] to read,
+                # and indexing it raised into every adapter.
+                self._record_eviction(self._buffer[0] if self._buffer else entry)
             self._buffer.append(entry)
             self._appended += 1
 
