@@ -129,8 +129,15 @@ async def _capture_action_screenshot(controller, udid: str, label: str) -> str |
         return None
 
 
-def _logging_start_lock(request: Request, udid: str) -> asyncio.Lock:
-    """The lock that serialises starting capture on one device."""
+def _logging_lock(request: Request, udid: str) -> asyncio.Lock:
+    """The lock that serialises starting and stopping capture on one device.
+
+    Stops need it as much as starts. `adapter.stop()` marks the adapter not
+    running before it has finished, so a start arriving in that gap passed
+    the "already running" check and registered a new capture -- which the
+    stop, resuming, then deleted from the registry, leaving it running with
+    no way to stop it (CodeRabbit on #319).
+    """
     locks = getattr(request.app.state, "logging_start_locks", None)
     if locks is None:
         locks = request.app.state.logging_start_locks = {}
@@ -825,7 +832,7 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
         raise _handle_device_error(e)
 
     # Serialised per device, for the reason given on start_device_logging.
-    async with _logging_start_lock(request, udid):
+    async with _logging_lock(request, udid):
         return await _start_simulator_logging(request, body, udid)
 
 
@@ -954,6 +961,12 @@ async def stop_simulator_logging(request: Request, body: StopSimLogRequest):
     except DeviceError as e:
         raise _handle_device_error(e)
 
+    # Under the same lock as starting; see _logging_lock.
+    async with _logging_lock(request, udid):
+        return await _stop_simulator_logging(request, udid)
+
+
+async def _stop_simulator_logging(request: Request, udid: str):
     sim_adapters: dict = request.app.state.sim_log_adapters
     adapter = sim_adapters.get(udid)
     if not adapter:
@@ -1016,7 +1029,7 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
     # stop and doubling every line (#255, second review; reproduced with a
     # fake adb: two "started" responses and one logcat left running after
     # every registered adapter was stopped).
-    async with _logging_start_lock(request, udid):
+    async with _logging_lock(request, udid):
         return await _start_device_logging(request, body, udid, controller)
 
 
@@ -1116,6 +1129,12 @@ async def stop_device_logging(request: Request, body: StopDeviceLogRequest):
     except DeviceError as e:
         raise _handle_device_error(e)
 
+    # Under the same lock as starting; see _logging_lock.
+    async with _logging_lock(request, udid):
+        return await _stop_device_logging(request, udid)
+
+
+async def _stop_device_logging(request: Request, udid: str):
     dev_adapters: dict = request.app.state.device_log_adapters
     adapter = dev_adapters.get(udid)
     if not adapter:

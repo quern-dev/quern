@@ -123,6 +123,32 @@ class TestNativeCrashAndAnr:
         assert crash.pid == 4242
         assert "not responding" in crash.message
 
+    def test_an_unrelated_system_server_line_does_not_close_the_anr(self):
+        """CodeRabbit on #319: a `Start proc` line between `ANR in` and `PID:`
+        closed the ANR early and lost the app's pid."""
+        crashes, _ = _feed([
+            "2026-09-26 18:05:07.000 +0000 555 720 E ActivityManager: ANR in com.example.app",
+            "2026-09-26 18:05:07.001 +0000 555 721 I ActivityManager: "
+            "Start proc 9000:com.other/u0a1",
+            "2026-09-26 18:05:07.002 +0000 555 720 E ActivityManager: PID: 4242",
+        ])
+        [crash] = crashes
+        assert crash.pid == 4242
+
+    def test_an_anr_whose_pid_line_is_too_far_off_is_reported_without_it(self):
+        from server.sources.android_crash import ANR_PID_WITHIN_LINES
+
+        chatter = [
+            f"2026-09-26 18:05:07.{i:03d} +0000 555 721 I ActivityManager: line {i}"
+            for i in range(ANR_PID_WITHIN_LINES)
+        ]
+        crashes, _ = _feed([
+            "2026-09-26 18:05:07.000 +0000 555 720 E ActivityManager: ANR in com.example.app",
+            *chatter,
+        ])
+        [crash] = crashes
+        assert crash.process == "com.example.app" and crash.pid is None
+
     def test_an_anr_whose_pid_line_never_comes_is_still_reported(self):
         crashes, detector = _feed([
             "2026-09-26 18:05:07.000 +0000 555 720 E ActivityManager: ANR in com.example.app",

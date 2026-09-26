@@ -435,3 +435,54 @@ async def test_two_starts_for_one_simulator_launch_one_capture(app, monkeypatch)
         "already_running", "started",
     ]
     assert starts == ["SIM-A"]
+
+
+async def test_a_start_during_a_stop_leaves_the_new_capture_registered(app, monkeypatch):
+    """CodeRabbit on #319: stop() marks the adapter not running before it
+    finishes, so a start in that gap registered a new capture which the stop,
+    resuming, deleted from the registry -- a running logcat the API could no
+    longer stop. The stop now holds the same per-device lock as the start."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from server.sources.logcat import LogcatAdapter
+
+    async def _resolve(udid):
+        return udid
+
+    async def _start(self):
+        self._running = True
+
+    async def _slow_stop(self):
+        self._running = False
+        await asyncio.sleep(0.3)      # shutting logcat down takes a moment
+
+    app.state.device_controller = SimpleNamespace(
+        resolve_udid=_resolve, _is_android=lambda u: True, _is_physical=lambda u: False,
+    )
+    app.state.deduplicator = SimpleNamespace(process=lambda entry: None)
+    monkeypatch.setattr(LogcatAdapter, "start", _start)
+    monkeypatch.setattr(LogcatAdapter, "stop", _slow_stop)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        body = {"udid": "emulator-5554"}
+        await client.post("/api/v1/device/logging/device/start", headers=HEADERS, json=body)
+
+        async def start_soon():
+            await asyncio.sleep(0.05)   # lands while the stop is shutting down
+            return await client.post(
+                "/api/v1/device/logging/device/start", headers=HEADERS, json=body,
+            )
+
+        stop, start = await asyncio.gather(
+            client.post("/api/v1/device/logging/device/stop", headers=HEADERS, json=body),
+            start_soon(),
+        )
+
+    assert stop.json()["status"] == "stopped"
+    assert start.json()["status"] == "started"
+    registered = app.state.device_log_adapters.get("emulator-5554")
+    assert registered is not None and registered.is_running, (
+        "the new capture is running but no longer registered, so it cannot be stopped"
+    )

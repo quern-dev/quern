@@ -35,6 +35,10 @@ _FATAL_SIGNAL = re.compile(r"^Fatal signal .*?\bpid (\d+) \(([^)]+)\)")
 _ANR = re.compile(r"^ANR in (\S+)")
 _ANR_PID = re.compile(r"^PID:\s*(\d+)")
 
+#: How many other ActivityManager lines from system_server may come between
+#: `ANR in` and its `PID:` line before the ANR is reported without a pid.
+ANR_PID_WITHIN_LINES = 20
+
 
 #: Linux keeps 15 characters of a process name (TASK_COMM_LEN is 16 with the
 #: terminator), and Android's `Process.setArgV0` keeps the *last* 15 of a
@@ -109,8 +113,9 @@ class AndroidCrashDetector:
         self.device_id = device_id
         self._pending: dict[int, _PendingJavaCrash] = {}
         # ANRs announced but whose `PID:` line has not arrived, keyed by the
-        # announcing process (system_server), not the app.
-        self._pending_anr: dict[int | None, tuple[LogEntry, str]] = {}
+        # announcing process (system_server), not the app, with a count of
+        # the other ActivityManager lines seen from it since.
+        self._pending_anr: dict[int | None, list] = {}
 
     def feed(self, entry: LogEntry) -> list[LogEntry]:
         tag, message, pid = entry.process, entry.message, entry.pid
@@ -152,20 +157,30 @@ class AndroidCrashDetector:
             # The `ANR in` line is logged by system_server, so its pid is
             # system_server's -- 555 on the device measured, not the app's.
             # The app's is on the `PID:` line that follows, so wait for it.
+            #
+            # Only the `PID:` line closes it. system_server logs plenty of other
+            # ActivityManager lines, and they can land between the two; closing
+            # on the first of them lost the pid (CodeRabbit on #319). A bound
+            # keeps an ANR whose `PID:` line never comes from waiting forever.
             anr = _ANR.match(message)
             if anr:
                 out.extend(self._flush_anr(pid))
-                self._pending_anr[pid] = (entry, anr.group(1))
+                self._pending_anr[pid] = [entry, anr.group(1), 0]
             elif pid in self._pending_anr:
                 app_pid = _ANR_PID.match(message)
-                out.extend(self._flush_anr(pid, int(app_pid.group(1)) if app_pid else None))
+                if app_pid:
+                    out.extend(self._flush_anr(pid, int(app_pid.group(1))))
+                else:
+                    self._pending_anr[pid][2] += 1
+                    if self._pending_anr[pid][2] >= ANR_PID_WITHIN_LINES:
+                        out.extend(self._flush_anr(pid))
         return out
 
     def _flush_anr(self, announcer: int | None, app_pid: int | None = None) -> list[LogEntry]:
         pending = self._pending_anr.pop(announcer, None)
         if pending is None:
             return []
-        entry, process = pending
+        entry, process, _ = pending
         return [self._crash(entry, process, app_pid,
                             f"{process} is not responding: {entry.message}", [entry.message])]
 

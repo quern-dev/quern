@@ -193,9 +193,27 @@ class _Request:
         return self.polls > 5
 
 
-async def _events(response, until):
+#: Captured at import, because the heartbeat tests replace asyncio.wait_for.
+_real_wait_for = asyncio.wait_for
+
+#: No single event should take longer than this. A handler that stops
+#: emitting what a test waits for must fail the test, not hang it for the
+#: handler's 15s heartbeat interval per remaining iteration (CodeRabbit, #319).
+EVENT_TIMEOUT_S = 5.0
+
+
+async def _next(events):
+    return await _real_wait_for(events.__anext__(), EVENT_TIMEOUT_S)
+
+
+async def _events(response, until, *, limit=5000):
     seen = []
-    async for event in response.body_iterator:
+    events = response.body_iterator
+    for _ in range(limit):
+        try:
+            event = await _next(events)
+        except StopAsyncIteration:
+            break
         seen.append(event)
         if event["event"] == until:
             break
@@ -222,7 +240,7 @@ async def test_the_log_stream_says_what_a_slow_client_missed():
     await asyncio.sleep(0)
     for i in range(1200):
         await ring.append(_entry(i))
-    await task
+    await _real_wait_for(task, EVENT_TIMEOUT_S)
 
     seen = await _events(response, until="dropped")
 
@@ -253,7 +271,7 @@ async def test_losses_at_the_streams_own_merge_queue_are_reported_too():
     task = asyncio.ensure_future(response.body_iterator.__anext__())
     await asyncio.sleep(0)
     await ring.append(_entry())
-    await task
+    await _real_wait_for(task, EVENT_TIMEOUT_S)
     for _chunk in range(3):
         for i in range(900):
             await ring.append(_entry(i))
@@ -280,7 +298,7 @@ async def test_the_flow_stream_says_what_a_slow_client_missed():
     await asyncio.sleep(0)
     for i in range(1100):
         await store.add(_make_flow(flow_id=f"f{i}"))
-    await task
+    await _real_wait_for(task, EVENT_TIMEOUT_S)
 
     seen = await _events(response, until="dropped")
 
@@ -308,7 +326,7 @@ async def test_the_log_stream_subscribes_with_the_clients_filter():
     task = asyncio.ensure_future(response.body_iterator.__anext__())
     await asyncio.sleep(0)
     await ring.append(_entry())
-    await task
+    await _real_wait_for(task, EVENT_TIMEOUT_S)
 
     for i in range(1500):
         noise = _entry(i)
@@ -341,12 +359,12 @@ async def test_the_heartbeat_carries_the_running_total(monkeypatch):
     monkeypatch.setattr(asyncio, "wait_for", _time_out)
     events = response.body_iterator
 
-    first = await events.__anext__()           # subscribes; reads nothing
+    first = await _next(events)                # subscribes; reads nothing
     assert first["event"] == "heartbeat"
     for i in range(1100):                      # 100 past the subscriber queue
         await ring.append(_entry(i))
 
-    seen = [await events.__anext__() for _ in range(2)]
+    seen = [await _next(events) for _ in range(2)]
 
     [heartbeat] = [e for e in seen if e["event"] == "heartbeat"]
     assert json.loads(heartbeat["data"])["total_dropped"] >= 100
@@ -365,7 +383,7 @@ async def test_the_flow_stream_subscribes_with_the_clients_filter():
     task = asyncio.ensure_future(response.body_iterator.__anext__())
     await asyncio.sleep(0)
     await store.add(_make_flow(flow_id="wanted", host="api.wanted.com"))
-    await task
+    await _real_wait_for(task, EVENT_TIMEOUT_S)
 
     for i in range(1500):
         await store.add(_make_flow(flow_id=f"noise{i}", host="cdn.other.com"))
@@ -392,11 +410,11 @@ async def test_the_flow_heartbeat_carries_the_running_total(monkeypatch):
     monkeypatch.setattr(asyncio, "wait_for", _time_out)
     events = response.body_iterator
 
-    assert (await events.__anext__())["event"] == "heartbeat"
+    assert (await _next(events))["event"] == "heartbeat"
     for i in range(1100):
         await store.add(_make_flow(flow_id=f"f{i}"))
 
-    seen = [await events.__anext__() for _ in range(2)]
+    seen = [await _next(events) for _ in range(2)]
 
     [heartbeat] = [e for e in seen if e["event"] == "heartbeat"]
     assert json.loads(heartbeat["data"])["total_dropped"] >= 100
