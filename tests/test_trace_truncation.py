@@ -22,33 +22,35 @@ def _entry(at_s, source=LogSource.SIMULATOR):
     )
 
 
-async def _call(ring, since):
+async def _call(ring, since, crashes=None, server=None):
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        server_buffer=RingBuffer(max_size=10), ring_buffer=ring,
+        server_buffer=server or RingBuffer(max_size=10),
+        crash_buffer=crashes or RingBuffer(max_size=10), ring_buffer=ring,
         flow_store=None, proxy_adapter=None,
     )))
     return await get_trace(request=request, since=since, udid=None, limit=100)
 
 
 class TestSilentEvictionIsReported:
-    """The buffer is a deque with a maxlen and eviction counts nothing, so an
-    incomplete trace is indistinguishable from a quiet one. The reader
-    concludes the app logged nothing, when the entries were dropped."""
+    """The buffer is a deque with a maxlen, and until #255 eviction counted
+    nothing, so an incomplete trace was indistinguishable from a quiet one.
+    The reader concluded the app logged nothing, when the entries were
+    dropped."""
 
-    async def test_a_full_buffer_that_starts_late_is_truncated(self):
+    async def test_an_entry_evicted_from_inside_the_window_is_reported(self):
         ring = RingBuffer(max_size=3)
-        for at in (10, 11, 12):          # window asks from t=0
+        for at in (10, 11, 12, 13):      # t=10 is evicted; window asks from t=0
             await ring.append(_entry(at))
 
         result = await _call(ring, BASE)
 
         assert result["log_window_truncated"] is True
 
-    async def test_a_full_buffer_reaching_back_far_enough_is_not(self):
-        """Full is not the same as truncated. If the oldest surviving entry
-        predates the window, nothing inside it was lost."""
+    async def test_a_window_starting_after_every_eviction_is_whole(self):
+        """Nothing stamped after the newest evicted entry was ever lost, so a
+        window that starts later is provably complete."""
         ring = RingBuffer(max_size=3)
-        for at in (10, 11, 12):
+        for at in (10, 11, 12, 13):      # t=10 evicted
             await ring.append(_entry(at))
 
         result = await _call(ring, BASE + timedelta(seconds=11))
@@ -62,6 +64,114 @@ class TestSilentEvictionIsReported:
         result = await _call(ring, BASE)
 
         assert result["log_window_truncated"] is False
+
+    async def test_exactly_full_with_nothing_evicted_is_not_truncated(self):
+        """The probe this replaced asked only "full, and oldest survivor newer
+        than the window?", so a buffer holding exactly `max_size` entries
+        reported loss that never happened. This test used to assert that
+        false positive as the expected behaviour."""
+        ring = RingBuffer(max_size=3)
+        for at in (10, 11, 12):          # full, nothing evicted
+            await ring.append(_entry(at))
+
+        result = await _call(ring, BASE)
+
+        assert result["log_window_truncated"] is False
+
+    async def test_an_old_stamped_survivor_does_not_hide_a_newer_eviction(self):
+        """Entries are not in timestamp order. An entry stamped long before
+        the window (a device clock, a late-arriving report) can survive at the
+        front of the buffer while newer-stamped lines behind it are evicted --
+        and the old probe, reading the front, called that whole."""
+        ring = RingBuffer(max_size=2)
+        await ring.append(_entry(20))    # inside the window; evicted below
+        await ring.append(_entry(-100))  # stamped before the window, survives
+        await ring.append(_entry(30))
+
+        result = await _call(ring, BASE)
+
+        assert result["log_window_truncated"] is True
+
+    async def test_a_purge_after_eviction_does_not_hide_the_loss(self):
+        """A filter change purges the buffer back below full. The old probe
+        required "full", so everything evicted before the purge vanished from
+        the record."""
+        ring = RingBuffer(max_size=3)
+        for at in (10, 11, 12, 13):      # t=10 evicted
+            await ring.append(_entry(at))
+        await ring.purge(lambda e: e.timestamp != BASE + timedelta(seconds=13))
+        assert ring.size < ring.max_size
+
+        result = await _call(ring, BASE)
+
+        assert result["log_window_truncated"] is True
+
+    async def test_shedding_lines_the_trace_does_not_use_is_not_truncation(self):
+        """Build output is discarded by the trace anyway, so its eviction
+        loses the trace nothing. Flagging it would train readers to ignore
+        the flag."""
+        ring = RingBuffer(max_size=2)
+        await ring.append(_entry(10, source=LogSource.BUILD))  # evicted
+        await ring.append(_entry(11))
+        await ring.append(_entry(12))
+
+        result = await _call(ring, BASE)
+
+        assert result["log_window_truncated"] is False
+
+
+class TestCrashesReachTheTrace:
+    """Crash reports moved to their own buffer so the firehose cannot evict
+    them. A trace that kept reading only the shared buffer would lose the one
+    entry it most exists to show -- silently, since an absent crash looks like
+    an app that did not crash."""
+
+    def _crash(self, at_s):
+        return LogEntry(
+            id=uuid.uuid4().hex, timestamp=BASE + timedelta(seconds=at_s),
+            device_id="SIM-A", process="MyApp", level=LogLevel.FAULT,
+            message="MyApp crashed", source=LogSource.CRASH,
+        )
+
+    async def test_a_crash_during_an_action_is_attributed_to_it(self):
+        server = RingBuffer(max_size=10)
+        await server.append(_action_entry(20, duration_ms=5000))  # t=15..20
+        crashes = RingBuffer(max_size=10)
+        await crashes.append(self._crash(17))
+
+        result = await _call(RingBuffer(max_size=10), BASE, crashes=crashes, server=server)
+
+        [attributed] = result["actions"]
+        assert [line["message"] for line in attributed["logs"]] == ["MyApp crashed"]
+
+    async def test_a_crash_survives_a_flood_of_app_lines(self):
+        """The bound on app lines must not slice crashes off: they join after
+        it, and a burst of newer lines is exactly when a crash matters."""
+        server = RingBuffer(max_size=10)
+        await server.append(_action_entry(20, duration_ms=20_000))  # t=0..20
+        ring = RingBuffer(max_size=5000)
+        for i in range(1500):  # far over limit=1 * 10
+            await ring.append(_entry(5 + i / 1000))
+        crashes = RingBuffer(max_size=10)
+        await crashes.append(self._crash(1))
+
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+            server_buffer=server, crash_buffer=crashes, ring_buffer=ring,
+            flow_store=None, proxy_adapter=None,
+        )))
+        result = await get_trace(request=request, since=BASE, udid=None, limit=1)
+
+        [attributed] = result["actions"]
+        assert "MyApp crashed" in [line["message"] for line in attributed["logs"]]
+
+    async def test_a_crash_evicted_from_its_own_buffer_is_reported(self):
+        crashes = RingBuffer(max_size=1)
+        await crashes.append(self._crash(10))
+        await crashes.append(self._crash(11))  # evicts t=10
+
+        result = await _call(RingBuffer(max_size=10), BASE, crashes=crashes)
+
+        assert result["log_window_truncated"] is True
 
 
 class TestTheLimitDoesNotCrashTheEndpoint:
@@ -86,7 +196,9 @@ class TestTheLimitDoesNotCrashTheEndpoint:
         for i in range(10):
             await server.append(_action_entry(i))
         request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-            server_buffer=server, ring_buffer=RingBuffer(max_size=10),
+            server_buffer=server,
+            crash_buffer=RingBuffer(max_size=10),
+            ring_buffer=RingBuffer(max_size=10),
             flow_store=None, proxy_adapter=None,
         )))
         result = await get_trace(
@@ -107,7 +219,9 @@ def _action_entry(i, duration_ms=10):
 
 async def _call_with_limit(ring, since, limit):
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        server_buffer=RingBuffer(max_size=10), ring_buffer=ring,
+        server_buffer=RingBuffer(max_size=10),
+        crash_buffer=RingBuffer(max_size=10),
+        ring_buffer=ring,
         flow_store=None, proxy_adapter=None,
     )))
     return await get_trace(request=request, since=since, udid=None, limit=limit)
@@ -216,6 +330,8 @@ def _flow(i, **kw):
 async def _call_full(*, ring, flows, limit, server=None, udid=None):
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
         server_buffer=server or RingBuffer(max_size=10),
+
+        crash_buffer=RingBuffer(max_size=10),
         ring_buffer=ring, flow_store=flows, proxy_adapter=None,
     )))
     return await get_trace(request=request, since=BASE, udid=udid, limit=limit)
@@ -498,7 +614,7 @@ class TestANaiveSinceIsServed:
         await server.append(_action_entry(2, duration_ms=3000))
 
         request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-            server_buffer=server, ring_buffer=ring,
+            server_buffer=server, crash_buffer=RingBuffer(max_size=10), ring_buffer=ring,
             flow_store=_FakeFlowStore([_flow(1)]), proxy_adapter=None,
         )))
         result = await get_trace(
@@ -525,7 +641,9 @@ class TestANaiveSinceIsServed:
             await ring.append(_entry(at))
 
         request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-            server_buffer=RingBuffer(max_size=10), ring_buffer=ring,
+            server_buffer=RingBuffer(max_size=10),
+            crash_buffer=RingBuffer(max_size=10),
+            ring_buffer=ring,
             flow_store=None, proxy_adapter=None,
         )))
         result = await get_trace(

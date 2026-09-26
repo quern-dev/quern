@@ -13,6 +13,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from server.api.actions import logged_action
 from server.models import (
+    Completeness,
     LogEntry,
     LogErrorsResponse,
     LogLevel,
@@ -36,17 +37,48 @@ router = APIRouter(prefix="/api/v1/logs", tags=["logs"])
 def _get_buffers(request: Request, source: LogSource | None) -> list[RingBuffer]:
     """Return the buffer(s) to query based on source filter.
 
-    Server logs live in a dedicated buffer so device syslog can't evict them.
+    Server logs and crash reports each live in a dedicated buffer, so device
+    syslog can evict neither.
     """
     if source == LogSource.SERVER:
         return [request.app.state.server_buffer]
+    if source == LogSource.CRASH:
+        return [request.app.state.crash_buffer]
     if source is not None:
         return [request.app.state.ring_buffer]
-    # No source filter — merge both
-    return [request.app.state.ring_buffer, request.app.state.server_buffer]
+    # No source filter — merge them all
+    return [
+        request.app.state.ring_buffer,
+        request.app.state.server_buffer,
+        request.app.state.crash_buffer,
+    ]
 
 
-class LogQueryResponse(BaseModel):
+def _completeness(
+    buffers: list[RingBuffer],
+    since: datetime | None,
+    *,
+    source: LogSource | None = None,
+    min_level: LogLevel | None = None,
+) -> dict[str, Any]:
+    """`truncated` and `complete_after` for an answer drawn from `buffers`.
+
+    Narrowed by the same source and level the query used, so a search for
+    errors is not reported incomplete because debug lines were shed -- a flag
+    that is always on tells the reader nothing.
+    """
+    sources = [source] if source is not None else None
+    truncated = not all(
+        b.is_complete_since(since, sources, min_level) for b in buffers
+    )
+    stamps = [
+        at for b in buffers
+        if (at := b.evicted_through(sources, min_level)) is not None
+    ]
+    return {"truncated": truncated, "complete_after": max(stamps) if stamps else None}
+
+
+class LogQueryResponse(Completeness):
     entries: list[LogEntry]
     total: int
     has_more: bool
@@ -54,6 +86,11 @@ class LogQueryResponse(BaseModel):
 
 class SourcesResponse(BaseModel):
     sources: list[dict[str, Any]]
+    #: Per buffer: capacity, size, intake, evictions by source, and the span it
+    #: still holds. `entries_captured` on a source is intake; this is what
+    #: survived it. A source can report 870,000 captured while its buffer holds
+    #: the last 3.5 seconds, and only this says so.
+    buffers: dict[str, dict[str, Any]] = {}
 
 
 class FilterRequest(BaseModel):
@@ -226,10 +263,25 @@ async def query_logs(
 
     entries.reverse()
 
+    completeness = _completeness(buffers, since, source=source, min_level=level)
+    # A tail asks for the newest N, not for a window. If it got N and all of
+    # them are newer than anything evicted, nothing lost could have ranked
+    # among them -- so the answer is whole even though older entries are
+    # gone. Without this, `tail_logs` on any busy server would say
+    # "truncated" on every call, and a flag that is always on is ignored.
+    through = completeness["complete_after"]
+    if (
+        tail and completeness["truncated"] and through is not None
+        and len(entries) == limit
+        and min(e.timestamp for e in entries) > through
+    ):
+        completeness["truncated"] = False
+
     return LogQueryResponse(
         entries=entries,
         total=total,
         has_more=(offset + limit) < total,
+        **completeness,
     )
 
 
@@ -254,8 +306,13 @@ async def get_summary(
     buffers = _get_buffers(request, None)
 
     all_entries: list[LogEntry] = []
+    # What the answer covers, for the completeness check. None when an
+    # unparseable cursor falls back to "everything held", which is complete
+    # only if nothing was ever evicted.
+    covers_since: datetime | None
     if since_cursor:
         cursor_ts = parse_cursor(since_cursor)
+        covers_since = cursor_ts
         for buf in buffers:
             if cursor_ts:
                 all_entries.extend(await buf.get_after(cursor_ts))
@@ -264,11 +321,24 @@ async def get_summary(
     else:
         duration = WINDOW_DURATIONS[window]
         cutoff = datetime.now(UTC) - duration
+        covers_since = cutoff
         for buf in buffers:
             all_entries.extend(await buf.get_since(cutoff))
 
     all_entries.sort(key=lambda e: e.timestamp)
-    return generate_summary(all_entries, window=window, process=process)
+    summary = generate_summary(all_entries, window=window, process=process)
+    completeness = _completeness(buffers, covers_since)
+    summary.truncated = completeness["truncated"]
+    summary.complete_after = completeness["complete_after"]
+    if summary.truncated:
+        # In the prose as well as the field. The prose is what a reader takes
+        # in first, and counts presented as whole when they are not are the
+        # exact misreading this exists to stop.
+        summary.summary = (
+            "Entries in this window were evicted before this summary, so the "
+            "counts below may be low. " + summary.summary
+        )
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +374,13 @@ async def get_errors(
     total = len(all_entries)
     limited = all_entries[:limit]
 
-    return LogErrorsResponse(entries=limited, total=total)
+    return LogErrorsResponse(
+        entries=limited,
+        total=total,
+        # Error-level evictions only: a busy buffer sheds debug lines all the
+        # time, and that loses no errors.
+        **_completeness(buffers, since, min_level=LogLevel.ERROR),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +393,12 @@ async def list_sources(request: Request) -> SourcesResponse:
     """List all active log source adapters and their status."""
     adapters = request.app.state.source_adapters
     return SourcesResponse(
-        sources=[adapter.status().model_dump() for adapter in adapters.values()]
+        sources=[adapter.status().model_dump() for adapter in adapters.values()],
+        buffers={
+            "logs": request.app.state.ring_buffer.stats(),
+            "server": request.app.state.server_buffer.stats(),
+            "crashes": request.app.state.crash_buffer.stats(),
+        },
     )
 
 
