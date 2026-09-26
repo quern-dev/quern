@@ -33,6 +33,42 @@ _PROCESS_LINE = re.compile(r"^Process:\s*([^,\s]+),\s*PID:\s*(\d+)")
 #  4321 (RenderThread), pid 1234 (com.example.app)"
 _FATAL_SIGNAL = re.compile(r"^Fatal signal .*?\bpid (\d+) \(([^)]+)\)")
 _ANR = re.compile(r"^ANR in (\S+)")
+_ANR_PID = re.compile(r"^PID:\s*(\d+)")
+
+
+#: Linux keeps 15 characters of a process name (TASK_COMM_LEN is 16 with the
+#: terminator), and Android's `Process.setArgV0` keeps the *last* 15 of a
+#: longer package name, so the suffix stays visible. A native crash is named
+#: by that kernel name: `com.example.myapplication` arrives as
+#: `e.myapplication`.
+COMM_LEN = 15
+
+#: logcat filterspecs that let every crash shape through, added to a caller's
+#: tag filter. A spec such as `MyTag:D *:S` silences everything else at the
+#: device -- including the lines a crash is recognised from -- so without
+#: these, filtering by tag quietly turned crash detection off.
+CRASH_TAG_SPECS = ("AndroidRuntime:E", "libc:F", "ActivityManager:E")
+
+
+def process_matches(process_filter: str, crash: LogEntry) -> bool:
+    """Does a crash entry belong to the process a caller filtered on?
+
+    Looser than the rule for ordinary lines, deliberately, because a crash's
+    name is not always the package name and losing a crash is worse than
+    showing one too many:
+
+    - a 15-character name may be the tail of the package, so the filter
+      ending with it is a match;
+    - a Java crash whose block had no `Process:` line has no name at all
+      (`pid N`), and is kept rather than discarded on a guess.
+    """
+    wanted = process_filter.lower()
+    name = crash.process.lower()
+    if wanted in name:
+        return True
+    if len(name) == COMM_LEN and wanted.endswith(name):
+        return True
+    return crash.process.startswith("pid ")
 
 
 @dataclass
@@ -55,6 +91,9 @@ class AndroidCrashDetector:
     def __init__(self, device_id: str = "") -> None:
         self.device_id = device_id
         self._pending: dict[int, _PendingJavaCrash] = {}
+        # ANRs announced but whose `PID:` line has not arrived, keyed by the
+        # announcing process (system_server), not the app.
+        self._pending_anr: dict[int | None, tuple[LogEntry, str]] = {}
 
     def feed(self, entry: LogEntry) -> list[LogEntry]:
         tag, message, pid = entry.process, entry.message, entry.pid
@@ -93,17 +132,33 @@ class AndroidCrashDetector:
                 out.append(self._crash(entry, signal.group(2), int(signal.group(1)),
                                        f"{signal.group(2)} crashed: {message}", [message]))
         elif tag == "ActivityManager":
+            # The `ANR in` line is logged by system_server, so its pid is
+            # system_server's -- 555 on the device measured, not the app's.
+            # The app's is on the `PID:` line that follows, so wait for it.
             anr = _ANR.match(message)
             if anr:
-                out.append(self._crash(entry, anr.group(1), pid,
-                                       f"{anr.group(1)} is not responding: {message}", [message]))
+                out.extend(self._flush_anr(pid))
+                self._pending_anr[pid] = (entry, anr.group(1))
+            elif pid in self._pending_anr:
+                app_pid = _ANR_PID.match(message)
+                out.extend(self._flush_anr(pid, int(app_pid.group(1)) if app_pid else None))
         return out
+
+    def _flush_anr(self, announcer: int | None, app_pid: int | None = None) -> list[LogEntry]:
+        pending = self._pending_anr.pop(announcer, None)
+        if pending is None:
+            return []
+        entry, process = pending
+        return [self._crash(entry, process, app_pid,
+                            f"{process} is not responding: {entry.message}", [entry.message])]
 
     def flush(self) -> list[LogEntry]:
         """Everything still pending, e.g. when capture stops mid-crash."""
         out: list[LogEntry] = []
         for pid in list(self._pending):
             out.extend(self._flush(pid))
+        for announcer in list(self._pending_anr):
+            out.extend(self._flush_anr(announcer))
         return out
 
     def _flush(self, pid: int) -> list[LogEntry]:

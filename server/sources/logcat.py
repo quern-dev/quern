@@ -30,7 +30,7 @@ from datetime import UTC, datetime
 
 from server.models import LogEntry, LogLevel, LogSource
 from server.sources import BaseSourceAdapter, EntryCallback
-from server.sources.android_crash import AndroidCrashDetector
+from server.sources.android_crash import CRASH_TAG_SPECS, AndroidCrashDetector, process_matches
 
 logger = logging.getLogger(__name__)
 
@@ -116,9 +116,13 @@ class LogcatAdapter(BaseSourceAdapter):
             "-T", "1",
         ]
 
-        # Add tag filter if specified (e.g. "MyTag:D *:S")
+        # Add tag filter if specified (e.g. "MyTag:D *:S"), plus the tags a
+        # crash is recognised from. A filterspec silences everything it does
+        # not name at the device, so without them a tag filter turned crash
+        # detection off with nothing to say so.
         if self.tag_filter:
             cmd.extend(self.tag_filter.split())
+            cmd.extend(CRASH_TAG_SPECS)
 
         try:
             self._process = await asyncio.create_subprocess_exec(
@@ -193,7 +197,7 @@ class LogcatAdapter(BaseSourceAdapter):
                     # line would drop exactly the crash of the app the caller
                     # asked to watch.
                     for crash in self._crashes.feed(entry):
-                        if self._wanted(crash):
+                        if self._wanted_crash(crash):
                             await self.emit(crash)
                     if self._wanted(entry):
                         await self.emit(entry)
@@ -207,7 +211,7 @@ class LogcatAdapter(BaseSourceAdapter):
             self._running = False
             # A crash whose last line never came is still a crash.
             for crash in self._crashes.flush():
-                if self._wanted(crash):
+                if self._wanted_crash(crash):
                     try:
                         await self.emit(crash)
                     except Exception:
@@ -216,6 +220,10 @@ class LogcatAdapter(BaseSourceAdapter):
     def _wanted(self, entry: LogEntry) -> bool:
         """Logcat cannot filter by process, so the adapter does."""
         return not self.process_filter or self.process_filter.lower() in entry.process.lower()
+
+    def _wanted_crash(self, crash: LogEntry) -> bool:
+        """The same for a crash, whose name is not always the package's."""
+        return not self.process_filter or process_matches(self.process_filter, crash)
 
     def _parse_line(self, line: str) -> LogEntry | None:
         """Parse a single logcat threadtime line into a LogEntry."""
