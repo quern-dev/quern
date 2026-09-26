@@ -9,7 +9,8 @@
   },
   "scripts": {
     "build": "tsc && cp src/launcher.cjs dist/launcher.cjs && chmod 755 dist/launcher.cjs dist/index.js",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test": "node --test test/*.test.mjs"
   },
   "files": [
     "dist"

@@ -229,3 +229,11 @@ jobs:
           cd mcp
           npm install
           npm run build
+
+      # Behavioural tests of the wrapper's response shaping, run against the
+      # build above. A source-text check of `tail_logs` passed three times on
+      # #255 with the forwarding it claimed to cover deleted or disabled.
+      - name: Test MCP server
+        run: |
+          cd mcp
+          npm test

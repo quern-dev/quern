@@ -243,22 +243,17 @@ class TestCrashBuffer:
         assert "MyApp crashed" in [e["message"] for e in unfiltered["entries"]]
 
 
-def test_tail_logs_forwards_every_completeness_field():
-    """`tail_logs` rebuilds its response in the MCP wrapper instead of passing
-    it through, so a field the server adds is dropped there unless named.
-    That would deliver the signal to every caller except the one that reaches
-    for `tail_logs` first -- an agent over MCP. Tied to the model, so a new
-    field fails here until the wrapper carries it."""
+def test_tail_logs_shapes_its_answer_with_the_tested_function():
+    """Wiring only. What the shaping does is tested by running it, in
+    `mcp/test/log-responses.test.mjs` (CI: `npm test`). This used to check
+    the TypeScript by text instead, and passed three times with the
+    forwarding it claimed to cover deleted or forced to false -- a text match
+    cannot tell forwarding from its absence. What text *can* confirm is that
+    `tail_logs` hands its answer to the function those tests run."""
     from pathlib import Path
-
-    from server.models import Completeness
 
     source = (Path(__file__).resolve().parents[1] / "mcp" / "src" / "tools" / "logs.ts").read_text()
     start = source.index('registerTool("tail_logs"')
     block = source[start:source.index("registerTool(", start + 1)]
 
-    # The forwarding expression, not the bare name: the tool's description
-    # mentions `truncated: true` too, and matching that let this pass with
-    # the forwarding deleted -- found by mutating it.
-    for field in Completeness.model_fields:
-        assert f"{field}: data.{field}" in block, f"tail_logs drops `{field}`"
+    assert "JSON.stringify(tailLogsResult(data)" in block

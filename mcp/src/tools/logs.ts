@@ -5,6 +5,7 @@ import { z } from "zod";
 import { readStateFile } from "../config.js";
 import { apiRequest } from "../http.js";
 import { strictParams } from "./helpers.js";
+import { type LogQueryAnswer, tailLogsResult } from "./log-responses.js";
 
 export function registerLogTools(server: McpServer): void {
   server.registerTool("ensure_server", {
@@ -240,28 +241,14 @@ export function registerLogTools(server: McpServer): void {
           process,
           source,
           tail: true,
-        })) as { entries: unknown[]; truncated?: boolean; complete_after?: string | null };
+        })) as LogQueryAnswer;
 
-        const entries = data.entries || [];
-
-        // Carry the completeness fields through. This tool rebuilds its
-        // response rather than passing it on, so without them the one signal
-        // that separates "nothing happened" from "it was evicted" would be
-        // dropped here, on the path an agent reaches for first (#255).
+        // Shaped by a function the test suite runs; see log-responses.ts.
         return {
           content: [
             {
               type: "text" as const,
-              text: JSON.stringify(
-                {
-                  entries,
-                  total: entries.length,
-                  truncated: data.truncated ?? false,
-                  complete_after: data.complete_after ?? null,
-                },
-                null,
-                2,
-              ),
+              text: JSON.stringify(tailLogsResult(data), null, 2),
             },
           ],
         };
