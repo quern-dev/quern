@@ -54,7 +54,11 @@ reports and quern's own logs. An unfiltered simulator can turn the shared buffer
 `query_logs`, `tail_logs`, `get_errors` and `get_log_summary` therefore return
 `truncated` and `complete_after`. `truncated: true` means entries stamped inside
 the requested window were evicted before the call, so the result *may* be
-missing some. `false` is a guarantee that nothing in the window was lost.
+missing some. `false` is a guarantee that nothing in the window was lost. For
+a tail (`tail_logs`, or `query_logs` with `tail`) it means something narrower:
+the entries returned really are the newest N, though older ones may have been
+evicted. Entries removed by a filter change are not evictions; the call that
+changed the filter reports them as `purged`.
 `complete_after` is the time after which nothing has been evicted. The check is
 narrowed by the query's `source` and `level`, so shed debug lines do not flag a
 search for errors. `get_trace` reports the same thing as
@@ -62,6 +66,13 @@ search for errors. `get_trace` reports the same thing as
 returns a `buffers` object with each buffer's capacity, intake, evictions by
 source, and the oldest entry it still holds. A source's `entries_captured` is
 intake, not retention.
+
+The live streams, `/logs/stream` and `/proxy/flows/stream`, tell a client
+that falls behind what it missed. They send a `dropped` event at most once a
+second, with the count, the running `total_dropped`, and `missed_from` /
+`missed_to`: the timestamps to backfill with `query_logs`. Only entries
+matching the stream's own filter are counted. Every heartbeat also carries
+`total_dropped`.
 
 Crash reports have a buffer of their own, so a busy source cannot evict them.
 On Android, where a crash exists only as logcat lines, the logcat adapter emits

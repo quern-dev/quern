@@ -54,8 +54,12 @@ def host_local_to_utc(naive: datetime) -> datetime:
     interval, while a windowed query reported itself complete (#255).
 
     `astimezone()` on a naive value assumes system local time and applies the
-    offset in force *on that date*, so a line from either side of a DST
-    change converts correctly.
+    offset in force on that date, so lines from summer and winter both
+    convert correctly. One hour a year cannot: when clocks fall back, the
+    repeated hour's local times occur twice, and a naive value does not say
+    which pass it came from. Python takes the first, so lines from the
+    second pass land an hour early. Nothing in the line can recover it --
+    pymobiledevice3 dropped the information when it formatted the time.
     """
     return naive.astimezone(UTC)
 

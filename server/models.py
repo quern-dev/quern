@@ -242,8 +242,13 @@ class Completeness(BaseModel):
             "evicted before this call, so the result may be missing some. It "
             "says 'may', not 'is': the evicted entries are not known to match "
             "this query's other filters. False is a guarantee -- nothing in "
-            "the window was lost. Narrow capture at the source (process, "
-            "subsystem) or ask for a later window."
+            "the window was lost -- with one difference for a tail (the newest "
+            "N): there, false means the entries returned really are the newest "
+            "N, while older ones may still have been evicted. Entries removed "
+            "by a filter change are not evictions and do not set this; the "
+            "call that changed the filter reports them as `purged`. Narrow "
+            "capture at the source (process, subsystem) or ask for a later "
+            "window."
         ),
     )
     complete_after: datetime | None = Field(
