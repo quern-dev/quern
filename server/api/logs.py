@@ -29,7 +29,7 @@ from server.processing.summarizer import (
     generate_summary,
     parse_cursor,
 )
-from server.storage.fanout import DropNotice
+from server.storage.fanout import DropNotice, Missed
 from server.storage.ring_buffer import RingBuffer
 
 router = APIRouter(prefix="/api/v1/logs", tags=["logs"])
@@ -164,20 +164,21 @@ async def stream_logs(
     async def event_generator():
         # Subscribe to all relevant buffers and merge into one queue
         merged: asyncio.Queue[LogEntry] = asyncio.Queue(maxsize=1000)
-        subscriptions = [(buf, buf.subscribe()) for buf in buffers]
-        merge_dropped = 0
+        # Subscribed with the client's filter, so entries it did not ask for
+        # never take a slot and are never counted as missed.
+        subscriptions = [(buf, buf.subscribe(matches_filter)) for buf in buffers]
+        merge_missed = Missed()
 
         async def forward(queue: asyncio.Queue[LogEntry]) -> None:
-            nonlocal merge_dropped
             while True:
                 entry = await queue.get()
                 try:
                     merged.put_nowait(entry)
                 except asyncio.QueueFull:
-                    merge_dropped += 1
+                    merge_missed.add(entry)
 
-        def missed() -> int:
-            return merge_dropped + sum(buf.dropped(q) for buf, q in subscriptions)
+        def missed() -> Missed:
+            return merge_missed.merged(*(buf.missed(q) for buf, q in subscriptions))
 
         notice = DropNotice()
         tasks = [asyncio.create_task(forward(q)) for _, q in subscriptions]
@@ -206,7 +207,7 @@ async def stream_logs(
                         "data": json.dumps({
                             "time": datetime.now(UTC).isoformat(),
                             "buffer_size": buffers[0].size,
-                            "total_dropped": missed(),
+                            "total_dropped": missed().count,
                         }),
                     }
         finally:

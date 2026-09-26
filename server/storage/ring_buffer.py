@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterable
 from datetime import datetime
 
 from server.models import LogEntry, LogLevel, LogQueryParams, LogSource
-from server.storage.fanout import Fanout
+from server.storage.fanout import Fanout, Missed
 
 
 def _source_key(source: LogSource | str) -> str:
@@ -217,13 +217,15 @@ class RingBuffer:
             items = list(self._buffer)
             return items[-count:]
 
-    def subscribe(self) -> asyncio.Queue[LogEntry]:
+    def subscribe(
+        self, accept: Callable[[LogEntry], bool] | None = None,
+    ) -> asyncio.Queue[LogEntry]:
         """Create a subscription queue for real-time SSE streaming.
 
         Returns a queue that will receive new entries as they arrive.
         Caller must call unsubscribe() when done.
         """
-        return self._fanout.subscribe()
+        return self._fanout.subscribe(accept)
 
     def unsubscribe(self, queue: asyncio.Queue[LogEntry]) -> None:
         """Remove a subscription queue."""
@@ -232,6 +234,10 @@ class RingBuffer:
     def dropped(self, queue: asyncio.Queue[LogEntry]) -> int:
         """Entries this subscriber missed because its queue was full."""
         return self._fanout.dropped(queue)
+
+    def missed(self, queue: asyncio.Queue[LogEntry]) -> Missed:
+        """What this subscriber missed: the count and the span of timestamps."""
+        return self._fanout.missed(queue)
 
     def _filter(self, params: LogQueryParams) -> list[LogEntry]:
         """Apply query filters to the buffer. Must be called under lock."""

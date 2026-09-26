@@ -741,7 +741,9 @@ async def stream_flows(
             }
             return
 
-        queue = flow_store.subscribe()
+        # With the client's filter, so flows it did not ask for never take a
+        # slot and are never counted as missed.
+        queue = flow_store.subscribe(matches_filter)
         notice = DropNotice()
         try:
             while True:
@@ -751,7 +753,7 @@ async def stream_flows(
                 # word while its heartbeats carried on, so the stream looked
                 # live and merely quiet, for good. Now it loses only what did
                 # not fit, and is told how much (#255).
-                if (due := notice.due(flow_store.dropped(queue))) is not None:
+                if (due := notice.due(flow_store.missed(queue))) is not None:
                     yield {"event": "dropped", "data": json.dumps(due)}
                 try:
                     flow = await asyncio.wait_for(

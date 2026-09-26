@@ -54,6 +54,28 @@ class TestFanout:
 
         assert queue.get_nowait() == 3
 
+    def test_items_the_subscriber_did_not_ask_for_take_no_slot(self):
+        """Counting everything published overstated the gap, and queueing it
+        made a filtered client overflow on traffic it would have discarded."""
+        fanout: Fanout[int] = Fanout(maxsize=2)
+        queue = fanout.subscribe(accept=lambda n: n % 2 == 0)
+
+        for i in range(10):
+            fanout.publish(i)
+
+        assert queue.qsize() == 2            # 0 and 2
+        assert fanout.dropped(queue) == 3    # 4, 6, 8 -- odd numbers never counted
+
+    def test_the_span_of_what_was_missed_is_kept(self):
+        fanout: Fanout = Fanout(maxsize=1)
+        queue = fanout.subscribe()
+        for i in (5, 9, 2):
+            fanout.publish(SimpleNamespace(timestamp=datetime(2026, 1, 1, 0, 0, i, tzinfo=UTC)))
+
+        missed = fanout.missed(queue)
+        assert missed.count == 2
+        assert missed.first.second == 2 and missed.last.second == 9
+
     def test_unsubscribing_forgets_the_count(self):
         fanout: Fanout[int] = Fanout(maxsize=1)
         queue = fanout.subscribe()
@@ -78,6 +100,17 @@ class TestDropNotice:
         notice.due(3)
         self.now += 5
         assert notice.due(3) is None
+
+    def test_a_notice_says_when_the_missed_entries_were_stamped(self):
+        """So the gap can be backfilled with one query."""
+        from server.storage.fanout import Missed
+
+        first = datetime(2026, 9, 26, 18, 0, 11, tzinfo=UTC)
+        last = datetime(2026, 9, 26, 18, 0, 14, tzinfo=UTC)
+        notice = self._notice().due(Missed(count=4, first=first, last=last))
+
+        assert notice["missed_from"] == first.isoformat()
+        assert notice["missed_to"] == last.isoformat()
 
     def test_losses_inside_the_interval_are_coalesced_into_the_next(self):
         notice = self._notice()
@@ -218,3 +251,64 @@ async def test_the_flow_stream_says_what_a_slow_client_missed():
     dropped = [e for e in seen if e["event"] == "dropped"]
     assert dropped, "the stream never said flows were missed"
     assert json.loads(dropped[0]["data"])["total_dropped"] >= 100
+
+
+async def test_the_log_stream_subscribes_with_the_clients_filter():
+    """Entries the client filtered out must not fill its queue: a stream for
+    one process fell behind on every other process's traffic."""
+    from server.api.logs import stream_logs
+
+    ring = RingBuffer(max_size=5000)
+    request = _Request(
+        ring_buffer=ring, server_buffer=RingBuffer(max_size=10),
+        crash_buffer=RingBuffer(max_size=10),
+    )
+    response = await stream_logs(
+        request=request, level=None, process="MyApp", subsystem=None, category=None,
+        source=LogSource.SIMULATOR, match=None, exclude=None, device_id=None,
+    )
+    task = asyncio.ensure_future(response.body_iterator.__anext__())
+    await asyncio.sleep(0)
+    await ring.append(_entry())
+    await task
+
+    for i in range(1500):
+        noise = _entry(i)
+        noise.process = "SpringBoard"
+        await ring.append(noise)
+
+    [sub] = ring._fanout._subs.values()
+    assert sub.missed.count == 0, "entries the client filtered out were queued and lost"
+
+
+async def test_the_heartbeat_carries_the_running_total(monkeypatch):
+    """Review mutations M19/M20 removed `total_dropped` from the heartbeat
+    and nothing failed."""
+    from server.api.logs import stream_logs
+
+    async def _time_out(awaitable, timeout):
+        awaitable.close()
+        raise TimeoutError
+
+    ring = RingBuffer(max_size=5000)
+    request = _Request(
+        ring_buffer=ring, server_buffer=RingBuffer(max_size=10),
+        crash_buffer=RingBuffer(max_size=10),
+    )
+    request.polls = -100  # stay connected for the whole test
+    response = await stream_logs(
+        request=request, level=None, process=None, subsystem=None, category=None,
+        source=LogSource.SIMULATOR, match=None, exclude=None, device_id=None,
+    )
+    monkeypatch.setattr(asyncio, "wait_for", _time_out)
+    events = response.body_iterator
+
+    first = await events.__anext__()           # subscribes; reads nothing
+    assert first["event"] == "heartbeat"
+    for i in range(1100):                      # 100 past the subscriber queue
+        await ring.append(_entry(i))
+
+    seen = [await events.__anext__() for _ in range(2)]
+
+    [heartbeat] = [e for e in seen if e["event"] == "heartbeat"]
+    assert json.loads(heartbeat["data"])["total_dropped"] >= 100

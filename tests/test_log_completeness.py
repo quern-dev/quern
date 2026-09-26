@@ -134,6 +134,23 @@ class TestTail:
         assert len(data["entries"]) == 3
         assert data["truncated"] is False
 
+    async def test_a_merged_tail_tied_with_an_eviction_is_not_whole(self, app):
+        """Merged across buffers the tail is ranked by timestamp, and an
+        evicted entry stamped at the same instant as the oldest returned one
+        could have ranked among them. Review mutation M3 (`>` to `>=`)
+        survived without this."""
+        at = datetime.now(UTC) - timedelta(seconds=5)
+        ring = app.state.ring_buffer
+        for i in range(6):   # capacity 5: the first is evicted
+            entry = _entry(f"tied {i}")
+            entry.timestamp = at
+            await ring.append(entry)
+
+        data = await _get(app, "/api/v1/logs/query", tail="true", limit=3)  # merged
+
+        assert len(data["entries"]) == 3
+        assert data["truncated"] is True
+
     async def test_a_short_tail_after_eviction_is_truncated(self, app):
         """Fewer matches than asked for means older matches may have been
         evicted -- the answer is not "only this many ever happened"."""

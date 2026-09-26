@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
+from collections.abc import Callable
 from datetime import datetime
 
 from server.models import FlowQueryParams, FlowRecord
-from server.storage.fanout import Fanout
+from server.storage.fanout import Fanout, Missed
 
 
 class FlowStore:
@@ -106,13 +107,15 @@ class FlowStore:
         async with self._lock:
             return list(self._flows.values())
 
-    def subscribe(self) -> asyncio.Queue[FlowRecord]:
+    def subscribe(
+        self, accept: Callable[[FlowRecord], bool] | None = None,
+    ) -> asyncio.Queue[FlowRecord]:
         """Create a subscription queue for real-time SSE streaming.
 
         Returns a queue that will receive new flows as they arrive.
         Caller must call unsubscribe() when done.
         """
-        return self._fanout.subscribe()
+        return self._fanout.subscribe(accept)
 
     def unsubscribe(self, queue: asyncio.Queue[FlowRecord]) -> None:
         """Remove a subscription queue."""
@@ -121,6 +124,10 @@ class FlowStore:
     def dropped(self, queue: asyncio.Queue[FlowRecord]) -> int:
         """Flows this subscriber missed because its queue was full."""
         return self._fanout.dropped(queue)
+
+    def missed(self, queue: asyncio.Queue[FlowRecord]) -> Missed:
+        """What this subscriber missed: the count and the span of timestamps."""
+        return self._fanout.missed(queue)
 
     def _filter(self, params: FlowQueryParams) -> list[FlowRecord]:
         """Apply query filters. Returns newest-first. Must be called under lock."""
