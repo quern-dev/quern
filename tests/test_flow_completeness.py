@@ -76,6 +76,19 @@ class TestTheStore:
         assert not store.is_complete_since(since, client_ip="127.0.0.1")
         assert not store.is_complete_since(since, simulator_udid="SIM-A")
 
+    async def test_one_ips_eviction_does_not_flag_another_ip(self):
+        """Physical devices are told apart by client_ip. A test that only
+        checked an evicted ip passed with the ip key removed altogether,
+        because the query then fell back to the global mark -- which was also
+        set. Here the two disagree."""
+        store = FlowStore(max_size=1)
+        await store.add(_flow("a", ip="10.0.0.1", ago_s=10))
+        await store.add(_flow("b", ip="10.0.0.2"))      # evicts 10.0.0.1's flow
+
+        since = datetime.now(UTC) - timedelta(minutes=1)
+        assert store.is_complete_since(since, client_ip="10.0.0.2")
+        assert not store.is_complete_since(since, client_ip="10.0.0.1")
+
     async def test_stats_separate_intake_from_what_survived(self):
         store = FlowStore(max_size=2)
         for i in range(5):
@@ -139,8 +152,12 @@ class TestQueryFlows:
         await _flood(app.state.flow_store, 10)
 
         data = (await _call(app, "GET", "/api/v1/proxy/flows",
-                            params={"limit": 3, "offset": 3})).json()
+                            params={"limit": 3, "offset": 1})).json()
 
+        # A full page, so only the offset separates it from a first page --
+        # at offset 3 of 5 the page came back short and the test could not
+        # tell whether the offset condition existed at all.
+        assert len(data["flows"]) == 3
         assert data["truncated"] is True
 
 
