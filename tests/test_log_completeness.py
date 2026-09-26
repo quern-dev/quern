@@ -399,3 +399,39 @@ async def test_starting_device_capture_with_a_preset_reports_what_it_purged(app,
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["purged"] == 1
+
+
+async def test_two_starts_for_one_simulator_launch_one_capture(app, monkeypatch):
+    """The simulator endpoint has the same check-then-register shape and the
+    same lock; without a test the lock could go unnoticed."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from server.sources.simulator_log import SimulatorLogAdapter
+
+    async def _resolve(udid):
+        return udid
+
+    starts = []
+
+    async def _slow_start(self):
+        starts.append(self.udid)
+        await asyncio.sleep(0.3)
+        self._running = True
+
+    app.state.device_controller = SimpleNamespace(resolve_udid=_resolve)
+    app.state.deduplicator = SimpleNamespace(process=lambda entry: None)
+    monkeypatch.setattr(SimulatorLogAdapter, "start", _slow_start)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async def start():
+            return await client.post(
+                "/api/v1/device/logging/start", headers=HEADERS, json={"udid": "SIM-A"},
+            )
+        first, second = await asyncio.gather(start(), start())
+
+    assert sorted([first.json()["status"], second.json()["status"]]) == [
+        "already_running", "started",
+    ]
+    assert starts == ["SIM-A"]

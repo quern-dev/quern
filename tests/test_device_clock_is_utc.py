@@ -212,7 +212,12 @@ async def test_a_normal_stop_is_not_an_error():
             ended.set()
 
         async def wait(self):
+            # A real wait suspends until the process has exited, and the read
+            # loop sees EOF in that time. A wait that returned without
+            # yielding let stop() cancel the read task before it reached the
+            # check under test, so this passed with the check removed.
             await ended.wait()
+            await asyncio.sleep(0.01)
             return self.returncode
 
     adapter = LogcatAdapter(serial="x")
@@ -223,6 +228,7 @@ async def test_a_normal_stop_is_not_an_error():
 
     await adapter.stop()
 
+    assert adapter._read_task is None
     assert adapter._error is None
     assert adapter.status().status == "stopped"
 
