@@ -264,16 +264,22 @@ async def query_logs(
     entries.reverse()
 
     completeness = _completeness(buffers, since, source=source, min_level=level)
-    # A tail asks for the newest N, not for a window. If it got N and all of
-    # them are newer than anything evicted, nothing lost could have ranked
-    # among them -- so the answer is whole even though older entries are
-    # gone. Without this, `tail_logs` on any busy server would say
-    # "truncated" on every call, and a flag that is always on is ignored.
+    # A tail asks for the newest N, not for a window, so older entries being
+    # gone does not make it incomplete. Without this, `tail_logs` on any busy
+    # server would say "truncated" on every call, and a flag that is always
+    # on is ignored. Two cases, because "newest" means two different things:
+    #
+    # - From one buffer, a tail is ranked by *arrival*, and a buffer evicts in
+    #   arrival order, so a tail that got its N is always whole. Timestamps do
+    #   not enter into it -- which matters, because a physical iPhone's lines
+    #   arrive out of timestamp order, and comparing timestamps here reported
+    #   a full tail as truncated. Measured on an iPhone 12 before this rule.
+    # - Merged across buffers, the result is ranked by *timestamp*, so it is
+    #   whole only if everything returned is newer than anything evicted.
     through = completeness["complete_after"]
-    if (
-        tail and completeness["truncated"] and through is not None
-        and len(entries) == limit
-        and min(e.timestamp for e in entries) > through
+    if tail and completeness["truncated"] and len(entries) == limit and (
+        len(buffers) == 1
+        or (through is not None and min(e.timestamp for e in entries) > through)
     ):
         completeness["truncated"] = False
 

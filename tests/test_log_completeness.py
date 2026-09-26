@@ -119,6 +119,21 @@ class TestTail:
             "tail_logs would read 'truncated' on every call to a busy server"
         )
 
+    async def test_a_full_tail_is_whole_even_when_timestamps_arrive_out_of_order(self, app):
+        """A physical iPhone's lines arrive out of timestamp order. One buffer
+        evicts in arrival order, so the newest N *arrivals* are all present
+        whatever their stamps say -- but a rule comparing timestamps reported
+        this full tail as truncated. Found live on an iPhone 12."""
+        ring = app.state.ring_buffer
+        await ring.append(_entry("late-stamped, arrived first", ago_s=0))  # evicted
+        for i in range(5):
+            await ring.append(_entry(f"earlier-stamped {i}", ago_s=30 - i))
+
+        data = await _get(app, "/api/v1/logs/query", source="simulator", tail="true", limit=3)
+
+        assert len(data["entries"]) == 3
+        assert data["truncated"] is False
+
     async def test_a_short_tail_after_eviction_is_truncated(self, app):
         """Fewer matches than asked for means older matches may have been
         evicted -- the answer is not "only this many ever happened"."""
