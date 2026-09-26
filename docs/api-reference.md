@@ -63,6 +63,12 @@ returns a `buffers` object with each buffer's capacity, intake, evictions by
 source, and the oldest entry it still holds. A source's `entries_captured` is
 intake, not retention.
 
+Crash reports have a buffer of their own, so a busy source cannot evict them.
+On Android, where a crash exists only as logcat lines, the logcat adapter emits
+a crash entry for each Java crash, native crash and ANR. Find them with
+`query_logs` (`source=crash`) or `get_errors`. `get_latest_crash` reads iOS
+crash reports only.
+
 ### Network proxy
 
 | MCP Tool | Method | Path | Description |
