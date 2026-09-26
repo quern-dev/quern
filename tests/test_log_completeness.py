@@ -228,5 +228,8 @@ def test_tail_logs_forwards_every_completeness_field():
     start = source.index('registerTool("tail_logs"')
     block = source[start:source.index("registerTool(", start + 1)]
 
+    # The forwarding expression, not the bare name: the tool's description
+    # mentions `truncated: true` too, and matching that let this pass with
+    # the forwarding deleted -- found by mutating it.
     for field in Completeness.model_fields:
-        assert f"{field}:" in block, f"tail_logs drops `{field}`"
+        assert f"{field}: data.{field}" in block, f"tail_logs drops `{field}`"
