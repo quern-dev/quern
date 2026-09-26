@@ -321,3 +321,45 @@ async def test_starting_capture_with_a_preset_reports_what_it_purged(app, monkey
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["purged"] == 1
+
+
+async def test_two_starts_for_one_device_launch_one_capture(app, monkeypatch):
+    """Starting logcat takes at least half a second, and the endpoint checked
+    for a running adapter before that and registered one after. Two calls in
+    the window both launched logcat; one was orphaned. Second review,
+    reproduced with a fake adb: two "started" responses, one process left
+    after stopping everything registered."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from server.sources.logcat import LogcatAdapter
+
+    async def _resolve(udid):
+        return udid
+
+    starts = []
+
+    async def _slow_start(self):
+        starts.append(self.serial)
+        await asyncio.sleep(0.3)      # the early-exit check, and then some
+        self._running = True
+
+    app.state.device_controller = SimpleNamespace(
+        resolve_udid=_resolve, _is_android=lambda u: True, _is_physical=lambda u: False,
+    )
+    app.state.deduplicator = SimpleNamespace(process=lambda entry: None)
+    monkeypatch.setattr(LogcatAdapter, "start", _slow_start)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async def start():
+            return await client.post(
+                "/api/v1/device/logging/device/start", headers=HEADERS,
+                json={"udid": "emulator-5554"},
+            )
+        first, second = await asyncio.gather(start(), start())
+
+    assert sorted([first.json()["status"], second.json()["status"]]) == [
+        "already_running", "started",
+    ]
+    assert starts == ["emulator-5554"], "a second logcat was launched"

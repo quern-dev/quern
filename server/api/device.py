@@ -129,6 +129,14 @@ async def _capture_action_screenshot(controller, udid: str, label: str) -> str |
         return None
 
 
+def _logging_start_lock(request: Request, udid: str) -> asyncio.Lock:
+    """The lock that serialises starting capture on one device."""
+    locks = getattr(request.app.state, "logging_start_locks", None)
+    if locks is None:
+        locks = request.app.state.logging_start_locks = {}
+    return locks.setdefault(udid, asyncio.Lock())
+
+
 def _get_controller(request: Request):
     """Get the DeviceController from app state."""
     controller = request.app.state.device_controller
@@ -808,8 +816,6 @@ async def set_display_density(request: Request, body: SetDisplayDensityRequest):
 @logged_action("start_simulator_logging", category="logs")
 async def start_simulator_logging(request: Request, body: StartSimLogRequest):
     """Start capturing logs from a simulator app via unified logging."""
-    from server.sources.simulator_log import SimulatorLogAdapter
-
     controller = _get_controller(request)
 
     # Resolve UDID
@@ -817,6 +823,14 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
         udid = await controller.resolve_udid(body.udid)
     except DeviceError as e:
         raise _handle_device_error(e)
+
+    # Serialised per device, for the reason given on start_device_logging.
+    async with _logging_start_lock(request, udid):
+        return await _start_simulator_logging(request, body, udid)
+
+
+async def _start_simulator_logging(request: Request, body: StartSimLogRequest, udid: str):
+    from server.sources.simulator_log import SimulatorLogAdapter
 
     # Check if already running for this UDID
     sim_adapters: dict = request.app.state.sim_log_adapters
@@ -985,9 +999,6 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
     Use process filter to limit noise. Use preset to apply an ingestion
     filter at start time.
     """
-    from server.sources.device_log import PhysicalDeviceLogAdapter
-    from server.sources.logcat import LogcatAdapter
-
     controller = _get_controller(request)
 
     # Resolve UDID
@@ -995,6 +1006,25 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
         udid = await controller.resolve_udid(body.udid)
     except DeviceError as e:
         raise _handle_device_error(e)
+
+    # One start per device at a time. The body checks for a running adapter,
+    # awaits the adapter's start, and only then registers it -- and starting
+    # logcat now takes at least half a second (the early-exit check) and up
+    # to ten more if the device is slow to answer getprop. A second call in
+    # that window passed the check too, spawned its own logcat, and replaced
+    # the first in the registry, orphaning a process the API could no longer
+    # stop and doubling every line (#255, second review; reproduced with a
+    # fake adb: two "started" responses and one logcat left running after
+    # every registered adapter was stopped).
+    async with _logging_start_lock(request, udid):
+        return await _start_device_logging(request, body, udid, controller)
+
+
+async def _start_device_logging(
+    request: Request, body: StartDeviceLogRequest, udid: str, controller,
+):
+    from server.sources.device_log import PhysicalDeviceLogAdapter
+    from server.sources.logcat import LogcatAdapter
 
     # Verify it's a physical or Android device (not a simulator)
     is_android = controller._is_android(udid)
