@@ -205,6 +205,19 @@ class TestSummary:
         assert data["truncated"] is True
         assert data["summary"].startswith("Entries in this window were evicted")
 
+    async def test_the_cursor_path_measures_from_the_cursor(self, app):
+        """Entries evicted after the cursor are exactly what a delta summary
+        is missing. Review mutation M6 -- measuring from `now` instead --
+        survived the full suite."""
+        await _flood(app, 3)
+        cursor = (await _get(app, "/api/v1/logs/summary", window="5m"))["cursor"]
+        for i in range(10):      # capacity 5: entries after the cursor are evicted
+            await app.state.ring_buffer.append(_entry(f"after {i}"))
+
+        data = await _get(app, "/api/v1/logs/summary", since_cursor=cursor)
+
+        assert data["truncated"] is True
+
     async def test_a_whole_window_says_nothing_extra(self, app):
         await _flood(app, 3)
 
