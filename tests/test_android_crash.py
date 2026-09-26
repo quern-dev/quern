@@ -163,6 +163,28 @@ class TestProcessFiltering:
         assert process_matches("com.example", crash)
 
 
+class TestCrashSpecs:
+    """liblog applies the last rule for a tag, so what is appended matters."""
+
+    def test_a_silencing_filter_gets_every_crash_tag(self):
+        from server.sources.android_crash import crash_specs_for
+
+        assert crash_specs_for("MyTag:D *:S") == ["AndroidRuntime:E", "libc:F", "ActivityManager:E"]
+
+    def test_a_tag_the_caller_named_is_left_as_they_set_it(self):
+        """Appending AndroidRuntime:E narrowed a caller's AndroidRuntime:V."""
+        from server.sources.android_crash import crash_specs_for
+
+        assert crash_specs_for("AndroidRuntime:V *:S") == ["libc:F", "ActivityManager:E"]
+
+    def test_without_a_default_rule_nothing_is_added(self):
+        """The default level is verbose; adding specs only lowered tags the
+        caller had left alone."""
+        from server.sources.android_crash import crash_specs_for
+
+        assert crash_specs_for("MyTag:D") == []
+
+
 class TestTheAdapterEmitsThem:
     async def _run(self, lines, **kwargs):
         emitted = []
@@ -184,12 +206,22 @@ class TestTheAdapterEmitsThem:
                     raise StopAsyncIteration
                 return self._lines.pop(0)
 
+        class _Stderr:
+            async def read(self):
+                return b""
+
         class _Proc:
             stdout = _Stdout()
+            stderr = _Stderr()
+            returncode = 0
 
         adapter._process = _Proc()
         adapter._running = True
         await adapter._read_loop()
+        # The fake stream ends without a stop, which is an error -- and it
+        # must be *that* error. The fake had no stderr, so every run here
+        # ended in an AttributeError nothing looked at (second review).
+        assert adapter._error is not None and "ended unexpectedly" in adapter._error, adapter._error
         return emitted
 
     async def test_the_crash_and_the_raw_lines_are_both_emitted(self):

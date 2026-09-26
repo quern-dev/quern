@@ -43,11 +43,28 @@ _ANR_PID = re.compile(r"^PID:\s*(\d+)")
 #: `e.myapplication`.
 COMM_LEN = 15
 
-#: logcat filterspecs that let every crash shape through, added to a caller's
-#: tag filter. A spec such as `MyTag:D *:S` silences everything else at the
-#: device -- including the lines a crash is recognised from -- so without
-#: these, filtering by tag quietly turned crash detection off.
+#: logcat filterspecs that let every crash shape through. A spec such as
+#: `MyTag:D *:S` silences everything else at the device -- including the lines
+#: a crash is recognised from -- so a tag filter quietly turned crash
+#: detection off. See `crash_specs_for` for when they are added.
 CRASH_TAG_SPECS = ("AndroidRuntime:E", "libc:F", "ActivityManager:E")
+
+
+def crash_specs_for(tag_filter: str) -> list[str]:
+    """The crash filterspecs to add to a caller's tag filter, and no more.
+
+    liblog applies the *last* rule for a tag, so appending `AndroidRuntime:E`
+    unconditionally narrowed a caller's own `AndroidRuntime:V` to errors.
+    And without a `*:` rule the default level is verbose, which lets crash
+    lines through already, so adding specs there only lowered tags the caller
+    had left alone. So: only when a `*:` rule exists to silence them, and only
+    for crash tags the caller did not name.
+    """
+    specs = tag_filter.split()
+    if not any(spec.startswith("*:") for spec in specs):
+        return []
+    named = {spec.split(":", 1)[0] for spec in specs}
+    return [spec for spec in CRASH_TAG_SPECS if spec.split(":", 1)[0] not in named]
 
 
 def process_matches(process_filter: str, crash: LogEntry) -> bool:

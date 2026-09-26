@@ -117,6 +117,16 @@ class TestOldAndroid:
         assert "exit 255" in adapter._error
         assert not adapter.is_running
 
+    async def test_an_old_adb_reason_on_stdout_is_not_lost(self, monkeypatch):
+        """Before Android 7 the device's error comes back on stdout and the
+        exit code as 0; reading stderr alone said "exit 0: no output"."""
+        FakeAdb(monkeypatch, sdk=b"", logcat_exit=0, stderr=b"",
+                stdout=b"Invalid parameter to -v: UTC\nUsage: logcat [options]\n")
+        adapter = LogcatAdapter(serial="x")
+        await adapter.start()
+
+        assert "Invalid parameter to -v: UTC" in adapter._error
+
     async def test_a_stream_that_ends_by_itself_is_an_error_not_a_stop(self, monkeypatch):
         """The device unplugged, or logcat died: status must read "error"."""
         adapter = LogcatAdapter(serial="x")
@@ -143,10 +153,52 @@ class TestOldAndroid:
         assert adapter.status().status == "error"
 
 
+async def test_a_normal_stop_is_not_an_error():
+    """The end-of-stream error is for a stream nobody stopped. Survivor P4 of
+    the second review: reporting it after `stop()` too failed nothing."""
+    import asyncio
+
+    ended = asyncio.Event()
+
+    class _Stdout:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await ended.wait()
+            raise StopAsyncIteration
+
+    class _Stderr:
+        async def read(self):
+            return b""
+
+    class _Proc:
+        stdout, stderr, returncode = _Stdout(), _Stderr(), None
+
+        def terminate(self):
+            self.returncode = -15
+            ended.set()
+
+        async def wait(self):
+            await ended.wait()
+            return self.returncode
+
+    adapter = LogcatAdapter(serial="x")
+    adapter._process = _Proc()
+    adapter._running = True
+    adapter._read_task = asyncio.create_task(adapter._read_loop())
+    await asyncio.sleep(0)
+
+    await adapter.stop()
+
+    assert adapter._error is None
+    assert adapter.status().status == "stopped"
+
+
 class FakeAdb:
     """`adb` for the adapter's two calls: getprop, then logcat."""
 
-    def __init__(self, monkeypatch, *, sdk=b"34\n", logcat_exit=None, stderr=b""):
+    def __init__(self, monkeypatch, *, sdk=b"34\n", logcat_exit=None, stderr=b"", stdout=None):
         import asyncio
         import shutil
 
@@ -167,9 +219,8 @@ class FakeAdb:
                 return sdk, b""
 
         class _Logcat:
-            stdout = None
-
             def __init__(self):
+                self.stdout = _Stream(stdout) if stdout is not None else None
                 self.stderr = _Stream(stderr)
                 self.returncode = logcat_exit
 

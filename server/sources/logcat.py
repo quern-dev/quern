@@ -31,7 +31,7 @@ from datetime import UTC, datetime
 
 from server.models import LogEntry, LogLevel, LogSource
 from server.sources import BaseSourceAdapter, EntryCallback
-from server.sources.android_crash import CRASH_TAG_SPECS, AndroidCrashDetector, process_matches
+from server.sources.android_crash import AndroidCrashDetector, crash_specs_for, process_matches
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +138,7 @@ class LogcatAdapter(BaseSourceAdapter):
         # detection off with nothing to say so.
         if self.tag_filter:
             cmd.extend(self.tag_filter.split())
-            cmd.extend(CRASH_TAG_SPECS)
+            cmd.extend(crash_specs_for(self.tag_filter))
 
         try:
             self._process = await asyncio.create_subprocess_exec(
@@ -164,7 +164,7 @@ class LogcatAdapter(BaseSourceAdapter):
         except TimeoutError:
             pass  # still running, which is the point
         else:
-            self._error = await self._exit_reason("exited at once")
+            self._error = await self._exit_reason("exited at once", read_stdout=True)
             logger.error(self._error)
             self._process = None
             return
@@ -275,17 +275,28 @@ class LogcatAdapter(BaseSourceAdapter):
         except ValueError:
             return None
 
-    async def _exit_reason(self, what: str) -> str:
-        """Why logcat is gone, from its exit code and whatever it said."""
+    async def _exit_reason(self, what: str, *, read_stdout: bool = False) -> str:
+        """Why logcat is gone, from its exit code and whatever it said.
+
+        `read_stdout` is for an exit before the read loop has started. Before
+        Android 7, adb has no separate stderr channel from the device: the
+        device's "Invalid parameter to -v" arrives on *stdout*, and the exit
+        code arrives as 0. Reading stderr alone reported "exit 0: no output"
+        for exactly the case this message exists to explain.
+        """
         proc = self._process
         said = ""
-        if proc is not None and proc.stderr is not None:
+        streams = [getattr(proc, "stderr", None)]
+        if read_stdout:
+            streams.append(getattr(proc, "stdout", None))
+        for stream in streams:
+            if said or stream is None:
+                continue
             try:
-                said = (await asyncio.wait_for(proc.stderr.read(), timeout=2)).decode(
-                    errors="replace",
-                ).strip()
-            except (OSError, TimeoutError):
-                said = ""
+                raw = await asyncio.wait_for(stream.read(), timeout=2)
+            except (OSError, TimeoutError, AttributeError):
+                continue
+            said = raw.decode(errors="replace").strip()[:500]
         code = proc.returncode if proc is not None else None
         return f"adb logcat {what} (exit {code}): {said or 'no output'}"
 
