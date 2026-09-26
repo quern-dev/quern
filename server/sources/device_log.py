@@ -43,6 +43,23 @@ PMD3_SYSLOG_PATTERN = re.compile(
     r"(.*)$"                                                 # message: everything else
 )
 
+def host_local_to_utc(naive: datetime) -> datetime:
+    """A `pymobiledevice3` timestamp, which is host-local time, as UTC.
+
+    `pymobiledevice3` builds each line's time with `datetime.fromtimestamp()`
+    and no zone (`services/os_trace.py`, 11.19.1), which is naive *local*
+    time on the machine running it -- this one. Stamping that as UTC put
+    every physical-device line off by the host's UTC offset, seven hours on a
+    Mac in Pacific time: outside every "last N minutes" query and every trace
+    interval, while a windowed query reported itself complete (#255).
+
+    `astimezone()` on a naive value assumes system local time and applies the
+    offset in force *on that date*, so a line from either side of a DST
+    change converts correctly.
+    """
+    return naive.astimezone(UTC)
+
+
 PMD3_LEVEL_MAP: dict[str, LogLevel] = {
     "debug": LogLevel.DEBUG,
     "info": LogLevel.INFO,
@@ -227,9 +244,7 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
         dt_str, process, subsystem, pid_str, level_str, message = match.groups()
 
         try:
-            ts = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S.%f").replace(
-                tzinfo=UTC,
-            )
+            ts = host_local_to_utc(datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S.%f"))
         except ValueError:
             ts = self._now()
 

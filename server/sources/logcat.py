@@ -1,10 +1,20 @@
 """Source adapter for Android device logs via adb logcat.
 
-Spawns `adb -s <serial> logcat -v threadtime` as a subprocess and parses
-the output line-by-line into LogEntry objects.
+Spawns `adb -s <serial> logcat -v threadtime -v UTC -v year` as a subprocess
+and parses the output line-by-line into LogEntry objects.
 
-Expected threadtime format:
-    03-08 14:22:45.123  1234  5678 D MyTag  : message text
+Expected format:
+    2026-09-26 18:05:07.696 +0000  1234  5678 D MyTag  : message text
+
+**Why UTC and year.** Plain `threadtime` prints the *device's local time*
+with no zone and no year, and this adapter used to stamp that as UTC. On a
+device set to Pacific time every line landed seven hours in the past --
+measured on an API 32 emulator, `11:05Z` for a line logged at `18:05Z` -- so
+Android lines fell outside every "last N minutes" query, the summary and the
+trace's action intervals, and a windowed query answered "nothing here, and
+complete" after capturing thousands of lines (#255). The year also removes a
+New Year's Eve bug: the old parse assumed the current year. Both modifiers
+exist from Android 7 (API 24); quern has only been measured on API 28 and up.
 
 This adapter is on-demand — agents start/stop it when they want to capture
 Android device logs, similar to PhysicalDeviceLogAdapter for iOS devices.
@@ -20,6 +30,7 @@ from datetime import UTC, datetime
 
 from server.models import LogEntry, LogLevel, LogSource
 from server.sources import BaseSourceAdapter, EntryCallback
+from server.sources.android_crash import AndroidCrashDetector
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +45,18 @@ LOGCAT_PATTERN = re.compile(
     r"([VDIWEFA])\s+"             # level: "D"
     r"(.+?)\s*:\s*"               # tag: "MyTag"
     r"(.*)$"                       # message: everything else
+)
+
+# The format actually requested: threadtime with `-v UTC -v year`.
+# Groups: datetime, zone, pid, tid, level, tag, message
+LOGCAT_UTC_PATTERN = re.compile(
+    r"^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+"  # "2026-09-26 18:05:07.696"
+    r"([+-]\d{4})\s+"                                    # zone: "+0000"
+    r"(\d+)\s+"                                          # pid
+    r"(\d+)\s+"                                          # tid
+    r"([VDIWEFA])\s+"                                     # level
+    r"(.+?)\s*:\s*"                                      # tag
+    r"(.*)$"                                               # message
 )
 
 LOGCAT_LEVEL_MAP: dict[str, LogLevel] = {
@@ -69,6 +92,7 @@ class LogcatAdapter(BaseSourceAdapter):
         self.tag_filter = tag_filter
         self._process: asyncio.subprocess.Process | None = None
         self._read_task: asyncio.Task | None = None
+        self._crashes = AndroidCrashDetector(device_id=device_id)
 
     async def start(self) -> None:
         """Clear logcat buffer, then spawn adb logcat and begin reading output."""
@@ -90,7 +114,7 @@ class LogcatAdapter(BaseSourceAdapter):
         except Exception:
             pass  # Non-fatal — proceed even if clear fails
 
-        cmd = ["adb", "-s", self.serial, "logcat", "-v", "threadtime"]
+        cmd = ["adb", "-s", self.serial, "logcat", "-v", "threadtime", "-v", "UTC", "-v", "year"]
 
         # Add tag filter if specified (e.g. "MyTag:D *:S")
         if self.tag_filter:
@@ -163,11 +187,16 @@ class LogcatAdapter(BaseSourceAdapter):
 
                 entry = self._parse_line(line)
                 if entry is not None:
-                    # Apply process filter (logcat doesn't support process filtering natively)
-                    if (self.process_filter
-                            and self.process_filter.lower() not in entry.process.lower()):
-                        continue
-                    await self.emit(entry)
+                    # Crashes first, and filtered by the process that crashed
+                    # rather than the line's tag. A Java crash is logged under
+                    # the tag `AndroidRuntime`, so filtering it like any other
+                    # line would drop exactly the crash of the app the caller
+                    # asked to watch.
+                    for crash in self._crashes.feed(entry):
+                        if self._wanted(crash):
+                            await self.emit(crash)
+                    if self._wanted(entry):
+                        await self.emit(entry)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -176,9 +205,41 @@ class LogcatAdapter(BaseSourceAdapter):
                 logger.exception("Logcat read loop failed")
         finally:
             self._running = False
+            # A crash whose last line never came is still a crash.
+            for crash in self._crashes.flush():
+                if self._wanted(crash):
+                    try:
+                        await self.emit(crash)
+                    except Exception:
+                        logger.exception("Could not emit a pending Android crash")
+
+    def _wanted(self, entry: LogEntry) -> bool:
+        """Logcat cannot filter by process, so the adapter does."""
+        return not self.process_filter or self.process_filter.lower() in entry.process.lower()
 
     def _parse_line(self, line: str) -> LogEntry | None:
         """Parse a single logcat threadtime line into a LogEntry."""
+        match = LOGCAT_UTC_PATTERN.match(line)
+        if match:
+            dt_str, zone, pid_str, tid_str, level_char, tag, message = match.groups()
+            try:
+                ts = datetime.strptime(
+                    f"{dt_str} {zone}", "%Y-%m-%d %H:%M:%S.%f %z",
+                ).astimezone(UTC)
+            except ValueError:
+                ts = self._now()
+            return LogEntry(
+                id=uuid.uuid4().hex[:8],
+                timestamp=ts,
+                device_id=self.device_id,
+                process=tag.strip(),
+                pid=int(pid_str),
+                level=LOGCAT_LEVEL_MAP.get(level_char, LogLevel.INFO),
+                message=message,
+                source=LogSource.LOGCAT,
+                raw=line,
+            )
+
         match = LOGCAT_PATTERN.match(line)
         if not match:
             # Continuation line or unparseable — emit as-is
@@ -192,17 +253,14 @@ class LogcatAdapter(BaseSourceAdapter):
                 raw=line,
             )
 
-        date_str, time_str, pid_str, tid_str, level_char, tag, message = match.groups()
+        _date, _time, pid_str, tid_str, level_char, tag, message = match.groups()
 
-        # Parse timestamp — logcat doesn't include year, use current year
-        now = datetime.now(UTC)
-        try:
-            ts = datetime.strptime(
-                f"{now.year}-{date_str} {time_str}",
-                "%Y-%m-%d %H:%M:%S.%f",
-            ).replace(tzinfo=UTC)
-        except ValueError:
-            ts = self._now()
+        # The legacy format: a device too old for `-v UTC -v year` (before
+        # API 24) prints local time with no zone and no year. Reading that as
+        # UTC was the seven-hour error; the device's zone is not in the line,
+        # so the honest timestamp is arrival on the host -- late by the
+        # pipe's latency, rather than wrong by the zone offset.
+        ts = self._now()
 
         level = LOGCAT_LEVEL_MAP.get(level_char, LogLevel.INFO)
 
