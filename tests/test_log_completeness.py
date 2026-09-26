@@ -257,3 +257,37 @@ def test_tail_logs_shapes_its_answer_with_the_tested_function():
     block = source[start:source.index("registerTool(", start + 1)]
 
     assert "JSON.stringify(tailLogsResult(data)" in block
+
+
+async def test_starting_capture_with_a_preset_reports_what_it_purged(app, monkeypatch):
+    """A preset purges entries from a window already captured. That is not
+    eviction, so no `truncated` flag will ever mention them; the response is
+    the only place it can be seen, and the count used to be discarded."""
+    from types import SimpleNamespace
+
+    from server.processing.ingestion_filter import IngestionFilter
+    from server.sources.simulator_log import SimulatorLogAdapter
+
+    async def _resolve(udid):
+        return "SIM-A"
+
+    async def _no_spawn(self):
+        self._running = True
+
+    app.state.device_controller = SimpleNamespace(resolve_udid=_resolve)
+    app.state.deduplicator = SimpleNamespace(process=lambda entry: None)
+    app.state.ingestion_filter = IngestionFilter()
+    monkeypatch.setattr(SimulatorLogAdapter, "start", _no_spawn)
+
+    await app.state.ring_buffer.append(_entry("HangTracer noise"))   # the preset excludes it
+    await app.state.ring_buffer.append(_entry("an app line"))
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/v1/device/logging/start", headers=HEADERS,
+            json={"udid": "SIM-A", "preset": "simulator-quiet"},
+        )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["purged"] == 1

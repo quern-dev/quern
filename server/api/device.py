@@ -852,6 +852,7 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
 
     # Apply ingestion filter preset if requested
     preset_applied = None
+    purged = 0
     if body.preset:
         from server.processing.ingestion_filter import PRESETS, build_config
 
@@ -865,7 +866,11 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
         from server.models import LogSource
         ingestion_filter.update_filter(config, source=LogSource.SIMULATOR)
         buffer = request.app.state.ring_buffer
-        await buffer.purge(lambda e: ingestion_filter.should_admit(e))
+        # Reported, not discarded. A purge removes entries the new filter
+        # would not admit, from a window already captured; they are then
+        # gone without eviction, so no `truncated` flag will ever mention
+        # them. The call that did it is the only place that can say so.
+        purged = await buffer.purge(lambda e: ingestion_filter.should_admit(e))
         preset_applied = body.preset
 
     # Auto-start plist watchers from persistent config
@@ -914,6 +919,7 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
         "status": "started", "udid": udid,
         "adapter_id": adapter.adapter_id,
         "preset_applied": preset_applied,
+        "purged": purged,
     }
     if plist_watchers_started:
         result["plist_watchers_started"] = plist_watchers_started
@@ -1039,6 +1045,7 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
 
     # Apply ingestion filter preset if requested
     preset_applied = None
+    purged = 0
     if body.preset:
         from server.processing.ingestion_filter import PRESETS, build_config
 
@@ -1052,13 +1059,18 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
         from server.models import LogSource
         ingestion_filter.update_filter(config, source=LogSource.DEVICE)
         buffer = request.app.state.ring_buffer
-        await buffer.purge(lambda e: ingestion_filter.should_admit(e))
+        # Reported, not discarded. A purge removes entries the new filter
+        # would not admit, from a window already captured; they are then
+        # gone without eviction, so no `truncated` flag will ever mention
+        # them. The call that did it is the only place that can say so.
+        purged = await buffer.purge(lambda e: ingestion_filter.should_admit(e))
         preset_applied = body.preset
 
     return {
         "status": "started", "udid": udid,
         "adapter_id": adapter.adapter_id,
         "preset_applied": preset_applied,
+        "purged": purged,
     }
 
 

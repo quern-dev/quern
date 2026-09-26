@@ -58,8 +58,12 @@ class RingBuffer:
         # A dozen sources by six levels bounds this at a few dozen keys.
         self._evicted_through: dict[tuple[str, LogLevel], datetime] = {}
         # Deliberate removals, counted apart from overflow. A purge follows a
-        # filter change and is already reported by the call that made it; an
-        # entry the caller's own filter excluded is not a lost answer.
+        # filter change, and every call that purges reports the count in its
+        # response (`set_log_filter`, and the two logging-start calls when a
+        # preset is applied) -- that response is the only place a purge can
+        # be seen, because it is not eviction and no `truncated` flag will
+        # mention it. An entry the caller's own filter excluded is not a lost
+        # answer; it is an answer to a different question.
         self._purged = 0
 
     @property
