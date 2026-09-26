@@ -106,6 +106,38 @@ class TestOldAndroid:
         assert adapter.api_level is None
         assert "UTC" in adb.logcat_args()
 
+    async def test_a_getprop_that_hangs_is_killed_and_reads_as_unknown(self, monkeypatch):
+        """An unauthorised or wedged device can leave getprop hanging. The
+        call is abandoned, the process killed, and the level is unknown --
+        not a guess. Survivor P25: dropping the kill failed nothing."""
+        import asyncio
+        import shutil
+
+        from server.sources import logcat
+
+        killed = []
+
+        class _Hung:
+            returncode = None
+
+            async def communicate(self):
+                await asyncio.sleep(3600)
+
+            def kill(self):
+                killed.append(True)
+
+        async def fake_exec(*args, **kwargs):
+            return _Hung()
+
+        monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/adb")
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(logcat, "GETPROP_TIMEOUT_S", 0.05)
+
+        level = await LogcatAdapter(serial="x")._api_level()
+
+        assert level is None
+        assert killed == [True], "a hung getprop was left running"
+
     async def test_a_logcat_that_exits_at_once_is_an_error_with_its_reason(self, monkeypatch):
         FakeAdb(monkeypatch, sdk=b"", logcat_exit=255,
                 stderr=b"Invalid parameter to -v: UTC\n")

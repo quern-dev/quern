@@ -70,9 +70,10 @@ intake, not retention.
 The live streams, `/logs/stream` and `/proxy/flows/stream`, tell a client
 that falls behind what it missed. They send a `dropped` event at most once a
 second, with the count, the running `total_dropped`, and `missed_from` /
-`missed_to`: the timestamps to backfill with `query_logs`. Only entries
-matching the stream's own filter are counted. Every heartbeat also carries
-`total_dropped`.
+`missed_to`: the span missed since the previous notice, so consecutive
+notices do not overlap. Backfill it with `query_logs` on the log stream and
+`query_flows` on the flow stream. Only entries matching the stream's own
+filter are counted. Every heartbeat also carries `total_dropped`.
 
 Crash reports have a buffer of their own, so a busy source cannot evict them.
 On Android, where a crash exists only as logcat lines, the logcat adapter emits

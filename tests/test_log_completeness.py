@@ -363,3 +363,39 @@ async def test_two_starts_for_one_device_launch_one_capture(app, monkeypatch):
         "already_running", "started",
     ]
     assert starts == ["emulator-5554"], "a second logcat was launched"
+
+
+async def test_starting_device_capture_with_a_preset_reports_what_it_purged(app, monkeypatch):
+    """Survivor P20: only the simulator endpoint was tested."""
+    from types import SimpleNamespace
+
+    from server.processing.ingestion_filter import IngestionFilter
+    from server.sources.device_log import PhysicalDeviceLogAdapter
+
+    async def _resolve(udid):
+        return "PHONE"
+
+    async def _no_spawn(self):
+        self._running = True
+
+    app.state.device_controller = SimpleNamespace(
+        resolve_udid=_resolve, _is_android=lambda u: False, _is_physical=lambda u: True,
+    )
+    app.state.deduplicator = SimpleNamespace(process=lambda entry: None)
+    app.state.ingestion_filter = IngestionFilter()
+    monkeypatch.setattr(PhysicalDeviceLogAdapter, "start", _no_spawn)
+
+    noise = _entry("pairing chatter", source=LogSource.DEVICE)
+    noise.process = "remotepairingdeviced"                 # the preset excludes it
+    await app.state.ring_buffer.append(noise)
+    await app.state.ring_buffer.append(_entry("an app line", source=LogSource.DEVICE))
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/v1/device/logging/device/start", headers=HEADERS,
+            json={"udid": "PHONE", "preset": "device-quiet"},
+        )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["purged"] == 1

@@ -35,15 +35,21 @@ T = TypeVar("T")
 
 @dataclass
 class Missed:
-    """What a subscriber lost: how many, and the span of their timestamps.
+    """What a subscriber lost: how many, and when those entries were stamped.
 
-    The span is what makes a gap fillable. "34 entries missed" says a query
-    is needed; "stamped between 18:00:11 and 18:00:14" says which one.
+    Two spans, for two readers. `first`/`last` cover everything missed since
+    the subscription began. `pending_first`/`pending_last` cover only what
+    was missed since the last notice took them, which is what a notice must
+    report: a span that kept growing re-covered earlier gaps and every entry
+    delivered between them, so a client backfilling it fetched duplicates and
+    could not find the new gap (second review).
     """
 
     count: int = 0
     first: datetime | None = None
     last: datetime | None = None
+    pending_first: datetime | None = None
+    pending_last: datetime | None = None
 
     def add(self, item: object) -> None:
         self.count += 1
@@ -51,16 +57,16 @@ class Missed:
         if isinstance(at, datetime):
             self.first = at if self.first is None or at < self.first else self.first
             self.last = at if self.last is None or at > self.last else self.last
+            if self.pending_first is None or at < self.pending_first:
+                self.pending_first = at
+            if self.pending_last is None or at > self.pending_last:
+                self.pending_last = at
 
-    def merged(self, *others: Missed) -> Missed:
-        out = Missed(self.count, self.first, self.last)
-        for other in others:
-            out.count += other.count
-            for at in (other.first, other.last):
-                if at is not None:
-                    out.first = at if out.first is None or at < out.first else out.first
-                    out.last = at if out.last is None or at > out.last else out.last
-        return out
+    def take_pending(self) -> tuple[datetime | None, datetime | None]:
+        """The span missed since the last call, and start a new one."""
+        span = (self.pending_first, self.pending_last)
+        self.pending_first = self.pending_last = None
+        return span
 
 
 @dataclass
@@ -116,7 +122,8 @@ class DropNotice:
     At most once per `interval` seconds. During a sustained overflow the count
     rises on almost every loop, and a notice each time buried the stream in
     them -- 855 in one measured run. Each notice carries the running total and
-    the span of what was missed, so coalescing loses nothing.
+    the span missed since the previous notice, so coalescing loses nothing
+    and consecutive notices' spans do not overlap.
     """
 
     def __init__(self, interval: float = 1.0, clock: Callable[[], float] = time.monotonic) -> None:
@@ -125,21 +132,28 @@ class DropNotice:
         self._reported = 0
         self._last: float | None = None
 
-    def due(self, missed: Missed | int) -> dict | None:
-        """The notice to send now, or None if there is nothing new or it is too soon."""
-        if isinstance(missed, int):
-            missed = Missed(count=missed)
-        total = missed.count
+    def due(self, *sources: Missed) -> dict | None:
+        """The notice to send now, or None if nothing is new or it is too soon.
+
+        `sources` are the live records for everything this stream can lose
+        at -- a subscription, and for the log stream its merge queue too. The
+        pending spans are taken from them when a notice is sent.
+        """
+        total = sum(m.count for m in sources)
         if total <= self._reported:
             return None
         now = self._clock()
         if self._last is not None and now - self._last < self._interval:
             return None
         notice: dict = {"dropped": total - self._reported, "total_dropped": total}
-        if missed.first is not None:
-            # The whole span missed since the stream began, so a client can
-            # backfill it with one `query_logs(since=..., until=...)`.
-            notice["missed_from"] = missed.first.isoformat()
-            notice["missed_to"] = missed.last.isoformat() if missed.last else None
+        spans = [m.take_pending() for m in sources]
+        starts = [a for a, _ in spans if a is not None]
+        ends = [b for _, b in spans if b is not None]
+        if starts:
+            # Since the previous notice only, so one query for this span --
+            # `query_logs` on the log stream, `query_flows` on the flow
+            # stream -- fetches this gap and nothing already delivered.
+            notice["missed_from"] = min(starts).isoformat()
+            notice["missed_to"] = max(ends).isoformat()
         self._reported, self._last = total, now
         return notice

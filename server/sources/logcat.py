@@ -66,6 +66,9 @@ UTC_FORMAT_MIN_API = 24
 #: How long a freshly spawned logcat gets to reject its arguments.
 STARTUP_GRACE_S = 0.5
 
+#: How long to wait for the device to answer getprop before starting anyway.
+GETPROP_TIMEOUT_S = 10
+
 LOGCAT_LEVEL_MAP: dict[str, LogLevel] = {
     "V": LogLevel.DEBUG,
     "D": LogLevel.DEBUG,
@@ -265,7 +268,7 @@ class LogcatAdapter(BaseSourceAdapter):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=GETPROP_TIMEOUT_S)
         except (OSError, TimeoutError):
             if proc is not None and proc.returncode is None:
                 proc.kill()

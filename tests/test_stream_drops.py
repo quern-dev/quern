@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 from server.models import LogEntry, LogLevel, LogSource
 from server.proxy.flow_store import FlowStore
-from server.storage.fanout import DropNotice, Fanout
+from server.storage.fanout import DropNotice, Fanout, Missed
 from server.storage.ring_buffer import RingBuffer
 from tests.test_flow_store import _make_flow
 
@@ -92,33 +92,65 @@ class TestDropNotice:
         self.now = 100.0
         return DropNotice(interval=1.0, clock=lambda: self.now)
 
+    @staticmethod
+    def _lose(missed, *seconds):
+        for sec in seconds:
+            missed.add(SimpleNamespace(timestamp=datetime(2026, 9, 26, 18, 0, sec, tzinfo=UTC)))
+
     def test_the_first_loss_is_reported_at_once(self):
-        assert self._notice().due(3) == {"dropped": 3, "total_dropped": 3}
+        missed = Missed()
+        self._lose(missed, 1, 2, 3)
+        assert self._notice().due(missed)["total_dropped"] == 3
 
     def test_nothing_new_means_no_notice(self):
-        notice = self._notice()
-        notice.due(3)
+        notice, missed = self._notice(), Missed()
+        self._lose(missed, 1)
+        notice.due(missed)
         self.now += 5
-        assert notice.due(3) is None
+        assert notice.due(missed) is None
+
+    def test_losses_inside_the_interval_are_coalesced_into_the_next(self):
+        notice, missed = self._notice(), Missed()
+        self._lose(missed, 1)
+        notice.due(missed)
+        self.now += 0.5
+        self._lose(missed, 2, 3)
+        assert notice.due(missed) is None
+        self.now += 0.6
+        due = notice.due(missed)
+        assert (due["dropped"], due["total_dropped"]) == (2, 3)
 
     def test_a_notice_says_when_the_missed_entries_were_stamped(self):
         """So the gap can be backfilled with one query."""
-        from server.storage.fanout import Missed
+        missed = Missed()
+        self._lose(missed, 11, 14, 12)
+        due = self._notice().due(missed)
+        assert due["missed_from"].endswith("18:00:11+00:00")
+        assert due["missed_to"].endswith("18:00:14+00:00")
 
-        first = datetime(2026, 9, 26, 18, 0, 11, tzinfo=UTC)
-        last = datetime(2026, 9, 26, 18, 0, 14, tzinfo=UTC)
-        notice = self._notice().due(Missed(count=4, first=first, last=last))
+    def test_consecutive_notices_cover_separate_gaps(self):
+        """A span covering everything since the stream began re-covered the
+        first gap and every entry delivered after it, so a backfill fetched
+        duplicates and could not find the new gap (second review)."""
+        notice, missed = self._notice(), Missed()
+        self._lose(missed, 1, 2)
+        notice.due(missed)
+        self.now += 2
+        self._lose(missed, 40, 41)
 
-        assert notice["missed_from"] == first.isoformat()
-        assert notice["missed_to"] == last.isoformat()
+        due = notice.due(missed)
 
-    def test_losses_inside_the_interval_are_coalesced_into_the_next(self):
-        notice = self._notice()
-        notice.due(3)
-        self.now += 0.5
-        assert notice.due(10) is None
-        self.now += 0.6
-        assert notice.due(12) == {"dropped": 9, "total_dropped": 12}
+        assert due["missed_from"].endswith("18:00:40+00:00")
+        assert due["missed_to"].endswith("18:00:41+00:00")
+
+    def test_spans_from_every_source_are_combined(self):
+        """The log stream loses at its subscriptions and its merge queue."""
+        sub, merge = Missed(), Missed()
+        self._lose(sub, 5)
+        self._lose(merge, 9)
+        due = self._notice().due(sub, merge)
+        assert due["total_dropped"] == 2
+        assert due["missed_from"].endswith(":05+00:00") and due["missed_to"].endswith(":09+00:00")
 
 
 async def test_the_log_buffer_keeps_a_slow_subscriber():
@@ -196,7 +228,11 @@ async def test_the_log_stream_says_what_a_slow_client_missed():
 
     dropped = [e for e in seen if e["event"] == "dropped"]
     assert dropped, "the stream never said entries were missed"
-    assert json.loads(dropped[0]["data"])["total_dropped"] >= 200
+    data = json.loads(dropped[0]["data"])
+    assert data["total_dropped"] >= 200
+    # From the real handler, not only DropNotice: survivor P17 passed the
+    # handler a bare count, which dropped the span from every notice sent.
+    assert data["missed_from"] and data["missed_to"]
 
 
 async def test_losses_at_the_streams_own_merge_queue_are_reported_too():
@@ -250,7 +286,9 @@ async def test_the_flow_stream_says_what_a_slow_client_missed():
 
     dropped = [e for e in seen if e["event"] == "dropped"]
     assert dropped, "the stream never said flows were missed"
-    assert json.loads(dropped[0]["data"])["total_dropped"] >= 100
+    data = json.loads(dropped[0]["data"])
+    assert data["total_dropped"] >= 100
+    assert data["missed_from"] and data["missed_to"]   # survivor P18
 
 
 async def test_the_log_stream_subscribes_with_the_clients_filter():
@@ -307,6 +345,56 @@ async def test_the_heartbeat_carries_the_running_total(monkeypatch):
     assert first["event"] == "heartbeat"
     for i in range(1100):                      # 100 past the subscriber queue
         await ring.append(_entry(i))
+
+    seen = [await events.__anext__() for _ in range(2)]
+
+    [heartbeat] = [e for e in seen if e["event"] == "heartbeat"]
+    assert json.loads(heartbeat["data"])["total_dropped"] >= 100
+
+
+async def test_the_flow_stream_subscribes_with_the_clients_filter():
+    """Survivor P13: the flow stream subscribing unfiltered failed nothing."""
+    from server.api.proxy import stream_flows
+
+    store = FlowStore(max_size=5000)
+    request = _Request(flow_store=store)
+    response = await stream_flows(
+        request=request, host="api.wanted.com", method=None, device_id=None,
+        simulator_udid=None,
+    )
+    task = asyncio.ensure_future(response.body_iterator.__anext__())
+    await asyncio.sleep(0)
+    await store.add(_make_flow(flow_id="wanted", host="api.wanted.com"))
+    await task
+
+    for i in range(1500):
+        await store.add(_make_flow(flow_id=f"noise{i}", host="cdn.other.com"))
+
+    [sub] = store._fanout._subs.values()
+    assert sub.missed.count == 0, "flows the client filtered out were queued and lost"
+
+
+async def test_the_flow_heartbeat_carries_the_running_total(monkeypatch):
+    """Survivor P19: removing it from the flow stream's heartbeat failed
+    nothing; the heartbeat test covered /logs/stream only."""
+    from server.api.proxy import stream_flows
+
+    async def _time_out(awaitable, timeout):
+        awaitable.close()
+        raise TimeoutError
+
+    store = FlowStore(max_size=5000)
+    request = _Request(flow_store=store)
+    request.polls = -100
+    response = await stream_flows(
+        request=request, host=None, method=None, device_id=None, simulator_udid=None,
+    )
+    monkeypatch.setattr(asyncio, "wait_for", _time_out)
+    events = response.body_iterator
+
+    assert (await events.__anext__())["event"] == "heartbeat"
+    for i in range(1100):
+        await store.add(_make_flow(flow_id=f"f{i}"))
 
     seen = [await events.__anext__() for _ in range(2)]
 

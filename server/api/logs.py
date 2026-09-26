@@ -177,8 +177,8 @@ async def stream_logs(
                 except asyncio.QueueFull:
                     merge_missed.add(entry)
 
-        def missed() -> Missed:
-            return merge_missed.merged(*(buf.missed(q) for buf, q in subscriptions))
+        def missed() -> list[Missed]:
+            return [merge_missed, *(buf.missed(q) for buf, q in subscriptions)]
 
         notice = DropNotice()
         tasks = [asyncio.create_task(forward(q)) for _, q in subscriptions]
@@ -192,7 +192,7 @@ async def stream_logs(
                 # it was the merge queue, which the forwarder above fills as fast
                 # as the buffer does. A gap the client is told about is one it
                 # can fill with `query_logs`; one it is not reads as quiet (#255).
-                if (due := notice.due(missed())) is not None:
+                if (due := notice.due(*missed())) is not None:
                     yield {"event": "dropped", "data": json.dumps(due)}
                 try:
                     entry = await asyncio.wait_for(merged.get(), timeout=15.0)
@@ -207,7 +207,7 @@ async def stream_logs(
                         "data": json.dumps({
                             "time": datetime.now(UTC).isoformat(),
                             "buffer_size": buffers[0].size,
-                            "total_dropped": missed().count,
+                            "total_dropped": sum(m.count for m in missed()),
                         }),
                     }
         finally:
