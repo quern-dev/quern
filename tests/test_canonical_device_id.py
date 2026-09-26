@@ -242,7 +242,9 @@ class TestTheTraceAcceptsEitherSpelling:
         server_buffer = RingBuffer(max_size=100)
         await server_buffer.append(_action_on(CD_UUID))
         request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-            server_buffer=server_buffer, ring_buffer=RingBuffer(max_size=10),
+            server_buffer=server_buffer,
+            crash_buffer=RingBuffer(max_size=10),
+            ring_buffer=RingBuffer(max_size=10),
             flow_store=None, proxy_adapter=None,
         )))
         return await get_trace(request=request, since=None, udid=udid, limit=10)

@@ -5,6 +5,7 @@ import { z } from "zod";
 import { readStateFile } from "../config.js";
 import { apiRequest } from "../http.js";
 import { strictParams } from "./helpers.js";
+import { type LogQueryAnswer, tailLogsResult } from "./log-responses.js";
 
 export function registerLogTools(server: McpServer): void {
   server.registerTool("ensure_server", {
@@ -214,7 +215,7 @@ export function registerLogTools(server: McpServer): void {
   );
 
   server.registerTool("tail_logs", {
-    description: `Show recent log entries (most recent first). Use this for quick "what just happened?" queries. Defaults to the 50 most recent entries.`,
+    description: `Show recent log entries (most recent first). Use this for quick "what just happened?" queries. Defaults to the 50 most recent entries. If the result has \`truncated: true\`, entries in the window were evicted before you asked, so an empty or short answer does NOT mean nothing happened — \`complete_after\` says from when the answer is whole.`,
     inputSchema: strictParams({
       count: z
         .coerce.number()
@@ -240,15 +241,14 @@ export function registerLogTools(server: McpServer): void {
           process,
           source,
           tail: true,
-        })) as { entries: unknown[] };
+        })) as LogQueryAnswer;
 
-        const entries = data.entries || [];
-
+        // Shaped by a function the test suite runs; see log-responses.ts.
         return {
           content: [
             {
               type: "text" as const,
-              text: JSON.stringify({ entries, total: entries.length }, null, 2),
+              text: JSON.stringify(tailLogsResult(data), null, 2),
             },
           ],
         };
@@ -267,7 +267,7 @@ export function registerLogTools(server: McpServer): void {
   );
 
   server.registerTool("query_logs", {
-    description: `Full-featured log search with time ranges and text search. Use this for investigating specific issues — filter by time, process, level, or search text.`,
+    description: `Full-featured log search with time ranges and text search. Use this for investigating specific issues — filter by time, process, level, or search text. If the result has \`truncated: true\`, entries in the window were evicted before you asked, so an empty or short answer does NOT mean nothing happened — \`complete_after\` says from when the answer is whole.`,
     inputSchema: strictParams({
       since: z
         .string()
@@ -331,7 +331,7 @@ export function registerLogTools(server: McpServer): void {
   );
 
   server.registerTool("get_log_summary", {
-    description: `Get an AI-optimized summary of recent log activity. Returns error counts, top issues, and a natural language summary. Supports cursor-based polling for efficient delta updates.`,
+    description: `Get an AI-optimized summary of recent log activity. Returns error counts, top issues, and a natural language summary. Supports cursor-based polling for efficient delta updates. If \`truncated\` is true, entries in the window were evicted and the counts may be low.`,
     inputSchema: strictParams({
       window: z
         .enum(["30s", "1m", "5m", "15m", "1h"])
@@ -373,7 +373,7 @@ export function registerLogTools(server: McpServer): void {
   );
 
   server.registerTool("get_errors", {
-    description: `Get error-level log entries and crash reports. Useful for quickly finding what's going wrong.`,
+    description: `Get error-level log entries and crash reports. Useful for quickly finding what's going wrong. \`truncated: true\` means error-level entries from the window were evicted before you asked, so an empty list is not proof there were no errors.`,
     inputSchema: strictParams({
       since: z
         .string()
@@ -732,7 +732,7 @@ With several agents on one server, pass \`udid\` to get only your own device's a
   });
 
   server.registerTool("list_log_sources", {
-    description: `List all active log source adapters and their current status (streaming, watching, stopped, error).`,
+    description: `List all active log source adapters and their current status (streaming, watching, stopped, error). \`buffers\` shows what each log buffer holds and what it lost: capacity, evictions by source, and the oldest entry still queryable. A source's \`entries_captured\` is intake, not retention — compare it with \`buffers.logs.evicted\` to see whether capture is outrunning the buffer; if it is, filter at the source with \`process\` or \`subsystem\`.`,
     inputSchema: strictParams({}),
   }, async () => {
       try {

@@ -134,6 +134,10 @@ async def get_trace(
 
     server_buffer = request.app.state.server_buffer
     ring_buffer = request.app.state.ring_buffer
+    # Crash reports have their own buffer so the firehose cannot evict them
+    # (#255), which means a trace that read only `ring_buffer` would silently
+    # lose the one entry it most exists to show.
+    crash_buffer = request.app.state.crash_buffer
     flow_store = getattr(request.app.state, "flow_store", None)
 
     entries = await server_buffer.filter_entries(
@@ -168,11 +172,13 @@ async def get_trace(
     # gone while `log_window_truncated` says nothing, because it was never
     # about that buffer. "Quern did nothing for two minutes" and "the entries
     # aged out" then look identical.
-    actions_truncated = False
-    if server_buffer.size >= server_buffer.max_size:
-        oldest_server = await server_buffer.get_recent(count=server_buffer.size)
-        if oldest_server and oldest_server[0].timestamp > window_start:
-            actions_truncated = True
+    #
+    # Answered by the buffer's own eviction record rather than a probe. The
+    # probe here asked "is it full, and is the oldest survivor newer than the
+    # window?", which was wrong in both directions: a buffer holding exactly
+    # `max_size` entries with nothing ever evicted read as truncated, and one
+    # purged back below full after evicting read as whole (#255).
+    actions_truncated = not server_buffer.is_complete_since(window_start)
 
     # Clamped, not multiplied blindly: LogQueryParams caps `limit` at 1000, so
     # `limit * 10` raised a ValidationError inside the handler -- an uncaught
@@ -207,23 +213,30 @@ async def get_trace(
     if logs_over_limit:
         device_logs = device_logs[-log_limit:]
 
-    # Did the window outlive the buffer?
+    # Crashes join after the bound, not before it. They come a handful per
+    # session from a buffer of their own, and letting a burst of newer app
+    # lines slice them off would undo the reason that buffer exists.
+    crashes = await crash_buffer.filter_entries(LogQueryParams(since=window_start))
+    if udid:
+        crashes = [e for e in crashes if not e.device_id or e.device_id == udid]
+    device_logs = sorted(device_logs + crashes, key=lambda e: e.timestamp)
+
+    # Did the window outlive the buffers?
     #
-    # The ring buffer is a deque with a maxlen, shared by syslog, oslog,
-    # crash, build and proxy. Eviction is silent -- nothing counts drops -- so
-    # a trace asking for the last five minutes gets whatever survived and
-    # looks identical whether or not anything was lost. A busy device can turn
-    # over 10,000 entries in well under that.
-    #
-    # It is detectable without new bookkeeping: if the buffer is full and its
-    # oldest surviving entry starts after the window did, the beginning of the
-    # window has been evicted. Cheap, and a false negative at worst -- it
-    # cannot claim truncation that did not happen.
-    truncated = False
-    if ring_buffer.size >= ring_buffer.max_size:
-        oldest = await ring_buffer.get_recent(count=ring_buffer.size)
-        if oldest and oldest[0].timestamp > window_start:
-            truncated = True
+    # Answered from what each buffer evicted rather than probed from what
+    # survived. The probe that stood here asked whether the buffer was full
+    # and its oldest survivor newer than the window, and it was wrong both
+    # ways: entries are not in timestamp order (a crash is stamped when it
+    # happened, a physical device by its own clock), so an old-stamped
+    # survivor hid newer evictions; a buffer purged below full after evicting
+    # read as whole; and one holding exactly `max_size` with nothing evicted
+    # read as truncated. Narrowed to the sources the trace uses, so build and
+    # proxy lines being shed does not flag an app trace (#255).
+    app_sources = APP_LOG_SOURCES - {LogSource.CRASH}
+    truncated = not (
+        ring_buffer.is_complete_since(window_start, app_sources)
+        and crash_buffer.is_complete_since(window_start)
+    )
     # Flows get the same treatment the logs already had, for the same two
     # reasons -- and they matter more here, because attribution compares every
     # flow against every action. Measured on this branch: 1,000 actions
@@ -266,16 +279,14 @@ async def get_trace(
         flows_over_limit = len(flows) > log_limit
         if flows_over_limit:
             flows = flows[-log_limit:]
-        # The store evicts oldest-first and silently, exactly like the ring
-        # buffer, so the same probe applies: full, and nothing surviving from
-        # before the window, means the start of it is gone.
-        if flow_store.size >= flow_store.max_size:
-            everything = await flow_store.get_since(
-                datetime.min.replace(tzinfo=UTC),
-            )
-            # `min` rather than `[0]`, for the same reason.
-            if everything and min(f.timestamp for f in everything) > window_start:
-                flow_window_truncated = True
+        # From the store's own eviction record, like the log buffers. The
+        # probe that stood here -- full, and oldest survivor newer than the
+        # window -- is the one #255 discredited: the store evicts in
+        # completion order and a flow is stamped when it started, so a long
+        # request from before the window survived and hid newer evictions.
+        # Reproduced in review: a store of 3 holding t=10, 11, 12, then a flow
+        # at t=-600, evicted t=10 and reported nothing lost.
+        flow_window_truncated = not flow_store.is_complete_since(window_start)
 
     # In a thread. Attribution is pure CPU over plain data with nothing to
     # await, and it compares every flow and every log against every action --

@@ -40,13 +40,46 @@ The key lives at `~/.quern/api-key`; the server's URL and port are in `~/.quern/
 | `get_latest_crash` | GET | `/api/v1/crashes/latest` | Recent parsed crash reports |
 | `set_log_filter` | POST | `/api/v1/logs/filter` | Reconfigure capture filters |
 | `get_log_filter` | GET | `/api/v1/logs/filter` | Current ingestion filter config at all scopes (global, per-source, per-device) |
-| `list_log_sources` | GET | `/api/v1/logs/sources` | Active log source adapters |
+| `list_log_sources` | GET | `/api/v1/logs/sources` | Active log source adapters, and what each log buffer holds and has evicted |
 | `start_simulator_logging` | POST | `/api/v1/device/logging/start` | Start simulator log capture |
 | `stop_simulator_logging` | POST | `/api/v1/device/logging/stop` | Stop simulator log capture |
 | `start_device_logging` | POST | `/api/v1/device/logging/device/start` | Start physical device log capture |
 | `stop_device_logging` | POST | `/api/v1/device/logging/device/stop` | Stop physical device log capture |
 | `start_oslog_streaming` | POST | `/api/v1/logs/oslog/start` | Start streaming the host Mac's unified log |
 | `stop_oslog_streaming` | POST | `/api/v1/logs/oslog/stop` | Stop host oslog streaming |
+
+**An empty answer is not always a true negative.** Logs live in fixed-size
+buffers that evict their oldest entries: a shared one, and one each for crash
+reports and quern's own logs. An unfiltered simulator can turn the shared buffer over in seconds.
+`query_logs`, `tail_logs`, `get_errors` and `get_log_summary` therefore return
+`truncated` and `complete_after`. `truncated: true` means entries stamped inside
+the requested window were evicted before the call, so the result *may* be
+missing some. `false` is a guarantee that nothing in the window was lost. For
+a tail (`tail_logs`, or `query_logs` with `tail`) it means something narrower:
+the entries returned really are the newest N, though older ones may have been
+evicted. Entries removed by a filter change are not evictions; the call that
+changed the filter reports them as `purged`.
+`complete_after` is the time after which nothing has been evicted. The check is
+narrowed by the query's `source` and `level`, so shed debug lines do not flag a
+search for errors. `get_trace` reports the same thing as
+`log_window_truncated` and `action_window_truncated`. `list_log_sources`
+returns a `buffers` object with each buffer's capacity, intake, evictions by
+source, and the oldest entry it still holds. A source's `entries_captured` is
+intake, not retention.
+
+The live streams, `/logs/stream` and `/proxy/flows/stream`, tell a client
+that falls behind what it missed. They send a `dropped` event at most once a
+second, with the count, the running `total_dropped`, and `missed_from` /
+`missed_to`: the span missed since the previous notice, so consecutive
+notices do not overlap. Backfill it with `query_logs` on the log stream and
+`query_flows` on the flow stream. Only entries matching the stream's own
+filter are counted. Every heartbeat also carries `total_dropped`.
+
+Crash reports have a buffer of their own, so a busy source cannot evict them.
+On Android, where a crash exists only as logcat lines, the logcat adapter emits
+a crash entry for each Java crash, native crash and ANR. Find them with
+`query_logs` (`source=crash`) or `get_errors`. `get_latest_crash` reads iOS
+crash reports only.
 
 ### Network proxy
 

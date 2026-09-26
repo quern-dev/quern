@@ -202,3 +202,28 @@ async def test_clear():
     assert store.size == 5
     await store.clear()
     assert store.size == 0
+
+
+class TestEvictionIsRecorded:
+    """The store evicted silently, like the log buffers did (#255)."""
+
+    @pytest.mark.asyncio
+    async def test_the_mark_is_the_newest_evicted_timestamp(self):
+        base = datetime(2026, 9, 26, 12, 0, tzinfo=UTC)
+        store = FlowStore(max_size=1)
+        await store.add(_make_flow("a", timestamp=base + timedelta(seconds=50)))
+        await store.add(_make_flow("b", timestamp=base + timedelta(seconds=10)))
+        await store.add(_make_flow("c", timestamp=base + timedelta(seconds=60)))
+
+        assert store.evicted == 2
+        assert store.evicted_through == base + timedelta(seconds=50)
+        assert not store.is_complete_since(base + timedelta(seconds=50))
+        assert store.is_complete_since(base + timedelta(seconds=51))
+
+    @pytest.mark.asyncio
+    async def test_updating_a_flow_in_place_is_not_eviction(self):
+        store = FlowStore(max_size=1)
+        await store.add(_make_flow("a"))
+        await store.add(_make_flow("a"))
+
+        assert store.evicted == 0 and store.is_complete_since(None)

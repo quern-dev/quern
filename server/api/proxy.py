@@ -49,6 +49,7 @@ from server.proxy.system_proxy import (
     detect_and_configure,
     restore_system_proxy,
 )
+from server.storage.fanout import DropNotice
 
 _proxy_logger = logging.getLogger(__name__)
 
@@ -740,11 +741,20 @@ async def stream_flows(
             }
             return
 
-        queue = flow_store.subscribe()
+        # With the client's filter, so flows it did not ask for never take a
+        # slot and are never counted as missed.
+        queue = flow_store.subscribe(matches_filter)
+        notice = DropNotice()
         try:
             while True:
                 if await request.is_disconnected():
                     break
+                # A client that fell behind used to be unsubscribed without a
+                # word while its heartbeats carried on, so the stream looked
+                # live and merely quiet, for good. Now it loses only what did
+                # not fit, and is told how much (#255).
+                if (due := notice.due(flow_store.missed(queue))) is not None:
+                    yield {"event": "dropped", "data": json.dumps(due)}
                 try:
                     flow = await asyncio.wait_for(
                         queue.get(), timeout=15.0,
@@ -761,6 +771,7 @@ async def stream_flows(
                         "data": json.dumps({
                             "time": datetime.now(UTC).isoformat(),
                             "store_size": flow_store.size,
+                            "total_dropped": flow_store.dropped(queue),
                         }),
                     }
         finally:

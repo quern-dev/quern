@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
+from collections.abc import Callable
 from datetime import datetime
 
 from server.models import FlowQueryParams, FlowRecord
+from server.storage.fanout import Fanout, Missed
 
 
 class FlowStore:
@@ -20,7 +22,16 @@ class FlowStore:
         self._flows: OrderedDict[str, FlowRecord] = OrderedDict()
         self._max_size = max_size
         self._lock = asyncio.Lock()
-        self._subscribers: list[asyncio.Queue[FlowRecord]] = []
+        self._fanout: Fanout[FlowRecord] = Fanout(maxsize=1000)
+        # What eviction has lost, the way RingBuffer records it (#255): a
+        # count, and the newest *timestamp* among evicted flows. The store
+        # evicts in completion order while a flow's timestamp is when its
+        # request started, so the oldest survivor says nothing about what
+        # went before it -- a long request that started early and finished
+        # late survives and hides newer evictions behind it. The maximum is
+        # exact regardless: nothing stamped after it was ever evicted.
+        self._evicted = 0
+        self._evicted_through: datetime | None = None
 
     @property
     def size(self) -> int:
@@ -37,19 +48,36 @@ class FlowStore:
                 # Update existing — move to end
                 del self._flows[flow.id]
             elif len(self._flows) >= self._max_size:
-                # Evict oldest
-                self._flows.popitem(last=False)
+                # Evict oldest, and remember it
+                _, gone = self._flows.popitem(last=False)
+                self._evicted += 1
+                if self._evicted_through is None or gone.timestamp > self._evicted_through:
+                    self._evicted_through = gone.timestamp
             self._flows[flow.id] = flow
 
-        # Notify subscribers (outside lock to avoid deadlock)
-        dead_subs: list[asyncio.Queue[FlowRecord]] = []
-        for queue in self._subscribers:
-            try:
-                queue.put_nowait(flow)
-            except asyncio.QueueFull:
-                dead_subs.append(queue)
-        for dead in dead_subs:
-            self._subscribers.remove(dead)
+        # Notify subscribers (outside lock to avoid deadlock). A slow one
+        # loses this flow and the loss is counted, rather than the subscriber
+        # being dropped without a word -- see server/storage/fanout.py.
+        self._fanout.publish(flow)
+
+    @property
+    def evicted(self) -> int:
+        return self._evicted
+
+    @property
+    def evicted_through(self) -> datetime | None:
+        """The newest timestamp of any evicted flow, or None if none were."""
+        return self._evicted_through
+
+    def is_complete_since(self, since: datetime | None) -> bool:
+        """Does the store still hold every flow stamped at or after `since`?
+
+        True is a guarantee. False means a flow stamped inside the window was
+        evicted, not necessarily one a given filter would have matched.
+        """
+        if self._evicted_through is None:
+            return True
+        return since is not None and since > self._evicted_through
 
     async def get(self, flow_id: str) -> FlowRecord | None:
         """Look up a flow by ID."""
@@ -79,22 +107,27 @@ class FlowStore:
         async with self._lock:
             return list(self._flows.values())
 
-    def subscribe(self) -> asyncio.Queue[FlowRecord]:
+    def subscribe(
+        self, accept: Callable[[FlowRecord], bool] | None = None,
+    ) -> asyncio.Queue[FlowRecord]:
         """Create a subscription queue for real-time SSE streaming.
 
         Returns a queue that will receive new flows as they arrive.
         Caller must call unsubscribe() when done.
         """
-        queue: asyncio.Queue[FlowRecord] = asyncio.Queue(maxsize=1000)
-        self._subscribers.append(queue)
-        return queue
+        return self._fanout.subscribe(accept)
 
     def unsubscribe(self, queue: asyncio.Queue[FlowRecord]) -> None:
         """Remove a subscription queue."""
-        try:
-            self._subscribers.remove(queue)
-        except ValueError:
-            pass
+        self._fanout.unsubscribe(queue)
+
+    def dropped(self, queue: asyncio.Queue[FlowRecord]) -> int:
+        """Flows this subscriber missed because its queue was full."""
+        return self._fanout.dropped(queue)
+
+    def missed(self, queue: asyncio.Queue[FlowRecord]) -> Missed:
+        """What this subscriber missed: the count and the span of timestamps."""
+        return self._fanout.missed(queue)
 
     def _filter(self, params: FlowQueryParams) -> list[FlowRecord]:
         """Apply query filters. Returns newest-first. Must be called under lock."""

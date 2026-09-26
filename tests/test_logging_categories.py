@@ -219,10 +219,13 @@ class TestTheQueryPathCanActuallyFilterOnIt:
         from types import SimpleNamespace
 
         from server.api.logs import query_logs
+        from server.storage.ring_buffer import RingBuffer
 
         buf = await self._buffer()
         request = SimpleNamespace(
-            app=SimpleNamespace(state=SimpleNamespace(server_buffer=buf, ring_buffer=buf)),
+            app=SimpleNamespace(state=SimpleNamespace(
+                server_buffer=buf, crash_buffer=RingBuffer(max_size=10), ring_buffer=buf,
+            )),
         )
 
         from server.models import LogSource

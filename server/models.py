@@ -225,7 +225,43 @@ class TopIssue(BaseModel):
     resolved: bool = False
 
 
-class LogSummaryResponse(BaseModel):
+class Completeness(BaseModel):
+    """Whether a log answer can be trusted to be whole.
+
+    The buffers are fixed-size and evict their oldest entries, so "nothing
+    matched" and "everything that matched is gone" used to come back
+    identical: `total: 0` either way. An agent reading the first concluded the
+    second -- confidently, and wrongly -- which is the failure #255 and #313
+    describe. These fields separate them.
+    """
+
+    truncated: bool = Field(
+        default=False,
+        description=(
+            "True when entries stamped inside the requested window were "
+            "evicted before this call, so the result may be missing some. It "
+            "says 'may', not 'is': the evicted entries are not known to match "
+            "this query's other filters. False is a guarantee -- nothing in "
+            "the window was lost -- with one difference for a tail (the newest "
+            "N): there, false means the entries returned really are the newest "
+            "N, while older ones may still have been evicted. Entries removed "
+            "by a filter change are not evictions and do not set this; the "
+            "call that changed the filter reports them as `purged`. Narrow "
+            "capture at the source (process, subsystem) or ask for a later "
+            "window."
+        ),
+    )
+    complete_after: datetime | None = Field(
+        default=None,
+        description=(
+            "Nothing stamped after this time has been evicted, so a window "
+            "starting later is complete. Null when nothing relevant was ever "
+            "evicted."
+        ),
+    )
+
+
+class LogSummaryResponse(Completeness):
     """Response from GET /api/v1/logs/summary."""
 
     window: str
@@ -238,7 +274,7 @@ class LogSummaryResponse(BaseModel):
     top_issues: list[TopIssue]
 
 
-class LogErrorsResponse(BaseModel):
+class LogErrorsResponse(Completeness):
     """Response from GET /api/v1/logs/errors."""
 
     entries: list[LogEntry]
