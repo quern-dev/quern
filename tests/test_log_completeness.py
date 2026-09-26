@@ -357,7 +357,8 @@ async def test_two_starts_for_one_device_launch_one_capture(app, monkeypatch):
                 "/api/v1/device/logging/device/start", headers=HEADERS,
                 json={"udid": "emulator-5554"},
             )
-        first, second = await asyncio.gather(start(), start())
+        # Bounded: a lock regression that deadlocks must fail, not hang.
+        first, second = await asyncio.wait_for(asyncio.gather(start(), start()), timeout=10)
 
     assert sorted([first.json()["status"], second.json()["status"]]) == [
         "already_running", "started",
@@ -429,7 +430,8 @@ async def test_two_starts_for_one_simulator_launch_one_capture(app, monkeypatch)
             return await client.post(
                 "/api/v1/device/logging/start", headers=HEADERS, json={"udid": "SIM-A"},
             )
-        first, second = await asyncio.gather(start(), start())
+        # Bounded: a lock regression that deadlocks must fail, not hang.
+        first, second = await asyncio.wait_for(asyncio.gather(start(), start()), timeout=10)
 
     assert sorted([first.json()["status"], second.json()["status"]]) == [
         "already_running", "started",
@@ -475,10 +477,10 @@ async def test_a_start_during_a_stop_leaves_the_new_capture_registered(app, monk
                 "/api/v1/device/logging/device/start", headers=HEADERS, json=body,
             )
 
-        stop, start = await asyncio.gather(
+        stop, start = await asyncio.wait_for(asyncio.gather(
             client.post("/api/v1/device/logging/device/stop", headers=HEADERS, json=body),
             start_soon(),
-        )
+        ), timeout=10)   # a lock regression that deadlocks must fail, not hang
 
     assert stop.json()["status"] == "stopped"
     assert start.json()["status"] == "started"

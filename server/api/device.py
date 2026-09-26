@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
@@ -49,6 +50,10 @@ from server.models import (
 #: seven tools per request costs six subprocesses. `/tools` and startup still
 #: measure fresh.
 TOOLS_IN_LIST_MAX_AGE = 5.0
+
+
+if TYPE_CHECKING:
+    from server.device.controller import DeviceController
 
 router = APIRouter(prefix="/api/v1/device", tags=["device"])
 logger = logging.getLogger(__name__)
@@ -836,7 +841,9 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
         return await _start_simulator_logging(request, body, udid)
 
 
-async def _start_simulator_logging(request: Request, body: StartSimLogRequest, udid: str):
+async def _start_simulator_logging(
+    request: Request, body: StartSimLogRequest, udid: str,
+) -> dict[str, Any]:
     from server.sources.simulator_log import SimulatorLogAdapter
 
     # Check if already running for this UDID
@@ -966,7 +973,7 @@ async def stop_simulator_logging(request: Request, body: StopSimLogRequest):
         return await _stop_simulator_logging(request, udid)
 
 
-async def _stop_simulator_logging(request: Request, udid: str):
+async def _stop_simulator_logging(request: Request, udid: str) -> dict[str, Any]:
     sim_adapters: dict = request.app.state.sim_log_adapters
     adapter = sim_adapters.get(udid)
     if not adapter:
@@ -1034,8 +1041,8 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
 
 
 async def _start_device_logging(
-    request: Request, body: StartDeviceLogRequest, udid: str, controller,
-):
+    request: Request, body: StartDeviceLogRequest, udid: str, controller: DeviceController,
+) -> dict[str, Any]:
     from server.sources.device_log import PhysicalDeviceLogAdapter
     from server.sources.logcat import LogcatAdapter
 
@@ -1134,7 +1141,7 @@ async def stop_device_logging(request: Request, body: StopDeviceLogRequest):
         return await _stop_device_logging(request, udid)
 
 
-async def _stop_device_logging(request: Request, udid: str):
+async def _stop_device_logging(request: Request, udid: str) -> dict[str, Any]:
     dev_adapters: dict = request.app.state.device_log_adapters
     adapter = dev_adapters.get(udid)
     if not adapter:
