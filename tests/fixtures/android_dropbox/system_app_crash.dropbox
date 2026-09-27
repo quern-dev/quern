@@ -1,0 +1,78 @@
+Drop box contents: 148 entries
+Max entries: 1000
+Low priority rate limit period: 2000 ms
+Low priority tags: {data_app_wtf, keymaster, system_server_wtf, system_app_strictmode, system_app_wtf, system_server_strictmode, data_app_strictmode, netstats}
+Searching for: system_app_crash
+
+========================================
+2026-09-26 11:05:07 system_app_crash (text, 986 bytes)
+Process: com.android.settings
+PID: 25084
+UID: 1000
+Flags: 0x28c9be45
+Package: com.android.settings v32 (12)
+Foreground: No
+Process-Runtime: 3907626
+Build: google/sdk_gphone64_arm64/emulator64_arm64:12/SE1B.240122.005/11418786:userdebug/dev-keys
+Loading-Progress: 1.0
+
+android.app.RemoteServiceException$CrashedByAdbException: shell-induced crash
+	at android.app.ActivityThread.throwRemoteServiceException(ActivityThread.java:1951)
+	at android.app.ActivityThread.access$2700(ActivityThread.java:256)
+	at android.app.ActivityThread$H.handleMessage(ActivityThread.java:2190)
+	at android.os.Handler.dispatchMessage(Handler.java:106)
+	at android.os.Looper.loopOnce(Looper.java:201)
+	at android.os.Looper.loop(Looper.java:288)
+	at android.app.ActivityThread.main(ActivityThread.java:7870)
+	at java.lang.reflect.Method.invoke(Native Method)
+	at com.android.internal.os.RuntimeInit$MethodAndArgsCaller.run(RuntimeInit.java:548)
+	at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:1003)
+
+========================================
+2026-09-26 11:15:29 system_app_crash (text, 983 bytes)
+Process: com.android.settings
+PID: 27953
+UID: 1000
+Flags: 0x28c9be45
+Package: com.android.settings v32 (12)
+Foreground: No
+Process-Runtime: 3668
+Build: google/sdk_gphone64_arm64/emulator64_arm64:12/SE1B.240122.005/11418786:userdebug/dev-keys
+Loading-Progress: 1.0
+
+android.app.RemoteServiceException$CrashedByAdbException: shell-induced crash
+	at android.app.ActivityThread.throwRemoteServiceException(ActivityThread.java:1951)
+	at android.app.ActivityThread.access$2700(ActivityThread.java:256)
+	at android.app.ActivityThread$H.handleMessage(ActivityThread.java:2190)
+	at android.os.Handler.dispatchMessage(Handler.java:106)
+	at android.os.Looper.loopOnce(Looper.java:201)
+	at android.os.Looper.loop(Looper.java:288)
+	at android.app.ActivityThread.main(ActivityThread.java:7870)
+	at java.lang.reflect.Method.invoke(Native Method)
+	at com.android.internal.os.RuntimeInit$MethodAndArgsCaller.run(RuntimeInit.java:548)
+	at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:1003)
+
+========================================
+2026-09-26 12:42:00 system_app_crash (text, 986 bytes)
+Process: com.android.settings
+PID: 28299
+UID: 1000
+Flags: 0x28c9be45
+Package: com.android.settings v32 (12)
+Foreground: No
+Process-Runtime: 2520801
+Build: google/sdk_gphone64_arm64/emulator64_arm64:12/SE1B.240122.005/11418786:userdebug/dev-keys
+Loading-Progress: 1.0
+
+android.app.RemoteServiceException$CrashedByAdbException: shell-induced crash
+	at android.app.ActivityThread.throwRemoteServiceException(ActivityThread.java:1951)
+	at android.app.ActivityThread.access$2700(ActivityThread.java:256)
+	at android.app.ActivityThread$H.handleMessage(ActivityThread.java:2190)
+	at android.os.Handler.dispatchMessage(Handler.java:106)
+	at android.os.Looper.loopOnce(Looper.java:201)
+	at android.os.Looper.loop(Looper.java:288)
+	at android.app.ActivityThread.main(ActivityThread.java:7870)
+	at java.lang.reflect.Method.invoke(Native Method)
+	at com.android.internal.os.RuntimeInit$MethodAndArgsCaller.run(RuntimeInit.java:548)
+	at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:1003)
+

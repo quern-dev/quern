@@ -133,6 +133,11 @@ class AdbBackend:
         if self._emulator_path:
             logger.info("emulator found at %s", self._emulator_path)
 
+    @property
+    def adb_path(self) -> str | None:
+        """Where adb is, or None if it was not found."""
+        return self._adb_path
+
     async def _run_adb(self, *args: str) -> tuple[str, str]:
         """Run an adb command and return (stdout, stderr).
 

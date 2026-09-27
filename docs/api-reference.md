@@ -37,7 +37,7 @@ The key lives at `~/.quern/api-key`; the server's URL and port are in `~/.quern/
 | `get_errors` | GET | `/api/v1/logs/errors` | Errors and crashes only |
 | `get_build_result` | GET | `/api/v1/builds/latest` | Most recent build result |
 | `parse_build_output` | POST | `/api/v1/builds/parse-file` | Parse a build log file from disk |
-| `get_latest_crash` | GET | `/api/v1/crashes/latest` | Recent parsed crash reports |
+| `get_latest_crash` | GET | `/api/v1/crashes/latest` | Recent parsed crash reports; with `udid`, fetched from an iPhone (USB) or an Android device first |
 | `set_log_filter` | POST | `/api/v1/logs/filter` | Reconfigure capture filters |
 | `get_log_filter` | GET | `/api/v1/logs/filter` | Current ingestion filter config at all scopes (global, per-source, per-device) |
 | `list_log_sources` | GET | `/api/v1/logs/sources` | Active log source adapters, and what each log buffer holds and has evicted |
@@ -91,6 +91,15 @@ or one ahead of anything the server has numbered, comes back with
 `cursor_reset: true`, and the summary then covers the requested window. On the
 flow summary, a string that is not a cursor at all is refused with 400. Older timestamp cursors are still accepted, and the response always
 returns an arrival cursor.
+
+**Crash reports on both platforms.** `get_latest_crash` with a `udid` fetches
+that device's crashes first. An iPhone is read over USB with
+`idevicecrashreport`. An Android device or emulator is read from its DropBox,
+which needs no root, and yields Java crashes, native crashes and ANRs; each
+report's `kind` says which. The response's `pull` says whether the fetch
+happened: `pulled`, `skipped` (with the reason, for example an iPhone that is not
+on USB) or `failed` (with the error). Only `pulled` means the list reflects the
+device.
 
 ### Network proxy
 

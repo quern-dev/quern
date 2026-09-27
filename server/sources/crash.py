@@ -16,6 +16,8 @@ import logging
 import re
 import shutil
 import uuid
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -29,6 +31,14 @@ CRASH_DIR = CONFIG_DIR / "crashes"
 DIAGNOSTIC_REPORTS_DIR = Path.home() / "Library" / "Logs" / "DiagnosticReports"
 POLL_INTERVAL = 10  # seconds
 PULL_TIMEOUT = 30  # seconds
+
+
+@dataclass
+class PullResult:
+    """What a pull from a device found, and why it failed if it did."""
+
+    new: list[CrashReport] = field(default_factory=list)
+    error: str | None = None
 
 
 class CrashAdapter(BaseSourceAdapter):
@@ -119,7 +129,7 @@ class CrashAdapter(BaseSourceAdapter):
         except asyncio.CancelledError:
             pass
 
-    async def pull_from_device(self, libimobiledevice_udid: str | None = None) -> list[CrashReport]:
+    async def pull_from_device(self, libimobiledevice_udid: str | None = None) -> PullResult:
         """Pull crash reports from a connected device via idevicecrashreport.
 
         Args:
@@ -127,11 +137,13 @@ class CrashAdapter(BaseSourceAdapter):
                 any connected device.
 
         Returns:
-            List of newly discovered CrashReport objects.
+            The newly discovered reports, and why the pull failed if it did.
+            A failure used to return an empty list -- the missing tool, a
+            timeout, a non-zero exit, an exception -- which read exactly like
+            "the device has no new crashes" (#316, aligning with Android).
         """
         if not shutil.which("idevicecrashreport"):
-            logger.debug("idevicecrashreport not found, skipping pull")
-            return []
+            return PullResult(error="idevicecrashreport not found on PATH")
 
         self.watch_dir.mkdir(parents=True, exist_ok=True)
 
@@ -140,27 +152,74 @@ class CrashAdapter(BaseSourceAdapter):
             cmd.extend(["-u", libimobiledevice_udid])
         cmd.append(str(self.watch_dir))
 
+        error: str | None = None
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            await asyncio.wait_for(proc.wait(), timeout=PULL_TIMEOUT)
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=PULL_TIMEOUT)
+            if proc.returncode:
+                said = stderr.decode(errors="replace").strip() if stderr else ""
+                error = f"idevicecrashreport exited {proc.returncode}: {said or 'no output'}"
         except TimeoutError:
             logger.warning("idevicecrashreport timed out after %ds", PULL_TIMEOUT)
-            if proc.returncode is None:
+            if proc is not None and proc.returncode is None:
                 proc.kill()
-        except FileNotFoundError:
-            return []
-        except Exception:
-            logger.exception("idevicecrashreport failed")
-            return []
+            error = f"idevicecrashreport timed out after {PULL_TIMEOUT}s"
+        except OSError as e:
+            return PullResult(error=f"could not run idevicecrashreport: {e}")
 
-        # Scan for any new files that were pulled
+        # Scan for any new files that were pulled, even after a failure: a
+        # timeout can follow a partial copy, and those reports are real.
         before = set(r.crash_id for r in self.crash_reports)
         await self._scan_for_new_files()
-        return [r for r in self.crash_reports if r.crash_id not in before]
+        new = [r for r in self.crash_reports if r.crash_id not in before]
+        return PullResult(new=new, error=error)
+
+    async def add_reports(
+        self,
+        reports: list[CrashReport],
+        *,
+        already_logged: Callable[[CrashReport], Awaitable[bool]] | None = None,
+    ) -> list[CrashReport]:
+        """Add reports from another source (Android's DropBox), once each.
+
+        Returns the ones that were new. Each new report also becomes a crash
+        log entry, like a report file does -- unless `already_logged` says the
+        same crash is already in the buffer, as it is when logcat was running
+        and recognised it as it happened (#255), which would otherwise put one
+        crash on the timeline twice.
+        """
+        known = {r.crash_id for r in self.crash_reports}
+        new = []
+        for report in reports:
+            if report.crash_id in known:
+                continue
+            known.add(report.crash_id)
+            self.crash_reports.append(report)
+            new.append(report)
+            if already_logged is not None and await already_logged(report):
+                continue
+            await self._emit_report(report, report.raw_text)
+        return new
+
+    async def _emit_report(self, report: CrashReport, raw: str) -> None:
+        entry = LogEntry(
+            id=report.crash_id,
+            timestamp=report.timestamp,
+            device_id=report.device_id or self.device_id,
+            process=report.process,
+            level=LogLevel.FAULT,
+            message=self._crash_summary(report),
+            source=LogSource.CRASH,
+            raw=raw[:2000],
+        )
+        await self.emit(entry)
+        if self.on_crash_hook:
+            asyncio.create_task(self._run_crash_hook(report))
 
     def _all_watch_dirs(self) -> list[Path]:
         """Return the primary watch dir plus any extra watch dirs."""
@@ -191,19 +250,7 @@ class CrashAdapter(BaseSourceAdapter):
             report = self._parse_crash_file(f, content)
             if report:
                 self.crash_reports.append(report)
-                entry = LogEntry(
-                    id=report.crash_id,
-                    timestamp=report.timestamp,
-                    device_id=self.device_id,
-                    process=report.process,
-                    level=LogLevel.FAULT,
-                    message=self._crash_summary(report),
-                    source=LogSource.CRASH,
-                    raw=content[:2000],
-                )
-                await self.emit(entry)
-                if self.on_crash_hook:
-                    asyncio.create_task(self._run_crash_hook(report))
+                await self._emit_report(report, content)
 
     async def _run_crash_hook(self, report: CrashReport) -> None:
         """Run the on-crash hook command with CrashReport JSON on stdin."""

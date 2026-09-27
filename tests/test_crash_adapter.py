@@ -413,7 +413,7 @@ async def test_pull_from_device_with_udid(tmp_crash_dir):
     await adapter.start()
 
     mock_proc = AsyncMock()
-    mock_proc.wait = AsyncMock(return_value=0)
+    mock_proc.communicate = AsyncMock(return_value=(b"", b""))
     mock_proc.returncode = 0
 
     with (
@@ -439,7 +439,7 @@ async def test_pull_from_device_without_udid(tmp_crash_dir):
     await adapter.start()
 
     mock_proc = AsyncMock()
-    mock_proc.wait = AsyncMock(return_value=0)
+    mock_proc.communicate = AsyncMock(return_value=(b"", b""))
     mock_proc.returncode = 0
 
     with (
@@ -464,34 +464,98 @@ async def test_pull_from_device_returns_new_reports(tmp_crash_dir):
 
     src = FIXTURES / "crash_sample.ips"
 
-    async def fake_wait():
+    async def fake_communicate():
         # Simulate idevicecrashreport writing a file
         (tmp_crash_dir / "pulled_crash.ips").write_text(src.read_text())
-        return 0
+        return b"", b""
 
     mock_proc = AsyncMock()
-    mock_proc.wait = fake_wait
+    mock_proc.communicate = fake_communicate
     mock_proc.returncode = 0
 
     with (
         patch("shutil.which", return_value="/usr/local/bin/idevicecrashreport"),
         patch("asyncio.create_subprocess_exec", return_value=mock_proc),
     ):
-        new_reports = await adapter.pull_from_device("00008030-AABBCCDD")
+        result = await adapter.pull_from_device("00008030-AABBCCDD")
 
-    assert len(new_reports) == 1
-    assert new_reports[0].process == "MyApp"
+    assert result.error is None
+    assert len(result.new) == 1
+    assert result.new[0].process == "MyApp"
     await adapter.stop()
 
 
 @pytest.mark.asyncio
 async def test_pull_from_device_no_binary(tmp_crash_dir):
-    """pull_from_device should return empty list if idevicecrashreport is not installed."""
+    """A missing idevicecrashreport is a failed pull, not an empty one: the
+    silent `[]` it used to return read as "no new crashes" (#316)."""
     adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
     await adapter.start()
 
     with patch("shutil.which", return_value=None):
         result = await adapter.pull_from_device("00008030-AABBCCDD")
 
-    assert result == []
+    assert result.new == []
+    assert "idevicecrashreport not found" in result.error
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_failing_pull_says_why(tmp_crash_dir):
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    await adapter.start()
+    mock_proc = AsyncMock()
+    mock_proc.communicate = AsyncMock(return_value=(b"", b"ERROR: No device found"))
+    mock_proc.returncode = 255
+
+    with (
+        patch("shutil.which", return_value="/usr/local/bin/idevicecrashreport"),
+        patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+    ):
+        result = await adapter.pull_from_device("00008030-AABBCCDD")
+
+    assert "exited 255" in result.error and "No device found" in result.error
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_pull_that_times_out_says_so(tmp_crash_dir, monkeypatch):
+    import asyncio
+
+    from server.sources import crash as crash_module
+
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    await adapter.start()
+    mock_proc = AsyncMock()
+    mock_proc.returncode = None
+
+    async def hang():
+        await asyncio.sleep(3600)
+
+    mock_proc.communicate = hang
+    mock_proc.kill = lambda: None
+    monkeypatch.setattr(crash_module, "PULL_TIMEOUT", 0.05)
+
+    with (
+        patch("shutil.which", return_value="/usr/local/bin/idevicecrashreport"),
+        patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+    ):
+        result = await adapter.pull_from_device("00008030-AABBCCDD")
+
+    assert "timed out" in result.error
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_pull_that_cannot_start_says_so(tmp_crash_dir):
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    await adapter.start()
+
+    with (
+        patch("shutil.which", return_value="/usr/local/bin/idevicecrashreport"),
+        patch("asyncio.create_subprocess_exec", side_effect=PermissionError("denied")),
+    ):
+        result = await adapter.pull_from_device("00008030-AABBCCDD")
+
+    assert "could not run idevicecrashreport" in result.error
     await adapter.stop()
