@@ -333,16 +333,22 @@ async def get_summary(
     # Summary always reads from every buffer (no source filter)
     buffers = _get_buffers(request, None)
     clock = buffers[0].clock
-    # Snapshot before reading. An entry arriving while the buffers are read in
-    # turn belongs to the next delta, and returning it now as well would count
-    # it twice -- whereas snapshotting after would skip it.
+    # Snapshot before reading, and read only up to it. Defensive today: no
+    # buffer holds its lock across an await, so an append cannot land between
+    # two buffers' reads. If that changes, this is what keeps the delta exact
+    # -- an entry arriving mid-read goes to the next delta, not to both.
     upto = clock.now
 
     all_entries: list[LogEntry] = []
     cursor = parse_any_cursor(since_cursor) if since_cursor else None
+    # Unhonourable: not a cursor, a cursor from another run, or one ahead of
+    # anything this server has numbered. That last can only be mangled or
+    # invented, and read as-is it answered "nothing new" with every flag clean.
     cursor_reset = bool(since_cursor) and (
         cursor is None
-        or (isinstance(cursor, ArrivalCursor) and cursor.boot != clock.boot)
+        or (isinstance(cursor, ArrivalCursor) and (
+            cursor.boot != clock.boot or cursor.seq > upto
+        ))
     )
     # What the answer covers, for the completeness check.
     covers_since: datetime | None = None
@@ -384,9 +390,12 @@ async def get_summary(
         # in first, and counts presented as whole when they are not are the
         # exact misreading this exists to stop.
         summary.summary = (
+            "Entries that arrived since the last summary were evicted before "
+            "this summary, so the counts below may be low. "
+            if arrival_after is not None else
             "Entries in this window were evicted before this summary, so the "
-            "counts below may be low. " + summary.summary
-        )
+            "counts below may be low. "
+        ) + summary.summary
     return summary
 
 

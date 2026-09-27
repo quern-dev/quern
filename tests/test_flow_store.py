@@ -227,3 +227,21 @@ class TestEvictionIsRecorded:
         await store.add(_make_flow("a"))
 
         assert store.evicted == 0 and store.is_complete_since(None)
+
+
+class TestArrivalOrder:
+    @pytest.mark.asyncio
+    async def test_an_update_moves_the_flow_to_the_end_of_eviction_order(self):
+        """Eviction must stay in arrival order, or the last evicted number
+        can go backwards and a delta read complete when it is not (review:
+        M17 survived). Updates are rare in production -- each flow gets a
+        fresh id -- but the store's contract is what the cursor relies on."""
+        store = FlowStore(max_size=2)
+        await store.add(_make_flow("a"))
+        await store.add(_make_flow("b"))
+        await store.add(_make_flow("a"))          # a re-arrives after b
+        await store.add(_make_flow("c"))          # so b is the one evicted
+
+        assert await store.get("b") is None
+        assert await store.get("a") is not None
+        assert store.last_evicted_seq == 2         # b's number, not a's first one

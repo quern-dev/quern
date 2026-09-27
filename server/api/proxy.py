@@ -736,13 +736,20 @@ async def flow_summary(
         )
 
     now = datetime.now(UTC)
-    # Snapshot before reading, so a flow finishing mid-read goes to the next
-    # delta rather than into both.
+    # Snapshot before reading, and read only up to it. Defensive today -- the
+    # store's lock is never held across an await -- but it keeps the delta
+    # exact if that changes.
     upto = flow_store.clock.now
     cursor = parse_any_cursor(since_cursor) if since_cursor else None
     if since_cursor and cursor is None:
         raise HTTPException(status_code=400, detail="Invalid cursor")
-    cursor_reset = isinstance(cursor, ArrivalCursor) and cursor.boot != flow_store.clock.boot
+    # A cursor from another run, or one ahead of anything this store has
+    # numbered -- mangled or invented, since no real cursor can be -- cannot
+    # be honoured. Read as-is, the second answered "nothing new" with every
+    # flag clean (review of #317).
+    cursor_reset = isinstance(cursor, ArrivalCursor) and (
+        cursor.boot != flow_store.clock.boot or cursor.seq > upto
+    )
     arrival_after: int | None = None
 
     if isinstance(cursor, ArrivalCursor) and not cursor_reset:
@@ -774,17 +781,24 @@ async def flow_summary(
         flow_store, since_ts, simulator_udid=simulator_udid, client_ip=client_ip,
     )
     if arrival_after is not None:
-        # Exact: the store evicts in arrival order.
-        completeness["truncated"] = flow_store.last_evicted_seq > arrival_after
+        # Exact, because the store evicts in arrival order -- and narrowed by
+        # device like the window path, or another device's flood flags every
+        # filtered delta, the always-on flag #318 removed (review of #317).
+        completeness["truncated"] = flow_store.last_evicted_seq_for(
+            simulator_udid=simulator_udid, client_ip=client_ip,
+        ) > arrival_after
     summary.truncated = completeness["truncated"]
     summary.complete_after = completeness["complete_after"]
     if summary.truncated:
         # In the prose too: it is what a reader takes in first, and counts
         # presented as whole when they are not are the misreading at issue.
         summary.summary = (
+            "Flows that finished since the last summary were evicted before "
+            "this summary, so the counts below may be low. "
+            if arrival_after is not None else
             "Flows in this window were evicted before this summary, so the "
-            "counts below may be low. " + summary.summary
-        )
+            "counts below may be low. "
+        ) + summary.summary
     return summary
 
 

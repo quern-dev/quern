@@ -41,6 +41,12 @@ def _flow(flow_id, *, ago_s=0.0):
     return _make_flow(flow_id=flow_id, timestamp=datetime.now(UTC) - timedelta(seconds=ago_s))
 
 
+def _flow_on(flow_id, udid):
+    flow = _flow(flow_id)
+    flow.simulator_udid = udid
+    return flow
+
+
 @pytest.fixture
 def app():
     app = create_app(
@@ -177,6 +183,44 @@ class TestLogSummary:
         assert delta["cursor_reset"] is True
         assert delta["total_count"] == 1              # the window, not "nothing new"
 
+    async def test_a_server_log_after_the_cursor_is_in_the_delta(self, app):
+        """The server buffer shares the log clock. On a clock of its own its
+        numbers start low, fall behind the cursor, and every server entry
+        after it is skipped (review: M1 survived the suite)."""
+        for i in range(10):
+            await app.state.ring_buffer.append(_entry(f"app{i}"))
+        cursor = (await _log_summary(app))["cursor"]
+        await app.state.server_buffer.append(_entry("quern said", source=LogSource.SERVER))
+
+        delta = await _log_summary(app, cursor)
+
+        assert delta["total_count"] == 1
+
+    async def test_a_cursor_ahead_of_the_clock_is_reset_not_read_as_nothing(self, app):
+        """Only a mangled or invented cursor can be ahead of the clock; read
+        as-is it answered "nothing new" with every flag clean (review)."""
+        from server.storage.arrival import make_arrival_cursor
+
+        for i in range(3):
+            await app.state.ring_buffer.append(_entry(f"e{i}", level=LogLevel.ERROR))
+        ahead = make_arrival_cursor(app.state.ring_buffer.clock, 10**12)
+
+        delta = await _log_summary(app, ahead)
+
+        assert delta["cursor_reset"] is True
+        assert delta["error_count"] == 3                # the window, not "nothing"
+
+    async def test_a_delta_that_lost_entries_says_so_in_delta_terms(self, app):
+        cursor = (await _log_summary(app))["cursor"]
+        for i in range(60):
+            await app.state.ring_buffer.append(_entry(f"e{i}"))
+
+        delta = await _log_summary(app, cursor)
+
+        assert delta["summary"].startswith(
+            "Entries that arrived since the last summary were evicted",
+        )
+
     async def test_a_junk_cursor_says_so(self, app):
         await app.state.ring_buffer.append(_entry("x"))
         delta = await _log_summary(app, "not-a-cursor")
@@ -247,6 +291,65 @@ class TestFlowSummary:
         delta = (await _flow_summary(app, stale)).json()
 
         assert delta["cursor_reset"] is True and delta["total_flows"] == 1
+
+    async def test_another_devices_eviction_does_not_flag_a_filtered_delta(self, app):
+        """The review's regression: the delta check used the store-wide
+        number, so an agent polling one simulator while another device
+        flooded the store got `truncated` on every delta -- the always-on
+        flag #318 removed from the window path."""
+        store = FlowStore(max_size=5)
+        app.state.flow_store = store
+        for i in range(5):
+            await store.add(_flow_on(f"b{i}", "SIM-B"))
+        cursor = (await _get(app, "/api/v1/proxy/flows/summary",
+                             simulator_udid="SIM-A")).json()["cursor"]
+        for i in range(6):                            # evicts SIM-B flows from after the cursor
+            await store.add(_flow_on(f"b2-{i}", "SIM-B"))
+        await store.add(_flow_on("mine", "SIM-A"))
+
+        mine = (await _get(app, "/api/v1/proxy/flows/summary",
+                           simulator_udid="SIM-A", since_cursor=cursor)).json()
+        theirs = (await _get(app, "/api/v1/proxy/flows/summary",
+                             simulator_udid="SIM-B", since_cursor=cursor)).json()
+
+        assert mine["total_flows"] == 1 and mine["truncated"] is False
+        assert theirs["truncated"] is True
+
+    async def test_losing_the_flow_the_cursor_points_at_is_not_truncation(self, app):
+        """The flow half of the boundary test (review: M4/M15 survived)."""
+        store = FlowStore(max_size=5)
+        app.state.flow_store = store
+        for i in range(5):
+            await store.add(_flow(f"a{i}"))
+        cursor = (await _flow_summary(app)).json()["cursor"]
+        for i in range(5):                            # evicts exactly up to the cursor
+            await store.add(_flow(f"b{i}"))
+
+        delta = (await _flow_summary(app, cursor)).json()
+
+        assert delta["total_flows"] == 5 and delta["truncated"] is False
+
+    async def test_a_cursor_ahead_of_the_clock_is_reset(self, app):
+        from server.storage.arrival import make_arrival_cursor
+
+        await app.state.flow_store.add(_flow("f"))
+        ahead = make_arrival_cursor(app.state.flow_store.clock, 10**12)
+
+        delta = (await _flow_summary(app, ahead)).json()
+
+        assert delta["cursor_reset"] is True and delta["total_flows"] == 1
+
+    async def test_an_old_timestamp_cursor_still_works(self, app):
+        """The flow half of the compatibility claim (review: M19 survived)."""
+        store = app.state.flow_store
+        await store.add(_flow("old", ago_s=10))
+        old_cursor = make_cursor(datetime.now(UTC) - timedelta(seconds=5))
+        await store.add(_flow("new"))
+
+        delta = (await _flow_summary(app, old_cursor)).json()
+
+        assert delta["total_flows"] == 1
+        assert delta["cursor"].startswith("a_")
 
     async def test_a_junk_cursor_is_still_refused(self, app):
         resp = await _flow_summary(app, "not-a-cursor")
