@@ -14,6 +14,10 @@ from datetime import datetime
 from server.models import FlowQueryParams, FlowRecord
 from server.storage.fanout import Fanout, Missed
 
+#: How many devices' eviction marks are kept individually. Past this the
+#: least recently evicted fold into a floor that applies to every device.
+MAX_DEVICE_KEYS = 256
+
 
 def _device_keys(simulator_udid: str | None, client_ip: str | None) -> list[str]:
     """The keys a flow's device is recorded under, one per field it carries."""
@@ -47,6 +51,12 @@ class FlowStore:
         # traffic was evicted (#318). A flow is recorded under each field it
         # carries -- a query on either will then see it.
         self._evicted_through_by_device: dict[str, datetime] = {}
+        # When the map is trimmed, the marks it drops fold into this floor,
+        # which every narrowed lookup takes the max with. Dropping a device's
+        # key outright would make its queries read complete -- a false
+        # all-clear bought to save a few bytes -- so trimming may only ever
+        # make the answer more cautious.
+        self._evicted_through_floor: datetime | None = None
         # New flows taken in, as opposed to updates of ones already held.
         # `size` is what survived; this is what arrived.
         self._added = 0
@@ -89,9 +99,18 @@ class FlowStore:
         if self._evicted_through is None or at > self._evicted_through:
             self._evicted_through = at
         for key in _device_keys(gone.simulator_udid, gone.client_ip):
-            previous = self._evicted_through_by_device.get(key)
-            if previous is None or at > previous:
-                self._evicted_through_by_device[key] = at
+            previous = self._evicted_through_by_device.pop(key, None)
+            # Re-inserted, so dict order is least recently evicted first.
+            self._evicted_through_by_device[key] = (
+                at if previous is None or at > previous else previous
+            )
+        # One key per udid or client_ip ever evicted, for the life of the
+        # server -- DHCP churn and simulator erase cycles only add. Bounded.
+        while len(self._evicted_through_by_device) > MAX_DEVICE_KEYS:
+            oldest = next(iter(self._evicted_through_by_device))
+            dropped = self._evicted_through_by_device.pop(oldest)
+            if self._evicted_through_floor is None or dropped > self._evicted_through_floor:
+                self._evicted_through_floor = dropped
 
     def evicted_through(
         self, *, simulator_udid: str | None = None, client_ip: str | None = None,
@@ -108,6 +127,8 @@ class FlowStore:
             self._evicted_through_by_device[k] for k in keys
             if k in self._evicted_through_by_device
         ]
+        if self._evicted_through_floor is not None:
+            stamps.append(self._evicted_through_floor)
         return max(stamps) if stamps else None
 
     def is_complete_since(

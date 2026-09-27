@@ -226,37 +226,38 @@ class TopIssue(BaseModel):
 
 
 class Completeness(BaseModel):
-    """Whether a log answer can be trusted to be whole.
+    """Whether an answer drawn from a fixed-size store can be trusted whole.
 
-    The buffers are fixed-size and evict their oldest entries, so "nothing
-    matched" and "everything that matched is gone" used to come back
-    identical: `total: 0` either way. An agent reading the first concluded the
-    second -- confidently, and wrongly -- which is the failure #255 and #313
-    describe. These fields separate them.
+    The log buffers and the flow store evict their oldest entries at
+    capacity, so "nothing matched" and "everything that matched is gone" used
+    to come back identical: `total: 0` either way. An agent reading the first
+    concluded the second -- confidently, and wrongly -- which is the failure
+    #255, #313 and #318 describe. These fields separate them, on every log
+    and flow answer that can be cut short.
     """
 
     truncated: bool = Field(
         default=False,
         description=(
             "True when entries stamped inside the requested window were "
-            "evicted before this call, so the result may be missing some. It "
-            "says 'may', not 'is': the evicted entries are not known to match "
-            "this query's other filters. False is a guarantee -- nothing in "
-            "the window was lost -- with one difference for a tail (the newest "
-            "N): there, false means the entries returned really are the newest "
-            "N, while older ones may still have been evicted. Entries removed "
-            "by a filter change are not evictions and do not set this; the "
-            "call that changed the filter reports them as `purged`. Narrow "
-            "capture at the source (process, subsystem) or ask for a later "
-            "window."
+            "evicted before this call, so the result -- including any count "
+            "-- may be missing some. It says 'may', not 'is': the evicted "
+            "entries are not known to match this query's other filters. False "
+            "is a guarantee that nothing in the window was lost, with one "
+            "exception: for a log tail (the newest N), false means only that "
+            "the entries returned really are the newest N. Removals made by a "
+            "filter change are not evictions; the call that changed the filter "
+            "reports them as `purged`. To get a clean answer, ask about a "
+            "window that starts after `complete_after`, or capture less (a "
+            "narrower filter at the source) so the store turns over less often."
         ),
     )
     complete_after: datetime | None = Field(
         default=None,
         description=(
             "Nothing stamped after this time has been evicted, so a window "
-            "starting later is complete. Null when nothing relevant was ever "
-            "evicted."
+            "starting later is complete. Null only when nothing relevant was "
+            "ever evicted."
         ),
     )
 

@@ -106,13 +106,15 @@ crash reports only.
 
 **Flow answers say when the store has evicted.** The flow store holds 5,000
 flows and evicts the oldest-completed at capacity. `query_flows`,
-`get_flow_summary`, `wait_for_flow` (on a timeout) and `stop_capture_session`
-return `truncated` and `complete_after`, which mean the same as on the log tools.
+`get_flow_summary`, `wait_for_flow` and `stop_capture_session` return
+`truncated` and `complete_after`, with the meaning they have on the log tools.
 They are narrowed by `simulator_udid` or `client_ip` when the query filters on
-one. A full first page of `query_flows` (`offset` 0, `limit` results) is always
-whole, since the store pages newest-first and evicts oldest-first. `proxy_status`
+one. `truncated` covers counts as well as entries: a page can hold the newest
+flows and still carry a `total` that is short by what was evicted. To ask only
+about recent traffic, pass `since` (for example, just before the action you
+triggered); evictions from before it do not flag the answer. `proxy_status`
 reports the store's capacity, intake (`added`), evictions and the span it still
-holds in `flow_store`; `flows_captured` is only what survived.
+holds in `flow_store`. `flows_captured` is only what survived.
 
 ### Intercept and mock
 

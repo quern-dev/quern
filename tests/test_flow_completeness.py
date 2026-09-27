@@ -89,6 +89,44 @@ class TestTheStore:
         assert store.is_complete_since(since, client_ip="10.0.0.2")
         assert not store.is_complete_since(since, client_ip="10.0.0.1")
 
+    async def test_a_devices_mark_is_its_newest_eviction_not_its_first(self):
+        """Keeping the first-evicted stamp would let a recent window read
+        complete after a later eviction for the same device -- a false
+        all-clear that every other test missed (review mutation M16)."""
+        store = FlowStore(max_size=1)
+        await store.add(_flow("old", udid="SIM-A", ago_s=600))
+        await store.add(_flow("recent", udid="SIM-A", ago_s=5))   # evicts "old"
+        await store.add(_flow("filler", udid="SIM-B"))            # evicts "recent"
+
+        window = datetime.now(UTC) - timedelta(seconds=30)
+        assert not store.is_complete_since(window, simulator_udid="SIM-A")
+
+    async def test_trimming_the_device_map_never_makes_an_answer_complete(self, monkeypatch):
+        """Past the cap, a dropped device's mark folds into a floor, so its
+        queries stay flagged rather than reading complete."""
+        from server.proxy import flow_store as fs
+
+        monkeypatch.setattr(fs, "MAX_DEVICE_KEYS", 2)
+        store = FlowStore(max_size=1)
+        await store.add(_flow("a", udid="SIM-A", ago_s=5))
+        for dev in ("SIM-B", "SIM-C", "SIM-D"):      # each evicts the one before
+            await store.add(_flow(f"x-{dev}", udid=dev))
+
+        assert len(store._evicted_through_by_device) <= 2
+        window = datetime.now(UTC) - timedelta(seconds=30)
+        assert not store.is_complete_since(window, simulator_udid="SIM-A")
+
+    async def test_stats_report_the_span_by_timestamp_not_position(self):
+        """The store holds flows in completion order, and a flow is stamped
+        when its request started; the oldest held is not the first held
+        (review mutation M20)."""
+        store = FlowStore(max_size=10)
+        await store.add(_flow("late", ago_s=1))
+        await store.add(_flow("long", ago_s=300))    # started long ago, finished now
+        stats = store.stats()
+        assert stats["oldest"] < stats["newest"]
+        assert stats["oldest"] == min(f.timestamp for f in store._flows.values()).isoformat()
+
     async def test_stats_separate_intake_from_what_survived(self):
         store = FlowStore(max_size=2)
         for i in range(5):
@@ -138,15 +176,36 @@ class TestQueryFlows:
         assert other["truncated"] is False
         assert mine["truncated"] is True
 
-    async def test_a_full_first_page_is_whole(self, app):
-        """The store evicts in completion order and pages newest-first by
-        completion, so the newest N are always all there."""
-        await _flood(app.state.flow_store, 10)
+    async def test_a_full_first_page_still_says_the_answer_is_incomplete(self, app):
+        """The page is the newest N and all present, but `total` and
+        `has_more` count only survivors. Exempting it answered "total 5,
+        has_more false, truncated false" for 8 matching flows (review)."""
+        store = app.state.flow_store
+        for i in range(8):
+            await store.add(_flow(f"sync{i}", path="/sync", ago_s=(8 - i) * 0.01))
 
-        data = (await _call(app, "GET", "/api/v1/proxy/flows", params={"limit": 3})).json()
+        data = (await _call(app, "GET", "/api/v1/proxy/flows",
+                            params={"path_contains": "/sync", "limit": 5})).json()
 
-        assert len(data["flows"]) == 3
-        assert data["truncated"] is False
+        assert (data["total"], data["has_more"]) == (5, False)
+        assert data["truncated"] is True
+
+    async def test_an_old_eviction_does_not_flag_a_recent_window(self, app):
+        """Every other eviction test floods flows stamped a moment ago, so no
+        test could tell `since` being passed from `since` being dropped."""
+        store = app.state.flow_store
+        for i in range(6):                                  # all stamped 10 min ago
+            await store.add(_flow(f"old{i}", ago_s=600 - i))
+        await store.add(_flow("fresh", path="/login"))
+
+        recent = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
+        scoped = (await _call(app, "GET", "/api/v1/proxy/flows",
+                              params={"path_contains": "/login", "since": recent})).json()
+        unscoped = (await _call(app, "GET", "/api/v1/proxy/flows",
+                                params={"path_contains": "/login"})).json()
+
+        assert scoped["truncated"] is False
+        assert unscoped["truncated"] is True
 
     async def test_a_later_page_after_eviction_is_not(self, app):
         await _flood(app.state.flow_store, 10)
@@ -192,6 +251,21 @@ class TestWaitForFlow:
 
         assert data["matched"] is False
         assert data["truncated"] is True
+
+    async def test_a_match_still_reports_the_real_mark(self, app):
+        """`complete_after: null` means nothing was ever evicted; a match
+        after evictions returned it anyway (review)."""
+        store = app.state.flow_store
+        await _flood(store, 6)                                 # one eviction
+        await store.add(_flow("hit", path="/login"))
+
+        data = (await _call(app, "POST", "/api/v1/proxy/flows/wait",
+                            json={"path_contains": "/login", "timeout": 0.5,
+                                  "interval": 0.1})).json()
+
+        assert data["matched"] is True
+        assert data["truncated"] is False
+        assert data["complete_after"] is not None
 
     async def test_a_quiet_timeout_is_a_true_negative(self, app):
         data = (await _call(app, "POST", "/api/v1/proxy/flows/wait",
@@ -250,3 +324,139 @@ async def test_proxy_status_reports_what_the_store_took_in_and_lost(app):
     stats = data["flow_store"]
     assert (stats["capacity"], stats["added"], stats["evicted"]) == (5, 8, 3)
     assert data["flows_captured"] == 5
+
+
+class TestEachEndpointScopesItsCheck:
+    """Every endpoint passes its window and its device filter to the check.
+    The review dropped each of those arguments in turn and nothing failed,
+    because every eviction in the other tests was stamped a moment ago and
+    every query was unfiltered."""
+
+    @staticmethod
+    async def _old_evictions(store, **device):
+        """Fill the store with flows stamped 10 minutes ago, then push them out."""
+        for i in range(5):
+            await store.add(_flow(f"old{i}", ago_s=600 - i, **device))
+        for i in range(5):
+            await store.add(_flow(f"newer{i}", ago_s=300 - i, **device))
+
+    @staticmethod
+    async def _recent_eviction(store, **device):
+        await store.add(_flow("gone", **device))
+        await _flood(store, 5, udid="SIM-OTHER")
+
+    # -- get_flow_summary ------------------------------------------------------
+
+    async def test_summary_window_ignores_older_evictions(self, app):
+        await self._old_evictions(app.state.flow_store)
+        data = (await _call(app, "GET", "/api/v1/proxy/flows/summary",
+                            params={"window": "1m"})).json()
+        assert data["truncated"] is False
+
+    async def test_summary_for_one_device_ignores_anothers_evictions(self, app):
+        await self._recent_eviction(app.state.flow_store, udid="SIM-A")
+        mine = (await _call(app, "GET", "/api/v1/proxy/flows/summary",
+                            params={"simulator_udid": "SIM-OTHER"})).json()
+        theirs = (await _call(app, "GET", "/api/v1/proxy/flows/summary",
+                              params={"simulator_udid": "SIM-A"})).json()
+        assert mine["truncated"] is False and theirs["truncated"] is True
+
+    # -- wait_for_flow ---------------------------------------------------------
+
+    async def test_wait_ignores_evictions_from_before_it_began(self, app):
+        await self._old_evictions(app.state.flow_store)
+        data = (await _call(app, "POST", "/api/v1/proxy/flows/wait",
+                            json={"path_contains": "/never", "timeout": 0.2,
+                                  "interval": 0.1})).json()
+        assert data["matched"] is False and data["truncated"] is False
+
+    async def test_wait_for_one_device_ignores_anothers_evictions(self, app):
+        await _flood(app.state.flow_store, 8, udid="SIM-OTHER")
+        data = (await _call(app, "POST", "/api/v1/proxy/flows/wait",
+                            json={"path_contains": "/never", "simulator_udid": "SIM-A",
+                                  "timeout": 0.2, "interval": 0.1})).json()
+        assert data["matched"] is False and data["truncated"] is False
+
+    # -- stop_capture_session --------------------------------------------------
+
+    async def test_capture_ignores_evictions_from_before_the_session(self, app):
+        """Flows stamped before the session are not part of it, even if they
+        were evicted while it ran."""
+        store = app.state.flow_store
+        for i in range(5):
+            await store.add(_flow(f"before{i}", ago_s=600 - i))
+        start = (await _call(app, "POST", "/api/v1/proxy/capture/start", json={})).json()
+        for i in range(5):                                   # evicts the old ones
+            await store.add(_flow(f"during{i}"))
+
+        data = (await _call(app, "POST", "/api/v1/proxy/capture/stop",
+                            json={"session_id": start["session_id"]})).json()
+
+        assert data["total_flows"] == 5 and data["truncated"] is False
+
+    async def test_capture_for_one_device_is_clean_when_only_others_were_evicted(self, app):
+        store = app.state.flow_store
+        await _flood(store, 5, udid="SIM-OTHER")
+        start = (await _call(app, "POST", "/api/v1/proxy/capture/start",
+                             json={"simulator_udid": "SIM-A"})).json()
+        await store.add(_flow("mine", udid="SIM-A"))          # evicts a SIM-OTHER flow
+
+        data = (await _call(app, "POST", "/api/v1/proxy/capture/stop",
+                            json={"session_id": start["session_id"]})).json()
+
+        assert data["total_flows"] == 1 and data["truncated"] is False
+        assert data["complete_after"] is None       # SIM-A lost nothing (M21)
+
+    # -- query_flows by client_ip ----------------------------------------------
+
+    async def test_query_by_ip_ignores_another_ips_evictions(self, app):
+        store = app.state.flow_store
+        await store.add(_flow("theirs", ip="10.0.0.1"))
+        await _flood(store, 5)                                # evicts 10.0.0.1's flow
+        await store.add(_flow("mine", ip="10.0.0.2"))
+
+        mine = (await _call(app, "GET", "/api/v1/proxy/flows",
+                            params={"client_ip": "10.0.0.2"})).json()
+        theirs = (await _call(app, "GET", "/api/v1/proxy/flows",
+                              params={"client_ip": "10.0.0.1"})).json()
+
+        assert mine["truncated"] is False and theirs["truncated"] is True
+        # The narrowed mark, not the global one (review mutation M22).
+        assert mine["complete_after"] is None and theirs["complete_after"] is not None
+
+
+@pytest.mark.parametrize("state", ["running", "error", "stopped"])
+async def test_proxy_status_reports_store_stats_in_every_production_branch(state):
+    """With a proxy adapter present -- which the lifespan always creates --
+    status goes through the running, error or final stopped branch. The one
+    status test there was ran only the adapter-is-None branch, which
+    production never reaches; dropping the stats from the others failed
+    nothing (review mutations M11, M12)."""
+    from unittest.mock import MagicMock
+
+    from fastapi import FastAPI
+
+    from server.api.proxy import router
+
+    adapter = MagicMock()
+    adapter.is_running = state == "running"
+    adapter._error = "boom" if state == "error" else None
+    adapter.listen_port, adapter.listen_host = 9101, "0.0.0.0"
+    adapter.started_at = datetime.now(UTC)
+    adapter._intercept_pattern, adapter._held_flows, adapter._mock_rules = None, {}, []
+
+    store = FlowStore(max_size=2)
+    for i in range(3):
+        await store.add(_flow(f"f{i}"))
+
+    app = FastAPI()
+    app.include_router(router)
+    app.state.proxy_adapter = adapter
+    app.state.flow_store = store
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        data = (await client.get("/api/v1/proxy/status")).json()
+
+    assert data["flow_store"]["evicted"] == 1 and data["flow_store"]["added"] == 3
+    assert data["flows_captured"] == 2

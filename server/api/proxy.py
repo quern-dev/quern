@@ -677,16 +677,16 @@ async def query_flows(
 
     flows, total = await flow_store.query(params)
     has_more = (offset + limit) < total
+    # No exemption for a full first page, deliberately. Its flows are the
+    # newest N and all present, but `total` and `has_more` count only what
+    # survived: with 8 matching flows and 3 evicted, `limit=5` answered
+    # "total 5, has_more false, truncated false" -- all of them, nothing lost.
+    # `tail` on the log tools is an explicit request for "the newest N"; this
+    # is the default mode of every flow query. The way to a clean answer is
+    # scoping `since` to the window that matters (#318 review).
     completeness = _flow_completeness(
         flow_store, since, simulator_udid=simulator_udid, client_ip=client_ip,
     )
-    # A first page is the newest N flows by completion, and the store evicts
-    # in completion order, so a full first page is always whole -- older
-    # flows may be gone, but none of them could have ranked among these. The
-    # same reasoning as a full log tail; without it the default query on any
-    # busy proxy would say "truncated" every time.
-    if completeness["truncated"] and offset == 0 and len(flows) == limit:
-        completeness["truncated"] = False
 
     if detail == "summary":
         from server.models import FlowSummaryItem
@@ -867,11 +867,19 @@ async def wait_for_flow(request: Request, body: WaitForFlowRequest) -> WaitForFl
             )
             flows, _ = await flow_store.query(params)
             if flows:
+                # Found, so nothing was missed that matters -- but the mark is
+                # still reported as it is. Null means "nothing was evicted",
+                # and saying that after evictions would be a false statement
+                # sitting next to a true answer (review).
                 return WaitForFlowResponse(
                     matched=True,
                     flow=flows[0],
                     elapsed_seconds=round(time.monotonic() - start, 3),
                     polls=polls,
+                    truncated=False,
+                    complete_after=flow_store.evicted_through(
+                        simulator_udid=body.simulator_udid, client_ip=body.client_ip,
+                    ),
                 )
 
         elapsed = time.monotonic() - start

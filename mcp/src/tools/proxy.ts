@@ -8,7 +8,7 @@ export function registerProxyTools(server: McpServer): void {
   server.registerTool("query_flows", {
     description: `Query captured HTTP flows from the network proxy. Filter by host, method, status code, and more.
 
-For physical devices, filter by client_ip to isolate that device's traffic — the recorded IP is in proxy_status cert_setup[udid].wifi_proxy_configs[ssid].client_ip. If filtering by client_ip returns nothing, check proxy_status for that device: wifi_proxy_stale:true means the proxy address on the device needs updating; a mismatched client_ip means the device got a new DHCP lease and record_device_proxy_config should be called again with the updated IP. If the result has \`truncated: true\`, flows in the window were evicted from the store (it holds 5,000) before you asked, so an empty or short answer does NOT mean the request never happened; \`complete_after\` says from when the answer is whole.`,
+For physical devices, filter by client_ip to isolate that device's traffic — the recorded IP is in proxy_status cert_setup[udid].wifi_proxy_configs[ssid].client_ip. If filtering by client_ip returns nothing, check proxy_status for that device: wifi_proxy_stale:true means the proxy address on the device needs updating; a mismatched client_ip means the device got a new DHCP lease and record_device_proxy_config should be called again with the updated IP. If the result has \`truncated: true\`, flows in the window were evicted from the store (it holds 5,000) before you asked, so an empty or short answer -- or a \`total\` -- does NOT mean the request never happened; \`complete_after\` says from when the answer is whole. Pass \`since\` (e.g. just before the action you triggered) to ask only about the window you care about: evictions from before it do not flag the answer.`,
     inputSchema: strictParams({
       host: z.string().optional().describe("Filter by hostname (single host; use hosts for multiple)"),
       hosts: z.array(z.string()).optional().describe("Filter to flows matching any of these hostnames"),
@@ -38,6 +38,14 @@ For physical devices, filter by client_ip to isolate that device's traffic — t
         .string()
         .optional()
         .describe("Filter by client IP address (physical device identification)"),
+      since: z
+        .string()
+        .optional()
+        .describe("Only flows whose request started at or after this time (ISO 8601). No offset means UTC. Also scopes the truncated check to this window."),
+      until: z
+        .string()
+        .optional()
+        .describe("Only flows whose request started at or before this time (ISO 8601). No offset means UTC."),
       detail: z
         .enum(["full", "summary"])
         .default("full")
@@ -61,6 +69,8 @@ For physical devices, filter by client_ip to isolate that device's traffic — t
     has_error,
     simulator_udid,
     client_ip,
+    since,
+    until,
     detail,
     limit,
     offset,
@@ -77,6 +87,8 @@ For physical devices, filter by client_ip to isolate that device's traffic — t
         has_error,
         simulator_udid,
         client_ip,
+        since,
+        until,
         detail,
         limit,
         offset,
