@@ -76,10 +76,10 @@ notices do not overlap. Backfill it with `query_logs` on the log stream and
 filter are counted. Every heartbeat also carries `total_dropped`.
 
 Crash reports have a buffer of their own, so a busy source cannot evict them.
-On Android, where a crash exists only as logcat lines, the logcat adapter emits
-a crash entry for each Java crash, native crash and ANR. Find them with
-`query_logs` (`source=crash`) or `get_errors`. `get_latest_crash` reads iOS
-crash reports only.
+On Android, while capture is running, the logcat adapter emits a crash entry for
+each Java crash, native crash and ANR as it happens. Find them with `query_logs`
+(`source=crash`) or `get_errors`. `get_latest_crash` reads Android crash reports
+too; see below.
 
 **Summary cursors follow arrival order.** `get_log_summary` and
 `get_flow_summary` return a `cursor`; pass it back as `since_cursor` to get only
@@ -99,8 +99,19 @@ which needs no root, and yields Java crashes, native crashes and ANRs; each
 report's `kind` says which. The response's `pull` says whether the fetch
 happened: `pulled`, `skipped` (with the reason, for example an iPhone that is not
 on USB) or `failed` (with the error). Only `pulled` means the list reflects the
-device. With a `udid`, the list is that device's crashes, plus reports that name
-no device, such as a simulator's crash file, which does not say which simulator.
+device. A `failed` Android pull can still add the reports it did read, for
+example when one DropBox tag could not be read, or when the device's timezone
+could not be read and records without a time of their own were skipped. A
+simulator is `skipped`: its crash reports are written on the Mac and read from
+`~/Library/Logs/DiagnosticReports` continuously, unless the server was started
+with `--no-simulator-crashes`, which the reason then says. With a `udid`, the
+list is that device's crashes, plus reports that name no device, such as a
+simulator's crash file, which does not say which simulator.
+
+Crash reports are left on the iPhone (`idevicecrashreport -k`), so a pull does
+not take them away from Xcode or Finder. A DropBox record from before the server
+started is listed but does not become a new log entry or run the on-crash hook.
+The hook runs for every newer crash, including one logcat already reported.
 
 On Android, `pull.open_dialogs` lists processes showing a crash ("keeps
 stopping") or ANR dialog right now. While a crash dialog is open, Android drops

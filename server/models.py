@@ -312,6 +312,9 @@ class CrashReport(BaseModel):
     #: is attributed on time with a caveat. Wrong-and-silent vs honest.
     device_id: str = ""
     process: str = Field(default="", description="Crashed process name")
+    pid: int | None = Field(
+        default=None, description="Crashed process ID, where the report gives it",
+    )
     kind: str = Field(
         default="crash",
         description=(

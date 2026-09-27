@@ -67,6 +67,10 @@ class CrashAdapter(BaseSourceAdapter):
         self.on_crash_hook = on_crash_hook
         self._poll_task: asyncio.Task | None = None
         self._seen_files: set[str] = set()
+        # One scan at a time. The poll loop scanning while idevicecrashreport
+        # was still writing took the phone's files as its own, so the pull
+        # neither counted nor tagged them.
+        self._scan_lock = asyncio.Lock()
         self.crash_reports: list[CrashReport] = []
 
     async def start(self) -> None:
@@ -119,7 +123,8 @@ class CrashAdapter(BaseSourceAdapter):
         try:
             while self._running:
                 try:
-                    await self._scan_for_new_files()
+                    async with self._scan_lock:
+                        await self._scan_for_new_files()
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -129,12 +134,21 @@ class CrashAdapter(BaseSourceAdapter):
         except asyncio.CancelledError:
             pass
 
-    async def pull_from_device(self, libimobiledevice_udid: str | None = None) -> PullResult:
+    async def pull_from_device(
+        self, libimobiledevice_udid: str | None = None, *, device_id: str = "",
+    ) -> PullResult:
         """Pull crash reports from a connected device via idevicecrashreport.
 
         Args:
             libimobiledevice_udid: Target a specific device. If None, pulls from
                 any connected device.
+            device_id: The device the reports are recorded against. The files
+                do not say which phone they came from, so the pull says it.
+
+        Only files this pull wrote count as its reports: new files in the
+        directory it writes to. The scan also covers the other watched
+        directories, and a simulator's crash written since the last poll was
+        counted as the phone's and tagged with its udid.
 
         Returns:
             The newly discovered reports, and why the pull failed if it did.
@@ -145,7 +159,10 @@ class CrashAdapter(BaseSourceAdapter):
         if not shutil.which("idevicecrashreport"):
             return PullResult(error="idevicecrashreport not found on PATH")
 
-        self.watch_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.watch_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return PullResult(error=f"could not create {self.watch_dir}: {e}")
 
         # -k: copy, and leave the reports on the phone. Without it the tool
         # deletes each report after copying, so a pull took the user's crash
@@ -158,6 +175,20 @@ class CrashAdapter(BaseSourceAdapter):
             cmd.extend(["-u", libimobiledevice_udid])
         cmd.append(str(self.watch_dir))
 
+        async with self._scan_lock:
+            before = {str(f) for f in _crash_files(self.watch_dir)}
+            error = await self._run_pull(cmd)
+            # Scan even after a failure: a timeout can follow a partial copy,
+            # and those reports are real.
+            added = await self._scan_for_new_files(
+                pulled=(before, device_id),
+            )
+        new = [r for r in added if r.file_path not in before
+               and Path(r.file_path).parent == self.watch_dir]
+        return PullResult(new=new, error=error)
+
+    async def _run_pull(self, cmd: list[str]) -> str | None:
+        """Run idevicecrashreport. The error, or None if it succeeded."""
         error: str | None = None
         proc = None
         try:
@@ -174,16 +205,11 @@ class CrashAdapter(BaseSourceAdapter):
             logger.warning("idevicecrashreport timed out after %ds", PULL_TIMEOUT)
             if proc is not None and proc.returncode is None:
                 proc.kill()
+                await proc.wait()
             error = f"idevicecrashreport timed out after {PULL_TIMEOUT}s"
         except OSError as e:
-            return PullResult(error=f"could not run idevicecrashreport: {e}")
-
-        # Scan for any new files that were pulled, even after a failure: a
-        # timeout can follow a partial copy, and those reports are real.
-        before = set(r.crash_id for r in self.crash_reports)
-        await self._scan_for_new_files()
-        new = [r for r in self.crash_reports if r.crash_id not in before]
-        return PullResult(new=new, error=error)
+            error = f"could not run idevicecrashreport: {e}"
+        return error
 
     async def add_reports(
         self,
@@ -197,22 +223,37 @@ class CrashAdapter(BaseSourceAdapter):
         log entry, like a report file does -- unless `already_logged` says the
         same crash is already in the buffer, as it is when logcat was running
         and recognised it as it happened (#255), which would otherwise put one
-        crash on the timeline twice.
+        crash on the timeline twice. The on-crash hook runs either way: logcat
+        does not run it, so skipping it there made it fire only when capture
+        happened to be off.
+
+        A crash from before this adapter started is listed but neither logged
+        nor hooked. DropBox holds days of records and this list starts empty,
+        so otherwise every restart logged the whole history as arriving now
+        and ran the hook once per record. It matches report files, which are
+        indexed without being emitted when the adapter starts.
         """
         known = {r.crash_id for r in self.crash_reports}
         new = []
         for report in reports:
             if report.crash_id in known:
                 continue
+            if self.process_filter and self.process_filter not in report.process:
+                continue
             known.add(report.crash_id)
             self.crash_reports.append(report)
             new.append(report)
-            if already_logged is not None and await already_logged(report):
+            if self.started_at is not None and report.timestamp < self.started_at:
                 continue
-            await self._emit_report(report, report.raw_text)
+            log = already_logged is None or not await already_logged(report)
+            await self._emit_report(report, report.raw_text, log=log)
         return new
 
-    async def _emit_report(self, report: CrashReport, raw: str) -> None:
+    async def _emit_report(self, report: CrashReport, raw: str, *, log: bool = True) -> None:
+        if self.on_crash_hook:
+            asyncio.create_task(self._run_crash_hook(report))
+        if not log:
+            return
         entry = LogEntry(
             id=report.crash_id,
             timestamp=report.timestamp,
@@ -224,24 +265,30 @@ class CrashAdapter(BaseSourceAdapter):
             raw=raw[:2000],
         )
         await self.emit(entry)
-        if self.on_crash_hook:
-            asyncio.create_task(self._run_crash_hook(report))
 
     def _all_watch_dirs(self) -> list[Path]:
         """Return the primary watch dir plus any extra watch dirs."""
         return [self.watch_dir] + self.extra_watch_dirs
 
-    async def _scan_for_new_files(self) -> None:
-        """Scan all watch directories for new crash files."""
-        all_files: list[Path] = []
-        for d in self._all_watch_dirs():
-            if not d.exists():
-                continue
-            for f in d.iterdir():
-                if f.suffix in (".ips", ".crash"):
-                    all_files.append(f)
+    async def _scan_for_new_files(
+        self, *, pulled: tuple[set[str], str] | None = None,
+    ) -> list[CrashReport]:
+        """Scan all watch directories for new crash files; the reports added.
 
-        for f in sorted(all_files, key=lambda p: p.stat().st_mtime):
+        `pulled` is (files in watch_dir before a pull, the device pulled from):
+        a file new to watch_dir came from that device and is tagged before it
+        is emitted, so its log entry names the device too.
+        """
+        all_files: list[tuple[float, Path]] = []
+        for d in self._all_watch_dirs():
+            for f in _crash_files(d):
+                try:
+                    all_files.append((f.stat().st_mtime, f))
+                except OSError:
+                    continue    # gone between listing and stat
+
+        added: list[CrashReport] = []
+        for _, f in sorted(all_files, key=lambda pair: pair[0]):
             if str(f) in self._seen_files:
                 continue
 
@@ -255,8 +302,12 @@ class CrashAdapter(BaseSourceAdapter):
 
             report = self._parse_crash_file(f, content)
             if report:
+                if pulled and f.parent == self.watch_dir and str(f) not in pulled[0]:
+                    report.device_id = pulled[1] or report.device_id
                 self.crash_reports.append(report)
+                added.append(report)
                 await self._emit_report(report, content)
+        return added
 
     async def _run_crash_hook(self, report: CrashReport) -> None:
         """Run the on-crash hook command with CrashReport JSON on stdin."""
@@ -459,3 +510,11 @@ class CrashAdapter(BaseSourceAdapter):
                 continue
 
         return datetime.now(UTC)
+
+
+def _crash_files(d: Path) -> list[Path]:
+    """The crash report files in `d`; none if it is missing or unreadable."""
+    try:
+        return [f for f in d.iterdir() if f.suffix in (".ips", ".crash")]
+    except OSError:
+        return []

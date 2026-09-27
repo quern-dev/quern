@@ -13,12 +13,14 @@ from server.models import (
     CrashLatestResponse,
     CrashPullStatus,
     CrashReport,
+    DeviceType,
     LogQueryParams,
     LogSource,
     OpenCrashDialog,
     UtcDatetime,
 )
 from server.sources.android_dropbox import DropboxPullError, pull_dropbox
+from server.sources.crash import DIAGNOSTIC_REPORTS_DIR
 
 #: How far apart logcat's crash entry and DropBox's record of the same crash
 #: may be stamped and still be the same crash.
@@ -42,9 +44,11 @@ async def get_latest_crashes(
 ) -> CrashLatestResponse:
     """Return recent crash reports.
 
-    When ``udid`` is provided, pulls fresh crashes from the device via
-    ``idevicecrashreport`` before returning results.  If the device is
-    network-only (no USB connection), the pull is silently skipped.
+    When ``udid`` is provided, fetches that device's crashes first: an iPhone
+    over USB with ``idevicecrashreport``, an Android device or emulator from
+    its DropBox. ``pull`` says whether that happened -- pulled, skipped or
+    failed, with the reason -- and the list is then that device's crashes,
+    plus reports that name no device.
     """
     crash_adapter = request.app.state.crash_adapter
     if crash_adapter is None:
@@ -89,26 +93,37 @@ async def _pull(request: Request, crash_adapter, udid: str) -> CrashPullStatus:
             udid=udid, status="skipped", reason="device controller not available",
         )
 
-    if controller._is_android(udid):
-        # DropBox, which an unrooted phone serves to the shell user; see
-        # server/sources/android_dropbox.py. There was no Android pull at all
-        # before #316, so `get_latest_crash` returned nothing after a crash.
-        try:
-            pulled = await pull_dropbox(controller.adb.adb_path, udid)
-        except DropboxPullError as e:
-            return CrashPullStatus(udid=udid, platform="android", status="failed", reason=str(e))
-        new = await crash_adapter.add_reports(
-            pulled.reports, already_logged=lambda r: _logged_by_logcat(request, r),
-        )
+    # Warm the type cache first: on a fresh server it is empty, and a cold
+    # `_is_android` sent an emulator's serial down the iPhone path to be
+    # told it was "not connected over USB" (see `_device_type`, and #305).
+    await controller._ensure_device_type_cached(canonical_device_id(udid))
+    device = canonical_device_id(udid)      # again: the refresh records aliases
+    kind = controller._device_type(device)
+
+    if kind in (DeviceType.ANDROID_DEVICE, DeviceType.ANDROID_EMULATOR):
+        return await _pull_android(request, crash_adapter, controller, udid)
+    if kind == DeviceType.SIMULATOR:
+        # Nothing to fetch: a simulator's crash reports are written on this
+        # Mac. Said as a skip with the reason, rather than the USB message
+        # every simulator used to get.
+        watching = DIAGNOSTIC_REPORTS_DIR in crash_adapter.extra_watch_dirs
         return CrashPullStatus(
-            udid=udid, platform="android", status="pulled", new_reports=len(new),
-            open_dialogs=None if pulled.open_dialogs is None else [
-                OpenCrashDialog(process=proc, kind=kind)
-                for proc, kind in sorted(pulled.open_dialogs.items())
-            ],
+            udid=udid, platform="ios", status="skipped",
+            reason=(
+                "a simulator's crash reports are written on this Mac and read "
+                "continuously from ~/Library/Logs/DiagnosticReports; there is nothing to pull"
+                if watching else
+                "a simulator's crash reports are read from ~/Library/Logs/DiagnosticReports, "
+                "and that is off (server started with --no-simulator-crashes)"
+            ),
+        )
+    if kind != DeviceType.DEVICE:
+        return CrashPullStatus(
+            udid=udid, status="skipped",
+            reason="quern does not know this device; list devices to check it is connected",
         )
 
-    lib_udid = await controller.get_libimobiledevice_udid(udid)
+    lib_udid = await controller.get_libimobiledevice_udid(device)
     if not lib_udid:
         # Was a debug log line, while the response looked like "no new
         # crashes". idevicecrashreport needs the phone on USB.
@@ -116,17 +131,61 @@ async def _pull(request: Request, crash_adapter, udid: str) -> CrashPullStatus:
             udid=udid, platform="ios", status="skipped",
             reason="not connected over USB; idevicecrashreport needs a USB connection",
         )
-    result = await crash_adapter.pull_from_device(lib_udid)
     # idevicecrashreport writes files that do not say which phone they came
     # from, so the pull says it: these came from the device asked for.
-    for report in result.new:
-        report.device_id = canonical_device_id(udid)
+    result = await crash_adapter.pull_from_device(lib_udid, device_id=device)
     if result.error:
         return CrashPullStatus(
             udid=udid, platform="ios", status="failed",
             new_reports=len(result.new), reason=result.error,
         )
     return CrashPullStatus(udid=udid, platform="ios", status="pulled", new_reports=len(result.new))
+
+
+async def _pull_android(request: Request, crash_adapter, controller, udid: str) -> CrashPullStatus:
+    """DropBox, which an unrooted phone serves to the shell user.
+
+    See server/sources/android_dropbox.py. There was no Android pull at all
+    before #316, so `get_latest_crash` returned nothing after a crash.
+    """
+    try:
+        pulled = await pull_dropbox(controller.adb.adb_path, udid)
+    except DropboxPullError as e:
+        return CrashPullStatus(udid=udid, platform="android", status="failed", reason=str(e))
+    new = await crash_adapter.add_reports(
+        pulled.reports, already_logged=lambda r: _logged_by_logcat(request, r),
+    )
+    # Records read before a failure are kept, but the pull did not succeed:
+    # "pulled" promises the list reflects the device, and it does not.
+    problems = list(pulled.errors)
+    if pulled.undated:
+        problems.append(
+            f"{pulled.undated} record(s) skipped: the device's timezone could not be read, "
+            "so their times could not be converted"
+        )
+    return CrashPullStatus(
+        udid=udid, platform="android", status="failed" if problems else "pulled",
+        new_reports=len(new), reason="; ".join(problems) or None,
+        open_dialogs=None if pulled.open_dialogs is None else [
+            OpenCrashDialog(process=proc, kind=kind)
+            for proc, kind in sorted(pulled.open_dialogs.items())
+        ],
+    )
+
+
+def _same_process(entry, report: CrashReport) -> bool:
+    """Is logcat's crash entry about the process this report names?
+
+    By pid where both have one. By name otherwise, allowing for a native
+    crash, which logcat names by the kernel's 15-character process name --
+    the tail of the package (`ndroid.settings` for `com.android.settings`).
+    Comparing names alone logged every native crash twice.
+    """
+    if entry.pid is not None and report.pid is not None:
+        return entry.pid == report.pid
+    if entry.process == report.process:
+        return True
+    return len(entry.process) == 15 and report.process.endswith(entry.process)
 
 
 async def _logged_by_logcat(request: Request, report: CrashReport) -> bool:
@@ -145,4 +204,4 @@ async def _logged_by_logcat(request: Request, report: CrashReport) -> bool:
         source=LogSource.CRASH, device_id=report.device_id,
         since=report.timestamp - window, until=report.timestamp + window,
     ))
-    return any(e.process == report.process and e.id.startswith("android-crash-") for e in seen)
+    return any(e.id.startswith("android-crash-") and _same_process(e, report) for e in seen)

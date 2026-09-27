@@ -58,6 +58,7 @@ _SUBJECT = re.compile(r"^Subject: (.*)$", re.M)
 _JAVA_EXCEPTION = re.compile(r"^([\w$.]+(?:Exception|Error|Throwable)[\w$]*)(?:: (.*))?$", re.M)
 _JAVA_FRAME = re.compile(r"^\s+at (.+)$", re.M)
 _NATIVE_FRAME = re.compile(r"^\s+(#\d+ pc .+)$", re.M)
+_MAIN_THREAD = re.compile(r'^"main" ', re.M)
 
 TOP_FRAMES = 8
 RAW_LIMIT = 4000
@@ -85,15 +86,30 @@ def device_zone(zone_name: str, offset: str) -> timezone | ZoneInfo | None:
 
 def parse_dropbox(text: str, *, serial: str, zone: timezone | ZoneInfo | None) -> list[CrashReport]:
     """Every crash record in `dumpsys dropbox --print` output, as CrashReports."""
-    reports = []
+    return _parse_records(text, serial=serial, zone=zone)[0]
+
+
+def _parse_records(text: str, *, serial: str, zone) -> tuple[list[CrashReport], int]:
+    """The reports, and how many crash records could not be dated.
+
+    A record is undated when the device's zone is unknown and it carries no
+    zone-stamped time of its own. It is dropped rather than guessed at, and
+    counted, because a pull that dropped records must not read as complete.
+    """
+    reports, undated = [], 0
     for block in _SEPARATOR.split(text):
         report = _parse_record(block.strip("\n"), serial=serial, zone=zone)
-        if report is not None:
+        if report is _UNDATED:
+            undated += 1
+        elif report is not None:
             reports.append(report)
-    return reports
+    return reports, undated
 
 
-def _parse_record(block: str, *, serial: str, zone) -> CrashReport | None:
+_UNDATED = object()
+
+
+def _parse_record(block: str, *, serial: str, zone):
     lines = block.splitlines()
     if not lines:
         return None
@@ -118,7 +134,7 @@ def _parse_record(block: str, *, serial: str, zone) -> CrashReport | None:
 
     timestamp = _timestamp(local_time, body if kind == "native_crash" else "", zone)
     if timestamp is None:
-        return None
+        return _UNDATED
     process = fields.get("Process", "")
     pid = fields.get("PID", "")
 
@@ -143,7 +159,10 @@ def _parse_record(block: str, *, serial: str, zone) -> CrashReport | None:
         frames = _main_thread_frames(body, pid)
 
     # Derived from the record, so a crash seen by two pulls is one report.
-    identity = f"{serial}|{tag}|{local_time}|{pid}|{process}"
+    # From the UTC time, not the header's: DropBox prints the header in the
+    # zone in force *now*, so after the device changed zone -- travel, or a
+    # manual change -- every record would have come back with a new id.
+    identity = f"{serial}|{tag}|{timestamp.isoformat()}|{pid}|{process}"
     crash_id = "android-" + hashlib.sha1(identity.encode()).hexdigest()[:12]
 
     return CrashReport(
@@ -151,6 +170,7 @@ def _parse_record(block: str, *, serial: str, zone) -> CrashReport | None:
         timestamp=timestamp,
         device_id=serial,
         process=process,
+        pid=int(pid) if pid.isdigit() else None,
         kind=kind,
         exception_type=exception_type,
         exception_codes=exception_codes,
@@ -162,7 +182,12 @@ def _parse_record(block: str, *, serial: str, zone) -> CrashReport | None:
 
 
 def _timestamp(local_time: str, tombstone_body: str, zone) -> datetime | None:
-    """UTC, from the tombstone's own zone-stamped time if it has one."""
+    """UTC, from the tombstone's own zone-stamped time if it has one.
+
+    A header time inside the hour repeated when clocks go back is ambiguous,
+    and is read as the first pass through it; the header carries nothing that
+    could say which.
+    """
     m = _TOMBSTONE_TIME.search(tombstone_body)
     if m:
         frac = (m.group(2) or ".0")[:7]
@@ -198,11 +223,13 @@ def _main_thread_frames(body: str, pid: str) -> list[str]:
         if e != -1
     ]
     section = body[start:min(ends)] if ends else body[start:]
-    main = section.find('"main"')
-    if main == -1:
+    # The thread's own header line. A bare `"main"` also matches the
+    # `| group="main"` line of every thread printed before it.
+    main = _MAIN_THREAD.search(section)
+    if main is None:
         return []
     frames = []
-    for line in section[main:].splitlines()[1:]:
+    for line in section[main.start():].splitlines()[1:]:
         if not line.strip():
             break
         stripped = line.strip()
@@ -212,8 +239,18 @@ def _main_thread_frames(body: str, pid: str) -> list[str]:
 
 
 #: Marks between the parts of the one shell round trip.
+_TZ = "__QUERN_TZ__"
+_OFFSET = "__QUERN_OFFSET__"
 _PROCS = "__QUERN_PROCS__"
 _SPLIT = "__QUERN_DROPBOX__"
+_TAG = "__QUERN_TAG__"
+_RC = "__QUERN_RC__"
+_TZ_LINE = re.compile(rf"^{_TZ} ?(.*)$", re.M)
+_OFFSET_LINE = re.compile(rf"^{_OFFSET} ?(.*)$", re.M)
+_TAG_LINE = re.compile(rf"^{_TAG} (\S+)$", re.M)
+_RC_LINE = re.compile(rf"^{_RC} (\d+)\s*$", re.M)
+#: dumpsys's own failure lines, which it prints and then exits 0 after.
+_DUMPSYS_FAILED = re.compile(r"^.*(?:Can't find service|DUMP TIMEOUT).*$", re.M)
 
 _PROCESS_RECORD = re.compile(r"ProcessRecord\{\w+ \d+:([^/}\s]+)")
 #: `mCrashing=true` is measured (API 32; the same ProcessErrorStateRecord dump
@@ -272,6 +309,11 @@ class DropboxPull:
     #: {process: "crash" | "anr"} for any process showing that dialog now;
     #: None when the process listing could not be read.
     open_dialogs: dict[str, str] | None = field(default_factory=dict)
+    #: Tags that could not be read in full. The records that were read are
+    #: still in `reports`; the pull as a whole did not succeed.
+    errors: list[str] = field(default_factory=list)
+    #: Crash records dropped because nothing said what zone their time is in.
+    undated: int = 0
 
 
 #: How long one pull may take. DropBox prints every stored record for each tag
@@ -295,12 +337,22 @@ async def pull_dropbox(adb_path: str | None, serial: str) -> DropboxPull:
 
     if not adb_path:
         raise DropboxPullError("adb not found")
+    # Each value behind its own marker: read by position, an empty timezone
+    # property shifted the offset into the zone-name slot, the zone came out
+    # unknown, and every Java crash and ANR was dropped. And each tag read
+    # on its own, with its exit status and its stderr: `;` passes on only the
+    # last command's status, so a failure in any earlier tag read as success
+    # with its records missing. The status is not enough on its own either --
+    # dumpsys exits 0 after "Can't find service" (measured, API 32) -- so the
+    # text is checked too.
     script = "; ".join([
-        "getprop persist.sys.timezone", "date +%z",
+        f'echo "{_TZ} $(getprop persist.sys.timezone)"',
+        f'echo "{_OFFSET} $(date +%z)"',
         f"echo {_PROCS}",
         _PROCS_GREP,
         f"echo {_SPLIT}",
-        *(f"dumpsys dropbox --print {tag}" for tag in CRASH_TAGS),
+        *(f"echo {_TAG} {tag}; dumpsys dropbox --print {tag} 2>&1; echo {_RC} $?"
+          for tag in CRASH_TAGS),
     ])
     proc = None
     try:
@@ -323,9 +375,23 @@ async def pull_dropbox(adb_path: str | None, serial: str) -> DropboxPull:
 
     head, _, body = out.partition(_SPLIT)
     zone_part, _, procs = head.partition(_PROCS)
-    lines = [line.strip() for line in zone_part.strip().splitlines()]
-    zone = device_zone(lines[0] if lines else "", lines[1] if len(lines) > 1 else "")
-    return DropboxPull(
-        reports=parse_dropbox(body, serial=serial, zone=zone),
-        open_dialogs=parse_open_dialogs(procs),
+    name, offset = _TZ_LINE.search(zone_part), _OFFSET_LINE.search(zone_part)
+    zone = device_zone(
+        name.group(1).strip() if name else "", offset.group(1).strip() if offset else "",
     )
+    pulled = DropboxPull(open_dialogs=parse_open_dialogs(procs))
+    chunks = _TAG_LINE.split(body)[1:]     # [tag, output, tag, output, ...]
+    read = set()
+    for tag, chunk in zip(chunks[::2], chunks[1::2], strict=True):
+        read.add(tag)
+        rc = _RC_LINE.search(chunk)
+        text = chunk[:rc.start()] if rc else chunk
+        if rc is None or rc.group(1) != "0":
+            pulled.errors.append(f"{tag}: dumpsys exited {rc.group(1) if rc else '(unknown)'}")
+        elif m := _DUMPSYS_FAILED.search(text):
+            pulled.errors.append(f"{tag}: {m.group(0).strip()}")
+        reports, undated = _parse_records(text, serial=serial, zone=zone)
+        pulled.reports.extend(reports)
+        pulled.undated += undated
+    pulled.errors.extend(f"{tag}: not read" for tag in CRASH_TAGS if tag not in read)
+    return pulled

@@ -574,7 +574,8 @@ async def test_a_pull_that_times_out_says_so(tmp_crash_dir, monkeypatch):
         await asyncio.sleep(3600)
 
     mock_proc.communicate = hang
-    mock_proc.kill = lambda: None
+    killed = []
+    mock_proc.kill = lambda: killed.append(True)
     monkeypatch.setattr(crash_module, "PULL_TIMEOUT", 0.05)
 
     with (
@@ -584,6 +585,8 @@ async def test_a_pull_that_times_out_says_so(tmp_crash_dir, monkeypatch):
         result = await adapter.pull_from_device("00008030-AABBCCDD")
 
     assert "timed out" in result.error
+    assert killed == [True]           # not left running against a wedged phone
+    mock_proc.wait.assert_awaited()   # and reaped
     await adapter.stop()
 
 
@@ -599,4 +602,177 @@ async def test_a_pull_that_cannot_start_says_so(tmp_crash_dir):
         result = await adapter.pull_from_device("00008030-AABBCCDD")
 
     assert "could not run idevicecrashreport" in result.error
+    await adapter.stop()
+
+
+# ---------------------------------------------------------------------------
+# which reports a pull produced (#316 review)
+# ---------------------------------------------------------------------------
+
+
+def _writing_proc(write):
+    """An idevicecrashreport that runs `write()` while it is running."""
+    async def communicate():
+        await write()
+        return b"", b""
+
+    proc = AsyncMock()
+    proc.communicate = communicate
+    proc.returncode = 0
+    return proc
+
+
+async def _pull_with(adapter, proc, device_id="PHONE-UUID"):
+    with (
+        patch("shutil.which", return_value="/usr/local/bin/idevicecrashreport"),
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+    ):
+        return await adapter.pull_from_device("00008101-HW", device_id=device_id)
+
+
+@pytest.mark.asyncio
+async def test_a_pulled_report_names_the_phone_on_its_log_entry_too(tmp_crash_dir):
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    entries = _collect_entries(adapter)
+    await adapter.start()
+    src = FIXTURES / "crash_sample.ips"
+
+    async def write():
+        (tmp_crash_dir / "MyApp-1.ips").write_text(src.read_text())
+
+    result = await _pull_with(adapter, _writing_proc(write))
+
+    assert [r.device_id for r in result.new] == ["PHONE-UUID"]
+    assert [e.device_id for e in entries] == ["PHONE-UUID"]
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_simulator_crash_found_during_a_pull_is_not_the_phones(tmp_crash_dir, tmp_path):
+    """The pull scans every watched directory, DiagnosticReports included. A
+    simulator's crash written since the last poll was counted as the phone's
+    and tagged with its udid, and vanished from the simulator's own list."""
+    sim_dir = tmp_path / "DiagnosticReports"
+    sim_dir.mkdir()
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60, extra_watch_dirs=[sim_dir])
+    entries = _collect_entries(adapter)
+    await adapter.start()
+    (sim_dir / "MyApp-sim.ips").write_text((FIXTURES / "crash_sample.ips").read_text())
+
+    async def write():
+        pass                                   # the phone had nothing
+
+    result = await _pull_with(adapter, _writing_proc(write))
+
+    assert result.new == []
+    assert [r.device_id for r in adapter.crash_reports] == [""]
+    assert [e.device_id for e in entries] == [""]      # still found, just not the phone's
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_poll_loop_cannot_take_a_pulls_files_mid_pull(tmp_crash_dir):
+    """The poll loop scanning while idevicecrashreport was still writing took
+    the phone's reports as its own: untagged and uncounted."""
+    import asyncio
+
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=0.001)
+    await adapter.start()
+
+    async def write():
+        (tmp_crash_dir / "MyApp-2.ips").write_text((FIXTURES / "crash_sample.ips").read_text())
+        await asyncio.sleep(0.1)              # the poll loop gets many chances
+
+    result = await _pull_with(adapter, _writing_proc(write))
+
+    assert [r.device_id for r in result.new] == ["PHONE-UUID"]
+    await adapter.stop()
+
+
+def _report(**fields):
+    from datetime import UTC, datetime
+
+    from server.models import CrashReport
+
+    return CrashReport(**{
+        "crash_id": "android-1", "timestamp": datetime.now(UTC), "process": "com.example.myapp",
+        "device_id": "emulator-5554", **fields,
+    })
+
+
+@pytest.mark.asyncio
+async def test_added_reports_keep_their_own_device_on_the_log_entry(tmp_crash_dir):
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    entries = _collect_entries(adapter)
+    await adapter.start()
+
+    await adapter.add_reports([_report()])
+
+    assert [e.device_id for e in entries] == ["emulator-5554"]
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_added_reports_obey_the_process_filter(tmp_crash_dir):
+    """`--crash-process-filter` applied to report files and not to DropBox."""
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60,
+                           process_filter="com.example.myapp")
+    await adapter.start()
+
+    new = await adapter.add_reports([
+        _report(), _report(crash_id="android-2", process="com.android.settings"),
+    ])
+
+    assert [r.process for r in new] == ["com.example.myapp"]
+    assert [r.process for r in adapter.crash_reports] == ["com.example.myapp"]
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_history_from_before_start_is_listed_not_replayed(tmp_crash_dir, tmp_path):
+    """DropBox keeps days of records and the list starts empty, so every
+    restart logged the whole history as arriving now and ran the hook once
+    per record."""
+    import asyncio
+    from datetime import timedelta
+
+    marker = tmp_path / "hook-ran"
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60,
+                           on_crash_hook=f"cat >> {marker}")
+    entries = _collect_entries(adapter)
+    await adapter.start()
+    old = _report(crash_id="old", timestamp=adapter.started_at - timedelta(days=2))
+
+    new = await adapter.add_reports([old])
+    await asyncio.sleep(0.3)
+
+    assert [r.crash_id for r in new] == ["old"]              # still in the list
+    assert entries == []                                     # not on the timeline
+    assert not marker.exists()                               # no hook
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_hook_runs_for_a_crash_logcat_already_logged(tmp_crash_dir, tmp_path):
+    """Logcat does not run the hook, so skipping it with the log entry made it
+    fire only when capture happened to be off."""
+    import asyncio
+
+    marker = tmp_path / "hook-ran"
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60,
+                           on_crash_hook=f"cat >> {marker}")
+    entries = _collect_entries(adapter)
+    await adapter.start()
+
+    async def logged(report):
+        return True
+
+    await adapter.add_reports([_report()], already_logged=logged)
+    for _ in range(50):
+        if marker.exists() and marker.read_text():
+            break
+        await asyncio.sleep(0.05)
+
+    assert entries == []
+    assert "com.example.myapp" in marker.read_text()
     await adapter.stop()
