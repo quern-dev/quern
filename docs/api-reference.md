@@ -99,7 +99,8 @@ which needs no root, and yields Java crashes, native crashes and ANRs; each
 report's `kind` says which. The response's `pull` says whether the fetch
 happened: `pulled`, `skipped` (with the reason, for example an iPhone that is not
 on USB) or `failed` (with the error). Only `pulled` means the list reflects the
-device.
+device. With a `udid`, the list is that device's crashes, plus reports that name
+no device, such as a simulator's crash file, which does not say which simulator.
 
 ### Network proxy
 

@@ -518,7 +518,7 @@ export function registerLogTools(server: McpServer): void {
   );
 
   server.registerTool("get_latest_crash", {
-    description: `Get recent crash reports with parsed exception types, signals, and stack frames. Pass \`udid\` to fetch a device's crashes first: an iPhone over USB (idevicecrashreport), or an Android device or emulator (its DropBox: Java crashes, native crashes, and ANRs -- \`kind\` says which). The response's \`pull\` says whether that fetch happened: 'pulled', 'skipped' (with the reason, e.g. an iPhone not on USB) or 'failed' (with the error). Only 'pulled' means the list reflects the device; otherwise an empty list is not proof of no crashes.`,
+    description: `Get recent crash reports with parsed exception types, signals, and stack frames. Pass \`udid\` to fetch a device's crashes first: an iPhone over USB (idevicecrashreport), or an Android device or emulator (its DropBox: Java crashes, native crashes, and ANRs -- \`kind\` says which). The response's \`pull\` says whether that fetch happened: 'pulled', 'skipped' (with the reason, e.g. an iPhone not on USB) or 'failed' (with the error). Only 'pulled' means the list reflects the device; otherwise an empty list is not proof of no crashes. With \`udid\`, the list is that device's crashes, plus reports that name no device (a simulator's crash file does not say which simulator).`,
     inputSchema: strictParams({
       limit: z
         .coerce.number()
