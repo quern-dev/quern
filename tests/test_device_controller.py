@@ -1309,6 +1309,34 @@ class TestUdidMapping:
         assert await ctrl.get_libimobiledevice_udid("00008101-HWUDID") == "00008101-HWUDID"
         ctrl.simctl.list_devices.assert_not_called()
 
+    async def test_two_phones_with_one_name_each_get_their_own_usb_udid(self):
+        """"iPhone" is the default name. Matched by name, one phone could be
+        given the other's UDID, and its crash reports filed under the other --
+        on disk, once pulls kept a directory per phone."""
+        from server.device import devicectl
+
+        ctrl = DeviceController()
+        ctrl.simctl.list_devices = AsyncMock(return_value=[])
+
+        async def list_physical():
+            devicectl._remember_identity("CORE-A", "00008101-AAAA")
+            devicectl._remember_identity("CORE-B", "00008101-BBBB")
+            return [
+                DeviceInfo(udid=u, name="iPhone", state=DeviceState.BOOTED,
+                           device_type=DeviceType.DEVICE, os_version="iOS 26.5")
+                for u in ("CORE-A", "CORE-B")
+            ]
+
+        ctrl.devicectl.list_devices = list_physical
+        ctrl.usbmux.list_devices = AsyncMock(return_value=[])
+        # usbmux keys by name, so one of the two is already lost here.
+        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={"iPhone": "00008101-BBBB"})
+
+        await ctrl.list_devices()
+
+        assert ctrl._usbmux_udid_map.get("CORE-B") == "00008101-BBBB"
+        assert "CORE-A" not in ctrl._usbmux_udid_map       # never B's UDID
+
     async def test_get_libimobiledevice_udid_pre_ios17_passthrough(self):
         """Pre-iOS 17 devices already use libimobiledevice UDIDs — return as-is."""
         ctrl = DeviceController()

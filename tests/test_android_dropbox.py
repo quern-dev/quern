@@ -193,7 +193,7 @@ class TestTimezones:
 class _FakeProc:
     def __init__(self, out=b"", err=b"", code=0, hang=False):
         self._out, self._err, self.returncode, self._hang = out, err, code, hang
-        self.killed = False
+        self.killed = self.waited = False
 
     async def communicate(self):
         if self._hang:
@@ -202,6 +202,11 @@ class _FakeProc:
 
     def kill(self):
         self.killed = True
+        self.returncode = -9
+
+    async def wait(self):
+        self.waited = True
+        return self.returncode
 
 
 def _device_output(*, zone="America/Los_Angeles", offset="-0700", procs=None, tags=None,
@@ -293,6 +298,25 @@ class TestPull:
         pulled = await self._pull(monkeypatch, _FakeProc(out=out))
         assert len(pulled.errors) == 1 and "DUMP TIMEOUT" in pulled.errors[0]
 
+    async def test_a_tag_whose_status_line_never_printed_is_reported(self, monkeypatch):
+        """Output cut off mid-tag: the section is there, its status is not."""
+        out = _device_output().replace(b"__QUERN_RC__ 0\n", b"", 1)
+        pulled = await self._pull(monkeypatch, _FakeProc(out=out))
+        assert pulled.errors == ["data_app_crash: dumpsys exited (unknown)"]
+
+    async def test_a_crash_message_naming_dumpsys_failures_is_not_one(self, monkeypatch):
+        """A record's own text may contain the phrases; only dumpsys's lines count."""
+        record = (
+            b"========================================\n"
+            b"2026-09-27 10:00:00 data_app_crash (text, 1 bytes)\nProcess: com.example\nPID: 7\n\n"
+            b"java.lang.IllegalStateException: Can't find service foo; DUMP TIMEOUT hit\n"
+            b"\tat com.example.A.b(A.java:1)\n"
+        )
+        out = _device_output(tags={"data_app_crash": record})
+        pulled = await self._pull(monkeypatch, _FakeProc(out=out))
+        assert pulled.errors == []
+        assert len(pulled.reports) == 1
+
     async def test_a_tag_whose_section_never_printed_is_reported(self, monkeypatch):
         out = _device_output(omit=("system_app_anr",))
         pulled = await self._pull(monkeypatch, _FakeProc(out=out))
@@ -332,7 +356,7 @@ class TestPull:
         proc.returncode = None
         with pytest.raises(DropboxPullError, match="timed out"):
             await self._pull(monkeypatch, proc)
-        assert proc.killed
+        assert proc.killed and proc.waited      # killed, and reaped
 
     async def test_a_spawn_failure_says_so(self, monkeypatch):
         with pytest.raises(DropboxPullError, match="could not run adb"):
@@ -577,6 +601,31 @@ class TestEndpoint:
 
         assert app.state.emitted == []
 
+    async def test_a_name_that_is_only_a_suffix_is_not_the_kernel_name(self, app, monkeypatch):
+        """The kernel name is exactly 15 characters; a shorter tail is some
+        other process that happens to end the same way."""
+        [first] = _parse("system_app_crash")[:1]                 # com.android.settings
+        await self._logcat_saw(app, timestamp=first.timestamp, process="settings")
+        app.state.device_controller = _controller()
+        _fake_dropbox(monkeypatch, reports=[first])
+
+        await _latest(app, udid="emulator-5554")
+
+        assert len(app.state.emitted) == 1
+
+    async def test_only_logcats_entries_count_as_logcat_having_seen_it(self, app, monkeypatch):
+        """An entry this pull path emitted for an earlier crash of the same app
+        a few seconds before is not logcat's record of this one."""
+        [first] = _parse("system_app_crash")[:1]
+        await self._logcat_saw(app, id="android-0123456789ab", timestamp=first.timestamp,
+                               process=first.process, pid=first.pid)
+        app.state.device_controller = _controller()
+        _fake_dropbox(monkeypatch, reports=[first])
+
+        await _latest(app, udid="emulator-5554")
+
+        assert len(app.state.emitted) == 1
+
     async def test_another_processs_crash_at_the_same_moment_is_not_this_one(
         self, app, monkeypatch,
     ):
@@ -650,6 +699,55 @@ class TestEndpoint:
         assert "data_app_anr: dumpsys exited 1" in data["pull"]["reason"]
         assert "2 record(s) skipped" in data["pull"]["reason"]
         assert data["pull"]["new_reports"] == 3 and data["total"] == 3
+
+    async def test_an_unread_tag_alone_makes_the_pull_failed(self, app, monkeypatch):
+        from server.api import crashes
+
+        async def fake_pull(adb_path, serial):
+            return DropboxPull(reports=[], errors=["data_app_anr: dumpsys exited 1"])
+
+        monkeypatch.setattr(crashes, "pull_dropbox", fake_pull)
+        app.state.device_controller = _controller()
+
+        data = await _latest(app, udid="emulator-5554")
+
+        assert data["pull"]["status"] == "failed"
+        assert data["pull"]["reason"] == "data_app_anr: dumpsys exited 1"
+
+    async def test_an_iphone_asked_for_by_its_hardware_udid(self, app, monkeypatch):
+        """The id Xcode, Finder and idevice_id show. On a cold server the alias
+        is learned by the refresh, so the id has to be canonicalised after it:
+        before, the phone is unknown and is skipped as such."""
+        from server.device import devicectl
+        from server.models import CrashReport, DeviceType
+        from server.sources.crash import PullResult
+
+        ctrl = _controller(lib_udid="LIB")
+        refresh = ctrl.list_devices
+
+        async def list_devices():
+            devicectl._remember_identity("CORE-UUID", "00008101-HWUDID")
+            ctrl._device_type_cache["CORE-UUID"] = DeviceType.DEVICE
+            return await refresh()
+
+        ctrl.list_devices = list_devices
+        app.state.device_controller = ctrl
+        app.state.crash_adapter.crash_reports.append(CrashReport(
+            crash_id="ios1", timestamp=datetime(2026, 9, 27, tzinfo=UTC), device_id="CORE-UUID",
+        ))
+        asked = {}
+
+        async def pull(lib_udid, *, device_id=""):
+            asked["device_id"] = device_id
+            return PullResult()
+
+        monkeypatch.setattr(app.state.crash_adapter, "pull_from_device", pull)
+
+        data = await _latest(app, udid="00008101-HWUDID")
+
+        assert data["pull"]["status"] == "pulled"
+        assert asked == {"device_id": "CORE-UUID"}
+        assert [c["crash_id"] for c in data["crashes"]] == ["ios1"]
 
     async def test_undated_records_alone_make_the_pull_failed(self, app, monkeypatch):
         from server.api import crashes

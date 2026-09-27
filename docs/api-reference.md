@@ -123,8 +123,9 @@ as not responding (`kind: "anr"`). The second starts when Android notices, about
 lasts until the dialog is answered. While a crash dialog is open, Android drops
 every further crash of that process, with no report and no log line, so no new
 reports does not mean it stopped crashing. Dismiss the dialog or force-stop the
-app. `[]` means none; `null` means it was not checked (iOS, a failed pull) or the
-process listing could not be read.
+app. `[]` means none; `null` means it was not checked (iOS, or a pull that could
+not run at all) or the process listing could not be read. A pull that is `failed`
+only because some DropBox tags could not be read still reports it.
 
 ### Network proxy
 

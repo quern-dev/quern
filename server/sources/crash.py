@@ -74,6 +74,11 @@ class CrashAdapter(BaseSourceAdapter):
         self.on_crash_hook = on_crash_hook
         self._poll_task: asyncio.Task | None = None
         self._seen_files: set[str] = set()
+        # Files that could not be parsed, by path, with the (size, mtime) they
+        # had. Retried only when that changes. Marking them seen instead lost
+        # a report for good: a pull that timed out mid-copy left a partial
+        # file, and -k re-copies the complete one to the same path.
+        self._unparsed: dict[str, tuple[int, int]] = {}
         # One scan at a time. The poll loop scanning while idevicecrashreport
         # was still writing took the phone's files as its own, so the pull
         # neither counted nor tagged them.
@@ -94,14 +99,17 @@ class CrashAdapter(BaseSourceAdapter):
         # unlisted: listed, they would appear under every device's udid.
         for d in self._all_watch_dirs():
             for f in _crash_files(d):
-                self._seen_files.add(str(f))
                 device = self._device_of(f)
                 if not device:
+                    self._seen_files.add(str(f))
                     continue
                 read = self._read_report(f)
-                if read:
-                    read[0].device_id = device
-                    self.crash_reports.append(read[0])
+                if read is None:
+                    self._mark_unparsed(f)
+                    continue
+                self._seen_files.add(str(f))
+                read[0].device_id = device
+                self.crash_reports.append(read[0])
 
         self._running = True
         self.started_at = self._now()
@@ -141,8 +149,12 @@ class CrashAdapter(BaseSourceAdapter):
         try:
             while self._running:
                 try:
-                    async with self._scan_lock:
-                        await self._scan_for_new_files()
+                    # Skip a turn while a pull holds the lock rather than wait
+                    # up to its 30s timeout: the pull's own scan covers every
+                    # directory, simulator crashes included.
+                    if not self._scan_lock.locked():
+                        async with self._scan_lock:
+                            await self._scan_for_new_files()
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -195,7 +207,10 @@ class CrashAdapter(BaseSourceAdapter):
         cmd.append(str(target))
 
         async with self._scan_lock:
-            before = {str(f) for f in _crash_files(target)}
+            # Files already read. Not merely present: a partial copy left by a
+            # timed-out pull is present, and its completed re-copy is this
+            # pull's report.
+            before = {str(f) for f in _crash_files(target) if str(f) in self._seen_files}
             error = await self._run_pull(cmd)
             # Scan even after a failure: a timeout can follow a partial copy,
             # and those reports are real.
@@ -228,6 +243,12 @@ class CrashAdapter(BaseSourceAdapter):
             error = f"idevicecrashreport timed out after {PULL_TIMEOUT}s"
         except OSError as e:
             error = f"could not run idevicecrashreport: {e}"
+        except asyncio.CancelledError:
+            # A cancelled request or a shutdown: do not leave it writing into
+            # the phone's directory with the lock released.
+            if proc is not None and proc.returncode is None:
+                proc.kill()
+            raise
         return error
 
     async def add_reports(
@@ -310,13 +331,27 @@ class CrashAdapter(BaseSourceAdapter):
         return f.parent.name if f.parent.parent == self.watch_dir / DEVICES_SUBDIR else ""
 
     def _read_report(self, f: Path) -> tuple[CrashReport, str] | None:
+        """The report in `f`, or None if it cannot be read or parsed.
+
+        Never raises. The parsers catch malformed JSON but not a well-formed
+        body of the wrong shape (`{"faultingThread": null}` raised TypeError),
+        and since start() reads a phone's reports, one such file on disk
+        stopped the server booting, every time.
+        """
         try:
             content = f.read_text(errors="replace")
-        except OSError:
+            report = self._parse_crash_file(f, content)
+        except Exception:
             logger.exception("Failed to read crash file %s", f)
             return None
-        report = self._parse_crash_file(f, content)
         return (report, content) if report else None
+
+    def _mark_unparsed(self, f: Path) -> None:
+        try:
+            st = f.stat()
+        except OSError:
+            return
+        self._unparsed[str(f)] = (st.st_size, st.st_mtime_ns)
 
     async def _scan_for_new_files(
         self, *, pulled: tuple[Path, set[str], str] | None = None,
@@ -328,23 +363,26 @@ class CrashAdapter(BaseSourceAdapter):
         from): a file new to it came from that device. Either way the report is
         tagged before it is emitted, so its log entry names the device too.
         """
-        all_files: list[tuple[float, Path]] = []
+        all_files: list[tuple[float, Path, tuple[int, int]]] = []
         for d in self._all_watch_dirs():
             for f in _crash_files(d):
                 try:
-                    all_files.append((f.stat().st_mtime, f))
+                    st = f.stat()
                 except OSError:
                     continue    # gone between listing and stat
+                all_files.append((st.st_mtime, f, (st.st_size, st.st_mtime_ns)))
 
         added: list[CrashReport] = []
-        for _, f in sorted(all_files, key=lambda pair: pair[0]):
-            if str(f) in self._seen_files:
+        for _, f, signature in sorted(all_files, key=lambda t: t[0]):
+            if str(f) in self._seen_files or self._unparsed.get(str(f)) == signature:
                 continue
 
-            self._seen_files.add(str(f))
             read = self._read_report(f)
             if not read:
+                self._unparsed[str(f)] = signature
                 continue
+            self._seen_files.add(str(f))
+            self._unparsed.pop(str(f), None)
             report, content = read
             from_pull = bool(pulled) and f.parent == pulled[0] and str(f) not in pulled[1]
             device = self._device_of(f) or (pulled[2] if from_pull else "")
@@ -352,10 +390,13 @@ class CrashAdapter(BaseSourceAdapter):
                 report.device_id = device
             self.crash_reports.append(report)
             added.append(report)
-            if from_pull and self._predates_start(report):
+            if (from_pull or self._device_of(f)) and self._predates_start(report):
                 # The pull leaves reports on the phone (-k), so a first
                 # pull into an empty directory copies its whole history.
-                # Listed, not replayed: the same rule as add_reports.
+                # Listed, not replayed: the same rule as add_reports. Any
+                # file in a phone's directory, not only this pull's: one
+                # the poll loop reaches first -- after a pull was cancelled,
+                # say -- was replayed with a hook run apiece.
                 continue
             await self._emit_report(report, content)
         return added
@@ -462,7 +503,7 @@ class CrashAdapter(BaseSourceAdapter):
 
         # Timestamp
         ts_str = data.get("captureTime", "") or data.get("timestamp", "")
-        ts = self._parse_timestamp(ts_str)
+        ts = self._parse_timestamp(ts_str, fallback=_mtime(path))
 
         return CrashReport(
             crash_id=crash_id,
@@ -514,7 +555,9 @@ class CrashAdapter(BaseSourceAdapter):
 
         # Timestamp
         ts_match = re.search(r"^Date/Time:\s+(.+)$", content, re.MULTILINE)
-        ts = self._parse_timestamp(ts_match.group(1).strip() if ts_match else "")
+        ts = self._parse_timestamp(
+            ts_match.group(1).strip() if ts_match else "", fallback=_mtime(path),
+        )
 
         return CrashReport(
             crash_id=crash_id,
@@ -542,10 +585,16 @@ class CrashAdapter(BaseSourceAdapter):
         return " ".join(parts)
 
     @staticmethod
-    def _parse_timestamp(ts_str: str) -> datetime:
-        """Best-effort timestamp parsing from crash report."""
+    def _parse_timestamp(ts_str: str, fallback: datetime | None = None) -> datetime:
+        """Best-effort timestamp parsing from crash report.
+
+        Unreadable, it is `fallback` -- the file's modification time, where the
+        caller has one -- and only then now. Now made every such report look
+        new, which defeats the rule that a crash from before start is listed
+        rather than replayed.
+        """
         if not ts_str:
-            return datetime.now(UTC)
+            return fallback or datetime.now(UTC)
 
         # ISO 8601
         for fmt in (
@@ -563,7 +612,7 @@ class CrashAdapter(BaseSourceAdapter):
             except ValueError:
                 continue
 
-        return datetime.now(UTC)
+        return fallback or datetime.now(UTC)
 
 
 def _crash_files(d: Path) -> list[Path]:
@@ -572,3 +621,10 @@ def _crash_files(d: Path) -> list[Path]:
         return [f for f in d.iterdir() if f.suffix in (".ips", ".crash")]
     except OSError:
         return []
+
+
+def _mtime(path: Path) -> datetime | None:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, UTC)
+    except OSError:
+        return None

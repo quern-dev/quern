@@ -374,7 +374,8 @@ class CrashPullStatus(BaseModel):
             "every further crash of that process -- no report, no log line -- "
             "so 'no new reports' does not mean it stopped crashing; dismiss "
             "the dialog or force-stop the app. [] means none; null means it "
-            "was not checked (iOS, a failed pull) or could not be read."
+            "was not checked (iOS, or a pull that could not run at all) or could "
+            "not be read. A pull that failed on some DropBox tags still checks."
         ),
     )
 

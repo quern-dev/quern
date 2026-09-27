@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import Counter
 
 from server import logging_ext
 from server.device.adb import AdbBackend
 from server.device.controller_ui import DeviceControllerUI
-from server.device.devicectl import DevicectlBackend, canonical_device_id
+from server.device.devicectl import DevicectlBackend, canonical_device_id, spellings_of
 from server.device.idb import IdbBackend
 from server.device.pmd3 import Pmd3Backend
 from server.device.screenshots import process_screenshot
@@ -686,11 +687,20 @@ class DeviceController(DeviceControllerUI):
             if d.name:
                 self._device_name_cache[d.udid] = d.name
 
-        # Build CoreDevice UUID -> libimobiledevice UDID mapping
-        # by correlating device names between devicectl and usbmux
+        # Build CoreDevice UUID -> libimobiledevice UDID mapping. Exactly,
+        # where devicectl gave us the phone's hardware UDID and usbmux lists
+        # it; by name only where the name is unique. Two phones sharing a
+        # name ("iPhone" is the default) could map one to the other's UDID,
+        # and a crash pull would then file one phone's reports under the
+        # other -- on disk, so for good once pulls kept a directory per phone.
         usb_name_map = await self.usbmux.get_usb_udid_map()
+        usb_udids = set(usb_name_map.values())
+        name_counts = Counter(d.name for d in physical_devices)
         for d in physical_devices:
-            if d.name in usb_name_map:
+            exact = next((s for s in spellings_of(d.udid) if s in usb_udids), None)
+            if exact:
+                self._usbmux_udid_map[d.udid] = exact
+            elif d.name in usb_name_map and name_counts[d.name] == 1:
                 self._usbmux_udid_map[d.udid] = usb_name_map[d.name]
 
         return sim_devices + physical_devices + usbmux_devices + android_devices

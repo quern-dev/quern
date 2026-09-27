@@ -250,7 +250,11 @@ _OFFSET_LINE = re.compile(rf"^{_OFFSET} ?(.*)$", re.M)
 _TAG_LINE = re.compile(rf"^{_TAG} (\S+)$", re.M)
 _RC_LINE = re.compile(rf"^{_RC} (\d+)\s*$", re.M)
 #: dumpsys's own failure lines, which it prints and then exits 0 after.
-_DUMPSYS_FAILED = re.compile(r"^.*(?:Can't find service|DUMP TIMEOUT).*$", re.M)
+#: Anchored to dumpsys's own wording: a crash record whose message merely
+#: contained one of these phrases marked its tag failed on every pull.
+_DUMPSYS_FAILED = re.compile(
+    r"^(?:Can't find service: .*|\*\*\* SERVICE '.*' DUMP TIMEOUT .*)$", re.M,
+)
 
 _PROCESS_RECORD = re.compile(r"ProcessRecord\{\w+ \d+:([^/}\s]+)")
 #: `mCrashing=true` is measured (API 32; the same ProcessErrorStateRecord dump
@@ -368,9 +372,14 @@ async def pull_dropbox(adb_path: str | None, serial: str) -> DropboxPull:
     except TimeoutError as e:
         if proc is not None and proc.returncode is None:
             proc.kill()
+            await proc.wait()
         raise DropboxPullError(f"dumpsys dropbox timed out after {PULL_TIMEOUT_S}s") from e
     except OSError as e:
         raise DropboxPullError(f"could not run adb: {e}") from e
+    except asyncio.CancelledError:
+        if proc is not None and proc.returncode is None:
+            proc.kill()
+        raise
 
     out = stdout.decode(errors="replace")
     if proc.returncode != 0 or _SPLIT not in out:

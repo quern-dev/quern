@@ -55,6 +55,11 @@ def canonical_device_id(udid: str) -> str:
     return _identity_aliases.get(udid, udid)
 
 
+def spellings_of(canonical: str) -> list[str]:
+    """Every spelling recorded for this device, the canonical one included."""
+    return [s for s, c in _identity_aliases.items() if c == canonical]
+
+
 def _remember_identity(canonical: str, *spellings: str) -> None:
     """Record every known spelling of one device, including the canonical.
 

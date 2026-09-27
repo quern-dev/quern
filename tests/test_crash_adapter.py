@@ -897,3 +897,177 @@ async def test_the_poll_loop_names_the_phone_for_a_file_in_its_directory(tmp_cra
 
     assert [e.device_id for e in entries] == ["PHONE-UUID"]
     await adapter.stop()
+
+
+# ---------------------------------------------------------------------------
+# failure paths around pulled files (second #316 review)
+# ---------------------------------------------------------------------------
+
+#: Well-formed JSON of the wrong shape: the parser raises AttributeError on it.
+MALFORMED_IPS = '{"bug_type":"309"}\n{"procName":"MyApp","exception": "boom"}'
+
+
+@pytest.mark.asyncio
+async def test_a_report_cut_short_by_a_timed_out_pull_is_read_when_complete(tmp_crash_dir):
+    """The pull scans after a timeout, so it read a half-copied file, failed,
+    and marked the path seen; with -k the next pull copies the complete file
+    to the same path, and it was skipped for the rest of the session."""
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    entries = _collect_entries(adapter)
+    await adapter.start()
+    full = _fresh_ips()
+
+    async def partial(target):
+        (target / "MyApp-1.ips").write_text(full[:120])
+
+    async def complete(target):
+        (target / "MyApp-1.ips").write_text(full)
+
+    assert (await _pull_with(adapter, partial)).new == []
+    assert [r.process for r in (await _pull_with(adapter, complete)).new] == ["MyApp"]
+    assert len(entries) == 1
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_an_unparseable_file_is_not_reread_until_it_changes(tmp_crash_dir):
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    await adapter.start()
+    (tmp_crash_dir / "broken.ips").write_text(MALFORMED_IPS)
+    reads = []
+    real = adapter._parse_crash_file
+    adapter._parse_crash_file = lambda path, content: reads.append(path) or real(path, content)
+
+    for _ in range(3):
+        await adapter._scan_for_new_files()
+
+    assert len(reads) == 1
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_report_does_not_fail_the_pull_or_hide_the_rest(tmp_crash_dir):
+    """The parsers catch malformed JSON but not the wrong shape, and the
+    exception escaped the pull as a 500, leaving later files to the poll loop."""
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    await adapter.start()
+
+    async def write(target):
+        (target / "A-broken.ips").write_text(MALFORMED_IPS)
+        (target / "B-good.ips").write_text(_fresh_ips())
+
+    result = await _pull_with(adapter, write)
+
+    assert result.error is None
+    assert [r.process for r in result.new] == ["MyApp"]
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_report_in_a_phones_directory_does_not_stop_start(tmp_crash_dir):
+    """start() reads a phone's reports now; one bad file on disk stopped the
+    server booting, on every boot, since the file stays."""
+    phone = tmp_crash_dir / "devices" / "PHONE-UUID"
+    phone.mkdir(parents=True)
+    (phone / "broken.ips").write_text(MALFORMED_IPS)
+    (phone / "good.ips").write_text((FIXTURES / "crash_sample.ips").read_text())
+
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    await adapter.start()
+
+    assert [(r.process, r.device_id) for r in adapter.crash_reports] == [("MyApp", "PHONE-UUID")]
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_an_old_report_the_poll_loop_finds_in_a_phones_directory_is_not_replayed(
+    tmp_crash_dir, tmp_path,
+):
+    """Any file there came from a pull. One the poll loop reached first --
+    after a cancelled pull, say -- was logged as new with a hook run apiece."""
+    import asyncio
+
+    marker = tmp_path / "hook-ran"
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60,
+                           on_crash_hook=f"cat >> {marker}")
+    entries = _collect_entries(adapter)
+    await adapter.start()
+    phone = tmp_crash_dir / "devices" / "PHONE-UUID"
+    phone.mkdir(parents=True)
+    (phone / "old.ips").write_text((FIXTURES / "crash_sample.ips").read_text())   # 2026-02-08
+
+    async with adapter._scan_lock:
+        await adapter._scan_for_new_files()
+    await asyncio.sleep(0.3)
+
+    assert [(r.process, r.device_id) for r in adapter.crash_reports] == [("MyApp", "PHONE-UUID")]
+    assert entries == [] and not marker.exists()
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_report_with_no_readable_time_takes_its_files(tmp_crash_dir):
+    """It was stamped now, so an old report with no readable time always
+    looked new and was replayed."""
+    import os
+
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    entries = _collect_entries(adapter)
+    await adapter.start()
+    phone = tmp_crash_dir / "devices" / "PHONE-UUID"
+    phone.mkdir(parents=True)
+    f = phone / "undated.ips"
+    f.write_text('{"bug_type":"309"}\n{"procName":"MyApp"}')
+    os.utime(f, (1_700_000_000, 1_700_000_000))                 # 2023-11-14
+
+    async with adapter._scan_lock:
+        await adapter._scan_for_new_files()
+
+    [report] = adapter.crash_reports
+    assert report.timestamp.timestamp() == 1_700_000_000
+    assert entries == []
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_pull_does_not_leave_the_tool_running(tmp_crash_dir):
+    import asyncio
+
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    await adapter.start()
+    proc = AsyncMock()
+    proc.returncode = None
+    killed = []
+    proc.kill = lambda: killed.append(True)
+
+    async def hang():
+        await asyncio.sleep(3600)
+
+    proc.communicate = hang
+    with (
+        patch("shutil.which", return_value="/usr/local/bin/idevicecrashreport"),
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+    ):
+        task = asyncio.create_task(adapter.pull_from_device("HW", device_id="PHONE-UUID"))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert killed == [True]
+    assert not adapter._scan_lock.locked()
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_poll_loop_does_not_queue_behind_a_pull(tmp_crash_dir):
+    """A pull holds the lock for up to its 30s timeout; the loop waiting on it
+    delayed simulator crashes by as much. It skips the turn instead."""
+    import asyncio
+
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=0.01)
+    await adapter.start()
+    async with adapter._scan_lock:
+        await asyncio.sleep(0.1)                     # many poll turns
+        assert not adapter._scan_lock._waiters       # none of them waiting
+    await adapter.stop()
