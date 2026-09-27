@@ -694,7 +694,7 @@ class DeviceController(DeviceControllerUI):
         # and a crash pull would then file one phone's reports under the
         # other -- on disk, so for good once pulls kept a directory per phone.
         usb_name_map = await self.usbmux.get_usb_udid_map()
-        usb_udids = set(usb_name_map.values())
+        usb_udids = set(usb_name_map.values()) if physical_devices else set()
         name_counts = Counter(d.name for d in physical_devices)
         for d in physical_devices:
             exact = next((s for s in spellings_of(d.udid) if s in usb_udids), None)

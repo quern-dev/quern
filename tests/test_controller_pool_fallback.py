@@ -144,6 +144,7 @@ async def test_devicectl_cannot_relabel_a_simulator_as_a_device():
     ctrl.devicectl.list_devices = AsyncMock(return_value=[from_devicectl])
     ctrl.usbmux = AsyncMock()
     ctrl.usbmux.list_devices = AsyncMock(return_value=[])
+    ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={})
     ctrl.adb = AsyncMock()
     ctrl.adb.list_devices = AsyncMock(return_value=[])
 
