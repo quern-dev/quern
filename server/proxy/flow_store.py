@@ -12,6 +12,7 @@ from collections.abc import Callable
 from datetime import datetime
 
 from server.models import FlowQueryParams, FlowRecord
+from server.storage.arrival import ArrivalClock
 from server.storage.fanout import Fanout, Missed
 
 #: How many devices' eviction marks are kept individually. Past this the
@@ -32,8 +33,16 @@ def _device_keys(simulator_udid: str | None, client_ip: str | None) -> list[str]
 class FlowStore:
     """Thread-safe in-memory store for HTTP flow records."""
 
-    def __init__(self, max_size: int = 5_000) -> None:
+    def __init__(self, max_size: int = 5_000, clock: ArrivalClock | None = None) -> None:
         self._flows: OrderedDict[str, FlowRecord] = OrderedDict()
+        # Arrival numbers per flow id, for the summary cursor (#317). A flow
+        # is stamped when its request started but stored when it finished, so
+        # a timestamp cursor skipped every request still running when a
+        # summary was taken. An update is a new arrival: it moves the flow to
+        # the end here and gets a new number, so a delta returns it.
+        self.clock = clock or ArrivalClock()
+        self._seq: dict[str, int] = {}
+        self._last_evicted_seq = 0
         self._max_size = max_size
         self._lock = asyncio.Lock()
         self._fanout: Fanout[FlowRecord] = Fanout(maxsize=1000)
@@ -79,9 +88,11 @@ class FlowStore:
                 self._added += 1
                 if len(self._flows) >= self._max_size:
                     # Evict oldest, and remember it
-                    _, gone = self._flows.popitem(last=False)
+                    gone_id, gone = self._flows.popitem(last=False)
                     self._record_eviction(gone)
+                    self._last_evicted_seq = self._seq.pop(gone_id, self._last_evicted_seq)
             self._flows[flow.id] = flow
+            self._seq[flow.id] = self.clock.tick()
 
         # Notify subscribers (outside lock to avoid deadlock). A slow one
         # loses this flow and the loss is counted, rather than the subscriber
@@ -180,6 +191,20 @@ class FlowStore:
         """Remove all flows."""
         async with self._lock:
             self._flows.clear()
+            self._seq.clear()
+
+    @property
+    def last_evicted_seq(self) -> int:
+        """Arrival number of the latest evicted flow; 0 if none ever were."""
+        return self._last_evicted_seq
+
+    async def flows_between(self, after: int, upto: int) -> list[FlowRecord]:
+        """Flows whose latest arrival is after `after` and no later than `upto`."""
+        async with self._lock:
+            return [
+                f for fid, f in self._flows.items()
+                if after < self._seq.get(fid, 0) <= upto
+            ]
 
     async def get_since(self, since: datetime) -> list[FlowRecord]:
         """Return all flows with timestamp > since."""

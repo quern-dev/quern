@@ -265,6 +265,16 @@ class Completeness(BaseModel):
 class LogSummaryResponse(Completeness):
     """Response from GET /api/v1/logs/summary."""
 
+    cursor_reset: bool = Field(
+        default=False,
+        description=(
+            "True when the `since_cursor` passed in could not be honoured -- "
+            "it came from before a server restart, or is not a cursor -- so "
+            "this summary covers the requested window instead of the delta. "
+            "Entries between the old cursor and that window are not in it."
+        ),
+    )
+
     window: str
     generated_at: datetime
     cursor: str
@@ -906,6 +916,16 @@ class SlowRequest(BaseModel):
 
 class FlowSummaryResponse(Completeness):
     """Response from GET /api/v1/proxy/flows/summary."""
+
+    cursor_reset: bool = Field(
+        default=False,
+        description=(
+            "True when the `since_cursor` passed in could not be honoured -- "
+            "it came from before a server restart, or is not a cursor -- so "
+            "this summary covers the requested window instead of the delta. "
+            "Entries between the old cursor and that window are not in it."
+        ),
+    )
 
     window: str
     generated_at: datetime

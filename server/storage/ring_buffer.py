@@ -16,6 +16,7 @@ from collections.abc import Callable, Iterable
 from datetime import datetime
 
 from server.models import LogEntry, LogLevel, LogQueryParams, LogSource
+from server.storage.arrival import ArrivalClock
 from server.storage.fanout import Fanout, Missed
 
 
@@ -32,8 +33,17 @@ def _source_key(source: LogSource | str) -> str:
 class RingBuffer:
     """Thread-safe ring buffer for log entries with query support."""
 
-    def __init__(self, max_size: int = 10_000) -> None:
+    def __init__(self, max_size: int = 10_000, clock: ArrivalClock | None = None) -> None:
         self._buffer: deque[LogEntry] = deque(maxlen=max_size)
+        # Arrival numbers, one per entry, in step with `_buffer` (#317). The
+        # clock is shared by every buffer a summary cursor spans, so one
+        # number orders an entry against all of them.
+        self.clock = clock or ArrivalClock()
+        self._seqs: deque[int] = deque(maxlen=max_size)
+        # The arrival number of the most recently evicted entry. Eviction is
+        # in arrival order, so "was anything evicted since cursor N" is
+        # exactly "is this greater than N".
+        self._last_evicted_seq = 0
         self._lock = asyncio.Lock()
         self._fanout: Fanout[LogEntry] = Fanout(maxsize=1000)
         # Eviction bookkeeping. A `deque(maxlen=)` drops the oldest entry
@@ -77,12 +87,15 @@ class RingBuffer:
     async def append(self, entry: LogEntry) -> None:
         """Add an entry to the buffer and notify all subscribers."""
         async with self._lock:
+            seq = self.clock.tick()
             if len(self._buffer) == self._buffer.maxlen:
                 # With a capacity of zero (`--buffer-size 0`) the entry being
                 # appended is the one that is lost; there is no [0] to read,
                 # and indexing it raised into every adapter.
                 self._record_eviction(self._buffer[0] if self._buffer else entry)
+                self._last_evicted_seq = self._seqs[0] if self._seqs else seq
             self._buffer.append(entry)
+            self._seqs.append(seq)
             self._appended += 1
 
         # Notify SSE subscribers (non-blocking). A slow one loses this entry,
@@ -93,10 +106,9 @@ class RingBuffer:
         """Remove entries that don't match the predicate. Returns count removed."""
         async with self._lock:
             before = len(self._buffer)
-            self._buffer = deque(
-                (e for e in self._buffer if keep(e)),
-                maxlen=self._buffer.maxlen,
-            )
+            kept = [(e, n) for e, n in zip(self._buffer, self._seqs, strict=True) if keep(e)]
+            self._buffer = deque((e for e, _ in kept), maxlen=self._buffer.maxlen)
+            self._seqs = deque((n for _, n in kept), maxlen=self._seqs.maxlen)
             removed = before - len(self._buffer)
             self._purged += removed
             return removed
@@ -201,6 +213,24 @@ class RingBuffer:
         async with self._lock:
             return self._filter(params)
 
+    @property
+    def last_evicted_seq(self) -> int:
+        """Arrival number of the latest evicted entry; 0 if none ever were."""
+        return self._last_evicted_seq
+
+    async def entries_between(self, after: int, upto: int) -> list[LogEntry]:
+        """Entries that arrived after `after` and no later than `upto`.
+
+        `upto` is a snapshot of the clock taken before reading, so an entry
+        arriving while several buffers are read one after another is left for
+        the next cursor rather than returned now and again then.
+        """
+        async with self._lock:
+            return [
+                e for e, n in zip(self._buffer, self._seqs, strict=True)
+                if after < n <= upto
+            ]
+
     async def get_since(self, since: datetime) -> list[LogEntry]:
         """Get all entries at or after a given timestamp."""
         async with self._lock:
@@ -272,3 +302,4 @@ class RingBuffer:
         """Clear all entries from the buffer."""
         async with self._lock:
             self._buffer.clear()
+            self._seqs.clear()

@@ -42,12 +42,18 @@ from server.models import (
     WaitForFlowResponse,
     WifiProxyNetworkConfig,
 )
-from server.processing.summarizer import WINDOW_DURATIONS, parse_cursor
+from server.processing.summarizer import WINDOW_DURATIONS
 from server.proxy.summary import generate_flow_summary
 from server.proxy.system_proxy import (
     SystemProxySnapshot,
     detect_and_configure,
     restore_system_proxy,
+)
+from server.storage.arrival import (
+    ArrivalCursor,
+    TimestampCursor,
+    make_arrival_cursor,
+    parse_any_cursor,
 )
 from server.storage.fanout import DropNotice
 
@@ -730,12 +736,28 @@ async def flow_summary(
         )
 
     now = datetime.now(UTC)
+    # Snapshot before reading, so a flow finishing mid-read goes to the next
+    # delta rather than into both.
+    upto = flow_store.clock.now
+    cursor = parse_any_cursor(since_cursor) if since_cursor else None
+    if since_cursor and cursor is None:
+        raise HTTPException(status_code=400, detail="Invalid cursor")
+    cursor_reset = isinstance(cursor, ArrivalCursor) and cursor.boot != flow_store.clock.boot
+    arrival_after: int | None = None
 
-    # Determine time boundary from cursor or window
-    if since_cursor:
-        since_ts = parse_cursor(since_cursor)
-        if since_ts is None:
-            raise HTTPException(status_code=400, detail="Invalid cursor")
+    if isinstance(cursor, ArrivalCursor) and not cursor_reset:
+        # Every flow that finished since the last summary. The timestamp
+        # cursor this replaces was the newest *request start* seen, so any
+        # request still running when a summary was taken finished with an
+        # earlier stamp and no delta ever returned it -- routine for an app
+        # with overlapping requests (#317).
+        arrival_after = cursor.seq
+        since_ts = None
+        flows = await flow_store.flows_between(cursor.seq, upto)
+    elif isinstance(cursor, TimestampCursor):
+        # An old cursor: read as it always was. The response carries an
+        # arrival cursor, so the next call is exact.
+        since_ts = cursor.at
         flows = await flow_store.get_since(since_ts)
     else:
         duration = WINDOW_DURATIONS.get(window, timedelta(minutes=5))
@@ -746,9 +768,14 @@ async def flow_summary(
         flows, window=window, host=host,
         simulator_udid=simulator_udid, client_ip=client_ip,
     )
+    summary.cursor = make_arrival_cursor(flow_store.clock, upto)
+    summary.cursor_reset = cursor_reset
     completeness = _flow_completeness(
         flow_store, since_ts, simulator_udid=simulator_udid, client_ip=client_ip,
     )
+    if arrival_after is not None:
+        # Exact: the store evicts in arrival order.
+        completeness["truncated"] = flow_store.last_evicted_seq > arrival_after
     summary.truncated = completeness["truncated"]
     summary.complete_after = completeness["complete_after"]
     if summary.truncated:

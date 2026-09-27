@@ -83,6 +83,7 @@ from server.sources.oslog import OslogAdapter
 from server.sources.proxy import ProxyAdapter
 from server.sources.server_log import ServerLogAdapter
 from server.sources.syslog import SyslogAdapter
+from server.storage.arrival import ArrivalClock
 from server.storage.ring_buffer import RingBuffer
 
 logger = logging.getLogger(__name__)
@@ -570,11 +571,14 @@ def create_app(
 
     # Store shared state
     app.state.config = config
-    app.state.ring_buffer = RingBuffer(max_size=config.ring_buffer_size)
-    app.state.server_buffer = RingBuffer(max_size=1_000)
+    # One arrival clock for the three log buffers, so a single summary cursor
+    # orders an entry against all of them (#317).
+    log_clock = ArrivalClock()
+    app.state.ring_buffer = RingBuffer(max_size=config.ring_buffer_size, clock=log_clock)
+    app.state.server_buffer = RingBuffer(max_size=1_000, clock=log_clock)
     # Crashes arrive a handful per session, so 1,000 is effectively "all of
     # them" -- the point is that nothing else can take their room.
-    app.state.crash_buffer = RingBuffer(max_size=1_000)
+    app.state.crash_buffer = RingBuffer(max_size=1_000, clock=log_clock)
     app.state.process_filter = process_filter
     app.state.enable_syslog = enable_syslog
     app.state.enable_oslog = enable_oslog
