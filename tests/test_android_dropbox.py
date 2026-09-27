@@ -120,6 +120,22 @@ class TestParsing:
         ]
         assert anr.pid == 4242
 
+    def test_an_anr_without_its_own_main_thread_borrows_nothing_after_it(self):
+        """The app's section ends where the next process's begins, with or
+        without an `----- end` line; its main thread is not the app's."""
+        text = (
+            "========\n2026-09-27 10:00:00 data_app_anr (text, 1 bytes)\n"
+            "Process: com.example.app\nPID: 4242\nSubject: Input dispatching timed out\n\n"
+            "----- pid 4242 at 2026-09-27 10:00:00 -----\n"
+            '"Binder:4242_1" prio=5 tid=2 Native\n'
+            "  at android.os.Binder.execTransact(Binder.java:1)\n\n"
+            "----- pid 1 at 2026-09-27 10:00:00 -----\n"
+            '"main" prio=5 tid=1 Native\n'
+            "  at com.android.server.SystemServer.run(SystemServer.java:1)\n"
+        )
+        [anr] = parse_dropbox(text, serial="s", zone=PACIFIC)
+        assert anr.top_frames == []
+
     def test_the_id_survives_the_device_changing_zone(self):
         """DropBox prints every header in the zone in force now, so the same
         crash reads 11:05 on a Pacific device and 14:05 once it is on Eastern
@@ -573,6 +589,21 @@ class TestEndpoint:
         await _latest(app, udid="emulator-5554")
 
         assert [e.process for e in app.state.emitted] == ["com.android.settings"]
+
+    async def test_the_same_app_crashing_again_under_a_new_pid_is_a_new_crash(
+        self, app, monkeypatch,
+    ):
+        """An app restarted and crashed again within the window: same name,
+        another process. The pid says which one logcat saw."""
+        [first] = _parse("system_app_crash")[:1]
+        await self._logcat_saw(app, timestamp=first.timestamp, process=first.process,
+                               pid=first.pid + 1)
+        app.state.device_controller = _controller()
+        _fake_dropbox(monkeypatch, reports=[first])
+
+        await _latest(app, udid="emulator-5554")
+
+        assert len(app.state.emitted) == 1
 
     async def test_the_same_crash_on_another_device_is_not_this_one(self, app, monkeypatch):
         [first] = _parse("system_app_crash")[:1]
