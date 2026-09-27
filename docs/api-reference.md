@@ -109,7 +109,9 @@ list is that device's crashes, plus reports that name no device, such as a
 simulator's crash file, which does not say which simulator.
 
 Crash reports are left on the iPhone (`idevicecrashreport -k`), so a pull does
-not take them away from Xcode or Finder. A crash from before the server started,
+not take them away from Xcode or Finder. Each phone's reports are kept in
+`~/.quern/crashes/devices/<device id>/`, so after a restart they are listed
+against the right phone again, as an Android device's DropBox history is. A crash from before the server started,
 on either platform, is listed but does not become a new log entry or run the
 on-crash hook.
 The hook runs for every newer crash, including one logcat already reported.
