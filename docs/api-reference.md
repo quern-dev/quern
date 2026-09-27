@@ -115,7 +115,10 @@ on-crash hook.
 The hook runs for every newer crash, including one logcat already reported.
 
 On Android, `pull.open_dialogs` lists processes showing a crash ("keeps
-stopping") or ANR dialog right now. While a crash dialog is open, Android drops
+stopping") dialog right now (`kind: "crash"`), and processes Android is treating
+as not responding (`kind: "anr"`). The second starts when Android notices, about
+13 seconds before the ANR dialog and its report appear (measured on API 32), and
+lasts until the dialog is answered. While a crash dialog is open, Android drops
 every further crash of that process, with no report and no log line, so no new
 reports does not mean it stopped crashing. Dismiss the dialog or force-stop the
 app. `[]` means none; `null` means it was not checked (iOS, a failed pull) or the

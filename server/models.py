@@ -366,8 +366,11 @@ class CrashPullStatus(BaseModel):
     open_dialogs: list[OpenCrashDialog] | None = Field(
         default=None,
         description=(
-            "Android only: processes showing a crash ('keeps stopping') or ANR "
-            "dialog right now. While a crash dialog is open, Android drops "
+            "Android only: processes showing a crash ('keeps stopping') dialog "
+            "right now (kind 'crash'), or that Android is treating as not "
+            "responding (kind 'anr') -- from the moment it notices, about 13s "
+            "before the ANR dialog and its report appear (measured, API 32), "
+            "until the dialog is answered. While a crash dialog is open, Android drops "
             "every further crash of that process -- no report, no log line -- "
             "so 'no new reports' does not mean it stopped crashing; dismiss "
             "the dialog or force-stop the app. [] means none; null means it "

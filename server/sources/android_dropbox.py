@@ -267,7 +267,11 @@ _PROCS_GREP = (
 
 
 def parse_open_dialogs(text: str) -> dict[str, str] | None:
-    """Processes showing a crash or ANR dialog right now: {process: kind}.
+    """Processes showing a crash dialog, or not responding: {process: kind}.
+
+    "anr" is set when Android notices, and the ANR dialog and DropBox record
+    follow about 13 seconds later, once its threads are dumped (measured, API
+    32); it clears when the dialog is answered.
 
     None when the listing named no process at all. A device always has
     processes, so that is a listing that failed, and reporting it as "no
