@@ -403,7 +403,11 @@ class TestEachEndpointScopesItsCheck:
         store = app.state.flow_store
         start = (await _call(app, "POST", "/api/v1/proxy/capture/start",
                              json={"simulator_udid": "SIM-A"})).json()
-        await _flood(store, 5, udid="SIM-OTHER")               # stamped after the start
+        # Stamped now, strictly after the start. `_flood` back-dates its flows
+        # by up to 50ms, which put the evicted one before the session began,
+        # and the window then made the test pass with no narrowing at all.
+        for i in range(5):
+            await store.add(_flow(f"other{i}", udid="SIM-OTHER", ago_s=0))
         await store.add(_flow("mine", udid="SIM-A"))          # evicts a SIM-OTHER flow
 
         data = (await _call(app, "POST", "/api/v1/proxy/capture/stop",
