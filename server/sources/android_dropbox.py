@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -210,8 +211,68 @@ def _main_thread_frames(body: str, pid: str) -> list[str]:
     return frames
 
 
-#: Marks where the timezone lines end and the DropBox output begins.
+#: Marks between the parts of the one shell round trip.
+_PROCS = "__QUERN_PROCS__"
 _SPLIT = "__QUERN_DROPBOX__"
+
+_PROCESS_RECORD = re.compile(r"ProcessRecord\{\w+ \d+:([^/}\s]+)")
+#: `mCrashing=true` is measured (API 32; the same ProcessErrorStateRecord dump
+#: from API 31 on). Android 11 and older printed the fields without the `m`,
+#: per AOSP, and that spelling has not been seen on a device here.
+_CRASHING = re.compile(r"\bm?[Cc]rashing=true\b")
+_NOT_RESPONDING = re.compile(r"\bm?[Nn]otResponding=true\b")
+#: The process lines, and the flag line printed under a process only while one
+#: of these is set -- so the whole listing stays small.
+_PROCS_GREP = (
+    "dumpsys activity processes"
+    " | grep -E 'ProcessRecord\\{|rashing=true|otResponding=true'"
+)
+
+
+def parse_open_dialogs(text: str) -> dict[str, str] | None:
+    """Processes showing a crash or ANR dialog right now: {process: kind}.
+
+    None when the listing named no process at all. A device always has
+    processes, so that is a listing that failed, and reporting it as "no
+    dialogs" would be the false all-clear this exists to prevent.
+
+    From `dumpsys activity processes`. This matters because Android holds a
+    process that crashed twice in quick succession behind an "app keeps
+    stopping" dialog, and while that dialog is open every further crash of it
+    is dropped -- no DropBox record, no logcat line, `am crash` exiting 0.
+    Found live: an app's first crashes were recorded and the next ones simply
+    were not, with nothing anywhere saying why. A pull that finds no new
+    crashes is true and still misleading unless it says this.
+
+    It is the process that is held, not the window: after `am force-stop` the
+    dialog stayed on screen and the next crash was recorded. And no dialog is
+    shown over a lock screen, so a locked phone records every crash.
+    """
+    dialogs: dict[str, str] = {}
+    current = ""
+    seen_any = False
+    for line in text.splitlines():
+        m = _PROCESS_RECORD.search(line)
+        if m:
+            current = m.group(1)
+            seen_any = True
+            continue
+        if not current:
+            continue
+        if _CRASHING.search(line):
+            dialogs[current] = "crash"
+        elif _NOT_RESPONDING.search(line):
+            dialogs[current] = "anr"
+    return dialogs if seen_any else None
+
+
+@dataclass
+class DropboxPull:
+    reports: list[CrashReport] = field(default_factory=list)
+    #: {process: "crash" | "anr"} for any process showing that dialog now;
+    #: None when the process listing could not be read.
+    open_dialogs: dict[str, str] | None = field(default_factory=dict)
+
 
 #: How long one pull may take. DropBox prints every stored record for each tag
 #: -- up to 1,000 -- so this is generous; a wedged device must still not hang
@@ -223,8 +284,8 @@ class DropboxPullError(Exception):
     """The pull could not be made. Distinct from a pull that found nothing."""
 
 
-async def pull_dropbox(adb_path: str | None, serial: str) -> list[CrashReport]:
-    """Every crash record DropBox holds for `serial`.
+async def pull_dropbox(adb_path: str | None, serial: str) -> DropboxPull:
+    """Every crash record DropBox holds for `serial`, and any open crash dialogs.
 
     Raises DropboxPullError when the device could not be asked, so a caller
     can tell "no crashes" from "could not look" -- the two must not read
@@ -235,7 +296,10 @@ async def pull_dropbox(adb_path: str | None, serial: str) -> list[CrashReport]:
     if not adb_path:
         raise DropboxPullError("adb not found")
     script = "; ".join([
-        "getprop persist.sys.timezone", "date +%z", f"echo {_SPLIT}",
+        "getprop persist.sys.timezone", "date +%z",
+        f"echo {_PROCS}",
+        _PROCS_GREP,
+        f"echo {_SPLIT}",
         *(f"dumpsys dropbox --print {tag}" for tag in CRASH_TAGS),
     ])
     proc = None
@@ -258,6 +322,10 @@ async def pull_dropbox(adb_path: str | None, serial: str) -> list[CrashReport]:
         raise DropboxPullError(f"adb shell failed (exit {proc.returncode}): {said}")
 
     head, _, body = out.partition(_SPLIT)
-    lines = [line.strip() for line in head.strip().splitlines()]
+    zone_part, _, procs = head.partition(_PROCS)
+    lines = [line.strip() for line in zone_part.strip().splitlines()]
     zone = device_zone(lines[0] if lines else "", lines[1] if len(lines) > 1 else "")
-    return parse_dropbox(body, serial=serial, zone=zone)
+    return DropboxPull(
+        reports=parse_dropbox(body, serial=serial, zone=zone),
+        open_dialogs=parse_open_dialogs(procs),
+    )

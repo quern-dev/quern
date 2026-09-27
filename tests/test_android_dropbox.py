@@ -18,9 +18,11 @@ from httpx import ASGITransport, AsyncClient
 
 from server.sources.android_dropbox import (
     CRASH_TAGS,
+    DropboxPull,
     DropboxPullError,
     device_zone,
     parse_dropbox,
+    parse_open_dialogs,
     pull_dropbox,
 )
 
@@ -152,14 +154,24 @@ class TestPull:
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
         return await pull_dropbox(adb, "emulator-5554")
 
-    async def test_a_pull_reads_the_zone_and_every_tag(self, monkeypatch):
+    async def test_a_pull_reads_the_zone_the_dialogs_and_every_tag(self, monkeypatch):
         out = (
-            b"America/Los_Angeles\n-0700\n__QUERN_DROPBOX__\n"
+            b"America/Los_Angeles\n-0700\n__QUERN_PROCS__\n"
+            + (FIXTURES / "processes_crash_dialog.dumpsys").read_bytes()
+            + b"__QUERN_DROPBOX__\n"
             + (FIXTURES / "system_app_crash.dropbox").read_bytes()
         )
-        reports = await self._pull(monkeypatch, _FakeProc(out=out))
-        assert len(reports) == 3
-        assert reports[0].timestamp == datetime(2026, 9, 26, 18, 5, 7, tzinfo=UTC)
+        pulled = await self._pull(monkeypatch, _FakeProc(out=out))
+        assert len(pulled.reports) == 3
+        assert pulled.reports[0].timestamp == datetime(2026, 9, 26, 18, 5, 7, tzinfo=UTC)
+        assert pulled.open_dialogs == {"com.google.android.deskclock": "crash"}
+
+    async def test_an_empty_process_listing_is_unknown_not_clear(self, monkeypatch):
+        """`dumpsys activity` failing prints nothing, and the script carries on
+        to the DropBox part: the pull succeeds with no process lines."""
+        out = b"America/Los_Angeles\n-0700\n__QUERN_PROCS__\n__QUERN_DROPBOX__\n"
+        pulled = await self._pull(monkeypatch, _FakeProc(out=out))
+        assert pulled.open_dialogs is None
 
     async def test_no_adb_is_a_failed_pull_not_an_empty_one(self, monkeypatch):
         with pytest.raises(DropboxPullError, match="adb not found"):
@@ -198,6 +210,43 @@ class TestPull:
     async def test_a_spawn_failure_says_so(self, monkeypatch):
         with pytest.raises(DropboxPullError, match="could not run adb"):
             await self._pull(monkeypatch, exc=PermissionError("denied"))
+
+
+class TestOpenDialogs:
+    """Android holds a process that crashed twice behind a "keeps stopping"
+    dialog and drops its further crashes silently. Found live, when `am crash`
+    exited 0 and produced neither a DropBox record nor a logcat line."""
+
+    def test_the_held_process_is_found_in_a_real_listing(self):
+        text = (FIXTURES / "processes_crash_dialog.dumpsys").read_text()
+        # 90 lines, ~60 naming processes; the flag belongs to the record above
+        # it, which is in the middle -- not the first or the last one seen.
+        assert parse_open_dialogs(text) == {"com.google.android.deskclock": "crash"}
+
+    def test_an_anr_dialog(self):
+        text = (
+            "  *APP* UID 10110 ProcessRecord{8f70e56 15082:com.example.app/u0a110}\n"
+            "     mCrashing=false null mNotResponding=true [AppNotRespondingDialog@1] bad=false\n"
+        )
+        assert parse_open_dialogs(text) == {"com.example.app": "anr"}
+
+    def test_the_pre_android_12_spelling(self):
+        text = (
+            "  *APP* UID 10110 ProcessRecord{8f70e56 15082:com.example.app/u0a110}\n"
+            "    crashing=true com.android.server.am.AppErrorDialog@1 notResponding=false\n"
+        )
+        assert parse_open_dialogs(text) == {"com.example.app": "crash"}
+
+    def test_false_flags_are_not_dialogs(self):
+        text = (
+            "  *APP* UID 10110 ProcessRecord{8f70e56 15082:com.example.app/u0a110}\n"
+            "     mCrashing=false null mNotResponding=false null bad=true\n"
+        )
+        assert parse_open_dialogs(text) == {}
+
+    def test_a_listing_with_no_processes_is_unknown(self):
+        assert parse_open_dialogs("") is None
+        assert parse_open_dialogs("Permission Denial: can't dump\n") is None
 
 
 # -- the endpoint ----------------------------------------------------------------
@@ -244,13 +293,16 @@ async def _latest(app, **params):
     return resp.json()
 
 
-def _fake_dropbox(monkeypatch, *, reports=None, error=None):
+def _fake_dropbox(monkeypatch, *, reports=None, error=None, open_dialogs=None):
     from server.api import crashes
 
     async def fake_pull(adb_path, serial):
         if error:
             raise DropboxPullError(error)
-        return reports if reports is not None else _parse("system_app_crash", serial=serial)
+        return DropboxPull(
+            reports=reports if reports is not None else _parse("system_app_crash", serial=serial),
+            open_dialogs={} if open_dialogs is None else open_dialogs,
+        )
 
     monkeypatch.setattr(crashes, "pull_dropbox", fake_pull)
 
@@ -267,9 +319,38 @@ class TestEndpoint:
         assert data["total"] == 3
         assert data["pull"] == {
             "udid": "emulator-5554", "platform": "android", "status": "pulled",
-            "new_reports": 3, "reason": None,
+            "new_reports": 3, "reason": None, "open_dialogs": [],
         }
         assert data["crashes"][0]["kind"] == "crash"
+
+    async def test_an_open_crash_dialog_is_reported(self, app, monkeypatch):
+        """No new reports reads as "it stopped crashing" -- untrue while
+        Android is dropping that process's crashes behind a dialog."""
+        app.state.device_controller = _controller(android=True)
+        _fake_dropbox(monkeypatch, open_dialogs={
+            "com.google.android.deskclock": "crash", "com.example.hung": "anr",
+        })
+
+        data = await _latest(app, udid="emulator-5554")
+
+        assert data["pull"]["open_dialogs"] == [
+            {"process": "com.example.hung", "kind": "anr"},
+            {"process": "com.google.android.deskclock", "kind": "crash"},
+        ]
+
+    async def test_an_unreadable_process_listing_is_null_not_empty(self, app, monkeypatch):
+        from server.api import crashes
+
+        async def fake_pull(adb_path, serial):
+            return DropboxPull(reports=[], open_dialogs=None)
+
+        monkeypatch.setattr(crashes, "pull_dropbox", fake_pull)
+        app.state.device_controller = _controller(android=True)
+
+        data = await _latest(app, udid="emulator-5554")
+
+        assert data["pull"]["status"] == "pulled"
+        assert data["pull"]["open_dialogs"] is None
 
     async def test_a_second_pull_adds_nothing_twice(self, app, monkeypatch):
         app.state.device_controller = _controller(android=True)
@@ -332,6 +413,7 @@ class TestEndpoint:
         assert data["pull"] == {
             "udid": "00008101-PHONE", "platform": "ios", "status": "failed",
             "new_reports": 0, "reason": "idevicecrashreport timed out after 30s",
+            "open_dialogs": None,
         }
 
     async def test_a_successful_iphone_pull_says_so(self, app, monkeypatch):

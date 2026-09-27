@@ -15,6 +15,7 @@ from server.models import (
     CrashReport,
     LogQueryParams,
     LogSource,
+    OpenCrashDialog,
     UtcDatetime,
 )
 from server.sources.android_dropbox import DropboxPullError, pull_dropbox
@@ -93,14 +94,18 @@ async def _pull(request: Request, crash_adapter, udid: str) -> CrashPullStatus:
         # server/sources/android_dropbox.py. There was no Android pull at all
         # before #316, so `get_latest_crash` returned nothing after a crash.
         try:
-            reports = await pull_dropbox(controller.adb.adb_path, udid)
+            pulled = await pull_dropbox(controller.adb.adb_path, udid)
         except DropboxPullError as e:
             return CrashPullStatus(udid=udid, platform="android", status="failed", reason=str(e))
         new = await crash_adapter.add_reports(
-            reports, already_logged=lambda r: _logged_by_logcat(request, r),
+            pulled.reports, already_logged=lambda r: _logged_by_logcat(request, r),
         )
         return CrashPullStatus(
             udid=udid, platform="android", status="pulled", new_reports=len(new),
+            open_dialogs=None if pulled.open_dialogs is None else [
+                OpenCrashDialog(process=proc, kind=kind)
+                for proc, kind in sorted(pulled.open_dialogs.items())
+            ],
         )
 
     lib_udid = await controller.get_libimobiledevice_udid(udid)

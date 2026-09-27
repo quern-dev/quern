@@ -332,6 +332,11 @@ class CrashReport(BaseModel):
     raw_text: str = Field(default="", description="First portion of raw crash content")
 
 
+class OpenCrashDialog(BaseModel):
+    process: str
+    kind: Literal["crash", "anr"]
+
+
 class CrashPullStatus(BaseModel):
     """What happened when `get_latest_crash` was asked to pull from a device.
 
@@ -355,6 +360,17 @@ class CrashPullStatus(BaseModel):
     )
     new_reports: int = Field(default=0, description="Reports this pull added.")
     reason: str | None = Field(default=None, description="Why it was skipped or failed.")
+    open_dialogs: list[OpenCrashDialog] | None = Field(
+        default=None,
+        description=(
+            "Android only: processes showing a crash ('keeps stopping') or ANR "
+            "dialog right now. While a crash dialog is open, Android drops "
+            "every further crash of that process -- no report, no log line -- "
+            "so 'no new reports' does not mean it stopped crashing; dismiss "
+            "the dialog or force-stop the app. [] means none; null means it "
+            "was not checked (iOS, a failed pull) or could not be read."
+        ),
+    )
 
 
 class CrashLatestResponse(BaseModel):

@@ -1,0 +1,90 @@
+  *APP* UID 10150 ProcessRecord{6c10264 1546:com.github.uiautomator/u0a150}
+  *APP* UID 10143 ProcessRecord{d17701a 908:com.google.android.ext.services/u0a143}
+  *APP* UID 10101 ProcessRecord{f411937 10519:com.google.android.gms.persistent/u0a101}
+  *APP* UID 10146 ProcessRecord{9f5c994 1452:com.google.android.providers.media.module/u0a146}
+  *PERS* UID 1000 ProcessRecord{3604990 549:system/1000}
+  *APP* UID 10103 ProcessRecord{935018c 1701:com.google.android.googlequicksearchbox:search/u0a103}
+  *APP* UID 10110 ProcessRecord{8f70e56 15082:com.google.android.deskclock/u0a110}
+     mCrashing=true [com.android.server.am.AppErrorDialog@7cca7f7] mNotResponding=false null bad=false
+  *APP* UID 10104 ProcessRecord{9571701 24744:com.android.chrome:privileged_process0/u0a104}
+  *APP* UID 90000 ProcessRecord{50dece 27380:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:1/u0a104i-9000}
+  *APP* UID 10145 ProcessRecord{a634d50 13574:com.google.android.permissioncontroller/u0a145}
+  *PERS* UID 1073 ProcessRecord{7ac6a9c 785:com.android.networkstack.process/1073}
+  *PERS* UID 1068 ProcessRecord{681b960 818:com.android.se/1068}
+  *APP* UID 10092 ProcessRecord{3e29090 13542:com.google.android.apps.wellbeing/u0a92}
+  *APP* UID 10115 ProcessRecord{f34a498 27473:com.google.android.apps.maps/u0a115}
+  *APP* UID 10101 ProcessRecord{eeb3476 25298:com.google.process.gservices/u0a101}
+  *APP* UID 10104 ProcessRecord{7fb28a3 24674:com.android.chrome/u0a104}
+  *APP* UID 10101 ProcessRecord{2b427e3 10606:com.google.android.gms/u0a101}
+  *APP* UID 10096 ProcessRecord{a41cd98 11570:com.google.android.partnersetup/u0a96}
+  *APP* UID 10131 ProcessRecord{53e6106 1039:com.google.android.apps.nexuslauncher/u0a131}
+  *PERS* UID 1000 ProcessRecord{5250e17 1499:com.android.emulator.multidisplay/1000}
+  *APP* UID 10103 ProcessRecord{74f11a4 1493:com.google.android.googlequicksearchbox:interactor/u0a103}
+  *APP* UID 10090 ProcessRecord{1c0a995 25062:com.google.android.settings.intelligence/u0a90}
+  *APP* UID 10130 ProcessRecord{978d928 13116:com.google.android.apps.wallpaper/u0a130}
+  *PERS* UID 1001 ProcessRecord{8beb8bf 869:com.android.phone/1001}
+  *PERS* UID 10139 ProcessRecord{9ed9394 726:com.android.systemui/u0a139}
+  *APP* UID 1002 ProcessRecord{70e3c28 713:com.android.bluetooth/1002}
+  *APP* UID 10123 ProcessRecord{61fab9a 12899:com.google.android.inputmethod.latin/u0a123}
+  *APP* UID 10097 ProcessRecord{c948d27 1494:com.google.android.apps.messaging:rcs/u0a97}
+    Isolated #0: ProcessRecord{50dece 27380:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:1/u0a104i-9000}
+  mHomeProcess: ProcessRecord{53e6106 1039:com.google.android.apps.nexuslauncher/u0a131}
+  mPreviousProcess: ProcessRecord{7fb28a3 24674:com.android.chrome/u0a104}
+      proc=ProcessRecord{5250e17 1499:com.android.emulator.multidisplay/1000}
+      proc=ProcessRecord{3604990 549:system/1000}
+      proc=ProcessRecord{8beb8bf 869:com.android.phone/1001}
+      proc=ProcessRecord{70e3c28 713:com.android.bluetooth/1002}
+      proc=ProcessRecord{681b960 818:com.android.se/1068}
+      proc=ProcessRecord{7ac6a9c 785:com.android.networkstack.process/1073}
+      proc=ProcessRecord{1c0a995 25062:com.google.android.settings.intelligence/u0a90}
+      proc=ProcessRecord{3e29090 13542:com.google.android.apps.wellbeing/u0a92}
+      proc=ProcessRecord{a41cd98 11570:com.google.android.partnersetup/u0a96}
+      proc=ProcessRecord{c948d27 1494:com.google.android.apps.messaging:rcs/u0a97}
+      proc=ProcessRecord{f411937 10519:com.google.android.gms.persistent/u0a101}
+      proc=ProcessRecord{eeb3476 25298:com.google.process.gservices/u0a101}
+      proc=ProcessRecord{2b427e3 10606:com.google.android.gms/u0a101}
+      proc=ProcessRecord{935018c 1701:com.google.android.googlequicksearchbox:search/u0a103}
+      proc=ProcessRecord{74f11a4 1493:com.google.android.googlequicksearchbox:interactor/u0a103}
+      proc=ProcessRecord{9571701 24744:com.android.chrome:privileged_process0/u0a104}
+      proc=ProcessRecord{7fb28a3 24674:com.android.chrome/u0a104}
+      proc=ProcessRecord{8f70e56 15082:com.google.android.deskclock/u0a110}
+      proc=ProcessRecord{f34a498 27473:com.google.android.apps.maps/u0a115}
+      proc=ProcessRecord{61fab9a 12899:com.google.android.inputmethod.latin/u0a123}
+      proc=ProcessRecord{978d928 13116:com.google.android.apps.wallpaper/u0a130}
+      proc=ProcessRecord{53e6106 1039:com.google.android.apps.nexuslauncher/u0a131}
+      proc=ProcessRecord{9ed9394 726:com.android.systemui/u0a139}
+      proc=ProcessRecord{d17701a 908:com.google.android.ext.services/u0a143}
+      proc=ProcessRecord{a634d50 13574:com.google.android.permissioncontroller/u0a145}
+      proc=ProcessRecord{9f5c994 1452:com.google.android.providers.media.module/u0a146}
+      proc=ProcessRecord{6c10264 1546:com.github.uiautomator/u0a150}
+      proc=ProcessRecord{50dece 27380:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:1/u0a104i-9000}
+    PID #549: ProcessRecord{3604990 549:system/1000}
+    PID #713: ProcessRecord{70e3c28 713:com.android.bluetooth/1002}
+    PID #726: ProcessRecord{9ed9394 726:com.android.systemui/u0a139}
+    PID #785: ProcessRecord{7ac6a9c 785:com.android.networkstack.process/1073}
+    PID #818: ProcessRecord{681b960 818:com.android.se/1068}
+    PID #869: ProcessRecord{8beb8bf 869:com.android.phone/1001}
+    PID #908: ProcessRecord{d17701a 908:com.google.android.ext.services/u0a143}
+    PID #1039: ProcessRecord{53e6106 1039:com.google.android.apps.nexuslauncher/u0a131}
+    PID #1452: ProcessRecord{9f5c994 1452:com.google.android.providers.media.module/u0a146}
+    PID #1493: ProcessRecord{74f11a4 1493:com.google.android.googlequicksearchbox:interactor/u0a103}
+    PID #1494: ProcessRecord{c948d27 1494:com.google.android.apps.messaging:rcs/u0a97}
+    PID #1499: ProcessRecord{5250e17 1499:com.android.emulator.multidisplay/1000}
+    PID #1546: ProcessRecord{6c10264 1546:com.github.uiautomator/u0a150}
+    PID #1701: ProcessRecord{935018c 1701:com.google.android.googlequicksearchbox:search/u0a103}
+    PID #10519: ProcessRecord{f411937 10519:com.google.android.gms.persistent/u0a101}
+    PID #10606: ProcessRecord{2b427e3 10606:com.google.android.gms/u0a101}
+    PID #11570: ProcessRecord{a41cd98 11570:com.google.android.partnersetup/u0a96}
+    PID #12899: ProcessRecord{61fab9a 12899:com.google.android.inputmethod.latin/u0a123}
+    PID #13116: ProcessRecord{978d928 13116:com.google.android.apps.wallpaper/u0a130}
+    PID #13542: ProcessRecord{3e29090 13542:com.google.android.apps.wellbeing/u0a92}
+    PID #13574: ProcessRecord{a634d50 13574:com.google.android.permissioncontroller/u0a145}
+    PID #15082: ProcessRecord{8f70e56 15082:com.google.android.deskclock/u0a110}
+    PID #24674: ProcessRecord{7fb28a3 24674:com.android.chrome/u0a104}
+    PID #24744: ProcessRecord{9571701 24744:com.android.chrome:privileged_process0/u0a104}
+    PID #25062: ProcessRecord{1c0a995 25062:com.google.android.settings.intelligence/u0a90}
+    PID #25298: ProcessRecord{eeb3476 25298:com.google.process.gservices/u0a101}
+    PID #27380: ProcessRecord{50dece 27380:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:1/u0a104i-9000}
+    PID #27473: ProcessRecord{f34a498 27473:com.google.android.apps.maps/u0a115}
+  mHomeProcess: ProcessRecord{53e6106 1039:com.google.android.apps.nexuslauncher/u0a131}
+  mPreviousProcess: ProcessRecord{7fb28a3 24674:com.android.chrome/u0a104}
