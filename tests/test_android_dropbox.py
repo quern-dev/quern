@@ -357,3 +357,50 @@ class TestEndpoint:
     async def test_no_udid_means_no_pull_field(self, app):
         data = await _latest(app)
         assert data["pull"] is None
+
+
+class TestOneDevicesCrashes:
+    """With a udid, the answer was every device's crashes -- the emulator's
+    crash at the top of a Pixel's list, found in the live test."""
+
+    async def test_another_devices_crashes_are_not_returned(self, app, monkeypatch):
+        app.state.device_controller = _controller(android=True)
+        _fake_dropbox(monkeypatch)
+        await _latest(app, udid="emulator-5554")                    # 3 emulator crashes
+
+        pixel = await _latest(app, udid="PIXEL-SERIAL")
+
+        assert all(c["device_id"] == "PIXEL-SERIAL" for c in pixel["crashes"])
+        assert pixel["total"] == 3                                   # its own, pulled now
+
+    async def test_reports_that_name_no_device_still_appear(self, app, monkeypatch):
+        """A simulator crash file does not say which simulator; filtering it
+        out would hide what used to show."""
+        from server.models import CrashReport
+
+        app.state.crash_adapter.crash_reports.append(CrashReport(
+            crash_id="sim1", timestamp=datetime(2026, 9, 27, tzinfo=UTC), process="MyApp",
+        ))
+        app.state.device_controller = _controller(android=True)
+        _fake_dropbox(monkeypatch, reports=[])
+
+        data = await _latest(app, udid="emulator-5554")
+
+        assert [c["crash_id"] for c in data["crashes"]] == ["sim1"]
+
+    async def test_an_iphone_pull_tags_its_reports_with_the_phone(self, app, monkeypatch):
+        from server.models import CrashReport
+        from server.sources.crash import PullResult
+
+        app.state.device_controller = _controller(android=False, lib_udid="LIB")
+        pulled = CrashReport(crash_id="ios1", timestamp=datetime(2026, 9, 27, tzinfo=UTC))
+
+        async def pull(lib_udid):
+            app.state.crash_adapter.crash_reports.append(pulled)
+            return PullResult(new=[pulled])
+
+        monkeypatch.setattr(app.state.crash_adapter, "pull_from_device", pull)
+
+        data = await _latest(app, udid="00008101-PHONE")
+
+        assert data["crashes"][0]["device_id"] == "00008101-PHONE"

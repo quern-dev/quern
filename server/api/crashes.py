@@ -8,6 +8,7 @@ from datetime import timedelta
 from fastapi import APIRouter, Query, Request
 
 from server.api.actions import logged_action
+from server.device.devicectl import canonical_device_id
 from server.models import (
     CrashLatestResponse,
     CrashPullStatus,
@@ -59,6 +60,14 @@ async def get_latest_crashes(
         pull = await _pull(request, crash_adapter, udid)
 
     reports = crash_adapter.crash_reports
+    if udid:
+        # That device's crashes -- plus reports that name no device (a
+        # simulator's crash file does not say which simulator), so nothing that
+        # showed before goes missing. Returning every device's crashes for one
+        # device's udid put the emulator's crash at the top of a Pixel's list
+        # once Android reports carried their device (#316, live test).
+        device = canonical_device_id(udid)
+        reports = [r for r in reports if not r.device_id or r.device_id == device]
 
     if since:
         reports = [r for r in reports if r.timestamp >= since]
@@ -103,6 +112,10 @@ async def _pull(request: Request, crash_adapter, udid: str) -> CrashPullStatus:
             reason="not connected over USB; idevicecrashreport needs a USB connection",
         )
     result = await crash_adapter.pull_from_device(lib_udid)
+    # idevicecrashreport writes files that do not say which phone they came
+    # from, so the pull says it: these came from the device asked for.
+    for report in result.new:
+        report.device_id = canonical_device_id(udid)
     if result.error:
         return CrashPullStatus(
             udid=udid, platform="ios", status="failed",
