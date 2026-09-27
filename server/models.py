@@ -249,7 +249,10 @@ class Completeness(BaseModel):
             "filter change are not evictions; the call that changed the filter "
             "reports them as `purged`. To get a clean answer, ask about a "
             "window that starts after `complete_after`, or capture less (a "
-            "narrower filter at the source) so the store turns over less often."
+            "narrower filter at the source) so the store turns over less often. "
+            "On a summary delta (`since_cursor`) the window is \"arrived since "
+            "the cursor\": true means something that arrived after it was "
+            "evicted before this call."
         ),
     )
     complete_after: datetime | None = Field(
@@ -264,6 +267,17 @@ class Completeness(BaseModel):
 
 class LogSummaryResponse(Completeness):
     """Response from GET /api/v1/logs/summary."""
+
+    cursor_reset: bool = Field(
+        default=False,
+        description=(
+            "True when the `since_cursor` passed in could not be honoured -- "
+            "it came from before a server restart, is ahead of anything this "
+            "server has numbered, or is not a cursor -- so this summary covers "
+            "the requested window instead of the delta. Entries between the "
+            "old cursor and that window are not in it."
+        ),
+    )
 
     window: str
     generated_at: datetime
@@ -906,6 +920,18 @@ class SlowRequest(BaseModel):
 
 class FlowSummaryResponse(Completeness):
     """Response from GET /api/v1/proxy/flows/summary."""
+
+    cursor_reset: bool = Field(
+        default=False,
+        description=(
+            "True when the `since_cursor` passed in could not be honoured -- "
+            "it came from before a server restart, or is ahead of anything "
+            "this server has numbered -- so this summary covers the requested "
+            "window instead of the delta. Flows between the old cursor and "
+            "that window are not in it. A string that is not a cursor at all "
+            "is refused with 400 rather than reset."
+        ),
+    )
 
     window: str
     generated_at: datetime

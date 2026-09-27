@@ -640,7 +640,7 @@ refusal exists to prevent.`,
   server.registerTool("get_flow_summary", {
     description: `Get an LLM-optimized summary of recent HTTP traffic. Groups by host, shows errors, slow requests, and overall statistics. Supports cursor-based polling for efficient delta updates.
 
-For physical devices, pass client_ip to isolate that device's traffic — the recorded IP is in proxy_status cert_setup[udid].wifi_proxy_configs[ssid].client_ip. If no flows appear, check proxy_status: wifi_proxy_stale:true means the device proxy needs reconfiguring; a mismatched client_ip means the device's IP changed and record_device_proxy_config should be called again with the new IP. If \`truncated\` is true, flows in the window were evicted and the counts may be low.`,
+For physical devices, pass client_ip to isolate that device's traffic — the recorded IP is in proxy_status cert_setup[udid].wifi_proxy_configs[ssid].client_ip. If no flows appear, check proxy_status: wifi_proxy_stale:true means the device proxy needs reconfiguring; a mismatched client_ip means the device's IP changed and record_device_proxy_config should be called again with the new IP. If \`truncated\` is true, flows in the window were evicted and the counts may be low. The cursor follows arrival order: a delta returns every flow that finished since the last summary, including requests that started before it. If \`cursor_reset\` is true, the cursor could not be honoured (the server restarted, or the cursor is ahead of anything the server has numbered) and the result covers the window instead; a string that is not a cursor is refused with an error.`,
     inputSchema: strictParams({
       window: z
         .enum(["30s", "1m", "5m", "15m", "1h"])

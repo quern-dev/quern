@@ -12,6 +12,7 @@ from collections.abc import Callable
 from datetime import datetime
 
 from server.models import FlowQueryParams, FlowRecord
+from server.storage.arrival import ArrivalClock
 from server.storage.fanout import Fanout, Missed
 
 #: How many devices' eviction marks are kept individually. Past this the
@@ -32,8 +33,18 @@ def _device_keys(simulator_udid: str | None, client_ip: str | None) -> list[str]
 class FlowStore:
     """Thread-safe in-memory store for HTTP flow records."""
 
-    def __init__(self, max_size: int = 5_000) -> None:
+    def __init__(self, max_size: int = 5_000, clock: ArrivalClock | None = None) -> None:
         self._flows: OrderedDict[str, FlowRecord] = OrderedDict()
+        # Arrival numbers per flow id, for the summary cursor (#317). A flow
+        # is stamped when its request started but stored when it finished, so
+        # a timestamp cursor skipped every request still running when a
+        # summary was taken. An update is a new arrival: it moves the flow to
+        # the end here and gets a new number, so a delta returns it.
+        self.clock = clock or ArrivalClock()
+        self._seq: dict[str, int] = {}
+        self._last_evicted_seq = 0
+        self._evicted_seq_by_device: dict[str, int] = {}
+        self._evicted_seq_floor = 0
         self._max_size = max_size
         self._lock = asyncio.Lock()
         self._fanout: Fanout[FlowRecord] = Fanout(maxsize=1000)
@@ -79,9 +90,11 @@ class FlowStore:
                 self._added += 1
                 if len(self._flows) >= self._max_size:
                     # Evict oldest, and remember it
-                    _, gone = self._flows.popitem(last=False)
-                    self._record_eviction(gone)
+                    gone_id, gone = self._flows.popitem(last=False)
+                    self._last_evicted_seq = self._seq.pop(gone_id, self._last_evicted_seq)
+                    self._record_eviction(gone, self._last_evicted_seq)
             self._flows[flow.id] = flow
+            self._seq[flow.id] = self.clock.tick()
 
         # Notify subscribers (outside lock to avoid deadlock). A slow one
         # loses this flow and the loss is counted, rather than the subscriber
@@ -92,7 +105,7 @@ class FlowStore:
     def evicted(self) -> int:
         return self._evicted
 
-    def _record_eviction(self, gone: FlowRecord) -> None:
+    def _record_eviction(self, gone: FlowRecord, seq: int) -> None:
         """Note a flow leaving the store. Must be called under lock."""
         self._evicted += 1
         at = gone.timestamp
@@ -104,6 +117,11 @@ class FlowStore:
             self._evicted_through_by_device[key] = (
                 at if previous is None or at > previous else previous
             )
+            # The arrival number too, per device, so a filtered summary delta
+            # is narrowed the way a filtered window is. Arrival numbers only
+            # grow and eviction is in arrival order, so the latest is the max.
+            self._evicted_seq_by_device.pop(key, None)
+            self._evicted_seq_by_device[key] = seq
         # One key per udid or client_ip ever evicted, for the life of the
         # server -- DHCP churn and simulator erase cycles only add. Bounded.
         while len(self._evicted_through_by_device) > MAX_DEVICE_KEYS:
@@ -111,6 +129,25 @@ class FlowStore:
             dropped = self._evicted_through_by_device.pop(oldest)
             if self._evicted_through_floor is None or dropped > self._evicted_through_floor:
                 self._evicted_through_floor = dropped
+        while len(self._evicted_seq_by_device) > MAX_DEVICE_KEYS:
+            oldest = next(iter(self._evicted_seq_by_device))
+            self._evicted_seq_floor = max(
+                self._evicted_seq_floor, self._evicted_seq_by_device.pop(oldest),
+            )
+
+    def last_evicted_seq_for(
+        self, *, simulator_udid: str | None = None, client_ip: str | None = None,
+    ) -> int:
+        """`last_evicted_seq`, narrowed to flows carrying these values.
+
+        Unnarrowed, it is the global one. A trimmed device's number lives on
+        in the floor, so trimming can only make a delta more cautious.
+        """
+        keys = _device_keys(simulator_udid, client_ip)
+        if not keys:
+            return self._last_evicted_seq
+        seqs = [self._evicted_seq_by_device.get(k, 0) for k in keys]
+        return max([*seqs, self._evicted_seq_floor])
 
     def evicted_through(
         self, *, simulator_udid: str | None = None, client_ip: str | None = None,
@@ -180,11 +217,32 @@ class FlowStore:
         """Remove all flows."""
         async with self._lock:
             self._flows.clear()
+            self._seq.clear()
 
-    async def get_since(self, since: datetime) -> list[FlowRecord]:
-        """Return all flows with timestamp > since."""
+    @property
+    def last_evicted_seq(self) -> int:
+        """Arrival number of the latest evicted flow; 0 if none ever were."""
+        return self._last_evicted_seq
+
+    async def flows_between(self, after: int, upto: int) -> list[FlowRecord]:
+        """Flows whose latest arrival is after `after` and no later than `upto`."""
         async with self._lock:
-            return [f for f in self._flows.values() if f.timestamp > since]
+            return [
+                f for fid, f in self._flows.items()
+                if after < self._seq.get(fid, 0) <= upto
+            ]
+
+    async def get_since(self, since: datetime, upto: int | None = None) -> list[FlowRecord]:
+        """Return all flows with timestamp > since.
+
+        `upto` bounds the read by arrival too, for a summary whose response
+        cursor is a snapshot taken before reading.
+        """
+        async with self._lock:
+            return [
+                f for fid, f in self._flows.items()
+                if f.timestamp > since and (upto is None or self._seq.get(fid, 0) <= upto)
+            ]
 
     async def get_all(self) -> list[FlowRecord]:
         """Return all flows (snapshot under lock)."""

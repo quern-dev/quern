@@ -81,6 +81,17 @@ a crash entry for each Java crash, native crash and ANR. Find them with
 `query_logs` (`source=crash`) or `get_errors`. `get_latest_crash` reads iOS
 crash reports only.
 
+**Summary cursors follow arrival order.** `get_log_summary` and
+`get_flow_summary` return a `cursor`; pass it back as `since_cursor` to get only
+what arrived since. The cursor counts arrivals, not timestamps, so the next delta
+also includes entries stamped earlier than the last summary: a device clock
+running ahead, a crash report written after the crash, a request that started
+before the summary and finished after it. A cursor from before a server restart,
+or one ahead of anything the server has numbered, comes back with
+`cursor_reset: true`, and the summary then covers the requested window. On the
+flow summary, a string that is not a cursor at all is refused with 400. Older timestamp cursors are still accepted, and the response always
+returns an arrival cursor.
+
 ### Network proxy
 
 | MCP Tool | Method | Path | Description |

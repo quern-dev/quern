@@ -27,7 +27,12 @@ from server.models import (
 from server.processing.summarizer import (
     WINDOW_DURATIONS,
     generate_summary,
-    parse_cursor,
+)
+from server.storage.arrival import (
+    ArrivalCursor,
+    TimestampCursor,
+    make_arrival_cursor,
+    parse_any_cursor,
 )
 from server.storage.fanout import DropNotice, Missed
 from server.storage.ring_buffer import RingBuffer
@@ -325,32 +330,59 @@ async def get_summary(
     The response includes a `cursor` field. Pass it back as `since_cursor`
     on the next call to get only new entries since the last summary.
     """
-    # Summary always reads from both buffers (no source filter)
+    # Summary always reads from every buffer (no source filter)
     buffers = _get_buffers(request, None)
+    clock = buffers[0].clock
+    # Snapshot before reading, and read only up to it. Defensive today: no
+    # buffer holds its lock across an await, so an append cannot land between
+    # two buffers' reads. If that changes, this is what keeps the delta exact
+    # -- an entry arriving mid-read goes to the next delta, not to both.
+    upto = clock.now
 
     all_entries: list[LogEntry] = []
-    # What the answer covers, for the completeness check. None when an
-    # unparseable cursor falls back to "everything held", which is complete
-    # only if nothing was ever evicted.
-    covers_since: datetime | None
-    if since_cursor:
-        cursor_ts = parse_cursor(since_cursor)
-        covers_since = cursor_ts
+    cursor = parse_any_cursor(since_cursor) if since_cursor else None
+    # Unhonourable: not a cursor, a cursor from another run, or one ahead of
+    # anything this server has numbered. That last can only be mangled or
+    # invented, and read as-is it answered "nothing new" with every flag clean.
+    cursor_reset = bool(since_cursor) and (
+        cursor is None
+        or (isinstance(cursor, ArrivalCursor) and (
+            cursor.boot != clock.boot or cursor.seq > upto
+        ))
+    )
+    # What the answer covers, for the completeness check.
+    covers_since: datetime | None = None
+    arrival_after: int | None = None
+    if isinstance(cursor, ArrivalCursor) and not cursor_reset:
+        # Everything that *arrived* since the last summary, whatever its
+        # timestamp. The timestamp cursor this replaces skipped any entry that
+        # arrived late with an earlier stamp -- a device clock ahead of the
+        # host, a crash report stamped when the crash happened (#317).
+        arrival_after = cursor.seq
         for buf in buffers:
-            if cursor_ts:
-                all_entries.extend(await buf.get_after(cursor_ts))
-            else:
-                all_entries.extend(await buf.get_recent(buf.max_size))
+            all_entries.extend(await buf.entries_between(cursor.seq, upto))
+    elif isinstance(cursor, TimestampCursor):
+        # An old cursor, from a client that has not taken a new one yet. Read
+        # the way it always was; the response carries an arrival cursor, so
+        # the next call is exact.
+        covers_since = cursor.at
+        for buf in buffers:
+            all_entries.extend(await buf.get_after(cursor.at, upto))
     else:
         duration = WINDOW_DURATIONS[window]
-        cutoff = datetime.now(UTC) - duration
-        covers_since = cutoff
+        covers_since = datetime.now(UTC) - duration
         for buf in buffers:
-            all_entries.extend(await buf.get_since(cutoff))
+            all_entries.extend(await buf.get_since(covers_since, upto))
 
     all_entries.sort(key=lambda e: e.timestamp)
     summary = generate_summary(all_entries, window=window, process=process)
+    summary.cursor = make_arrival_cursor(clock, upto)
+    summary.cursor_reset = cursor_reset
     completeness = _completeness(buffers, covers_since)
+    if arrival_after is not None:
+        # Eviction is in arrival order, so this is exact: something that
+        # arrived after the cursor is gone iff the latest eviction did.
+        completeness["truncated"] = any(b.last_evicted_seq > arrival_after for b in buffers)
     summary.truncated = completeness["truncated"]
     summary.complete_after = completeness["complete_after"]
     if summary.truncated:
@@ -358,9 +390,12 @@ async def get_summary(
         # in first, and counts presented as whole when they are not are the
         # exact misreading this exists to stop.
         summary.summary = (
+            "Entries that arrived since the last summary were evicted before "
+            "this summary, so the counts below may be low. "
+            if arrival_after is not None else
             "Entries in this window were evicted before this summary, so the "
-            "counts below may be low. " + summary.summary
-        )
+            "counts below may be low. "
+        ) + summary.summary
     return summary
 
 
