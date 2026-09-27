@@ -1282,6 +1282,33 @@ class TestUdidMapping:
         result = await ctrl.get_libimobiledevice_udid("WIFI-ONLY-UUID")
         assert result is None
 
+    async def test_get_libimobiledevice_udid_accepts_the_hardware_udid(self):
+        """The hardware UDID is what idevice_id, Xcode and Finder show. Passed
+        to a crash pull, it was answered "not connected over USB" for an
+        iPhone 12 that was plugged in. The alias is recorded by the refresh
+        itself, as on a server that has not listed devices yet."""
+        from server.device import devicectl
+
+        ctrl = DeviceController()
+        ctrl.simctl.list_devices = AsyncMock(return_value=[])
+
+        async def list_physical():
+            devicectl._remember_identity("48CF8DD9-CORE-UUID", "00008101-HWUDID")
+            return [DeviceInfo(
+                udid="48CF8DD9-CORE-UUID", name="iPhone 12", state=DeviceState.BOOTED,
+                device_type=DeviceType.DEVICE, os_version="iOS 26.5",
+            )]
+
+        ctrl.devicectl.list_devices = list_physical
+        ctrl.usbmux.list_devices = AsyncMock(return_value=[])
+        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={"iPhone 12": "00008101-HWUDID"})
+
+        assert await ctrl.get_libimobiledevice_udid("00008101-HWUDID") == "00008101-HWUDID"
+        # And once known, without another refresh.
+        ctrl.simctl.list_devices.reset_mock()
+        assert await ctrl.get_libimobiledevice_udid("00008101-HWUDID") == "00008101-HWUDID"
+        ctrl.simctl.list_devices.assert_not_called()
+
     async def test_get_libimobiledevice_udid_pre_ios17_passthrough(self):
         """Pre-iOS 17 devices already use libimobiledevice UDIDs — return as-is."""
         ctrl = DeviceController()

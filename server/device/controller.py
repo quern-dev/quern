@@ -703,9 +703,15 @@ class DeviceController(DeviceControllerUI):
 
         Returns None if the device is not USB-connected (e.g. network-only).
         Refreshes the mapping if the UDID isn't found on first lookup.
+
+        Any spelling of the device is accepted. The map is keyed by CoreDevice
+        UUID, and a caller holding the hardware UDID -- the one `idevice_id`,
+        Xcode and Finder show -- was told a phone plugged in over USB was not
+        connected. The alias is re-read after the refresh, because the refresh
+        is what records it on a server that has not listed devices yet.
         """
         # Check the CoreDevice -> libimobiledevice mapping
-        udid = self._usbmux_udid_map.get(coredevice_udid)
+        udid = self._usbmux_udid_map.get(canonical_device_id(coredevice_udid))
         if udid is not None:
             return udid
 
@@ -722,7 +728,7 @@ class DeviceController(DeviceControllerUI):
         # Refresh and try again
         await self.list_devices()
 
-        udid = self._usbmux_udid_map.get(coredevice_udid)
+        udid = self._usbmux_udid_map.get(canonical_device_id(coredevice_udid))
         if udid is not None:
             return udid
 
