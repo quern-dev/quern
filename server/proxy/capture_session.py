@@ -90,6 +90,19 @@ class CaptureSessionManager:
             limit=1000,
         )
         flows, total = await flow_store.query(params)
+        # Flows evicted during the session were part of it. Without this the
+        # response counted what survived and presented it as everything the
+        # bracketed action caused (#318).
+        through = flow_store.evicted_through(
+            simulator_udid=session.simulator_udid, client_ip=session.client_ip,
+        )
+        completeness = {
+            "truncated": not flow_store.is_complete_since(
+                session.start_time,
+                simulator_udid=session.simulator_udid, client_ip=session.client_ip,
+            ),
+            "complete_after": through,
+        }
 
         # Build by_host breakdown
         host_counts: dict[str, int] = {}
@@ -126,6 +139,7 @@ class CaptureSessionManager:
                 total_flows=total,
                 flow_summaries=summaries,
                 by_host=by_host,
+                **completeness,
             )
 
         logger.info(
@@ -138,6 +152,7 @@ class CaptureSessionManager:
             total_flows=total,
             flows=flows,
             by_host=by_host,
+            **completeness,
         )
 
     def _cleanup_expired(self) -> None:

@@ -216,7 +216,7 @@ class TestEvictionIsRecorded:
         await store.add(_make_flow("c", timestamp=base + timedelta(seconds=60)))
 
         assert store.evicted == 2
-        assert store.evicted_through == base + timedelta(seconds=50)
+        assert store.evicted_through() == base + timedelta(seconds=50)
         assert not store.is_complete_since(base + timedelta(seconds=50))
         assert store.is_complete_since(base + timedelta(seconds=51))
 

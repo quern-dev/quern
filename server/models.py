@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import enum
 from datetime import UTC, datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, BaseModel, Field, model_validator
 
@@ -226,37 +226,38 @@ class TopIssue(BaseModel):
 
 
 class Completeness(BaseModel):
-    """Whether a log answer can be trusted to be whole.
+    """Whether an answer drawn from a fixed-size store can be trusted whole.
 
-    The buffers are fixed-size and evict their oldest entries, so "nothing
-    matched" and "everything that matched is gone" used to come back
-    identical: `total: 0` either way. An agent reading the first concluded the
-    second -- confidently, and wrongly -- which is the failure #255 and #313
-    describe. These fields separate them.
+    The log buffers and the flow store evict their oldest entries at
+    capacity, so "nothing matched" and "everything that matched is gone" used
+    to come back identical: `total: 0` either way. An agent reading the first
+    concluded the second -- confidently, and wrongly -- which is the failure
+    #255, #313 and #318 describe. These fields separate them, on every log
+    and flow answer that can be cut short.
     """
 
     truncated: bool = Field(
         default=False,
         description=(
             "True when entries stamped inside the requested window were "
-            "evicted before this call, so the result may be missing some. It "
-            "says 'may', not 'is': the evicted entries are not known to match "
-            "this query's other filters. False is a guarantee -- nothing in "
-            "the window was lost -- with one difference for a tail (the newest "
-            "N): there, false means the entries returned really are the newest "
-            "N, while older ones may still have been evicted. Entries removed "
-            "by a filter change are not evictions and do not set this; the "
-            "call that changed the filter reports them as `purged`. Narrow "
-            "capture at the source (process, subsystem) or ask for a later "
-            "window."
+            "evicted before this call, so the result -- including any count "
+            "-- may be missing some. It says 'may', not 'is': the evicted "
+            "entries are not known to match this query's other filters. False "
+            "is a guarantee that nothing in the window was lost, with one "
+            "exception: for a log tail (the newest N), false means only that "
+            "the entries returned really are the newest N. Removals made by a "
+            "filter change are not evictions; the call that changed the filter "
+            "reports them as `purged`. To get a clean answer, ask about a "
+            "window that starts after `complete_after`, or capture less (a "
+            "narrower filter at the source) so the store turns over less often."
         ),
     )
     complete_after: datetime | None = Field(
         default=None,
         description=(
             "Nothing stamped after this time has been evicted, so a window "
-            "starting later is complete. Null when nothing relevant was ever "
-            "evicted."
+            "starting later is complete. Null only when nothing relevant was "
+            "ever evicted."
         ),
     )
 
@@ -520,7 +521,7 @@ class FlowSummaryItem(BaseModel):
     total_ms: float | None = None
 
 
-class FlowQueryResponse(BaseModel):
+class FlowQueryResponse(Completeness):
     """Response from flow query endpoint."""
 
     flows: list[FlowRecord] = []
@@ -553,7 +554,7 @@ class CaptureStopRequest(BaseModel):
     session_id: str
 
 
-class CaptureStopResponse(BaseModel):
+class CaptureStopResponse(Completeness):
     """Response from POST /api/v1/proxy/capture/stop."""
 
     session_id: str
@@ -580,7 +581,7 @@ class WaitForFlowRequest(BaseModel):
     since: UtcDatetime | None = None  # defaults to now - 5s if omitted
 
 
-class WaitForFlowResponse(BaseModel):
+class WaitForFlowResponse(Completeness):
     """Response from POST /api/v1/proxy/flows/wait."""
 
     matched: bool
@@ -808,7 +809,14 @@ class ProxyStatusResponse(BaseModel):
     port: int = 9101
     listen_host: str = "0.0.0.0"
     started_at: datetime | None = None
+    #: Flows held right now -- what survived, not what arrived. On a busy
+    #: proxy the store turns over and this stays at capacity while traffic is
+    #: lost; `flow_store` says how much.
     flows_captured: int = 0
+    #: The flow store's capacity, intake, evictions and the span it still
+    #: holds, so capture outrunning the store is visible rather than inferred
+    #: from queries coming back short (#318).
+    flow_store: dict[str, Any] | None = None
     active_filter: str | None = None
     active_intercept: str | None = None
     held_flows_count: int = 0
@@ -896,7 +904,7 @@ class SlowRequest(BaseModel):
     status_code: int | None = None
 
 
-class FlowSummaryResponse(BaseModel):
+class FlowSummaryResponse(Completeness):
     """Response from GET /api/v1/proxy/flows/summary."""
 
     window: str
