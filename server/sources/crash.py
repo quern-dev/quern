@@ -32,6 +32,13 @@ DIAGNOSTIC_REPORTS_DIR = Path.home() / "Library" / "Logs" / "DiagnosticReports"
 POLL_INTERVAL = 10  # seconds
 PULL_TIMEOUT = 30  # seconds
 
+#: Under the watch dir, one directory per phone a pull has read, named by
+#: its device id. A report file does not say which phone it came from, so
+#: the directory says it -- which is what lets a restart list a phone's
+#: reports against the right device instead of losing them.
+DEVICES_SUBDIR = "devices"
+_SAFE_DEVICE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
 
 @dataclass
 class PullResult:
@@ -77,13 +84,24 @@ class CrashAdapter(BaseSourceAdapter):
         """Start the crash watcher background loop."""
         self.watch_dir.mkdir(parents=True, exist_ok=True)
 
-        # Index existing files so we don't re-emit on restart
+        # Index existing files so we don't re-emit on restart. A phone's
+        # reports are listed too, without being emitted: Android's DropBox
+        # history is listed again after a restart, and an iPhone's reports
+        # were marked seen and never listed, so the phone showed none -- and
+        # since the pull leaves them on the phone and re-copies them to the
+        # same paths, it never would again. Loose files in the watch dir, from
+        # before pulls had a directory per phone, name no device and stay
+        # unlisted: listed, they would appear under every device's udid.
         for d in self._all_watch_dirs():
-            if not d.exists():
-                continue
-            for f in d.iterdir():
-                if f.suffix in (".ips", ".crash"):
-                    self._seen_files.add(str(f))
+            for f in _crash_files(d):
+                self._seen_files.add(str(f))
+                device = self._device_of(f)
+                if not device:
+                    continue
+                read = self._read_report(f)
+                if read:
+                    read[0].device_id = device
+                    self.crash_reports.append(read[0])
 
         self._running = True
         self.started_at = self._now()
@@ -159,10 +177,11 @@ class CrashAdapter(BaseSourceAdapter):
         if not shutil.which("idevicecrashreport"):
             return PullResult(error="idevicecrashreport not found on PATH")
 
+        target = self._device_dir(device_id) or self.watch_dir
         try:
-            self.watch_dir.mkdir(parents=True, exist_ok=True)
+            target.mkdir(parents=True, exist_ok=True)
         except OSError as e:
-            return PullResult(error=f"could not create {self.watch_dir}: {e}")
+            return PullResult(error=f"could not create {target}: {e}")
 
         # -k: copy, and leave the reports on the phone. Without it the tool
         # deletes each report after copying, so a pull took the user's crash
@@ -173,18 +192,18 @@ class CrashAdapter(BaseSourceAdapter):
         cmd = ["idevicecrashreport", "-k", "-e"]
         if libimobiledevice_udid:
             cmd.extend(["-u", libimobiledevice_udid])
-        cmd.append(str(self.watch_dir))
+        cmd.append(str(target))
 
         async with self._scan_lock:
-            before = {str(f) for f in _crash_files(self.watch_dir)}
+            before = {str(f) for f in _crash_files(target)}
             error = await self._run_pull(cmd)
             # Scan even after a failure: a timeout can follow a partial copy,
             # and those reports are real.
             added = await self._scan_for_new_files(
-                pulled=(before, device_id),
+                pulled=(target, before, device_id),
             )
         new = [r for r in added if r.file_path not in before
-               and Path(r.file_path).parent == self.watch_dir]
+               and Path(r.file_path).parent == target]
         return PullResult(new=new, error=error)
 
     async def _run_pull(self, cmd: list[str]) -> str | None:
@@ -267,17 +286,47 @@ class CrashAdapter(BaseSourceAdapter):
         await self.emit(entry)
 
     def _all_watch_dirs(self) -> list[Path]:
-        """Return the primary watch dir plus any extra watch dirs."""
-        return [self.watch_dir] + self.extra_watch_dirs
+        """The primary watch dir, each phone's directory under it, and the extras."""
+        return [self.watch_dir, *self._device_dirs(), *self.extra_watch_dirs]
+
+    def _device_dirs(self) -> list[Path]:
+        try:
+            return sorted(d for d in (self.watch_dir / DEVICES_SUBDIR).iterdir() if d.is_dir())
+        except OSError:
+            return []
+
+    def _device_dir(self, device_id: str) -> Path | None:
+        """Where a pull from this device writes; None without a usable id.
+
+        None falls back to the watch dir itself, where the pull still tags
+        what it wrote for this run but the device is not remembered.
+        """
+        if device_id and _SAFE_DEVICE_ID.match(device_id):
+            return self.watch_dir / DEVICES_SUBDIR / device_id
+        return None
+
+    def _device_of(self, f: Path) -> str:
+        """The device a report file belongs to, from its directory; "" if none."""
+        return f.parent.name if f.parent.parent == self.watch_dir / DEVICES_SUBDIR else ""
+
+    def _read_report(self, f: Path) -> tuple[CrashReport, str] | None:
+        try:
+            content = f.read_text(errors="replace")
+        except OSError:
+            logger.exception("Failed to read crash file %s", f)
+            return None
+        report = self._parse_crash_file(f, content)
+        return (report, content) if report else None
 
     async def _scan_for_new_files(
-        self, *, pulled: tuple[set[str], str] | None = None,
+        self, *, pulled: tuple[Path, set[str], str] | None = None,
     ) -> list[CrashReport]:
         """Scan all watch directories for new crash files; the reports added.
 
-        `pulled` is (files in watch_dir before a pull, the device pulled from):
-        a file new to watch_dir came from that device and is tagged before it
-        is emitted, so its log entry names the device too.
+        A file in a phone's directory is that phone's. `pulled` is (the
+        directory a pull wrote to, the files in it before, the device pulled
+        from): a file new to it came from that device. Either way the report is
+        tagged before it is emitted, so its log entry names the device too.
         """
         all_files: list[tuple[float, Path]] = []
         for d in self._all_watch_dirs():
@@ -293,26 +342,22 @@ class CrashAdapter(BaseSourceAdapter):
                 continue
 
             self._seen_files.add(str(f))
-
-            try:
-                content = f.read_text(errors="replace")
-            except Exception:
-                logger.exception("Failed to read crash file %s", f)
+            read = self._read_report(f)
+            if not read:
                 continue
-
-            report = self._parse_crash_file(f, content)
-            if report:
-                from_pull = pulled and f.parent == self.watch_dir and str(f) not in pulled[0]
-                if from_pull:
-                    report.device_id = pulled[1] or report.device_id
-                self.crash_reports.append(report)
-                added.append(report)
-                if from_pull and self._predates_start(report):
-                    # The pull leaves reports on the phone (-k), so a first
-                    # pull into an empty directory copies its whole history.
-                    # Listed, not replayed: the same rule as add_reports.
-                    continue
-                await self._emit_report(report, content)
+            report, content = read
+            from_pull = bool(pulled) and f.parent == pulled[0] and str(f) not in pulled[1]
+            device = self._device_of(f) or (pulled[2] if from_pull else "")
+            if device:
+                report.device_id = device
+            self.crash_reports.append(report)
+            added.append(report)
+            if from_pull and self._predates_start(report):
+                # The pull leaves reports on the phone (-k), so a first
+                # pull into an empty directory copies its whole history.
+                # Listed, not replayed: the same rule as add_reports.
+                continue
+            await self._emit_report(report, content)
         return added
 
     def _predates_start(self, report: CrashReport) -> bool:

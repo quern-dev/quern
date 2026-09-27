@@ -145,8 +145,10 @@ async def test_does_not_reemit_on_restart(tmp_crash_dir):
     await adapter.start()
     await asyncio.sleep(0.5)
 
-    # File was there before start — should not emit
+    # File was there before start — should not emit, nor list: a loose file
+    # names no device, and listed it would appear under every device's udid.
     assert len(entries) == 0
+    assert adapter.crash_reports == []
 
     # Now add a new file
     (tmp_crash_dir / "new_crash.ips").write_text(src.read_text())
@@ -619,22 +621,26 @@ def _fresh_ips():
     return (FIXTURES / "crash_sample.ips").read_text().replace("2026-02-08 10:30:45.000 +0000", now)
 
 
-def _writing_proc(write):
-    """An idevicecrashreport that runs `write()` while it is running."""
-    async def communicate():
-        await write()
-        return b"", b""
-
+async def _pull_with(adapter, write, device_id="PHONE-UUID", sent=None):
+    """Pull with an idevicecrashreport that runs `write(target)` while it runs,
+    `target` being the directory the command was told to write to."""
     proc = AsyncMock()
-    proc.communicate = communicate
     proc.returncode = 0
-    return proc
 
+    async def exec_(*args, **kwargs):
+        if sent is not None:
+            sent.extend(args)
 
-async def _pull_with(adapter, proc, device_id="PHONE-UUID"):
+        async def communicate():
+            await write(Path(args[-1]))
+            return b"", b""
+
+        proc.communicate = communicate
+        return proc
+
     with (
         patch("shutil.which", return_value="/usr/local/bin/idevicecrashreport"),
-        patch("asyncio.create_subprocess_exec", return_value=proc),
+        patch("asyncio.create_subprocess_exec", side_effect=exec_),
     ):
         return await adapter.pull_from_device("00008101-HW", device_id=device_id)
 
@@ -645,10 +651,10 @@ async def test_a_pulled_report_names_the_phone_on_its_log_entry_too(tmp_crash_di
     entries = _collect_entries(adapter)
     await adapter.start()
 
-    async def write():
-        (tmp_crash_dir / "MyApp-1.ips").write_text(_fresh_ips())
+    async def write(target):
+        (target / "MyApp-1.ips").write_text(_fresh_ips())
 
-    result = await _pull_with(adapter, _writing_proc(write))
+    result = await _pull_with(adapter, write)
 
     assert [r.device_id for r in result.new] == ["PHONE-UUID"]
     assert [e.device_id for e in entries] == ["PHONE-UUID"]
@@ -667,10 +673,10 @@ async def test_a_simulator_crash_found_during_a_pull_is_not_the_phones(tmp_crash
     await adapter.start()
     (sim_dir / "MyApp-sim.ips").write_text((FIXTURES / "crash_sample.ips").read_text())
 
-    async def write():
+    async def write(target):
         pass                                   # the phone had nothing
 
-    result = await _pull_with(adapter, _writing_proc(write))
+    result = await _pull_with(adapter, write)
 
     assert result.new == []
     assert [r.device_id for r in adapter.crash_reports] == [""]
@@ -687,11 +693,11 @@ async def test_the_poll_loop_cannot_take_a_pulls_files_mid_pull(tmp_crash_dir):
     adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=0.001)
     await adapter.start()
 
-    async def write():
-        (tmp_crash_dir / "MyApp-2.ips").write_text((FIXTURES / "crash_sample.ips").read_text())
+    async def write(target):
+        (target / "MyApp-2.ips").write_text((FIXTURES / "crash_sample.ips").read_text())
         await asyncio.sleep(0.1)              # the poll loop gets many chances
 
-    result = await _pull_with(adapter, _writing_proc(write))
+    result = await _pull_with(adapter, write)
 
     assert [r.device_id for r in result.new] == ["PHONE-UUID"]
     await adapter.stop()
@@ -799,13 +805,95 @@ async def test_a_pulled_crash_from_before_start_is_listed_not_replayed(tmp_crash
     entries = _collect_entries(adapter)
     await adapter.start()
 
-    async def write():            # crash_sample.ips is from 2026-01-15
-        (tmp_crash_dir / "MyApp-old.ips").write_text((FIXTURES / "crash_sample.ips").read_text())
+    async def write(target):      # crash_sample.ips is from 2026-02-08
+        (target / "MyApp-old.ips").write_text((FIXTURES / "crash_sample.ips").read_text())
 
-    result = await _pull_with(adapter, _writing_proc(write))
+    result = await _pull_with(adapter, write)
     await asyncio.sleep(0.3)
 
     assert [r.device_id for r in result.new] == ["PHONE-UUID"]      # still reported
     assert entries == []
     assert not marker.exists()
+    await adapter.stop()
+
+
+# ---------------------------------------------------------------------------
+# a directory per phone, so a restart still knows whose reports they are
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_pull_writes_into_the_phones_own_directory(tmp_crash_dir):
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    await adapter.start()
+    sent = []
+
+    async def write(target):
+        (target / "MyApp-1.ips").write_text(_fresh_ips())
+
+    result = await _pull_with(adapter, write, sent=sent)
+
+    assert sent[-1] == str(tmp_crash_dir / "devices" / "PHONE-UUID")
+    assert Path(result.new[0].file_path).parent == tmp_crash_dir / "devices" / "PHONE-UUID"
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_after_a_restart_a_phones_reports_are_listed_against_it(tmp_crash_dir, tmp_path):
+    """They were marked seen and never listed, so after a restart the phone
+    showed no crashes -- and, left on the phone and re-copied to the same
+    paths, never would again -- while Android listed its history."""
+    import asyncio
+
+    first = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    await first.start()
+
+    async def write(target):
+        (target / "MyApp-1.ips").write_text(_fresh_ips())
+
+    await _pull_with(first, write)
+    await first.stop()
+
+    marker = tmp_path / "hook-ran"
+    restarted = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60,
+                             on_crash_hook=f"cat >> {marker}")
+    entries = _collect_entries(restarted)
+    await restarted.start()
+
+    assert [(r.process, r.device_id) for r in restarted.crash_reports] == [("MyApp", "PHONE-UUID")]
+    assert (await _pull_with(restarted, write)).new == []      # re-copied, same path
+    await asyncio.sleep(0.3)
+    assert entries == [] and not marker.exists()               # listed, not replayed
+    assert len(restarted.crash_reports) == 1
+    await restarted.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_device_id_unfit_for_a_directory_name_still_tags_this_pull(tmp_crash_dir):
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    await adapter.start()
+
+    async def write(target):
+        assert target == tmp_crash_dir                # not a path built from "../x"
+        (target / "MyApp-1.ips").write_text(_fresh_ips())
+
+    result = await _pull_with(adapter, write, device_id="../x")
+
+    assert [r.device_id for r in result.new] == ["../x"]
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_poll_loop_names_the_phone_for_a_file_in_its_directory(tmp_crash_dir):
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    entries = _collect_entries(adapter)
+    await adapter.start()
+    phone = tmp_crash_dir / "devices" / "PHONE-UUID"
+    phone.mkdir(parents=True)
+    (phone / "MyApp-3.ips").write_text(_fresh_ips())
+
+    async with adapter._scan_lock:
+        await adapter._scan_for_new_files()
+
+    assert [e.device_id for e in entries] == ["PHONE-UUID"]
     await adapter.stop()
