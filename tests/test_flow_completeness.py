@@ -287,6 +287,7 @@ class TestCaptureSession:
                             json={"session_id": start["session_id"]})).json()
 
         assert data["truncated"] is True
+        assert data["complete_after"] is not None   # the real mark, not null (M21)
 
     async def test_a_session_with_nothing_evicted_is_whole(self, app):
         start = (await _call(app, "POST", "/api/v1/proxy/capture/start", json={})).json()
@@ -395,10 +396,14 @@ class TestEachEndpointScopesItsCheck:
         assert data["total_flows"] == 5 and data["truncated"] is False
 
     async def test_capture_for_one_device_is_clean_when_only_others_were_evicted(self, app):
+        """The other device's flow is evicted *during* the session, so only
+        the device narrowing -- not the window -- keeps this clean. With the
+        eviction before the session the window alone made it clean, and the
+        test passed with the narrowing removed (mutation M1)."""
         store = app.state.flow_store
-        await _flood(store, 5, udid="SIM-OTHER")
         start = (await _call(app, "POST", "/api/v1/proxy/capture/start",
                              json={"simulator_udid": "SIM-A"})).json()
+        await _flood(store, 5, udid="SIM-OTHER")               # stamped after the start
         await store.add(_flow("mine", udid="SIM-A"))          # evicts a SIM-OTHER flow
 
         data = (await _call(app, "POST", "/api/v1/proxy/capture/stop",
