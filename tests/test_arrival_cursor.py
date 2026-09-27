@@ -130,6 +130,36 @@ class TestLogSummary:
         assert delta["total_count"] == 1
         assert delta["truncated"] is False
 
+    async def test_losing_the_entry_the_cursor_points_at_is_not_truncation(self, app):
+        """That entry was in the previous summary. Only arrivals *after* the
+        cursor count; the boundary is exact, and `>=` there would flag every
+        delta whose first eviction was the last thing already seen."""
+        ring = app.state.ring_buffer
+        for i in range(50):                           # capacity 50: seqs 1..50
+            await ring.append(_entry(f"a{i}"))
+        cursor = (await _log_summary(app))["cursor"]
+        for i in range(50):                           # evicts 1..50, exactly up to the cursor
+            await ring.append(_entry(f"b{i}"))
+
+        delta = await _log_summary(app, cursor)
+
+        assert delta["total_count"] == 50
+        assert delta["truncated"] is False
+
+    async def test_a_purge_between_summaries_keeps_the_delta_exact(self, app):
+        """A filter change purges the buffer. The arrival numbers must be
+        filtered with the entries, or they fall out of step."""
+        ring = app.state.ring_buffer
+        await ring.append(_entry("noise before"))
+        cursor = (await _log_summary(app))["cursor"]
+        await ring.append(_entry("noise after"))
+        await ring.append(_entry("kept after"))
+        await ring.purge(lambda e: not e.message.startswith("noise"))
+
+        delta = await _log_summary(app, cursor)
+
+        assert delta["total_count"] == 1
+
     async def test_a_cursor_from_before_a_restart_is_not_read_as_nothing_new(self, app):
         """Arrival numbers restart with the server; a cursor carrying a
         number from a previous run must not be compared against this one's."""
