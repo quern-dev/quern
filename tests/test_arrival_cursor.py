@@ -426,6 +426,69 @@ class TestInterleaving:
         assert first["total_flows"] + second["total_flows"] == 1
 
 
+class TestEveryPathIsBoundedBySnapshot:
+    """The window and legacy-cursor paths read by timestamp, and hand back an
+    arrival cursor at the snapshot. Unbounded, an arrival that landed during
+    the read was in this answer and the next delta too (CodeRabbit on #321)."""
+
+    @staticmethod
+    def _append_during_get(read_from, method, write_to, entry):
+        original = getattr(read_from, method)
+        fired = []
+
+        async def interleaved(*args, **kwargs):
+            result = await original(*args, **kwargs)
+            if not fired:
+                fired.append(True)
+                await write_to.append(entry)
+            return result
+
+        setattr(read_from, method, interleaved)
+
+    async def test_a_window_summary_does_not_repeat_a_mid_read_arrival(self, app):
+        self._append_during_get(
+            app.state.ring_buffer, "get_since", app.state.crash_buffer,
+            _entry("crashed mid-read", level=LogLevel.FAULT, source=LogSource.CRASH),
+        )
+
+        first = await _log_summary(app)
+        second = await _log_summary(app, first["cursor"])
+
+        assert first["total_count"] + second["total_count"] == 1, "counted twice"
+
+    async def test_a_legacy_cursor_summary_does_not_repeat_a_mid_read_arrival(self, app):
+        old_cursor = make_cursor(datetime.now(UTC) - timedelta(minutes=1))
+        self._append_during_get(
+            app.state.ring_buffer, "get_after", app.state.crash_buffer,
+            _entry("crashed mid-read", level=LogLevel.FAULT, source=LogSource.CRASH),
+        )
+
+        first = await _log_summary(app, old_cursor)
+        second = await _log_summary(app, first["cursor"])
+
+        assert first["total_count"] + second["total_count"] == 1, "counted twice"
+
+    @pytest.mark.parametrize("legacy", [False, True])
+    async def test_a_flow_window_or_legacy_summary_does_not_repeat_a_mid_read_flow(
+        self, app, legacy,
+    ):
+        store = app.state.flow_store
+        original = store.get_since
+
+        async def interleaved(*args, **kwargs):
+            store.get_since = original                  # once
+            await store.add(_flow("finished mid-read"))
+            return await original(*args, **kwargs)
+
+        store.get_since = interleaved
+        cursor = make_cursor(datetime.now(UTC) - timedelta(minutes=1)) if legacy else None
+
+        first = (await _flow_summary(app, cursor)).json()
+        second = (await _flow_summary(app, first["cursor"])).json()
+
+        assert first["total_flows"] + second["total_flows"] == 1
+
+
 async def test_clearing_a_buffer_between_summaries_keeps_the_delta_exact(app):
     """`clear()` has no production caller, so nothing exercised it: a clear
     that forgot the arrival numbers would put them out of step with the

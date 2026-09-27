@@ -765,11 +765,11 @@ async def flow_summary(
         # An old cursor: read as it always was. The response carries an
         # arrival cursor, so the next call is exact.
         since_ts = cursor.at
-        flows = await flow_store.get_since(since_ts)
+        flows = await flow_store.get_since(since_ts, upto)
     else:
         duration = WINDOW_DURATIONS.get(window, timedelta(minutes=5))
         since_ts = now - duration
-        flows = await flow_store.get_since(since_ts)
+        flows = await flow_store.get_since(since_ts, upto)
 
     summary = generate_flow_summary(
         flows, window=window, host=host,

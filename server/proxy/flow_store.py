@@ -232,10 +232,17 @@ class FlowStore:
                 if after < self._seq.get(fid, 0) <= upto
             ]
 
-    async def get_since(self, since: datetime) -> list[FlowRecord]:
-        """Return all flows with timestamp > since."""
+    async def get_since(self, since: datetime, upto: int | None = None) -> list[FlowRecord]:
+        """Return all flows with timestamp > since.
+
+        `upto` bounds the read by arrival too, for a summary whose response
+        cursor is a snapshot taken before reading.
+        """
         async with self._lock:
-            return [f for f in self._flows.values() if f.timestamp > since]
+            return [
+                f for fid, f in self._flows.items()
+                if f.timestamp > since and (upto is None or self._seq.get(fid, 0) <= upto)
+            ]
 
     async def get_all(self) -> list[FlowRecord]:
         """Return all flows (snapshot under lock)."""

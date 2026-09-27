@@ -231,15 +231,26 @@ class RingBuffer:
                 if after < n <= upto
             ]
 
-    async def get_since(self, since: datetime) -> list[LogEntry]:
-        """Get all entries at or after a given timestamp."""
-        async with self._lock:
-            return [e for e in self._buffer if e.timestamp >= since]
+    async def get_since(self, since: datetime, upto: int | None = None) -> list[LogEntry]:
+        """Get all entries at or after a given timestamp.
 
-    async def get_after(self, after: datetime) -> list[LogEntry]:
-        """Get all entries strictly after a given timestamp (for cursor deltas)."""
+        `upto` bounds the read by arrival as well, for a summary: its response
+        cursor is a snapshot taken before reading, and anything arriving after
+        it belongs to the next delta, not to this answer and that one too.
+        """
         async with self._lock:
-            return [e for e in self._buffer if e.timestamp > after]
+            return [
+                e for e, n in zip(self._buffer, self._seqs, strict=True)
+                if e.timestamp >= since and (upto is None or n <= upto)
+            ]
+
+    async def get_after(self, after: datetime, upto: int | None = None) -> list[LogEntry]:
+        """Get all entries strictly after a given timestamp, bounded like get_since."""
+        async with self._lock:
+            return [
+                e for e, n in zip(self._buffer, self._seqs, strict=True)
+                if e.timestamp > after and (upto is None or n <= upto)
+            ]
 
     async def get_recent(self, count: int = 100) -> list[LogEntry]:
         """Get the N most recent entries."""

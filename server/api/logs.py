@@ -367,12 +367,12 @@ async def get_summary(
         # the next call is exact.
         covers_since = cursor.at
         for buf in buffers:
-            all_entries.extend(await buf.get_after(cursor.at))
+            all_entries.extend(await buf.get_after(cursor.at, upto))
     else:
         duration = WINDOW_DURATIONS[window]
         covers_since = datetime.now(UTC) - duration
         for buf in buffers:
-            all_entries.extend(await buf.get_since(covers_since))
+            all_entries.extend(await buf.get_since(covers_since, upto))
 
     all_entries.sort(key=lambda e: e.timestamp)
     summary = generate_summary(all_entries, window=window, process=process)
