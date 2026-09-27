@@ -1071,3 +1071,23 @@ async def test_the_poll_loop_does_not_queue_behind_a_pull(tmp_crash_dir):
         await asyncio.sleep(0.1)                     # many poll turns
         assert not adapter._scan_lock._waiters       # none of them waiting
     await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_partial_copy_left_from_before_a_restart_is_read_when_completed(tmp_crash_dir):
+    """The server stopped (or the pull timed out) mid-copy; start() finds the
+    partial file. The next pull's complete copy must still be read."""
+    phone = tmp_crash_dir / "devices" / "PHONE-UUID"
+    phone.mkdir(parents=True)
+    full = _fresh_ips()
+    (phone / "MyApp-1.ips").write_text(full[:120])
+
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    await adapter.start()
+    assert adapter.crash_reports == []
+
+    async def complete(target):
+        (target / "MyApp-1.ips").write_text(full)
+
+    assert [r.process for r in (await _pull_with(adapter, complete)).new] == ["MyApp"]
+    await adapter.stop()
