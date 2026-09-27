@@ -243,7 +243,7 @@ class CrashAdapter(BaseSourceAdapter):
             known.add(report.crash_id)
             self.crash_reports.append(report)
             new.append(report)
-            if self.started_at is not None and report.timestamp < self.started_at:
+            if self._predates_start(report):
                 continue
             log = already_logged is None or not await already_logged(report)
             await self._emit_report(report, report.raw_text, log=log)
@@ -302,12 +302,21 @@ class CrashAdapter(BaseSourceAdapter):
 
             report = self._parse_crash_file(f, content)
             if report:
-                if pulled and f.parent == self.watch_dir and str(f) not in pulled[0]:
+                from_pull = pulled and f.parent == self.watch_dir and str(f) not in pulled[0]
+                if from_pull:
                     report.device_id = pulled[1] or report.device_id
                 self.crash_reports.append(report)
                 added.append(report)
+                if from_pull and self._predates_start(report):
+                    # The pull leaves reports on the phone (-k), so a first
+                    # pull into an empty directory copies its whole history.
+                    # Listed, not replayed: the same rule as add_reports.
+                    continue
                 await self._emit_report(report, content)
         return added
+
+    def _predates_start(self, report: CrashReport) -> bool:
+        return self.started_at is not None and report.timestamp < self.started_at
 
     async def _run_crash_hook(self, report: CrashReport) -> None:
         """Run the on-crash hook command with CrashReport JSON on stdin."""

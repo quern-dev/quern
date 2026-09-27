@@ -493,10 +493,11 @@ async def test_reports_left_on_the_phone_are_not_new_twice(tmp_crash_dir):
     """With -k every pull copies the phone's whole history again, to the same
     paths. That must not turn one crash into a new report on each pull, nor
     after a restart."""
-    src = FIXTURES / "crash_sample.ips"
+    fresh = []    # stamped at the first copy, after start; the same bytes each time
 
     async def fake_communicate():
-        (tmp_crash_dir / "Calculator-2026-09-27-143510.ips").write_text(src.read_text())
+        fresh[:] = fresh or [_fresh_ips()]
+        (tmp_crash_dir / "Calculator-2026-09-27-143510.ips").write_text(fresh[0])
         return b"", b""
 
     mock_proc = AsyncMock()
@@ -610,6 +611,14 @@ async def test_a_pull_that_cannot_start_says_so(tmp_crash_dir):
 # ---------------------------------------------------------------------------
 
 
+def _fresh_ips():
+    """crash_sample.ips, stamped now: a crash from after the adapter started."""
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S.%f +0000")
+    return (FIXTURES / "crash_sample.ips").read_text().replace("2026-02-08 10:30:45.000 +0000", now)
+
+
 def _writing_proc(write):
     """An idevicecrashreport that runs `write()` while it is running."""
     async def communicate():
@@ -635,10 +644,9 @@ async def test_a_pulled_report_names_the_phone_on_its_log_entry_too(tmp_crash_di
     adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
     entries = _collect_entries(adapter)
     await adapter.start()
-    src = FIXTURES / "crash_sample.ips"
 
     async def write():
-        (tmp_crash_dir / "MyApp-1.ips").write_text(src.read_text())
+        (tmp_crash_dir / "MyApp-1.ips").write_text(_fresh_ips())
 
     result = await _pull_with(adapter, _writing_proc(write))
 
@@ -775,4 +783,29 @@ async def test_the_hook_runs_for_a_crash_logcat_already_logged(tmp_crash_dir, tm
 
     assert entries == []
     assert "com.example.myapp" in marker.read_text()
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_pulled_crash_from_before_start_is_listed_not_replayed(tmp_crash_dir, tmp_path):
+    """Reports stay on the phone now (-k), so the first pull into an empty
+    directory copies its whole history; logging each old crash as new, and
+    running the hook for each, is the replay add_reports already refuses."""
+    import asyncio
+
+    marker = tmp_path / "hook-ran"
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60,
+                           on_crash_hook=f"cat >> {marker}")
+    entries = _collect_entries(adapter)
+    await adapter.start()
+
+    async def write():            # crash_sample.ips is from 2026-01-15
+        (tmp_crash_dir / "MyApp-old.ips").write_text((FIXTURES / "crash_sample.ips").read_text())
+
+    result = await _pull_with(adapter, _writing_proc(write))
+    await asyncio.sleep(0.3)
+
+    assert [r.device_id for r in result.new] == ["PHONE-UUID"]      # still reported
+    assert entries == []
+    assert not marker.exists()
     await adapter.stop()
