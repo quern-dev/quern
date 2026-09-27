@@ -169,6 +169,17 @@ class TestPull:
         with pytest.raises(DropboxPullError, match="device offline"):
             await self._pull(monkeypatch, _FakeProc(err=b"error: device offline", code=1))
 
+    async def test_a_run_that_failed_partway_is_not_read_as_complete(self, monkeypatch):
+        """The zone lines and the marker printed, then dumpsys failed: the
+        output looks well-formed and holds no records, which read as "no
+        crashes". Only the exit code says otherwise."""
+        proc = _FakeProc(
+            out=b"America/Los_Angeles\n-0700\n__QUERN_DROPBOX__\n",
+            err=b"Can't find service: dropbox", code=1,
+        )
+        with pytest.raises(DropboxPullError, match="Can't find service"):
+            await self._pull(monkeypatch, proc)
+
     async def test_output_without_the_marker_is_not_mistaken_for_no_crashes(self, monkeypatch):
         """An unauthorised device can answer with exit 0 and nothing useful."""
         with pytest.raises(DropboxPullError):
