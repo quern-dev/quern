@@ -102,6 +102,13 @@ on USB) or `failed` (with the error). Only `pulled` means the list reflects the
 device. With a `udid`, the list is that device's crashes, plus reports that name
 no device, such as a simulator's crash file, which does not say which simulator.
 
+On Android, `pull.open_dialogs` lists processes showing a crash ("keeps
+stopping") or ANR dialog right now. While a crash dialog is open, Android drops
+every further crash of that process, with no report and no log line, so no new
+reports does not mean it stopped crashing. Dismiss the dialog or force-stop the
+app. `[]` means none; `null` means it was not checked (iOS, a failed pull) or the
+process listing could not be read.
+
 ### Network proxy
 
 | MCP Tool | Method | Path | Description |
