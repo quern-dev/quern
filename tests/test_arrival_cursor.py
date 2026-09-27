@@ -354,3 +354,89 @@ class TestFlowSummary:
     async def test_a_junk_cursor_is_still_refused(self, app):
         resp = await _flow_summary(app, "not-a-cursor")
         assert resp.status_code == 400
+
+
+class TestInterleaving:
+    """No store holds its lock across an await today, so an append cannot land
+    mid-summary on its own; these tests force it. They are what keeps "no
+    gaps, no repeats" true if a lock is ever held across an await -- the
+    snapshot taken before reading is otherwise invisible (review of #317:
+    removing it survived the suite)."""
+
+    @staticmethod
+    def _append_during(read_from, write_to, entry):
+        """Make `read_from.entries_between` append `entry` to `write_to` after
+        it has read, the way a concurrent arrival would."""
+        original = read_from.entries_between
+        fired = []
+
+        async def interleaved(after, upto):
+            result = await original(after, upto)
+            if not fired:
+                fired.append(True)
+                await write_to.append(entry)
+            return result
+
+        read_from.entries_between = interleaved
+
+    async def test_an_arrival_into_a_buffer_not_yet_read_is_not_counted_twice(self, app):
+        """Logs are read before crashes. A crash arriving between the two reads
+        would, without the snapshot, be in this delta and the next."""
+        cursor = (await _log_summary(app))["cursor"]
+        self._append_during(
+            app.state.ring_buffer, app.state.crash_buffer,
+            _entry("crashed mid-read", level=LogLevel.FAULT, source=LogSource.CRASH),
+        )
+
+        first = await _log_summary(app, cursor)
+        second = await _log_summary(app, first["cursor"])
+
+        assert first["total_count"] + second["total_count"] == 1, "counted twice"
+        assert second["total_count"] == 1                # it belongs to the next delta
+
+    async def test_an_arrival_into_a_buffer_already_read_is_not_skipped(self, app):
+        """Crashes are read last. A log line arriving then has missed this
+        delta's read of its buffer; a cursor taken after reading would put it
+        behind the cursor, and no delta would ever return it."""
+        cursor = (await _log_summary(app))["cursor"]
+        self._append_during(
+            app.state.crash_buffer, app.state.ring_buffer, _entry("arrived mid-read"),
+        )
+
+        first = await _log_summary(app, cursor)
+        second = await _log_summary(app, first["cursor"])
+
+        assert first["total_count"] + second["total_count"] == 1, "skipped"
+
+    async def test_a_flow_finishing_mid_read_is_in_exactly_one_delta(self, app):
+        store = app.state.flow_store
+        cursor = (await _flow_summary(app)).json()["cursor"]
+        original = store.flows_between
+
+        async def interleaved(after, upto):
+            store.flows_between = original              # once
+            await store.add(_flow("finished mid-read"))
+            return await original(after, upto)
+
+        store.flows_between = interleaved
+
+        first = (await _flow_summary(app, cursor)).json()
+        second = (await _flow_summary(app, first["cursor"])).json()
+
+        assert first["total_flows"] + second["total_flows"] == 1
+
+
+async def test_clearing_a_buffer_between_summaries_keeps_the_delta_exact(app):
+    """`clear()` has no production caller, so nothing exercised it: a clear
+    that forgot the arrival numbers would put them out of step with the
+    entries and break the next read (review of #317)."""
+    ring = app.state.ring_buffer
+    await ring.append(_entry("before"))
+    cursor = (await _log_summary(app))["cursor"]
+    await ring.append(_entry("after, then cleared"))
+    await ring.clear()
+    await ring.append(_entry("after the clear"))
+
+    delta = await _log_summary(app, cursor)
+
+    assert delta["total_count"] == 1
