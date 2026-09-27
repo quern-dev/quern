@@ -331,7 +331,7 @@ export function registerLogTools(server: McpServer): void {
   );
 
   server.registerTool("get_log_summary", {
-    description: `Get an AI-optimized summary of recent log activity. Returns error counts, top issues, and a natural language summary. Supports cursor-based polling for efficient delta updates. If \`truncated\` is true, entries in the window were evicted and the counts may be low. The cursor follows arrival order: a delta returns everything that arrived since the last summary, including entries stamped earlier (a device clock ahead, a late crash report, a request that started before the summary and finished after). If \`cursor_reset\` is true, the cursor could not be honoured (server restarted, or not a cursor) and the result covers the window instead.`,
+    description: `Get an AI-optimized summary of recent log activity. Returns error counts, top issues, and a natural language summary. Supports cursor-based polling for efficient delta updates. If \`truncated\` is true, entries in the window were evicted and the counts may be low. The cursor follows arrival order: a delta returns everything that arrived since the last summary, including entries stamped earlier (a device clock ahead of the host, a crash report written after the crash). If \`cursor_reset\` is true, the cursor could not be honoured (the server restarted, the cursor is ahead of anything the server has numbered, or it is not a cursor) and the result covers the window instead.`,
     inputSchema: strictParams({
       window: z
         .enum(["30s", "1m", "5m", "15m", "1h"])
