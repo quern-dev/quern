@@ -428,6 +428,8 @@ async def test_pull_from_device_with_udid(tmp_crash_dir):
         assert "-u" in args
         assert "00008030-AABBCCDD" in args
         assert "-e" in args
+        # Keep the reports on the phone: without -k the tool deletes them.
+        assert "-k" in args
 
     await adapter.stop()
 
@@ -451,6 +453,7 @@ async def test_pull_from_device_without_udid(tmp_crash_dir):
         args = mock_exec.call_args[0]
         assert "-u" not in args
         assert "-e" in args
+        assert "-k" in args
 
     await adapter.stop()
 
@@ -483,6 +486,44 @@ async def test_pull_from_device_returns_new_reports(tmp_crash_dir):
     assert len(result.new) == 1
     assert result.new[0].process == "MyApp"
     await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_reports_left_on_the_phone_are_not_new_twice(tmp_crash_dir):
+    """With -k every pull copies the phone's whole history again, to the same
+    paths. That must not turn one crash into a new report on each pull, nor
+    after a restart."""
+    src = FIXTURES / "crash_sample.ips"
+
+    async def fake_communicate():
+        (tmp_crash_dir / "Calculator-2026-09-27-143510.ips").write_text(src.read_text())
+        return b"", b""
+
+    mock_proc = AsyncMock()
+    mock_proc.communicate = fake_communicate
+    mock_proc.returncode = 0
+
+    async def pull(adapter):
+        with (
+            patch("shutil.which", return_value="/usr/local/bin/idevicecrashreport"),
+            patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+        ):
+            return await adapter.pull_from_device("00008101-HWUDID")
+
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    entries = _collect_entries(adapter)
+    await adapter.start()
+    assert len((await pull(adapter)).new) == 1
+    assert (await pull(adapter)).new == []
+    assert len(entries) == 1
+    await adapter.stop()
+
+    restarted = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    later = _collect_entries(restarted)
+    await restarted.start()
+    assert (await pull(restarted)).new == []
+    assert later == []
+    await restarted.stop()
 
 
 @pytest.mark.asyncio

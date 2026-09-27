@@ -3,7 +3,7 @@
 Polls a directory for new .ips / .crash files, parses them into structured
 CrashReport objects, and emits a LogEntry for each new crash.
 
-Optionally runs ``idevicecrashreport -e <dir>`` to pull crash reports from a
+Optionally runs ``idevicecrashreport -k -e <dir>`` to pull crash reports from a
 connected device.  The command has a hard timeout because it can hang when the
 device is in a bad state.
 """
@@ -147,7 +147,13 @@ class CrashAdapter(BaseSourceAdapter):
 
         self.watch_dir.mkdir(parents=True, exist_ok=True)
 
-        cmd = ["idevicecrashreport", "-e"]
+        # -k: copy, and leave the reports on the phone. Without it the tool
+        # deletes each report after copying, so a pull took the user's crash
+        # history away from Xcode, Finder and everything else that reads it --
+        # the same fault as the `logcat -c` #255 removed. Keeping them means a
+        # pull re-copies reports it has already seen; they land at the same
+        # path, which `_seen_files` already skips, including across restarts.
+        cmd = ["idevicecrashreport", "-k", "-e"]
         if libimobiledevice_udid:
             cmd.extend(["-u", libimobiledevice_udid])
         cmd.append(str(self.watch_dir))
