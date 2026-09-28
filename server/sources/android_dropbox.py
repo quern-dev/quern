@@ -146,6 +146,7 @@ def _parse_record(
     exception_type = exception_codes = signal = reason = ""
     frames: list[str] = []
     structured: list[CrashFrame] = []
+    native: list[tuple[CrashFrame, str]] = []      # native crashes' frames, with paths
     app_frame: CrashFrame | None = None
     package, app_version, build_version = _package(fields.get("Package", ""))
     if kind == "crash":
@@ -163,7 +164,8 @@ def _parse_record(
         # The crashing thread's backtrace only: the tombstone goes on to
         # every other thread's, and reading the whole body mixed them in.
         frames = _NATIVE_FRAME.findall(_crashing_backtrace(body))
-        structured = _safe(crash_frames.native_frames, frames)
+        native = _safe(_native_frames, frames)
+        structured = [frame for frame, _ in native]
         app_frame = crash_frames.first_app_frame(structured)     # from the whole stack
         abort = _ABORT_MESSAGE.search(body)
         reason = abort.group(1) if abort else ""
@@ -195,7 +197,7 @@ def _parse_record(
         signal=signal,
         top_frames=[f.strip() for f in frames[:TOP_FRAMES]],
         frames=structured[:crash_frames.MAX_FRAMES],
-        images=_native_images(structured, frames) if kind == "native_crash" else [],
+        images=_native_images(native, app_frame),
         frames_from=_FRAMES_FROM[kind] if structured else "",
         app_frame=app_frame,
         reason=reason,
@@ -242,14 +244,20 @@ def _crashing_backtrace(body: str) -> str:
     return block if end == -1 else block[:end]
 
 
-def _native_images(frames: list[CrashFrame], lines: list[str]) -> list[CrashImage]:
-    """The libraries the native frames point into, with their BuildIds."""
+def _native_frames(lines: list[str]) -> list[tuple[CrashFrame, str]]:
+    return [parsed for parsed in map(crash_frames.native_frame, lines) if parsed]
+
+
+def _native_images(native: list[tuple[CrashFrame, str]],
+                   app_frame: CrashFrame | None) -> list[CrashImage]:
+    """The libraries the returned frames point into, with their BuildIds, and
+    the app frame's, which may lie past the cap."""
+    wanted = {frame.image for frame, _ in native[:crash_frames.MAX_FRAMES]}
+    wanted |= {app_frame.image} if app_frame else set()
     images: dict[str, CrashImage] = {}
-    for frame, line in zip(frames, lines, strict=False):
-        if frame.image and frame.image not in images:
-            images[frame.image] = CrashImage(
-                name=frame.image, uuid=frame.build_id, path=crash_frames.native_path(line),
-            )
+    for frame, path in native:
+        if frame.image in wanted and frame.image not in images:
+            images[frame.image] = CrashImage(name=frame.image, uuid=frame.build_id, path=path)
     return list(images.values())
 
 
@@ -317,7 +325,7 @@ def _anr_frames(lines: list[str], package: str) -> list[CrashFrame]:
     return frames
 
 
-def _safe(parse, lines, *args) -> list[CrashFrame]:
+def _safe(parse, lines, *args) -> list:
     """A parse of frames that cannot fail the pull: a record with frames it
     cannot read is still a crash, just without them."""
     try:

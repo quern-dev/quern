@@ -700,6 +700,7 @@ class CrashAdapter(BaseSourceAdapter):
         except (TypeError, ValueError, AttributeError):
             logger.warning("Could not read the frames of %s", path, exc_info=True)
             frames, images = [], []
+        app_frame = crash_frames.first_app_frame(frames)       # before the cap
         identifier = re.search(r"^Identifier:\s+(\S+)", content, re.MULTILINE)
         exe_path = re.search(r"^Path:\s+(\S.*)$", content, re.MULTILINE)
         version = re.search(r"^Version:\s+(\S+)(?:\s+\((\S+)\))?", content, re.MULTILINE)
@@ -720,10 +721,10 @@ class CrashAdapter(BaseSourceAdapter):
             exception_codes=exc_codes,
             signal=signal_name,
             top_frames=[crash_frames.format_frame(f) for f in frames[:crash_frames.TOP_FRAMES]],
-            frames=frames,
-            images=images,
+            frames=frames[:crash_frames.MAX_FRAMES],
+            images=_images_for(images, frames[:crash_frames.MAX_FRAMES], app_frame),
             frames_from="crashing_thread" if frames else "",
-            app_frame=crash_frames.first_app_frame(frames),
+            app_frame=app_frame,
             bundle_id=identifier.group(1) if identifier else "",
             app_version=version.group(1) if version else "",
             build_version=(version.group(2) or "") if version else "",

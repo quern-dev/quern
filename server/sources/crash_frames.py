@@ -274,7 +274,9 @@ _TEXT_IMAGE = re.compile(
 
 
 def crash_text_frames(content: str) -> tuple[list[CrashFrame], list[CrashImage]]:
-    """The crashed thread's frames from a text report, and their images."""
+    """The crashed thread's frames from a text report, and their images.
+
+    Every frame, so the caller picks the app's before it caps them."""
     images_by_name: dict[str, CrashImage] = {}
     section = content.split("Binary Images:", 1)
     if len(section) == 2:
@@ -293,7 +295,7 @@ def crash_text_frames(content: str) -> tuple[list[CrashFrame], list[CrashImage]]
     crashed = re.search(r"^Thread \d+ Crashed:.*\n((?:\d+\s+.+\n?)+)", content, re.M)
     frames: list[CrashFrame] = []
     used: dict[str, CrashImage] = {}
-    for line in (crashed.group(1).splitlines() if crashed else [])[:MAX_FRAMES]:
+    for line in crashed.group(1).splitlines() if crashed else []:
         m = _TEXT_FRAME.match(line.strip())
         if not m:
             continue
@@ -341,35 +343,30 @@ _JAVA_NOT_APP = (
 def native_frames(lines: list[str]) -> list[CrashFrame]:
     """Frames from tombstone backtrace lines. A frame is the app's when its
     library was installed with the app (`/data/app/…`)."""
-    frames = []
-    for line in lines:
-        m = _NATIVE.match(line)
-        if not m:
-            continue
-        rest = m.group(2)
-        build_id = _NATIVE_BUILD_ID.search(rest)
-        if build_id:
-            rest = rest[:build_id.start()]
-        rest = _NATIVE_APK_OFFSET.sub("", rest).rstrip()
-        path, symbol, symbol_offset = _native_path_and_symbol(rest)
-        frames.append(CrashFrame(
-            image=posixpath.basename(path.split("!")[-1]),
-            offset=int(m.group(1), 16),
-            symbol=symbol,
-            symbol_offset=symbol_offset,
-            build_id=build_id.group(1) if build_id else "",
-            app=path.startswith("/data/app/"),
-        ))
-    return frames
+    return [parsed[0] for parsed in map(native_frame, lines) if parsed]
 
 
-def native_path(line: str) -> str:
-    """The library path of one tombstone backtrace line; "" if it is not one."""
+def native_frame(line: str) -> tuple[CrashFrame, str] | None:
+    """One tombstone backtrace line as a frame, with its library's path; None
+    if it is not one. Returned together so a line that is skipped cannot put
+    the paths out of step with the frames."""
     m = _NATIVE.match(line)
     if not m:
-        return ""
-    rest = _NATIVE_BUILD_ID.sub("", m.group(2))
-    return _native_path_and_symbol(_NATIVE_APK_OFFSET.sub("", rest).rstrip())[0]
+        return None
+    rest = m.group(2)
+    build_id = _NATIVE_BUILD_ID.search(rest)
+    if build_id:
+        rest = rest[:build_id.start()]
+    rest = _NATIVE_APK_OFFSET.sub("", rest).rstrip()
+    path, symbol, symbol_offset = _native_path_and_symbol(rest)
+    return CrashFrame(
+        image=posixpath.basename(path.split("!")[-1]),
+        offset=int(m.group(1), 16),
+        symbol=symbol,
+        symbol_offset=symbol_offset,
+        build_id=build_id.group(1) if build_id else "",
+        app=path.startswith("/data/app/"),
+    ), path
 
 
 def _native_path_and_symbol(rest: str) -> tuple[str, str, int | None]:

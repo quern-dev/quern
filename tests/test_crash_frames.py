@@ -362,6 +362,24 @@ class TestCrashText:
         assert (report.bundle_id, report.app_version, report.build_version) == (
             "com.example.myapp", "1.0.0", "100")
 
+    def test_the_crash_site_past_the_frame_cap(self, tmp_path):
+        """Picked before the frames are capped, as in an `.ips`, and its image
+        kept."""
+        deep = "".join(f"{i}   UIKitCore                   0x00000001abcd{i:04x} "
+                       f"-[UIView layout{i}] + 4\n" for i in range(35))
+        text = (FIXTURES / "crash_sample.crash").read_text().replace(
+            "Thread 0 Crashed:\n", "Thread 0 Crashed:\n" + deep, 1)
+        text = text.rstrip("\n") + (
+            "\n0x1abc00000 -        0x1abffffff UIKitCore arm64  <11> /System/UIKitCore"
+            "\n0x1cde00000 - 0x1cdffffff CoreFoundation arm64  <22> /System/CoreFoundation\n")
+        f = tmp_path / "MyApp.crash"
+        f.write_text(text)
+        report = _parse(f)
+        assert report.app_frame.symbol == "-[FeedViewController tableView:cellForRowAtIndexPath:]"
+        assert len(report.frames) == crash_frames.MAX_FRAMES
+        # CoreFoundation's frames all lie past the cap.
+        assert {i.name for i in report.images} == {"MyApp", "UIKitCore"}
+
     def test_an_unsymbolicated_line_keeps_the_offset(self, tmp_path):
         text = (FIXTURES / "crash_sample.crash").read_text().replace(
             "0x0000000100abc000 -[FeedViewController tableView:cellForRowAtIndexPath:] + 128",
@@ -500,6 +518,40 @@ class TestAndroidNative:
         libc = next(i for i in report.images if i.name == "libc.so")
         assert libc.uuid == "cd7952cb40d1a2deca6420c2da7910be"
         assert libc.path == "/apex/com.android.runtime/lib64/bionic/libc.so"
+
+
+    def _native(self, text):
+        from server.sources.android_dropbox import device_zone, parse_dropbox
+
+        [report] = parse_dropbox(text, serial="s", zone=device_zone("America/Los_Angeles", ""))
+        return report
+
+    def test_a_line_that_is_not_a_frame_leaves_the_paths_in_step(self):
+        """Each image's path comes from its own frame's line: pairing frames
+        with lines by position put every image after a skipped line on the
+        next line's path."""
+        text = (FIXTURES / "android_dropbox" / "system_app_native_crash.dropbox").read_text()
+        text = text.replace("      #01 pc 0000000000016628",
+                            "      #00 pc (unreadable)\n      #01 pc 0000000000016628", 1)
+        paths = {i.name: i.path for i in self._native(text).images}
+        assert paths["libutils.so"] == "/system/lib64/libutils.so"
+        assert paths["libandroid_runtime.so"] == "/system/lib64/libandroid_runtime.so"
+
+    def test_the_images_are_the_returned_frames_and_the_crash_sites(self):
+        text = (FIXTURES / "android_dropbox" / "system_app_native_crash.dropbox").read_text()
+        deep = "".join(f"      #{i:02d} pc {i:016x}  /system/lib64/libdeep{i}.so (f+4)\n"
+                       for i in range(35))
+        app = ("      #35 pc 0000000000001234  /data/app/~~x/com.example-1/lib/arm64/"
+               "libapp.so (crash+8) (BuildId: abcd)\n")
+        text = text.replace("backtrace:\n", "backtrace:\n" + deep + app, 1)
+        report = self._native(text)
+        assert len(report.frames) == crash_frames.MAX_FRAMES
+        assert report.app_frame.image == "libapp.so"
+        images = {i.name: i for i in report.images}
+        assert images["libapp.so"].path.endswith("/lib/arm64/libapp.so")
+        assert images["libapp.so"].uuid == "abcd"
+        assert "libc.so" not in images          # only past the cap
+        assert "libdeep34.so" not in images
 
 
 class TestAndroidJava:
