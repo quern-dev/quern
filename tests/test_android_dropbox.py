@@ -1126,6 +1126,26 @@ class TestClearDeviceCrashes:
         assert resp.status_code == 409
         assert "not connected over USB" in resp.json()["detail"]
 
+    async def test_a_listing_that_fails_deletes_nothing(self, app, monkeypatch):
+        from server.device import devicectl
+        from server.sources import ios_crash
+
+        devicectl._remember_identity("00008101-PHONE", "LIB")
+        app.state.device_controller = _controller(lib_udid="LIB")
+        sent = []
+
+        async def run(argv, what, timeout):
+            sent.append(what)
+            raise ios_crash.IosCrashError("pymobiledevice3 crash ls exited 1: Device not found")
+
+        monkeypatch.setattr(ios_crash, "command", lambda: ["/bin/pmd3"])
+        monkeypatch.setattr(ios_crash, "_run", run)
+
+        resp = await _clear_device(app, "00008101-PHONE")
+
+        assert resp.status_code == 502 and "Device not found" in resp.json()["detail"]
+        assert sent == ["crash ls"]                      # never reached the delete
+
     async def test_a_delete_that_fails_partway_says_what_is_gone(self, app, monkeypatch):
         """The delete is permanent and goes one report at a time: a 502 that
         says only why reads as "nothing was deleted"."""
