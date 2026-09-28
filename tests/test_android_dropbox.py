@@ -530,6 +530,8 @@ class TestEndpoint:
         assert data["pull"] == {
             "udid": "emulator-5554", "platform": "android", "status": "pulled",
             "new_reports": 3, "reason": None, "open_dialogs": [],
+            "window_days": None, "older_on_device": None, "oldest_on_device": None,
+            "note": None,
         }
         assert data["crashes"][0]["kind"] == "crash"
 
@@ -770,7 +772,7 @@ class TestEndpoint:
         ))
         asked = {}
 
-        async def pull(lib_udid, *, device_id=""):
+        async def pull(lib_udid, *, device_id="", days=3):
             asked["device_id"] = device_id
             return PullResult()
 
@@ -839,8 +841,8 @@ class TestEndpoint:
 
         app.state.device_controller = _controller(lib_udid="00008101-LIB")
 
-        async def failing(lib_udid, *, device_id=""):
-            return PullResult(error="idevicecrashreport timed out after 30s")
+        async def failing(lib_udid, *, device_id="", days=3):
+            return PullResult(error="pymobiledevice3 crash pull timed out after 30s")
 
         monkeypatch.setattr(app.state.crash_adapter, "pull_from_device", failing)
 
@@ -848,8 +850,10 @@ class TestEndpoint:
 
         assert data["pull"] == {
             "udid": "00008101-PHONE", "platform": "ios", "status": "failed",
-            "new_reports": 0, "reason": "idevicecrashreport timed out after 30s",
+            "new_reports": 0, "reason": "pymobiledevice3 crash pull timed out after 30s",
             "open_dialogs": None,
+            "window_days": None, "older_on_device": None, "oldest_on_device": None,
+            "note": None,
         }
 
     async def test_a_successful_iphone_pull_says_so(self, app, monkeypatch):
@@ -857,7 +861,7 @@ class TestEndpoint:
 
         app.state.device_controller = _controller(lib_udid="00008101-LIB")
 
-        async def ok(lib_udid, *, device_id=""):
+        async def ok(lib_udid, *, device_id="", days=3):
             return PullResult()
 
         monkeypatch.setattr(app.state.crash_adapter, "pull_from_device", ok)
@@ -914,7 +918,7 @@ class TestOneDevicesCrashes:
         app.state.device_controller = _controller(lib_udid="LIB")
         asked = {}
 
-        async def pull(lib_udid, *, device_id=""):
+        async def pull(lib_udid, *, device_id="", days=3):
             asked.update(lib_udid=lib_udid, device_id=device_id)
             return PullResult()
 
@@ -923,3 +927,183 @@ class TestOneDevicesCrashes:
         await _latest(app, udid="00008101-PHONE")
 
         assert asked == {"lib_udid": "LIB", "device_id": "00008101-PHONE"}
+
+
+# -- #322: the pull's window, clearing the Mac, clearing a phone ------------------
+
+
+class TestWindowOnTheResponse:
+    async def test_what_the_pull_left_on_the_phone_is_said(self, app, monkeypatch):
+        """Skipping old reports must not read as a full sync."""
+        from datetime import date
+
+        from server.sources.crash import PullResult
+
+        app.state.device_controller = _controller(lib_udid="LIB")
+        asked = {}
+
+        async def pull(lib_udid, *, device_id="", days=3):
+            asked["days"] = days
+            return PullResult(window_days=days, older_on_device=214,
+                              oldest_on_device=date(2026, 3, 2))
+
+        monkeypatch.setattr(app.state.crash_adapter, "pull_from_device", pull)
+
+        data = await _latest(app, udid="00008101-PHONE", days=5)
+
+        assert asked == {"days": 5}
+        p = data["pull"]
+        assert (p["status"], p["window_days"], p["older_on_device"], p["oldest_on_device"]) == (
+            "pulled", 5, 214, "2026-03-02")
+        assert "214 report(s) older than 5 day(s)" in p["note"]
+        assert "clear_device_crashes" in p["note"]
+
+    async def test_nothing_left_behind_means_no_note(self, app, monkeypatch):
+        from server.sources.crash import PullResult
+
+        app.state.device_controller = _controller(lib_udid="LIB")
+
+        async def pull(lib_udid, *, device_id="", days=3):
+            return PullResult(window_days=3, older_on_device=0)
+
+        monkeypatch.setattr(app.state.crash_adapter, "pull_from_device", pull)
+
+        data = await _latest(app, udid="00008101-PHONE")
+
+        assert data["pull"]["older_on_device"] == 0 and data["pull"]["note"] is None
+
+    async def test_days_is_bounded(self, app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/v1/crashes/latest", headers=HEADERS,
+                                    params={"udid": "00008101-PHONE", "days": 0})
+        assert resp.status_code == 422
+
+
+async def _delete(app, **params):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        return await client.delete("/api/v1/crashes", headers=HEADERS, params=params)
+
+
+async def _clear_device(app, udid):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        return await client.post("/api/v1/crashes/device/clear", headers=HEADERS,
+                                 json={"udid": udid})
+
+
+class TestClearCrashes:
+    async def test_one_devices_reports(self, app):
+        from server.models import CrashReport
+
+        app.state.device_controller = _controller()
+        adapter = app.state.crash_adapter
+        adapter.crash_reports += [
+            CrashReport(crash_id="a", timestamp=datetime(2026, 9, 27, tzinfo=UTC),
+                        device_id="emulator-5554"),
+            CrashReport(crash_id="b", timestamp=datetime(2026, 9, 27, tzinfo=UTC),
+                        device_id="PIXEL-SERIAL"),
+        ]
+
+        resp = await _delete(app, udid="emulator-5554")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["reports_removed"] == 1
+        assert [r.crash_id for r in adapter.crash_reports] == ["b"]
+
+    async def test_a_device_quern_never_saw_is_not_cleared(self, app):
+        """#182: success for an id that never existed tells teardown it worked."""
+        app.state.device_controller = _controller()
+
+        resp = await _delete(app, udid="NOT-A-DEVICE")
+
+        assert resp.status_code == 404
+
+    async def test_a_known_device_with_nothing_stored_is_cleared(self, app):
+        app.state.device_controller = _controller()
+
+        resp = await _delete(app, udid="PIXEL-SERIAL")
+
+        assert resp.status_code == 200 and resp.json()["reports_removed"] == 0
+
+    async def test_everything(self, app):
+        from server.models import CrashReport
+
+        app.state.crash_adapter.crash_reports.append(
+            CrashReport(crash_id="a", timestamp=datetime(2026, 9, 27, tzinfo=UTC)))
+
+        resp = await _delete(app)
+
+        assert resp.status_code == 200 and resp.json()["reports_removed"] == 1
+
+    async def test_disabled_capture(self, app):
+        app.state.crash_adapter = None
+        assert (await _delete(app)).status_code == 409
+
+
+class TestClearDeviceCrashes:
+    def _pmd3(self, monkeypatch, listings, sent):
+        """listings: what successive `crash ls` calls answer."""
+        from server.sources import ios_crash
+
+        calls = iter(listings)
+
+        async def run(cmd, timeout):
+            sent.append(cmd[1:3])
+            if cmd[1:3] == ["crash", "ls"]:
+                return "".join(f"/{n}\n" for n in next(calls))
+            return ""
+
+        monkeypatch.setattr(ios_crash, "find_binary", lambda: "/bin/pmd3")
+        monkeypatch.setattr(ios_crash, "_run", run)
+
+    async def test_an_iphone_is_cleared_and_the_count_reported(self, app, monkeypatch):
+        app.state.device_controller = _controller(lib_udid="LIB")
+        sent = []
+        self._pmd3(monkeypatch, [["A.ips", "B.ips"], []], sent)
+
+        resp = await _clear_device(app, "00008101-PHONE")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"udid": "00008101-PHONE", "removed": 2, "remaining": 0}
+        assert sent == [["crash", "ls"], ["crash", "clear"], ["crash", "ls"]]
+
+    async def test_android_is_refused_with_the_reason(self, app, monkeypatch):
+        app.state.device_controller = _controller()
+        sent = []
+        self._pmd3(monkeypatch, [], sent)
+
+        resp = await _clear_device(app, "emulator-5554")
+
+        assert resp.status_code == 400 and "only be read" in resp.json()["detail"]
+        assert sent == []
+
+    async def test_a_simulator_is_refused_with_the_reason(self, app):
+        app.state.device_controller = _controller()
+        resp = await _clear_device(app, "SIM-UDID")
+        assert resp.status_code == 400 and "DiagnosticReports" in resp.json()["detail"]
+
+    async def test_an_unknown_device_is_not_found(self, app):
+        app.state.device_controller = _controller()
+        assert (await _clear_device(app, "NOT-A-DEVICE")).status_code == 404
+
+    async def test_an_iphone_not_on_usb(self, app):
+        app.state.device_controller = _controller(lib_udid=None)
+        resp = await _clear_device(app, "00008101-PHONE")
+        assert resp.status_code == 409 and "USB" in resp.json()["detail"]
+
+    async def test_a_tool_failure_is_not_a_success(self, app, monkeypatch):
+        from server.sources import ios_crash
+
+        app.state.device_controller = _controller(lib_udid="LIB")
+
+        async def run(cmd, timeout):
+            raise ios_crash.IosCrashError("pymobiledevice3 crash clear exited 1: boom")
+
+        monkeypatch.setattr(ios_crash, "find_binary", lambda: "/bin/pmd3")
+        monkeypatch.setattr(ios_crash, "_run", run)
+
+        resp = await _clear_device(app, "00008101-PHONE")
+
+        assert resp.status_code == 502 and "boom" in resp.json()["detail"]

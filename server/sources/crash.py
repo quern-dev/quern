@@ -3,9 +3,10 @@
 Polls a directory for new .ips / .crash files, parses them into structured
 CrashReport objects, and emits a LogEntry for each new crash.
 
-Optionally runs ``idevicecrashreport -k -e <dir>`` to pull crash reports from a
-connected device.  The command has a hard timeout because it can hang when the
-device is in a bad state.
+Optionally pulls crash reports from a connected iPhone with pymobiledevice3:
+the recent ones only, left on the phone (see server/sources/ios_crash.py).
+Every call has a hard timeout because it can hang when the device is in a bad
+state.
 """
 
 from __future__ import annotations
@@ -13,24 +14,24 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
-import shutil
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from server.config import CONFIG_DIR
 from server.models import CrashReport, LogEntry, LogLevel, LogSource
-from server.sources import BaseSourceAdapter, EntryCallback
+from server.sources import BaseSourceAdapter, EntryCallback, ios_crash
 
 logger = logging.getLogger(__name__)
 
 CRASH_DIR = CONFIG_DIR / "crashes"
 DIAGNOSTIC_REPORTS_DIR = Path.home() / "Library" / "Logs" / "DiagnosticReports"
 POLL_INTERVAL = 10  # seconds
-PULL_TIMEOUT = 30  # seconds
 
 #: Under the watch dir, one directory per phone a pull has read, named by
 #: its device id. A report file does not say which phone it came from, so
@@ -46,6 +47,29 @@ class PullResult:
 
     new: list[CrashReport] = field(default_factory=list)
     error: str | None = None
+    #: How far back the pull reached, in days, when it listed the phone.
+    window_days: int | None = None
+    #: Reports older than the window, left on the phone and not pulled.
+    older_on_device: int | None = None
+    #: The oldest report date on the phone.
+    oldest_on_device: date | None = None
+
+
+@dataclass
+class ClearResult:
+    """What a clear or a retention pass removed from the Mac."""
+
+    files_removed: int = 0
+    reports_removed: int = 0
+    errors: list[str] = field(default_factory=list)
+
+
+#: Pulled reports older than this are removed from the Mac (#322). The files'
+#: mtime is when they were last copied (`_stamp_copied`), and a pull re-copies
+#: only reports within its window, so a file this old has been outside every
+#: window since -- including a wider one someone asked for with `days`.
+DEFAULT_RETENTION_DAYS = 30
+RETENTION_INTERVAL_S = 3600
 
 
 class CrashAdapter(BaseSourceAdapter):
@@ -60,6 +84,7 @@ class CrashAdapter(BaseSourceAdapter):
         extra_watch_dirs: list[Path] | None = None,
         process_filter: str | None = None,
         on_crash_hook: str | None = None,
+        retention_days: int = DEFAULT_RETENTION_DAYS,
     ) -> None:
         super().__init__(
             adapter_id="crash",
@@ -76,21 +101,30 @@ class CrashAdapter(BaseSourceAdapter):
         self._seen_files: set[str] = set()
         # Files that could not be parsed, by path, with the size they had.
         # Retried only when it changes. Marking them seen instead lost a report
-        # for good: a pull that timed out mid-copy left a partial file, and -k
-        # re-copies the complete one to the same path -- always larger. Not
-        # the mtime: idevicecrashreport rewrites every file it copies (measured,
-        # 1.4.0), so every pull would re-read every non-crash report a phone
-        # holds, JetsamEvent and the like, which never parse.
+        # for good: a pull that timed out mid-copy left a partial file, and the
+        # next pull re-copies the complete one to the same path -- always
+        # larger. Not the mtime: each pull stamps what it copied with the copy
+        # time (`_stamp_copied`), so every pull would re-read every report that
+        # never parses.
         self._unparsed: dict[str, int] = {}
         # One scan at a time. The poll loop scanning while idevicecrashreport
         # was still writing took the phone's files as its own, so the pull
         # neither counted nor tagged them.
         self._scan_lock = asyncio.Lock()
+        # What has been logged (and hooked), by file path or DropBox record.
+        # A report cleared from the list and read again -- re-copied from the
+        # phone, re-pulled from DropBox -- is listed again but not logged as
+        # a new crash a second time.
+        self._emitted: set[str] = set()
+        #: 0 turns automatic removal off.
+        self.retention_days = retention_days
+        self._last_prune: float | None = None
         self.crash_reports: list[CrashReport] = []
 
     async def start(self) -> None:
         """Start the crash watcher background loop."""
         self.watch_dir.mkdir(parents=True, exist_ok=True)
+        self.prune()
 
         # Index existing files so we don't re-emit on restart. A phone's
         # reports are listed too, without being emitted: Android's DropBox
@@ -158,6 +192,8 @@ class CrashAdapter(BaseSourceAdapter):
                     if not self._scan_lock.locked():
                         async with self._scan_lock:
                             await self._scan_for_new_files()
+                            if self._prune_due():
+                                self.prune()
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -169,14 +205,21 @@ class CrashAdapter(BaseSourceAdapter):
 
     async def pull_from_device(
         self, libimobiledevice_udid: str | None = None, *, device_id: str = "",
+        days: int = ios_crash.DEFAULT_WINDOW_DAYS,
     ) -> PullResult:
-        """Pull crash reports from a connected device via idevicecrashreport.
+        """Pull a connected iPhone's recent crash reports with pymobiledevice3.
 
         Args:
-            libimobiledevice_udid: Target a specific device. If None, pulls from
-                any connected device.
+            libimobiledevice_udid: Target a specific device. If None, the first
+                connected device.
             device_id: The device the reports are recorded against. The files
                 do not say which phone they came from, so the pull says it.
+            days: How far back to reach. Older reports stay on the phone and
+                are counted in `older_on_device`, never silently dropped.
+
+        Reports are left on the phone: the pull copies, it never deletes. The
+        old tool deleted each report it copied unless told not to, taking the
+        history away from Xcode, Finder and anything else reading it (#316).
 
         Only files this pull wrote count as its reports: new files in the
         directory it writes to. The scan also covers the other watched
@@ -184,13 +227,13 @@ class CrashAdapter(BaseSourceAdapter):
         counted as the phone's and tagged with its udid.
 
         Returns:
-            The newly discovered reports, and why the pull failed if it did.
-            A failure used to return an empty list -- the missing tool, a
-            timeout, a non-zero exit, an exception -- which read exactly like
-            "the device has no new crashes" (#316, aligning with Android).
+            The newly discovered reports, what the pull left on the phone, and
+            why it failed if it did. A failure used to return an empty list,
+            which read exactly like "the device has no new crashes".
         """
-        if not shutil.which("idevicecrashreport"):
-            return PullResult(error="idevicecrashreport not found on PATH")
+        binary = ios_crash.find_binary()
+        if not binary:
+            return PullResult(error="pymobiledevice3 not found")
 
         target = self._device_dir(device_id) or self.watch_dir
         try:
@@ -198,23 +241,23 @@ class CrashAdapter(BaseSourceAdapter):
         except OSError as e:
             return PullResult(error=f"could not create {target}: {e}")
 
-        # -k: copy, and leave the reports on the phone. Without it the tool
-        # deletes each report after copying, so a pull took the user's crash
-        # history away from Xcode, Finder and everything else that reads it --
-        # the same fault as the `logcat -c` #255 removed. Keeping them means a
-        # pull re-copies reports it has already seen; they land at the same
-        # path, which `_seen_files` already skips, including across restarts.
-        cmd = ["idevicecrashreport", "-k", "-e"]
-        if libimobiledevice_udid:
-            cmd.extend(["-u", libimobiledevice_udid])
-        cmd.append(str(target))
-
+        selection: ios_crash.Selection | None = None
         async with self._scan_lock:
             # Files already read. Not merely present: a partial copy left by a
             # timed-out pull is present, and its completed re-copy is this
             # pull's report.
             before = {str(f) for f in _crash_files(target) if str(f) in self._seen_files}
-            error = await self._run_pull(cmd)
+            error = None
+            try:
+                names = await ios_crash.list_reports(binary, libimobiledevice_udid)
+                selection = ios_crash.select_recent(names, days, datetime.now())
+                await ios_crash.pull_reports(
+                    binary, libimobiledevice_udid, selection.wanted, target,
+                )
+            except ios_crash.IosCrashError as e:
+                error = str(e)
+            if selection:
+                _stamp_copied(target, selection.wanted)
             # Scan even after a failure: a timeout can follow a partial copy,
             # and those reports are real.
             added = await self._scan_for_new_files(
@@ -222,37 +265,12 @@ class CrashAdapter(BaseSourceAdapter):
             )
         new = [r for r in added if r.file_path not in before
                and Path(r.file_path).parent == target]
-        return PullResult(new=new, error=error)
-
-    async def _run_pull(self, cmd: list[str]) -> str | None:
-        """Run idevicecrashreport. The error, or None if it succeeded."""
-        error: str | None = None
-        proc = None
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=PULL_TIMEOUT)
-            if proc.returncode:
-                said = stderr.decode(errors="replace").strip() if stderr else ""
-                error = f"idevicecrashreport exited {proc.returncode}: {said or 'no output'}"
-        except TimeoutError:
-            logger.warning("idevicecrashreport timed out after %ds", PULL_TIMEOUT)
-            if proc is not None and proc.returncode is None:
-                proc.kill()
-                await proc.wait()
-            error = f"idevicecrashreport timed out after {PULL_TIMEOUT}s"
-        except OSError as e:
-            error = f"could not run idevicecrashreport: {e}"
-        except asyncio.CancelledError:
-            # A cancelled request or a shutdown: do not leave it writing into
-            # the phone's directory with the lock released.
-            if proc is not None and proc.returncode is None:
-                proc.kill()
-            raise
-        return error
+        return PullResult(
+            new=new, error=error,
+            window_days=days if selection else None,
+            older_on_device=selection.older if selection else None,
+            oldest_on_device=selection.oldest if selection else None,
+        )
 
     async def add_reports(
         self,
@@ -293,6 +311,10 @@ class CrashAdapter(BaseSourceAdapter):
         return new
 
     async def _emit_report(self, report: CrashReport, raw: str, *, log: bool = True) -> None:
+        key = report.file_path or report.crash_id
+        if key in self._emitted:
+            return
+        self._emitted.add(key)
         if self.on_crash_hook:
             asyncio.create_task(self._run_crash_hook(report))
         if not log:
@@ -402,6 +424,97 @@ class CrashAdapter(BaseSourceAdapter):
                 continue
             await self._emit_report(report, content)
         return added
+
+    def clear(self, device_id: str | None = None) -> ClearResult:
+        """Forget stored crash reports: one device's, or all of quern's.
+
+        Removes the report files quern pulled (the watch dir and each phone's
+        directory under it) and the reports from the list, Android's included.
+        Never touches the extra watch dirs: ~/Library/Logs/DiagnosticReports
+        belongs to the Mac, and its reports are only dropped from the list.
+
+        Clearing the Mac does not clear the device. A later pull lists again
+        whatever the phone or DropBox still holds within its window -- without
+        logging it as a new crash a second time.
+        """
+        result = ClearResult()
+        if device_id:
+            directory = self._device_dir(device_id)
+            dirs = [directory] if directory else []
+        else:
+            dirs = [self.watch_dir, *self._device_dirs()]
+        removed = self._remove_files(
+            [f for d in dirs for f in _crash_files(d)], result,
+        )
+        kept = []
+        for report in self.crash_reports:
+            belongs = device_id is None or report.device_id == device_id
+            if belongs or report.file_path in removed:
+                result.reports_removed += 1
+            else:
+                kept.append(report)
+        self.crash_reports = kept
+        self._remove_empty_device_dirs()
+        return result
+
+    def prune(self, now: datetime | None = None) -> ClearResult:
+        """Remove pulled report files not copied for `retention_days` (#322).
+
+        A pull re-copies only reports within its window, so a file's mtime is
+        when it was last inside one; past the retention age it has been
+        outside every window since. Loose files from before pulls kept a
+        directory per phone are included. DiagnosticReports never is.
+        """
+        result = ClearResult()
+        self._last_prune = time.monotonic()
+        if self.retention_days <= 0:
+            return result
+        cutoff = (now or datetime.now(UTC)) - timedelta(days=self.retention_days)
+        stale = []
+        for d in [self.watch_dir, *self._device_dirs()]:
+            for f in _crash_files(d):
+                when = _mtime(f)
+                if when is not None and when < cutoff:
+                    stale.append(f)
+        removed = self._remove_files(stale, result)
+        before = len(self.crash_reports)
+        self.crash_reports = [r for r in self.crash_reports if r.file_path not in removed]
+        result.reports_removed = before - len(self.crash_reports)
+        self._remove_empty_device_dirs()
+        if result.files_removed or result.errors:
+            logger.info("Crash retention removed %d file(s) older than %d days%s",
+                        result.files_removed, self.retention_days,
+                        f"; {len(result.errors)} could not be removed" if result.errors else "")
+        return result
+
+    def _prune_due(self) -> bool:
+        if self._last_prune is None:
+            return True
+        return time.monotonic() - self._last_prune >= RETENTION_INTERVAL_S
+
+    def _remove_files(self, files: list[Path], result: ClearResult) -> set[str]:
+        """Delete these files; the paths removed. Failures are counted, not raised."""
+        removed = set()
+        for f in files:
+            try:
+                f.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                result.errors.append(f"{f.name}: {e.strerror or e}")
+                continue
+            removed.add(str(f))
+            self._seen_files.discard(str(f))
+            self._unparsed.pop(str(f), None)
+        result.files_removed += len(removed)
+        return removed
+
+    def _remove_empty_device_dirs(self) -> None:
+        for d in self._device_dirs():
+            try:
+                d.rmdir()               # only succeeds when empty
+            except OSError:
+                pass
 
     def _predates_start(self, report: CrashReport) -> bool:
         return self.started_at is not None and report.timestamp < self.started_at
@@ -602,9 +715,9 @@ class CrashAdapter(BaseSourceAdapter):
         Unreadable, it is `fallback` -- the file's modification time, where the
         caller has one -- and only then now. That helps a report written on
         this Mac (a simulator's, in DiagnosticReports), whose mtime is when it
-        was written. It does not help a pulled one: idevicecrashreport rewrites
-        each file it copies, so the mtime is the copy time. A crash report
-        carries its own time (`captureTime`, `Date/Time`), so this is rare.
+        was written. It does not help a pulled one, whose mtime is when it was
+        last copied (`_stamp_copied`). A crash report carries its own time
+        (`captureTime`, `Date/Time`), so this is rare.
         """
         if not ts_str:
             return fallback or datetime.now(UTC)
@@ -641,3 +754,19 @@ def _mtime(path: Path) -> datetime | None:
         return datetime.fromtimestamp(path.stat().st_mtime, UTC)
     except OSError:
         return None
+
+
+def _stamp_copied(target: Path, names: list[str]) -> None:
+    """Set each file just pulled to the copy time.
+
+    pymobiledevice3 keeps the device's time as the file's mtime (measured: a
+    report copied twice kept 19:08:47, its crash time). Retention reads the
+    mtime as "last copied", and by crash age it would delete a report someone
+    had just pulled on purpose with a wider `days` -- then copy it back on the
+    next pull.
+    """
+    for name in names:
+        try:
+            os.utime(target / name)     # never creates: a report not copied stays absent
+        except OSError:
+            continue

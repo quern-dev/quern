@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import enum
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, BaseModel, Field, model_validator
@@ -363,6 +363,25 @@ class CrashPullStatus(BaseModel):
     )
     new_reports: int = Field(default=0, description="Reports this pull added.")
     reason: str | None = Field(default=None, description="Why it was skipped or failed.")
+    window_days: int | None = Field(
+        default=None,
+        description="iPhone only: how far back the pull reached, in days.",
+    )
+    older_on_device: int | None = Field(
+        default=None,
+        description=(
+            "iPhone only: reports on the phone older than the window, not "
+            "pulled. Pass a larger `days` to include them, or clear them from "
+            "the phone with clear_device_crashes."
+        ),
+    )
+    oldest_on_device: date | None = Field(
+        default=None, description="iPhone only: the oldest report date on the phone.",
+    )
+    note: str | None = Field(
+        default=None,
+        description="What the pull left behind, when that is worth knowing.",
+    )
     open_dialogs: list[OpenCrashDialog] | None = Field(
         default=None,
         description=(
@@ -378,6 +397,25 @@ class CrashPullStatus(BaseModel):
             "not be read. A pull that failed on some DropBox tags still checks."
         ),
     )
+
+
+class ClearCrashesResponse(BaseModel):
+    udid: str | None = Field(default=None, description="The device cleared; null for all.")
+    files_removed: int = Field(description="Report files deleted from the Mac.")
+    reports_removed: int = Field(description="Reports dropped from quern's list.")
+    errors: list[str] = Field(
+        default_factory=list, description="Files that could not be deleted, and why.",
+    )
+
+
+class ClearDeviceCrashesRequest(BaseModel):
+    udid: str = Field(description="The iPhone to clear.")
+
+
+class ClearDeviceCrashesResponse(BaseModel):
+    udid: str
+    removed: int = Field(description="Reports the phone held before, now deleted.")
+    remaining: int = Field(description="Reports still on the phone afterwards.")
 
 
 class CrashLatestResponse(BaseModel):
