@@ -45,7 +45,7 @@ class TestTheRefusalNamesTheAlternative:
         ("set_app_plist_values", "SharedPreferences"),
         ("delete_app_plist_key", "SharedPreferences"),
         ("diff_app_plist", "SharedPreferences"),
-        ("start_plist_watch", "stat"),
+        ("start_plist_watch", "inotifyd"),
         ("save_app_state", "tar cf -"),
         ("restore_app_state", "tar xf -"),
     ])
@@ -138,4 +138,57 @@ class TestTheMapDoesNotDriftFromTheCode:
         assert mapped <= guarded, (
             f"advice for operations that no longer pass through the guard: "
             f"{sorted(mapped - guarded)}"
+        )
+
+
+class TestTheAdviceDoesNotOverclaim:
+    """Each of these was an over-claim CodeRabbit caught on #327, and two were
+    checkable against the attached hardware rather than arguable."""
+
+    def test_the_prefs_advice_admits_datastore_exists(self):
+        """"any debuggable app" was too broad: an app using Jetpack DataStore
+        keeps preferences under `files/datastore/` as protobuf, so
+        `shared_prefs/<name>.xml` does not hold them and the suggested read
+        finds nothing."""
+        msg = _refusal(_android(), "read_app_plist")
+        assert "DataStore" in msg
+        assert "SharedPreferences" in msg
+
+    def test_the_watch_advice_names_inotifyd(self):
+        """I claimed Android has no inotify over adb. It does: `inotifyd` is
+        at /system/bin/inotifyd on both attached phones and executes under
+        `run-as`. Polling `stat` is the fallback where it is absent, not the
+        only option."""
+        msg = _refusal(_android(), "start_plist_watch")
+        assert "inotifyd" in msg
+        assert "stat" in msg
+
+    # Spelled out rather than taken from `_NEEDS_DEBUGGABLE`. Deriving the
+    # cases from the collection under test makes the test tautological: drop
+    # an operation from the set and the case for it simply disappears, so the
+    # very regression this guards against is invisible. Caught by mutation --
+    # removing `read_app_plist` from the set left the suite green.
+    @pytest.mark.parametrize("operation", [
+        "read_app_plist", "set_app_plist_value", "set_app_plist_values",
+        "delete_app_plist_key", "diff_app_plist", "start_plist_watch",
+        "save_app_state", "restore_app_state",
+    ])
+    def test_run_as_mechanisms_say_they_need_a_debuggable_app(self, operation):
+        """`run-as` is refused for a release build -- measured, the platform
+        answers `package not debuggable` -- so offering these unqualified
+        hands a caller a mechanism their app cannot use."""
+        assert "For a debuggable app" in _refusal(_android(), operation)
+
+    def test_erase_is_not_scoped_to_debuggable(self):
+        """The negative control: `-wipe-data` is an emulator launch flag and
+        has nothing to do with `run-as`, so the qualifier must not be
+        sprayed over every entry."""
+        assert "For a debuggable app" not in _refusal(_android(), "Erase")
+
+    def test_every_run_as_entry_is_actually_in_the_advice_table(self):
+        """The two collections are keyed by the same strings and drift apart
+        silently: a name in `_NEEDS_DEBUGGABLE` but not in the advice map
+        qualifies advice that is never shown."""
+        assert DeviceController._NEEDS_DEBUGGABLE <= set(
+            DeviceController._ANDROID_ALTERNATIVE
         )

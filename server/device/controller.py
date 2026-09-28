@@ -437,37 +437,53 @@ class DeviceController(DeviceControllerUI):
     #: Absent from this map means the first case: nothing to point at.
     _ANDROID_ALTERNATIVE: dict[str, str] = {
         "read_app_plist":
-            "Android keeps app preferences in SharedPreferences XML, readable "
-            "with `run-as <pkg> cat shared_prefs/<name>.xml` on any debuggable "
-            "app without root. Quern does not expose it yet -- see #314",
+            "an app that uses SharedPreferences keeps them in XML readable "
+            "with `run-as <pkg> cat shared_prefs/<name>.xml`; one using "
+            "Jetpack DataStore keeps them under `files/datastore/` as "
+            "protobuf instead. Quern exposes neither yet -- see #314",
         "set_app_plist_value":
-            "Android's equivalent is writing the SharedPreferences XML back, "
-            "not exposed yet -- see #314. Note the values are cached in the "
-            "app's process, so a write alone does not change a running app",
+            "the equivalent is writing an app's SharedPreferences XML back "
+            "through `run-as`, not exposed yet -- see #314. The values are "
+            "cached in the app's process, so a write alone does not change a "
+            "running app",
         "set_app_plist_values":
-            "Android's equivalent is writing the SharedPreferences XML back, "
-            "not exposed yet -- see #314. Note the values are cached in the "
-            "app's process, so a write alone does not change a running app",
+            "the equivalent is writing an app's SharedPreferences XML back "
+            "through `run-as`, not exposed yet -- see #314. The values are "
+            "cached in the app's process, so a write alone does not change a "
+            "running app",
         "delete_app_plist_key":
-            "Android's equivalent is rewriting the SharedPreferences XML "
+            "the equivalent is rewriting an app's SharedPreferences XML "
             "without the key, not exposed yet -- see #314",
         "diff_app_plist":
-            "Android's equivalent is diffing two SharedPreferences reads, "
-            "not exposed yet -- see #314",
+            "the equivalent is diffing two SharedPreferences reads, not "
+            "exposed yet -- see #314",
         "start_plist_watch":
-            "Android has no inotify over adb; the equivalent is polling "
-            "`run-as <pkg> stat` on the prefs file, not exposed yet -- #314",
+            "`inotifyd` ships in Android's toybox and runs under `run-as`, "
+            "streaming events over adb; where it is absent, polling "
+            "`run-as <pkg> stat` on the file is the fallback. Neither is "
+            "exposed yet -- see #314",
         "save_app_state":
-            "Android's equivalent is archiving the app's private directory "
-            "with `run-as <pkg> tar cf -`, not exposed yet -- see #314",
+            "the equivalent is archiving the app's private directory with "
+            "`run-as <pkg> tar cf -`, not exposed yet -- see #314",
         "restore_app_state":
-            "Android's equivalent is unpacking that archive back through "
+            "the equivalent is unpacking that archive back through "
             "`run-as <pkg> tar xf -`, not exposed yet -- see #314",
         "Erase":
             "Android's nearest equivalent is launching the emulator with "
             "`-wipe-data`, which restarts it rather than wiping it in place; "
             "a physical device has none at all -- see #263",
     }
+
+    #: Every entry above that depends on `run-as`, which the Android platform
+    #: refuses for a package that is not debuggable -- measured: a release
+    #: build answers `run-as: package not debuggable`. Stated once here rather
+    #: than repeated in nine strings, and prepended when it applies, so the
+    #: refusal does not offer a release build a mechanism it cannot use.
+    _NEEDS_DEBUGGABLE = frozenset({
+        "read_app_plist", "set_app_plist_value", "set_app_plist_values",
+        "delete_app_plist_key", "diff_app_plist", "start_plist_watch",
+        "save_app_state", "restore_app_state",
+    })
 
     def _require_simulator(self, udid: str, operation: str) -> None:
         """Refuse anything that is not known to be an iOS simulator.
@@ -492,7 +508,11 @@ class DeviceController(DeviceControllerUI):
         if kind in (DeviceType.ANDROID_DEVICE, DeviceType.ANDROID_EMULATOR):
             alternative = self._ANDROID_ALTERNATIVE.get(operation)
             if alternative:
-                detail = f" {udid} is Android. {alternative}."
+                scope = (
+                    "For a debuggable app, " if operation in self._NEEDS_DEBUGGABLE
+                    else ""
+                )
+                detail = f" {udid} is Android. {scope}{alternative}."
             else:
                 detail = (
                     f" {udid} is Android, and there is no Android equivalent "
