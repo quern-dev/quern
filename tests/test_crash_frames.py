@@ -745,6 +745,33 @@ class TestWhoseCrashItIs:
         body.update(marker)
         assert crash_frames.is_mac_process(header, body) is False
 
+    @pytest.mark.parametrize("platform", [7, 8, 9, 12])
+    def test_a_simulator_platform_is_enough(self, platform):
+        """Every real simulator report carries 7; a Mac process 0 or 1."""
+        header, body = _ips("mac_process")
+        header["platform"] = platform
+        assert crash_frames.is_mac_process(header, body) is False
+
+    def test_a_host_side_simulator_service_is_the_macs(self):
+        """Only a simulated device's coalition says it ran in a simulator."""
+        header, body = _ips("mac_process")
+        body["coalitionName"] = "com.apple.CoreSimulator.CoreSimulatorService"
+        assert crash_frames.is_mac_process(header, body) is True
+
+    def test_the_headers_os_wins_over_the_bodys(self):
+        header, body = _ips("mac_process")
+        header["os_version"] = "iPhone OS 26.5.2 (23F84)"
+        assert crash_frames.is_mac_process(header, body) is False
+
+    @pytest.mark.parametrize("os_version", [
+        "iPhone OS 26.5.2 (23F84)", "iPadOS 26.0 (23A1)", "xrOS 26.0", "watchOS 26.0", "",
+    ])
+    def test_only_macos_is_claimed(self, os_version):
+        header, body = _ips("mac_process")
+        header["os_version"] = os_version
+        body["osVersion"] = {"train": os_version}
+        assert crash_frames.is_mac_process(header, body) is False
+
     def test_the_os_from_the_body_when_the_header_has_none(self):
         header, body = _ips("mac_process")
         header.pop("os_version")

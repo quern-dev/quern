@@ -244,7 +244,9 @@ def _bundle_dir(proc_path: str) -> str:
 
 _SIMULATOR = re.compile(r"/CoreSimulator/Devices/([0-9A-Fa-f-]{36})/")
 #: `coalitionName`, which a simulator's system processes carry too.
-_SIMULATOR_COALITION = re.compile(r"^com\.apple\.CoreSimulator\.SimDevice\.([0-9A-Fa-f-]{36})$")
+_SIMULATOR_COALITION = re.compile(r"com\.apple\.CoreSimulator\.SimDevice\.([0-9A-Fa-f-]{36})$")
+#: The header's `platform`: iOS, tvOS, watchOS and visionOS simulators.
+_SIMULATOR_PLATFORMS = {7, 8, 9, 12}
 
 
 def simulator_udid(proc_path: str, coalition: str = "") -> str:
@@ -265,8 +267,8 @@ def simulator_udid(proc_path: str, coalition: str = "") -> str:
 def is_mac_process(header: dict, data: dict) -> bool:
     """A crash of this Mac's own processes, not a simulator's or a device's.
 
-    Written on macOS, with nothing to say it ran in a simulator: its path, its
-    coalition and its parent all say so for a simulator's process. A report
+    Written on macOS, with nothing to say it ran in a simulator: its platform,
+    path, coalition and parent all say so for a simulator's process. A report
     that does not say what it ran on is not claimed -- listing a Mac crash
     under a phone is noise, but hiding a phone's crash is the defect.
     """
@@ -275,11 +277,10 @@ def is_mac_process(header: dict, data: dict) -> bool:
         _str(os_info.get("train")) if isinstance(os_info, dict) else "")
     if not os_version.startswith("macOS"):
         return False
-    proc_path = _str(data.get("procPath"))
     return not (
-        simulator_udid(proc_path, _str(data.get("coalitionName")))
-        or "/CoreSimulator/" in proc_path
-        or _str(data.get("coalitionName")).startswith("com.apple.CoreSimulator.")
+        header.get("platform") in _SIMULATOR_PLATFORMS
+        or "/CoreSimulator/" in _str(data.get("procPath"))
+        or _str(data.get("coalitionName")).startswith("com.apple.CoreSimulator.SimDevice.")
         or _str(data.get("parentProc")) == "launchd_sim"
     )
 
