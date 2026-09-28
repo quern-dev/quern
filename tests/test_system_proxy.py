@@ -519,6 +519,9 @@ def mock_proxy_adapter():
 def mock_flow_store():
     store = MagicMock()
     store.size = 0
+    # proxy_status reports the store's stats (#318); a mock's stats() would
+    # otherwise be a MagicMock where the response model requires a dict.
+    store.stats.return_value = {"capacity": 5000, "size": 0, "added": 0, "evicted": 0}
     return store
 
 

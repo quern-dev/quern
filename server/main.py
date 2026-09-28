@@ -50,6 +50,7 @@ from server.api.wda import router as wda_router
 from server.auth import APIKeyMiddleware
 from server.config import (
     ServerConfig,
+    get_crash_retention_days,
     get_local_capture_processes,
     set_local_capture_processes,
     with_capture_minimum,
@@ -71,7 +72,7 @@ from server.lifecycle.state import (
     write_state,
 )
 from server.lifecycle.watchdog import proxy_watchdog
-from server.models import LogEntry
+from server.models import LogEntry, LogSource
 from server.processing.deduplicator import Deduplicator
 from server.processing.ingestion_filter import IngestionFilter
 from server.proxy.capture_session import CaptureSessionManager
@@ -83,6 +84,7 @@ from server.sources.oslog import OslogAdapter
 from server.sources.proxy import ProxyAdapter
 from server.sources.server_log import ServerLogAdapter
 from server.sources.syslog import SyslogAdapter
+from server.storage.arrival import ArrivalClock
 from server.storage.ring_buffer import RingBuffer
 
 logger = logging.getLogger(__name__)
@@ -156,6 +158,20 @@ def _fix_developer_dir() -> str | None:
     return None
 
 
+def buffer_for(entry: LogEntry, *, logs: RingBuffer, crashes: RingBuffer) -> RingBuffer:
+    """Which buffer an admitted entry belongs in.
+
+    Crash reports get their own, for the reason server logs already had one:
+    a crash is the most valuable entry quern holds and one of the rarest, and
+    in the shared buffer it had the same 10,000-entry budget as a simulator
+    producing ~2,900 lines a second -- so the crash that explained a failure
+    was evicted about 3.5 seconds after it arrived. `get_latest_crash` never
+    lost it (it reads the adapter's own list); `query_logs`, `get_errors` and
+    the trace did (#255).
+    """
+    return crashes if entry.source == LogSource.CRASH else logs
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage server startup and shutdown."""
@@ -166,9 +182,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     ingestion_filter = IngestionFilter()
     app.state.ingestion_filter = ingestion_filter
 
+    crash_buffer: RingBuffer = app.state.crash_buffer
+
     async def filtered_append(entry: LogEntry) -> None:
         if ingestion_filter.should_admit(entry):
-            await buffer.append(entry)
+            await buffer_for(entry, logs=buffer, crashes=crash_buffer).append(entry)
 
     dedup = Deduplicator(on_entry=filtered_append)
     dedup.start()
@@ -211,6 +229,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             extra_watch_dirs=app.state.crash_extra_watch_dirs,
             process_filter=app.state.crash_process_filter,
             on_crash_hook=app.state.on_crash_hook,
+            retention_days=get_crash_retention_days(),
         )
         adapters["crash"] = crash
         app.state.crash_adapter = crash
@@ -554,8 +573,14 @@ def create_app(
 
     # Store shared state
     app.state.config = config
-    app.state.ring_buffer = RingBuffer(max_size=config.ring_buffer_size)
-    app.state.server_buffer = RingBuffer(max_size=1_000)
+    # One arrival clock for the three log buffers, so a single summary cursor
+    # orders an entry against all of them (#317).
+    log_clock = ArrivalClock()
+    app.state.ring_buffer = RingBuffer(max_size=config.ring_buffer_size, clock=log_clock)
+    app.state.server_buffer = RingBuffer(max_size=1_000, clock=log_clock)
+    # Crashes arrive a handful per session, so 1,000 is effectively "all of
+    # them" -- the point is that nothing else can take their room.
+    app.state.crash_buffer = RingBuffer(max_size=1_000, clock=log_clock)
     app.state.process_filter = process_filter
     app.state.enable_syslog = enable_syslog
     app.state.enable_oslog = enable_oslog

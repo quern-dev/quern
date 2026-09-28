@@ -202,3 +202,46 @@ async def test_clear():
     assert store.size == 5
     await store.clear()
     assert store.size == 0
+
+
+class TestEvictionIsRecorded:
+    """The store evicted silently, like the log buffers did (#255)."""
+
+    @pytest.mark.asyncio
+    async def test_the_mark_is_the_newest_evicted_timestamp(self):
+        base = datetime(2026, 9, 26, 12, 0, tzinfo=UTC)
+        store = FlowStore(max_size=1)
+        await store.add(_make_flow("a", timestamp=base + timedelta(seconds=50)))
+        await store.add(_make_flow("b", timestamp=base + timedelta(seconds=10)))
+        await store.add(_make_flow("c", timestamp=base + timedelta(seconds=60)))
+
+        assert store.evicted == 2
+        assert store.evicted_through() == base + timedelta(seconds=50)
+        assert not store.is_complete_since(base + timedelta(seconds=50))
+        assert store.is_complete_since(base + timedelta(seconds=51))
+
+    @pytest.mark.asyncio
+    async def test_updating_a_flow_in_place_is_not_eviction(self):
+        store = FlowStore(max_size=1)
+        await store.add(_make_flow("a"))
+        await store.add(_make_flow("a"))
+
+        assert store.evicted == 0 and store.is_complete_since(None)
+
+
+class TestArrivalOrder:
+    @pytest.mark.asyncio
+    async def test_an_update_moves_the_flow_to_the_end_of_eviction_order(self):
+        """Eviction must stay in arrival order, or the last evicted number
+        can go backwards and a delta read complete when it is not (review:
+        M17 survived). Updates are rare in production -- each flow gets a
+        fresh id -- but the store's contract is what the cursor relies on."""
+        store = FlowStore(max_size=2)
+        await store.add(_make_flow("a"))
+        await store.add(_make_flow("b"))
+        await store.add(_make_flow("a"))          # a re-arrives after b
+        await store.add(_make_flow("c"))          # so b is the one evicted
+
+        assert await store.get("b") is None
+        assert await store.get("a") is not None
+        assert store.last_evicted_seq == 2         # b's number, not a's first one

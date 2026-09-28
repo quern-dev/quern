@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import enum
-from datetime import UTC, datetime
-from typing import Annotated, Literal
+from datetime import UTC, date, datetime
+from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, BaseModel, Field, model_validator
 
@@ -225,8 +225,59 @@ class TopIssue(BaseModel):
     resolved: bool = False
 
 
-class LogSummaryResponse(BaseModel):
+class Completeness(BaseModel):
+    """Whether an answer drawn from a fixed-size store can be trusted whole.
+
+    The log buffers and the flow store evict their oldest entries at
+    capacity, so "nothing matched" and "everything that matched is gone" used
+    to come back identical: `total: 0` either way. An agent reading the first
+    concluded the second -- confidently, and wrongly -- which is the failure
+    #255, #313 and #318 describe. These fields separate them, on every log
+    and flow answer that can be cut short.
+    """
+
+    truncated: bool = Field(
+        default=False,
+        description=(
+            "True when entries stamped inside the requested window were "
+            "evicted before this call, so the result -- including any count "
+            "-- may be missing some. It says 'may', not 'is': the evicted "
+            "entries are not known to match this query's other filters. False "
+            "is a guarantee that nothing in the window was lost, with one "
+            "exception: for a log tail (the newest N), false means only that "
+            "the entries returned really are the newest N. Removals made by a "
+            "filter change are not evictions; the call that changed the filter "
+            "reports them as `purged`. To get a clean answer, ask about a "
+            "window that starts after `complete_after`, or capture less (a "
+            "narrower filter at the source) so the store turns over less often. "
+            "On a summary delta (`since_cursor`) the window is \"arrived since "
+            "the cursor\": true means something that arrived after it was "
+            "evicted before this call."
+        ),
+    )
+    complete_after: datetime | None = Field(
+        default=None,
+        description=(
+            "Nothing stamped after this time has been evicted, so a window "
+            "starting later is complete. Null only when nothing relevant was "
+            "ever evicted."
+        ),
+    )
+
+
+class LogSummaryResponse(Completeness):
     """Response from GET /api/v1/logs/summary."""
+
+    cursor_reset: bool = Field(
+        default=False,
+        description=(
+            "True when the `since_cursor` passed in could not be honoured -- "
+            "it came from before a server restart, is ahead of anything this "
+            "server has numbered, or is not a cursor -- so this summary covers "
+            "the requested window instead of the delta. Entries between the "
+            "old cursor and that window are not in it."
+        ),
+    )
 
     window: str
     generated_at: datetime
@@ -238,7 +289,7 @@ class LogSummaryResponse(BaseModel):
     top_issues: list[TopIssue]
 
 
-class LogErrorsResponse(BaseModel):
+class LogErrorsResponse(Completeness):
     """Response from GET /api/v1/logs/errors."""
 
     entries: list[LogEntry]
@@ -248,6 +299,39 @@ class LogErrorsResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Crash report models (Phase 1c)
 # ---------------------------------------------------------------------------
+
+
+class CrashFrame(BaseModel):
+    """One frame of the crashing thread, as structured as the report allows."""
+
+    image: str = Field(
+        default="", description="The binary: 'MyApp.debug.dylib', 'UIKitCore', 'libc.so'",
+    )
+    offset: int | None = Field(
+        default=None,
+        description="Offset into the image (iOS imageOffset; Android pc). With the image's "
+                    "load address, what a symbolicator needs.",
+    )
+    symbol: str = Field(default="", description="Function, where the report names it")
+    symbol_offset: int | None = Field(default=None, description="Bytes into `symbol`")
+    file: str = Field(default="", description="Source file, where the report has it")
+    line: int | None = Field(default=None, description="Source line, where the report has it")
+    app: bool = Field(default=False, description="In the app's own code, not the OS's")
+    build_id: str = Field(
+        default="",
+        description="Android native: the library's BuildId. With `image`, which of `images` "
+                    "this is: two libraries can share a name.",
+    )
+
+
+class CrashImage(BaseModel):
+    """A binary a crash frame points into: what symbolicating it needs."""
+
+    name: str
+    uuid: str = ""
+    base: int | None = Field(default=None, description="Load address")
+    path: str = ""
+    arch: str = ""
 
 
 class CrashReport(BaseModel):
@@ -261,6 +345,18 @@ class CrashReport(BaseModel):
     #: is attributed on time with a caveat. Wrong-and-silent vs honest.
     device_id: str = ""
     process: str = Field(default="", description="Crashed process name")
+    pid: int | None = Field(
+        default=None, description="Crashed process ID, where the report gives it",
+    )
+    kind: str = Field(
+        default="crash",
+        description=(
+            "What failed: 'crash' (an iOS crash, or an Android Java crash), "
+            "'native_crash' (an Android native crash), or 'anr' (an Android app "
+            "that stopped responding -- not a crash strictly, but the app dying "
+            "from the user's point of view)."
+        ),
+    )
     exception_type: str = Field(default="", description="e.g. EXC_BAD_ACCESS")
     exception_codes: str = Field(default="", description="e.g. KERN_INVALID_ADDRESS at 0x0")
     signal: str = Field(default="", description="e.g. SIGSEGV")
@@ -269,7 +365,147 @@ class CrashReport(BaseModel):
         description="Top stack frames from crashing thread",
     )
     file_path: str = Field(default="", description="Path to the raw crash file on disk")
-    raw_text: str = Field(default="", description="First portion of raw crash content")
+    raw_text: str = Field(
+        default="",
+        description=(
+            "First portion of raw crash content. In get_latest_crash only with include_raw."
+        ),
+    )
+    app_frame: CrashFrame | None = Field(
+        default=None,
+        description=(
+            "Where in the app's own code it happened: the first app frame of the "
+            "exception's backtrace or the crashing thread, not counting a crash "
+            "reporter's signal handler or the app's entry point. None when the "
+            "crash never reached the app's code, or when another process ended the "
+            "app (see killed_by)."
+        ),
+    )
+    reason: str = Field(
+        default="",
+        description=(
+            "The report's own words for why: iOS's application-specific information "
+            "(an uncaught exception's reason), Android's abort message or root "
+            "cause. A Swift fatalError's message is in the app's log, not here."
+        ),
+    )
+    killed_by: str = Field(
+        default="",
+        description=(
+            "The process that sent the signal that ended the app, when it was not "
+            "the app itself (a kill from a shell, or devicectl). Its frames then say "
+            "where it was waiting, not what went wrong, and app_frame is null. A "
+            "watchdog or memory termination is not counted: its frames are where it "
+            "hung, and its explanation is in reason. .ips reports only."
+        ),
+    )
+    frames_from: str = Field(
+        default="",
+        description=(
+            "What `frames` is: 'exception' (an uncaught exception's backtrace; a Java "
+            "crash's trace and its causes), 'crashing_thread', or 'main_thread' (an ANR)"
+        ),
+    )
+    frames: list[CrashFrame] = Field(
+        default_factory=list,
+        description="The frames, innermost first. In get_latest_crash only with detail=true.",
+    )
+    images: list[CrashImage] = Field(
+        default_factory=list,
+        description=(
+            "The binaries those frames point into: UUID (Android: BuildId) and load "
+            "address (iOS). In get_latest_crash only with detail=true."
+        ),
+    )
+    bundle_id: str = ""
+    app_version: str = ""
+    build_version: str = ""
+
+
+class OpenCrashDialog(BaseModel):
+    process: str
+    kind: Literal["crash", "anr"]
+
+
+class CrashPullStatus(BaseModel):
+    """What happened when `get_latest_crash` was asked to pull from a device.
+
+    Said on the response because a pull that could not be made used to look
+    exactly like one that found nothing: the iOS pull returned an empty list
+    for a missing tool, a timeout or a phone on Wi-Fi only, and Android had no
+    pull at all (#316).
+    """
+
+    udid: str
+    platform: Literal["ios", "android"] | None = Field(
+        default=None, description="Which pull was used; null if none could be chosen.",
+    )
+    status: Literal["pulled", "skipped", "failed"] = Field(
+        description=(
+            "'pulled': the device was asked and answered (it may have had "
+            "nothing new). 'skipped': it could not be asked, for the stated "
+            "reason. 'failed': it was asked and the pull went wrong. Only "
+            "'pulled' means the crash list reflects the device."
+        ),
+    )
+    new_reports: int = Field(default=0, description="Reports this pull added.")
+    reason: str | None = Field(default=None, description="Why it was skipped or failed.")
+    window_days: int | None = Field(
+        default=None,
+        description="iPhone only: how far back the pull reached, in days.",
+    )
+    older_on_device: int | None = Field(
+        default=None,
+        description=(
+            "iPhone only: reports on the phone older than the window, not "
+            "pulled. Pass a larger `days` to include them, or clear them from "
+            "the phone with clear_device_crashes."
+        ),
+    )
+    oldest_on_device: date | None = Field(
+        default=None, description="iPhone only: the oldest report date on the phone.",
+    )
+    note: str | None = Field(
+        default=None,
+        description="What the pull left behind, when that is worth knowing.",
+    )
+    open_dialogs: list[OpenCrashDialog] | None = Field(
+        default=None,
+        description=(
+            "Android only: processes showing a crash ('keeps stopping') dialog "
+            "right now (kind 'crash'), or that Android is treating as not "
+            "responding (kind 'anr') -- from the moment it notices, about 13s "
+            "before the ANR dialog and its report appear (measured, API 32), "
+            "until the dialog is answered. While a crash dialog is open, Android drops "
+            "every further crash of that process -- no report, no log line -- "
+            "so 'no new reports' does not mean it stopped crashing; dismiss "
+            "the dialog or force-stop the app. [] means none; null means it "
+            "was not checked (iOS, or a pull that could not run at all) or could "
+            "not be read. A pull that failed on some DropBox tags still checks."
+        ),
+    )
+
+
+class ClearCrashesResponse(BaseModel):
+    udid: str | None = Field(default=None, description="The device cleared; null for all.")
+    files_removed: int = Field(description="Report files deleted from the Mac.")
+    reports_removed: int = Field(description="Reports dropped from quern's list.")
+    errors: list[str] = Field(
+        default_factory=list, description="Files that could not be deleted, and why.",
+    )
+
+
+class ClearDeviceCrashesRequest(BaseModel):
+    udid: str = Field(min_length=1, description="The iPhone to clear.")
+
+
+class ClearDeviceCrashesResponse(BaseModel):
+    udid: str
+    removed: int = Field(description="Crash reports deleted from the phone.")
+    remaining: int = Field(description="Crash reports still on the phone afterwards.")
+    failed: list[str] = Field(
+        default_factory=list, description="Reports the phone would not delete.",
+    )
 
 
 class CrashLatestResponse(BaseModel):
@@ -277,6 +513,9 @@ class CrashLatestResponse(BaseModel):
 
     crashes: list[CrashReport]
     total: int
+    #: Present when a `udid` was given: whether its crashes were actually
+    #: fetched, and if not, why. Null when no pull was asked for.
+    pull: CrashPullStatus | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -484,7 +723,7 @@ class FlowSummaryItem(BaseModel):
     total_ms: float | None = None
 
 
-class FlowQueryResponse(BaseModel):
+class FlowQueryResponse(Completeness):
     """Response from flow query endpoint."""
 
     flows: list[FlowRecord] = []
@@ -517,7 +756,7 @@ class CaptureStopRequest(BaseModel):
     session_id: str
 
 
-class CaptureStopResponse(BaseModel):
+class CaptureStopResponse(Completeness):
     """Response from POST /api/v1/proxy/capture/stop."""
 
     session_id: str
@@ -544,7 +783,7 @@ class WaitForFlowRequest(BaseModel):
     since: UtcDatetime | None = None  # defaults to now - 5s if omitted
 
 
-class WaitForFlowResponse(BaseModel):
+class WaitForFlowResponse(Completeness):
     """Response from POST /api/v1/proxy/flows/wait."""
 
     matched: bool
@@ -772,7 +1011,14 @@ class ProxyStatusResponse(BaseModel):
     port: int = 9101
     listen_host: str = "0.0.0.0"
     started_at: datetime | None = None
+    #: Flows held right now -- what survived, not what arrived. On a busy
+    #: proxy the store turns over and this stays at capacity while traffic is
+    #: lost; `flow_store` says how much.
     flows_captured: int = 0
+    #: The flow store's capacity, intake, evictions and the span it still
+    #: holds, so capture outrunning the store is visible rather than inferred
+    #: from queries coming back short (#318).
+    flow_store: dict[str, Any] | None = None
     active_filter: str | None = None
     active_intercept: str | None = None
     held_flows_count: int = 0
@@ -860,8 +1106,20 @@ class SlowRequest(BaseModel):
     status_code: int | None = None
 
 
-class FlowSummaryResponse(BaseModel):
+class FlowSummaryResponse(Completeness):
     """Response from GET /api/v1/proxy/flows/summary."""
+
+    cursor_reset: bool = Field(
+        default=False,
+        description=(
+            "True when the `since_cursor` passed in could not be honoured -- "
+            "it came from before a server restart, or is ahead of anything "
+            "this server has numbered -- so this summary covers the requested "
+            "window instead of the delta. Flows between the old cursor and "
+            "that window are not in it. A string that is not a cursor at all "
+            "is refused with 400 rather than reset."
+        ),
+    )
 
     window: str
     generated_at: datetime

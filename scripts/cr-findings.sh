@@ -29,6 +29,12 @@
 # Docstring Coverage is therefore reported under a separate heading, not hidden
 # -- hiding it would just be a fourth blind spot.
 #
+# That measurement is history, not a current claim: the check was turned off in
+# `.coderabbit.yaml` on 2026-09-28 (`795c9c0`), so the row should stop appearing
+# on new PRs. The filter stays -- it goes inert on its own, and keeps working if
+# anyone re-enables the check. The heading below says "as of" for the same
+# reason a dated measurement stays true while a present-tense one decays.
+#
 # Usage:  scripts/cr-findings.sh <pr-number> [owner/repo]
 set -euo pipefail
 N="${1:?usage: cr-findings.sh <pr-number>}"
@@ -165,7 +171,7 @@ if real:
         print(f"    - {n}")
         if w: print(f"        {w}")
 if noise:
-    print("  known-noisy (fails on ~4 of every 5 merged PRs here; judge, do not reflex-fix):")
+    print("  known-noisy as of 2026-09-25; judge, do not reflex-fix:")
     for n, _ in noise:
         print(f"    - {n}")
 # The count is the real guard. Widening a regex fixes the case you thought of;
@@ -180,3 +186,41 @@ if declared and parsed != declared:
 elif declared and not real and not noise:
     print("  tally shows failures but no rows parsed -- read the comment by hand")
 '
+
+# ── how much of this PR has actually been reviewed ───────────────────────────
+#
+# Everything above reports *findings*. None of it reports whether a review has
+# seen the current code, and thread state tracks the last review rather than
+# the head -- which misleads in both directions. On #327 all three threads read
+# `[resolved]` and every section above printed clean, while the two commits
+# carrying the substantive work were entirely unreviewed. Earlier the same week
+# the mirror case: an `[OPEN]` thread for a finding already fixed and pushed.
+#
+# So the one comparison that separates those cases gets printed here: the
+# newest review *with a body* against the head commit's push time. Empty-bodied
+# reviews are the artifact GitHub creates when CodeRabbit resolves a thread,
+# and counting them is how `pr-review-status.py` once called unread commits
+# reviewed.
+#
+# Advisory, deliberately. `scripts/pr-review-status.py` is the gate and decides
+# merges; this only makes the staleness visible to someone reading findings,
+# which is where they already are when the question occurs to them.
+echo
+echo "── review coverage ──"
+gh pr view "$N" --repo "$REPO" --json reviews,commits \
+  --jq '{
+      reviewed: ([.reviews[]? | select((.body // "") != "") | .submittedAt] | max),
+      pushed:   ([.commits[]?.committedDate] | max)
+    } | "\(.reviewed // "never")\t\(.pushed // "unknown")"' \
+| while IFS=$'\t' read -r reviewed pushed; do
+    echo "  newest review with a body: $reviewed"
+    echo "  head commit pushed:        $pushed"
+    if [ "$reviewed" = "never" ]; then
+      echo "  => NOT REVIEWED. An empty findings list above means nothing yet."
+    elif [[ "$reviewed" < "$pushed" ]]; then
+      echo "  => STALE: commits landed after the last review. The findings above"
+      echo "     describe older code; ask for '@coderabbitai full review'."
+    else
+      echo "  => the newest review is at or after the head commit."
+    fi
+  done

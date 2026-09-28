@@ -18,7 +18,6 @@ import asyncio
 import logging
 import re
 import uuid
-from datetime import UTC, datetime
 
 from server.models import LogEntry, LogLevel, LogSource
 from server.sources import BaseSourceAdapter, EntryCallback
@@ -172,20 +171,18 @@ class SyslogAdapter(BaseSourceAdapter):
                 raw=line,
             )
 
-        date_str, time_str, device, process, subsystem, pid_str, level_str, message = (
+        _date, _time, device, process, subsystem, pid_str, level_str, message = (
             match.groups()
         )
 
-        # Parse the timestamp (idevicesyslog doesn't include year)
-        now = datetime.now(UTC)
-        try:
-            # Handle optional fractional seconds (e.g. "14:23:01.123456")
-            fmt = "%Y %b %d %H:%M:%S.%f" if "." in time_str else "%Y %b %d %H:%M:%S"
-            ts = datetime.strptime(
-                f"{now.year} {date_str} {time_str}", fmt
-            ).replace(tzinfo=UTC)
-        except ValueError:
-            ts = now
+        # Stamped on arrival, not parsed. idevicesyslog prints the *device's*
+        # local time with no zone and no year, and this read it as UTC in the
+        # current year: seven hours off on a phone in Pacific time, and a
+        # year off across New Year -- the bug #255 fixed in logcat and
+        # pymobiledevice3, left here in the opt-in adapter. The zone is not
+        # in the line, so arrival on the host is the honest time: late by
+        # the pipe's latency rather than wrong by the offset.
+        ts = self._now()
 
         level = LEVEL_MAP.get(level_str.lower(), LogLevel.INFO)
 

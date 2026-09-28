@@ -58,7 +58,7 @@ class TestAdaptersNameTheirDevice:
 
         from server.api import device as device_api
 
-        source = inspect.getsource(device_api.start_simulator_logging)
+        source = inspect.getsource(device_api._start_simulator_logging)
         assert "device_id=udid" in source, (
             "entries would carry no device, and the trace could not attribute "
             "a single app log line"
@@ -69,7 +69,7 @@ class TestAdaptersNameTheirDevice:
 
         from server.api import device as device_api
 
-        source = inspect.getsource(device_api.start_device_logging)
+        source = inspect.getsource(device_api._start_device_logging)
         assert "device_id=udid" in source
 
     def test_android_is_not_forgotten(self):
@@ -81,7 +81,7 @@ class TestAdaptersNameTheirDevice:
 
         from server.api import device as device_api
 
-        source = inspect.getsource(device_api.start_device_logging)
+        source = inspect.getsource(device_api._start_device_logging)
         logcat = source[source.index("LogcatAdapter("):]
         assert "device_id=udid" in logcat[:300], (
             "Android log lines would name no device"

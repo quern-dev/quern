@@ -37,16 +37,157 @@ The key lives at `~/.quern/api-key`; the server's URL and port are in `~/.quern/
 | `get_errors` | GET | `/api/v1/logs/errors` | Errors and crashes only |
 | `get_build_result` | GET | `/api/v1/builds/latest` | Most recent build result |
 | `parse_build_output` | POST | `/api/v1/builds/parse-file` | Parse a build log file from disk |
-| `get_latest_crash` | GET | `/api/v1/crashes/latest` | Recent parsed crash reports |
+| `get_latest_crash` | GET | `/api/v1/crashes/latest` | Recent parsed crash reports; with `udid`, fetched from an iPhone (USB, the last `days`, default 3) or an Android device first |
+| `clear_crashes` | DELETE | `/api/v1/crashes` | Delete the crash reports quern stored on the Mac, for one `udid` or all; the device keeps its own |
+| `clear_device_crashes` | POST | `/api/v1/crashes/device/clear` | Permanently delete every crash report on an iPhone (USB); Android and simulators are refused with the reason |
 | `set_log_filter` | POST | `/api/v1/logs/filter` | Reconfigure capture filters |
 | `get_log_filter` | GET | `/api/v1/logs/filter` | Current ingestion filter config at all scopes (global, per-source, per-device) |
-| `list_log_sources` | GET | `/api/v1/logs/sources` | Active log source adapters |
+| `list_log_sources` | GET | `/api/v1/logs/sources` | Active log source adapters, and what each log buffer holds and has evicted |
 | `start_simulator_logging` | POST | `/api/v1/device/logging/start` | Start simulator log capture |
 | `stop_simulator_logging` | POST | `/api/v1/device/logging/stop` | Stop simulator log capture |
 | `start_device_logging` | POST | `/api/v1/device/logging/device/start` | Start physical device log capture |
 | `stop_device_logging` | POST | `/api/v1/device/logging/device/stop` | Stop physical device log capture |
 | `start_oslog_streaming` | POST | `/api/v1/logs/oslog/start` | Start streaming the host Mac's unified log |
 | `stop_oslog_streaming` | POST | `/api/v1/logs/oslog/stop` | Stop host oslog streaming |
+
+**An empty answer is not always a true negative.** Logs live in fixed-size
+buffers that evict their oldest entries: a shared one, and one each for crash
+reports and quern's own logs. An unfiltered simulator can turn the shared buffer over in seconds.
+`query_logs`, `tail_logs`, `get_errors` and `get_log_summary` therefore return
+`truncated` and `complete_after`. `truncated: true` means entries stamped inside
+the requested window were evicted before the call, so the result *may* be
+missing some. `false` is a guarantee that nothing in the window was lost. For
+a tail (`tail_logs`, or `query_logs` with `tail`) it means something narrower:
+the entries returned really are the newest N, though older ones may have been
+evicted. Entries removed by a filter change are not evictions; the call that
+changed the filter reports them as `purged`.
+`complete_after` is the time after which nothing has been evicted. The check is
+narrowed by the query's `source` and `level`, so shed debug lines do not flag a
+search for errors. `get_trace` reports the same thing as
+`log_window_truncated` and `action_window_truncated`. `list_log_sources`
+returns a `buffers` object with each buffer's capacity, intake, evictions by
+source, and the oldest entry it still holds. A source's `entries_captured` is
+intake, not retention.
+
+The live streams, `/logs/stream` and `/proxy/flows/stream`, tell a client
+that falls behind what it missed. They send a `dropped` event at most once a
+second, with the count, the running `total_dropped`, and `missed_from` /
+`missed_to`: the span missed since the previous notice, so consecutive
+notices do not overlap. Backfill it with `query_logs` on the log stream and
+`query_flows` on the flow stream. Only entries matching the stream's own
+filter are counted. Every heartbeat also carries `total_dropped`.
+
+Crash reports have a buffer of their own, so a busy source cannot evict them.
+On Android, while capture is running, the logcat adapter emits a crash entry for
+each Java crash, native crash and ANR as it happens. Find them with `query_logs`
+(`source=crash`) or `get_errors`. `get_latest_crash` reads Android crash reports
+too; see below.
+
+**Summary cursors follow arrival order.** `get_log_summary` and
+`get_flow_summary` return a `cursor`; pass it back as `since_cursor` to get only
+what arrived since. The cursor counts arrivals, not timestamps, so the next delta
+also includes entries stamped earlier than the last summary: a device clock
+running ahead, a crash report written after the crash, a request that started
+before the summary and finished after it. A cursor from before a server restart,
+or one ahead of anything the server has numbered, comes back with
+`cursor_reset: true`, and the summary then covers the requested window. On the
+flow summary, a string that is not a cursor at all is refused with 400. Older timestamp cursors are still accepted, and the response always
+returns an arrival cursor.
+
+**Where it crashed.** Each crash report carries `app_frame`: where in the app's own
+code it happened, with source file and line where the report has them.
+- **Which frame.** It comes from an uncaught exception's backtrace when the report has
+  one, and otherwise from the crashing thread. A crash reporter's signal handler and
+  the app's entry point are skipped.
+- **Source lines.** A simulator's Debug build has them, because macOS resolves the
+  frames on the Mac. A phone names the function for a Debug build and gives only an
+  offset for a stripped one.
+- **`reason`** is the report's own explanation: an uncaught exception's reason, or
+  Android's abort message or root cause. A Swift `fatalError` writes its message to
+  the app's log, not the report, so query the logs for it.
+- **`killed_by`** names the process whose signal ended the app, when it was not
+  the app itself, such as a kill from a shell or `devicectl`. It is decided by
+  pid, because the name is truncated to 32 characters. In that case `app_frame`
+  is null, because the frames only say where the app was waiting. A watchdog or
+  memory termination is not a kill: it keeps its frames, which are where the app
+  hung, and its explanation goes in `reason`.
+- **`.crash` text reports** (iOS 14 and older) get neither `killed_by` nor the
+  exception backtrace. Their frames are the crashed thread's.
+
+The response is compact by default: `app_frame`, `reason`, `killed_by`, the top
+frames, and the app's `bundle_id`, `app_version` and `build_version`.
+- **`detail=true`** adds `frames` (the exception's backtrace or the crashing thread,
+  each frame with image, offset, symbol and source line) and `images` (the UUID and
+  load address of each binary they point into). Symbolicating a frame needs these.
+- **`include_raw=true`** adds `raw_text`.
+
+A frame counts as the app's when:
+- **iOS:** its binary is inside the app bundle.
+- **Android native:** it was installed with the app.
+- **Java:** its class is in the app's package, or in a shorter prefix of it (a
+  Debug build's `.debug` suffix, or a module), falling back to excluding platform
+  and common-library packages.
+
+**Crash reports on both platforms.** `get_latest_crash` with a `udid` fetches
+that device's crashes first. An iPhone is read over USB with `pymobiledevice3`:
+the reports dated within the last `days` (default 3), and `pull` says what it
+left on the phone (`older_on_device`, `oldest_on_device`, and a `note` pointing at
+`days` and `clear_device_crashes`). An Android device or emulator is read from its DropBox,
+which needs no root, and yields Java crashes, native crashes and ANRs; each
+report's `kind` says which. The response's `pull` says whether the fetch
+happened: `pulled`, `skipped` (with the reason, for example an iPhone that is not
+on USB) or `failed` (with the error). Only `pulled` means the list reflects the
+device (for an iPhone, within the pull's window; `older_on_device` says what lay beyond it). A `failed` Android pull can still add the reports it did read, for
+example when one DropBox tag could not be read, or when the device's timezone
+could not be read and records without a time of their own were skipped. A
+simulator is `skipped`: its crash reports are written on the Mac and read from
+`~/Library/Logs/DiagnosticReports` continuously, unless the server was started
+with `--no-simulator-crashes`, which the reason then says. With a `udid`, the
+list is that device's crashes, plus reports quern cannot place on any device. A
+simulator's crash names its simulator by the app's path, so it is listed under
+that simulator only. `raw_text` is left out of the response unless
+`include_raw=true`: it runs to about a thousand tokens of JSON per crash. For an
+iOS report the whole file is on disk at `file_path`. An Android report has no
+file, and `file_path` names its DropBox record.
+
+Crash reports are left on the iPhone (the pull copies, it never deletes), so a
+pull does not take them away from Xcode or Finder. Each phone's reports are kept in
+`~/.quern/crashes/devices/<device id>/`, so after a restart they are listed
+against the right phone again, as an Android device's DropBox history is. A crash from before the server started,
+on either platform, is listed but does not become a new log entry or run the
+on-crash hook.
+The hook runs for every newer crash, including one logcat already reported.
+
+**Clearing.** `clear_crashes` deletes quern's stored copies on the Mac, for one
+`udid` or all: only the files quern's own pulls wrote, under
+`~/.quern/crashes/devices/`. Nothing else in the crash directory is deleted, and
+never `~/Library/Logs/DiagnosticReports`. It does not clear the device: a later
+pull lists again whatever the device still holds within its window, without
+logging it as a new crash. An unknown `udid` is a 404, and an empty one a 400.
+Pulled reports not copied for 30 days are also removed automatically, at start-up
+and hourly; set `crash_retention_days` in `~/.quern/config.json` (0 keeps them
+forever). The removals are logged in the server log only.
+
+`clear_device_crashes` permanently deletes an iPhone's own crash reports, for
+Xcode and Finder too: every `.ips`/`.crash` report at the top of its crash
+directory, each by name. DiagnosticLogs (sysdiagnose archives) and other files
+are left; `pymobiledevice3 crash clear` would remove them too, and is not used.
+It returns how many it removed, how many remain and any that failed. It refuses a
+phone matched to USB by name rather than by its hardware UDID (#323), Android (an
+unrooted device's DropBox can only be read), and a simulator, whose reports are
+files on the Mac. A phone with a long history lists more slowly; that cost has
+not been measured.
+
+On Android, `pull.open_dialogs` lists processes showing a crash ("keeps
+stopping") dialog right now (`kind: "crash"`), and processes Android is treating
+as not responding (`kind: "anr"`). The second starts when Android notices, about
+13 seconds before the ANR dialog and its report appear (measured on API 32), and
+lasts until the dialog is answered. While a crash dialog is open, Android drops
+every further crash of that process, with no report and no log line, so no new
+reports does not mean it stopped crashing. Dismiss the dialog or force-stop the
+app. `[]` means none; `null` means it was not checked (iOS, or a pull that could
+not run at all) or the process listing could not be read. A pull that is `failed`
+only because some DropBox tags could not be read still reports it.
 
 ### Network proxy
 
@@ -70,6 +211,18 @@ The key lives at `~/.quern/api-key`; the server's URL and port are in `~/.quern/
 | `clear_bypass` | DELETE | `/api/v1/proxy/bypass` | Remove bypass patterns, or clear all |
 | `configure_system_proxy` | POST | `/api/v1/proxy/configure-system` | Auto-configure macOS system proxy. Returns **428** when a booted simulator does not trust the mitmproxy CA; pass `skip_cert_check` to proceed anyway |
 | `unconfigure_system_proxy` | POST | `/api/v1/proxy/unconfigure-system` | Restore original proxy settings |
+
+**Flow answers say when the store has evicted.** The flow store holds 5,000
+flows and evicts the oldest-completed at capacity. `query_flows`,
+`get_flow_summary`, `wait_for_flow` and `stop_capture_session` return
+`truncated` and `complete_after`, with the meaning they have on the log tools.
+They are narrowed by `simulator_udid` or `client_ip` when the query filters on
+one. `truncated` covers counts as well as entries: a page can hold the newest
+flows and still carry a `total` that is short by what was evicted. To ask only
+about recent traffic, pass `since` (for example, just before the action you
+triggered); evictions from before it do not flag the answer. `proxy_status`
+reports the store's capacity, intake (`added`), evictions and the span it still
+holds in `flow_store`. `flows_captured` is only what survived.
 
 ### Intercept and mock
 

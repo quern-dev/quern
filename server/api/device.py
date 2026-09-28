@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
@@ -49,6 +50,10 @@ from server.models import (
 #: seven tools per request costs six subprocesses. `/tools` and startup still
 #: measure fresh.
 TOOLS_IN_LIST_MAX_AGE = 5.0
+
+
+if TYPE_CHECKING:
+    from server.device.controller import DeviceController
 
 router = APIRouter(prefix="/api/v1/device", tags=["device"])
 logger = logging.getLogger(__name__)
@@ -127,6 +132,21 @@ async def _capture_action_screenshot(controller, udid: str, label: str) -> str |
         return str(filepath)
     except Exception:
         return None
+
+
+def _logging_lock(request: Request, udid: str) -> asyncio.Lock:
+    """The lock that serialises starting and stopping capture on one device.
+
+    Stops need it as much as starts. `adapter.stop()` marks the adapter not
+    running before it has finished, so a start arriving in that gap passed
+    the "already running" check and registered a new capture -- which the
+    stop, resuming, then deleted from the registry, leaving it running with
+    no way to stop it (CodeRabbit on #319).
+    """
+    locks = getattr(request.app.state, "logging_start_locks", None)
+    if locks is None:
+        locks = request.app.state.logging_start_locks = {}
+    return locks.setdefault(udid, asyncio.Lock())
 
 
 def _get_controller(request: Request):
@@ -808,8 +828,6 @@ async def set_display_density(request: Request, body: SetDisplayDensityRequest):
 @logged_action("start_simulator_logging", category="logs")
 async def start_simulator_logging(request: Request, body: StartSimLogRequest):
     """Start capturing logs from a simulator app via unified logging."""
-    from server.sources.simulator_log import SimulatorLogAdapter
-
     controller = _get_controller(request)
 
     # Resolve UDID
@@ -817,6 +835,16 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
         udid = await controller.resolve_udid(body.udid)
     except DeviceError as e:
         raise _handle_device_error(e)
+
+    # Serialised per device, for the reason given on start_device_logging.
+    async with _logging_lock(request, udid):
+        return await _start_simulator_logging(request, body, udid)
+
+
+async def _start_simulator_logging(
+    request: Request, body: StartSimLogRequest, udid: str,
+) -> dict[str, Any]:
+    from server.sources.simulator_log import SimulatorLogAdapter
 
     # Check if already running for this UDID
     sim_adapters: dict = request.app.state.sim_log_adapters
@@ -852,6 +880,7 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
 
     # Apply ingestion filter preset if requested
     preset_applied = None
+    purged = 0
     if body.preset:
         from server.processing.ingestion_filter import PRESETS, build_config
 
@@ -865,7 +894,11 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
         from server.models import LogSource
         ingestion_filter.update_filter(config, source=LogSource.SIMULATOR)
         buffer = request.app.state.ring_buffer
-        await buffer.purge(lambda e: ingestion_filter.should_admit(e))
+        # Reported, not discarded. A purge removes entries the new filter
+        # would not admit, from a window already captured; they are then
+        # gone without eviction, so no `truncated` flag will ever mention
+        # them. The call that did it is the only place that can say so.
+        purged = await buffer.purge(lambda e: ingestion_filter.should_admit(e))
         preset_applied = body.preset
 
     # Auto-start plist watchers from persistent config
@@ -914,6 +947,7 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
         "status": "started", "udid": udid,
         "adapter_id": adapter.adapter_id,
         "preset_applied": preset_applied,
+        "purged": purged,
     }
     if plist_watchers_started:
         result["plist_watchers_started"] = plist_watchers_started
@@ -934,6 +968,12 @@ async def stop_simulator_logging(request: Request, body: StopSimLogRequest):
     except DeviceError as e:
         raise _handle_device_error(e)
 
+    # Under the same lock as starting; see _logging_lock.
+    async with _logging_lock(request, udid):
+        return await _stop_simulator_logging(request, udid)
+
+
+async def _stop_simulator_logging(request: Request, udid: str) -> dict[str, Any]:
     sim_adapters: dict = request.app.state.sim_log_adapters
     adapter = sim_adapters.get(udid)
     if not adapter:
@@ -979,9 +1019,6 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
     Use process filter to limit noise. Use preset to apply an ingestion
     filter at start time.
     """
-    from server.sources.device_log import PhysicalDeviceLogAdapter
-    from server.sources.logcat import LogcatAdapter
-
     controller = _get_controller(request)
 
     # Resolve UDID
@@ -989,6 +1026,25 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
         udid = await controller.resolve_udid(body.udid)
     except DeviceError as e:
         raise _handle_device_error(e)
+
+    # One start per device at a time. The body checks for a running adapter,
+    # awaits the adapter's start, and only then registers it -- and starting
+    # logcat now takes at least half a second (the early-exit check) and up
+    # to ten more if the device is slow to answer getprop. A second call in
+    # that window passed the check too, spawned its own logcat, and replaced
+    # the first in the registry, orphaning a process the API could no longer
+    # stop and doubling every line (#255, second review; reproduced with a
+    # fake adb: two "started" responses and one logcat left running after
+    # every registered adapter was stopped).
+    async with _logging_lock(request, udid):
+        return await _start_device_logging(request, body, udid, controller)
+
+
+async def _start_device_logging(
+    request: Request, body: StartDeviceLogRequest, udid: str, controller: DeviceController,
+) -> dict[str, Any]:
+    from server.sources.device_log import PhysicalDeviceLogAdapter
+    from server.sources.logcat import LogcatAdapter
 
     # Verify it's a physical or Android device (not a simulator)
     is_android = controller._is_android(udid)
@@ -1039,6 +1095,7 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
 
     # Apply ingestion filter preset if requested
     preset_applied = None
+    purged = 0
     if body.preset:
         from server.processing.ingestion_filter import PRESETS, build_config
 
@@ -1052,13 +1109,18 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
         from server.models import LogSource
         ingestion_filter.update_filter(config, source=LogSource.DEVICE)
         buffer = request.app.state.ring_buffer
-        await buffer.purge(lambda e: ingestion_filter.should_admit(e))
+        # Reported, not discarded. A purge removes entries the new filter
+        # would not admit, from a window already captured; they are then
+        # gone without eviction, so no `truncated` flag will ever mention
+        # them. The call that did it is the only place that can say so.
+        purged = await buffer.purge(lambda e: ingestion_filter.should_admit(e))
         preset_applied = body.preset
 
     return {
         "status": "started", "udid": udid,
         "adapter_id": adapter.adapter_id,
         "preset_applied": preset_applied,
+        "purged": purged,
     }
 
 
@@ -1074,6 +1136,12 @@ async def stop_device_logging(request: Request, body: StopDeviceLogRequest):
     except DeviceError as e:
         raise _handle_device_error(e)
 
+    # Under the same lock as starting; see _logging_lock.
+    async with _logging_lock(request, udid):
+        return await _stop_device_logging(request, udid)
+
+
+async def _stop_device_logging(request: Request, udid: str) -> dict[str, Any]:
     dev_adapters: dict = request.app.state.device_log_adapters
     adapter = dev_adapters.get(udid)
     if not adapter:
