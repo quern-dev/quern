@@ -94,6 +94,20 @@ or one ahead of anything the server has numbered, comes back with
 flow summary, a string that is not a cursor at all is refused with 400. Older timestamp cursors are still accepted, and the response always
 returns an arrival cursor.
 
+**Where it crashed.** Each crash report carries `app_frame`: the first frame of
+the crashing thread in the app's own code, with source file and line where the
+report has them. A simulator's Debug build does, because macOS resolves the frames
+on the Mac. A phone names the function for a Debug build, and gives only an offset
+for a stripped one. `frames` holds the crashing thread, each frame with its image,
+offset, symbol and source line. `images` holds the UUID and load address of each
+binary those frames point into, which is what resolving an unsymbolicated frame
+needs. Android frames come from the crashing thread only: native ones with their
+library and BuildId, Java ones with file and line. A frame counts as the app's
+when its binary is inside the app bundle (iOS) or was installed with the app
+(Android native). For Java, a frame is the app's unless it is in a platform or
+common-library package, which is a heuristic. `bundle_id`, `app_version` and
+`build_version` identify the app.
+
 **Crash reports on both platforms.** `get_latest_crash` with a `udid` fetches
 that device's crashes first. An iPhone is read over USB with `pymobiledevice3`:
 the reports dated within the last `days` (default 3), and `pull` says what it

@@ -1,0 +1,184 @@
+{"app_name": "MyApp", "timestamp": "2026-09-28 08:03:08.00 -0700", "app_version": "1.2.3", "slice_uuid": "6c31c929-34e1-8c57-5dee-6557a7e1d568", "build_version": "42", "platform": 7, "bundleID": "com.example.myapp", "share_with_app_devs": 0, "is_first_party": 0, "bug_type": "309", "os_version": "macOS 26.6.2 (25G83)", "incident_id": "00000000-0000-0000-0000-0000000000FF", "name": "MyApp"}
+{
+  "procName": "MyApp",
+  "procPath": "/Users/USER/Library/Developer/CoreSimulator/Devices/00000000-0000-0000-0000-00000000000A/data/Containers/Bundle/Application/00000000-0000-0000-0000-000000000002/MyApp.app/MyApp",
+  "captureTime": "2026-09-28 08:02:45.9642 -0700",
+  "cpuType": "ARM-64",
+  "exception": {
+    "codes": "0x0000000000000000, 0x0000000000000000",
+    "rawCodes": [
+      0,
+      0
+    ],
+    "type": "EXC_CRASH",
+    "signal": "SIGABRT"
+  },
+  "termination": {
+    "flags": 0,
+    "code": 6,
+    "namespace": "SIGNAL",
+    "indicator": "Abort trap: 6",
+    "byProc": "zsh",
+    "byPid": 51204
+  },
+  "faultingThread": 0,
+  "bundleInfo": {
+    "CFBundleShortVersionString": "1.2.3",
+    "CFBundleVersion": "42",
+    "CFBundleIdentifier": "com.example.myapp"
+  },
+  "threads": [
+    {
+      "triggered": true,
+      "id": 181024451,
+      "queue": "com.apple.main-thread",
+      "frames": [
+        {
+          "imageOffset": 2928,
+          "symbol": "mach_msg2_trap",
+          "symbolLocation": 8,
+          "imageIndex": 2
+        },
+        {
+          "imageOffset": 73348,
+          "symbol": "mach_msg2_internal",
+          "symbolLocation": 72,
+          "imageIndex": 2
+        },
+        {
+          "imageOffset": 35908,
+          "symbol": "mach_msg_overwrite",
+          "symbolLocation": 484,
+          "imageIndex": 2
+        },
+        {
+          "imageOffset": 3824,
+          "symbol": "mach_msg",
+          "symbolLocation": 20,
+          "imageIndex": 2
+        },
+        {
+          "imageOffset": 600688,
+          "symbol": "__CFRunLoopServiceMachPort",
+          "symbolLocation": 156,
+          "imageIndex": 4
+        },
+        {
+          "imageOffset": 578640,
+          "symbol": "__CFRunLoopRun",
+          "symbolLocation": 1148,
+          "imageIndex": 4
+        },
+        {
+          "imageOffset": 576408,
+          "symbol": "CFRunLoopRunSpecific",
+          "symbolLocation": 536,
+          "imageIndex": 4
+        },
+        {
+          "imageOffset": 11520,
+          "symbol": "GSEventRunModal",
+          "symbolLocation": 164,
+          "imageIndex": 5
+        },
+        {
+          "imageOffset": 15068088,
+          "symbol": "-[UIApplication _run]",
+          "symbolLocation": 796,
+          "imageIndex": 6
+        },
+        {
+          "imageOffset": 15085444,
+          "symbol": "UIApplicationMain",
+          "symbolLocation": 124,
+          "imageIndex": 6
+        },
+        {
+          "imageOffset": 3021164,
+          "sourceLine": 13,
+          "sourceFile": "AppDelegate.swift",
+          "symbol": "__debug_main_executable_dylib_entry_point",
+          "imageIndex": 1,
+          "symbolLocation": 64
+        },
+        {
+          "imageOffset": 5076,
+          "symbol": "start_sim",
+          "symbolLocation": 20,
+          "imageIndex": 0
+        },
+        {
+          "imageOffset": 132324,
+          "symbol": "start",
+          "symbolLocation": 6992,
+          "imageIndex": 3
+        }
+      ]
+    }
+  ],
+  "usedImages": [
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 4366057472,
+      "size": 311296,
+      "uuid": "7cf6da16-f8ae-0148-0738-36b58bc3a13c",
+      "path": "/Volumes/VOLUME/*/dyld_sim",
+      "name": "dyld_sim"
+    },
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 4529963008,
+      "size": 58736640,
+      "uuid": "1079d559-088c-e069-3942-516aa8865481",
+      "path": "/Users/USER/Library/Developer/CoreSimulator/Devices/00000000-0000-0000-0000-00000000000A/data/Containers/Bundle/Application/00000000-0000-0000-0000-000000000002/MyApp.app/MyApp.debug.dylib",
+      "name": "MyApp.debug.dylib"
+    },
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 4370317312,
+      "size": 245760,
+      "uuid": "460f4c51-3d89-6077-c09f-52d00e0b7351",
+      "path": "/usr/lib/system/libsystem_kernel.dylib",
+      "name": "libsystem_kernel.dylib"
+    },
+    {
+      "source": "P",
+      "arch": "arm64e",
+      "base": 4366958592,
+      "size": 737280,
+      "uuid": "3dbba1b7-2db9-14fa-9b0a-bf8387bc54cb",
+      "path": "/usr/lib/dyld",
+      "name": "dyld"
+    },
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 6446211072,
+      "size": 4292608,
+      "uuid": "864a81c3-e989-d33c-58cc-94c38f8588e3",
+      "path": "/Volumes/VOLUME/*/CoreFoundation.framework/CoreFoundation",
+      "name": "CoreFoundation"
+    },
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 6727782400,
+      "size": 33280,
+      "uuid": "0c2371d5-ecab-d11e-8d4f-7c74615f3439",
+      "path": "/Volumes/VOLUME/*/GraphicsServices.framework/GraphicsServices",
+      "name": "GraphicsServices"
+    },
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 6524239872,
+      "size": 30854208,
+      "uuid": "028cb2b4-0b68-8621-4af8-b3b6f85d5cb3",
+      "path": "/Volumes/VOLUME/*/UIKitCore.framework/UIKitCore",
+      "name": "UIKitCore"
+    }
+  ]
+}

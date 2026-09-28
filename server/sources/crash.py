@@ -25,7 +25,7 @@ from pathlib import Path
 
 from server.config import CONFIG_DIR
 from server.models import CrashReport, LogEntry, LogLevel, LogSource
-from server.sources import BaseSourceAdapter, EntryCallback, ios_crash
+from server.sources import BaseSourceAdapter, EntryCallback, crash_frames, ios_crash
 
 logger = logging.getLogger(__name__)
 
@@ -621,20 +621,10 @@ class CrashAdapter(BaseSourceAdapter):
         if not signal_name:
             signal_name = data.get("termination", {}).get("signal", "")
 
-        # Extract top frames from faulting thread
-        top_frames: list[str] = []
-        threads = data.get("threads", [])
-        faulting = data.get("faultingThread", 0)
-        if isinstance(threads, list) and 0 <= faulting < len(threads):
-            thread = threads[faulting]
-            frames = thread.get("frames", [])
-            for frame in frames[:5]:
-                image = frame.get("imageOffset", "")
-                symbol = frame.get("symbol", "")
-                if symbol:
-                    top_frames.append(symbol)
-                elif image:
-                    top_frames.append(str(image))
+        # The faulting thread, with each frame's image, offset and source
+        # line, and the images' UUIDs and load addresses (#326).
+        frames, images = crash_frames.ips_frames(data)
+        bundle = data.get("bundleInfo") if isinstance(data.get("bundleInfo"), dict) else {}
 
         # Timestamp
         ts_str = data.get("captureTime", "") or data.get("timestamp", "")
@@ -648,7 +638,13 @@ class CrashAdapter(BaseSourceAdapter):
             exception_type=exc_type,
             exception_codes=exc_codes,
             signal=signal_name,
-            top_frames=top_frames,
+            top_frames=[crash_frames.format_frame(f) for f in frames[:crash_frames.TOP_FRAMES]],
+            frames=frames,
+            images=images,
+            app_frame=crash_frames.first_app_frame(frames),
+            bundle_id=header.get("bundleID") or bundle.get("CFBundleIdentifier") or "",
+            app_version=header.get("app_version") or bundle.get("CFBundleShortVersionString") or "",
+            build_version=header.get("build_version") or bundle.get("CFBundleVersion") or "",
             file_path=str(path),
             raw_text=content[:3000],
         )
@@ -684,18 +680,11 @@ class CrashAdapter(BaseSourceAdapter):
         if sig_match:
             signal_name = sig_match.group(1)
 
-        # Extract top frames from "Thread N Crashed:" section
-        top_frames: list[str] = []
-        crashed_section = re.search(
-            r"Thread \d+ Crashed.*?\n((?:\d+\s+.+\n){1,5})", content
-        )
-        if crashed_section:
-            for line in crashed_section.group(1).strip().split("\n"):
-                parts = line.split(None, 3)
-                if len(parts) >= 4:
-                    top_frames.append(parts[3].strip())
-                elif len(parts) >= 3:
-                    top_frames.append(parts[2].strip())
+        # The crashed thread, and the Binary Images the frames point into.
+        # Only the part after the address was kept, which dropped the image.
+        frames, images = crash_frames.crash_text_frames(content)
+        identifier = re.search(r"^Identifier:\s+(\S+)", content, re.MULTILINE)
+        version = re.search(r"^Version:\s+(\S+)(?:\s+\((\S+)\))?", content, re.MULTILINE)
 
         # Timestamp
         ts_match = re.search(r"^Date/Time:\s+(.+)$", content, re.MULTILINE)
@@ -711,7 +700,13 @@ class CrashAdapter(BaseSourceAdapter):
             exception_type=exc_type,
             exception_codes=exc_codes,
             signal=signal_name,
-            top_frames=top_frames,
+            top_frames=[crash_frames.format_frame(f) for f in frames[:crash_frames.TOP_FRAMES]],
+            frames=frames,
+            images=images,
+            app_frame=crash_frames.first_app_frame(frames),
+            bundle_id=identifier.group(1) if identifier else "",
+            app_version=version.group(1) if version else "",
+            build_version=(version.group(2) or "") if version else "",
             file_path=str(path),
             raw_text=content[:3000],
         )
@@ -724,7 +719,10 @@ class CrashAdapter(BaseSourceAdapter):
             parts.append(report.exception_type)
         if report.signal:
             parts.append(f"({report.signal})")
-        if report.top_frames:
+        # Where in the app's code, when the report can say; else the top frame.
+        if report.app_frame is not None:
+            parts.append(f"in {crash_frames.format_frame(report.app_frame)}")
+        elif report.top_frames:
             parts.append(f"@ {report.top_frames[0]}")
         return " ".join(parts)
 

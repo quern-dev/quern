@@ -301,6 +301,35 @@ class LogErrorsResponse(Completeness):
 # ---------------------------------------------------------------------------
 
 
+class CrashFrame(BaseModel):
+    """One frame of the crashing thread, as structured as the report allows."""
+
+    image: str = Field(
+        default="", description="The binary: 'MyApp.debug.dylib', 'UIKitCore', 'libc.so'",
+    )
+    offset: int | None = Field(
+        default=None,
+        description="Offset into the image (iOS imageOffset; Android pc). With the image's "
+                    "load address, what a symbolicator needs.",
+    )
+    symbol: str = Field(default="", description="Function, where the report names it")
+    symbol_offset: int | None = Field(default=None, description="Bytes into `symbol`")
+    file: str = Field(default="", description="Source file, where the report has it")
+    line: int | None = Field(default=None, description="Source line, where the report has it")
+    app: bool = Field(default=False, description="In the app's own code, not the OS's")
+    build_id: str = Field(default="", description="Android native: the library's BuildId")
+
+
+class CrashImage(BaseModel):
+    """A binary a crash frame points into: what symbolicating it needs."""
+
+    name: str
+    uuid: str = ""
+    base: int | None = Field(default=None, description="Load address")
+    path: str = ""
+    arch: str = ""
+
+
 class CrashReport(BaseModel):
     """A parsed crash report."""
 
@@ -333,6 +362,24 @@ class CrashReport(BaseModel):
     )
     file_path: str = Field(default="", description="Path to the raw crash file on disk")
     raw_text: str = Field(default="", description="First portion of raw crash content")
+    app_frame: CrashFrame | None = Field(
+        default=None,
+        description=(
+            "The first frame of the crashing thread in the app's own code: where in "
+            "the app it crashed, or was when it was stopped. None when that thread "
+            "never entered the app's code, or the report cannot tell."
+        ),
+    )
+    frames: list[CrashFrame] = Field(
+        default_factory=list, description="The crashing thread's frames, innermost first",
+    )
+    images: list[CrashImage] = Field(
+        default_factory=list,
+        description="The binaries those frames point into, with UUID and load address",
+    )
+    bundle_id: str = ""
+    app_version: str = ""
+    build_version: str = ""
 
 
 class OpenCrashDialog(BaseModel):

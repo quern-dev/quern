@@ -34,7 +34,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from server.models import CrashReport
+from server.models import CrashFrame, CrashImage, CrashReport
+from server.sources import crash_frames
 
 #: Every app crash, native crash and ANR, for both regular and system apps.
 #: SYSTEM_TOMBSTONE is left out: it is the same native crash again, written by
@@ -144,23 +145,34 @@ def _parse_record(
 
     exception_type = exception_codes = signal = ""
     frames: list[str] = []
+    structured: list[CrashFrame] = []
     if kind == "crash":
         m = _JAVA_EXCEPTION.search(body)
         if m:
             exception_type, exception_codes = m.group(1), m.group(2) or ""
         frames = _JAVA_FRAME.findall(body)
+        structured = crash_frames.java_frames([f"at {f}" for f in frames])
     elif kind == "native_crash":
         m = _SIGNAL.search(body)
         if m:
             signal = m.group(2)
             exception_type = f"signal {m.group(1)} ({m.group(2)})"
             exception_codes = m.group(3)
-        frames = _NATIVE_FRAME.findall(body)
+        # The crashing thread's backtrace only: the tombstone goes on to
+        # every other thread's, and reading the whole body mixed them in.
+        frames = _NATIVE_FRAME.findall(_crashing_backtrace(body))
+        structured = crash_frames.native_frames(frames)
     else:  # anr
         exception_type = "ANR"
         m = _SUBJECT.search(body)
         exception_codes = m.group(1) if m else ""
-        frames = _main_thread_frames(body, pid)
+        lines = _main_thread_frames(body, pid)
+        frames = [line.removeprefix("at ") for line in lines]
+        structured = [
+            f for line in lines
+            for f in (crash_frames.java_frames([line]) if line.startswith("at ")
+                      else crash_frames.native_frames([line.removeprefix("native: ")]))
+        ]
 
     # Derived from the record, so a crash seen by two pulls is one report.
     # From the UTC time, not the header's: DropBox prints the header in the
@@ -180,6 +192,9 @@ def _parse_record(
         exception_codes=exception_codes,
         signal=signal,
         top_frames=[f.strip() for f in frames[:TOP_FRAMES]],
+        frames=structured,
+        images=_native_images(structured, frames) if kind == "native_crash" else [],
+        app_frame=crash_frames.first_app_frame(structured),
         file_path=f"dropbox:{tag}@{local_time}",
         raw_text=block[:RAW_LIMIT],
     )
@@ -207,6 +222,27 @@ def _timestamp(
         return None
     naive = datetime.strptime(local_time, "%Y-%m-%d %H:%M:%S")
     return naive.replace(tzinfo=zone).astimezone(UTC)
+
+
+def _crashing_backtrace(body: str) -> str:
+    """The `backtrace:` block of the crashing thread, which a tombstone lists
+    first; the whole body when there is none."""
+    start = body.find("\nbacktrace:")
+    if start == -1:
+        return body
+    block = body[start + len("\nbacktrace:"):]
+    end = block.find("\n\n")
+    return block if end == -1 else block[:end]
+
+
+def _native_images(frames: list[CrashFrame], lines: list[str]) -> list[CrashImage]:
+    """The libraries the native frames point into, with their BuildIds."""
+    images: dict[str, CrashImage] = {}
+    for frame, line in zip(frames, lines, strict=False):
+        path = line.split()[3] if len(line.split()) > 3 else ""
+        if frame.image and frame.image not in images:
+            images[frame.image] = CrashImage(name=frame.image, uuid=frame.build_id, path=path)
+    return list(images.values())
 
 
 def _main_thread_frames(body: str, pid: str) -> list[str]:
@@ -240,7 +276,7 @@ def _main_thread_frames(body: str, pid: str) -> list[str]:
             break
         stripped = line.strip()
         if stripped.startswith(("at ", "native:")):
-            frames.append(stripped.removeprefix("at "))
+            frames.append(stripped)
     return frames
 
 
