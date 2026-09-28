@@ -83,6 +83,14 @@ class TestKilledByAnotherProcess:
         report = _parse(FIXTURES / "crash_ips" / "device_debug.ips")
         assert report.killed_by == "dtappserviced" and report.app_frame is None
 
+    def test_a_kill_is_no_crash_site_even_inside_the_apps_code(self, tmp_path):
+        """Stopped mid-work, its frames can be deep in the app -- still not a
+        crash site."""
+        header, body = _ips("simulator_fatal_error")
+        body["termination"]["byProc"] = "zsh"
+        report = _parse(_write(tmp_path, header, body))
+        assert report.killed_by == "zsh" and report.app_frame is None
+
     def test_the_frames_are_still_kept(self):
         """Where it was is still worth having; it is only not the crash site."""
         report = _parse(FIXTURES / "crash_ips" / "simulator_debug.ips")
@@ -240,7 +248,8 @@ class TestWhichFrame:
         header, body = _self_crash("device_debug")
         body["procPath"] = "/usr/libexec/foo"
         body["procName"] = "foo"
-        body["usedImages"][0]["path"] = "/usr/libexec/libneighbour.dylib"
+        first = body["usedImages"][body["threads"][0]["frames"][0]["imageIndex"]]
+        first["path"] = "/usr/libexec/libneighbour.dylib"
         report = _parse(_write(tmp_path, header, body))
         assert not report.frames[0].app
 
@@ -248,8 +257,9 @@ class TestWhichFrame:
         """`/…/MyApp.app2/lib` is not inside `/…/MyApp.app`."""
         header, body = _self_crash("device_debug")
         app_dir = body["procPath"].rsplit("/", 1)[0]
-        body["usedImages"][0]["path"] = app_dir + "2/libneighbour.dylib"
-        body["usedImages"][0]["name"] = "libneighbour.dylib"
+        first = body["usedImages"][body["threads"][0]["frames"][0]["imageIndex"]]
+        first["path"] = app_dir + "2/libneighbour.dylib"
+        first["name"] = "libneighbour.dylib"
         report = _parse(_write(tmp_path, header, body))
         assert not report.frames[0].app
 
@@ -290,6 +300,39 @@ class TestWhichFrame:
         header["bundleID"] = ["not", "text"]
         report = _parse(_write(tmp_path, header, body))
         assert report is not None and report.process == "MyApp"
+        # And the frames themselves survive: one odd field costs that field.
+        assert len(report.frames) == 12
+
+    def test_frames_that_cannot_be_read_cost_the_frames_not_the_report(
+        self, tmp_path, monkeypatch,
+    ):
+        def broken(data):
+            raise TypeError("a shape nobody has seen")
+
+        monkeypatch.setattr(crash_frames, "ips_frames", broken)
+        report = _parse(FIXTURES / "crash_ips" / "simulator_fatal_error.ips")
+        assert report is not None and report.frames == [] and report.app_frame is None
+        assert report.exception_type == "EXC_BREAKPOINT"
+
+    def test_a_boolean_faulting_thread_is_not_thread_one(self, tmp_path):
+        header, body = _ips("device_debug")
+        body["threads"].append({"frames": [{"imageIndex": 0, "imageOffset": 1}]})
+        body["faultingThread"] = True                  # True == 1 to Python
+        report = _parse(_write(tmp_path, header, body))
+        assert len(report.frames) == 12               # the triggered thread, 0
+
+    def test_a_nested_app_counts_as_the_outer_one(self, tmp_path):
+        """A watch app inside the phone app: its frameworks and the phone
+        app's are one app's code."""
+        header, body = _self_crash("device_debug")
+        app_dir = body["procPath"].rsplit("/", 1)[0]
+        body["procPath"] = f"{app_dir}/Watch/Face.app/Face"
+        body["procName"] = "Face"
+        body["usedImages"].append({"name": "Shared", "arch": "arm64", "base": 4400000000,
+                                   "path": f"{app_dir}/Frameworks/Shared.framework/Shared"})
+        body["threads"][0]["frames"].insert(0, {
+            "imageIndex": len(body["usedImages"]) - 1, "imageOffset": 8, "symbol": "Shared.f()"})
+        assert _parse(_write(tmp_path, header, body)).app_frame.image == "Shared"
 
 
 class TestCrashText:
