@@ -35,11 +35,11 @@ class TestSelectRecent:
     def test_the_window_has_a_day_of_margin_for_zones(self):
         """Names are device-local and now is the Mac's; the two can differ."""
         names = [
-            "A-2026-09-24-230000.ips",      # 3 days and a bit: inside the margin
+            "A-2026-09-24-120000.ips",      # 3 days 10 hours: only the margin keeps it
             "B-2026-09-23-210000.ips",      # just past days + 1
         ]
         selection = select_recent(names, 3, NOW)
-        assert selection.wanted == ["A-2026-09-24-230000.ips"]
+        assert selection.wanted == ["A-2026-09-24-120000.ips"]
         assert selection.older == 1
 
     def test_undated_reports_are_pulled(self):
@@ -90,9 +90,12 @@ class TestCommands:
         await ios_crash.pull_reports("/bin/pmd3", "HW", names, tmp_path)
         [cmd] = sent
         pattern = cmd[cmd.index("--match") + 1]
-        assert all(re.fullmatch(pattern, n) for n in names)
-        assert not re.fullmatch(pattern, "stacksXcom.x-2026-09-27-010000.ips")   # "+" escaped
-        assert not re.fullmatch(pattern, "A.ips.old")                          # anchored
+        # pymobiledevice3's pull applies it with re.search over each basename
+        # (services/afc.py), which is unanchored -- so the anchors are ours.
+        assert all(re.search(pattern, n) for n in names)
+        assert not re.search(pattern, "stacksXcom.x-2026-09-27-010000.ips")    # "+" escaped
+        assert not re.search(pattern, "A.ips.synced")                          # anchored at end
+        assert not re.search(pattern, "OldA.ips")                              # and at start
         assert "--erase" not in cmd and cmd[-1] == str(tmp_path)
 
     async def test_nothing_to_pull_runs_nothing(self, monkeypatch, tmp_path):

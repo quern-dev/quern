@@ -1069,6 +1069,19 @@ class TestClearDeviceCrashes:
         assert resp.json() == {"udid": "00008101-PHONE", "removed": 2, "remaining": 0}
         assert sent == [["crash", "ls"], ["crash", "clear"], ["crash", "ls"]]
 
+    async def test_a_report_that_survives_the_clear_is_not_counted_as_removed(
+        self, app, monkeypatch,
+    ):
+        """One written between the clear and the second listing, or one the
+        phone would not delete: `removed` is what went, not what was there."""
+        app.state.device_controller = _controller(lib_udid="LIB")
+        sent = []
+        self._pmd3(monkeypatch, [["A.ips", "B.ips", "C.ips"], ["C.ips"]], sent)
+
+        resp = await _clear_device(app, "00008101-PHONE")
+
+        assert resp.json() == {"udid": "00008101-PHONE", "removed": 2, "remaining": 1}
+
     async def test_android_is_refused_with_the_reason(self, app, monkeypatch):
         app.state.device_controller = _controller()
         sent = []
