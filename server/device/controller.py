@@ -688,20 +688,28 @@ class DeviceController(DeviceControllerUI):
                 self._device_name_cache[d.udid] = d.name
 
         # Build CoreDevice UUID -> libimobiledevice UDID mapping. Exactly,
-        # where devicectl gave us the phone's hardware UDID and usbmux lists
-        # it; by name only where the name is unique. Two phones sharing a
-        # name ("iPhone" is the default) could map one to the other's UDID,
-        # and a crash pull would then file one phone's reports under the
-        # other -- on disk, so for good once pulls kept a directory per phone.
-        usb_name_map = await self.usbmux.get_usb_udid_map()
-        usb_udids = set(usb_name_map.values()) if physical_devices else set()
+        # through the identity aliases devicectl records: its hardware UDID
+        # *is* the USB UDID, so a phone is on USB when usbmux lists one of its
+        # spellings. It used to correlate names, and two phones sharing one
+        # ("iPhone" is the default) could map to each other's UDID -- so a
+        # crash pull filed one phone's reports under the other, on disk once
+        # pulls kept a directory per phone.
+        #
+        # By name only as a fallback, and only when the name is unique on both
+        # sides, for a phone devicectl listed without a hardware UDID. Every
+        # paired device measured under Xcode 26.5 reports one; Xcode 27 is not
+        # yet measured, which is the only reason this fallback remains (#323).
+        usb_devices = await self.usbmux.get_usb_devices() if physical_devices else []
+        usb_udids = {udid for udid, _ in usb_devices}
+        usb_names = Counter(name for _, name in usb_devices if name)
         name_counts = Counter(d.name for d in physical_devices)
         for d in physical_devices:
             exact = next((s for s in spellings_of(d.udid) if s in usb_udids), None)
             if exact:
                 self._usbmux_udid_map[d.udid] = exact
-            elif d.name in usb_name_map and name_counts[d.name] == 1:
-                self._usbmux_udid_map[d.udid] = usb_name_map[d.name]
+            elif (len(spellings_of(d.udid)) <= 1 and name_counts[d.name] == 1
+                  and usb_names[d.name] == 1):
+                self._usbmux_udid_map[d.udid] = next(u for u, n in usb_devices if n == d.name)
 
         return sim_devices + physical_devices + usbmux_devices + android_devices
 

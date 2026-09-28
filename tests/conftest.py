@@ -344,12 +344,9 @@ def _no_hardware_attached(monkeypatch, request):
     async def _none(self, *a, **k):
         return []
 
-    async def _no_map(self, *a, **k):
-        return {}
-
     for backend in (SimctlBackend, DevicectlBackend, UsbmuxBackend, AdbBackend):
         monkeypatch.setattr(backend, "list_devices", _none, raising=False)
-    monkeypatch.setattr(UsbmuxBackend, "get_usb_udid_map", _no_map, raising=False)
+    monkeypatch.setattr(UsbmuxBackend, "get_usb_devices", _none, raising=False)
     monkeypatch.setattr(AdbBackend, "list_avds", _none, raising=False)
 
     # "Is this tool installed?" is the machine's second question, asked by
