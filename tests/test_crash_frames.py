@@ -645,8 +645,8 @@ class TestWhoEndedIt:
         """Measured: abort() in `…_well_past_thirty_two_chars` carried byProc
         `…_well_p` and read as a kill, hiding the crash site."""
         header, body = _ips("simulator_fatal_error")
-        body["procName"] = "MyAppNotificationServiceExtension"
-        body["termination"].update(byProc="MyAppNotificationServiceExte", byPid=body["pid"])
+        body["procName"] = "qrprobe_abort_with_a_name_well_past_thirty_two_chars"
+        body["termination"].update(byProc="qrprobe_abort_with_a_name_well_p", byPid=body["pid"])
         report = _parse(_write(tmp_path, header, body))
         assert report.killed_by == "" and report.app_frame is not None
 
@@ -664,6 +664,17 @@ class TestWhoEndedIt:
         assert _parse(_write(tmp_path, header, body)).killed_by == ""
         body["termination"]["byProc"] = "zsh"
         assert _parse(_write(tmp_path, header, body)).killed_by == "zsh"
+
+    @pytest.mark.parametrize("by_proc", ["exc handler", "qrprobe_abort_with_a_name_well_p"])
+    def test_by_name_the_handler_and_a_cut_name_are_its_own(self, tmp_path, by_proc):
+        """Without pids: the exception handler, and the app's own name as the
+        kernel cuts it at 32 characters, are the app ending itself."""
+        header, body = _ips("simulator_fatal_error")
+        body.pop("pid")
+        body["procName"] = "qrprobe_abort_with_a_name_well_past_thirty_two_chars"
+        body["termination"].pop("byPid")
+        body["termination"]["byProc"] = by_proc
+        assert _parse(_write(tmp_path, header, body)).killed_by == ""
 
     def test_a_watchdog_keeps_where_it_hung(self, tmp_path):
         """The system ended it, but the main thread's frames are the answer."""
@@ -740,6 +751,27 @@ class TestReviewTwoAndroid:
             "java.lang.IllegalStateException: boom\n"
             "\tat com.acme.feature.Map.draw(Map.kt:3)\n")))
         assert report.app_frame.symbol == "com.acme.feature.Map.draw"
+
+    def test_a_shared_top_level_domain_is_not_the_apps_package(self):
+        """`com.` is everyone's: with nothing under `com.acme` the package
+        decides nothing, and every non-library frame counts."""
+        report = self._parse(self._record("com.acme.app v7 (1.0)", (
+            "java.lang.IllegalStateException: boom\n"
+            "\tat org.thirdparty.Z.run(Z.kt:1)\n"
+            "\tat com.vendor.sdk.Lib.go(Lib.kt:2)\n")))
+        assert [f.app for f in report.frames] == [True, True]
+
+    def test_every_block_agrees_on_the_apps_package(self):
+        """The trace names the app's package once: a cause whose frames match
+        only a shorter prefix is not the app's because its own block lacks a
+        full match."""
+        report = self._parse(self._record("com.acme.app v7 (1.0)", (
+            "java.lang.RuntimeException: wrapped\n"
+            "\tat com.acme.app.Main.run(Main.kt:1)\n"
+            "Caused by: java.lang.IllegalStateException: boom\n"
+            "\tat com.acme.lib.Parser.read(Parser.kt:2)\n")))
+        assert [f.app for f in report.frames] == [True, False]
+        assert report.app_frame.symbol == "com.acme.app.Main.run"
 
     def test_the_crash_site_past_the_frame_cap(self):
         compose = "".join(f"\tat androidx.compose.ui.N{i}.f(N.kt:1)\n" for i in range(35))
