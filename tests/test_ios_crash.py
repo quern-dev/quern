@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
@@ -56,14 +57,19 @@ class TestSelectRecent:
         assert (selection.wanted, selection.older, selection.oldest) == ([], 0, None)
 
 
-def _fake_run(monkeypatch, out="", error=None, sent=None):
-    async def run(cmd, timeout):
+def _fake_run(monkeypatch, out="", err="", error=None, sent=None, on_pull=None):
+    async def run(argv, what, timeout):
         if sent is not None:
-            sent.append(cmd)
+            sent.append(argv)
         if error:
             raise error
-        return out
+        if on_pull is not None and "pull" in argv:
+            on_pull(Path(argv[-1]))
+        return out, err
     monkeypatch.setattr(ios_crash, "_run", run)
+
+
+PMD3 = ["/usr/bin/python3", "-m", "pymobiledevice3"]
 
 
 class TestCommands:
@@ -74,41 +80,119 @@ class TestCommands:
             "/DiagnosticLogs/Search/spotlight_heartbeat_last.log\n"
             "/Retired/MyApp-2026-01-01-000000.ips\n/notes.log\nnoise\n"
         ))
-        names = await ios_crash.list_reports("/bin/pmd3", "HW")
+        names = await ios_crash.list_reports(PMD3, "HW")
         assert names == ["Calculator-2026-09-27-190847.ips", "Old.crash"]
 
-    async def test_the_listing_targets_the_device(self, monkeypatch):
+    async def test_every_command_names_its_phone(self, monkeypatch, tmp_path):
+        """Without --udid pymobiledevice3 picks the first USB phone: with two
+        plugged in, the wrong one."""
+        sent = []
+        _fake_run(monkeypatch, sent=sent,
+                  on_pull=lambda staging: (staging / "A.ips").write_text("x"))
+        await ios_crash.list_reports(PMD3, "00008101-HW")
+        await ios_crash.pull_reports(PMD3, "00008101-HW", ["A.ips"], tmp_path)
+        for argv in sent:
+            assert argv[argv.index("--udid") + 1] == "00008101-HW", argv
+
+    @pytest.mark.parametrize("udid", [None, ""])
+    async def test_no_udid_is_refused_not_first_device(self, monkeypatch, tmp_path, udid):
         sent = []
         _fake_run(monkeypatch, sent=sent)
-        await ios_crash.list_reports("/bin/pmd3", "00008101-HW")
-        assert sent == [["/bin/pmd3", "crash", "ls", "--udid", "00008101-HW", "--depth", "1"]]
+        for call in (ios_crash.list_reports(PMD3, udid),
+                     ios_crash.pull_reports(PMD3, udid, ["A.ips"], tmp_path),
+                     ios_crash.remove_reports(udid, ["A.ips"])):
+            with pytest.raises(IosCrashError, match="no device udid"):
+                await call
+        assert sent == []
 
     async def test_a_pull_matches_exactly_the_names_and_never_erases(self, monkeypatch, tmp_path):
         sent = []
-        _fake_run(monkeypatch, sent=sent)
         names = ["stacks+com.x-2026-09-27-010000.ips", "A.ips"]
-        await ios_crash.pull_reports("/bin/pmd3", "HW", names, tmp_path)
-        [cmd] = sent
-        pattern = cmd[cmd.index("--match") + 1]
+
+        def write(staging):
+            for n in names:
+                (staging / n).write_text("report")
+
+        _fake_run(monkeypatch, sent=sent, on_pull=write)
+        copied = await ios_crash.pull_reports(PMD3, "HW", names, tmp_path)
+        [argv] = sent
+        pattern = argv[argv.index("--match") + 1]
         # pymobiledevice3's pull applies it with re.search over each basename
         # (services/afc.py), which is unanchored -- so the anchors are ours.
         assert all(re.search(pattern, n) for n in names)
         assert not re.search(pattern, "stacksXcom.x-2026-09-27-010000.ips")    # "+" escaped
         assert not re.search(pattern, "A.ips.synced")                          # anchored at end
         assert not re.search(pattern, "OldA.ips")                              # and at start
-        assert "--erase" not in cmd and cmd[-1] == str(tmp_path)
+        assert "--erase" not in argv
+        assert copied == names and all((tmp_path / n).read_text() == "report" for n in names)
+        assert not (tmp_path / ".incoming").exists()
+
+    async def test_a_file_the_pull_skipped_is_a_failure_not_an_empty_copy(
+        self, monkeypatch, tmp_path,
+    ):
+        """pymobiledevice3 creates the file, fails to read it, logs "(Ignoring)"
+        and exits 0. Pulled straight into place, that left an empty report --
+        and truncated a good copy from an earlier pull."""
+        (tmp_path / "B.ips").write_text("good copy from an earlier pull")
+
+        def write(staging):
+            (staging / "A.ips").write_text("report")
+            (staging / "B.ips").write_text("")                  # created, then skipped
+
+        err = ("2026-09-27 22:00:00 host pymobiledevice3.services.afc[1] WARNING "
+               "(Ignoring) Error: /B.ips: device busy\n")
+        _fake_run(monkeypatch, err=err, on_pull=write)
+        with pytest.raises(IosCrashError, match=r"did not copy 1 of 2 report\(s\) \(B.ips\)") as e:
+            await ios_crash.pull_reports(PMD3, "HW", ["A.ips", "B.ips"], tmp_path)
+        assert "device busy" in str(e.value)
+        assert e.value.copied == ["A.ips"]
+        assert (tmp_path / "A.ips").read_text() == "report"
+        assert (tmp_path / "B.ips").read_text() == "good copy from an earlier pull"
+
+    async def test_a_pull_that_fails_keeps_what_it_copied(self, monkeypatch, tmp_path):
+        async def run(argv, what, timeout):
+            (Path(argv[-1]) / "A.ips").write_text("report")
+            raise IosCrashError("pymobiledevice3 crash pull timed out after 30s")
+        monkeypatch.setattr(ios_crash, "_run", run)
+
+        with pytest.raises(IosCrashError, match="timed out.*copied 1 of 2") as e:
+            await ios_crash.pull_reports(PMD3, "HW", ["A.ips", "B.ips"], tmp_path)
+        assert e.value.copied == ["A.ips"] and (tmp_path / "A.ips").exists()
+        assert not (tmp_path / ".incoming").exists()
 
     async def test_nothing_to_pull_runs_nothing(self, monkeypatch, tmp_path):
         sent = []
         _fake_run(monkeypatch, sent=sent)
-        await ios_crash.pull_reports("/bin/pmd3", "HW", [], tmp_path)
+        assert await ios_crash.pull_reports(PMD3, "HW", [], tmp_path) == []
         assert sent == []
 
-    async def test_clear_is_the_clear_command(self, monkeypatch):
+    async def test_deleting_is_by_name_and_reports_each(self, monkeypatch):
+        """Not `crash clear`, which removes DiagnosticLogs and its sysdiagnose
+        archives with everything else."""
+        sent = []
+        _fake_run(monkeypatch, sent=sent,
+                  out='{"removed": ["A.ips"], "failed": ["B.ips"]}\n')
+        removed, failed = await ios_crash.remove_reports("HW", ["A.ips", "B.ips"])
+        [argv] = sent
+        assert "clear" not in argv
+        assert argv[-3:] == ["HW", "A.ips", "B.ips"]
+        assert (removed, failed) == (["A.ips"], ["B.ips"])
+
+    async def test_a_delete_with_no_result_is_an_error(self, monkeypatch):
+        _fake_run(monkeypatch, out="")
+        with pytest.raises(IosCrashError, match="no result"):
+            await ios_crash.remove_reports("HW", ["A.ips"])
+
+    async def test_nothing_to_delete_runs_nothing(self, monkeypatch):
         sent = []
         _fake_run(monkeypatch, sent=sent)
-        await ios_crash.clear_reports("/bin/pmd3", "HW")
-        assert sent == [["/bin/pmd3", "crash", "clear", "--udid", "HW"]]
+        assert await ios_crash.remove_reports("HW", []) == ([], [])
+        assert sent == []
+
+    def test_the_command_is_querns_own_library(self):
+        import sys
+
+        assert ios_crash.command() == [sys.executable, "-m", "pymobiledevice3"]
 
 
 class _Proc:
@@ -144,7 +228,7 @@ class TestRun:
                b"Device not found: usbmux has no device matching udid 00008101-DEADBEEF0000000\n")
         self._spawn(monkeypatch, _Proc(err=err, code=1))
         with pytest.raises(IosCrashError) as e:
-            await ios_crash._run(["/bin/pmd3", "crash", "ls"], 5)
+            await ios_crash._run(["/bin/pmd3", "crash", "ls"], "crash ls", 5)
         assert str(e.value) == (
             "pymobiledevice3 crash ls exited 1: Device not found: usbmux has no "
             "device matching udid 00008101-DEADBEEF0000000"
@@ -155,19 +239,19 @@ class TestRun:
         proc.returncode = None
         self._spawn(monkeypatch, proc)
         with pytest.raises(IosCrashError, match="timed out"):
-            await ios_crash._run(["/bin/pmd3", "crash", "pull"], 0.05)
+            await ios_crash._run(["/bin/pmd3", "crash", "pull"], "crash pull", 0.05)
         assert proc.killed and proc.waited
 
     async def test_a_spawn_failure_says_so(self, monkeypatch):
         self._spawn(monkeypatch, exc=PermissionError("denied"))
         with pytest.raises(IosCrashError, match="could not run pymobiledevice3"):
-            await ios_crash._run(["/bin/pmd3", "crash", "ls"], 5)
+            await ios_crash._run(["/bin/pmd3", "crash", "ls"], "crash ls", 5)
 
     async def test_a_cancelled_call_does_not_leave_it_running(self, monkeypatch):
         proc = _Proc(hang=True)
         proc.returncode = None
         self._spawn(monkeypatch, proc)
-        task = asyncio.create_task(ios_crash._run(["/bin/pmd3", "crash", "pull"], 60))
+        task = asyncio.create_task(ios_crash._run(["/bin/pmd3", "crash", "pull"], "crash pull", 60))
         await asyncio.sleep(0.05)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -176,4 +260,16 @@ class TestRun:
 
     async def test_success_returns_stdout(self, monkeypatch):
         self._spawn(monkeypatch, _Proc(out=b"/A.ips\n"))
-        assert await ios_crash._run(["/bin/pmd3", "crash", "ls"], 5) == "/A.ips\n"
+        assert await ios_crash._run(["/bin/pmd3", "crash", "ls"], "crash ls", 5) == ("/A.ips\n", "")
+
+    async def test_a_usage_error_says_what_not_where(self, monkeypatch):
+        """Measured: a usage error is drawn in a box; the reason is inside it."""
+        err = ("Usage: python -m pymobiledevice3 crash pull [OPTIONS] {out}\n"
+               "Try 'python -m pymobiledevice3 crash pull -h' for help.\n"
+               "╭─ Error ─────────────────╮\n"
+               "│ No such option: --bogus │\n"
+               "╰─────────────────────────╯\n").encode()
+        self._spawn(monkeypatch, _Proc(err=err, code=2))
+        with pytest.raises(IosCrashError) as e:
+            await ios_crash._run(["/bin/pmd3", "crash", "pull"], "crash pull", 5)
+        assert str(e.value) == "pymobiledevice3 crash pull exited 2: No such option: --bogus"

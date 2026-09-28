@@ -409,13 +409,16 @@ class ClearCrashesResponse(BaseModel):
 
 
 class ClearDeviceCrashesRequest(BaseModel):
-    udid: str = Field(description="The iPhone to clear.")
+    udid: str = Field(min_length=1, description="The iPhone to clear.")
 
 
 class ClearDeviceCrashesResponse(BaseModel):
     udid: str
-    removed: int = Field(description="Reports the phone held before, now deleted.")
-    remaining: int = Field(description="Reports still on the phone afterwards.")
+    removed: int = Field(description="Crash reports deleted from the phone.")
+    remaining: int = Field(description="Crash reports still on the phone afterwards.")
+    failed: list[str] = Field(
+        default_factory=list, description="Reports the phone would not delete.",
+    )
 
 
 class CrashLatestResponse(BaseModel):

@@ -9,6 +9,7 @@ system_server's stack dump on purpose -- see the frames test.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -1037,25 +1038,40 @@ class TestClearCrashes:
 
         assert resp.status_code == 200 and resp.json()["reports_removed"] == 1
 
+    async def test_an_empty_udid_is_refused_not_read_as_all(self, app):
+        resp = await _delete(app, udid="")
+        assert resp.status_code == 400
+
     async def test_disabled_capture(self, app):
         app.state.crash_adapter = None
         assert (await _delete(app)).status_code == 409
 
 
 class TestClearDeviceCrashes:
-    def _pmd3(self, monkeypatch, listings, sent):
-        """listings: what successive `crash ls` calls answer."""
+    def _pmd3(self, monkeypatch, listings, sent, refuse=(), exact=True):
+        """listings: what successive `crash ls` calls answer. The delete
+        removes the names it is given, except `refuse`. `exact` records the
+        phone's hardware UDID ("LIB") as its alias, as devicectl does."""
+        from server.device import devicectl
         from server.sources import ios_crash
 
+        if exact:
+            devicectl._remember_identity("00008101-PHONE", "LIB")
         calls = iter(listings)
 
-        async def run(cmd, timeout):
-            sent.append(cmd[1:3])
-            if cmd[1:3] == ["crash", "ls"]:
-                return "".join(f"/{n}\n" for n in next(calls))
-            return ""
+        async def run(argv, what, timeout):
+            sent.append(what)
+            if what == "crash ls":
+                assert argv[argv.index("--udid") + 1] == "LIB"
+                return "".join(f"/{n}\n" for n in next(calls)), ""
+            if what == "crash delete":
+                assert argv[3] == "LIB"
+                names = argv[4:]
+                removed = [n for n in names if n not in refuse]
+                return json.dumps({"removed": removed, "failed": list(refuse)}), ""
+            raise AssertionError(argv)
 
-        monkeypatch.setattr(ios_crash, "find_binary", lambda: "/bin/pmd3")
+        monkeypatch.setattr(ios_crash, "command", lambda: ["/bin/pmd3"])
         monkeypatch.setattr(ios_crash, "_run", run)
 
     async def test_an_iphone_is_cleared_and_the_count_reported(self, app, monkeypatch):
@@ -1066,8 +1082,10 @@ class TestClearDeviceCrashes:
         resp = await _clear_device(app, "00008101-PHONE")
 
         assert resp.status_code == 200, resp.text
-        assert resp.json() == {"udid": "00008101-PHONE", "removed": 2, "remaining": 0}
-        assert sent == [["crash", "ls"], ["crash", "clear"], ["crash", "ls"]]
+        assert resp.json() == {"udid": "00008101-PHONE", "removed": 2, "remaining": 0,
+                               "failed": []}
+        # Each report by name -- never `crash clear`, which takes DiagnosticLogs too.
+        assert sent == ["crash ls", "crash delete", "crash ls"]
 
     async def test_a_report_that_survives_the_clear_is_not_counted_as_removed(
         self, app, monkeypatch,
@@ -1076,11 +1094,12 @@ class TestClearDeviceCrashes:
         phone would not delete: `removed` is what went, not what was there."""
         app.state.device_controller = _controller(lib_udid="LIB")
         sent = []
-        self._pmd3(monkeypatch, [["A.ips", "B.ips", "C.ips"], ["C.ips"]], sent)
+        self._pmd3(monkeypatch, [["A.ips", "B.ips", "C.ips"], ["C.ips"]], sent, refuse=("C.ips",))
 
         resp = await _clear_device(app, "00008101-PHONE")
 
-        assert resp.json() == {"udid": "00008101-PHONE", "removed": 2, "remaining": 1}
+        assert resp.json() == {"udid": "00008101-PHONE", "removed": 2, "remaining": 1,
+                               "failed": ["C.ips"]}
 
     async def test_android_is_refused_with_the_reason(self, app, monkeypatch):
         app.state.device_controller = _controller()
@@ -1106,15 +1125,28 @@ class TestClearDeviceCrashes:
         resp = await _clear_device(app, "00008101-PHONE")
         assert resp.status_code == 409 and "USB" in resp.json()["detail"]
 
+    async def test_a_phone_matched_only_by_name_is_not_deleted_from(self, app, monkeypatch):
+        """The #323 fallback is fine for reading, not for deleting."""
+        app.state.device_controller = _controller(lib_udid="LIB")
+        sent = []
+        self._pmd3(monkeypatch, [["A.ips"]], sent, exact=False)
+
+        resp = await _clear_device(app, "00008101-PHONE")
+
+        assert resp.status_code == 409 and "matched by name" in resp.json()["detail"]
+        assert sent == []
+
     async def test_a_tool_failure_is_not_a_success(self, app, monkeypatch):
+        from server.device import devicectl
         from server.sources import ios_crash
 
+        devicectl._remember_identity("00008101-PHONE", "LIB")
         app.state.device_controller = _controller(lib_udid="LIB")
 
-        async def run(cmd, timeout):
-            raise ios_crash.IosCrashError("pymobiledevice3 crash clear exited 1: boom")
+        async def run(argv, what, timeout):
+            raise ios_crash.IosCrashError("pymobiledevice3 crash ls exited 1: boom")
 
-        monkeypatch.setattr(ios_crash, "find_binary", lambda: "/bin/pmd3")
+        monkeypatch.setattr(ios_crash, "command", lambda: ["/bin/pmd3"])
         monkeypatch.setattr(ios_crash, "_run", run)
 
         resp = await _clear_device(app, "00008101-PHONE")

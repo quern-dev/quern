@@ -424,32 +424,38 @@ async def _pull_with(adapter, write, device_id="PHONE-UUID", sent=None, names=No
                      fail=None, days=3):
     """Pull through a fake pymobiledevice3.
 
-    Its listing answers `names` (default: one report dated today); its pull
+    Its listing answers `names` (default: the files `write` creates); its pull
     runs `write(target)`, `target` being the directory it was told to write
-    to. `fail`, an IosCrashError, is raised by the pull after `write` ran --
-    a timeout that follows a partial copy. `sent` collects every command.
+    to -- the pull's staging directory, from which complete files are moved.
+    `fail`, an IosCrashError, is raised by the pull after `write` ran -- a
+    timeout that follows a partial copy. `sent` collects every command.
     """
-    from datetime import datetime
-
     from server.sources import ios_crash
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    listing = names if names is not None else [f"MyApp-{today}-120000.ips"]
+    if names is None:
+        # The phone holds whatever this pull will copy: learn the names by
+        # running `write` once into a scratch directory.
+        import tempfile
 
-    async def fake_run(cmd, timeout):
+        with tempfile.TemporaryDirectory() as probe:
+            await write(Path(probe))
+            names = sorted(f.name for f in Path(probe).iterdir())
+    listing = names
+
+    async def fake_run(argv, what, timeout):
         if sent is not None:
-            sent.append(list(cmd))
-        if cmd[1:3] == ["crash", "ls"]:
-            return "/DiagnosticLogs\n" + "".join(f"/{n}\n" for n in listing)
-        if cmd[1:3] == ["crash", "pull"]:
-            await write(Path(cmd[-1]))
+            sent.append(list(argv))
+        if argv[1:3] == ["crash", "ls"]:
+            return "/DiagnosticLogs\n" + "".join(f"/{n}\n" for n in listing), ""
+        if argv[1:3] == ["crash", "pull"]:
+            await write(Path(argv[-1]))           # the staging directory
             if fail is not None:
                 raise fail
-            return ""
-        raise AssertionError(f"unexpected command {cmd}")
+            return "", ""
+        raise AssertionError(f"unexpected command {argv}")
 
     with (
-        patch.object(ios_crash, "find_binary", return_value="/usr/local/bin/pymobiledevice3"),
+        patch.object(ios_crash, "command", return_value=["/bin/pmd3"]),
         patch.object(ios_crash, "_run", side_effect=fake_run),
     ):
         return await adapter.pull_from_device("00008101-HW", device_id=device_id, days=days)
@@ -581,7 +587,7 @@ async def test_pull_from_device_no_binary(tmp_crash_dir):
     adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
     await adapter.start()
 
-    with patch.object(ios_crash, "find_binary", return_value=None):
+    with patch.object(ios_crash, "command", return_value=None):
         result = await adapter.pull_from_device("00008030-AABBCCDD")
 
     assert result.new == []
@@ -596,13 +602,13 @@ async def test_a_failing_listing_says_why(tmp_crash_dir):
     adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
     await adapter.start()
 
-    async def failing(cmd, timeout):
+    async def failing(argv, what, timeout):
         raise ios_crash.IosCrashError(
             "pymobiledevice3 crash ls exited 1: Device not found: usbmux has no device matching",
         )
 
     with (
-        patch.object(ios_crash, "find_binary", return_value="/usr/local/bin/pymobiledevice3"),
+        patch.object(ios_crash, "command", return_value=["/bin/pmd3"]),
         patch.object(ios_crash, "_run", side_effect=failing),
     ):
         result = await adapter.pull_from_device("00008030-AABBCCDD", device_id="PHONE-UUID")
@@ -799,7 +805,7 @@ async def test_a_pull_writes_into_the_phones_own_directory(tmp_crash_dir):
 
     result = await _pull_with(adapter, write, sent=sent)
 
-    assert sent[-1][-1] == str(tmp_crash_dir / "devices" / "PHONE-UUID")
+    assert sent[-1][-1] == str(tmp_crash_dir / "devices" / "PHONE-UUID" / ".incoming")
     assert Path(result.new[0].file_path).parent == tmp_crash_dir / "devices" / "PHONE-UUID"
     await adapter.stop()
 
@@ -840,11 +846,12 @@ async def test_a_device_id_unfit_for_a_directory_name_still_tags_this_pull(tmp_c
     await adapter.start()
 
     async def write(target):
-        assert target == tmp_crash_dir                # not a path built from "../x"
         (target / "MyApp-1.ips").write_text(_fresh_ips())
 
-    result = await _pull_with(adapter, write, device_id="../x")
+    sent = []
+    result = await _pull_with(adapter, write, device_id="../x", sent=sent)
 
+    assert sent[-1][-1] == str(tmp_crash_dir / ".incoming")   # not a path built from "../x"
     assert [r.device_id for r in result.new] == ["../x"]
     await adapter.stop()
 
@@ -1049,7 +1056,7 @@ async def test_a_cancelled_pull_does_not_leave_the_tool_running(tmp_crash_dir):
 
     proc.communicate = hang
     with (
-        patch("server.sources.ios_crash.find_binary", return_value="/bin/pymobiledevice3"),
+        patch("server.sources.ios_crash.command", return_value=["/bin/pymobiledevice3"]),
         patch("asyncio.create_subprocess_exec", return_value=proc),
     ):
         task = asyncio.create_task(adapter.pull_from_device("HW", device_id="PHONE-UUID"))
@@ -1119,7 +1126,7 @@ async def test_clearing_one_device_leaves_the_others(tmp_crash_dir):
     await adapter.start()
     await adapter.add_reports([_report(crash_id="android-x", device_id="emulator-5554")])
 
-    result = adapter.clear("PHONE-A")
+    result = await adapter.clear("PHONE-A")
 
     assert (result.files_removed, result.reports_removed) == (1, 1)
     assert not a.exists() and b.exists()
@@ -1129,8 +1136,9 @@ async def test_clearing_one_device_leaves_the_others(tmp_crash_dir):
 
 
 @pytest.mark.asyncio
-async def test_clearing_everything_never_deletes_the_macs_own_reports(tmp_crash_dir, tmp_path):
-    """DiagnosticReports belongs to the Mac; its reports leave the list only."""
+async def test_clearing_everything_deletes_only_what_quern_pulled(tmp_crash_dir, tmp_path):
+    """DiagnosticReports belongs to the Mac, and a loose file in the watch dir
+    to whoever put it there; their reports leave the list only."""
     sim_dir = tmp_path / "DiagnosticReports"
     sim_dir.mkdir()
     adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60, extra_watch_dirs=[sim_dir])
@@ -1143,10 +1151,12 @@ async def test_clearing_everything_never_deletes_the_macs_own_reports(tmp_crash_
     await adapter._scan_for_new_files()
     assert len(adapter.crash_reports) == 3
 
-    result = adapter.clear()
+    result = await adapter.clear()
 
-    assert result.files_removed == 2 and result.reports_removed == 3
-    assert not phone.exists() and not loose.exists() and sim.exists()
+    # Only what quern's pulls wrote: a loose file in the watch dir may be
+    # someone else's, since --crash-dir can point at any directory.
+    assert result.files_removed == 1 and result.reports_removed == 3
+    assert not phone.exists() and loose.exists() and sim.exists()
     assert adapter.crash_reports == []
     await adapter.stop()
 
@@ -1164,7 +1174,7 @@ async def test_a_report_read_again_after_a_clear_is_listed_not_logged_twice(tmp_
         (target / "MyApp-1.ips").write_text(content)
 
     assert len((await _pull_with(adapter, write)).new) == 1
-    adapter.clear("PHONE-UUID")
+    await adapter.clear("PHONE-UUID")
     assert adapter.crash_reports == []
 
     assert len((await _pull_with(adapter, write)).new) == 1       # listed again
@@ -1179,7 +1189,7 @@ async def test_an_android_report_pulled_again_after_a_clear_is_not_logged_twice(
     await adapter.start()
     report = _report(file_path="dropbox:data_app_crash@2026-09-27 10:00:00")
     await adapter.add_reports([report])
-    adapter.clear()
+    await adapter.clear()
 
     again = await adapter.add_reports([report.model_copy()])
 
@@ -1208,8 +1218,9 @@ async def test_retention_removes_only_reports_not_copied_for_that_long(tmp_crash
     adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60, extra_watch_dirs=[sim_dir])
     await adapter.start()                                   # prunes on start
 
-    assert not old_phone.exists() and not old_loose.exists()
+    assert not old_phone.exists()
     assert new_phone.exists() and old_sim.exists()          # recent; and the Mac's own
+    assert old_loose.exists()                                # not written by a pull
     assert not (tmp_crash_dir / "devices" / "PHONE-A").exists()
     assert [r.device_id for r in adapter.crash_reports] == ["PHONE-B"]
     await adapter.stop()
@@ -1279,11 +1290,96 @@ async def test_a_pulled_file_is_stamped_with_the_copy_time(tmp_crash_dir):
         f.write_text(_fresh_ips())
         os.utime(f, (crash_time, crash_time))          # as pymobiledevice3 leaves it
 
-    await _pull_with(adapter, write, names=[name, "NotCopied-2026-09-27-000000.ips"], days=60)
+    not_copied = f"NotCopied-{datetime.now().strftime('%Y-%m-%d')}-000000.ips"   # in the window
+    await _pull_with(adapter, write, names=[name, not_copied], days=60)
 
     phone = tmp_crash_dir / "devices" / "PHONE-UUID"
     assert _time.time() - (phone / name).stat().st_mtime < 60
-    assert not (phone / "NotCopied-2026-09-27-000000.ips").exists()   # never created
+    assert not (phone / not_copied).exists()                          # never created
     adapter.prune()
     assert (phone / name).exists()
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_retention_never_deletes_from_a_shared_crash_dir(tmp_path):
+    """`--crash-dir ~/Library/Logs/DiagnosticReports` makes the watch dir the
+    Mac's own. Retention deleted its reports older than 30 days on every start."""
+    import os
+    import time as _time
+
+    shared = tmp_path / "DiagnosticReports"
+    shared.mkdir()
+    old = shared / "MyApp-old.ips"
+    old.write_text(_fresh_ips())
+    ts = _time.time() - 400 * 86400
+    os.utime(old, (ts, ts))
+
+    adapter = CrashAdapter(watch_dir=shared, poll_interval=60, extra_watch_dirs=[shared])
+    await adapter.start()
+    await adapter.clear()
+
+    assert old.exists()
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_two_dropbox_crashes_in_one_second_are_both_logged(tmp_crash_dir):
+    """A DropBox record's file_path is only tag@second; keyed on it, two
+    emulators (or two processes) crashing in the same second were one."""
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    entries = _collect_entries(adapter)
+    await adapter.start()
+    same = "dropbox:data_app_crash@2026-09-27 10:00:00"
+
+    await adapter.add_reports([
+        _report(crash_id="android-aaa", device_id="emulator-5554", file_path=same),
+        _report(crash_id="android-bbb", device_id="emulator-5556", file_path=same),
+    ])
+
+    assert sorted(e.device_id for e in entries) == ["emulator-5554", "emulator-5556"]
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_pull_without_a_usb_udid_is_refused(tmp_crash_dir):
+    """Without one, pymobiledevice3 picks the first USB phone and its reports
+    are filed under this device."""
+    from server.sources import ios_crash
+
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    await adapter.start()
+    with patch.object(ios_crash, "command", return_value=["/bin/pmd3"]):
+        result = await adapter.pull_from_device(None, device_id="PHONE-UUID")
+    assert result.error == "no USB udid for this device"
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_partly_failed_pull_stamps_only_what_it_copied(tmp_crash_dir):
+    import os
+    import time as _time
+    from datetime import datetime
+
+    from server.sources import ios_crash
+
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    await adapter.start()
+    today = datetime.now().strftime("%Y-%m-%d")
+    got, stale = f"Got-{today}-010000.ips", f"Stale-{today}-020000.ips"
+    phone = tmp_crash_dir / "devices" / "PHONE-UUID"
+    phone.mkdir(parents=True)
+    (phone / stale).write_text(_fresh_ips())               # an earlier pull's copy
+    old = _time.time() - 20 * 86400
+    os.utime(phone / stale, (old, old))
+
+    async def write(staging):
+        (staging / got).write_text(_fresh_ips())
+
+    result = await _pull_with(adapter, write, names=[got, stale],
+                              fail=ios_crash.IosCrashError("pymobiledevice3 crash pull timed out"))
+
+    assert "timed out" in result.error
+    assert _time.time() - (phone / got).stat().st_mtime < 60
+    assert abs((phone / stale).stat().st_mtime - old) < 5        # not copied, not stamped
     await adapter.stop()

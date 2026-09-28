@@ -103,7 +103,7 @@ which needs no root, and yields Java crashes, native crashes and ANRs; each
 report's `kind` says which. The response's `pull` says whether the fetch
 happened: `pulled`, `skipped` (with the reason, for example an iPhone that is not
 on USB) or `failed` (with the error). Only `pulled` means the list reflects the
-device. A `failed` Android pull can still add the reports it did read, for
+device (for an iPhone, within the pull's window; `older_on_device` says what lay beyond it). A `failed` Android pull can still add the reports it did read, for
 example when one DropBox tag could not be read, or when the device's timezone
 could not be read and records without a time of their own were skipped. A
 simulator is `skipped`: its crash reports are written on the Mac and read from
@@ -121,15 +121,24 @@ on-crash hook.
 The hook runs for every newer crash, including one logcat already reported.
 
 **Clearing.** `clear_crashes` deletes quern's stored copies on the Mac, for one
-`udid` or all. It never touches `~/Library/Logs/DiagnosticReports`, and it does not
-clear the device: a later pull lists again whatever the device still holds within
-its window, without logging it as a new crash. An unknown `udid` is a 404.
+`udid` or all: only the files quern's own pulls wrote, under
+`~/.quern/crashes/devices/`. Nothing else in the crash directory is deleted, and
+never `~/Library/Logs/DiagnosticReports`. It does not clear the device: a later
+pull lists again whatever the device still holds within its window, without
+logging it as a new crash. An unknown `udid` is a 404, and an empty one a 400.
 Pulled reports not copied for 30 days are also removed automatically, at start-up
 and hourly; set `crash_retention_days` in `~/.quern/config.json` (0 keeps them
-forever). `clear_device_crashes` permanently deletes an iPhone's own reports,
-for Xcode and Finder too, and returns how many it removed. Android is refused (an
-unrooted device's DropBox can only be read), and so is a simulator, whose reports
-are files on the Mac.
+forever). The removals are logged in the server log only.
+
+`clear_device_crashes` permanently deletes an iPhone's own crash reports, for
+Xcode and Finder too: every `.ips`/`.crash` report at the top of its crash
+directory, each by name. DiagnosticLogs (sysdiagnose archives) and other files
+are left; `pymobiledevice3 crash clear` would remove them too, and is not used.
+It returns how many it removed, how many remain and any that failed. It refuses a
+phone matched to USB by name rather than by its hardware UDID (#323), Android (an
+unrooted device's DropBox can only be read), and a simulator, whose reports are
+files on the Mac. A phone with a long history lists more slowly; that cost has
+not been measured.
 
 On Android, `pull.open_dialogs` lists processes showing a crash ("keeps
 stopping") dialog right now (`kind: "crash"`), and processes Android is treating

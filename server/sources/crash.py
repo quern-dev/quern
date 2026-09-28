@@ -107,7 +107,7 @@ class CrashAdapter(BaseSourceAdapter):
         # time (`_stamp_copied`), so every pull would re-read every report that
         # never parses.
         self._unparsed: dict[str, int] = {}
-        # One scan at a time. The poll loop scanning while idevicecrashreport
+        # One scan at a time. The poll loop scanning while a pull
         # was still writing took the phone's files as its own, so the pull
         # neither counted nor tagged them.
         self._scan_lock = asyncio.Lock()
@@ -231,9 +231,13 @@ class CrashAdapter(BaseSourceAdapter):
             why it failed if it did. A failure used to return an empty list,
             which read exactly like "the device has no new crashes".
         """
-        binary = ios_crash.find_binary()
-        if not binary:
+        cmd = ios_crash.command()
+        if not cmd:
             return PullResult(error="pymobiledevice3 not found")
+        if not libimobiledevice_udid:
+            # Without one, pymobiledevice3 picks the first USB phone -- the
+            # wrong one when two are plugged in, filed under this device.
+            return PullResult(error="no USB udid for this device")
 
         target = self._device_dir(device_id) or self.watch_dir
         try:
@@ -248,16 +252,17 @@ class CrashAdapter(BaseSourceAdapter):
             # pull's report.
             before = {str(f) for f in _crash_files(target) if str(f) in self._seen_files}
             error = None
+            copied: list[str] = []
             try:
-                names = await ios_crash.list_reports(binary, libimobiledevice_udid)
+                names = await ios_crash.list_reports(cmd, libimobiledevice_udid)
                 selection = ios_crash.select_recent(names, days, datetime.now())
-                await ios_crash.pull_reports(
-                    binary, libimobiledevice_udid, selection.wanted, target,
+                copied = await ios_crash.pull_reports(
+                    cmd, libimobiledevice_udid, selection.wanted, target,
                 )
             except ios_crash.IosCrashError as e:
                 error = str(e)
-            if selection:
-                _stamp_copied(target, selection.wanted)
+                copied = e.copied
+            _stamp_copied(target, copied)
             # Scan even after a failure: a timeout can follow a partial copy,
             # and those reports are real.
             added = await self._scan_for_new_files(
@@ -311,7 +316,13 @@ class CrashAdapter(BaseSourceAdapter):
         return new
 
     async def _emit_report(self, report: CrashReport, raw: str, *, log: bool = True) -> None:
-        key = report.file_path or report.crash_id
+        # A file by its path; a DropBox record by its id, which hashes serial,
+        # tag, time, pid and process. Its file_path is only tag@second: two
+        # crashes in one second, on two emulators or two processes, shared it,
+        # and the second was listed but never logged.
+        key = report.crash_id if report.file_path.startswith("dropbox:") else (
+            report.file_path or report.crash_id
+        )
         if key in self._emitted:
             return
         self._emitted.add(key)
@@ -425,24 +436,32 @@ class CrashAdapter(BaseSourceAdapter):
             await self._emit_report(report, content)
         return added
 
-    def clear(self, device_id: str | None = None) -> ClearResult:
+    async def clear(self, device_id: str | None = None) -> ClearResult:
         """Forget stored crash reports: one device's, or all of quern's.
 
-        Removes the report files quern pulled (the watch dir and each phone's
-        directory under it) and the reports from the list, Android's included.
-        Never touches the extra watch dirs: ~/Library/Logs/DiagnosticReports
-        belongs to the Mac, and its reports are only dropped from the list.
+        Deletes only the files quern's own pulls wrote -- each phone's
+        directory under `devices/` -- and drops the reports from the list,
+        Android's included. Nothing else in the watch dir is deleted: it is
+        whatever `--crash-dir` names, which may be a shared directory, even
+        ~/Library/Logs/DiagnosticReports, and a loose file there may be one
+        someone put there. Reports from those are only dropped from the list.
+
+        Under the scan lock, so it cannot delete files under a pull in progress.
 
         Clearing the Mac does not clear the device. A later pull lists again
         whatever the phone or DropBox still holds within its window -- without
         logging it as a new crash a second time.
         """
+        async with self._scan_lock:
+            return self._clear(device_id)
+
+    def _clear(self, device_id: str | None) -> ClearResult:
         result = ClearResult()
         if device_id:
             directory = self._device_dir(device_id)
             dirs = [directory] if directory else []
         else:
-            dirs = [self.watch_dir, *self._device_dirs()]
+            dirs = self._device_dirs()
         removed = self._remove_files(
             [f for d in dirs for f in _crash_files(d)], result,
         )
@@ -462,8 +481,9 @@ class CrashAdapter(BaseSourceAdapter):
 
         A pull re-copies only reports within its window, so a file's mtime is
         when it was last inside one; past the retention age it has been
-        outside every window since. Loose files from before pulls kept a
-        directory per phone are included. DiagnosticReports never is.
+        outside every window since, or no pull has run. Only the files quern's
+        own pulls wrote, under `devices/`: never a loose file in the watch dir,
+        which `--crash-dir` may point anywhere, and never DiagnosticReports.
         """
         result = ClearResult()
         self._last_prune = time.monotonic()
@@ -471,7 +491,7 @@ class CrashAdapter(BaseSourceAdapter):
             return result
         cutoff = (now or datetime.now(UTC)) - timedelta(days=self.retention_days)
         stale = []
-        for d in [self.watch_dir, *self._device_dirs()]:
+        for d in self._device_dirs():
             for f in _crash_files(d):
                 when = _mtime(f)
                 if when is not None and when < cutoff:
