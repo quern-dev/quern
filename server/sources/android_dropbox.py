@@ -89,7 +89,9 @@ def parse_dropbox(text: str, *, serial: str, zone: timezone | ZoneInfo | None) -
     return _parse_records(text, serial=serial, zone=zone)[0]
 
 
-def _parse_records(text: str, *, serial: str, zone) -> tuple[list[CrashReport], int]:
+def _parse_records(
+    text: str, *, serial: str, zone: timezone | ZoneInfo | None,
+) -> tuple[list[CrashReport], int]:
     """The reports, and how many crash records could not be dated.
 
     A record is undated when the device's zone is unknown and it carries no
@@ -109,7 +111,9 @@ def _parse_records(text: str, *, serial: str, zone) -> tuple[list[CrashReport], 
 _UNDATED = object()
 
 
-def _parse_record(block: str, *, serial: str, zone):
+def _parse_record(
+    block: str, *, serial: str, zone: timezone | ZoneInfo | None,
+) -> CrashReport | object | None:
     lines = block.splitlines()
     if not lines:
         return None
@@ -181,7 +185,9 @@ def _parse_record(block: str, *, serial: str, zone):
     )
 
 
-def _timestamp(local_time: str, tombstone_body: str, zone) -> datetime | None:
+def _timestamp(
+    local_time: str, tombstone_body: str, zone: timezone | ZoneInfo | None,
+) -> datetime | None:
     """UTC, from the tombstone's own zone-stamped time if it has one.
 
     A header time inside the hour repeated when clocks go back is ambiguous,
@@ -397,7 +403,9 @@ async def pull_dropbox(adb_path: str | None, serial: str) -> DropboxPull:
     return await asyncio.to_thread(_parse_pull, body, procs, serial, zone)
 
 
-def _parse_pull(body: str, procs: str, serial: str, zone) -> DropboxPull:
+def _parse_pull(
+    body: str, procs: str, serial: str, zone: timezone | ZoneInfo | None,
+) -> DropboxPull:
     pulled = DropboxPull(open_dialogs=parse_open_dialogs(procs))
     chunks = _TAG_LINE.split(body)[1:]     # [tag, output, tag, output, ...]
     read = set()

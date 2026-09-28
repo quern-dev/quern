@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Query, Request
 
@@ -14,6 +15,7 @@ from server.models import (
     CrashPullStatus,
     CrashReport,
     DeviceType,
+    LogEntry,
     LogQueryParams,
     LogSource,
     OpenCrashDialog,
@@ -21,6 +23,10 @@ from server.models import (
 )
 from server.sources.android_dropbox import DropboxPullError, pull_dropbox
 from server.sources.crash import DIAGNOSTIC_REPORTS_DIR
+
+if TYPE_CHECKING:
+    from server.device.controller import DeviceController
+    from server.sources.crash import CrashAdapter
 
 #: How far apart logcat's crash entry and DropBox's record of the same crash
 #: may be stamped and still be the same crash.
@@ -85,7 +91,7 @@ async def get_latest_crashes(
     return CrashLatestResponse(crashes=limited, total=total, pull=pull)
 
 
-async def _pull(request: Request, crash_adapter, udid: str) -> CrashPullStatus:
+async def _pull(request: Request, crash_adapter: CrashAdapter, udid: str) -> CrashPullStatus:
     """Fetch the device's crash reports, and say plainly if that could not happen."""
     controller = request.app.state.device_controller
     if controller is None:
@@ -142,7 +148,9 @@ async def _pull(request: Request, crash_adapter, udid: str) -> CrashPullStatus:
     return CrashPullStatus(udid=udid, platform="ios", status="pulled", new_reports=len(result.new))
 
 
-async def _pull_android(request: Request, crash_adapter, controller, udid: str) -> CrashPullStatus:
+async def _pull_android(
+    request: Request, crash_adapter: CrashAdapter, controller: DeviceController, udid: str,
+) -> CrashPullStatus:
     """DropBox, which an unrooted phone serves to the shell user.
 
     See server/sources/android_dropbox.py. There was no Android pull at all
@@ -173,7 +181,7 @@ async def _pull_android(request: Request, crash_adapter, controller, udid: str) 
     )
 
 
-def _same_process(entry, report: CrashReport) -> bool:
+def _same_process(entry: LogEntry, report: CrashReport) -> bool:
     """Is logcat's crash entry about the process this report names?
 
     By pid where both have one. By name otherwise, allowing for a native
