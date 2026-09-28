@@ -425,6 +425,50 @@ class DeviceController(DeviceControllerUI):
         """
         return self._device_type(udid) in (DeviceType.ANDROID_EMULATOR, DeviceType.ANDROID_DEVICE)
 
+    #: What an Android caller should do instead, keyed by the operation name
+    #: passed to `_require_simulator`. Three distinct situations, and a
+    #: refusal that conflates them is worth little: *no equivalent exists*,
+    #: *an equivalent exists and quern has not built it*, and *an equivalent
+    #: exists with different semantics*. Saying "no Android equivalent" for
+    #: the second is simply false, and it was -- `run-as <pkg> cat
+    #: shared_prefs/<name>.xml` reads an app's preferences on an unrooted
+    #: phone today, measured.
+    #:
+    #: Absent from this map means the first case: nothing to point at.
+    _ANDROID_ALTERNATIVE: dict[str, str] = {
+        "read_app_plist":
+            "Android keeps app preferences in SharedPreferences XML, readable "
+            "with `run-as <pkg> cat shared_prefs/<name>.xml` on any debuggable "
+            "app without root. Quern does not expose it yet -- see #314",
+        "set_app_plist_value":
+            "Android's equivalent is writing the SharedPreferences XML back, "
+            "not exposed yet -- see #314. Note the values are cached in the "
+            "app's process, so a write alone does not change a running app",
+        "set_app_plist_values":
+            "Android's equivalent is writing the SharedPreferences XML back, "
+            "not exposed yet -- see #314. Note the values are cached in the "
+            "app's process, so a write alone does not change a running app",
+        "delete_app_plist_key":
+            "Android's equivalent is rewriting the SharedPreferences XML "
+            "without the key, not exposed yet -- see #314",
+        "diff_app_plist":
+            "Android's equivalent is diffing two SharedPreferences reads, "
+            "not exposed yet -- see #314",
+        "start_plist_watch":
+            "Android has no inotify over adb; the equivalent is polling "
+            "`run-as <pkg> stat` on the prefs file, not exposed yet -- #314",
+        "save_app_state":
+            "Android's equivalent is archiving the app's private directory "
+            "with `run-as <pkg> tar cf -`, not exposed yet -- see #314",
+        "restore_app_state":
+            "Android's equivalent is unpacking that archive back through "
+            "`run-as <pkg> tar xf -`, not exposed yet -- see #314",
+        "Erase":
+            "Android's nearest equivalent is launching the emulator with "
+            "`-wipe-data`, which restarts it rather than wiping it in place; "
+            "a physical device has none at all -- see #263",
+    }
+
     def _require_simulator(self, udid: str, operation: str) -> None:
         """Refuse anything that is not known to be an iOS simulator.
 
@@ -446,11 +490,14 @@ class DeviceController(DeviceControllerUI):
         # rewording it wholesale would silently turn every one of these
         # refusals into a 500. The detail is appended rather than substituted.
         if kind in (DeviceType.ANDROID_DEVICE, DeviceType.ANDROID_EMULATOR):
-            detail = (
-                f" {udid} is Android, and quern has no Android equivalent for "
-                "this operation -- it is implemented through simctl, which "
-                "drives iOS simulators only."
-            )
+            alternative = self._ANDROID_ALTERNATIVE.get(operation)
+            if alternative:
+                detail = f" {udid} is Android. {alternative}."
+            else:
+                detail = (
+                    f" {udid} is Android, and there is no Android equivalent "
+                    "for this -- it is a simulator-only concept."
+                )
         elif kind == DeviceType.DEVICE:
             detail = f" {udid} is a physical iOS device."
         else:
