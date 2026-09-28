@@ -537,6 +537,20 @@ class TestAndroidNative:
         assert paths["libutils.so"] == "/system/lib64/libutils.so"
         assert paths["libandroid_runtime.so"] == "/system/lib64/libandroid_runtime.so"
 
+    def test_two_libraries_of_one_name_are_both_kept(self):
+        """An app's own libcrypto.so beside the system's: keyed by name, the
+        second lost its path and BuildId."""
+        text = (FIXTURES / "android_dropbox" / "system_app_native_crash.dropbox").read_text()
+        own = ("      #00 pc 0000000000001000  /data/app/~~x/com.example-1/lib/arm64/"
+               "libcrypto.so (EVP_Digest+8) (BuildId: aaaa)\n"
+               "      #01 pc 0000000000002000  /system/lib64/libcrypto.so (SHA256+4) "
+               "(BuildId: bbbb)\n")
+        report = self._native(text.replace("backtrace:\n", "backtrace:\n" + own, 1))
+        crypto = sorted((i.uuid, i.path) for i in report.images if i.name == "libcrypto.so")
+        assert crypto == [("aaaa", "/data/app/~~x/com.example-1/lib/arm64/libcrypto.so"),
+                          ("bbbb", "/system/lib64/libcrypto.so")]
+        assert [f.build_id for f in report.frames[:2]] == ["aaaa", "bbbb"]
+
     def test_the_images_are_the_returned_frames_and_the_crash_sites(self):
         text = (FIXTURES / "android_dropbox" / "system_app_native_crash.dropbox").read_text()
         deep = "".join(f"      #{i:02d} pc {i:016x}  /system/lib64/libdeep{i}.so (f+4)\n"

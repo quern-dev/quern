@@ -30,8 +30,10 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
+from typing import TypeVar
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from server.models import CrashFrame, CrashImage, CrashReport
@@ -251,13 +253,17 @@ def _native_frames(lines: list[str]) -> list[tuple[CrashFrame, str]]:
 def _native_images(native: list[tuple[CrashFrame, str]],
                    app_frame: CrashFrame | None) -> list[CrashImage]:
     """The libraries the returned frames point into, with their BuildIds, and
-    the app frame's, which may lie past the cap."""
-    wanted = {frame.image for frame, _ in native[:crash_frames.MAX_FRAMES]}
-    wanted |= {app_frame.image} if app_frame else set()
+    the app frame's, which may lie past the cap.
+
+    One per path, not per name: an app's own `libcrypto.so` and the system's
+    share a name, and keying by it kept only the first. A frame's `image` and
+    `build_id` together say which of them it is."""
+    wanted = {path for _, path in native[:crash_frames.MAX_FRAMES]}
+    wanted |= {path for frame, path in native if frame is app_frame}
     images: dict[str, CrashImage] = {}
     for frame, path in native:
-        if frame.image in wanted and frame.image not in images:
-            images[frame.image] = CrashImage(name=frame.image, uuid=frame.build_id, path=path)
+        if path and path in wanted and path not in images:
+            images[path] = CrashImage(name=frame.image, uuid=frame.build_id, path=path)
     return list(images.values())
 
 
@@ -325,7 +331,10 @@ def _anr_frames(lines: list[str], package: str) -> list[CrashFrame]:
     return frames
 
 
-def _safe(parse, lines, *args) -> list:
+_T = TypeVar("_T")
+
+
+def _safe(parse: Callable[..., list[_T]], lines: list[str], *args: str) -> list[_T]:
     """A parse of frames that cannot fail the pull: a record with frames it
     cannot read is still a crash, just without them."""
     try:

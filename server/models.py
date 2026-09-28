@@ -317,7 +317,11 @@ class CrashFrame(BaseModel):
     file: str = Field(default="", description="Source file, where the report has it")
     line: int | None = Field(default=None, description="Source line, where the report has it")
     app: bool = Field(default=False, description="In the app's own code, not the OS's")
-    build_id: str = Field(default="", description="Android native: the library's BuildId")
+    build_id: str = Field(
+        default="",
+        description="Android native: the library's BuildId. With `image`, which of `images` "
+                    "this is: two libraries can share a name.",
+    )
 
 
 class CrashImage(BaseModel):
