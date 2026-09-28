@@ -39,39 +39,50 @@ def _refusal(ctrl, operation, udid="PHONE"):
 
 
 class TestTheRefusalNamesTheAlternative:
-    @pytest.mark.parametrize("operation,expected", [
-        ("read_app_plist", "shared_prefs"),
-        ("set_app_plist_value", "SharedPreferences"),
-        ("set_app_plist_values", "SharedPreferences"),
-        ("delete_app_plist_key", "SharedPreferences"),
-        ("diff_app_plist", "SharedPreferences"),
-        ("start_plist_watch", "inotifyd"),
-        ("save_app_state", "tar cf -"),
-        ("restore_app_state", "tar xf -"),
+    @pytest.mark.parametrize("operation", [
+        "read_app_plist", "set_app_plist_value", "set_app_plist_values",
+        "delete_app_plist_key", "diff_app_plist", "start_plist_watch",
+        "save_app_state", "restore_app_state",
     ])
-    def test_an_operation_with_an_equivalent_points_at_it(self, operation, expected):
+    def test_an_operation_with_an_equivalent_points_at_the_issue(self, operation):
         msg = _refusal(_android(), operation)
-        assert expected in msg
+        assert "run-as" in msg or "inotifyd" in msg
         assert "#314" in msg
 
-    def test_erase_names_its_different_semantics(self):
-        """Not "no equivalent" and not "coming soon": `-wipe-data` exists and
-        restarts the AVD rather than wiping in place, which is a difference a
-        caller needs to know before asking for it."""
+    def test_erase_names_a_launch_flag_rather_than_a_live_operation(self):
+        """`-wipe-data` cannot be applied to a running emulator. An earlier
+        version said it "restarts it", which is not what a launch flag does,
+        and a test asserting that literal phrase held the wrong wording in
+        place."""
         msg = _refusal(_android(), "Erase")
         assert "-wipe-data" in msg
-        assert "restarts it" in msg
+        assert "launch flag" in msg
 
-    def test_an_operation_with_no_equivalent_says_so_plainly(self):
-        """The negative control. Without it, a map that claimed an
-        alternative for everything would satisfy every test above."""
+    def test_set_hardware_keyboard_is_not_called_simulator_only(self):
+        """It was. `hw.keyboard` is an AVD property and
+        `show_ime_with_hard_keyboard` governs the same behaviour on a device,
+        so "a simulator-only concept" was measurably false -- and this is the
+        one unmapped operation that actually reached a caller."""
         msg = _refusal(_android(), "Set hardware keyboard")
-        assert "no Android equivalent" in msg
-        assert "#314" not in msg
+        assert "hw.keyboard" in msg
+        assert "simulator-only" not in msg
 
-    def test_an_unmapped_operation_does_not_invent_one(self):
+
+class TestTheDefaultClaimsOnlyWhatQuernCanKnow:
+    """The generic refusal asserted "there is no Android equivalent for this
+    -- it is a simulator-only concept": a claim about the world, false for
+    every operation that reached it. quern lacking a path is checkable and
+    stays true as the platform moves; the platform lacking a feature is
+    neither."""
+
+    def test_the_default_talks_about_quern_not_android(self):
         msg = _refusal(_android(), "Some future operation")
-        assert "no Android equivalent" in msg
+        assert "quern has no Android path" in msg
+        assert "no Android equivalent" not in msg
+        assert "simulator-only concept" not in msg
+
+    def test_it_still_says_which_tool_it_goes_through(self):
+        assert "simctl" in _refusal(_android(), "Some future operation")
 
 
 class TestTheRefusalStillCarriesWhatTheApiDependsOn:
@@ -124,71 +135,146 @@ class TestTheMapDoesNotDriftFromTheCode:
     operation and the entry simply stops matching, with the refusal quietly
     falling back to "no equivalent" -- which is the false claim this replaced."""
 
-    def test_every_mapped_operation_is_one_that_is_actually_guarded(self):
+    @staticmethod
+    def _guarded_operations() -> set[str]:
+        """Every operation name passed to `_require_simulator` in `server/`.
+
+        Rooted at the repository rather than the working directory: keyed on
+        `pathlib.Path("server")`, running pytest from anywhere else made this
+        report all nine operations as drifted, which is a wrong diagnosis
+        rather than a silent pass but still a failure nobody can act on.
+        """
         import pathlib
         import re
 
-        guarded = set()
-        for path in pathlib.Path("server").rglob("*.py"):
+        root = pathlib.Path(__file__).resolve().parent.parent / "server"
+        guarded: set[str] = set()
+        for path in root.rglob("*.py"):
             for m in re.finditer(r'_require_simulator\(\s*[^,]+,\s*"([^"]+)"',
                                  path.read_text()):
                 guarded.add(m.group(1))
+        return guarded
 
+    def test_the_guard_finder_finds_something(self):
+        """A positive control for the two checks below. Both compare against
+        this set, so a regex that matched nothing would make one vacuous and
+        the other fail loudly for the wrong reason."""
+        assert len(self._guarded_operations()) >= 10
+
+    def test_every_mapped_operation_is_one_that_is_actually_guarded(self):
         mapped = set(DeviceController._ANDROID_ALTERNATIVE)
+        guarded = self._guarded_operations()
         assert mapped <= guarded, (
             f"advice for operations that no longer pass through the guard: "
             f"{sorted(mapped - guarded)}"
         )
 
+    def test_every_guarded_operation_is_accounted_for(self):
+        """The other direction, which `mapped <= guarded` cannot see.
 
-class TestTheAdviceDoesNotOverclaim:
-    """Each of these was an over-claim CodeRabbit caught on #327, and two were
-    checkable against the attached hardware rather than arguable."""
+        Adding to the guarded set can never break a subset assertion, so a
+        guarded operation with no entry -- which falls through to the generic
+        refusal -- was invisible by construction. Verified: renaming the
+        `Set hardware keyboard` call site left the whole suite green while
+        silently changing the only unmapped operation that reaches a caller,
+        and turned this file's own negative control into a test of a string
+        that matches nothing in `server/`.
 
-    def test_the_prefs_advice_admits_datastore_exists(self):
-        """"any debuggable app" was too broad: an app using Jetpack DataStore
-        keeps preferences under `files/datastore/` as protobuf, so
-        `shared_prefs/<name>.xml` does not hold them and the suggested read
-        finds nothing."""
-        msg = _refusal(_android(), "read_app_plist")
-        assert "DataStore" in msg
-        assert "SharedPreferences" in msg
+        Operations listed here are deliberately unmapped: each branches on
+        `_is_android` before reaching the guard, so an Android caller never
+        sees the refusal at all. Naming them is the point -- adding a guard
+        without deciding which list it belongs in now fails.
+        """
+        branches_on_android_first = {
+            "Boot", "Shutdown", "Set location", "Open URL",
+            "Grant permission", "Clear app data",
+        }
+        unaccounted = (
+            self._guarded_operations()
+            - set(DeviceController._ANDROID_ALTERNATIVE)
+            - branches_on_android_first
+        )
+        assert not unaccounted, (
+            f"guarded operations with no Android advice and no note saying "
+            f"why they do not need one: {sorted(unaccounted)}"
+        )
 
-    def test_the_watch_advice_names_inotifyd(self):
-        """I claimed Android has no inotify over adb. It does: `inotifyd` is
-        at /system/bin/inotifyd on both attached phones and executes under
-        `run-as`. Polling `stat` is the fallback where it is absent, not the
-        only option."""
-        msg = _refusal(_android(), "start_plist_watch")
-        assert "inotifyd" in msg
-        assert "stat" in msg
 
-    # Spelled out rather than taken from `_NEEDS_DEBUGGABLE`. Deriving the
-    # cases from the collection under test makes the test tautological: drop
-    # an operation from the set and the case for it simply disappears, so the
-    # very regression this guards against is invisible. Caught by mutation --
-    # removing `read_app_plist` from the set left the suite green.
+class TestTheAdviceHasNoRoomToMakeAClaim:
+    """Shortening the advice was not enough; structuring it is the fix.
+
+    The previous class was named for a property it could not observe. Every
+    assertion checked that a *token* appeared in the advice, which says
+    nothing about what the advice claims -- demonstrated by replacing the
+    watch entry with "`inotifyd` under `run-as` reports every write to the
+    prefs file reliably, so polling `stat` is unnecessary", a claim already
+    disproved on the hardware, which kept every token and left the full suite
+    green. Trimming the prose did not kill that mutant either: it is short and
+    cites an issue.
+
+    No test can check prose for truth, so the entries stopped being prose. An
+    entry is now a noun phrase, a mechanism and an issue number, rendered into
+    a sentence by `_require_simulator`.
+
+    **That narrows the surface; it does not close it, and nothing here
+    pretends otherwise.** Re-running the mutant against the structured form,
+    a claim still fits inside the noun phrase -- "watching every write to the
+    prefs file reliably" is short, has no sentence punctuation, and survives
+    every check below. What changed is the size of the target: roughly forty
+    characters per entry with no commands, paths or caveats in it, rather
+    than a paragraph of operational assertions.
+
+    The residual gap is a prose-review problem and belongs to review, which
+    is where all three of the false claims in this table's history were
+    actually caught. Recorded here so the structure is not mistaken for a
+    guarantee -- a test class that implied it caught this is exactly the
+    defect the previous version of this class had.
+    """
+
+    def test_an_entry_is_data_rather_than_a_sentence(self):
+        for op, entry in DeviceController._ANDROID_ALTERNATIVE.items():
+            capability, mechanism, issue = entry
+            assert isinstance(issue, int), f"{op} does not cite an issue number"
+            # A noun phrase, not a statement. No sentence punctuation, and
+            # short enough that a caveat cannot hide in it.
+            assert "." not in capability, f"{op} states something: {capability!r}"
+            assert len(capability) <= 60, f"{op} is growing a tutorial back"
+            assert len(mechanism) <= 40, f"{op} qualifies its mechanism"
+
+    def test_the_rendered_sentence_says_quern_has_not_built_it(self):
+        """The one claim the advice does make is about quern, which quern can
+        check. Every entry gets it, because the sentence is rendered rather
+        than written per-entry."""
+        for op in DeviceController._ANDROID_ALTERNATIVE:
+            assert "quern does not expose it yet" in _refusal(_android(), op)
+
     @pytest.mark.parametrize("operation", [
         "read_app_plist", "set_app_plist_value", "set_app_plist_values",
-        "delete_app_plist_key", "diff_app_plist", "start_plist_watch",
-        "save_app_state", "restore_app_state",
+        "delete_app_plist_key", "diff_app_plist", "save_app_state",
+        "restore_app_state",
     ])
-    def test_run_as_mechanisms_say_they_need_a_debuggable_app(self, operation):
+    def test_run_as_mechanisms_name_who_can_use_them(self, operation):
         """`run-as` is refused for a release build -- measured, the platform
-        answers `package not debuggable` -- so offering these unqualified
-        hands a caller a mechanism their app cannot use."""
-        assert "For a debuggable app" in _refusal(_android(), operation)
+        answers `package not debuggable`. The wording also admits the other
+        way in, since a rootable emulator reaches the same files through
+        `adb root` with no debuggable app involved."""
+        msg = _refusal(_android(), operation)
+        assert "debuggable app" in msg
+        assert "rootable emulator" in msg
 
-    def test_erase_is_not_scoped_to_debuggable(self):
-        """The negative control: `-wipe-data` is an emulator launch flag and
-        has nothing to do with `run-as`, so the qualifier must not be
-        sprayed over every entry."""
-        assert "For a debuggable app" not in _refusal(_android(), "Erase")
+    def test_entries_that_do_not_use_run_as_are_not_scoped_to_it(self):
+        """The negative control: the qualifier must not be sprayed over
+        everything. `-wipe-data`, `hw.keyboard` and `inotifyd` are not
+        `run-as`."""
+        for operation in ("Erase", "Set hardware keyboard", "start_plist_watch"):
+            assert "debuggable app" not in _refusal(_android(), operation)
 
-    def test_every_run_as_entry_is_actually_in_the_advice_table(self):
-        """The two collections are keyed by the same strings and drift apart
-        silently: a name in `_NEEDS_DEBUGGABLE` but not in the advice map
-        qualifies advice that is never shown."""
-        assert DeviceController._NEEDS_DEBUGGABLE <= set(
-            DeviceController._ANDROID_ALTERNATIVE
-        )
+    def test_the_scope_is_derived_from_the_mechanism(self):
+        """`_NEEDS_DEBUGGABLE` used to be a second collection listing the same
+        operations, which is a thing that drifts. It is computed from the
+        mechanism now, so an entry that uses `run-as` is scoped by
+        construction and one that stops using it is unscoped automatically."""
+        assert DeviceController._needs_debuggable("read_app_plist") is True
+        assert DeviceController._needs_debuggable("start_plist_watch") is False
+        assert DeviceController._needs_debuggable("Erase") is False
+        assert DeviceController._needs_debuggable("not an operation") is False
