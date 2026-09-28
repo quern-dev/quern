@@ -518,7 +518,7 @@ export function registerLogTools(server: McpServer): void {
   );
 
   server.registerTool("get_latest_crash", {
-    description: `Get recent crash reports with parsed exception types, signals, and stack frames. Each report's \`app_frame\` is the first frame of the crashing thread in the app's own code -- where in the app it crashed, with source file and line when the report has them (simulator Debug builds do; a phone gives the function name for Debug builds and an offset for stripped ones). \`frames\` is the crashing thread, each with image, offset, symbol and source line; \`images\` gives the UUID and load address of each binary they point into, which is what resolving an unsymbolicated frame needs. \`top_frames\` is the first few frames as text. Pass \`udid\` to fetch a device's crashes first: an iPhone over USB (pymobiledevice3), or an Android device or emulator (its DropBox: Java crashes, native crashes, and ANRs -- \`kind\` says which). The response's \`pull\` says whether that fetch happened: 'pulled', 'skipped' (with the reason, e.g. an iPhone not on USB) or 'failed' (with the error). An iPhone pull reaches back \`days\` (default 3) and says what it left on the phone in \`pull.older_on_device\` / \`pull.note\`; pass a larger \`days\` to reach further. Only 'pulled' means the list reflects the device (for an iPhone, within the window); otherwise an empty list is not proof of no crashes (a 'failed' Android pull may still add the reports it could read; a simulator is 'skipped' because its reports are read continuously on the Mac). On Android, \`pull.open_dialogs\` names processes showing a crash dialog, or that Android is treating as not responding ('anr', which starts before its report exists): while a crash dialog is open, Android silently drops that process's further crashes, so dismiss it or force-stop the app before reproducing. With \`udid\`, the list is that device's crashes, plus reports that name no device (a simulator's crash file does not say which simulator).`,
+    description: `Get recent crash reports with parsed exception types, signals, and stack frames. Each report's \`app_frame\` is the first frame of the crashing thread in the app's own code -- where in the app it crashed, with source file and line when the report has them (simulator Debug builds do; a phone gives the function name for Debug builds and an offset for stripped ones). \`frames\` is the crashing thread, each with image, offset, symbol and source line; \`images\` gives the UUID and load address of each binary they point into, which is what resolving an unsymbolicated frame needs. \`top_frames\` is the first few frames as text. Pass \`udid\` to fetch a device's crashes first: an iPhone over USB (pymobiledevice3), or an Android device or emulator (its DropBox: Java crashes, native crashes, and ANRs -- \`kind\` says which). The response's \`pull\` says whether that fetch happened: 'pulled', 'skipped' (with the reason, e.g. an iPhone not on USB) or 'failed' (with the error). An iPhone pull reaches back \`days\` (default 3) and says what it left on the phone in \`pull.older_on_device\` / \`pull.note\`; pass a larger \`days\` to reach further. Only 'pulled' means the list reflects the device (for an iPhone, within the window); otherwise an empty list is not proof of no crashes (a 'failed' Android pull may still add the reports it could read; a simulator is 'skipped' because its reports are read continuously on the Mac). On Android, \`pull.open_dialogs\` names processes showing a crash dialog, or that Android is treating as not responding ('anr', which starts before its report exists): while a crash dialog is open, Android silently drops that process's further crashes, so dismiss it or force-stop the app before reproducing. With \`udid\`, the list is that device's crashes, plus reports quern cannot place on a device; a simulator's crashes carry its UDID, read from the app's path.`,
     inputSchema: strictParams({
       limit: z
         .coerce.number()
@@ -541,14 +541,19 @@ export function registerLogTools(server: McpServer): void {
         .max(3650)
         .optional()
         .describe("iPhone: how far back the pull reaches, in days (default 3). Older reports stay on the phone and are counted in pull.older_on_device."),
+      include_raw: z
+        .boolean()
+        .optional()
+        .describe("Include each report's raw_text (about a thousand tokens per crash). Off by default; the full report is on disk at file_path."),
     }),
-  }, async ({ limit, since, udid, days }) => {
+  }, async ({ limit, since, udid, days, include_raw }) => {
       try {
         const data = await apiRequest("GET", "/api/v1/crashes/latest", {
           limit,
           since,
           udid,
           days,
+          include_raw,
         });
 
         return {

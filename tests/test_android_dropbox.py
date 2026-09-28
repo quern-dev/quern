@@ -1201,3 +1201,32 @@ class TestClearDeviceCrashes:
         resp = await _clear_device(app, "00008101-PHONE")
 
         assert resp.status_code == 502 and "boom" in resp.json()["detail"]
+
+
+class TestCrashListShape:
+    async def test_a_simulators_crash_is_not_in_a_phones_list(self, app, monkeypatch):
+        from server.sources.crash import PullResult
+
+        fixture = Path(__file__).parent / "fixtures" / "crash_ips" / "simulator_debug.ips"
+        adapter = app.state.crash_adapter
+        adapter.crash_reports.append(adapter._parse_crash_file(fixture, fixture.read_text()))
+        app.state.device_controller = _controller(lib_udid="LIB")
+
+        async def pull(lib_udid, *, device_id="", days=3):
+            return PullResult()
+
+        monkeypatch.setattr(adapter, "pull_from_device", pull)
+
+        assert (await _latest(app, udid="00008101-PHONE"))["total"] == 0
+        assert (await _latest(app))["total"] == 1
+
+    async def test_raw_text_is_left_out_unless_asked_for(self, app):
+        from server.models import CrashReport
+
+        app.state.crash_adapter.crash_reports.append(CrashReport(
+            crash_id="a", timestamp=datetime(2026, 9, 27, tzinfo=UTC), raw_text="x" * 3000))
+
+        assert (await _latest(app))["crashes"][0]["raw_text"] == ""
+        assert (await _latest(app, include_raw="true"))["crashes"][0]["raw_text"] == "x" * 3000
+        # The stored report keeps it.
+        assert app.state.crash_adapter.crash_reports[0].raw_text == "x" * 3000

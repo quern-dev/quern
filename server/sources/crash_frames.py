@@ -109,6 +109,20 @@ def _is_app(name: str, path: str, bundle: str, process: str) -> bool:
     return bool(process) and name in (process, f"{process}.debug.dylib")
 
 
+_SIMULATOR = re.compile(r"/CoreSimulator/Devices/([0-9A-Fa-f-]{36})/")
+
+
+def simulator_udid(proc_path: str) -> str:
+    """The simulator a report came from, read from its app's path; "" if none.
+
+    A simulator's crash file names no device, so a report without one was
+    listed under every device's udid -- an iPhone's list included the
+    simulator's crashes.
+    """
+    m = _SIMULATOR.search(proc_path)
+    return m.group(1).upper() if m else ""
+
+
 def _bundle_dir(proc_path: str) -> str:
     """`/…/MyApp.app` for `/…/MyApp.app/MyApp`; "" when it is not an app bundle."""
     head = posixpath.dirname(proc_path)

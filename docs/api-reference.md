@@ -123,8 +123,11 @@ could not be read and records without a time of their own were skipped. A
 simulator is `skipped`: its crash reports are written on the Mac and read from
 `~/Library/Logs/DiagnosticReports` continuously, unless the server was started
 with `--no-simulator-crashes`, which the reason then says. With a `udid`, the
-list is that device's crashes, plus reports that name no device, such as a
-simulator's crash file, which does not say which simulator.
+list is that device's crashes, plus reports quern cannot place on any device. A
+simulator's crash names its simulator by the app's path, so it is listed under
+that simulator only. `raw_text` is left out of the response unless
+`include_raw=true`: it runs to about a thousand tokens of JSON per crash, and the
+full report is on disk at `file_path`.
 
 Crash reports are left on the iPhone (the pull copies, it never deletes), so a
 pull does not take them away from Xcode or Finder. Each phone's reports are kept in

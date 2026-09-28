@@ -633,7 +633,7 @@ class CrashAdapter(BaseSourceAdapter):
         return CrashReport(
             crash_id=crash_id,
             timestamp=ts,
-            device_id=self.device_id,
+            device_id=crash_frames.simulator_udid(data.get("procPath") or "") or self.device_id,
             process=proc_name,
             exception_type=exc_type,
             exception_codes=exc_codes,
@@ -684,6 +684,7 @@ class CrashAdapter(BaseSourceAdapter):
         # Only the part after the address was kept, which dropped the image.
         frames, images = crash_frames.crash_text_frames(content)
         identifier = re.search(r"^Identifier:\s+(\S+)", content, re.MULTILINE)
+        exe_path = re.search(r"^Path:\s+(\S.*)$", content, re.MULTILINE)
         version = re.search(r"^Version:\s+(\S+)(?:\s+\((\S+)\))?", content, re.MULTILINE)
 
         # Timestamp
@@ -695,7 +696,8 @@ class CrashAdapter(BaseSourceAdapter):
         return CrashReport(
             crash_id=crash_id,
             timestamp=ts,
-            device_id=self.device_id,
+            device_id=(crash_frames.simulator_udid(exe_path.group(1)) if exe_path else "")
+            or self.device_id,
             process=proc_name,
             exception_type=exc_type,
             exception_codes=exc_codes,

@@ -314,3 +314,25 @@ def test_the_log_line_names_a_signal_once():
     assert CrashAdapter._crash_summary(report) == "CRASH: app signal 11 (SIGSEGV)"
     report.exception_type = "EXC_BAD_ACCESS"
     assert CrashAdapter._crash_summary(report) == "CRASH: app EXC_BAD_ACCESS (SIGSEGV)"
+
+
+class TestWhichDevice:
+    """A simulator's crash file names no device, so it was listed under every
+    device's udid: an iPhone's crashes included the simulator's."""
+
+    def test_a_simulator_report_names_its_simulator(self):
+        report = _parse(FIXTURES / "crash_ips" / "simulator_debug.ips")
+        assert report.device_id == "00000000-0000-0000-0000-00000000000A"
+
+    def test_a_phone_report_is_left_to_the_pull_to_tag(self):
+        report = _parse(FIXTURES / "crash_ips" / "device_debug.ips")
+        assert report.device_id == ""
+
+    def test_a_text_report_from_a_simulator(self, tmp_path):
+        text = (FIXTURES / "crash_sample.crash").read_text().replace(
+            "/private/var/containers/Bundle/Application/.../MyApp.app/MyApp",
+            "/Users/USER/Library/Developer/CoreSimulator/Devices/"
+            "45395d76-af20-4cef-8966-9b1c43bf9475/data/Containers/Bundle/Application/X/MyApp.app/MyApp")
+        f = tmp_path / "MyApp.crash"
+        f.write_text(text)
+        assert _parse(f).device_id == "45395D76-AF20-4CEF-8966-9B1C43BF9475"

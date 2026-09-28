@@ -58,6 +58,13 @@ async def get_latest_crashes(
             "phone and are counted in pull.older_on_device."
         ),
     ),
+    include_raw: bool = Query(
+        default=False,
+        description=(
+            "Include each report's raw_text. Off by default: it is about a thousand "
+            "tokens of JSON per crash, and the full report is on disk at file_path."
+        ),
+    ),
 ) -> CrashLatestResponse:
     """Return recent crash reports.
 
@@ -98,6 +105,8 @@ async def get_latest_crashes(
     reports = sorted(reports, key=lambda r: r.timestamp, reverse=True)
     total = len(reports)
     limited = reports[:limit]
+    if not include_raw:
+        limited = [r.model_copy(update={"raw_text": ""}) for r in limited]
 
     return CrashLatestResponse(crashes=limited, total=total, pull=pull)
 
