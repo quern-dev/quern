@@ -702,6 +702,13 @@ class TestWhoEndedIt:
         report = _parse(_write(tmp_path, header, body))
         assert report.killed_by == "" and report.app_frame is not None
 
+    def test_a_kill_from_another_process_of_the_same_name(self, tmp_path):
+        """A second copy of the app, or a helper sharing its executable's name:
+        the name says it was its own doing, the pid says otherwise."""
+        header, body = _ips("simulator_fatal_error")
+        body["termination"].update(byProc=body["procName"], byPid=body["pid"] + 1)
+        assert _parse(_write(tmp_path, header, body)).killed_by == body["procName"]
+
     def test_an_uncaught_exception_carries_the_apps_own_name(self, tmp_path):
         """What a real one reads; the earlier test used `exc handler`."""
         header, body = _ips("simulator_fatal_error")
