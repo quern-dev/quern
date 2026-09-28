@@ -86,6 +86,14 @@ async def _capture_screen_context(controller, udid: str, registry=None) -> dict:
             "element_count": summary.get("element_count", 0),
             "interactive_elements": summary.get("interactive_elements", []),
         }
+        # Carried, not dropped. "Tapped, and the screen now has 0 elements" is
+        # the most common way a caller meets a timed-out read, and this
+        # whitelist computed the explanation one frame up and discarded it
+        # (#170). An element count the caller cannot interpret is the whole
+        # defect, so the field that interprets it travels with the count.
+        if summary.get("source_timed_out"):
+            context["source_timed_out"] = True
+            context["degraded"] = summary.get("degraded", "")
         context.update(await _identify_for_context(controller, udid, registry, elements))
         return context
     except Exception:

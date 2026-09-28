@@ -74,6 +74,15 @@ SOURCE_TIMEOUT = 10.0
 # derive the budget from the first successful /source per device and delete
 # these constants, which is the open half of #170.
 SOURCE_TIMEOUT_SLOW = 20.0
+
+#: How many times to ask `/status` after a `/source` timeout before
+#: concluding the runner is hung rather than busy. One ping was not enough:
+#: a runner building a large tree can miss it and be healthy.
+SOURCE_TIMEOUT_PING_ATTEMPTS = 4
+
+#: Seconds between those pings. A constant so a test can drive the retry
+#: without paying for it.
+SOURCE_TIMEOUT_PING_GAP = 1.0
 # WDA default is 50 — 25 resolves most screens;
 # skeleton fallback handles dense maps
 SNAPSHOT_MAX_DEPTH = 25
@@ -264,6 +273,11 @@ class WdaBackend:
         self._current_depth: dict[str, int] = {}
         # Per-device lock for session creation (prevents parallel _ensure_session races)
         self._session_locks: dict[str, asyncio.Lock] = {}
+        #: Seconds the last `/source` ran before timing out, per device, or
+        #: absent once a read succeeds. Read by the summary so a fallback is
+        #: reported rather than passed off as the screen -- see
+        #: `_note_source_timeout`.
+        self._source_timed_out: dict[str, float] = {}
 
     def _source_timeout(self, udid: str) -> float:
         """Return the /source timeout for a device, extended for slower chips.
@@ -361,6 +375,7 @@ class WdaBackend:
         self._connections.clear()
         self._last_interaction.clear()
         self._current_depth.clear()
+        self._source_timed_out.clear()
 
     # ------------------------------------------------------------------
     # Connection management
@@ -837,8 +852,59 @@ class WdaBackend:
 
         return resp
 
-    async def _is_wda_responsive(self, udid: str) -> bool:
-        """Quick /status ping to check if WDA is still alive (2s timeout)."""
+    def _note_source_timeout(self, udid: str, seconds: float) -> None:
+        """Record that this device's tree read timed out and fell back.
+
+        The fallback returns a container skeleton, which is frequently empty
+        -- and an empty result is exactly what a genuinely blank screen
+        returns. `element_count: 0` with no error is the reason #170 took a
+        long time to diagnose: every symptom said the device was fine and
+        the screen was empty, when the read had simply not finished.
+
+        Cleared on the next successful read rather than after being reported,
+        so it describes the device's current state instead of draining on
+        whoever asks first.
+        """
+        self._source_timed_out[udid] = seconds
+
+    def _clear_source_timeout(self, udid: str) -> None:
+        """Forget a recorded timeout, once a read has actually succeeded."""
+        self._source_timed_out.pop(udid, None)
+
+    def source_timed_out(self, udid: str) -> float | None:
+        """Seconds the last tree read burned before falling back, if it did."""
+        return self._source_timed_out.get(udid)
+
+    async def _is_wda_responsive(
+        self, udid: str, *, attempts: int = 1, timeout: float = 2.0,
+        gap: float | None = None,
+    ) -> bool:
+        """Whether WDA answers `/status`.
+
+        One 2s ping by default, which is the right question for "is this
+        thing alive at all".
+
+        `attempts` exists for the caller that has just had a *different*
+        endpoint time out. A runner part-way through building a large
+        accessibility tree can miss a 2s ping while being perfectly healthy
+        -- `/source` on an iPhone 11 measures 10.19-10.35s under Xcode 27 --
+        and the old single ping declared that runner hung. The cost of being
+        wrong is not a retry: `_restart_wda` reinstalls the runner through
+        `xcodebuild`, so a slow read destroyed the device's automation
+        rather than degrading it (#170).
+
+        The retry window is deliberately *not* derived from that figure. The
+        constants above record that a margin sized to the last observation
+        has been wrong twice here, the second time because a toolchain
+        rebuild moved the same device by three seconds. This asks a few more
+        times over a few more seconds, which is enough to tell "busy" from
+        "dead" without encoding a number that expires.
+
+        What it costs when the runner really is hung: up to three extra
+        requests and about nine seconds before the restart that was going to
+        happen anyway. Nothing when the runner answers -- the first attempt
+        does not sleep.
+        """
         conn = self._connections.get(udid)
         if not conn:
             # No cached connection — try to resolve base URL without full reconnect
@@ -849,12 +915,18 @@ class WdaBackend:
         else:
             base_url = conn.base_url
 
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(f"{base_url}/status", timeout=2.0)
-                return resp.status_code == 200
-        except Exception:
-            return False
+        pause = SOURCE_TIMEOUT_PING_GAP if gap is None else gap
+        for attempt in range(max(1, attempts)):
+            if attempt:
+                await asyncio.sleep(pause)
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(f"{base_url}/status", timeout=timeout)
+                    if resp.status_code == 200:
+                        return True
+            except Exception:  # noqa: BLE001 - any failure is "did not answer"
+                pass
+        return False
 
     async def _restart_wda(self, udid: str) -> None:
         """Stop and restart the WDA driver for a device, clearing cached connection."""
@@ -1056,13 +1128,29 @@ class WdaBackend:
                 elapsed, udid[:8],
             )
 
-            # Check if WDA is hung (common with MapKit/large trees)
-            if not await self._is_wda_responsive(udid):
+            # A slow /source is not evidence of a hung runner, and the
+            # recovery is expensive enough that guessing wrong is worse than
+            # the fault: `_restart_wda` reinstalls through xcodebuild. So the
+            # runner gets several chances to answer, spread over a window
+            # wider than the read that just timed out -- it may still be
+            # finishing that very tree.
+            self._note_source_timeout(udid, elapsed / 1000)
+            alive = await self._is_wda_responsive(
+                udid, attempts=SOURCE_TIMEOUT_PING_ATTEMPTS,
+            )
+            if not alive:
                 logger.warning("WDA hung on %s, restarting driver...", udid[:8])
                 await self._restart_wda(udid)
+            else:
+                logger.warning(
+                    "wda /source timed out on %s but the runner is answering; "
+                    "leaving it alone and falling back to element queries",
+                    udid[:8],
+                )
 
             return await self.build_screen_skeleton(udid)
 
+        self._clear_source_timeout(udid)
         data = resp.json()
         # WDA returns {"value": {...tree...}, "sessionId": ...}
         tree = data.get("value", data)
@@ -1110,13 +1198,28 @@ class WdaBackend:
                 elapsed, udid[:8],
             )
 
-            if not await self._is_wda_responsive(udid):
+            # Identical reasoning to `describe_all` above, and this route had
+            # none of it until a review asked which call site the fix forgot.
+            # `get_ui_tree(children_of=...)` reaches only here, so a nested
+            # read on a slow-but-healthy runner reinstalled it exactly as the
+            # flat read used to.
+            self._note_source_timeout(udid, elapsed / 1000)
+            if not await self._is_wda_responsive(
+                udid, attempts=SOURCE_TIMEOUT_PING_ATTEMPTS,
+            ):
                 logger.warning("WDA hung on %s, restarting driver...", udid[:8])
                 await self._restart_wda(udid)
+            else:
+                logger.warning(
+                    "wda /source timed out on %s (nested) but the runner is "
+                    "answering; leaving it alone",
+                    udid[:8],
+                )
 
             # Fallback returns flat list — no hierarchy, but better than an error
             return await self.build_screen_skeleton(udid)
 
+        self._clear_source_timeout(udid)
         data = resp.json()
         tree = data.get("value", data)
 

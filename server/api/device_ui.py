@@ -137,11 +137,28 @@ async def get_ui_elements(
             act.udid = resolved_udid
             act.detail += f", {len(elements)} elements"
             dump_kwargs = {} if include_raw else {"exclude": {"extra_attrs"}}
-            return {
+            body = {
                 "elements": [e.model_dump(**dump_kwargs) for e in elements],
                 "element_count": len(elements),
                 "udid": resolved_udid,
             }
+            # `element_count` here has the same problem it has on the summary:
+            # a tree read that timed out falls back to a container skeleton,
+            # and a small count is indistinguishable from a simple screen.
+            # `get_ui_tree` is a separate route from `get_screen_summary`, so
+            # it needs telling separately -- #170 was diagnosed twice over
+            # because only the log knew.
+            backend = getattr(controller, "wda_client", None)
+            timed_out = getattr(backend, "source_timed_out", None)
+            seconds = timed_out(resolved_udid) if callable(timed_out) else None
+            if seconds is not None:
+                body["source_timed_out"] = True
+                body["degraded"] = (
+                    f"The accessibility tree read timed out after {seconds:.1f}s, "
+                    "so this is a partial fallback rather than the tree. Retry "
+                    "with a larger source_timeout."
+                )
+            return body
         except DeviceError as e:
             raise _handle_device_error(e)
 
