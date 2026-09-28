@@ -1123,7 +1123,8 @@ class TestClearDeviceCrashes:
     async def test_an_iphone_not_on_usb(self, app):
         app.state.device_controller = _controller(lib_udid=None)
         resp = await _clear_device(app, "00008101-PHONE")
-        assert resp.status_code == 409 and "USB" in resp.json()["detail"]
+        assert resp.status_code == 409
+        assert "not connected over USB" in resp.json()["detail"]
 
     async def test_a_phone_matched_only_by_name_is_not_deleted_from(self, app, monkeypatch):
         """The #323 fallback is fine for reading, not for deleting."""
@@ -1144,7 +1145,9 @@ class TestClearDeviceCrashes:
         app.state.device_controller = _controller(lib_udid="LIB")
 
         async def run(argv, what, timeout):
-            raise ios_crash.IosCrashError("pymobiledevice3 crash ls exited 1: boom")
+            if what == "crash ls":                  # the listing works; the delete fails
+                return "/A.ips\n", ""
+            raise ios_crash.IosCrashError("pymobiledevice3 crash delete exited 1: boom")
 
         monkeypatch.setattr(ios_crash, "command", lambda: ["/bin/pmd3"])
         monkeypatch.setattr(ios_crash, "_run", run)
