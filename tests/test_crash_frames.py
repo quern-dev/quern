@@ -200,6 +200,16 @@ class TestCrashText:
         assert report.app_frame.symbol == "" and report.app_frame.offset == 11255808
         assert format_frame(report.app_frame) == "MyApp: 0xabc000"
 
+    def test_an_unsymbolicated_line_without_binary_images(self, tmp_path):
+        """The offset is on the line; with no Binary Images section, there is
+        no load address to compute it from."""
+        text = (FIXTURES / "crash_sample.crash").read_text().replace(
+            "0x0000000100abc000 -[FeedViewController tableView:cellForRowAtIndexPath:] + 128",
+            "0x0000000100abc000 0x100000000 + 11255808").split("Binary Images:")[0]
+        f = tmp_path / "MyApp.crash"
+        f.write_text(text)
+        assert _parse(f).app_frame.offset == 11255808
+
     def test_a_symbol_with_its_source_line(self, tmp_path):
         text = (FIXTURES / "crash_sample.crash").read_text().replace(
             "-[FeedViewController tableView:cellForRowAtIndexPath:] + 128",
@@ -221,6 +231,15 @@ class TestAndroidNative:
             "libutils.so", 0x1650c, "android::Looper::pollOnce(int, int*, int*, void**)",
             112, "c1f7ebcd")
         assert not frame.app
+
+    def test_a_cpp_operator_with_a_plus_in_its_name(self):
+        """The offset follows the last "+", not the first."""
+        [frame] = native_frames([
+            "#03 pc 0000000000009abc  /system/lib64/libc++.so "
+            "(std::__1::basic_string<char>::operator+=(char const*)+24) (BuildId: 1234)",
+        ])
+        assert (frame.symbol, frame.symbol_offset) == (
+            "std::__1::basic_string<char>::operator+=(char const*)", 24)
 
     def test_the_apps_library_is_the_apps(self):
         [frame] = native_frames([
