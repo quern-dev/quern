@@ -85,7 +85,7 @@ class UsbmuxBackend:
             return []
         return self._parse_devices(raw)
 
-    async def get_usb_devices(self) -> list[tuple[str, str]]:
+    async def get_usb_devices(self) -> list[tuple[str, str]] | None:
         """(libimobiledevice_udid, device_name) for every USB-connected device.
 
         Unlike list_devices(), this does NOT filter by iOS version — it includes
@@ -94,10 +94,13 @@ class UsbmuxBackend:
         A list, not a {name: udid} map, which it used to be: keyed by name,
         two phones sharing one ("iPhone" is the default) collapsed to a single
         entry, and the one dropped could not be matched to USB at all.
+
+        None when usbmux could not be asked, which is not the same answer as
+        "nothing on USB" and must not read as it.
         """
         raw = await self._run_usbmux_list()
         if raw is None:
-            return []
+            return None
         return [
             (entry.get("UniqueDeviceID", ""), entry.get("DeviceName", ""))
             for entry in raw

@@ -690,9 +690,11 @@ class DeviceController(DeviceControllerUI):
         # Build CoreDevice UUID -> libimobiledevice UDID mapping. Exactly,
         # through the identity aliases devicectl records: its hardware UDID
         # *is* the USB UDID, so a phone is on USB when usbmux lists one of its
-        # spellings, or when devicectl itself says the transport is wired --
-        # which holds even when usbmux could not be asked (pymobiledevice3
-        # missing or timing out), where every phone used to read "not on USB".
+        # spellings. When usbmux could not be asked at all (pymobiledevice3
+        # missing or timing out), devicectl's own "wired" transport stands in
+        # -- every phone used to read "not on USB" then. Only then: when usbmux
+        # answered without the phone, that answer wins, or a pull would go
+        # ahead against a UDID usbmux does not have.
         # It used to correlate names, and two phones sharing one ("iPhone" is
         # the default) could map to each other's UDID -- so a crash pull filed
         # one phone's reports under the other, on disk once pulls kept a
@@ -707,7 +709,9 @@ class DeviceController(DeviceControllerUI):
         # unplugged since, and now on Wi-Fi, kept it and was pulled over a USB
         # connection that no longer existed. A phone absent from this listing
         # keeps it, since a failed devicectl call is not evidence of anything.
-        usb_devices = await self.usbmux.get_usb_devices() if physical_devices else []
+        usb_answer = await self.usbmux.get_usb_devices() if physical_devices else []
+        usbmux_failed = usb_answer is None
+        usb_devices = usb_answer or []
         usb_udids = {udid for udid, _ in usb_devices}
         usb_names = Counter(name for _, name in usb_devices if name)
         name_counts = Counter(d.name for d in physical_devices)
@@ -716,7 +720,8 @@ class DeviceController(DeviceControllerUI):
         matched: dict[str, str] = {}
         for d in physical_devices:
             exact = next((s for s in hardware[d.udid] if s in usb_udids), None)
-            if exact is None and d.connection_type == "usb" and len(hardware[d.udid]) == 1:
+            if (exact is None and usbmux_failed and d.connection_type == "usb"
+                    and len(hardware[d.udid]) == 1):
                 exact = hardware[d.udid][0]
             if exact:
                 matched[d.udid] = exact

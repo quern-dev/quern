@@ -392,6 +392,12 @@ async def pull_dropbox(adb_path: str | None, serial: str) -> DropboxPull:
     zone = device_zone(
         name.group(1).strip() if name else "", offset.group(1).strip() if offset else "",
     )
+    # Parsed in a thread: up to DropBox's 1,000 records, which should not hold
+    # the event loop (measured: 0.16s for 43 crash records among 196 entries).
+    return await asyncio.to_thread(_parse_pull, body, procs, serial, zone)
+
+
+def _parse_pull(body: str, procs: str, serial: str, zone) -> DropboxPull:
     pulled = DropboxPull(open_dialogs=parse_open_dialogs(procs))
     chunks = _TAG_LINE.split(body)[1:]     # [tag, output, tag, output, ...]
     read = set()

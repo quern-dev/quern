@@ -209,7 +209,7 @@ class TestGetUsbDevices:
     async def test_empty_on_failure(self, backend):
         with patch("asyncio.create_subprocess_exec", side_effect=FileNotFoundError):
             result = await backend.get_usb_devices()
-        assert result == []
+        assert result is None      # could not ask -- not "nothing on USB"
 
     async def test_skips_only_entries_without_a_udid(self, backend):
         raw = json.dumps(

@@ -1217,7 +1217,7 @@ def _usb_controller(phones, usb):
 
     ctrl.devicectl.list_devices = list_physical
     ctrl.usbmux.list_devices = AsyncMock(return_value=[])
-    ctrl.usbmux.get_usb_devices = AsyncMock(side_effect=lambda: list(usb))
+    ctrl.usbmux.get_usb_devices = AsyncMock(side_effect=lambda: None if usb is None else list(usb))
     return ctrl
 
 
@@ -1382,10 +1382,19 @@ class TestUdidMapping:
         """devicectl says the transport is wired, and its hardware UDID is the
         USB UDID. With pymobiledevice3 missing, usbmux answers nothing, and
         every phone used to read "not connected over USB"."""
-        ctrl = _usb_controller({"CORE-A": ("iPhone 12", "00008101-AAAA", "usb")}, usb=[])
+        ctrl = _usb_controller({"CORE-A": ("iPhone 12", "00008101-AAAA", "usb")}, usb=None)
         await ctrl.list_devices()
 
         assert ctrl._usbmux_udid_map == {"CORE-A": "00008101-AAAA"}
+
+    async def test_usbmux_answering_without_the_phone_wins_over_wired(self):
+        """usbmux answered, and the phone is not on its list: a pull against
+        that UDID would fail, so devicectl's "wired" does not overrule it
+        (CodeRabbit on #324)."""
+        ctrl = _usb_controller({"CORE-A": ("iPhone 12", "00008101-AAAA", "usb")}, usb=[])
+        await ctrl.list_devices()
+
+        assert ctrl._usbmux_udid_map == {}
 
     async def test_an_unplugged_phone_loses_its_usb_mapping(self):
         """It kept it, and a phone now on Wi-Fi was pulled over a USB
