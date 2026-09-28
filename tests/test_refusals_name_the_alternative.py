@@ -79,11 +79,34 @@ class TestTheRefusalStillCarriesWhatTheApiDependsOn:
         "read_app_plist", "Erase", "Set hardware keyboard",
     ])
     def test_the_phrase_that_maps_to_400_survives(self, operation):
-        """`_handle_device_error` matches this literal string to return 400
-        (`server/api/device.py`). Appending detail is safe; rewording the
-        leading clause would turn every refusal into a 500 with nothing to
-        indicate it had happened."""
+        """`_handle_device_error` matches this literal string to return 400.
+        Appending detail is safe; rewording the leading clause would turn
+        every refusal into a 500 with nothing to indicate it had happened."""
         assert "only supported on simulators" in _refusal(_android(), operation)
+
+    @pytest.mark.parametrize("module", ["server.api.device", "server.api.app_state"])
+    def test_every_copy_of_the_mapper_agrees_on_the_status(self, module):
+        """Asserting the phrase is in the string tests the wrong thing: it
+        says nothing about what the API returns, and both are needed for a
+        400 to reach the caller.
+
+        There are two `_handle_device_error` functions. `server/api/app_state`
+        carries its own and never gained this rule, so the identical refusal
+        was a 400 from one route and a **500** from another -- a client error
+        reported as a server fault, decided by which file the route happened
+        to live in. A live call against an attached Pixel 3 XL returned 500
+        while this file's earlier string assertion passed.
+        """
+        import importlib
+
+        from server.models import DeviceError
+
+        handler = importlib.import_module(module)._handle_device_error
+        err = DeviceError(
+            "read_app_plist is only supported on simulators. X is Android.",
+            tool="simctl",
+        )
+        assert handler(err).status_code == 400
 
     def test_non_android_devices_are_unaffected(self):
         c = DeviceController()
