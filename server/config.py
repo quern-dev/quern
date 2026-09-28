@@ -148,6 +148,23 @@ def get_default_device_family() -> str:
 # tarball updater uses (#41).
 # ---------------------------------------------------------------------------
 
+DEFAULT_CRASH_RETENTION_DAYS = 30
+
+
+def get_crash_retention_days() -> int:
+    """Days to keep pulled crash reports on the Mac; 0 keeps them forever (#322).
+
+    `crash_retention_days` in config.json. Anything but a non-negative whole
+    number reads as the default -- a typo should keep the usual behaviour, and
+    never turn into "delete everything now". A bool is not a number here,
+    though Python says it is.
+    """
+    raw = read_user_config().get("crash_retention_days")
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+        return raw
+    return DEFAULT_CRASH_RETENTION_DAYS
+
+
 VALID_UPDATE_CHANNELS = ("stable", "beta")
 DEFAULT_UPDATE_CHANNEL = "stable"
 

@@ -37,7 +37,9 @@ The key lives at `~/.quern/api-key`; the server's URL and port are in `~/.quern/
 | `get_errors` | GET | `/api/v1/logs/errors` | Errors and crashes only |
 | `get_build_result` | GET | `/api/v1/builds/latest` | Most recent build result |
 | `parse_build_output` | POST | `/api/v1/builds/parse-file` | Parse a build log file from disk |
-| `get_latest_crash` | GET | `/api/v1/crashes/latest` | Recent parsed crash reports; with `udid`, fetched from an iPhone (USB) or an Android device first |
+| `get_latest_crash` | GET | `/api/v1/crashes/latest` | Recent parsed crash reports; with `udid`, fetched from an iPhone (USB, the last `days`, default 3) or an Android device first |
+| `clear_crashes` | DELETE | `/api/v1/crashes` | Delete the crash reports quern stored on the Mac, for one `udid` or all; the device keeps its own |
+| `clear_device_crashes` | POST | `/api/v1/crashes/device/clear` | Permanently delete every crash report on an iPhone (USB); Android and simulators are refused with the reason |
 | `set_log_filter` | POST | `/api/v1/logs/filter` | Reconfigure capture filters |
 | `get_log_filter` | GET | `/api/v1/logs/filter` | Current ingestion filter config at all scopes (global, per-source, per-device) |
 | `list_log_sources` | GET | `/api/v1/logs/sources` | Active log source adapters, and what each log buffer holds and has evicted |
@@ -93,13 +95,15 @@ flow summary, a string that is not a cursor at all is refused with 400. Older ti
 returns an arrival cursor.
 
 **Crash reports on both platforms.** `get_latest_crash` with a `udid` fetches
-that device's crashes first. An iPhone is read over USB with
-`idevicecrashreport`. An Android device or emulator is read from its DropBox,
+that device's crashes first. An iPhone is read over USB with `pymobiledevice3`:
+the reports dated within the last `days` (default 3), and `pull` says what it
+left on the phone (`older_on_device`, `oldest_on_device`, and a `note` pointing at
+`days` and `clear_device_crashes`). An Android device or emulator is read from its DropBox,
 which needs no root, and yields Java crashes, native crashes and ANRs; each
 report's `kind` says which. The response's `pull` says whether the fetch
 happened: `pulled`, `skipped` (with the reason, for example an iPhone that is not
 on USB) or `failed` (with the error). Only `pulled` means the list reflects the
-device. A `failed` Android pull can still add the reports it did read, for
+device (for an iPhone, within the pull's window; `older_on_device` says what lay beyond it). A `failed` Android pull can still add the reports it did read, for
 example when one DropBox tag could not be read, or when the device's timezone
 could not be read and records without a time of their own were skipped. A
 simulator is `skipped`: its crash reports are written on the Mac and read from
@@ -108,13 +112,33 @@ with `--no-simulator-crashes`, which the reason then says. With a `udid`, the
 list is that device's crashes, plus reports that name no device, such as a
 simulator's crash file, which does not say which simulator.
 
-Crash reports are left on the iPhone (`idevicecrashreport -k`), so a pull does
-not take them away from Xcode or Finder. Each phone's reports are kept in
+Crash reports are left on the iPhone (the pull copies, it never deletes), so a
+pull does not take them away from Xcode or Finder. Each phone's reports are kept in
 `~/.quern/crashes/devices/<device id>/`, so after a restart they are listed
 against the right phone again, as an Android device's DropBox history is. A crash from before the server started,
 on either platform, is listed but does not become a new log entry or run the
 on-crash hook.
 The hook runs for every newer crash, including one logcat already reported.
+
+**Clearing.** `clear_crashes` deletes quern's stored copies on the Mac, for one
+`udid` or all: only the files quern's own pulls wrote, under
+`~/.quern/crashes/devices/`. Nothing else in the crash directory is deleted, and
+never `~/Library/Logs/DiagnosticReports`. It does not clear the device: a later
+pull lists again whatever the device still holds within its window, without
+logging it as a new crash. An unknown `udid` is a 404, and an empty one a 400.
+Pulled reports not copied for 30 days are also removed automatically, at start-up
+and hourly; set `crash_retention_days` in `~/.quern/config.json` (0 keeps them
+forever). The removals are logged in the server log only.
+
+`clear_device_crashes` permanently deletes an iPhone's own crash reports, for
+Xcode and Finder too: every `.ips`/`.crash` report at the top of its crash
+directory, each by name. DiagnosticLogs (sysdiagnose archives) and other files
+are left; `pymobiledevice3 crash clear` would remove them too, and is not used.
+It returns how many it removed, how many remain and any that failed. It refuses a
+phone matched to USB by name rather than by its hardware UDID (#323), Android (an
+unrooted device's DropBox can only be read), and a simulator, whose reports are
+files on the Mac. A phone with a long history lists more slowly; that cost has
+not been measured.
 
 On Android, `pull.open_dialogs` lists processes showing a crash ("keeps
 stopping") dialog right now (`kind: "crash"`), and processes Android is treating

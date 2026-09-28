@@ -50,6 +50,7 @@ from server.api.wda import router as wda_router
 from server.auth import APIKeyMiddleware
 from server.config import (
     ServerConfig,
+    get_crash_retention_days,
     get_local_capture_processes,
     set_local_capture_processes,
     with_capture_minimum,
@@ -228,6 +229,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             extra_watch_dirs=app.state.crash_extra_watch_dirs,
             process_filter=app.state.crash_process_filter,
             on_crash_hook=app.state.on_crash_hook,
+            retention_days=get_crash_retention_days(),
         )
         adapters["crash"] = crash
         app.state.crash_adapter = crash

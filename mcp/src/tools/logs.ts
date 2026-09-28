@@ -518,7 +518,7 @@ export function registerLogTools(server: McpServer): void {
   );
 
   server.registerTool("get_latest_crash", {
-    description: `Get recent crash reports with parsed exception types, signals, and stack frames. Pass \`udid\` to fetch a device's crashes first: an iPhone over USB (idevicecrashreport), or an Android device or emulator (its DropBox: Java crashes, native crashes, and ANRs -- \`kind\` says which). The response's \`pull\` says whether that fetch happened: 'pulled', 'skipped' (with the reason, e.g. an iPhone not on USB) or 'failed' (with the error). Only 'pulled' means the list reflects the device; otherwise an empty list is not proof of no crashes (a 'failed' Android pull may still add the reports it could read; a simulator is 'skipped' because its reports are read continuously on the Mac). On Android, \`pull.open_dialogs\` names processes showing a crash dialog, or that Android is treating as not responding ('anr', which starts before its report exists): while a crash dialog is open, Android silently drops that process's further crashes, so dismiss it or force-stop the app before reproducing. With \`udid\`, the list is that device's crashes, plus reports that name no device (a simulator's crash file does not say which simulator).`,
+    description: `Get recent crash reports with parsed exception types, signals, and stack frames. Pass \`udid\` to fetch a device's crashes first: an iPhone over USB (pymobiledevice3), or an Android device or emulator (its DropBox: Java crashes, native crashes, and ANRs -- \`kind\` says which). The response's \`pull\` says whether that fetch happened: 'pulled', 'skipped' (with the reason, e.g. an iPhone not on USB) or 'failed' (with the error). An iPhone pull reaches back \`days\` (default 3) and says what it left on the phone in \`pull.older_on_device\` / \`pull.note\`; pass a larger \`days\` to reach further. Only 'pulled' means the list reflects the device (for an iPhone, within the window); otherwise an empty list is not proof of no crashes (a 'failed' Android pull may still add the reports it could read; a simulator is 'skipped' because its reports are read continuously on the Mac). On Android, \`pull.open_dialogs\` names processes showing a crash dialog, or that Android is treating as not responding ('anr', which starts before its report exists): while a crash dialog is open, Android silently drops that process's further crashes, so dismiss it or force-stop the app before reproducing. With \`udid\`, the list is that device's crashes, plus reports that name no device (a simulator's crash file does not say which simulator).`,
     inputSchema: strictParams({
       limit: z
         .coerce.number()
@@ -534,14 +534,85 @@ export function registerLogTools(server: McpServer): void {
         .string()
         .optional()
         .describe("Device UDID to pull fresh crashes from before returning results"),
+      days: z
+        .coerce.number()
+        .int()
+        .min(1)
+        .max(3650)
+        .optional()
+        .describe("iPhone: how far back the pull reaches, in days (default 3). Older reports stay on the phone and are counted in pull.older_on_device."),
     }),
-  }, async ({ limit, since, udid }) => {
+  }, async ({ limit, since, udid, days }) => {
       try {
         const data = await apiRequest("GET", "/api/v1/crashes/latest", {
           limit,
           since,
           udid,
+          days,
         });
+
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(data, null, 2) },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.registerTool("clear_crashes", {
+    description: `Delete the crash reports quern has stored on this Mac: one device's (pass \`udid\`) or all of them. Deletes only the copies quern's own pulls wrote, and drops reports from get_latest_crash's list; never deletes anything else in the crash directory, and never ~/Library/Logs/DiagnosticReports, which belongs to the Mac. It does not clear the device: a later get_latest_crash lists again whatever the device still holds within its window (without logging it as a new crash). To remove an iPhone's own reports, use clear_device_crashes. An unknown \`udid\` is an error, not a success.`,
+    inputSchema: strictParams({
+      udid: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Clear only this device's stored reports; omit to clear all"),
+    }),
+  }, async ({ udid }) => {
+      try {
+        const data = await apiRequest("DELETE", "/api/v1/crashes", { udid });
+
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(data, null, 2) },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.registerTool("clear_device_crashes", {
+    description: `PERMANENTLY delete the crash reports on an iPhone (over USB): every .ips/.crash report at the top of its crash directory, recent and old alike. They are gone for Xcode, Finder and anything else that reads them, not only for quern — only call this when the user has asked for the device's crash reports to be removed, for example after get_latest_crash reported a large backlog in pull.older_on_device. DiagnosticLogs (sysdiagnose archives) and other files there are left alone. Returns how many were removed, how many remain, and any the phone would not delete. quern's copies on the Mac stay, subject to the 30-day retention (clear_crashes removes them). Refused for a phone matched to USB by name rather than its hardware UDID, for Android (an unrooted device's crash store can only be read), and for a simulator (its reports are files on the Mac).`,
+    inputSchema: strictParams({
+      udid: z
+        .string()
+        .min(1)
+        .describe("The iPhone whose crash reports to delete"),
+    }),
+  }, async ({ udid }) => {
+      try {
+        const data = await apiRequest("POST", "/api/v1/crashes/device/clear", undefined, { udid });
 
         return {
           content: [

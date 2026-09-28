@@ -6,11 +6,14 @@ import logging
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from server.api.actions import logged_action
-from server.device.devicectl import canonical_device_id
+from server.device.devicectl import canonical_device_id, spellings_of
 from server.models import (
+    ClearCrashesResponse,
+    ClearDeviceCrashesRequest,
+    ClearDeviceCrashesResponse,
     CrashLatestResponse,
     CrashPullStatus,
     CrashReport,
@@ -21,6 +24,7 @@ from server.models import (
     OpenCrashDialog,
     UtcDatetime,
 )
+from server.sources import ios_crash
 from server.sources.android_dropbox import DropboxPullError, pull_dropbox
 from server.sources.crash import DIAGNOSTIC_REPORTS_DIR
 
@@ -47,12 +51,19 @@ async def get_latest_crashes(
         default=None,
         description="Device UDID to pull crashes from before returning",
     ),
+    days: int = Query(
+        default=ios_crash.DEFAULT_WINDOW_DAYS, ge=1, le=3650,
+        description=(
+            "iPhone: how far back the pull reaches. Older reports stay on the "
+            "phone and are counted in pull.older_on_device."
+        ),
+    ),
 ) -> CrashLatestResponse:
     """Return recent crash reports.
 
     When ``udid`` is provided, fetches that device's crashes first: an iPhone
-    over USB with ``idevicecrashreport``, an Android device or emulator from
-    its DropBox. ``pull`` says whether that happened -- pulled, skipped or
+    over USB with pymobiledevice3 (the last ``days``), an Android device or
+    emulator from its DropBox. ``pull`` says whether that happened -- pulled, skipped or
     failed, with the reason -- and the list is then that device's crashes,
     plus reports that name no device.
     """
@@ -68,7 +79,7 @@ async def get_latest_crashes(
 
     pull: CrashPullStatus | None = None
     if udid:
-        pull = await _pull(request, crash_adapter, udid)
+        pull = await _pull(request, crash_adapter, udid, days)
 
     reports = crash_adapter.crash_reports
     if udid:
@@ -91,7 +102,22 @@ async def get_latest_crashes(
     return CrashLatestResponse(crashes=limited, total=total, pull=pull)
 
 
-async def _pull(request: Request, crash_adapter: CrashAdapter, udid: str) -> CrashPullStatus:
+async def _resolve(controller: DeviceController, udid: str) -> tuple[str, DeviceType | None]:
+    """The device's canonical id and its kind, warming the type cache first.
+
+    On a fresh server the cache is empty, and a cold `_is_android` sent an
+    emulator's serial down the iPhone path to be told it was "not connected
+    over USB" (see `_device_type`, and #305).
+    """
+    await controller._ensure_device_type_cached(canonical_device_id(udid))
+    device = canonical_device_id(udid)      # again: the refresh records aliases
+    return device, controller._device_type(device)
+
+
+async def _pull(
+    request: Request, crash_adapter: CrashAdapter, udid: str,
+    days: int = ios_crash.DEFAULT_WINDOW_DAYS,
+) -> CrashPullStatus:
     """Fetch the device's crash reports, and say plainly if that could not happen."""
     controller = request.app.state.device_controller
     if controller is None:
@@ -99,12 +125,7 @@ async def _pull(request: Request, crash_adapter: CrashAdapter, udid: str) -> Cra
             udid=udid, status="skipped", reason="device controller not available",
         )
 
-    # Warm the type cache first: on a fresh server it is empty, and a cold
-    # `_is_android` sent an emulator's serial down the iPhone path to be
-    # told it was "not connected over USB" (see `_device_type`, and #305).
-    await controller._ensure_device_type_cached(canonical_device_id(udid))
-    device = canonical_device_id(udid)      # again: the refresh records aliases
-    kind = controller._device_type(device)
+    device, kind = await _resolve(controller, udid)
 
     if kind in (DeviceType.ANDROID_DEVICE, DeviceType.ANDROID_EMULATOR):
         return await _pull_android(request, crash_adapter, controller, udid)
@@ -132,20 +153,38 @@ async def _pull(request: Request, crash_adapter: CrashAdapter, udid: str) -> Cra
     lib_udid = await controller.get_libimobiledevice_udid(device)
     if not lib_udid:
         # Was a debug log line, while the response looked like "no new
-        # crashes". idevicecrashreport needs the phone on USB.
+        # crashes". The crash service is reached over USB.
         return CrashPullStatus(
             udid=udid, platform="ios", status="skipped",
-            reason="not connected over USB; idevicecrashreport needs a USB connection",
+            reason="not connected over USB; crash reports are pulled over USB",
         )
-    # idevicecrashreport writes files that do not say which phone they came
-    # from, so the pull says it: these came from the device asked for.
-    result = await crash_adapter.pull_from_device(lib_udid, device_id=device)
+    # Report files do not say which phone they came from, so the pull says
+    # it: these came from the device asked for.
+    result = await crash_adapter.pull_from_device(lib_udid, device_id=device, days=days)
+    left = dict(
+        window_days=result.window_days, older_on_device=result.older_on_device,
+        oldest_on_device=result.oldest_on_device, note=_left_behind(result),
+    )
     if result.error:
         return CrashPullStatus(
             udid=udid, platform="ios", status="failed",
-            new_reports=len(result.new), reason=result.error,
+            new_reports=len(result.new), reason=result.error, **left,
         )
-    return CrashPullStatus(udid=udid, platform="ios", status="pulled", new_reports=len(result.new))
+    return CrashPullStatus(
+        udid=udid, platform="ios", status="pulled", new_reports=len(result.new), **left,
+    )
+
+
+def _left_behind(result) -> str | None:
+    """Say what a pull left on the phone, and what to do about it."""
+    if not result.older_on_device:
+        return None
+    return (
+        f"{result.older_on_device} report(s) older than {result.window_days} day(s) "
+        f"stay on the phone, the oldest from {result.oldest_on_device}. Pass a "
+        "larger `days` to include them. clear_device_crashes deletes every crash "
+        "report on the phone, these and the recent ones alike."
+    )
 
 
 async def _pull_android(
@@ -213,3 +252,121 @@ async def _logged_by_logcat(request: Request, report: CrashReport) -> bool:
         since=report.timestamp - window, until=report.timestamp + window,
     ))
     return any(e.id.startswith("android-crash-") and _same_process(e, report) for e in seen)
+
+
+@router.delete("", response_model=ClearCrashesResponse)
+@logged_action("clear_crashes", category="logs")
+async def clear_crashes(
+    request: Request,
+    udid: str | None = Query(
+        default=None, description="Clear only this device's reports; omit for all.",
+    ),
+) -> ClearCrashesResponse:
+    """Delete the crash reports quern stored on the Mac: one device's, or all.
+
+    Clears quern's copies only. The device keeps its own, and a later pull
+    lists again whatever it still holds within the pull's window -- without
+    logging those as new crashes. Use clear_device_crashes to clear an iPhone.
+    """
+    crash_adapter = request.app.state.crash_adapter
+    if crash_adapter is None:
+        raise HTTPException(
+            status_code=409, detail="crash capture is disabled (server started with --no-crash)",
+        )
+    if udid is not None and not udid.strip():
+        # An empty udid read as "omitted" and cleared every device.
+        raise HTTPException(status_code=400, detail="udid is empty; omit it to clear all devices")
+    device = None
+    if udid:
+        controller = request.app.state.device_controller
+        known = controller is not None and (await _resolve(controller, udid))[1] is not None
+        device = canonical_device_id(udid)
+        stored = any(r.device_id == device for r in crash_adapter.crash_reports)
+        if not known and not stored:
+            # An id quern has never seen is not "cleared" (#182): answering
+            # success would tell teardown code it worked.
+            raise HTTPException(
+                status_code=404, detail=f"quern knows no device and no crash reports for {udid}",
+            )
+    result = await crash_adapter.clear(device)
+    return ClearCrashesResponse(
+        udid=udid, files_removed=result.files_removed,
+        reports_removed=result.reports_removed, errors=result.errors,
+    )
+
+
+@router.post("/device/clear", response_model=ClearDeviceCrashesResponse)
+@logged_action("clear_device_crashes", category="device.action")
+async def clear_device_crashes(
+    request: Request, body: ClearDeviceCrashesRequest,
+) -> ClearDeviceCrashesResponse:
+    """Permanently delete the crash reports on an iPhone.
+
+    A deliberate action, never a side effect of reading: the reports are gone
+    for Xcode, Finder and anything else that reads them too. Only the reports
+    (`.ips`, `.crash` at the top of the crash directory), each by name --
+    pymobiledevice3's own `crash clear` also removes DiagnosticLogs, where
+    sysdiagnose archives live, and everything else there. quern's copies on
+    the Mac stay, subject to the usual retention.
+    """
+    controller = request.app.state.device_controller
+    if controller is None:
+        raise HTTPException(status_code=503, detail="device controller not available")
+    device, kind = await _resolve(controller, body.udid)
+    if kind in (DeviceType.ANDROID_DEVICE, DeviceType.ANDROID_EMULATOR):
+        raise HTTPException(status_code=400, detail=(
+            "clearing crash reports is not supported on Android: an unrooted "
+            "device's DropBox can only be read, not cleared (dumpsys dropbox "
+            "prints, and cmd dropbox only sets a rate limit)"
+        ))
+    if kind == DeviceType.SIMULATOR:
+        raise HTTPException(status_code=400, detail=(
+            "a simulator's crash reports are files on this Mac, in "
+            "~/Library/Logs/DiagnosticReports; there is nothing on the device to clear"
+        ))
+    if kind != DeviceType.DEVICE:
+        raise HTTPException(
+            status_code=404,
+            detail=f"quern does not know {body.udid}; list devices to check it is connected",
+        )
+    lib_udid = await controller.get_libimobiledevice_udid(device)
+    if not lib_udid:
+        raise HTTPException(status_code=409, detail=(
+            "not connected over USB; crash reports are cleared over USB"
+        ))
+    if lib_udid not in spellings_of(device):
+        # Matched by name (the fallback #323 is about), not by the phone's own
+        # hardware UDID. Good enough to read from; not to delete from.
+        raise HTTPException(status_code=409, detail=(
+            "this phone's USB connection was matched by name, not by its hardware "
+            "UDID, so quern will not delete from it; see #323"
+        ))
+    cmd = ios_crash.command()
+    if not cmd:
+        raise HTTPException(status_code=502, detail="pymobiledevice3 not found")
+    try:
+        names = await ios_crash.list_reports(cmd, lib_udid)
+    except ios_crash.IosCrashError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+    try:
+        removed, failed = await ios_crash.remove_reports(lib_udid, names)
+    except ios_crash.IosCrashError as e:
+        # Reports go one at a time, so a timeout or crash partway may have
+        # deleted some -- permanently. An error that says only why reads as
+        # "nothing happened"; say what the phone holds now (CodeRabbit, #325).
+        try:
+            left = len(await ios_crash.list_reports(cmd, lib_udid))
+            state = (f"{max(len(names) - left, 0)} of {len(names)} report(s) may already "
+                     f"be deleted; {left} remain")
+        except ios_crash.IosCrashError:
+            state = "some reports may already be deleted; list again to check"
+        raise HTTPException(status_code=502, detail=f"{e}; {state}") from e
+    try:
+        remaining = len(await ios_crash.list_reports(cmd, lib_udid))
+    except ios_crash.IosCrashError as e:
+        raise HTTPException(status_code=502, detail=(
+            f"deleted {len(removed)} report(s), but could not list what remains: {e}"
+        )) from e
+    return ClearDeviceCrashesResponse(
+        udid=body.udid, removed=len(removed), remaining=remaining, failed=failed,
+    )
