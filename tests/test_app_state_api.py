@@ -78,7 +78,15 @@ class TestSaveEndpoint:
                     json={"bundle_id": "com.example.App", "label": "baseline"},
                     headers=auth_headers,
                 )
-        assert resp.status_code == 500
+        # 400, not 500. This asserted 500 and so pinned the defect as
+        # expected behaviour: asking for a simulator-only operation on
+        # another kind of device is a bad request, and `server/api/device.py`
+        # classified it that way all along. `app_state.py` carries its own
+        # copy of `_handle_device_error` which never gained the rule, so the
+        # same refusal came back 400 from one route and 500 from another
+        # (#263). The test's own name says what it is about -- the refusal --
+        # and the status was incidental to that.
+        assert resp.status_code == 400
 
 
 class TestRestoreEndpoint:
