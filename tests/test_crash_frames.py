@@ -146,6 +146,19 @@ class TestIpsShapes:
         report = _parse(_write(tmp_path, header, body))
         assert report.frames[0].image == "" and len(report.frames) == 12
 
+    def test_an_embedded_framework_is_the_apps(self, tmp_path):
+        """Inside the app's bundle, named after nothing in particular."""
+        header, body = _ips("device_debug")
+        app_dir = body["procPath"].rsplit("/", 1)[0]
+        body["usedImages"].append({"name": "Vendor", "arch": "arm64", "base": 4400000000,
+                                   "uuid": "11111111-2222-3333-4444-555555555555",
+                                   "path": f"{app_dir}/Frameworks/Vendor.framework/Vendor"})
+        body["threads"][0]["frames"].insert(0, {
+            "imageIndex": len(body["usedImages"]) - 1, "imageOffset": 512,
+            "symbol": "Vendor.explode()", "symbolLocation": 4})
+        report = _parse(_write(tmp_path, header, body))
+        assert report.app_frame.image == "Vendor"
+
     def test_paths_elided_the_app_is_known_by_its_name(self, tmp_path):
         header, body = _ips("device_debug")
         for img in body["usedImages"]:
