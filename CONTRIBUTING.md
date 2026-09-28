@@ -616,13 +616,35 @@ and `git rev-list --count origin/<branch>..HEAD` is 0, because this discards
 the tree rather than moving it:
 
 ```sh
+# $src must be absolute, and must be a worktree git knows about. The rm below
+# is the reason: if $src is a typo, or names some other directory that happens
+# to exist, `git worktree remove` fails and the bare `[ -d ]` test still
+# passes -- so the fallback deletes a tree nobody asked it to touch. Ask the
+# registration, not the filesystem.
+git worktree list --porcelain | grep -qx "worktree $src" \
+  || { echo "not a registered worktree: $src" >&2; exit 1; }
+
 git worktree remove --force "$src"
+
+# Only now is a leftover directory git's debris. The registration being gone
+# is what makes the remaining files the half-success case rather than someone
+# else's work, so re-read it rather than assuming the remove succeeded.
+git worktree list --porcelain | grep -qx "worktree $src" \
+  && { echo "still registered, refusing to delete: $src" >&2; exit 1; }
 [ -d "$src" ] && rm -rf "$src"          # the half-success check, which does fire
+
 git worktree add "$dst" "$branch"
 ```
 
 With uncommitted work, `cp -r` and then `git worktree repair "$dst"` instead;
-it preserves the tree. (Removals that left debris behind: twice in about ten.)
+it preserves the tree. But finish the move: `cp -r` leaves `$src` on disk, and
+both copies' `.git` files name the *same* administration directory, which
+`repair` then points at `$dst`. So `$src` is not an independent worktree, it is
+a second window onto `$dst`'s registration -- git run from it stages into
+`$dst`'s index while reading the old copy's files. Verify `$dst` (its
+`git status` matches what you copied), then delete or move `$src` aside.
+Nothing warns you: until you do, both directories look like working trees.
+(Removals that left debris behind: twice in about ten.)
 
 **Scratch copies need the parent directory, not a name.** Mutation testing
 works from `git archive` extracts, which no worktree check will ever report --
