@@ -1358,6 +1358,17 @@ class TestUdidMapping:
 
         assert ctrl._usbmux_udid_map == {"CORE-B": "00008101-BBBB"}
 
+    async def test_two_phones_sharing_a_name_and_no_udid_are_left_unmatched(self):
+        """Neither can be told apart by name, so neither gets the one USB
+        device of that name -- not whichever happens to be listed first."""
+        ctrl = _usb_controller(
+            {"CORE-A": ("iPhone", None), "CORE-B": ("iPhone", None)},
+            usb=[("00008101-XXXX", "iPhone")],
+        )
+        await ctrl.list_devices()
+
+        assert ctrl._usbmux_udid_map == {}
+
     async def test_a_name_usbmux_lists_twice_is_never_matched_by_name(self):
         ctrl = _usb_controller(
             {"CORE-A": ("iPhone", None)},
