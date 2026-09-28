@@ -702,6 +702,57 @@ class TestWhichDevice:
         assert _parse(f).device_id == "45395D76-AF20-4CEF-8966-9B1C43BF9475"
 
 
+class TestWhoseCrashItIs:
+    """#330: a simulator's system extension and the Mac's own processes were
+    listed under every device's udid."""
+
+    def test_a_simulators_system_extension_is_placed_by_its_coalition(self):
+        """Real: Siri's widget extension runs from the runtime volume, so its
+        path names no simulator; its coalition does."""
+        report = _parse(FIXTURES / "crash_ips" / "simulator_system_extension.ips")
+        assert report.device_id == "00000000-0000-0000-0000-00000000000B"
+        assert report.mac_process is False
+
+    def test_the_apps_path_wins_over_the_coalition(self):
+        assert crash_frames.simulator_udid(
+            "/x/CoreSimulator/Devices/00000000-0000-0000-0000-00000000000A/data/MyApp.app/MyApp",
+            "com.apple.CoreSimulator.SimDevice.00000000-0000-0000-0000-00000000000B",
+        ) == "00000000-0000-0000-0000-00000000000A"
+
+    @pytest.mark.parametrize("coalition", [
+        "com.apple.CoreSimulator.SimDevice.not-a-udid", "com.example.agent",
+        "xcom.apple.CoreSimulator.SimDevice.00000000-0000-0000-0000-00000000000B",
+    ])
+    def test_only_a_simulator_coalition_places_it(self, coalition):
+        assert crash_frames.simulator_udid("/usr/bin/x", coalition) == ""
+
+    def test_a_mac_process_is_the_macs(self):
+        """Real: a `node` crash on this Mac, names replaced."""
+        report = _parse(FIXTURES / "crash_ips" / "mac_process.ips")
+        assert report.mac_process is True and report.device_id == ""
+
+    @pytest.mark.parametrize("name", ["simulator_debug", "simulator_fatal_error", "device_debug"])
+    def test_a_simulators_or_a_phones_is_not(self, name):
+        assert _parse(FIXTURES / "crash_ips" / f"{name}.ips").mac_process is False
+
+    @pytest.mark.parametrize("marker", [
+        {"parentProc": "launchd_sim"},
+        {"procPath": "/Library/Developer/CoreSimulator/Volumes/iOS_23A/x/Siri.app/Siri"},
+        {"coalitionName": "com.apple.CoreSimulator.SimDevice.unreadable"},
+    ])
+    def test_any_one_simulator_marker_is_enough(self, marker):
+        header, body = _ips("mac_process")
+        body.update(marker)
+        assert crash_frames.is_mac_process(header, body) is False
+
+    def test_the_os_from_the_body_when_the_header_has_none(self):
+        header, body = _ips("mac_process")
+        header.pop("os_version")
+        assert crash_frames.is_mac_process(header, body) is True
+        body.pop("osVersion")
+        assert crash_frames.is_mac_process(header, body) is False   # cannot tell: not claimed
+
+
 class TestWhoEndedIt:
     """Second review, with crash reports it produced on purpose: `byPid ==
     pid` marks a self-inflicted crash in every one of them, and the name does

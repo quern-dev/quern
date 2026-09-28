@@ -144,8 +144,10 @@ simulator is `skipped`: its crash reports are written on the Mac and read from
 `~/Library/Logs/DiagnosticReports` continuously, unless the server was started
 with `--no-simulator-crashes`, which the reason then says. With a `udid`, the
 list is that device's crashes, plus reports quern cannot place on any device. A
-simulator's crash names its simulator by the app's path, so it is listed under
-that simulator only. `raw_text` is left out of the response unless
+simulator's crash names its simulator by the app's path, or for a system app or
+extension (which runs from the runtime volume) by the report's `coalitionName`,
+so it is listed under that simulator only. A crash of one of the Mac's own
+processes has `mac_process: true` and is listed only without a `udid`. `raw_text` is left out of the response unless
 `include_raw=true`: it runs to about a thousand tokens of JSON per crash. For an
 iOS report the whole file is on disk at `file_path`. An Android report has no
 file, and `file_path` names its DropBox record.

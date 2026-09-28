@@ -97,15 +97,17 @@ async def get_latest_crashes(
 
     reports = crash_adapter.crash_reports
     if udid:
-        # That device's crashes -- plus reports that name no device (a
-        # simulator's crash file does not say which simulator), so nothing that
-        # showed before goes missing. Returning every device's crashes for one
+        # That device's crashes -- plus reports quern cannot place, so nothing
+        # that might be the device's goes missing. Not the Mac's own processes:
+        # they are no device's, and a Mac app's crash sat in every phone's list
+        # (#330). Returning every device's crashes for one
         # device's udid put the emulator's crash at the top of a Pixel's list
         # once Android reports carried their device (#316, live test).
         # Case-insensitively: a simulator's UDID is read upper-case from the
         # report's path, and a caller may pass it in lower case.
         device = canonical_device_id(udid).upper()
-        reports = [r for r in reports if not r.device_id or r.device_id.upper() == device]
+        reports = [r for r in reports if not r.mac_process
+                   and (not r.device_id or r.device_id.upper() == device)]
 
     if since:
         reports = [r for r in reports if r.timestamp >= since]

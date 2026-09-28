@@ -243,17 +243,45 @@ def _bundle_dir(proc_path: str) -> str:
 
 
 _SIMULATOR = re.compile(r"/CoreSimulator/Devices/([0-9A-Fa-f-]{36})/")
+#: `coalitionName`, which a simulator's system processes carry too.
+_SIMULATOR_COALITION = re.compile(r"^com\.apple\.CoreSimulator\.SimDevice\.([0-9A-Fa-f-]{36})$")
 
 
-def simulator_udid(proc_path: str) -> str:
-    """The simulator a report came from, read from its app's path; "" if none.
+def simulator_udid(proc_path: str, coalition: str = "") -> str:
+    """The simulator a report came from; "" if none.
 
-    A simulator's crash file names no device, so a report without one was
-    listed under every device's udid -- an iPhone's list included the
-    simulator's crashes.
+    Read from the app's path, else from its coalition. A simulator's crash file
+    names no device, so a report without one was listed under every device's
+    udid. An installed app's path names its simulator; a system app's or
+    extension's runs from the runtime volume and does not, but its coalition
+    does (#330).
     """
     m = _SIMULATOR.search(proc_path) if isinstance(proc_path, str) else None
+    if not m and isinstance(coalition, str):
+        m = _SIMULATOR_COALITION.match(coalition)
     return m.group(1).upper() if m else ""
+
+
+def is_mac_process(header: dict, data: dict) -> bool:
+    """A crash of this Mac's own processes, not a simulator's or a device's.
+
+    Written on macOS, with nothing to say it ran in a simulator: its path, its
+    coalition and its parent all say so for a simulator's process. A report
+    that does not say what it ran on is not claimed -- listing a Mac crash
+    under a phone is noise, but hiding a phone's crash is the defect.
+    """
+    os_info = data.get("osVersion")
+    os_version = _str(header.get("os_version")) or (
+        _str(os_info.get("train")) if isinstance(os_info, dict) else "")
+    if not os_version.startswith("macOS"):
+        return False
+    proc_path = _str(data.get("procPath"))
+    return not (
+        simulator_udid(proc_path, _str(data.get("coalitionName")))
+        or "/CoreSimulator/" in proc_path
+        or _str(data.get("coalitionName")).startswith("com.apple.CoreSimulator.")
+        or _str(data.get("parentProc")) == "launchd_sim"
+    )
 
 
 # -- iOS .crash text (iOS 14 and older) ------------------------------------------

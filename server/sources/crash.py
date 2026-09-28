@@ -643,7 +643,10 @@ class CrashAdapter(BaseSourceAdapter):
         return CrashReport(
             crash_id=crash_id,
             timestamp=ts,
-            device_id=crash_frames.simulator_udid(data.get("procPath")) or self.device_id,
+            device_id=crash_frames.simulator_udid(
+                data.get("procPath"), data.get("coalitionName"),
+            ) or self.device_id,
+            mac_process=crash_frames.is_mac_process(header, data),
             process=proc_name,
             exception_type=exc_type,
             exception_codes=exc_codes,
