@@ -1126,6 +1126,32 @@ class TestClearDeviceCrashes:
         assert resp.status_code == 409
         assert "not connected over USB" in resp.json()["detail"]
 
+    async def test_a_delete_that_fails_partway_says_what_is_gone(self, app, monkeypatch):
+        """The delete is permanent and goes one report at a time: a 502 that
+        says only why reads as "nothing was deleted"."""
+        from server.device import devicectl
+        from server.sources import ios_crash
+
+        devicectl._remember_identity("00008101-PHONE", "LIB")
+        app.state.device_controller = _controller(lib_udid="LIB")
+        listings = iter([["A.ips", "B.ips"], ["B.ips"]])
+
+        async def run(argv, what, timeout):
+            if what == "crash ls":
+                return "".join(f"/{n}\n" for n in next(listings)), ""
+            raise ios_crash.IosCrashError("pymobiledevice3 crash delete timed out after 30s")
+
+        monkeypatch.setattr(ios_crash, "command", lambda: ["/bin/pmd3"])
+        monkeypatch.setattr(ios_crash, "_run", run)
+
+        resp = await _clear_device(app, "00008101-PHONE")
+
+        assert resp.status_code == 502
+        assert resp.json()["detail"] == (
+            "pymobiledevice3 crash delete timed out after 30s; "
+            "1 of 2 report(s) may already be deleted; 1 remain"
+        )
+
     async def test_a_phone_matched_only_by_name_is_not_deleted_from(self, app, monkeypatch):
         """The #323 fallback is fine for reading, not for deleting."""
         app.state.device_controller = _controller(lib_udid="LIB")

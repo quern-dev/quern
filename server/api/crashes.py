@@ -346,9 +346,21 @@ async def clear_device_crashes(
         raise HTTPException(status_code=502, detail="pymobiledevice3 not found")
     try:
         names = await ios_crash.list_reports(cmd, lib_udid)
-        removed, failed = await ios_crash.remove_reports(lib_udid, names)
     except ios_crash.IosCrashError as e:
         raise HTTPException(status_code=502, detail=str(e)) from e
+    try:
+        removed, failed = await ios_crash.remove_reports(lib_udid, names)
+    except ios_crash.IosCrashError as e:
+        # Reports go one at a time, so a timeout or crash partway may have
+        # deleted some -- permanently. An error that says only why reads as
+        # "nothing happened"; say what the phone holds now (CodeRabbit, #325).
+        try:
+            left = len(await ios_crash.list_reports(cmd, lib_udid))
+            state = (f"{max(len(names) - left, 0)} of {len(names)} report(s) may already "
+                     f"be deleted; {left} remain")
+        except ios_crash.IosCrashError:
+            state = "some reports may already be deleted; list again to check"
+        raise HTTPException(status_code=502, detail=f"{e}; {state}") from e
     try:
         remaining = len(await ios_crash.list_reports(cmd, lib_udid))
     except ios_crash.IosCrashError as e:
