@@ -717,7 +717,8 @@ class CrashAdapter(BaseSourceAdapter):
         parts = [f"CRASH: {report.process}"]
         if report.exception_type:
             parts.append(report.exception_type)
-        if report.signal:
+        if report.signal and f"({report.signal})" not in report.exception_type:
+            # An Android native crash's type already names it: "signal 11 (SIGSEGV)".
             parts.append(f"({report.signal})")
         # Where in the app's code, when the report can say; else the top frame.
         if report.app_frame is not None:

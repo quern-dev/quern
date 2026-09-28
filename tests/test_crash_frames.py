@@ -304,3 +304,13 @@ class TestAndroidJava:
         report = parse_dropbox(text, serial="s", zone=device_zone("America/Los_Angeles", ""))[0]
         assert report.app_frame is None               # am crash: all framework code
         assert report.frames[0].file == "ActivityThread.java"
+
+
+def test_the_log_line_names_a_signal_once():
+    from server.models import CrashReport
+
+    report = CrashReport(crash_id="x", timestamp="2026-09-28T00:00:00Z", process="app",
+                         exception_type="signal 11 (SIGSEGV)", signal="SIGSEGV")
+    assert CrashAdapter._crash_summary(report) == "CRASH: app signal 11 (SIGSEGV)"
+    report.exception_type = "EXC_BAD_ACCESS"
+    assert CrashAdapter._crash_summary(report) == "CRASH: app EXC_BAD_ACCESS (SIGSEGV)"
