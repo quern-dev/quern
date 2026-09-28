@@ -388,14 +388,19 @@ class CrashReport(BaseModel):
     killed_by: str = Field(
         default="",
         description=(
-            "The process that ended the app, when it was not the app itself: a "
-            "signal sent from a shell or a debugger. Its frames then say where it "
-            "was waiting, not what went wrong."
+            "The process that sent the signal that ended the app, when it was not "
+            "the app itself (a kill from a shell, or devicectl). Its frames then say "
+            "where it was waiting, not what went wrong, and app_frame is null. A "
+            "watchdog or memory termination is not counted: its frames are where it "
+            "hung, and its explanation is in reason. .ips reports only."
         ),
     )
     frames_from: str = Field(
         default="",
-        description="'exception' (an uncaught exception's backtrace) or 'crashing_thread'",
+        description=(
+            "What `frames` is: 'exception' (an uncaught exception's backtrace; a Java "
+            "crash's trace and its causes), 'crashing_thread', or 'main_thread' (an ANR)"
+        ),
     )
     frames: list[CrashFrame] = Field(
         default_factory=list,

@@ -105,9 +105,14 @@ code it happened, with source file and line where the report has them.
 - **`reason`** is the report's own explanation: an uncaught exception's reason, or
   Android's abort message or root cause. A Swift `fatalError` writes its message to
   the app's log, not the report, so query the logs for it.
-- **`killed_by`** names the process that ended the app when it was not the app
-  itself, such as a signal from a shell or a debugger. In that case `app_frame` is
-  null, because the frames only say where the app was waiting.
+- **`killed_by`** names the process whose signal ended the app, when it was not
+  the app itself, such as a kill from a shell or `devicectl`. It is decided by
+  pid, because the name is truncated to 32 characters. In that case `app_frame`
+  is null, because the frames only say where the app was waiting. A watchdog or
+  memory termination is not a kill: it keeps its frames, which are where the app
+  hung, and its explanation goes in `reason`.
+- **`.crash` text reports** (iOS 14 and older) get neither `killed_by` nor the
+  exception backtrace. Their frames are the crashed thread's.
 
 The response is compact by default: `app_frame`, `reason`, `killed_by`, the top
 frames, and the app's `bundle_id`, `app_version` and `build_version`.
@@ -119,7 +124,9 @@ frames, and the app's `bundle_id`, `app_version` and `build_version`.
 A frame counts as the app's when:
 - **iOS:** its binary is inside the app bundle.
 - **Android native:** it was installed with the app.
-- **Java:** its class is in the app's package.
+- **Java:** its class is in the app's package, or in a shorter prefix of it (a
+  Debug build's `.debug` suffix, or a module), falling back to excluding platform
+  and common-library packages.
 
 **Crash reports on both platforms.** `get_latest_crash` with a `udid` fetches
 that device's crashes first. An iPhone is read over USB with `pymobiledevice3`:

@@ -1220,6 +1220,17 @@ class TestCrashListShape:
         assert (await _latest(app, udid="00008101-PHONE"))["total"] == 0
         assert (await _latest(app))["total"] == 1
 
+    async def test_a_simulator_asked_for_in_lower_case(self, app, monkeypatch):
+        """Its UDID is read upper-case from the report's path."""
+        fixture = Path(__file__).parent / "fixtures" / "crash_ips" / "simulator_fatal_error.ips"
+        adapter = app.state.crash_adapter
+        adapter.crash_reports.append(adapter._parse_crash_file(fixture, fixture.read_text()))
+        app.state.device_controller = _controller()
+
+        data = await _latest(app, udid="00000000-0000-0000-0000-00000000000a")
+
+        assert data["total"] == 1
+
     async def test_raw_text_is_left_out_unless_asked_for(self, app):
         from server.models import CrashReport
 

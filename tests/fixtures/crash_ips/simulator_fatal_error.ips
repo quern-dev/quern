@@ -18,7 +18,8 @@
     "code": 5,
     "namespace": "SIGNAL",
     "indicator": "Trace/BPT trap: 5",
-    "byProc": "exc handler"
+    "byProc": "exc handler",
+    "byPid": 78163
   },
   "os_fault": {
     "process": "MyApp"
@@ -316,5 +317,6 @@
       "path": "/Volumes/VOLUME/*/GraphicsServices.framework/GraphicsServices",
       "name": "GraphicsServices"
     }
-  ]
+  ],
+  "pid": 78163
 }

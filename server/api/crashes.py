@@ -102,8 +102,10 @@ async def get_latest_crashes(
         # showed before goes missing. Returning every device's crashes for one
         # device's udid put the emulator's crash at the top of a Pixel's list
         # once Android reports carried their device (#316, live test).
-        device = canonical_device_id(udid)
-        reports = [r for r in reports if not r.device_id or r.device_id == device]
+        # Case-insensitively: a simulator's UDID is read upper-case from the
+        # report's path, and a caller may pass it in lower case.
+        device = canonical_device_id(udid).upper()
+        reports = [r for r in reports if not r.device_id or r.device_id.upper() == device]
 
     if since:
         reports = [r for r in reports if r.timestamp >= since]

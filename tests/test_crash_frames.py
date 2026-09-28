@@ -87,7 +87,7 @@ class TestKilledByAnotherProcess:
         """Stopped mid-work, its frames can be deep in the app -- still not a
         crash site."""
         header, body = _ips("simulator_fatal_error")
-        body["termination"]["byProc"] = "zsh"
+        body["termination"].update(byProc="zsh", byPid=body["pid"] + 7)
         report = _parse(_write(tmp_path, header, body))
         assert report.killed_by == "zsh" and report.app_frame is None
 
@@ -104,9 +104,11 @@ def _image_index(body, name):
 
 
 def _self_crash(name):
-    """A fixture made into a crash the app raised itself."""
+    """A fixture made into a crash the app raised itself, as a real one reads:
+    the signal from the app's own pid."""
     header, body = _ips(name)
     body["termination"]["byProc"] = "exc handler"
+    body["termination"]["byPid"] = body["pid"]
     return header, body
 
 
@@ -136,18 +138,28 @@ class TestIpsFromAPhone:
 
 
 class TestWhichFrame:
-    def test_the_entry_point_is_never_the_crash_site(self, tmp_path):
+    def test_the_entry_point_under_the_run_loop_is_not_the_crash_site(self, tmp_path):
         """A crash that never reached the app's own code is not "in main"."""
         header, body = _self_crash("device_debug")
         report = _parse(_write(tmp_path, header, body))
         assert report.app_frame is None
         assert "@ libsystem_kernel.dylib: mach_msg2_trap + 8" in CrashAdapter._crash_summary(report)
 
-    def test_a_swift_main_is_an_entry_point(self):
+    def test_a_swift_main_under_the_run_loop_is_an_entry_point(self):
         from server.models import CrashFrame
 
+        run_loop = CrashFrame(image="UIKitCore", symbol="UIApplicationMain")
         main = CrashFrame(image="MyApp", symbol="static MyApp.$main()", app=True)
-        assert crash_frames.first_app_frame([main]) is None
+        assert crash_frames.first_app_frame([run_loop, main]) is None
+
+    def test_main_is_the_crash_site_when_it_crashed_there(self):
+        """An abort() from main itself (measured, from a real probe report):
+        with no run loop above it, main is where it went wrong."""
+        from server.models import CrashFrame
+
+        abort = CrashFrame(image="libsystem_c.dylib", symbol="abort")
+        main = CrashFrame(image="probe", symbol="main", file="a.c", line=2, app=True)
+        assert crash_frames.first_app_frame([abort, main]) is main
 
     def test_a_signal_handlers_frames_are_skipped(self, tmp_path):
         """A crash reporter linked into the app runs its handler on the
@@ -622,3 +634,150 @@ class TestWhichDevice:
         f = tmp_path / "MyApp.crash"
         f.write_text(text)
         assert _parse(f).device_id == "45395D76-AF20-4CEF-8966-9B1C43BF9475"
+
+
+class TestWhoEndedIt:
+    """Second review, with crash reports it produced on purpose: `byPid ==
+    pid` marks a self-inflicted crash in every one of them, and the name does
+    not -- the kernel cuts it at 32 characters."""
+
+    def test_an_abort_from_a_long_named_process_is_its_own(self, tmp_path):
+        """Measured: abort() in `…_well_past_thirty_two_chars` carried byProc
+        `…_well_p` and read as a kill, hiding the crash site."""
+        header, body = _ips("simulator_fatal_error")
+        body["procName"] = "MyAppNotificationServiceExtension"
+        body["termination"].update(byProc="MyAppNotificationServiceExte", byPid=body["pid"])
+        report = _parse(_write(tmp_path, header, body))
+        assert report.killed_by == "" and report.app_frame is not None
+
+    def test_an_uncaught_exception_carries_the_apps_own_name(self, tmp_path):
+        """What a real one reads; the earlier test used `exc handler`."""
+        header, body = _ips("simulator_fatal_error")
+        body["termination"].update(byProc="MyApp", byPid=body["pid"])
+        assert _parse(_write(tmp_path, header, body)).killed_by == ""
+
+    def test_by_name_when_the_pids_are_missing(self, tmp_path):
+        header, body = _ips("simulator_fatal_error")
+        body.pop("pid")
+        body["termination"].pop("byPid")
+        body["termination"]["byProc"] = "MyApp"
+        assert _parse(_write(tmp_path, header, body)).killed_by == ""
+        body["termination"]["byProc"] = "zsh"
+        assert _parse(_write(tmp_path, header, body)).killed_by == "zsh"
+
+    def test_a_watchdog_keeps_where_it_hung(self, tmp_path):
+        """The system ended it, but the main thread's frames are the answer."""
+        header, body = _ips("simulator_fatal_error")
+        body["termination"] = {"namespace": "FRONTBOARD", "code": 2343432205,
+                               "byProc": "runningboardd", "byPid": 55,
+                               "reasons": ["scene-update watchdog transgression: exhausted "
+                                           "real (wall clock) time allowance of 10.00 seconds"]}
+        report = _parse(_write(tmp_path, header, body))
+        assert report.killed_by == ""
+        assert report.app_frame.symbol == "closure #1 in SettingsPresenter.resetStore()"
+        assert "watchdog transgression" in report.reason
+
+
+class TestReviewTwoShapes:
+    def test_the_crash_site_past_the_frame_cap_is_still_found(self, tmp_path):
+        """A deep UIKit or SwiftUI stack put the app's frame past the cap."""
+        header, body = _self_crash("simulator_fatal_error")
+        frames = body["threads"][0]["frames"]
+        system = frames[0]["imageIndex"]
+        app_frame = frames[1]
+        filler = [{"imageIndex": system, "imageOffset": 4 * i, "symbol": f"AG::Graph::f{i}"}
+                  for i in range(40)]
+        body["threads"][0]["frames"] = filler + [app_frame]
+        report = _parse(_write(tmp_path, header, body))
+        assert report.app_frame.file == "SettingsPresenter.swift"
+        assert len(report.frames) == crash_frames.MAX_FRAMES
+        assert "MyApp.debug.dylib" in {i.name for i in report.images}   # its image kept
+
+    def test_a_real_path_outside_the_bundle_is_not_the_app_by_name(self, tmp_path):
+        """An app named Contacts would otherwise claim Apple's Contacts framework."""
+        header, body = _self_crash("device_debug")
+        first = body["usedImages"][body["threads"][0]["frames"][0]["imageIndex"]]
+        first.update(name="MyApp", path="/System/Library/Frameworks/MyApp.framework/MyApp")
+        assert not _parse(_write(tmp_path, header, body)).frames[0].app
+
+    @pytest.mark.parametrize("mangle", [
+        lambda b: b.update(exception="boom"),
+        lambda b: b.update(termination="gone", exception={}),
+        lambda b: b.update(procName=42),
+        lambda b: b.update(captureTime=12345),
+    ])
+    def test_odd_top_level_fields_do_not_drop_the_report(self, tmp_path, mangle):
+        header, body = _ips("device_debug")
+        mangle(body)
+        assert _parse(_write(tmp_path, header, body)) is not None
+
+
+class TestReviewTwoAndroid:
+    def _record(self, package, body):
+        return ("========\n2026-09-27 10:00:00 data_app_crash (text, 1 bytes)\n"
+                f"Process: com.example.app\nPID: 7\nPackage: {package}\n\n{body}")
+
+    def _parse(self, text):
+        from server.sources.android_dropbox import device_zone, parse_dropbox
+
+        return parse_dropbox(text, serial="s", zone=device_zone("America/Los_Angeles", ""))[0]
+
+    @pytest.mark.parametrize("package", [
+        "com.example.app.debug v7 (1.0)", "com.example.app.staging v7 (1.0)",
+        "com.example.app v7 (1.0)",
+    ])
+    def test_a_debug_builds_suffix_still_finds_the_apps_code(self, package):
+        """applicationIdSuffix is the norm for the Debug builds quern debugs;
+        matching the whole id found no app frame at all."""
+        report = self._parse(self._record(package, (
+            "java.lang.IllegalStateException: boom\n"
+            "\tat androidx.lifecycle.X.y(X.java:1)\n"
+            "\tat com.example.app.Feed.parse(Feed.kt:12)\n")))
+        assert report.app_frame.symbol == "com.example.app.Feed.parse"
+
+    def test_a_module_under_the_apps_namespace(self):
+        report = self._parse(self._record("com.acme.app v7 (1.0)", (
+            "java.lang.IllegalStateException: boom\n"
+            "\tat com.acme.feature.Map.draw(Map.kt:3)\n")))
+        assert report.app_frame.symbol == "com.acme.feature.Map.draw"
+
+    def test_the_crash_site_past_the_frame_cap(self):
+        compose = "".join(f"\tat androidx.compose.ui.N{i}.f(N.kt:1)\n" for i in range(35))
+        report = self._parse(self._record("com.example.app v7 (1.0)", (
+            "java.lang.IllegalStateException: boom\n" + compose
+            + "\tat com.example.app.Screen.render(Screen.kt:9)\n")))
+        assert report.app_frame.symbol == "com.example.app.Screen.render"
+        assert len(report.frames) == crash_frames.MAX_FRAMES
+
+    def test_a_single_exception_is_its_own_root_cause(self):
+        report = self._parse(self._record("com.example.app v7 (1.0)", (
+            "java.lang.IllegalStateException: boom\n"
+            "\tat com.example.app.Feed.parse(Feed.kt:12)\n")))
+        assert report.reason == "java.lang.IllegalStateException: boom"
+        assert report.frames_from == "exception"
+
+    def test_what_the_frames_are_per_kind(self):
+        from server.sources.android_dropbox import device_zone, parse_dropbox
+
+        zone = device_zone("America/Los_Angeles", "")
+        for name, expected in (("system_app_crash", "exception"),
+                               ("system_app_native_crash", "crashing_thread")):
+            text = (FIXTURES / "android_dropbox" / f"{name}.dropbox").read_text()
+            assert parse_dropbox(text, serial="s", zone=zone)[0].frames_from == expected
+
+    def test_an_anr_uses_the_package_and_is_the_main_thread(self):
+        from server.sources.android_dropbox import device_zone, parse_dropbox
+
+        text = (
+            "========\n2026-09-27 10:00:00 data_app_anr (text, 1 bytes)\n"
+            "Process: com.example.app\nPID: 4242\nPackage: com.example.app.debug v7 (1.0)\n"
+            "Subject: Input dispatching timed out\n\n"
+            "----- pid 4242 at 2026-09-27 10:00:00 -----\n"
+            '"main" prio=5 tid=1 Sleeping\n'
+            "  at a.b.c(Unknown Source:3)\n"
+            "  at com.example.app.Main.onClick(Main.java:42)\n\n"
+            "----- end 4242 -----\n"
+        )
+        [report] = parse_dropbox(text, serial="s", zone=device_zone("America/Los_Angeles", ""))
+        assert report.app_frame.symbol == "com.example.app.Main.onClick"   # not obfuscated a.b.c
+        assert report.frames_from == "main_thread"

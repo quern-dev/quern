@@ -38,11 +38,15 @@ MAX_FRAMES = 30
 TOP_FRAMES = 8
 
 #: The app's entry point: where an idle main thread sits, under
-#: UIApplicationMain. Not where anything went wrong.
+#: UIApplicationMain. Not where anything went wrong -- when the run loop is
+#: above it. An abort() called from main itself is main.
 _ENTRY_POINTS = ("main", "__debug_main_executable_dylib_entry_point")
-#: A terminating process that means the app ended itself -- a crash -- rather
-#: than being ended by another process.
-_SELF = ("", "exc handler", "kernel", "launchd")
+_RUN_LOOP = ("UIApplicationMain", "NSApplicationMain", "CFRunLoopRun", "GSEventRunModal",
+             "WKApplicationMain", "_dispatch_main_queue")
+#: `byProc` when `byPid` is missing: the name a real crash carries. Measured
+#: on every self-inflicted report seen; the process's own name also shows up
+#: (an abort(), an uncaught exception), truncated to 32 characters.
+_SELF = ("", "exc handler")
 
 
 def format_frame(frame: CrashFrame) -> str:
@@ -65,13 +69,22 @@ def format_frame(frame: CrashFrame) -> str:
 
 def first_app_frame(frames: list[CrashFrame]) -> CrashFrame | None:
     """Where in the app's code it happened: the first app frame, not counting a
-    signal handler's frames or the app's entry point."""
+    signal handler's frames, or the app's entry point where the run loop sits
+    above it."""
     start = next((i + 1 for i, f in enumerate(frames) if f.symbol == "_sigtramp"), 0)
-    return next((f for f in frames[start:] if f.app and not _is_entry_point(f)), None)
+    for i in range(start, len(frames)):
+        frame = frames[i]
+        if frame.app and not (_is_entry_point(frame) and _run_loop_above(frames[start:i])):
+            return frame
+    return None
 
 
 def _is_entry_point(frame: CrashFrame) -> bool:
     return frame.symbol in _ENTRY_POINTS or frame.symbol.endswith("$main()")
+
+
+def _run_loop_above(frames: list[CrashFrame]) -> bool:
+    return any(any(name in f.symbol for name in _RUN_LOOP) for f in frames)
 
 
 def _str(value) -> str:
@@ -129,9 +142,12 @@ def ips_frames(data: dict) -> tuple[list[CrashFrame], list[CrashImage], bool]:
         raw_frames = threads[faulting].get("frames")
         raw_frames = raw_frames if isinstance(raw_frames, list) else []
 
+    # Every frame, so the app frame can be picked from the whole stack; the
+    # caller caps what is returned. A deep SwiftUI or UIKit stack can put the
+    # app's frame past any cap.
     frames: list[CrashFrame] = []
     wanted: dict[int, CrashImage] = {}
-    for raw in raw_frames[:MAX_FRAMES]:
+    for raw in raw_frames:
         if not isinstance(raw, dict):
             continue
         index = raw.get("imageIndex")
@@ -158,37 +174,59 @@ def ips_frames(data: dict) -> tuple[list[CrashFrame], list[CrashImage], bool]:
 
 
 def ips_reason(data: dict) -> str:
-    """The report's own words for why: `asi`, the application-specific
-    information ("Terminating app due to uncaught exception …"). A Swift
-    `fatalError` puts its message in the app's log, not the report."""
+    """The report's own words for why.
+
+    `asi`, the application-specific information ("Terminating app due to
+    uncaught exception …"); and for a termination that was not a signal -- a
+    watchdog, a memory limit -- its explanation. A Swift `fatalError` puts its
+    message in the app's log, not the report.
+    """
+    parts: list[str] = []
     asi = data.get("asi")
-    if not isinstance(asi, dict):
-        return ""
-    lines = [line for values in asi.values() if isinstance(values, list)
-             for line in values if isinstance(line, str) and line.strip()]
-    return " ".join(line.strip() for line in lines)[:500]
+    if isinstance(asi, dict):
+        parts += [line.strip() for values in asi.values() if isinstance(values, list)
+                  for line in values if isinstance(line, str) and line.strip()]
+    termination = data.get("termination")
+    if isinstance(termination, dict) and _str(termination.get("namespace")) not in ("", "SIGNAL"):
+        reasons = termination.get("reasons")
+        if isinstance(reasons, list):
+            parts += [r.strip() for r in reasons if isinstance(r, str) and r.strip()]
+        elif _str(termination.get("indicator")):
+            parts.append(_str(termination.get("indicator")))
+    return " ".join(parts)[:500]
 
 
 def ips_killed_by(data: dict) -> str:
-    """The process that ended the app, when it was not the app itself.
+    """The process that sent the signal that ended the app, when it was not
+    the app itself.
 
-    Measured: a signal sent from a shell names the shell (`zsh`,
-    `python3.11`), `devicectl` names `dtappserviced`, and a real crash names
-    `exc handler`. When another process ended the app, its frames say where it
-    was waiting, not what went wrong.
+    Decided by pid, not name: `byPid` equals the app's `pid` for every
+    self-inflicted crash measured -- `exc handler` for a fault, the app's own
+    name for an abort() or an uncaught exception, which the kernel truncates
+    to 32 characters, so a longer name never matches. A kill from a shell
+    (`zsh`, `python3.11`) or `devicectl` (`dtappserviced`) has another pid.
+
+    Only for a signal. A watchdog or a memory limit is the system ending the
+    app too, but there the frames are where it hung, which is the answer --
+    so it keeps its frames, and its explanation goes in `reason`.
     """
     termination = data.get("termination")
-    if not isinstance(termination, dict):
+    if not isinstance(termination, dict) or _str(termination.get("namespace")) != "SIGNAL":
         return ""
     by = _str(termination.get("byProc"))
-    return "" if by in _SELF or by == _str(data.get("procName")) else by
+    by_pid, pid = _int(termination.get("byPid")), _int(data.get("pid"))
+    if by_pid is not None and pid is not None:
+        return "" if by_pid == pid else (by or f"pid {by_pid}")
+    return "" if by in _SELF or by == _str(data.get("procName"))[:32] else by
 
 
 def _is_app(name: str, path: str, bundle: str, process: str) -> bool:
-    """Inside the app's bundle; or, where paths are elided, named after the
-    process -- the main binary, or its Debug build's `.debug.dylib`."""
-    if bundle and path.startswith(bundle + "/"):
-        return True
+    """Inside the app's bundle; or, where the path is elided, named after the
+    process -- the main binary, or its Debug build's `.debug.dylib`. Not by
+    name when the path is known: an app named `Contacts` would otherwise claim
+    `/System/Library/Frameworks/Contacts.framework`."""
+    if path:
+        return bool(bundle) and path.startswith(bundle + "/")
     return bool(process) and name in (process, f"{process}.debug.dylib")
 
 
@@ -304,7 +342,7 @@ def native_frames(lines: list[str]) -> list[CrashFrame]:
     """Frames from tombstone backtrace lines. A frame is the app's when its
     library was installed with the app (`/data/app/…`)."""
     frames = []
-    for line in lines[:MAX_FRAMES]:
+    for line in lines:
         m = _NATIVE.match(line)
         if not m:
             continue
@@ -360,28 +398,40 @@ def _native_path_and_symbol(rest: str) -> tuple[str, str, int | None]:
 
 
 def java_frames(lines: list[str], package: str = "") -> list[CrashFrame]:
-    """Frames from `at …` lines.
+    """Frames from `at …` lines, with which ones are the app's decided together.
 
-    A frame is the app's when its class is in the app's package, where the
-    record names it. Otherwise: unless it is in a platform or common-library
-    package -- a heuristic, since the report does not say what the app shipped.
+    By the app's package where the record names it: the full applicationId
+    first, then shorter prefixes of it -- a Debug build's `com.example.app.debug`
+    runs code in `com.example.app`, and a module can live in `com.acme.feature`
+    under `com.acme.app` -- never shorter than two segments, and never a
+    platform or common-library package. If nothing matches even so, or there
+    is no package: every frame outside those packages, a heuristic, since the
+    report does not say what the app shipped.
     """
     frames = []
-    for line in lines[:MAX_FRAMES]:
+    for line in lines:
         m = _JAVA.match(line)
         if not m:
             continue
         symbol, where = m.group(1), m.group(2)
         source = _JAVA_SOURCE.match(where) if where not in ("Native Method", "") else None
         file = source.group(1) if source and source.group(1) != "Unknown Source" else ""
-        if package:
-            app = symbol.startswith(package + ".")
-        else:
-            app = not symbol.startswith(_JAVA_NOT_APP)
         frames.append(CrashFrame(
             symbol=symbol,
             file=file,
             line=_int(source.group(2)) if source and source.group(2) and file else None,
-            app=app,
         ))
+    for frame, app in zip(frames, _java_app_flags([f.symbol for f in frames], package),
+                          strict=True):
+        frame.app = app
     return frames
+
+
+def _java_app_flags(symbols: list[str], package: str) -> list[bool]:
+    parts = package.split(".") if package else []
+    for n in range(len(parts), 1, -1):
+        prefix = ".".join(parts[:n]) + "."
+        flags = [s.startswith(prefix) and not s.startswith(_JAVA_NOT_APP) for s in symbols]
+        if any(flags):
+            return flags
+    return [not s.startswith(_JAVA_NOT_APP) for s in symbols]

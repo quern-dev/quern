@@ -164,7 +164,7 @@ def _parse_record(
         # every other thread's, and reading the whole body mixed them in.
         frames = _NATIVE_FRAME.findall(_crashing_backtrace(body))
         structured = _safe(crash_frames.native_frames, frames)
-        app_frame = crash_frames.first_app_frame(structured)
+        app_frame = crash_frames.first_app_frame(structured)     # from the whole stack
         abort = _ABORT_MESSAGE.search(body)
         reason = abort.group(1) if abort else ""
     else:  # anr
@@ -173,11 +173,7 @@ def _parse_record(
         exception_codes = m.group(1) if m else ""
         lines = _main_thread_frames(body, pid)
         frames = [line.removeprefix("at ") for line in lines]
-        structured = [
-            f for line in lines
-            for f in (_safe(crash_frames.java_frames, [line], package) if line.startswith("at ")
-                      else _safe(crash_frames.native_frames, [line.removeprefix("native: ")]))
-        ]
+        structured = _anr_frames(lines, package)
         app_frame = crash_frames.first_app_frame(structured)
 
     # Derived from the record, so a crash seen by two pulls is one report.
@@ -198,9 +194,9 @@ def _parse_record(
         exception_codes=exception_codes,
         signal=signal,
         top_frames=[f.strip() for f in frames[:TOP_FRAMES]],
-        frames=structured,
+        frames=structured[:crash_frames.MAX_FRAMES],
         images=_native_images(structured, frames) if kind == "native_crash" else [],
-        frames_from="crashing_thread" if structured else "",
+        frames_from=_FRAMES_FROM[kind] if structured else "",
         app_frame=app_frame,
         reason=reason,
         bundle_id=package,
@@ -284,12 +280,41 @@ def _java_trace(body: str, package: str) -> tuple[list[CrashFrame], CrashFrame |
             blocks.append([])
         elif _JAVA_FRAME.match(line):
             blocks[-1].append(line)
-    parsed = [_safe(crash_frames.java_frames, block, package) for block in blocks]
-    frames = [f for block in parsed for f in block][:crash_frames.MAX_FRAMES]
+    # Decided over the whole trace, so every block agrees on which package is
+    # the app's; then split back into blocks to find the innermost cause.
+    lines = [line for block in blocks for line in block]
+    frames = _safe(crash_frames.java_frames, lines, package)
+    parsed, i = [], 0
+    for block in blocks:
+        parsed.append(frames[i:i + len(block)])
+        i += len(block)
     app_frame = next((a for a in (crash_frames.first_app_frame(b) for b in reversed(parsed))
                       if a is not None), None)
     causes = _CAUSED_BY.findall(body)
-    return frames, app_frame, (causes[-1].strip() if causes else "")
+    # The root cause; a trace with no cause is its own.
+    first = _JAVA_EXCEPTION.search(body)
+    reason = causes[-1].strip() if causes else (first.group(0).strip() if first else "")
+    return frames, app_frame, reason
+
+
+#: What `frames` is, per kind of record.
+_FRAMES_FROM = {"crash": "exception", "native_crash": "crashing_thread", "anr": "main_thread"}
+
+
+def _anr_frames(lines: list[str], package: str) -> list[CrashFrame]:
+    """The ANR'd main thread, `at` and `native:` lines in order, with the Java
+    frames' app flags decided over all of them together."""
+    java = _safe(crash_frames.java_frames, [ln for ln in lines if ln.startswith("at ")], package)
+    java_iter = iter(java)
+    frames: list[CrashFrame] = []
+    for line in lines:
+        if line.startswith("at "):
+            frame = next(java_iter, None)
+            if frame is not None:
+                frames.append(frame)
+        else:
+            frames += _safe(crash_frames.native_frames, [line.removeprefix("native: ")])
+    return frames
 
 
 def _safe(parse, lines, *args) -> list[CrashFrame]:

@@ -606,20 +606,22 @@ class CrashAdapter(BaseSourceAdapter):
             return None
 
         crash_id = uuid.uuid4().hex[:12]
-        proc_name = data.get("procName", "") or data.get("name", "") or path.stem
+        proc_name = _text(data.get("procName"), data.get("name")) or path.stem
 
         if self.process_filter and self.process_filter not in proc_name:
             return None
 
-        # Extract exception info
-        exception = data.get("exception", {})
-        exc_type = exception.get("type", "")
-        exc_codes = exception.get("codes", "")
-        signal_name = exception.get("signal", "")
+        # Extract exception info. Each field as text or absent: a report of an
+        # odd shape still says it crashed.
+        exception = data.get("exception") if isinstance(data.get("exception"), dict) else {}
+        exc_type = _text(exception.get("type"))
+        exc_codes = _text(exception.get("codes"))
+        signal_name = _text(exception.get("signal"))
 
         # Also check top-level for signal
+        termination = data.get("termination") if isinstance(data.get("termination"), dict) else {}
         if not signal_name:
-            signal_name = data.get("termination", {}).get("signal", "")
+            signal_name = _text(termination.get("signal"))
 
         # Where it happened, with each frame's image, offset and source line,
         # and the images' UUIDs and load addresses (#326). A shape this cannot
@@ -631,9 +633,11 @@ class CrashAdapter(BaseSourceAdapter):
             frames, images, from_exception = [], [], False
         bundle = data.get("bundleInfo") if isinstance(data.get("bundleInfo"), dict) else {}
         killed_by = crash_frames.ips_killed_by(data)
+        # From the whole stack, before it is capped for the response.
+        app_frame = None if killed_by else crash_frames.first_app_frame(frames)
 
         # Timestamp
-        ts_str = data.get("captureTime", "") or data.get("timestamp", "")
+        ts_str = _text(data.get("captureTime"), data.get("timestamp"))
         ts = self._parse_timestamp(ts_str, fallback=_mtime(path))
 
         return CrashReport(
@@ -645,10 +649,10 @@ class CrashAdapter(BaseSourceAdapter):
             exception_codes=exc_codes,
             signal=signal_name,
             top_frames=[crash_frames.format_frame(f) for f in frames[:crash_frames.TOP_FRAMES]],
-            frames=frames,
-            images=images,
+            frames=frames[:crash_frames.MAX_FRAMES],
+            images=_images_for(images, frames[:crash_frames.MAX_FRAMES], app_frame),
             frames_from=("exception" if from_exception else "crashing_thread") if frames else "",
-            app_frame=None if killed_by else crash_frames.first_app_frame(frames),
+            app_frame=app_frame,
             reason=crash_frames.ips_reason(data),
             killed_by=killed_by,
             bundle_id=_text(header.get("bundleID"), bundle.get("CFBundleIdentifier")),
@@ -812,3 +816,10 @@ def _stamp_copied(target: Path, names: list[str]) -> None:
 def _text(*values) -> str:
     """The first value that is non-empty text; report fields can be anything."""
     return next((v for v in values if isinstance(v, str) and v), "")
+
+
+def _images_for(images, frames, app_frame):
+    """The images the returned frames point into, and the app frame's --
+    which may lie past the cap, and is the one most worth symbolicating."""
+    names = {f.image for f in frames} | ({app_frame.image} if app_frame else set())
+    return [i for i in images if i.name in names]
