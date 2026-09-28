@@ -931,17 +931,28 @@ async def test_a_report_cut_short_by_a_timed_out_pull_is_read_when_complete(tmp_
 
 @pytest.mark.asyncio
 async def test_an_unparseable_file_is_not_reread_until_it_changes(tmp_crash_dir):
+    """idevicecrashreport rewrites every file it copies (measured, 1.4.0), so
+    each -k pull gives an unparseable file -- a JetsamEvent, say -- a new
+    mtime and the same size. Keyed on mtime, every pull re-read them all."""
+    import os
+
     adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
     await adapter.start()
-    (tmp_crash_dir / "broken.ips").write_text(MALFORMED_IPS)
+    broken = tmp_crash_dir / "broken.ips"
+    broken.write_text(MALFORMED_IPS)
     reads = []
     real = adapter._parse_crash_file
     adapter._parse_crash_file = lambda path, content: reads.append(path) or real(path, content)
 
-    for _ in range(3):
+    for i in range(3):
+        broken.write_text(MALFORMED_IPS)                    # re-copied, same bytes
+        os.utime(broken, (1_800_000_000 + i, 1_800_000_000 + i))
         await adapter._scan_for_new_files()
-
     assert len(reads) == 1
+
+    broken.write_text(MALFORMED_IPS + " ")                  # the size changed
+    await adapter._scan_for_new_files()
+    assert len(reads) == 2
     await adapter.stop()
 
 
@@ -1005,27 +1016,54 @@ async def test_an_old_report_the_poll_loop_finds_in_a_phones_directory_is_not_re
     await adapter.stop()
 
 
+@pytest.mark.parametrize("name, content", [
+    ("undated.ips", '{"bug_type":"309"}\n{"procName":"MyApp"}'),
+    ("undated.crash", "Process:  MyApp [1]\nException Type:  EXC_CRASH (SIGABRT)\n"),
+])
 @pytest.mark.asyncio
-async def test_a_report_with_no_readable_time_takes_its_files(tmp_crash_dir):
-    """It was stamped now, so an old report with no readable time always
-    looked new and was replayed."""
+async def test_a_report_with_no_readable_time_takes_its_files(tmp_path, name, content):
+    """For a report written on this Mac -- a simulator's, in DiagnosticReports
+    -- the mtime is when it was written, which beats now. (A pulled file's is
+    the copy time: idevicecrashreport rewrites each file it copies.)"""
     import os
 
-    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
-    entries = _collect_entries(adapter)
+    reports_dir = tmp_path / "DiagnosticReports"
+    reports_dir.mkdir()
+    adapter = CrashAdapter(watch_dir=tmp_path / "crashes", poll_interval=60,
+                           extra_watch_dirs=[reports_dir])
     await adapter.start()
-    phone = tmp_crash_dir / "devices" / "PHONE-UUID"
-    phone.mkdir(parents=True)
-    f = phone / "undated.ips"
-    f.write_text('{"bug_type":"309"}\n{"procName":"MyApp"}')
+    f = reports_dir / name
+    f.write_text(content)
     os.utime(f, (1_700_000_000, 1_700_000_000))                 # 2023-11-14
 
-    async with adapter._scan_lock:
-        await adapter._scan_for_new_files()
+    await adapter._scan_for_new_files()
 
     [report] = adapter.crash_reports
     assert report.timestamp.timestamp() == 1_700_000_000
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_cut_short_crash_text_report_is_read_when_complete(tmp_crash_dir):
+    """.crash, what iOS 14 and older write. The text parser never failed, so a
+    partial copy was logged as a crash named after its file, with no exception,
+    and marked seen: the complete copy was never read."""
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    entries = _collect_entries(adapter)
+    await adapter.start()
+    full = (FIXTURES / "crash_sample.crash").read_text()
+    assert full.index("Exception Type:") > 200             # cut before it
+
+    async def partial(target):
+        (target / "MyApp-1.crash").write_text(full[:200])
+
+    async def complete(target):
+        (target / "MyApp-1.crash").write_text(full)
+
+    assert (await _pull_with(adapter, partial)).new == []
     assert entries == []
+    [report] = (await _pull_with(adapter, complete)).new
+    assert report.exception_type == "EXC_BAD_ACCESS (SIGSEGV)"
     await adapter.stop()
 
 
@@ -1061,8 +1099,9 @@ async def test_a_cancelled_pull_does_not_leave_the_tool_running(tmp_crash_dir):
 
 @pytest.mark.asyncio
 async def test_the_poll_loop_does_not_queue_behind_a_pull(tmp_crash_dir):
-    """A pull holds the lock for up to its 30s timeout; the loop waiting on it
-    delayed simulator crashes by as much. It skips the turn instead."""
+    """A pull holds the lock for up to its 30s timeout. The loop waiting on it
+    would only have made a redundant scan afterwards -- the pull's own scan
+    covers every directory -- so it skips the turn instead of queueing."""
     import asyncio
 
     adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=0.01)

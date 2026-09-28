@@ -690,26 +690,49 @@ class DeviceController(DeviceControllerUI):
         # Build CoreDevice UUID -> libimobiledevice UDID mapping. Exactly,
         # through the identity aliases devicectl records: its hardware UDID
         # *is* the USB UDID, so a phone is on USB when usbmux lists one of its
-        # spellings. It used to correlate names, and two phones sharing one
-        # ("iPhone" is the default) could map to each other's UDID -- so a
-        # crash pull filed one phone's reports under the other, on disk once
-        # pulls kept a directory per phone.
+        # spellings, or when devicectl itself says the transport is wired --
+        # which holds even when usbmux could not be asked (pymobiledevice3
+        # missing or timing out), where every phone used to read "not on USB".
+        # It used to correlate names, and two phones sharing one ("iPhone" is
+        # the default) could map to each other's UDID -- so a crash pull filed
+        # one phone's reports under the other, on disk once pulls kept a
+        # directory per phone.
         #
-        # By name only as a fallback, and only when the name is unique on both
-        # sides, for a phone devicectl listed without a hardware UDID. Every
-        # paired device measured under Xcode 26.5 reports one; Xcode 27 is not
-        # yet measured, which is the only reason this fallback remains (#323).
+        # By name only as a fallback, for a phone devicectl listed without a
+        # hardware UDID, with its name unique on both sides and a UDID no other
+        # phone matched. Every paired device measured under Xcode 26.5 reports
+        # one; Xcode 27 is not yet measured, the only reason this remains (#323).
+        #
+        # A listed phone that matches nothing now loses its old mapping: one
+        # unplugged since, and now on Wi-Fi, kept it and was pulled over a USB
+        # connection that no longer existed. A phone absent from this listing
+        # keeps it, since a failed devicectl call is not evidence of anything.
         usb_devices = await self.usbmux.get_usb_devices() if physical_devices else []
         usb_udids = {udid for udid, _ in usb_devices}
         usb_names = Counter(name for _, name in usb_devices if name)
         name_counts = Counter(d.name for d in physical_devices)
+        hardware = {d.udid: [s for s in spellings_of(d.udid) if s != d.udid]
+                    for d in physical_devices}
+        matched: dict[str, str] = {}
         for d in physical_devices:
-            exact = next((s for s in spellings_of(d.udid) if s in usb_udids), None)
+            exact = next((s for s in hardware[d.udid] if s in usb_udids), None)
+            if exact is None and d.connection_type == "usb" and len(hardware[d.udid]) == 1:
+                exact = hardware[d.udid][0]
             if exact:
-                self._usbmux_udid_map[d.udid] = exact
-            elif (len(spellings_of(d.udid)) <= 1 and name_counts[d.name] == 1
-                  and usb_names[d.name] == 1):
-                self._usbmux_udid_map[d.udid] = next(u for u, n in usb_devices if n == d.name)
+                matched[d.udid] = exact
+        taken = set(matched.values())
+        for d in physical_devices:
+            if (d.udid in matched or hardware[d.udid] or name_counts[d.name] != 1
+                    or usb_names[d.name] != 1):
+                continue
+            by_name = next(u for u, n in usb_devices if n == d.name)
+            if by_name not in taken:
+                matched[d.udid] = by_name
+        for d in physical_devices:
+            if d.udid in matched:
+                self._usbmux_udid_map[d.udid] = matched[d.udid]
+            else:
+                self._usbmux_udid_map.pop(d.udid, None)
 
         return sim_devices + physical_devices + usbmux_devices + android_devices
 

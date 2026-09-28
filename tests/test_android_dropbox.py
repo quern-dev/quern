@@ -358,6 +358,21 @@ class TestPull:
             await self._pull(monkeypatch, proc)
         assert proc.killed and proc.waited      # killed, and reaped
 
+    async def test_a_cancelled_pull_does_not_leave_adb_running(self, monkeypatch):
+        proc = _FakeProc(hang=True)
+        proc.returncode = None
+
+        async def fake_exec(*args, **kwargs):
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        task = asyncio.create_task(pull_dropbox("/usr/bin/adb", "emulator-5554"))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert proc.killed
+
     async def test_a_spawn_failure_says_so(self, monkeypatch):
         with pytest.raises(DropboxPullError, match="could not run adb"):
             await self._pull(monkeypatch, exc=PermissionError("denied"))

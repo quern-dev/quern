@@ -74,11 +74,14 @@ class CrashAdapter(BaseSourceAdapter):
         self.on_crash_hook = on_crash_hook
         self._poll_task: asyncio.Task | None = None
         self._seen_files: set[str] = set()
-        # Files that could not be parsed, by path, with the (size, mtime) they
-        # had. Retried only when that changes. Marking them seen instead lost
-        # a report for good: a pull that timed out mid-copy left a partial
-        # file, and -k re-copies the complete one to the same path.
-        self._unparsed: dict[str, tuple[int, int]] = {}
+        # Files that could not be parsed, by path, with the size they had.
+        # Retried only when it changes. Marking them seen instead lost a report
+        # for good: a pull that timed out mid-copy left a partial file, and -k
+        # re-copies the complete one to the same path -- always larger. Not
+        # the mtime: idevicecrashreport rewrites every file it copies (measured,
+        # 1.4.0), so every pull would re-read every non-crash report a phone
+        # holds, JetsamEvent and the like, which never parse.
+        self._unparsed: dict[str, int] = {}
         # One scan at a time. The poll loop scanning while idevicecrashreport
         # was still writing took the phone's files as its own, so the pull
         # neither counted nor tagged them.
@@ -348,10 +351,9 @@ class CrashAdapter(BaseSourceAdapter):
 
     def _mark_unparsed(self, f: Path) -> None:
         try:
-            st = f.stat()
+            self._unparsed[str(f)] = f.stat().st_size
         except OSError:
             return
-        self._unparsed[str(f)] = (st.st_size, st.st_mtime_ns)
 
     async def _scan_for_new_files(
         self, *, pulled: tuple[Path, set[str], str] | None = None,
@@ -363,14 +365,14 @@ class CrashAdapter(BaseSourceAdapter):
         from): a file new to it came from that device. Either way the report is
         tagged before it is emitted, so its log entry names the device too.
         """
-        all_files: list[tuple[float, Path, tuple[int, int]]] = []
+        all_files: list[tuple[float, Path, int]] = []
         for d in self._all_watch_dirs():
             for f in _crash_files(d):
                 try:
                     st = f.stat()
                 except OSError:
                     continue    # gone between listing and stat
-                all_files.append((st.st_mtime, f, (st.st_size, st.st_mtime_ns)))
+                all_files.append((st.st_mtime, f, st.st_size))
 
         added: list[CrashReport] = []
         for _, f, signature in sorted(all_files, key=lambda t: t[0]):
@@ -526,12 +528,21 @@ class CrashAdapter(BaseSourceAdapter):
         exc_match = re.search(r"^Exception Type:\s+(.+)$", content, re.MULTILINE)
         codes_match = re.search(r"^Exception Codes:\s+(.+)$", content, re.MULTILINE)
 
+        # Every crash report states its exception type. A file without one is
+        # not a report yet: an empty or cut-short copy from a pull that timed
+        # out "parsed" as a crash named after the file, was logged and hooked,
+        # and marked seen, so the complete copy was never read. Unparsed, it is
+        # retried when its size changes. A copy cut off further in still
+        # parses, as a report with fewer frames.
+        if exc_match is None:
+            return None
+
         proc_name = proc_match.group(1) if proc_match else path.stem
 
         if self.process_filter and self.process_filter not in proc_name:
             return None
 
-        exc_type = exc_match.group(1).strip() if exc_match else ""
+        exc_type = exc_match.group(1).strip()
         exc_codes = codes_match.group(1).strip() if codes_match else ""
 
         # Extract signal from exception type (e.g. "EXC_BAD_ACCESS (SIGSEGV)")
@@ -589,9 +600,11 @@ class CrashAdapter(BaseSourceAdapter):
         """Best-effort timestamp parsing from crash report.
 
         Unreadable, it is `fallback` -- the file's modification time, where the
-        caller has one -- and only then now. Now made every such report look
-        new, which defeats the rule that a crash from before start is listed
-        rather than replayed.
+        caller has one -- and only then now. That helps a report written on
+        this Mac (a simulator's, in DiagnosticReports), whose mtime is when it
+        was written. It does not help a pulled one: idevicecrashreport rewrites
+        each file it copies, so the mtime is the copy time. A crash report
+        carries its own time (`captureTime`, `Date/Time`), so this is rare.
         """
         if not ts_str:
             return fallback or datetime.now(UTC)
