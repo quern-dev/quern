@@ -1,0 +1,320 @@
+{"app_name": "MyApp", "timestamp": "2026-09-28 09:32:04.00 -0700", "app_version": "1.2.3", "slice_uuid": "6c31c929-34e1-8c57-5dee-6557a7e1d568", "build_version": "42", "platform": 7, "bundleID": "com.example.myapp", "bug_type": "309", "os_version": "macOS 26.6.2 (25G83)", "incident_id": "00000000-0000-0000-0000-0000000000FE", "name": "MyApp"}
+{
+  "procName": "MyApp",
+  "procPath": "/Users/USER/Library/Developer/CoreSimulator/Devices/00000000-0000-0000-0000-00000000000A/data/Containers/Bundle/Application/00000000-0000-0000-0000-000000000003/MyApp.app/MyApp",
+  "captureTime": "2026-09-28 09:31:57.4469 -0700",
+  "cpuType": "ARM-64",
+  "exception": {
+    "codes": "0x0000000000000001, 0x00000001956a5d2c",
+    "rawCodes": [
+      1,
+      6801743148
+    ],
+    "type": "EXC_BREAKPOINT",
+    "signal": "SIGTRAP"
+  },
+  "termination": {
+    "flags": 0,
+    "code": 5,
+    "namespace": "SIGNAL",
+    "indicator": "Trace/BPT trap: 5",
+    "byProc": "exc handler"
+  },
+  "os_fault": {
+    "process": "MyApp"
+  },
+  "faultingThread": 0,
+  "bundleInfo": {
+    "CFBundleShortVersionString": "1.2.3",
+    "CFBundleVersion": "42",
+    "CFBundleIdentifier": "com.example.myapp"
+  },
+  "threads": [
+    {
+      "triggered": true,
+      "id": 181289175,
+      "queue": "com.apple.main-thread",
+      "frames": [
+        {
+          "imageOffset": 175404,
+          "symbol": "_assertionFailure(_:_:file:line:flags:)",
+          "symbolLocation": 156,
+          "imageIndex": 3
+        },
+        {
+          "imageOffset": 18082960,
+          "sourceLine": 368,
+          "sourceFile": "SettingsPresenter.swift",
+          "symbol": "closure #1 in SettingsPresenter.resetStore()",
+          "imageIndex": 1,
+          "symbolLocation": 412
+        },
+        {
+          "imageOffset": 36245020,
+          "sourceLine": 82,
+          "sourceFile": "UIViewController+Confirm.swift",
+          "symbol": "closure #1 in closure #1 in UIViewController.confirm(_:message:handler:)",
+          "imageIndex": 1,
+          "symbolLocation": 88
+        },
+        {
+          "imageOffset": 3267484,
+          "sourceFile": "/<compiler-generated>",
+          "symbol": "thunk for @escaping @callee_guaranteed (@guaranteed UIAlertAction) -> ()",
+          "symbolLocation": 72,
+          "imageIndex": 1
+        },
+        {
+          "imageOffset": 2834456,
+          "symbol": "-[UIAlertController _invokeHandlersForAction:]",
+          "symbolLocation": 80,
+          "imageIndex": 4
+        },
+        {
+          "imageOffset": 2836268,
+          "symbol": "__103-[UIAlertController _dismissAnimated:triggeringAction:triggeredByPopoverDimmingView:dismissCompletion:]_block_invoke_2",
+          "symbolLocation": 28,
+          "imageIndex": 4
+        },
+        {
+          "imageOffset": 6239760,
+          "symbol": "-[UIPresentationController transitionDidFinish:]",
+          "symbolLocation": 784,
+          "imageIndex": 4
+        },
+        {
+          "imageOffset": 6255256,
+          "symbol": "__77-[UIPresentationController runTransitionForCurrentStateAnimated:handoffData:]_block_invoke.89",
+          "symbolLocation": 340,
+          "imageIndex": 4
+        },
+        {
+          "imageOffset": 7366936,
+          "symbol": "-[_UIViewControllerTransitionContext completeTransition:]",
+          "symbolLocation": 180,
+          "imageIndex": 4
+        },
+        {
+          "imageOffset": 20753496,
+          "symbol": "__UIVIEW_IS_EXECUTING_ANIMATION_COMPLETION_BLOCK__",
+          "symbolLocation": 28,
+          "imageIndex": 4
+        },
+        {
+          "imageOffset": 20754100,
+          "symbol": "-[UIViewAnimationBlockDelegate _didEndBlockAnimation:finished:context:]",
+          "symbolLocation": 596,
+          "imageIndex": 4
+        },
+        {
+          "imageOffset": 20588800,
+          "symbol": "-[UIViewAnimationState sendDelegateAnimationDidStop:finished:]",
+          "symbolLocation": 212,
+          "imageIndex": 4
+        },
+        {
+          "imageOffset": 20589864,
+          "symbol": "-[UIViewAnimationState animationDidStop:finished:]",
+          "symbolLocation": 188,
+          "imageIndex": 4
+        },
+        {
+          "imageOffset": 1400036,
+          "symbol": "-[UIViewAnimationStateAccessibility animationDidStop:finished:]",
+          "symbolLocation": 248,
+          "imageIndex": 5
+        },
+        {
+          "imageOffset": 20589976,
+          "symbol": "-[UIViewAnimationState animationDidStop:finished:]",
+          "symbolLocation": 300,
+          "imageIndex": 4
+        },
+        {
+          "imageOffset": 1400036,
+          "symbol": "-[UIViewAnimationStateAccessibility animationDidStop:finished:]",
+          "symbolLocation": 248,
+          "imageIndex": 5
+        },
+        {
+          "imageOffset": 1821016,
+          "symbol": "run_animation_callbacks(void*)",
+          "symbolLocation": 128,
+          "imageIndex": 6
+        },
+        {
+          "imageOffset": 115320,
+          "symbol": "_dispatch_client_callout",
+          "symbolLocation": 12,
+          "imageIndex": 7
+        },
+        {
+          "imageOffset": 229428,
+          "symbol": "<deduplicated_symbol>",
+          "symbolLocation": 24,
+          "imageIndex": 7
+        },
+        {
+          "imageOffset": 70084,
+          "symbol": "_dispatch_main_queue_drain",
+          "symbolLocation": 1184,
+          "imageIndex": 7
+        },
+        {
+          "imageOffset": 68884,
+          "symbol": "_dispatch_main_queue_callback_4CF",
+          "symbolLocation": 40,
+          "imageIndex": 7
+        },
+        {
+          "imageOffset": 601416,
+          "symbol": "__CFRUNLOOP_IS_SERVICING_THE_MAIN_DISPATCH_QUEUE__",
+          "symbolLocation": 12,
+          "imageIndex": 8
+        },
+        {
+          "imageOffset": 579412,
+          "symbol": "__CFRunLoopRun",
+          "symbolLocation": 1920,
+          "imageIndex": 8
+        },
+        {
+          "imageOffset": 576408,
+          "symbol": "CFRunLoopRunSpecific",
+          "symbolLocation": 536,
+          "imageIndex": 8
+        },
+        {
+          "imageOffset": 11520,
+          "symbol": "GSEventRunModal",
+          "symbolLocation": 164,
+          "imageIndex": 9
+        },
+        {
+          "imageOffset": 15068088,
+          "symbol": "-[UIApplication _run]",
+          "symbolLocation": 796,
+          "imageIndex": 4
+        },
+        {
+          "imageOffset": 15085444,
+          "symbol": "UIApplicationMain",
+          "symbolLocation": 124,
+          "imageIndex": 4
+        },
+        {
+          "imageOffset": 3021164,
+          "sourceLine": 13,
+          "sourceFile": "AppDelegate.swift",
+          "symbol": "__debug_main_executable_dylib_entry_point",
+          "imageIndex": 1,
+          "symbolLocation": 64
+        },
+        {
+          "imageOffset": 5076,
+          "symbol": "start_sim",
+          "symbolLocation": 20,
+          "imageIndex": 0
+        },
+        {
+          "imageOffset": 132324,
+          "symbol": "start",
+          "symbolLocation": 6992,
+          "imageIndex": 2
+        }
+      ]
+    }
+  ],
+  "usedImages": [
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 4373233664,
+      "size": 311296,
+      "uuid": "7cf6da16-f8ae-0148-0738-36b58bc3a13c",
+      "path": "/Volumes/VOLUME/*/dyld_sim",
+      "name": "dyld_sim"
+    },
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 4537745408,
+      "size": 58736640,
+      "uuid": "1079d559-088c-e069-3942-516aa8865481",
+      "path": "/Users/USER/Library/Developer/CoreSimulator/Devices/00000000-0000-0000-0000-00000000000A/data/Containers/Bundle/Application/00000000-0000-0000-0000-000000000003/MyApp.app/MyApp.debug.dylib",
+      "name": "MyApp.debug.dylib"
+    },
+    {
+      "source": "P",
+      "arch": "arm64e",
+      "base": 4374740992,
+      "size": 737280,
+      "uuid": "3dbba1b7-2db9-14fa-9b0a-bf8387bc54cb",
+      "path": "/usr/lib/dyld",
+      "name": "dyld"
+    },
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 6801567744,
+      "size": 4731872,
+      "uuid": "bc1e8350-41fb-4cce-24ea-347a1ad88b15",
+      "path": "/Volumes/VOLUME/*/libswiftCore.dylib",
+      "name": "libswiftCore.dylib"
+    },
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 6524239872,
+      "size": 30854208,
+      "uuid": "028cb2b4-0b68-8621-4af8-b3b6f85d5cb3",
+      "path": "/Volumes/VOLUME/*/UIKitCore.framework/UIKitCore",
+      "name": "UIKitCore"
+    },
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 7731552256,
+      "size": 1969632,
+      "uuid": "813dd27b-837c-d250-cd15-f0c2999c23d3",
+      "path": "/Volumes/VOLUME/*/UIKit",
+      "name": "UIKit"
+    },
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 6631079936,
+      "size": 3109568,
+      "uuid": "be05494c-e8e9-b7e0-9994-221a67881a8d",
+      "path": "/Volumes/VOLUME/*/QuartzCore.framework/QuartzCore",
+      "name": "QuartzCore"
+    },
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 6444003328,
+      "size": 281536,
+      "uuid": "9624b6b7-b0b2-6166-623d-8e5daec3e909",
+      "path": "/Volumes/VOLUME/*/libdispatch.dylib",
+      "name": "libdispatch.dylib"
+    },
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 6446211072,
+      "size": 4292608,
+      "uuid": "864a81c3-e989-d33c-58cc-94c38f8588e3",
+      "path": "/Volumes/VOLUME/*/CoreFoundation.framework/CoreFoundation",
+      "name": "CoreFoundation"
+    },
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 6727782400,
+      "size": 33280,
+      "uuid": "0c2371d5-ecab-d11e-8d4f-7c74615f3439",
+      "path": "/Volumes/VOLUME/*/GraphicsServices.framework/GraphicsServices",
+      "name": "GraphicsServices"
+    }
+  ]
+}

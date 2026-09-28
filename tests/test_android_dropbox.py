@@ -1230,3 +1230,16 @@ class TestCrashListShape:
         assert (await _latest(app, include_raw="true"))["crashes"][0]["raw_text"] == "x" * 3000
         # The stored report keeps it.
         assert app.state.crash_adapter.crash_reports[0].raw_text == "x" * 3000
+
+    async def test_frames_and_images_come_with_detail(self, app):
+        fixture = Path(__file__).parent / "fixtures" / "crash_ips" / "simulator_fatal_error.ips"
+        adapter = app.state.crash_adapter
+        adapter.crash_reports.append(adapter._parse_crash_file(fixture, fixture.read_text()))
+
+        compact = (await _latest(app))["crashes"][0]
+        assert compact["frames"] == [] and compact["images"] == []
+        assert compact["app_frame"]["line"] == 368 and compact["top_frames"]
+
+        full = (await _latest(app, detail="true"))["crashes"][0]
+        assert len(full["frames"]) == 30 and full["images"]
+        assert len(adapter.crash_reports[0].frames) == 30     # stored in full

@@ -94,19 +94,32 @@ or one ahead of anything the server has numbered, comes back with
 flow summary, a string that is not a cursor at all is refused with 400. Older timestamp cursors are still accepted, and the response always
 returns an arrival cursor.
 
-**Where it crashed.** Each crash report carries `app_frame`: the first frame of
-the crashing thread in the app's own code, with source file and line where the
-report has them. A simulator's Debug build does, because macOS resolves the frames
-on the Mac. A phone names the function for a Debug build, and gives only an offset
-for a stripped one. `frames` holds the crashing thread, each frame with its image,
-offset, symbol and source line. `images` holds the UUID and load address of each
-binary those frames point into, which is what resolving an unsymbolicated frame
-needs. Android frames come from the crashing thread only: native ones with their
-library and BuildId, Java ones with file and line. A frame counts as the app's
-when its binary is inside the app bundle (iOS) or was installed with the app
-(Android native). For Java, a frame is the app's unless it is in a platform or
-common-library package, which is a heuristic. `bundle_id`, `app_version` and
-`build_version` identify the app.
+**Where it crashed.** Each crash report carries `app_frame`: where in the app's own
+code it happened, with source file and line where the report has them.
+- **Which frame.** It comes from an uncaught exception's backtrace when the report has
+  one, and otherwise from the crashing thread. A crash reporter's signal handler and
+  the app's entry point are skipped.
+- **Source lines.** A simulator's Debug build has them, because macOS resolves the
+  frames on the Mac. A phone names the function for a Debug build and gives only an
+  offset for a stripped one.
+- **`reason`** is the report's own explanation: an uncaught exception's reason, or
+  Android's abort message or root cause. A Swift `fatalError` writes its message to
+  the app's log, not the report, so query the logs for it.
+- **`killed_by`** names the process that ended the app when it was not the app
+  itself, such as a signal from a shell or a debugger. In that case `app_frame` is
+  null, because the frames only say where the app was waiting.
+
+The response is compact by default: `app_frame`, `reason`, `killed_by`, the top
+frames, and the app's `bundle_id`, `app_version` and `build_version`.
+- **`detail=true`** adds `frames` (the exception's backtrace or the crashing thread,
+  each frame with image, offset, symbol and source line) and `images` (the UUID and
+  load address of each binary they point into). Symbolicating a frame needs these.
+- **`include_raw=true`** adds `raw_text`.
+
+A frame counts as the app's when:
+- **iOS:** its binary is inside the app bundle.
+- **Android native:** it was installed with the app.
+- **Java:** its class is in the app's package.
 
 **Crash reports on both platforms.** `get_latest_crash` with a `udid` fetches
 that device's crashes first. An iPhone is read over USB with `pymobiledevice3`:
@@ -126,8 +139,9 @@ with `--no-simulator-crashes`, which the reason then says. With a `udid`, the
 list is that device's crashes, plus reports quern cannot place on any device. A
 simulator's crash names its simulator by the app's path, so it is listed under
 that simulator only. `raw_text` is left out of the response unless
-`include_raw=true`: it runs to about a thousand tokens of JSON per crash, and the
-full report is on disk at `file_path`.
+`include_raw=true`: it runs to about a thousand tokens of JSON per crash. For an
+iOS report the whole file is on disk at `file_path`. An Android report has no
+file, and `file_path` names its DropBox record.
 
 Crash reports are left on the iPhone (the pull copies, it never deletes), so a
 pull does not take them away from Xcode or Finder. Each phone's reports are kept in

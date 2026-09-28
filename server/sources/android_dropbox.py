@@ -143,15 +143,17 @@ def _parse_record(
     process = fields.get("Process", "")
     pid = fields.get("PID", "")
 
-    exception_type = exception_codes = signal = ""
+    exception_type = exception_codes = signal = reason = ""
     frames: list[str] = []
     structured: list[CrashFrame] = []
+    app_frame: CrashFrame | None = None
+    package, app_version, build_version = _package(fields.get("Package", ""))
     if kind == "crash":
         m = _JAVA_EXCEPTION.search(body)
         if m:
             exception_type, exception_codes = m.group(1), m.group(2) or ""
         frames = _JAVA_FRAME.findall(body)
-        structured = crash_frames.java_frames([f"at {f}" for f in frames])
+        structured, app_frame, reason = _java_trace(body, package)
     elif kind == "native_crash":
         m = _SIGNAL.search(body)
         if m:
@@ -161,7 +163,10 @@ def _parse_record(
         # The crashing thread's backtrace only: the tombstone goes on to
         # every other thread's, and reading the whole body mixed them in.
         frames = _NATIVE_FRAME.findall(_crashing_backtrace(body))
-        structured = crash_frames.native_frames(frames)
+        structured = _safe(crash_frames.native_frames, frames)
+        app_frame = crash_frames.first_app_frame(structured)
+        abort = _ABORT_MESSAGE.search(body)
+        reason = abort.group(1) if abort else ""
     else:  # anr
         exception_type = "ANR"
         m = _SUBJECT.search(body)
@@ -170,9 +175,10 @@ def _parse_record(
         frames = [line.removeprefix("at ") for line in lines]
         structured = [
             f for line in lines
-            for f in (crash_frames.java_frames([line]) if line.startswith("at ")
-                      else crash_frames.native_frames([line.removeprefix("native: ")]))
+            for f in (_safe(crash_frames.java_frames, [line], package) if line.startswith("at ")
+                      else _safe(crash_frames.native_frames, [line.removeprefix("native: ")]))
         ]
+        app_frame = crash_frames.first_app_frame(structured)
 
     # Derived from the record, so a crash seen by two pulls is one report.
     # From the UTC time, not the header's: DropBox prints the header in the
@@ -194,7 +200,12 @@ def _parse_record(
         top_frames=[f.strip() for f in frames[:TOP_FRAMES]],
         frames=structured,
         images=_native_images(structured, frames) if kind == "native_crash" else [],
-        app_frame=crash_frames.first_app_frame(structured),
+        frames_from="crashing_thread" if structured else "",
+        app_frame=app_frame,
+        reason=reason,
+        bundle_id=package,
+        app_version=app_version,
+        build_version=build_version,
         file_path=f"dropbox:{tag}@{local_time}",
         raw_text=block[:RAW_LIMIT],
     )
@@ -239,10 +250,55 @@ def _native_images(frames: list[CrashFrame], lines: list[str]) -> list[CrashImag
     """The libraries the native frames point into, with their BuildIds."""
     images: dict[str, CrashImage] = {}
     for frame, line in zip(frames, lines, strict=False):
-        path = line.split()[3] if len(line.split()) > 3 else ""
         if frame.image and frame.image not in images:
-            images[frame.image] = CrashImage(name=frame.image, uuid=frame.build_id, path=path)
+            images[frame.image] = CrashImage(
+                name=frame.image, uuid=frame.build_id, path=crash_frames.native_path(line),
+            )
     return list(images.values())
+
+
+_PACKAGE = re.compile(r"^(\S+)(?: v(\d+))?(?: \((.+)\))?")
+_ABORT_MESSAGE = re.compile(r"^Abort message: '(.*)'\s*$", re.M)
+_CAUSED_BY = re.compile(r"^Caused by: (.+)$", re.M)
+
+
+def _package(value: str) -> tuple[str, str, str]:
+    """`com.example.app v32 (1.2.3)` -> package, version name, version code."""
+    m = _PACKAGE.match(value.strip())
+    if not m:
+        return "", "", ""
+    return m.group(1), m.group(3) or "", m.group(2) or ""
+
+
+def _java_trace(body: str, package: str) -> tuple[list[CrashFrame], CrashFrame | None, str]:
+    """The frames of a Java trace, where in the app it began, and its root cause.
+
+    The frames are the outer exception's followed by each `Caused by`. Where it
+    began is the first app frame of the innermost cause that reaches the app's
+    code: the outer exception is often only a wrapper rethrowing it. The root
+    cause's message is the reason.
+    """
+    blocks: list[list[str]] = [[]]
+    for line in body.splitlines():
+        if line.startswith("Caused by: "):
+            blocks.append([])
+        elif _JAVA_FRAME.match(line):
+            blocks[-1].append(line)
+    parsed = [_safe(crash_frames.java_frames, block, package) for block in blocks]
+    frames = [f for block in parsed for f in block][:crash_frames.MAX_FRAMES]
+    app_frame = next((a for a in (crash_frames.first_app_frame(b) for b in reversed(parsed))
+                      if a is not None), None)
+    causes = _CAUSED_BY.findall(body)
+    return frames, app_frame, (causes[-1].strip() if causes else "")
+
+
+def _safe(parse, lines, *args) -> list[CrashFrame]:
+    """A parse of frames that cannot fail the pull: a record with frames it
+    cannot read is still a crash, just without them."""
+    try:
+        return parse(lines, *args)
+    except (TypeError, ValueError, AttributeError):
+        return []
 
 
 def _main_thread_frames(body: str, pid: str) -> list[str]:

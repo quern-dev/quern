@@ -58,11 +58,18 @@ async def get_latest_crashes(
             "phone and are counted in pull.older_on_device."
         ),
     ),
+    detail: bool = Query(
+        default=False,
+        description=(
+            "Include each report's full frames and images (UUID, load address): "
+            "what symbolicating it needs. Off by default: several kilobytes per crash."
+        ),
+    ),
     include_raw: bool = Query(
         default=False,
         description=(
-            "Include each report's raw_text. Off by default: it is about a thousand "
-            "tokens of JSON per crash, and the full report is on disk at file_path."
+            "Include each report's raw_text, the start of the report as written. Off "
+            "by default: about a thousand tokens of JSON per crash."
         ),
     ),
 ) -> CrashLatestResponse:
@@ -105,8 +112,16 @@ async def get_latest_crashes(
     reports = sorted(reports, key=lambda r: r.timestamp, reverse=True)
     total = len(reports)
     limited = reports[:limit]
+    # Compact by default: where it crashed, why, and the top frames. The full
+    # frames and images are a few kilobytes a crash, which at the default limit
+    # of ten swamped the answer -- more than the raw text it replaced.
+    trimmed: dict = {}
+    if not detail:
+        trimmed.update(frames=[], images=[])
     if not include_raw:
-        limited = [r.model_copy(update={"raw_text": ""}) for r in limited]
+        trimmed["raw_text"] = ""
+    if trimmed:
+        limited = [r.model_copy(update=trimmed) for r in limited]
 
     return CrashLatestResponse(crashes=limited, total=total, pull=pull)
 

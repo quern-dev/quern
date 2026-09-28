@@ -361,21 +361,52 @@ class CrashReport(BaseModel):
         description="Top stack frames from crashing thread",
     )
     file_path: str = Field(default="", description="Path to the raw crash file on disk")
-    raw_text: str = Field(default="", description="First portion of raw crash content")
+    raw_text: str = Field(
+        default="",
+        description=(
+            "First portion of raw crash content. In get_latest_crash only with include_raw."
+        ),
+    )
     app_frame: CrashFrame | None = Field(
         default=None,
         description=(
-            "The first frame of the crashing thread in the app's own code: where in "
-            "the app it crashed, or was when it was stopped. None when that thread "
-            "never entered the app's code, or the report cannot tell."
+            "Where in the app's own code it happened: the first app frame of the "
+            "exception's backtrace or the crashing thread, not counting a crash "
+            "reporter's signal handler or the app's entry point. None when the "
+            "crash never reached the app's code, or when another process ended the "
+            "app (see killed_by)."
         ),
     )
+    reason: str = Field(
+        default="",
+        description=(
+            "The report's own words for why: iOS's application-specific information "
+            "(an uncaught exception's reason), Android's abort message or root "
+            "cause. A Swift fatalError's message is in the app's log, not here."
+        ),
+    )
+    killed_by: str = Field(
+        default="",
+        description=(
+            "The process that ended the app, when it was not the app itself: a "
+            "signal sent from a shell or a debugger. Its frames then say where it "
+            "was waiting, not what went wrong."
+        ),
+    )
+    frames_from: str = Field(
+        default="",
+        description="'exception' (an uncaught exception's backtrace) or 'crashing_thread'",
+    )
     frames: list[CrashFrame] = Field(
-        default_factory=list, description="The crashing thread's frames, innermost first",
+        default_factory=list,
+        description="The frames, innermost first. In get_latest_crash only with detail=true.",
     )
     images: list[CrashImage] = Field(
         default_factory=list,
-        description="The binaries those frames point into, with UUID and load address",
+        description=(
+            "The binaries those frames point into: UUID (Android: BuildId) and load "
+            "address (iOS). In get_latest_crash only with detail=true."
+        ),
     )
     bundle_id: str = ""
     app_version: str = ""

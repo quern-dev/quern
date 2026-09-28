@@ -35,44 +35,82 @@ def _parse(path):
     return CrashAdapter(watch_dir=path.parent)._parse_crash_file(path, path.read_text())
 
 
-class TestIpsFromTheSimulator:
-    """macOS resolves a simulator app's frames to function and source line."""
+class TestARealCrash:
+    """A Swift fatalError in a real app's Debug build on a simulator
+    (EXC_BREAKPOINT), with the app's names replaced. Swift's
+    _assertionFailure is on top; the app's own frame is right under it."""
 
-    def test_where_in_the_app_it_crashed_keeps_its_source_line(self):
-        report = _parse(FIXTURES / "crash_ips" / "simulator_debug.ips")
-        frame = report.app_frame
-        assert (frame.image, frame.symbol, frame.symbol_offset) == (
-            "MyApp.debug.dylib", "__debug_main_executable_dylib_entry_point", 64)
-        assert (frame.file, frame.line) == ("AppDelegate.swift", 13)
-        assert format_frame(frame) == (
-            "MyApp.debug.dylib: __debug_main_executable_dylib_entry_point + 64"
-            " (AppDelegate.swift:13)")
+    def test_where_in_the_app_it_crashed(self):
+        report = _parse(FIXTURES / "crash_ips" / "simulator_fatal_error.ips")
+        assert format_frame(report.app_frame) == (
+            "MyApp.debug.dylib: closure #1 in SettingsPresenter.resetStore() + 412"
+            " (SettingsPresenter.swift:368)")
+        assert report.frames[0].symbol == "_assertionFailure(_:_:file:line:flags:)"
+        assert not report.frames[0].app
+        assert (report.exception_type, report.signal) == ("EXC_BREAKPOINT", "SIGTRAP")
+        assert report.killed_by == "" and report.frames_from == "crashing_thread"
 
     def test_the_app_and_its_build(self):
-        report = _parse(FIXTURES / "crash_ips" / "simulator_debug.ips")
+        report = _parse(FIXTURES / "crash_ips" / "simulator_fatal_error.ips")
         assert (report.bundle_id, report.app_version, report.build_version) == (
             "com.example.myapp", "1.2.3", "42")
 
     def test_the_log_line_says_where_in_the_app(self):
+        report = _parse(FIXTURES / "crash_ips" / "simulator_fatal_error.ips")
+        assert CrashAdapter._crash_summary(report) == (
+            "CRASH: MyApp EXC_BREAKPOINT (SIGTRAP) in MyApp.debug.dylib: closure #1 in "
+            "SettingsPresenter.resetStore() + 412 (SettingsPresenter.swift:368)")
+
+    def test_a_swift_fatal_error_has_no_reason_in_the_report(self):
+        """Its message goes to the app's log. Saying so beats inventing one."""
+        assert _parse(FIXTURES / "crash_ips" / "simulator_fatal_error.ips").reason == ""
+
+
+class TestKilledByAnotherProcess:
+    """Both .ips fixtures below are the app stopped by a signal from outside:
+    from a shell on the simulator, through devicectl on the phone. Their
+    frames say where it was idle -- the app's entry point under the run loop
+    -- and presenting that as where it crashed sent the reader to
+    AppDelegate.swift line 13."""
+
+    def test_the_simulator_kill_names_the_killer_and_no_crash_site(self):
         report = _parse(FIXTURES / "crash_ips" / "simulator_debug.ips")
-        assert CrashAdapter._crash_summary(report).endswith(
-            "in MyApp.debug.dylib: __debug_main_executable_dylib_entry_point + 64"
-            " (AppDelegate.swift:13)")
+        assert report.killed_by == "zsh"
+        assert report.app_frame is None
+        assert CrashAdapter._crash_summary(report).endswith("(killed by zsh)")
+
+    def test_the_phone_kill_through_devicectl(self):
+        report = _parse(FIXTURES / "crash_ips" / "device_debug.ips")
+        assert report.killed_by == "dtappserviced" and report.app_frame is None
+
+    def test_the_frames_are_still_kept(self):
+        """Where it was is still worth having; it is only not the crash site."""
+        report = _parse(FIXTURES / "crash_ips" / "simulator_debug.ips")
+        entry = next(f for f in report.frames if f.app)
+        assert (entry.symbol, entry.file, entry.line) == (
+            "__debug_main_executable_dylib_entry_point", "AppDelegate.swift", 13)
+
+
+def _image_index(body, name):
+    return next(i for i, img in enumerate(body["usedImages"]) if img["name"] == name)
+
+
+def _self_crash(name):
+    """A fixture made into a crash the app raised itself."""
+    header, body = _ips(name)
+    body["termination"]["byProc"] = "exc handler"
+    return header, body
 
 
 class TestIpsFromAPhone:
-    """A Debug build is not stripped, so the phone names the function; the
-    source line needs the build's debug info on the Mac (#326, step 3)."""
-
-    def test_the_function_is_named_but_not_the_line(self):
-        report = _parse(FIXTURES / "crash_ips" / "device_debug.ips")
-        assert report.app_frame.symbol == "__debug_main_executable_dylib_entry_point"
-        assert report.app_frame.file == "" and report.app_frame.line is None
+    """A Debug build is not stripped, so the phone names functions; source
+    lines need the build's debug info on the Mac (#326, step 3)."""
 
     def test_every_frame_keeps_its_image_and_offset(self):
         report = _parse(FIXTURES / "crash_ips" / "device_debug.ips")
         assert len(report.frames) == 12
         assert all(f.image and f.offset is not None for f in report.frames)
+        assert all(f.file == "" for f in report.frames)
         assert report.top_frames[0] == "libsystem_kernel.dylib: mach_msg2_trap + 8"
 
     def test_the_images_carry_what_a_symbolicator_needs(self):
@@ -89,33 +127,68 @@ class TestIpsFromAPhone:
         assert {f.image for f in report.frames if f.app} == {"MyApp.debug.dylib"}
 
 
-class TestIpsShapes:
+class TestWhichFrame:
+    def test_the_entry_point_is_never_the_crash_site(self, tmp_path):
+        """A crash that never reached the app's own code is not "in main"."""
+        header, body = _self_crash("device_debug")
+        report = _parse(_write(tmp_path, header, body))
+        assert report.app_frame is None
+        assert "@ libsystem_kernel.dylib: mach_msg2_trap + 8" in CrashAdapter._crash_summary(report)
+
+    def test_a_swift_main_is_an_entry_point(self):
+        from server.models import CrashFrame
+
+        main = CrashFrame(image="MyApp", symbol="static MyApp.$main()", app=True)
+        assert crash_frames.first_app_frame([main]) is None
+
+    def test_a_signal_handlers_frames_are_skipped(self, tmp_path):
+        """A crash reporter linked into the app runs its handler on the
+        crashing thread, above _sigtramp: its frames are the app's binary but
+        not where the app went wrong."""
+        header, body = _ips("simulator_fatal_error")
+        app = _image_index(body, "MyApp.debug.dylib")
+        system = body["threads"][0]["frames"][0]["imageIndex"]
+        body["threads"][0]["frames"][:0] = [
+            {"imageIndex": app, "imageOffset": 10, "symbol": "ReporterSignalHandler",
+             "symbolLocation": 4},
+            {"imageIndex": system, "imageOffset": 20, "symbol": "_sigtramp", "symbolLocation": 56},
+        ]
+        report = _parse(_write(tmp_path, header, body))
+        assert report.app_frame.symbol == "closure #1 in SettingsPresenter.resetStore()"
+
+    def test_an_uncaught_exception_uses_its_own_backtrace(self, tmp_path):
+        """Its crashing thread is only abort under the run loop; the throw site
+        and the reason are in lastExceptionBacktrace and asi."""
+        header, body = _self_crash("device_debug")
+        app = _image_index(body, "MyApp.debug.dylib")
+        body["lastExceptionBacktrace"] = [
+            {"imageIndex": 1, "imageOffset": 1000, "symbol": "__exceptionPreprocess",
+             "symbolLocation": 164},
+            {"imageIndex": app, "imageOffset": 81234, "symbol": "CacheList.load()",
+             "symbolLocation": 120},
+        ]
+        body["asi"] = {"CoreFoundation": [
+            "*** Terminating app due to uncaught exception 'NSRangeException', "
+            "reason: 'index 3 beyond bounds'"]}
+        report = _parse(_write(tmp_path, header, body))
+        assert report.frames_from == "exception"
+        assert report.app_frame.symbol == "CacheList.load()"
+        assert report.reason.startswith(
+            "*** Terminating app due to uncaught exception 'NSRangeException'")
+        assert len(report.frames) == 2
+
     def test_a_stripped_build_keeps_the_offset_to_resolve_later(self, tmp_path):
         """A Release build has no symbols on the phone: the frame was a bare
         number with no binary, so nothing could ever resolve it."""
-        header, body = _ips("device_debug")
+        header, body = _self_crash("simulator_fatal_error")
         for frame in body["threads"][0]["frames"]:
             if body["usedImages"][frame["imageIndex"]]["name"] == "MyApp.debug.dylib":
-                del frame["symbol"], frame["symbolLocation"]
+                for k in ("symbol", "symbolLocation", "sourceFile", "sourceLine"):
+                    frame.pop(k, None)
         report = _parse(_write(tmp_path, header, body))
         frame = report.app_frame
-        assert frame.symbol == "" and frame.offset == 2813080
-        assert format_frame(frame) == "MyApp.debug.dylib: 0x2aec98"
-
-    def test_the_first_app_frame_is_where_it_crashed(self, tmp_path):
-        """A real crash in the app's code has app frames above main: the
-        innermost one is the answer, not the entry point."""
-        header, body = _ips("simulator_debug")
-        app_index = next(i for i, img in enumerate(body["usedImages"])
-                         if img["name"] == "MyApp.debug.dylib")
-        body["threads"][0]["frames"][:0] = [
-            {"imageIndex": 0, "imageOffset": 4012, "symbol": "__pthread_kill", "symbolLocation": 8},
-            {"imageIndex": app_index, "imageOffset": 81234, "symbol": "CacheList.load()",
-             "symbolLocation": 120, "sourceFile": "CacheList.swift", "sourceLine": 88},
-        ]
-        report = _parse(_write(tmp_path, header, body))
-        assert format_frame(report.app_frame) == (
-            "MyApp.debug.dylib: CacheList.load() + 120 (CacheList.swift:88)")
+        assert frame.symbol == "" and frame.offset is not None
+        assert format_frame(frame) == f"MyApp.debug.dylib: 0x{frame.offset:x}"
 
     def test_an_offset_of_zero_is_a_frame(self, tmp_path):
         """`elif image:` dropped it, and the frames after it shifted up."""
@@ -123,15 +196,6 @@ class TestIpsShapes:
         body["threads"][0]["frames"][0] = {"imageIndex": 0, "imageOffset": 0}
         report = _parse(_write(tmp_path, header, body))
         assert report.frames[0].offset == 0 and len(report.frames) == 12
-
-    def test_no_app_frame_falls_back_to_the_top_frame(self, tmp_path):
-        header, body = _ips("device_debug")
-        body["threads"][0]["frames"] = [f for f in body["threads"][0]["frames"]
-                                        if body["usedImages"][f["imageIndex"]]["name"]
-                                        != "MyApp.debug.dylib"]
-        report = _parse(_write(tmp_path, header, body))
-        assert report.app_frame is None
-        assert "@ libsystem_kernel.dylib: mach_msg2_trap + 8" in CrashAdapter._crash_summary(report)
 
     def test_no_faulting_index_uses_the_triggered_thread(self, tmp_path):
         header, body = _ips("device_debug")
@@ -148,7 +212,7 @@ class TestIpsShapes:
 
     def test_an_embedded_framework_is_the_apps(self, tmp_path):
         """Inside the app's bundle, named after nothing in particular."""
-        header, body = _ips("device_debug")
+        header, body = _self_crash("device_debug")
         app_dir = body["procPath"].rsplit("/", 1)[0]
         body["usedImages"].append({"name": "Vendor", "arch": "arm64", "base": 4400000000,
                                    "uuid": "11111111-2222-3333-4444-555555555555",
@@ -159,12 +223,50 @@ class TestIpsShapes:
         report = _parse(_write(tmp_path, header, body))
         assert report.app_frame.image == "Vendor"
 
+    def test_an_extension_counts_its_host_apps_frameworks(self, tmp_path):
+        header, body = _self_crash("device_debug")
+        app_dir = body["procPath"].rsplit("/", 1)[0]
+        body["procPath"] = f"{app_dir}/PlugIns/Widget.appex/Widget"
+        body["procName"] = "Widget"
+        body["usedImages"].append({"name": "Shared", "arch": "arm64", "base": 4400000000,
+                                   "path": f"{app_dir}/Frameworks/Shared.framework/Shared"})
+        body["threads"][0]["frames"].insert(0, {
+            "imageIndex": len(body["usedImages"]) - 1, "imageOffset": 8, "symbol": "Shared.f()"})
+        assert _parse(_write(tmp_path, header, body)).app_frame.image == "Shared"
+
+    def test_a_daemon_outside_an_app_bundle_has_no_app(self, tmp_path):
+        """Without the .app check, a daemon at /usr/libexec/foo made every
+        image beside it the app's."""
+        header, body = _self_crash("device_debug")
+        body["procPath"] = "/usr/libexec/foo"
+        body["procName"] = "foo"
+        body["usedImages"][0]["path"] = "/usr/libexec/libneighbour.dylib"
+        report = _parse(_write(tmp_path, header, body))
+        assert not report.frames[0].app
+
+    def test_a_bundle_prefix_is_not_the_bundle(self, tmp_path):
+        """`/…/MyApp.app2/lib` is not inside `/…/MyApp.app`."""
+        header, body = _self_crash("device_debug")
+        app_dir = body["procPath"].rsplit("/", 1)[0]
+        body["usedImages"][0]["path"] = app_dir + "2/libneighbour.dylib"
+        body["usedImages"][0]["name"] = "libneighbour.dylib"
+        report = _parse(_write(tmp_path, header, body))
+        assert not report.frames[0].app
+
     def test_paths_elided_the_app_is_known_by_its_name(self, tmp_path):
         header, body = _ips("device_debug")
         for img in body["usedImages"]:
             img["path"] = ""
         report = _parse(_write(tmp_path, header, body))
-        assert report.app_frame is not None and report.app_frame.image == "MyApp.debug.dylib"
+        assert {f.image for f in report.frames if f.app} == {"MyApp.debug.dylib"}
+
+    def test_the_bundle_info_when_the_header_lacks_it(self, tmp_path):
+        header, body = _ips("device_debug")
+        for k in ("bundleID", "app_version", "build_version"):
+            header.pop(k)
+        report = _parse(_write(tmp_path, header, body))
+        assert (report.bundle_id, report.app_version, report.build_version) == (
+            "com.example.myapp", "1.2.3", "42")
 
     def test_a_deep_stack_is_capped(self, tmp_path):
         header, body = _ips("device_debug")
@@ -173,6 +275,21 @@ class TestIpsShapes:
         report = _parse(_write(tmp_path, header, body))
         assert len(report.frames) == crash_frames.MAX_FRAMES
         assert len(report.top_frames) == crash_frames.TOP_FRAMES
+
+    @pytest.mark.parametrize("mangle", [
+        lambda b: b["usedImages"][0].update(name=123, path=["x"], uuid={}, arch=4),
+        lambda b: b.update(procPath=42),
+        lambda b: b["threads"][0]["frames"][0].update(sourceFile=7, symbol=8),
+        lambda b: b.update(faultingThread=True),
+    ])
+    def test_odd_field_types_cost_detail_not_the_report(self, tmp_path, mangle):
+        """These made a report that used to parse vanish, with only a server
+        log line to say so."""
+        header, body = _ips("device_debug")
+        mangle(body)
+        header["bundleID"] = ["not", "text"]
+        report = _parse(_write(tmp_path, header, body))
+        assert report is not None and report.process == "MyApp"
 
 
 class TestCrashText:
@@ -209,6 +326,45 @@ class TestCrashText:
         f = tmp_path / "MyApp.crash"
         f.write_text(text)
         assert _parse(f).app_frame.offset == 11255808
+
+    def test_the_bundle_path_decides_what_is_the_apps(self, tmp_path):
+        """With real paths, not the name fallback: a framework inside the bundle
+        is the app's, one outside it is not."""
+        text = (FIXTURES / "crash_sample.crash").read_text()
+        app = "/private/var/containers/Bundle/Application/X/MyApp.app"
+        text = text.replace(
+            "Path:                /private/var/containers/Bundle/Application/.../MyApp.app/MyApp",
+            f"Path:                {app}/MyApp")
+        text = text.replace(
+            "0   MyApp                       0x0000000100abc000",
+            "0   Kit                         0x0000000100abc000")
+        text = text.replace("<AABB1122334455667788990011223344> /private/var/.../MyApp",
+                            f"<AABB1122334455667788990011223344> {app}/MyApp") + (
+            "0x100000000 -        0x100ffffff Kit arm64  <CCDD1122334455667788990011223344> "
+            f"{app}/Frameworks/Kit.framework/Kit\n")
+        f = tmp_path / "MyApp.crash"
+        f.write_text(text)
+        assert _parse(f).app_frame.image == "Kit"
+
+    def test_an_image_name_with_spaces(self, tmp_path):
+        """The old split kept it; a `\\S+` image name dropped the whole frame."""
+        text = (FIXTURES / "crash_sample.crash").read_text().replace(
+            "0   MyApp                       0x0000000100abc000",
+            "0   My App                      0x0000000100abc000",
+        ).replace("Process:             MyApp", "Process:             My App")
+        f = tmp_path / "MyApp.crash"
+        f.write_text(text)
+        assert _parse(f).app_frame.image == "My App"
+
+    def test_the_macos_style_unsymbolicated_line(self, tmp_path):
+        """`MyApp + 11255808`: an image and an offset, not a function named MyApp."""
+        text = (FIXTURES / "crash_sample.crash").read_text().replace(
+            "0x0000000100abc000 -[FeedViewController tableView:cellForRowAtIndexPath:] + 128",
+            "0x0000000100abc000 MyApp + 11255808")
+        f = tmp_path / "MyApp.crash"
+        f.write_text(text)
+        frame = _parse(f).app_frame
+        assert frame.symbol == "" and frame.offset == 11255808
 
     def test_a_symbol_with_its_source_line(self, tmp_path):
         text = (FIXTURES / "crash_sample.crash").read_text().replace(
@@ -255,6 +411,19 @@ class TestAndroidNative:
         ])
         assert (frame.image, frame.symbol, frame.symbol_offset) == ("libfoo.so", "Foo::crash()", 12)
 
+    def test_a_jit_frame(self):
+        """`/memfd:jit-cache (deleted)`: a path with a bracket of its own."""
+        [frame] = native_frames([
+            "#04 pc 0000000000123456  /memfd:jit-cache (deleted) (offset 0x2000000) "
+            "(com.example.Foo.bar+300)",
+        ])
+        assert (frame.image, frame.symbol, frame.symbol_offset) == (
+            "memfd:jit-cache (deleted)", "com.example.Foo.bar", 300)
+
+    def test_a_jit_frame_without_a_symbol(self):
+        [frame] = native_frames(["#04 pc 0000000000123456  /memfd:jit-cache (deleted)"])
+        assert frame.symbol == "" and frame.image == "memfd:jit-cache (deleted)"
+
     def test_an_unsymbolized_frame(self):
         [frame] = native_frames(["#00 pc 0000000000001234  /data/app/x/lib/arm64/libfoo.so"])
         assert frame.symbol == "" and frame.offset == 0x1234
@@ -273,8 +442,9 @@ class TestAndroidNative:
         [report] = parse_dropbox(text, serial="s", zone=device_zone("America/Los_Angeles", ""))
         assert len(report.frames) == 22
         assert "libother.so" not in {f.image for f in report.frames}
-        build_ids = {i.name: i.uuid for i in report.images}
-        assert build_ids["libc.so"] == "cd7952cb40d1a2deca6420c2da7910be"
+        libc = next(i for i in report.images if i.name == "libc.so")
+        assert libc.uuid == "cd7952cb40d1a2deca6420c2da7910be"
+        assert libc.path == "/apex/com.android.runtime/lib64/bionic/libc.so"
 
 
 class TestAndroidJava:
@@ -296,6 +466,79 @@ class TestAndroidJava:
     def test_the_platforms_frames_are_not_the_apps(self, symbol):
         [frame] = java_frames([f"at {symbol}(X.java:1)"])
         assert not frame.app
+
+    def test_the_apps_package_decides(self):
+        """Firebase, Gson, React Native: libraries the app ships, not its code."""
+        lines = ["at com.google.gson.Gson.fromJson(Gson.java:1)",
+                 "at com.example.app.Feed.parse(Feed.kt:12)",
+                 "at a.b.c(Unknown Source:3)"]
+        frames = java_frames(lines, package="com.example.app")
+        assert [f.app for f in frames] == [False, True, False]
+
+    @pytest.mark.parametrize("symbol", [
+        "com.google.firebase.crashlytics.Foo.bar", "com.google.gson.Gson.fromJson",
+        "com.facebook.react.bridge.X.y", "io.flutter.embedding.X.y",
+        "com.google.common.base.Preconditions.check", "org.chromium.base.X.y",
+    ])
+    def test_common_libraries_are_not_the_app_without_a_package(self, symbol):
+        [frame] = java_frames([f"at {symbol}(X.java:1)"])
+        assert not frame.app
+
+    def test_the_root_cause_is_where_it_began(self):
+        """The outer exception is often only a wrapper rethrowing the cause."""
+        from server.sources.android_dropbox import _java_trace
+
+        body = (
+            "java.lang.RuntimeException: Unable to start activity\n"
+            "\tat android.app.ActivityThread.performLaunchActivity(ActivityThread.java:1)\n"
+            "\tat com.example.app.Launcher.start(Launcher.kt:5)\n"
+            "Caused by: java.lang.IllegalStateException: no token\n"
+            "\tat com.example.app.Session.token(Session.kt:42)\n"
+            "\tat com.example.app.Launcher.start(Launcher.kt:4)\n"
+        )
+        frames, app_frame, reason = _java_trace(body, "com.example.app")
+        assert (app_frame.symbol, app_frame.line) == ("com.example.app.Session.token", 42)
+        assert reason == "java.lang.IllegalStateException: no token"
+        assert len(frames) == 4
+
+    def test_the_package_line_names_the_app_and_its_versions(self):
+        from server.sources.android_dropbox import device_zone, parse_dropbox
+
+        text = (FIXTURES / "android_dropbox" / "system_app_crash.dropbox").read_text()
+        report = parse_dropbox(text, serial="s", zone=device_zone("America/Los_Angeles", ""))[0]
+        assert (report.bundle_id, report.app_version, report.build_version) == (
+            "com.android.settings", "12", "32")
+
+    def test_a_native_crashs_abort_message_is_its_reason(self):
+        from server.sources.android_dropbox import device_zone, parse_dropbox
+
+        text = (FIXTURES / "android_dropbox" / "system_app_native_crash.dropbox").read_text()
+        text = text.replace(
+            "\nbacktrace:", "\nAbort message: 'Check failed: mutex held'\nbacktrace:", 1)
+        [report] = parse_dropbox(text, serial="s", zone=device_zone("America/Los_Angeles", ""))
+        assert report.reason == "Check failed: mutex held"
+
+    def test_an_anrs_main_thread_is_structured(self):
+        """Both its `at` lines and its `native:` lines -- untested until now."""
+        from server.sources.android_dropbox import device_zone, parse_dropbox
+
+        text = (
+            "========\n2026-09-27 10:00:00 data_app_anr (text, 1 bytes)\n"
+            "Process: com.example.app\nPID: 4242\nPackage: com.example.app v7 (1.0)\n"
+            "Subject: Input dispatching timed out\n\n"
+            "----- pid 4242 at 2026-09-27 10:00:00 -----\n"
+            '"main" prio=5 tid=1 Sleeping\n'
+            "  native: #00 pc 000000000009e498  /apex/com.android.runtime/lib64/bionic/libc.so "
+            "(__epoll_pwait+8) (BuildId: cd79)\n"
+            "  at java.lang.Thread.sleep(Native method)\n"
+            "  at com.example.app.Main.onClick(Main.java:42)\n\n"
+            "----- end 4242 -----\n"
+        )
+        [report] = parse_dropbox(text, serial="s", zone=device_zone("America/Los_Angeles", ""))
+        assert [(f.image or f.symbol) for f in report.frames] == [
+            "libc.so", "java.lang.Thread.sleep", "com.example.app.Main.onClick"]
+        assert (report.app_frame.symbol, report.app_frame.line) == (
+            "com.example.app.Main.onClick", 42)
 
     def test_a_crash_through_the_framework_names_no_app_frame(self):
         from server.sources.android_dropbox import device_zone, parse_dropbox
