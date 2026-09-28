@@ -1383,3 +1383,19 @@ async def test_a_partly_failed_pull_stamps_only_what_it_copied(tmp_crash_dir):
     assert _time.time() - (phone / got).stat().st_mtime < 60
     assert abs((phone / stale).stat().st_mtime - old) < 5        # not copied, not stamped
     await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_clear_waits_for_a_pull_in_progress(tmp_crash_dir):
+    """It deleted files under the pull, which then under-counted what it
+    copied and re-listed what it re-copied."""
+    import asyncio
+
+    adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
+    await adapter.start()
+    async with adapter._scan_lock:                      # a pull holds it
+        task = asyncio.create_task(adapter.clear())
+        await asyncio.sleep(0.05)
+        assert not task.done()
+    await asyncio.wait_for(task, 1)
+    await adapter.stop()
