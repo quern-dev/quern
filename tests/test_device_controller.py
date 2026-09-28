@@ -47,7 +47,7 @@ class TestActiveDeviceName:
         ctrl.devicectl.list_devices = AsyncMock(return_value=[])
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
         ctrl.adb.list_devices = AsyncMock(return_value=[])
-        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={})
+        ctrl.usbmux.get_usb_devices = AsyncMock(return_value=[])
 
         await ctrl.resolve_udid("AAAA-1111")
 
@@ -87,7 +87,7 @@ class TestActiveDeviceName:
         ctrl.devicectl.list_devices = AsyncMock(return_value=[])
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
         ctrl.adb.list_devices = AsyncMock(return_value=[])
-        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={})
+        ctrl.usbmux.get_usb_devices = AsyncMock(return_value=[])
 
         assert await ctrl.resolve_udid() == "AAAA-1111"
 
@@ -1195,6 +1195,32 @@ class TestGetScreenSummaryStrategy:
 # ---------------------------------------------------------------------------
 
 
+def _usb_controller(phones, usb):
+    """phones: {coredevice uuid: (name, hardware udid or None[, transport])};
+    usb: usbmux's (udid, name) list. Aliases are recorded by the fake devicectl
+    pass, as the real one records them from `hardwareProperties.udid`. Both
+    are read at each listing, so a test can change them between listings."""
+    from server.device import devicectl
+
+    ctrl = DeviceController()
+    ctrl.simctl.list_devices = AsyncMock(return_value=[])
+
+    async def list_physical():
+        for core, (_, hw, *_) in phones.items():
+            devicectl._remember_identity(core, hw or "")
+        return [
+            DeviceInfo(udid=core, name=spec[0], state=DeviceState.BOOTED,
+                       device_type=DeviceType.DEVICE, os_version="iOS 26.5",
+                       connection_type=spec[2] if len(spec) > 2 else "")
+            for core, spec in phones.items()
+        ]
+
+    ctrl.devicectl.list_devices = list_physical
+    ctrl.usbmux.list_devices = AsyncMock(return_value=[])
+    ctrl.usbmux.get_usb_devices = AsyncMock(side_effect=lambda: None if usb is None else list(usb))
+    return ctrl
+
+
 class TestUdidMapping:
     async def test_list_devices_populates_mapping(self):
         """list_devices() should correlate devicectl and usbmux names."""
@@ -1212,10 +1238,8 @@ class TestUdidMapping:
             ]
         )
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
-        ctrl.usbmux.get_usb_udid_map = AsyncMock(
-            return_value={
-                "iPhone 11": "00008030-AABBCCDDEEFF",
-            }
+        ctrl.usbmux.get_usb_devices = AsyncMock(
+            return_value=[("00008030-AABBCCDDEEFF", "iPhone 11")]
         )
 
         await ctrl.list_devices()
@@ -1229,7 +1253,7 @@ class TestUdidMapping:
         ctrl.simctl.list_devices = AsyncMock(return_value=[])
         ctrl.devicectl.list_devices = AsyncMock(return_value=[])
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
-        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={})
+        ctrl.usbmux.get_usb_devices = AsyncMock(return_value=[])
 
         result = await ctrl.get_libimobiledevice_udid("CORE-UUID")
         assert result == "00008030-CACHED"
@@ -1252,10 +1276,8 @@ class TestUdidMapping:
             ]
         )
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
-        ctrl.usbmux.get_usb_udid_map = AsyncMock(
-            return_value={
-                "iPhone 15 Pro": "00008030-NEWDEVICE",
-            }
+        ctrl.usbmux.get_usb_devices = AsyncMock(
+            return_value=[("00008030-NEWDEVICE", "iPhone 15 Pro")]
         )
 
         result = await ctrl.get_libimobiledevice_udid("NEW-CORE-UUID")
@@ -1277,10 +1299,150 @@ class TestUdidMapping:
             ]
         )
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
-        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={})
+        ctrl.usbmux.get_usb_devices = AsyncMock(return_value=[])
 
         result = await ctrl.get_libimobiledevice_udid("WIFI-ONLY-UUID")
         assert result is None
+
+    async def test_get_libimobiledevice_udid_accepts_the_hardware_udid(self):
+        """The hardware UDID is what idevice_id, Xcode and Finder show. Passed
+        to a crash pull, it was answered "not connected over USB" for an
+        iPhone 12 that was plugged in. The alias is recorded by the refresh
+        itself, as on a server that has not listed devices yet."""
+        from server.device import devicectl
+
+        ctrl = DeviceController()
+        ctrl.simctl.list_devices = AsyncMock(return_value=[])
+
+        async def list_physical():
+            devicectl._remember_identity("48CF8DD9-CORE-UUID", "00008101-HWUDID")
+            return [DeviceInfo(
+                udid="48CF8DD9-CORE-UUID", name="iPhone 12", state=DeviceState.BOOTED,
+                device_type=DeviceType.DEVICE, os_version="iOS 26.5",
+            )]
+
+        ctrl.devicectl.list_devices = list_physical
+        ctrl.usbmux.list_devices = AsyncMock(return_value=[])
+        ctrl.usbmux.get_usb_devices = AsyncMock(return_value=[("00008101-HWUDID", "iPhone 12")])
+
+        assert await ctrl.get_libimobiledevice_udid("00008101-HWUDID") == "00008101-HWUDID"
+        # And once known, without another refresh.
+        ctrl.simctl.list_devices.reset_mock()
+        assert await ctrl.get_libimobiledevice_udid("00008101-HWUDID") == "00008101-HWUDID"
+        ctrl.simctl.list_devices.assert_not_called()
+
+    async def test_two_phones_with_one_name_each_get_their_own_usb_udid(self):
+        """"iPhone" is the default name, and this Mac has two. Matched by name,
+        one phone could be given the other's UDID, and its crash reports filed
+        under the other -- on disk, once pulls kept a directory per phone. And
+        usbmux keyed by name dropped one of the two before matching began."""
+        from server.device import devicectl
+
+        ctrl = _usb_controller(
+            {"CORE-A": ("iPhone", "00008101-AAAA"), "CORE-B": ("iPhone", "00008101-BBBB")},
+            usb=[("00008101-AAAA", "iPhone"), ("00008101-BBBB", "iPhone")],
+        )
+        await ctrl.list_devices()
+
+        assert ctrl._usbmux_udid_map == {"CORE-A": "00008101-AAAA", "CORE-B": "00008101-BBBB"}
+        assert devicectl.canonical_device_id("00008101-BBBB") == "CORE-B"
+
+    async def test_a_shared_name_is_never_matched_by_name(self):
+        """No hardware UDID for one of two same-named phones: it stays
+        unmatched rather than take the other's."""
+        ctrl = _usb_controller(
+            {"CORE-A": ("iPhone", None), "CORE-B": ("iPhone", "00008101-BBBB")},
+            usb=[("00008101-BBBB", "iPhone")],
+        )
+        await ctrl.list_devices()
+
+        assert ctrl._usbmux_udid_map == {"CORE-B": "00008101-BBBB"}
+
+    async def test_two_phones_sharing_a_name_and_no_udid_are_left_unmatched(self):
+        """Neither can be told apart by name, so neither gets the one USB
+        device of that name -- not whichever happens to be listed first."""
+        ctrl = _usb_controller(
+            {"CORE-A": ("iPhone", None), "CORE-B": ("iPhone", None)},
+            usb=[("00008101-XXXX", "iPhone")],
+        )
+        await ctrl.list_devices()
+
+        assert ctrl._usbmux_udid_map == {}
+
+    async def test_a_name_usbmux_lists_twice_is_never_matched_by_name(self):
+        ctrl = _usb_controller(
+            {"CORE-A": ("iPhone", None)},
+            usb=[("00008101-XXXX", "iPhone"), ("00008101-YYYY", "iPhone")],
+        )
+        await ctrl.list_devices()
+
+        assert ctrl._usbmux_udid_map == {}
+
+    async def test_a_wired_phone_matches_when_usbmux_cannot_be_asked(self):
+        """devicectl says the transport is wired, and its hardware UDID is the
+        USB UDID. With pymobiledevice3 missing, usbmux answers nothing, and
+        every phone used to read "not connected over USB"."""
+        ctrl = _usb_controller({"CORE-A": ("iPhone 12", "00008101-AAAA", "usb")}, usb=None)
+        await ctrl.list_devices()
+
+        assert ctrl._usbmux_udid_map == {"CORE-A": "00008101-AAAA"}
+
+    async def test_usbmux_answering_without_the_phone_wins_over_wired(self):
+        """usbmux answered, and the phone is not on its list: a pull against
+        that UDID would fail, so devicectl's "wired" does not overrule it
+        (CodeRabbit on #324)."""
+        ctrl = _usb_controller({"CORE-A": ("iPhone 12", "00008101-AAAA", "usb")}, usb=[])
+        await ctrl.list_devices()
+
+        assert ctrl._usbmux_udid_map == {}
+
+    async def test_an_unplugged_phone_loses_its_usb_mapping(self):
+        """It kept it, and a phone now on Wi-Fi was pulled over a USB
+        connection that no longer existed."""
+        phones = {"CORE-A": ("iPhone 12", "00008101-AAAA", "usb")}
+        usb = [("00008101-AAAA", "iPhone 12")]
+        ctrl = _usb_controller(phones, usb)
+        await ctrl.list_devices()
+        assert ctrl._usbmux_udid_map == {"CORE-A": "00008101-AAAA"}
+
+        phones["CORE-A"] = ("iPhone 12", "00008101-AAAA", "localNetwork")
+        usb.clear()
+        await ctrl.list_devices()
+
+        assert ctrl._usbmux_udid_map == {}
+
+    async def test_a_phone_missing_from_a_listing_keeps_its_mapping(self):
+        """A failed or partial devicectl listing is not evidence it moved."""
+        phones = {"CORE-A": ("iPhone 12", "00008101-AAAA", "usb")}
+        ctrl = _usb_controller(phones, usb=[("00008101-AAAA", "iPhone 12")])
+        await ctrl.list_devices()
+        phones.clear()
+
+        await ctrl.list_devices()
+
+        assert ctrl._usbmux_udid_map == {"CORE-A": "00008101-AAAA"}
+
+    async def test_the_name_fallback_never_takes_a_udid_another_phone_matched(self):
+        """usbmux and devicectl can name one phone differently; the fallback
+        must not hand a phone the UDID another already matched exactly."""
+        ctrl = _usb_controller(
+            {"CORE-A": ("Phone A", "00008101-AAAA"), "CORE-B": ("iPhone", None)},
+            usb=[("00008101-AAAA", "iPhone")],
+        )
+        await ctrl.list_devices()
+
+        assert ctrl._usbmux_udid_map == {"CORE-A": "00008101-AAAA"}
+
+    async def test_a_phone_with_a_udid_not_on_usb_is_not_matched_by_name(self):
+        """Its hardware UDID is not on usbmux's list, so it is not on USB --
+        whatever else on USB happens to share its name."""
+        ctrl = _usb_controller(
+            {"CORE-WIFI": ("iPad", "00008027-WIFI")},
+            usb=[("00008027-OTHER", "iPad")],
+        )
+        await ctrl.list_devices()
+
+        assert ctrl._usbmux_udid_map == {}
 
     async def test_get_libimobiledevice_udid_pre_ios17_passthrough(self):
         """Pre-iOS 17 devices already use libimobiledevice UDIDs — return as-is."""
@@ -1291,7 +1453,7 @@ class TestUdidMapping:
         ctrl.simctl.list_devices = AsyncMock(return_value=[])
         ctrl.devicectl.list_devices = AsyncMock(return_value=[])
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
-        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={})
+        ctrl.usbmux.get_usb_devices = AsyncMock(return_value=[])
 
         result = await ctrl.get_libimobiledevice_udid(usbmux_udid)
         assert result == usbmux_udid
@@ -1426,7 +1588,7 @@ class TestAndroidListDevicesMerge:
         )
         ctrl.devicectl.list_devices = AsyncMock(return_value=[])
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
-        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={})
+        ctrl.usbmux.get_usb_devices = AsyncMock(return_value=[])
         ctrl.adb.list_devices = AsyncMock(
             return_value=[
                 _android_device(udid="emulator-5554"),
@@ -2020,7 +2182,7 @@ class TestAMissingToolIsNotAnError:
                 else AsyncMock(return_value=[])
             )
             getattr(ctrl, name).list_devices = mock
-        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={})
+        ctrl.usbmux.get_usb_devices = AsyncMock(return_value=[])
         return ctrl
 
     @pytest.mark.parametrize("absent", ["simctl", "devicectl", "usbmux", "adb"])

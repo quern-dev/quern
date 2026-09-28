@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import Counter
 
 from server import logging_ext
 from server.device.adb import AdbBackend
 from server.device.controller_ui import DeviceControllerUI
-from server.device.devicectl import DevicectlBackend, canonical_device_id
+from server.device.devicectl import DevicectlBackend, canonical_device_id, spellings_of
 from server.device.idb import IdbBackend
 from server.device.pmd3 import Pmd3Backend
 from server.device.screenshots import process_screenshot
@@ -686,12 +687,57 @@ class DeviceController(DeviceControllerUI):
             if d.name:
                 self._device_name_cache[d.udid] = d.name
 
-        # Build CoreDevice UUID -> libimobiledevice UDID mapping
-        # by correlating device names between devicectl and usbmux
-        usb_name_map = await self.usbmux.get_usb_udid_map()
+        # Build CoreDevice UUID -> libimobiledevice UDID mapping. Exactly,
+        # through the identity aliases devicectl records: its hardware UDID
+        # *is* the USB UDID, so a phone is on USB when usbmux lists one of its
+        # spellings. When usbmux could not be asked at all (pymobiledevice3
+        # missing or timing out), devicectl's own "wired" transport stands in
+        # -- every phone used to read "not on USB" then. Only then: when usbmux
+        # answered without the phone, that answer wins, or a pull would go
+        # ahead against a UDID usbmux does not have.
+        # It used to correlate names, and two phones sharing one ("iPhone" is
+        # the default) could map to each other's UDID -- so a crash pull filed
+        # one phone's reports under the other, on disk once pulls kept a
+        # directory per phone.
+        #
+        # By name only as a fallback, for a phone devicectl listed without a
+        # hardware UDID, with its name unique on both sides and a UDID no other
+        # phone matched. Every paired device measured under Xcode 26.5 reports
+        # one; Xcode 27 is not yet measured, the only reason this remains (#323).
+        #
+        # A listed phone that matches nothing now loses its old mapping: one
+        # unplugged since, and now on Wi-Fi, kept it and was pulled over a USB
+        # connection that no longer existed. A phone absent from this listing
+        # keeps it, since a failed devicectl call is not evidence of anything.
+        usb_answer = await self.usbmux.get_usb_devices() if physical_devices else []
+        usbmux_failed = usb_answer is None
+        usb_devices = usb_answer or []
+        usb_udids = {udid for udid, _ in usb_devices}
+        usb_names = Counter(name for _, name in usb_devices if name)
+        name_counts = Counter(d.name for d in physical_devices)
+        hardware = {d.udid: [s for s in spellings_of(d.udid) if s != d.udid]
+                    for d in physical_devices}
+        matched: dict[str, str] = {}
         for d in physical_devices:
-            if d.name in usb_name_map:
-                self._usbmux_udid_map[d.udid] = usb_name_map[d.name]
+            exact = next((s for s in hardware[d.udid] if s in usb_udids), None)
+            if (exact is None and usbmux_failed and d.connection_type == "usb"
+                    and len(hardware[d.udid]) == 1):
+                exact = hardware[d.udid][0]
+            if exact:
+                matched[d.udid] = exact
+        taken = set(matched.values())
+        for d in physical_devices:
+            if (d.udid in matched or hardware[d.udid] or name_counts[d.name] != 1
+                    or usb_names[d.name] != 1):
+                continue
+            by_name = next(u for u, n in usb_devices if n == d.name)
+            if by_name not in taken:
+                matched[d.udid] = by_name
+        for d in physical_devices:
+            if d.udid in matched:
+                self._usbmux_udid_map[d.udid] = matched[d.udid]
+            else:
+                self._usbmux_udid_map.pop(d.udid, None)
 
         return sim_devices + physical_devices + usbmux_devices + android_devices
 
@@ -703,9 +749,15 @@ class DeviceController(DeviceControllerUI):
 
         Returns None if the device is not USB-connected (e.g. network-only).
         Refreshes the mapping if the UDID isn't found on first lookup.
+
+        Any spelling of the device is accepted. The map is keyed by CoreDevice
+        UUID, and a caller holding the hardware UDID -- the one `idevice_id`,
+        Xcode and Finder show -- was told a phone plugged in over USB was not
+        connected. The alias is re-read after the refresh, because the refresh
+        is what records it on a server that has not listed devices yet.
         """
         # Check the CoreDevice -> libimobiledevice mapping
-        udid = self._usbmux_udid_map.get(coredevice_udid)
+        udid = self._usbmux_udid_map.get(canonical_device_id(coredevice_udid))
         if udid is not None:
             return udid
 
@@ -722,7 +774,7 @@ class DeviceController(DeviceControllerUI):
         # Refresh and try again
         await self.list_devices()
 
-        udid = self._usbmux_udid_map.get(coredevice_udid)
+        udid = self._usbmux_udid_map.get(canonical_device_id(coredevice_udid))
         if udid is not None:
             return udid
 

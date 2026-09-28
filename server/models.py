@@ -312,6 +312,18 @@ class CrashReport(BaseModel):
     #: is attributed on time with a caveat. Wrong-and-silent vs honest.
     device_id: str = ""
     process: str = Field(default="", description="Crashed process name")
+    pid: int | None = Field(
+        default=None, description="Crashed process ID, where the report gives it",
+    )
+    kind: str = Field(
+        default="crash",
+        description=(
+            "What failed: 'crash' (an iOS crash, or an Android Java crash), "
+            "'native_crash' (an Android native crash), or 'anr' (an Android app "
+            "that stopped responding -- not a crash strictly, but the app dying "
+            "from the user's point of view)."
+        ),
+    )
     exception_type: str = Field(default="", description="e.g. EXC_BAD_ACCESS")
     exception_codes: str = Field(default="", description="e.g. KERN_INVALID_ADDRESS at 0x0")
     signal: str = Field(default="", description="e.g. SIGSEGV")
@@ -323,11 +335,59 @@ class CrashReport(BaseModel):
     raw_text: str = Field(default="", description="First portion of raw crash content")
 
 
+class OpenCrashDialog(BaseModel):
+    process: str
+    kind: Literal["crash", "anr"]
+
+
+class CrashPullStatus(BaseModel):
+    """What happened when `get_latest_crash` was asked to pull from a device.
+
+    Said on the response because a pull that could not be made used to look
+    exactly like one that found nothing: the iOS pull returned an empty list
+    for a missing tool, a timeout or a phone on Wi-Fi only, and Android had no
+    pull at all (#316).
+    """
+
+    udid: str
+    platform: Literal["ios", "android"] | None = Field(
+        default=None, description="Which pull was used; null if none could be chosen.",
+    )
+    status: Literal["pulled", "skipped", "failed"] = Field(
+        description=(
+            "'pulled': the device was asked and answered (it may have had "
+            "nothing new). 'skipped': it could not be asked, for the stated "
+            "reason. 'failed': it was asked and the pull went wrong. Only "
+            "'pulled' means the crash list reflects the device."
+        ),
+    )
+    new_reports: int = Field(default=0, description="Reports this pull added.")
+    reason: str | None = Field(default=None, description="Why it was skipped or failed.")
+    open_dialogs: list[OpenCrashDialog] | None = Field(
+        default=None,
+        description=(
+            "Android only: processes showing a crash ('keeps stopping') dialog "
+            "right now (kind 'crash'), or that Android is treating as not "
+            "responding (kind 'anr') -- from the moment it notices, about 13s "
+            "before the ANR dialog and its report appear (measured, API 32), "
+            "until the dialog is answered. While a crash dialog is open, Android drops "
+            "every further crash of that process -- no report, no log line -- "
+            "so 'no new reports' does not mean it stopped crashing; dismiss "
+            "the dialog or force-stop the app. [] means none; null means it "
+            "was not checked (iOS, or a pull that could not run at all) or could "
+            "not be read. A pull that failed on some DropBox tags still checks."
+        ),
+    )
+
+
 class CrashLatestResponse(BaseModel):
     """Response from GET /api/v1/crashes/latest."""
 
     crashes: list[CrashReport]
     total: int
+    #: Present when a `udid` was given: whether its crashes were actually
+    #: fetched, and if not, why. Null when no pull was asked for.
+    pull: CrashPullStatus | None = None
 
 
 # ---------------------------------------------------------------------------

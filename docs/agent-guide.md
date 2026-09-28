@@ -285,7 +285,7 @@ When the question is "what screen am I on right now?" — for verifying navigati
 
 **Crash discovery**: Simulator crash reports are automatically picked up from `~/Library/Logs/DiagnosticReports/` (enabled by default). The macOS crash dialog can be disabled via `quern setup` or manually with `defaults write com.apple.CrashReporter DialogType none` — crash reports are still written to disk.
 
-**Crash hooks**: Use `--on-crash '<command>'` to run a shell command whenever a crash is detected. The full `CrashReport` JSON is piped to the command's stdin. The hook runs in the background with a 60-second timeout and never blocks the server. Example:
+**Crash hooks**: Use `--on-crash '<command>'` to run a shell command whenever a crash is detected: an iOS crash report, or an Android crash found by `get_latest_crash` (once per crash, even when logcat already logged it). Crashes from before the server started, such as a phone's older reports or DropBox history, are listed but do not run the hook. The full `CrashReport` JSON is piped to the command's stdin. The hook runs in the background with a 60-second timeout and never blocks the server. Example:
 
 ```bash
 quern start --on-crash 'cat > /tmp/last_crash.json'

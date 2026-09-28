@@ -37,7 +37,7 @@ The key lives at `~/.quern/api-key`; the server's URL and port are in `~/.quern/
 | `get_errors` | GET | `/api/v1/logs/errors` | Errors and crashes only |
 | `get_build_result` | GET | `/api/v1/builds/latest` | Most recent build result |
 | `parse_build_output` | POST | `/api/v1/builds/parse-file` | Parse a build log file from disk |
-| `get_latest_crash` | GET | `/api/v1/crashes/latest` | Recent parsed crash reports |
+| `get_latest_crash` | GET | `/api/v1/crashes/latest` | Recent parsed crash reports; with `udid`, fetched from an iPhone (USB) or an Android device first |
 | `set_log_filter` | POST | `/api/v1/logs/filter` | Reconfigure capture filters |
 | `get_log_filter` | GET | `/api/v1/logs/filter` | Current ingestion filter config at all scopes (global, per-source, per-device) |
 | `list_log_sources` | GET | `/api/v1/logs/sources` | Active log source adapters, and what each log buffer holds and has evicted |
@@ -76,10 +76,10 @@ notices do not overlap. Backfill it with `query_logs` on the log stream and
 filter are counted. Every heartbeat also carries `total_dropped`.
 
 Crash reports have a buffer of their own, so a busy source cannot evict them.
-On Android, where a crash exists only as logcat lines, the logcat adapter emits
-a crash entry for each Java crash, native crash and ANR. Find them with
-`query_logs` (`source=crash`) or `get_errors`. `get_latest_crash` reads iOS
-crash reports only.
+On Android, while capture is running, the logcat adapter emits a crash entry for
+each Java crash, native crash and ANR as it happens. Find them with `query_logs`
+(`source=crash`) or `get_errors`. `get_latest_crash` reads Android crash reports
+too; see below.
 
 **Summary cursors follow arrival order.** `get_log_summary` and
 `get_flow_summary` return a `cursor`; pass it back as `since_cursor` to get only
@@ -91,6 +91,41 @@ or one ahead of anything the server has numbered, comes back with
 `cursor_reset: true`, and the summary then covers the requested window. On the
 flow summary, a string that is not a cursor at all is refused with 400. Older timestamp cursors are still accepted, and the response always
 returns an arrival cursor.
+
+**Crash reports on both platforms.** `get_latest_crash` with a `udid` fetches
+that device's crashes first. An iPhone is read over USB with
+`idevicecrashreport`. An Android device or emulator is read from its DropBox,
+which needs no root, and yields Java crashes, native crashes and ANRs; each
+report's `kind` says which. The response's `pull` says whether the fetch
+happened: `pulled`, `skipped` (with the reason, for example an iPhone that is not
+on USB) or `failed` (with the error). Only `pulled` means the list reflects the
+device. A `failed` Android pull can still add the reports it did read, for
+example when one DropBox tag could not be read, or when the device's timezone
+could not be read and records without a time of their own were skipped. A
+simulator is `skipped`: its crash reports are written on the Mac and read from
+`~/Library/Logs/DiagnosticReports` continuously, unless the server was started
+with `--no-simulator-crashes`, which the reason then says. With a `udid`, the
+list is that device's crashes, plus reports that name no device, such as a
+simulator's crash file, which does not say which simulator.
+
+Crash reports are left on the iPhone (`idevicecrashreport -k`), so a pull does
+not take them away from Xcode or Finder. Each phone's reports are kept in
+`~/.quern/crashes/devices/<device id>/`, so after a restart they are listed
+against the right phone again, as an Android device's DropBox history is. A crash from before the server started,
+on either platform, is listed but does not become a new log entry or run the
+on-crash hook.
+The hook runs for every newer crash, including one logcat already reported.
+
+On Android, `pull.open_dialogs` lists processes showing a crash ("keeps
+stopping") dialog right now (`kind: "crash"`), and processes Android is treating
+as not responding (`kind: "anr"`). The second starts when Android notices, about
+13 seconds before the ANR dialog and its report appear (measured on API 32), and
+lasts until the dialog is answered. While a crash dialog is open, Android drops
+every further crash of that process, with no report and no log line, so no new
+reports does not mean it stopped crashing. Dismiss the dialog or force-stop the
+app. `[]` means none; `null` means it was not checked (iOS, or a pull that could
+not run at all) or the process listing could not be read. A pull that is `failed`
+only because some DropBox tags could not be read still reports it.
 
 ### Network proxy
 
