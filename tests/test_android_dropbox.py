@@ -358,6 +358,24 @@ class TestPull:
             await self._pull(monkeypatch, proc)
         assert proc.killed and proc.waited      # killed, and reaped
 
+    async def test_the_parse_runs_off_the_event_loop(self, monkeypatch):
+        """Up to 1,000 records; parsing them must not hold the loop."""
+        import threading
+
+        from server.sources import android_dropbox
+
+        seen = []
+        real = android_dropbox._parse_pull
+
+        def spy(*args):
+            seen.append(threading.get_ident())
+            return real(*args)
+
+        monkeypatch.setattr(android_dropbox, "_parse_pull", spy)
+        await self._pull(monkeypatch, _FakeProc(out=_device_output()))
+
+        assert seen and seen[0] != threading.get_ident()
+
     async def test_a_cancelled_pull_does_not_leave_adb_running(self, monkeypatch):
         proc = _FakeProc(hang=True)
         proc.returncode = None
