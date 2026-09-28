@@ -301,6 +301,39 @@ class LogErrorsResponse(Completeness):
 # ---------------------------------------------------------------------------
 
 
+class CrashFrame(BaseModel):
+    """One frame of the crashing thread, as structured as the report allows."""
+
+    image: str = Field(
+        default="", description="The binary: 'MyApp.debug.dylib', 'UIKitCore', 'libc.so'",
+    )
+    offset: int | None = Field(
+        default=None,
+        description="Offset into the image (iOS imageOffset; Android pc). With the image's "
+                    "load address, what a symbolicator needs.",
+    )
+    symbol: str = Field(default="", description="Function, where the report names it")
+    symbol_offset: int | None = Field(default=None, description="Bytes into `symbol`")
+    file: str = Field(default="", description="Source file, where the report has it")
+    line: int | None = Field(default=None, description="Source line, where the report has it")
+    app: bool = Field(default=False, description="In the app's own code, not the OS's")
+    build_id: str = Field(
+        default="",
+        description="Android native: the library's BuildId. With `image`, which of `images` "
+                    "this is: two libraries can share a name.",
+    )
+
+
+class CrashImage(BaseModel):
+    """A binary a crash frame points into: what symbolicating it needs."""
+
+    name: str
+    uuid: str = ""
+    base: int | None = Field(default=None, description="Load address")
+    path: str = ""
+    arch: str = ""
+
+
 class CrashReport(BaseModel):
     """A parsed crash report."""
 
@@ -332,7 +365,61 @@ class CrashReport(BaseModel):
         description="Top stack frames from crashing thread",
     )
     file_path: str = Field(default="", description="Path to the raw crash file on disk")
-    raw_text: str = Field(default="", description="First portion of raw crash content")
+    raw_text: str = Field(
+        default="",
+        description=(
+            "First portion of raw crash content. In get_latest_crash only with include_raw."
+        ),
+    )
+    app_frame: CrashFrame | None = Field(
+        default=None,
+        description=(
+            "Where in the app's own code it happened: the first app frame of the "
+            "exception's backtrace or the crashing thread, not counting a crash "
+            "reporter's signal handler or the app's entry point. None when the "
+            "crash never reached the app's code, or when another process ended the "
+            "app (see killed_by)."
+        ),
+    )
+    reason: str = Field(
+        default="",
+        description=(
+            "The report's own words for why: iOS's application-specific information "
+            "(an uncaught exception's reason), Android's abort message or root "
+            "cause. A Swift fatalError's message is in the app's log, not here."
+        ),
+    )
+    killed_by: str = Field(
+        default="",
+        description=(
+            "The process that sent the signal that ended the app, when it was not "
+            "the app itself (a kill from a shell, or devicectl). Its frames then say "
+            "where it was waiting, not what went wrong, and app_frame is null. A "
+            "watchdog or memory termination is not counted: its frames are where it "
+            "hung, and its explanation is in reason. .ips reports only."
+        ),
+    )
+    frames_from: str = Field(
+        default="",
+        description=(
+            "What `frames` is: 'exception' (an uncaught exception's backtrace; a Java "
+            "crash's trace and its causes), 'crashing_thread', or 'main_thread' (an ANR)"
+        ),
+    )
+    frames: list[CrashFrame] = Field(
+        default_factory=list,
+        description="The frames, innermost first. In get_latest_crash only with detail=true.",
+    )
+    images: list[CrashImage] = Field(
+        default_factory=list,
+        description=(
+            "The binaries those frames point into: UUID (Android: BuildId) and load "
+            "address (iOS). In get_latest_crash only with detail=true."
+        ),
+    )
+    bundle_id: str = ""
+    app_version: str = ""
+    build_version: str = ""
 
 
 class OpenCrashDialog(BaseModel):

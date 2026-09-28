@@ -30,11 +30,14 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
+from typing import TypeVar
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from server.models import CrashReport
+from server.models import CrashFrame, CrashImage, CrashReport
+from server.sources import crash_frames
 
 #: Every app crash, native crash and ANR, for both regular and system apps.
 #: SYSTEM_TOMBSTONE is left out: it is the same native crash again, written by
@@ -142,25 +145,40 @@ def _parse_record(
     process = fields.get("Process", "")
     pid = fields.get("PID", "")
 
-    exception_type = exception_codes = signal = ""
+    exception_type = exception_codes = signal = reason = ""
     frames: list[str] = []
+    structured: list[CrashFrame] = []
+    native: list[tuple[CrashFrame, str]] = []      # native crashes' frames, with paths
+    app_frame: CrashFrame | None = None
+    package, app_version, build_version = _package(fields.get("Package", ""))
     if kind == "crash":
         m = _JAVA_EXCEPTION.search(body)
         if m:
             exception_type, exception_codes = m.group(1), m.group(2) or ""
         frames = _JAVA_FRAME.findall(body)
+        structured, app_frame, reason = _java_trace(body, package)
     elif kind == "native_crash":
         m = _SIGNAL.search(body)
         if m:
             signal = m.group(2)
             exception_type = f"signal {m.group(1)} ({m.group(2)})"
             exception_codes = m.group(3)
-        frames = _NATIVE_FRAME.findall(body)
+        # The crashing thread's backtrace only: the tombstone goes on to
+        # every other thread's, and reading the whole body mixed them in.
+        frames = _NATIVE_FRAME.findall(_crashing_backtrace(body))
+        native = _safe(_native_frames, frames)
+        structured = [frame for frame, _ in native]
+        app_frame = crash_frames.first_app_frame(structured)     # from the whole stack
+        abort = _ABORT_MESSAGE.search(body)
+        reason = abort.group(1) if abort else ""
     else:  # anr
         exception_type = "ANR"
         m = _SUBJECT.search(body)
         exception_codes = m.group(1) if m else ""
-        frames = _main_thread_frames(body, pid)
+        lines = _main_thread_frames(body, pid)
+        frames = [line.removeprefix("at ") for line in lines]
+        structured = _anr_frames(lines, package)
+        app_frame = crash_frames.first_app_frame(structured)
 
     # Derived from the record, so a crash seen by two pulls is one report.
     # From the UTC time, not the header's: DropBox prints the header in the
@@ -180,6 +198,14 @@ def _parse_record(
         exception_codes=exception_codes,
         signal=signal,
         top_frames=[f.strip() for f in frames[:TOP_FRAMES]],
+        frames=structured[:crash_frames.MAX_FRAMES],
+        images=_native_images(native, app_frame),
+        frames_from=_FRAMES_FROM[kind] if structured else "",
+        app_frame=app_frame,
+        reason=reason,
+        bundle_id=package,
+        app_version=app_version,
+        build_version=build_version,
         file_path=f"dropbox:{tag}@{local_time}",
         raw_text=block[:RAW_LIMIT],
     )
@@ -207,6 +233,114 @@ def _timestamp(
         return None
     naive = datetime.strptime(local_time, "%Y-%m-%d %H:%M:%S")
     return naive.replace(tzinfo=zone).astimezone(UTC)
+
+
+def _crashing_backtrace(body: str) -> str:
+    """The `backtrace:` block of the crashing thread, which a tombstone lists
+    first; the whole body when there is none."""
+    start = body.find("\nbacktrace:")
+    if start == -1:
+        return body
+    block = body[start + len("\nbacktrace:"):]
+    end = block.find("\n\n")
+    return block if end == -1 else block[:end]
+
+
+def _native_frames(lines: list[str]) -> list[tuple[CrashFrame, str]]:
+    return [parsed for parsed in map(crash_frames.native_frame, lines) if parsed]
+
+
+def _native_images(native: list[tuple[CrashFrame, str]],
+                   app_frame: CrashFrame | None) -> list[CrashImage]:
+    """The libraries the returned frames point into, with their BuildIds, and
+    the app frame's, which may lie past the cap.
+
+    One per path, not per name: an app's own `libcrypto.so` and the system's
+    share a name, and keying by it kept only the first. A frame's `image` and
+    `build_id` together say which of them it is."""
+    wanted = {path for _, path in native[:crash_frames.MAX_FRAMES]}
+    wanted |= {path for frame, path in native if frame is app_frame}
+    images: dict[str, CrashImage] = {}
+    for frame, path in native:
+        if path and path in wanted and path not in images:
+            images[path] = CrashImage(name=frame.image, uuid=frame.build_id, path=path)
+    return list(images.values())
+
+
+_PACKAGE = re.compile(r"^(\S+)(?: v(\d+))?(?: \((.+)\))?")
+_ABORT_MESSAGE = re.compile(r"^Abort message: '(.*)'\s*$", re.M)
+_CAUSED_BY = re.compile(r"^Caused by: (.+)$", re.M)
+
+
+def _package(value: str) -> tuple[str, str, str]:
+    """`com.example.app v32 (1.2.3)` -> package, version name, version code."""
+    m = _PACKAGE.match(value.strip())
+    if not m:
+        return "", "", ""
+    return m.group(1), m.group(3) or "", m.group(2) or ""
+
+
+def _java_trace(body: str, package: str) -> tuple[list[CrashFrame], CrashFrame | None, str]:
+    """The frames of a Java trace, where in the app it began, and its root cause.
+
+    The frames are the outer exception's followed by each `Caused by`. Where it
+    began is the first app frame of the innermost cause that reaches the app's
+    code: the outer exception is often only a wrapper rethrowing it. The root
+    cause's message is the reason.
+    """
+    blocks: list[list[str]] = [[]]
+    for line in body.splitlines():
+        if line.startswith("Caused by: "):
+            blocks.append([])
+        elif _JAVA_FRAME.match(line):
+            blocks[-1].append(line)
+    # Decided over the whole trace, so every block agrees on which package is
+    # the app's; then split back into blocks to find the innermost cause.
+    lines = [line for block in blocks for line in block]
+    frames = _safe(crash_frames.java_frames, lines, package)
+    parsed, i = [], 0
+    for block in blocks:
+        parsed.append(frames[i:i + len(block)])
+        i += len(block)
+    app_frame = next((a for a in (crash_frames.first_app_frame(b) for b in reversed(parsed))
+                      if a is not None), None)
+    causes = _CAUSED_BY.findall(body)
+    # The root cause; a trace with no cause is its own.
+    first = _JAVA_EXCEPTION.search(body)
+    reason = causes[-1].strip() if causes else (first.group(0).strip() if first else "")
+    return frames, app_frame, reason
+
+
+#: What `frames` is, per kind of record.
+_FRAMES_FROM = {"crash": "exception", "native_crash": "crashing_thread", "anr": "main_thread"}
+
+
+def _anr_frames(lines: list[str], package: str) -> list[CrashFrame]:
+    """The ANR'd main thread, `at` and `native:` lines in order, with the Java
+    frames' app flags decided over all of them together."""
+    java = _safe(crash_frames.java_frames, [ln for ln in lines if ln.startswith("at ")], package)
+    java_iter = iter(java)
+    frames: list[CrashFrame] = []
+    for line in lines:
+        if line.startswith("at "):
+            frame = next(java_iter, None)
+            if frame is not None:
+                frames.append(frame)
+        else:
+            frames += _safe(crash_frames.native_frames, [line.removeprefix("native: ")])
+    return frames
+
+
+_T = TypeVar("_T")
+
+
+def _safe(parse: Callable[..., list[_T]], lines: list[str], *args: str) -> list[_T]:
+    """A parse of frames that cannot fail the pull: a record with frames it
+    cannot read is still a crash, just without them."""
+    try:
+        return parse(lines, *args)
+    except (TypeError, ValueError, AttributeError):
+        return []
 
 
 def _main_thread_frames(body: str, pid: str) -> list[str]:
@@ -240,7 +374,7 @@ def _main_thread_frames(body: str, pid: str) -> list[str]:
             break
         stripped = line.strip()
         if stripped.startswith(("at ", "native:")):
-            frames.append(stripped.removeprefix("at "))
+            frames.append(stripped)
     return frames
 
 

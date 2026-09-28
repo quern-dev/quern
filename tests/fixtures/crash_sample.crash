@@ -29,4 +29,4 @@ Thread 1:
 0   libsystem_kernel.dylib      0x00000001ff000000 __workq_kernreturn + 8
 
 Binary Images:
-0x100000000 -        0x100ffffff MyApp arm64  <AABB1122334455667788990011223344> /private/var/.../MyApp
+0x100000000 -        0x100ffffff MyApp arm64  <AABB1122334455667788990011223344> /private/var/containers/Bundle/Application/.../MyApp.app/MyApp

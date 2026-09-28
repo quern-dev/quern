@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Crash reports say where in the app it crashed, and why (#326).** The `.ips` parser kept only the bare symbol of the first five frames. It threw away the source file and line macOS had resolved for a simulator build, the image and offset of each frame, and every binary's UUID and load address. Each report now carries:
+  - `app_frame`: where in the app's own code it happened. It is taken from an uncaught exception's backtrace (`lastExceptionBacktrace`) when there is one, and otherwise from the crashing thread, skipping a crash reporter's signal handler and the app's entry point. On a real Swift `fatalError` in an app's Debug build it named the closure at the `fatalError` line, with file and line.
+  - `reason`: the report's own explanation (`asi` on iOS, the abort message or root cause on Android).
+  - `killed_by`: the process that ended the app, when it was not the app itself. A signal sent from a shell had been reported as a crash in the app's entry point. It is decided by pid, because the name is truncated to 32 characters, and only for a signal: a watchdog keeps its frames, and its explanation goes in `reason`.
+  - `bundle_id`, `app_version` and `build_version`, now also on Android, from the record's package line.
+  - `frames` and `images`, with `detail=true`. `raw_text` needs `include_raw=true`: it was about a thousand tokens of JSON per crash, and the full frames and images are several kilobytes more.
+
+  Other changes:
+  - **Simulator crashes:** each carries its simulator's UDID, so an iPhone's list no longer includes the simulator's crashes.
+  - **Text reports:** `.crash` reports keep each frame's image, including names with spaces, and read the Binary Images section.
+  - **Android frames:** native frames come from the crashing thread only, with library, offset, symbol and BuildId. Java frames tell app code from library code by the app's package.
+  - **Unreadable fields:** a frame or header field quern cannot read now costs that field, not the whole report.
 - **iPhone crash pulls reach back 3 days by default, and say what they left behind; crash reports can be cleared (#322).** Since #316 an iPhone pull left reports on the phone, so every pull re-copied the phone's whole history within a 30-second timeout. On a busy phone that could time out before the newest crash, and the copy order is not chronological. The pull now uses `pymobiledevice3`, run from quern's own environment: it lists the phone's reports without copying them (0.63s measured), keeps those dated within the window by the capture time in their names, and pulls only those (0.54s for one). `days` widens the window. The response reports what stayed on the phone, `older_on_device` and `oldest_on_device`, with a `note` saying how to include or remove them, so a partial sync never reads as a full one. `clear_crashes` deletes quern's stored copies on the Mac, for one device or all, and only the files its own pulls wrote. A report read again afterwards is listed again but not logged as a new crash, and an unknown device is a 404. Pulled reports not copied for 30 days are removed automatically; set `crash_retention_days` in `config.json`, or 0 to keep them. `clear_device_crashes` permanently deletes an iPhone's own crash reports, each by name, as an explicit action that is never a side effect of reading. `pymobiledevice3 crash clear` is not used, because it also removes DiagnosticLogs and its sysdiagnose archives. A phone matched to USB only by name is refused. Android is refused with the reason, because an unrooted device's DropBox can only be read.
 
 ### Fixed
