@@ -40,7 +40,12 @@ PUBLIC_PATHS = frozenset({
     "/docs",
     "/redoc",
     "/openapi.json",
-    "/video-test",
+    # `/video-test` was here until 0.22.0 removed the route (#283). It was a
+    # browser harness for MJPEG streaming, it was public, and it interpolated
+    # the live API key into its JavaScript -- so one unauthenticated GET from
+    # anywhere on the network returned the credential for every other endpoint.
+    # The suite caught its removal as a failure, which is the suite working:
+    # the list is the contract, and the contract changed.
     "/api/v1/proxy/cert",
 })
 
