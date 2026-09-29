@@ -264,13 +264,13 @@ class IdbBackend:
         # raw `idb ui describe-all`, and the shipped detector fires on idb's
         # own output unchanged (measured, #337). Until now only sim-bridge
         # healed it, so an Xcode < 26 or Intel machine had it unhandled.
-        if await ax_recovery.should_retry(udid, flat, _recovered):
-            return await self.describe_all(
+        return await ax_recovery.reread_after_recovery(
+            udid, flat,
+            lambda: self.describe_all(
                 udid, snapshot_depth=snapshot_depth,
                 source_timeout=source_timeout, probe=probe, _recovered=True,
-            )
-
-        return flat
+            ),
+        ) if not _recovered else flat
 
     async def describe_all_nested(
         self, udid: str, *, snapshot_depth: int | None = None,
@@ -301,11 +301,12 @@ class IdbBackend:
                 f"Expected JSON array from describe-all, got {type(data).__name__}",
                 tool="idb",
             )
-        if await ax_recovery.should_retry(udid, data, _recovered):
-            return await self.describe_all_nested(
+        return await ax_recovery.reread_after_recovery(
+            udid, data,
+            lambda: self.describe_all_nested(
                 udid, snapshot_depth=snapshot_depth, _recovered=True,
-            )
-        return data
+            ),
+        ) if not _recovered else data
 
     async def describe_all_flat(
         self, udid: str, *,
@@ -373,13 +374,13 @@ class IdbBackend:
             f"raw={len(data)}, deduped={len(flat)}"
         )
 
-        if await ax_recovery.should_retry(udid, flat, _recovered):
-            return await self.describe_all_flat(
+        return await ax_recovery.reread_after_recovery(
+            udid, flat,
+            lambda: self.describe_all_flat(
                 udid, snapshot_depth=snapshot_depth,
                 source_timeout=source_timeout, _recovered=True,
-            )
-
-        return flat
+            ),
+        ) if not _recovered else flat
 
     async def describe_point(self, udid: str, x: float, y: float) -> dict | None:
         """Get the UI element at specific coordinates.

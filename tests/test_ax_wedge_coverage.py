@@ -25,6 +25,14 @@ from server.device.sim_bridge import SimBridgeBackend, SimBridgeManager
 FIXTURES = Path(__file__).parent / "fixtures" / "ax-wedge"
 WEDGED = json.loads((FIXTURES / "wedged-idb-describe-all.json").read_text())
 HEALTHY = json.loads((FIXTURES / "healthy-idb-describe-all.json").read_text())
+#: A real `--nested` capture: one root Application carrying four children.
+#: The flat healthy tree is the wrong control for a nested reader -- its 17
+#: elements trip `len != 1` and the frame is never examined, so a nested test
+#: fed it never exercises the discrimination those paths actually use
+#: (review of #337).
+HEALTHY_NESTED = json.loads(
+    (Path(__file__).parent / "fixtures" / "idb_describe_all_nested_output.json").read_text()
+)
 UDID = "F5AF3736-C05F-493F-AA52-CA883B13B18C"
 
 
@@ -35,34 +43,102 @@ def test_the_captured_tree_is_the_one_the_detector_is_for():
     assert not ax_recovery.looks_poisoned(HEALTHY)
 
 
-class TestTheDecisionIsSharedAndGuarded:
-    async def test_a_poisoned_tree_resets_the_bridge(self, monkeypatch):
-        killed = []
-        monkeypatch.setattr(ax_recovery, "reset_bridge",
-                            lambda u: killed.append(u) or _true())
-        assert await ax_recovery.should_retry(UDID, WEDGED, False) is True
-        assert killed == [UDID]
+def test_a_nested_root_with_children_is_never_a_wedge():
+    """On a nested read `len != 1` can never fire -- the shape is always one
+    root -- so without this the decision rests on two attributes of a single
+    element, and a 0x0 unlabelled root over real content would get the bridge
+    killed on a healthy screen."""
+    assert len(HEALTHY_NESTED) == 1, "the fixture is not a nested capture"
+    root = dict(HEALTHY_NESTED[0])
+    root["frame"] = {"x": 0, "y": 0, "width": 0, "height": 0}
+    root["AXLabel"] = None
+    assert root["children"], "the fixture root has no children to protect"
+    assert not ax_recovery.looks_poisoned([root])
 
+
+def test_a_childless_zero_frame_root_is_still_a_wedge():
+    """The hardening must not swallow the real signature."""
+    root = dict(HEALTHY_NESTED[0])
+    root["frame"] = {"x": 0, "y": 0, "width": 0, "height": 0}
+    root["AXLabel"] = None
+    root["children"] = []
+    assert ax_recovery.looks_poisoned([root])
+
+
+class TestTheRecoveryWatchesRatherThanWaits:
     async def test_a_healthy_tree_kills_nothing(self, monkeypatch):
         killed = []
         monkeypatch.setattr(ax_recovery, "reset_bridge",
                             lambda u: killed.append(u) or _true())
-        assert await ax_recovery.should_retry(UDID, HEALTHY, False) is False
-        assert killed == []
+        out = await ax_recovery.reread_after_recovery(
+            UDID, HEALTHY, lambda: _value(WEDGED))
+        assert out is HEALTHY and killed == []
 
-    async def test_the_guard_stops_a_second_round(self, monkeypatch):
-        """Without it the retry re-enters the same read and a bridge that
-        stays wedged loops forever."""
-        killed = []
-        monkeypatch.setattr(ax_recovery, "reset_bridge",
-                            lambda u: killed.append(u) or _true())
-        assert await ax_recovery.should_retry(UDID, WEDGED, True) is False
-        assert killed == []
+    async def test_it_keeps_reading_until_the_bridge_answers(self, monkeypatch):
+        """The live defect. `reset_bridge` returns at ~0.07s while the bridge
+        needs ~0.8-1.3s, so a single immediate re-read got the same poisoned
+        tree and handed it back as the answer."""
+        state = _respawning_pids(monkeypatch)
 
-    async def test_a_failed_reset_is_not_a_retry(self, monkeypatch):
-        """Re-reading after a kill that did not happen returns the same tree."""
+        async def kill(_udid):
+            state["killed"] = True
+            return True
+
+        monkeypatch.setattr(ax_recovery, "reset_bridge", kill)
+        seq = [WEDGED, WEDGED, HEALTHY]
+        reads = []
+
+        async def reread():
+            reads.append(1)
+            return seq.pop(0)
+
+        out = await ax_recovery.reread_after_recovery(UDID, WEDGED, reread, budget=5.0)
+        assert not ax_recovery.looks_poisoned(out)
+        assert len(reads) == 3, "it stopped re-reading before the bridge answered"
+
+    async def test_a_bridge_that_never_answers_gives_up_inside_the_budget(
+        self, monkeypatch
+    ):
+        """Bounded, so a permanently wedged bridge cannot hang the caller --
+        and the poisoned tree is the honest answer, not an exception."""
+        state = _respawning_pids(monkeypatch)
+
+        async def kill(_udid):
+            state["killed"] = True
+            return True
+
+        monkeypatch.setattr(ax_recovery, "reset_bridge", kill)
+        out = await ax_recovery.reread_after_recovery(
+            UDID, WEDGED, lambda: _value(WEDGED), budget=0.3)
+        assert ax_recovery.looks_poisoned(out)
+
+    async def test_a_failed_reset_is_not_re_read(self, monkeypatch):
         monkeypatch.setattr(ax_recovery, "reset_bridge", lambda _u: _false())
-        assert await ax_recovery.should_retry(UDID, WEDGED, False) is False
+        reads = []
+
+        async def reread():
+            reads.append(1)
+            return HEALTHY
+
+        out = await ax_recovery.reread_after_recovery(UDID, WEDGED, reread)
+        assert out is WEDGED and reads == []
+
+
+async def _value(v):
+    return v
+
+
+def _respawning_pids(monkeypatch):
+    """`bridge_pids_for` as it really behaves: the old pid until the kill, a
+    different one after. A constant would make the pid wait spin for the whole
+    budget, which is not what the code under test does."""
+    state = {"killed": False}
+
+    async def pids(_udid):
+        return [2] if state["killed"] else [1]
+
+    monkeypatch.setattr(ax_recovery, "bridge_pids_for", pids)
+    return state
 
 
 async def _true():
@@ -79,7 +155,9 @@ def _idb_returning(monkeypatch, trees):
     seq = list(trees)
 
     async def fake_run(self, *args):
-        return json.dumps(seq.pop(0) if seq else HEALTHY), ""
+        # The last tree repeats. A fallback to HEALTHY would quietly end a
+        # "stays wedged" scenario the moment the script ran out.
+        return json.dumps(seq.pop(0) if len(seq) > 1 else seq[0]), ""
 
     monkeypatch.setattr(IdbBackend, "_run", fake_run)
     return backend, seq
@@ -90,9 +168,15 @@ class TestIdbHealsOnEveryReader:
                                         "describe_all_nested"])
     async def test_a_wedged_read_is_retried_after_a_reset(self, monkeypatch, method):
         backend, _ = _idb_returning(monkeypatch, [WEDGED, HEALTHY])
+        state = _respawning_pids(monkeypatch)
         resets = []
-        monkeypatch.setattr(ax_recovery, "reset_bridge",
-                            lambda u: resets.append(u) or _true())
+
+        async def kill(udid):
+            resets.append(udid)
+            state["killed"] = True
+            return True
+
+        monkeypatch.setattr(ax_recovery, "reset_bridge", kill)
         monkeypatch.setattr("server.device.probing.probe_container",
                             lambda *a, **k: _empty())
 
@@ -102,13 +186,21 @@ class TestIdbHealsOnEveryReader:
         assert not ax_recovery.looks_poisoned(out), f"{method} returned the wedge"
         assert len(out) > 1
 
-    @pytest.mark.parametrize("method", ["describe_all", "describe_all_flat",
-                                        "describe_all_nested"])
-    async def test_a_healthy_read_resets_nothing(self, monkeypatch, method):
-        backend, _ = _idb_returning(monkeypatch, [HEALTHY])
+    @pytest.mark.parametrize("method,healthy", [
+        ("describe_all", HEALTHY), ("describe_all_flat", HEALTHY),
+        ("describe_all_nested", HEALTHY_NESTED),
+    ])
+    async def test_a_healthy_read_resets_nothing(self, monkeypatch, method, healthy):
+        backend, _ = _idb_returning(monkeypatch, [healthy])
+        state = _respawning_pids(monkeypatch)
         resets = []
-        monkeypatch.setattr(ax_recovery, "reset_bridge",
-                            lambda u: resets.append(u) or _true())
+
+        async def kill(udid):
+            resets.append(udid)
+            state["killed"] = True
+            return True
+
+        monkeypatch.setattr(ax_recovery, "reset_bridge", kill)
         monkeypatch.setattr("server.device.probing.probe_container",
                             lambda *a, **k: _empty())
 
@@ -121,10 +213,17 @@ class TestIdbHealsOnEveryReader:
     async def test_a_bridge_that_stays_wedged_is_reset_once(self, monkeypatch, method):
         """The answer is still poisoned, and that is correct -- what matters is
         that it is returned rather than looped on."""
-        backend, _ = _idb_returning(monkeypatch, [WEDGED, WEDGED, WEDGED])
+        monkeypatch.setattr(ax_recovery, "_RESPAWN_BUDGET", 0.3)
+        backend, _ = _idb_returning(monkeypatch, [WEDGED])  # then WEDGED forever
+        state = _respawning_pids(monkeypatch)
         resets = []
-        monkeypatch.setattr(ax_recovery, "reset_bridge",
-                            lambda u: resets.append(u) or _true())
+
+        async def kill(udid):
+            resets.append(udid)
+            state["killed"] = True
+            return True
+
+        monkeypatch.setattr(ax_recovery, "reset_bridge", kill)
         monkeypatch.setattr("server.device.probing.probe_container",
                             lambda *a, **k: _empty())
 
@@ -141,12 +240,13 @@ async def _empty():
 class TestSimBridgeNestedHealsToo:
     async def test_a_wedged_nested_read_is_retried(self, monkeypatch):
         backend = SimBridgeBackend(SimBridgeManager())
-        seq = [WEDGED, HEALTHY]
+        seq = [WEDGED, HEALTHY_NESTED]
 
         async def fetch(self, _udid):
             return seq.pop(0)
 
         monkeypatch.setattr(SimBridgeBackend, "_fetch_nested", fetch)
+        _respawning_pids(monkeypatch)
         resets = []
         monkeypatch.setattr(ax_recovery, "reset_bridge",
                             lambda u: resets.append(u) or _true())
@@ -156,11 +256,31 @@ class TestSimBridgeNestedHealsToo:
         assert resets == [UDID]
         assert not ax_recovery.looks_poisoned(out)
 
+    async def test_a_bridge_that_stays_wedged_is_reset_once(self, monkeypatch):
+        """Finding 1 of the review: dropping `_recovered=True` from this
+        retry left every test green while the call ran 401 fetches and 400
+        SIGKILLs of CoreSimulatorBridge before a tripwire stopped it."""
+        backend = SimBridgeBackend(SimBridgeManager())
+
+        async def fetch(self, _udid):
+            return WEDGED
+
+        monkeypatch.setattr(SimBridgeBackend, "_fetch_nested", fetch)
+        _respawning_pids(monkeypatch)
+        resets = []
+        monkeypatch.setattr(ax_recovery, "reset_bridge",
+                            lambda u: resets.append(u) or _true())
+
+        out = await backend.describe_all_nested(UDID, _recovered=False)
+
+        assert len(resets) == 1, f"reset {len(resets)} times, not once"
+        assert ax_recovery.looks_poisoned(out)
+
     async def test_a_healthy_nested_read_resets_nothing(self, monkeypatch):
         backend = SimBridgeBackend(SimBridgeManager())
 
         async def fetch(self, _udid):
-            return HEALTHY
+            return HEALTHY_NESTED
 
         monkeypatch.setattr(SimBridgeBackend, "_fetch_nested", fetch)
         resets = []

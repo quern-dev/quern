@@ -60,6 +60,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
+from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +86,15 @@ def looks_poisoned(elements: list[dict]) -> bool:
     el = elements[0]
     if el.get("type") != "Application":
         return False
+    # A nested read is *always* one root, so `len != 1` above can never fire on
+    # one and the whole decision falls to the frame and label. A root with
+    # children has told us something, whatever its own frame says -- and a
+    # wedged bridge reports no children at all. Without this the nested paths
+    # rest on two attributes of a single element, and a 0x0 unlabelled root
+    # over real content would SIGKILL the bridge on a healthy screen
+    # (review of #337).
+    if el.get("children"):
+        return False
     frame = el.get("frame") or {}
     if (frame.get("width") or 0) or (frame.get("height") or 0):
         return False
@@ -102,22 +113,82 @@ async def _run(*args: str, timeout: float = 5.0) -> tuple[int, str]:
     return proc.returncode or 0, out.decode(errors="replace")
 
 
-async def should_retry(udid: str, tree: list[dict], already_recovered: bool) -> bool:
-    """Whether `tree` is a wedge worth re-reading, having just healed it.
+#: Ceiling on the whole recovery, not a wait anyone expects to spend. Both
+#: phases below watch for something real; this only bounds how long they may
+#: watch for. Measured on a real wedge: the replacement process appears at
+#: +0.66s and reads come good at +0.80s, +1.27s and +1.29s, so this is roughly
+#: three times the slowest observed.
+_RESPAWN_BUDGET = 4.0
+_RESPAWN_POLL = 0.1
 
-    The decision lives here rather than being written out at each read, because
-    there are four of them across two backends and a copy of this is a copy
-    that drifts -- which is how `describe_all` ended up the only path with any
-    recovery at all (#337).
 
-    `already_recovered` is the recursion guard and every caller must thread it:
-    the retry re-enters the same read, so without it a bridge that stays wedged
-    loops. Once only -- if the tree still looks poisoned after a reset the
-    cause is something else, and retrying is a slower way to the same answer.
+async def reread_after_recovery(
+    udid: str,
+    tree: list[dict],
+    reread: Callable[[], Awaitable[list[dict]]],
+    *,
+    budget: float | None = None,
+) -> list[dict]:
+    """`tree`, or a fresh read taken once a reset bridge is answering again.
+
+    The decision lives here rather than at each read, because there are five of
+    them across two backends and a copied condition drifts -- which is how
+    `describe_all` ended up the only path with any recovery at all (#337).
+
+    **Re-reading immediately does not work, and used to be what happened.**
+    `reset_bridge` returns as soon as the kill lands -- 0.07s measured -- while
+    the bridge takes about a second to come back usable. Against a real wedge
+    the immediate retry read the *same* poisoned tree and handed it back as the
+    answer, so a path that looked covered healed nothing.
+
+    Nothing here sleeps a guessed interval. Two things are watched instead:
+
+    1. **The replacement process.** `bridge_pids_for` shows a new pid at +0.66s
+       measured, without anything having read the tree -- launchd brings it
+       back on its own rather than waiting to be asked.
+    2. **The tree itself**, because the pid is necessary and not sufficient:
+       the process is up before its cache answers, and reads came good at
+       +0.80s to +1.29s. Only a read proves the recovery, so a read decides.
+
+    `budget` is a ceiling on both phases together, not an expected wait.
+
+    `reread` must not itself recover, or a bridge that stays wedged recurses.
+    Every caller passes a read with its own `_recovered=True`.
     """
-    if already_recovered or not looks_poisoned(tree):
-        return False
-    return await reset_bridge(udid)
+    if not looks_poisoned(tree):
+        return tree
+
+    # Read at call time rather than bound as a default, so the ceiling stays a
+    # module constant one place can change.
+    budget = _RESPAWN_BUDGET if budget is None else budget
+
+    before = set(await bridge_pids_for(udid))
+    if not await reset_bridge(udid):
+        return tree
+
+    deadline = time.monotonic() + budget
+
+    # Phase 1: wait for the replacement, so the first re-read is not spent
+    # confirming what `ps` already knows. Cheap next to a tree read.
+    while time.monotonic() < deadline:
+        if set(await bridge_pids_for(udid)) - before:
+            break
+        await asyncio.sleep(_RESPAWN_POLL)
+
+    # Phase 2: the authoritative one.
+    while True:
+        fresh = await reread()
+        if not looks_poisoned(fresh):
+            return fresh
+        if time.monotonic() >= deadline:
+            # Still wedged after a reset and the full budget: the cause is
+            # something else, and the poisoned tree is the honest answer.
+            logger.warning(
+                "accessibility bridge for %s still wedged %.1fs after a reset",
+                udid, budget,
+            )
+            return fresh
+        await asyncio.sleep(_RESPAWN_POLL)
 
 
 async def bridge_pids_for(udid: str) -> list[int]:
