@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import plistlib
 import shutil
 import uuid as uuid_mod
@@ -226,7 +227,7 @@ async def _keep_dsyms(
             # The file `atos -o` takes. A dSYM can cover several binaries, and
             # atos given the bundle picked the wrong one and resolved nothing
             # (live, on a phone crash against MyApp.app.dSYM).
-            dwarf = await asyncio.to_thread(_dwarf_for, target, uuids)
+            dwarf = await asyncio.to_thread(dwarf_for, target, uuids)
             if not dwarf:
                 raise RuntimeError("the dSYM holds no DWARF file with this binary's UUID")
         except (OSError, RuntimeError, TimeoutError) as e:
@@ -238,7 +239,7 @@ async def _keep_dsyms(
         binary.dwarf = str(recorded_as / name / dwarf)
 
 
-def _dwarf_for(dsym: Path, uuids: set[str]) -> str:
+def dwarf_for(dsym: Path, uuids: set[str]) -> str:
     """The DWARF file in `dsym` covering `uuids`, relative to it; "" if none."""
     for dwarf in sorted((dsym / "Contents" / "Resources" / "DWARF").glob("*")):
         m = macho.read(dwarf)
@@ -268,6 +269,26 @@ def _first_line(text: str) -> str:
 def load_all(root: Path | None = None) -> list[BuildRecord]:
     """Every complete record, newest first. An unreadable one is skipped."""
     return [record for record, _ in _load(root or RECORDS_DIR)[0]]
+
+
+def load_with_unreadable(root: Path | None = None) -> tuple[list[BuildRecord], int, bool]:
+    """Every complete record, newest first; how many could not be read; and
+    whether the directory itself could be listed. `glob` on a directory that
+    cannot be read returns nothing rather than raising, which reads as "no
+    records" -- the directory is checked first so it is not."""
+    root = root or RECORDS_DIR
+    try:
+        root.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return [], 0, True                   # asked: nothing recorded yet
+    except OSError:
+        # An unsearchable parent: 3.13 raises from is_dir(), 3.14 answers
+        # False and globs nothing -- "no records", said of records it never saw.
+        return [], 0, False
+    if not os.access(root, os.R_OK | os.X_OK):
+        return [], 0, False
+    records, unreadable = _load(root)
+    return [record for record, _ in records], len(unreadable), True
 
 
 def _load(root: Path) -> tuple[list[tuple[BuildRecord, Path]], list[Path]]:

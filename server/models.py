@@ -324,6 +324,25 @@ class CrashFrame(BaseModel):
     )
 
 
+class ImageSymbols(BaseModel):
+    """How one image's frames in a crash were symbolicated (#326)."""
+
+    image: str
+    uuid: str = ""
+    source: str = Field(
+        default="",
+        description="'build_record' (a build quern made), 'spotlight' (a dSYM Spotlight "
+                    "indexed: DerivedData, Xcode archives), or '' when none was found",
+    )
+    build_id: str = Field(default="", description="The build record, when it came from one")
+    dwarf: str = Field(default="", description="The DWARF file atos read")
+    frames_resolved: int = 0
+    frames_total: int = 0
+    note: str = Field(default="", description="Why it was not symbolicated, or only partly")
+    #: atos has answered for it: a later read keeps this entry, not asks again.
+    settled: bool = Field(default=False, exclude=True)
+
+
 class CrashImage(BaseModel):
     """A binary a crash frame points into: what symbolicating it needs."""
 
@@ -427,6 +446,16 @@ class CrashReport(BaseModel):
             "device's. Listed only when get_latest_crash is not given a udid."
         ),
     )
+    symbols: list[ImageSymbols] = Field(
+        default_factory=list,
+        description=(
+            "Where the app's frames were symbolicated from, per image, or why they "
+            "could not be: a device report names the app's code by UUID and offset, "
+            "and only the matching build's dSYM turns that into function and line."
+        ),
+    )
+    #: Set once symbolication has run, so a report is not handed to atos again.
+    symbolicated: bool = Field(default=False, exclude=True)
 
 
 class OpenCrashDialog(BaseModel):
