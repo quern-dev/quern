@@ -42,6 +42,30 @@ The following build commands failed:
 (1 failure)
 """
 
+# Real, from the same build once the plug-in was let through: this Mac had no
+# signing identity. Written against the project file, with no line.
+NO_CERTIFICATE = """\
+/Volumes/src/Geocaching.xcodeproj: error: No signing certificate "iOS Development" found: No \
+"iOS Development" signing certificate matching team ID "8SSDY9WB6W" with a private key was \
+found. (in target 'Geocaching' from project 'Geocaching')
+note: Run script build phase 'Run Script (SwiftLint)' will be run during every build
+** BUILD FAILED **
+
+
+The following build commands failed:
+\tBuilding workspace Geocaching with scheme Internal and configuration Debug
+(1 failure)
+"""
+
+NOTHING_READABLE = """\
+** BUILD FAILED **
+
+
+The following build commands failed:
+\tBuilding workspace Geocaching with scheme Internal and configuration Debug
+(1 failure)
+"""
+
 COMPILE = """\
 /src/App/Feed.swift:12:5: error: cannot find 'x' in scope
 ** BUILD FAILED **
@@ -79,6 +103,19 @@ class TestWhatFailed:
             "Signing for \"MyApp\" requires a development team. Select a development team in "
             "the Signing & Capabilities editor. (in target 'MyApp' from project 'MyApp')"]
         assert result.errors[0].file == ""
+
+    async def test_an_error_against_the_project_file_keeps_it_as_the_file(self):
+        result = await _parse(NO_CERTIFICATE)
+        [error] = result.errors
+        assert error.file == "/Volumes/src/Geocaching.xcodeproj"
+        assert error.message.startswith('No signing certificate "iOS Development" found')
+        assert error.line is None
+
+    async def test_a_failure_with_nothing_readable_still_says_it_failed(self):
+        """Never "0 errors" for a failed build."""
+        result = await _parse(NOTHING_READABLE)
+        [error] = result.errors
+        assert "printed no error quern could read" in error.message
 
     async def test_compile_errors_are_not_repeated_as_steps(self):
         result = await _parse(COMPILE)

@@ -43,10 +43,20 @@ TEST_CASE_RE = re.compile(
 # Matches: ** BUILD SUCCEEDED ** or ** BUILD FAILED **
 BUILD_STATUS_RE = re.compile(r"\*\*\s+BUILD\s+(SUCCEEDED|FAILED)\s+\*\*")
 
-# An error with no source location: signing, provisioning, package resolution.
-# `error: Signing for "App" requires a development team.` DIAGNOSTIC_RE wants
-# file:line:col, so these parsed as nothing and a failed build read "0 errors".
-LOCATIONLESS_ERROR_RE = re.compile(r"^(?:xcodebuild: )?error: (.+?)\s*$", re.MULTILINE)
+# An error with no line: signing, provisioning, package resolution. Written
+# bare (`error: Signing for "App" requires a development team.`) or against a
+# project file (`/src/App.xcodeproj: error: No signing certificate "iOS
+# Development" found`). DIAGNOSTIC_RE wants file:line:col, so both parsed as
+# nothing and a failed build read "0 errors" -- the second measured on
+# Geocaching's device build. The path excludes ":", so a file:line:col line
+# cannot match here too.
+LOCATIONLESS_ERROR_RE = re.compile(
+    r"^(?:(?:xcodebuild|(/[^:\n]+)): )?error: (.+?)\s*$", re.MULTILINE,
+)
+UNREADABLE_FAILURE = (
+    "xcodebuild reported the build failed but printed no error quern could read; "
+    "build it in Xcode, or run xcodebuild and read its output, to see why"
+)
 
 # The step list xcodebuild prints after ** BUILD FAILED **. For a failure
 # outside compilation it is the only statement of what failed: plug-in
@@ -242,9 +252,9 @@ class BuildAdapter(BaseSourceAdapter):
 
         seen_errors = {e.message for e in errors}
         for m in LOCATIONLESS_ERROR_RE.finditer(content):
-            if m.group(1) not in seen_errors:       # xcodebuild repeats them
-                seen_errors.add(m.group(1))
-                errors.append(BuildDiagnostic(message=m.group(1)))
+            if m.group(2) not in seen_errors:       # xcodebuild repeats them
+                seen_errors.add(m.group(2))
+                errors.append(BuildDiagnostic(file=m.group(1) or "", message=m.group(2)))
 
         # Dedup warnings on (file, line, column, message)
         seen_warnings: set[tuple[str, int | None, int | None, str]] = set()
@@ -318,6 +328,10 @@ class BuildAdapter(BaseSourceAdapter):
                 if _VALIDATION_RE.match(step):
                     message += f": {PLUGIN_VALIDATION_HINT}"
                 errors.append(BuildDiagnostic(message=message))
+        if not succeeded and not errors:
+            # Never "0 errors" for a failed build: that reads as a parser that
+            # found nothing wrong, not one that could not see what was.
+            errors.append(BuildDiagnostic(message=UNREADABLE_FAILURE))
 
         result = BuildResult(
             succeeded=succeeded,
