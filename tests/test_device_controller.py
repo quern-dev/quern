@@ -1832,16 +1832,22 @@ class TestScrollToElement:
 
         element = {"label": "Log", "identifier": "button_log",
                    "type": "Button", "x": 100, "y": 200}
-        backend = MagicMock()
-        backend.scroll_into_view = AsyncMock(return_value=element)
-        ctrl._ui_backend = MagicMock(return_value=backend)
+        # `_ui_backend` is deliberately left alone so the real Android
+        # routing runs -- mocking it away made this test unable to notice
+        # Android selecting the wrong backend, which is the thing it is
+        # named for. Only the backend's own call is stubbed.
+        ctrl.u2.scroll_into_view = AsyncMock(return_value=element)
 
         result = await ctrl.scroll_to_element(identifier="button_log", max_swipes=5)
         assert result["status"] == "ok"
         assert result["element"] == element
         assert result["udid"] == "emulator-5554"
-        assert "backend" in result
-        backend.scroll_into_view.assert_called_once_with(
+        # The value, not just the key. Asserting presence let the
+        # precedence test next door stand in for Android routing, and that
+        # one mocks `_ui_backend` -- so both could pass with Android
+        # wrongly selecting sim-bridge.
+        assert result["backend"] == "u2"
+        ctrl.u2.scroll_into_view.assert_called_once_with(
             "emulator-5554", identifier="button_log", label=None, max_swipes=5,
         )
 
@@ -2414,3 +2420,46 @@ class TestScrollReportsTheBackendThatSwept:
             "the resolved udid must travel with the result; the route used to "
             "have no way to ask which device was swept"
         )
+
+
+class TestANestedReadRecordsItsOwnBackend:
+    """`get_ui_elements_children_of` was the one read path that selected a
+    backend without recording it.
+
+    So `get_ui_tree?children_of=...` reported whichever backend an *earlier*
+    read had used — the stale answer this change exists to remove, surviving
+    on the route nobody looked at. Raised by review after an agent review
+    had already flagged it and I deferred it as out of scope; two reviewers
+    finding the same thing is the argument for closing it.
+    """
+
+    async def test_it_records_the_backend_that_did_this_read(self):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["SIM-1"] = DeviceType.SIMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value="SIM-1")
+        ctrl._sim_bridge_ok = True
+        ctrl.sim_bridge.describe_all_nested = AsyncMock(return_value={})
+        # A stale record from an earlier read on the other backend.
+        ctrl._last_read_backend["SIM-1"] = "idb"
+
+        await ctrl.get_ui_elements_children_of(children_of="Root")
+
+        assert ctrl._last_read_backend["SIM-1"] == "sim-bridge", (
+            "a nested read left an earlier read's backend in place"
+        )
+        assert ctrl.backend_that_served("SIM-1") == "sim-bridge"
+
+    async def test_it_reads_through_the_backend_it_recorded(self):
+        """Recorded and used must be the same object, or the record is a
+        guess. They were two separate `_ui_backend` calls before."""
+        ctrl = DeviceController()
+        ctrl._device_type_cache["SIM-1"] = DeviceType.SIMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value="SIM-1")
+        ctrl._sim_bridge_ok = True
+        ctrl.sim_bridge.describe_all_nested = AsyncMock(return_value={})
+        ctrl.idb.describe_all_nested = AsyncMock(return_value={})
+
+        await ctrl.get_ui_elements_children_of(children_of="Root")
+
+        ctrl.sim_bridge.describe_all_nested.assert_awaited_once()
+        ctrl.idb.describe_all_nested.assert_not_awaited()

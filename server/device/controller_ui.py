@@ -1515,7 +1515,16 @@ class DeviceControllerUI:
         then returns its flattened descendants as parsed UIElements.
         """
         resolved = await self.resolve_udid(udid)
-        nested = await self._ui_backend(resolved).describe_all_nested(
+        # Selected once and recorded, the same way `get_ui_elements` does it.
+        # This was the one read path that did neither, so `get_ui_tree`
+        # with `children_of` reported whichever backend an *earlier* read
+        # had used -- the stale answer this whole change exists to remove,
+        # surviving on the one route nobody looked at.
+        backend = self._ui_backend(resolved)
+        self._last_read_backend[resolved] = getattr(
+            backend, "TOOL_NAME", "unknown",
+        )
+        nested = await backend.describe_all_nested(
             resolved, snapshot_depth=snapshot_depth,
         )
         child_dicts = find_children_of(
