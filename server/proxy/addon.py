@@ -25,6 +25,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from mitmproxy import ctx, flowfilter, http
@@ -76,7 +77,16 @@ try:
             # here rather than later because these sockets are short-lived --
             # observed CLOSED seconds afterwards -- and this hook runs at
             # connection setup, while it is certainly open.
-            pid, process_name = _pid_from_local_socket(writer)
+            # Started on a worker, not awaited here. This hook runs
+            # synchronously on mitmproxy's event loop, and `lsof` took ~40ms
+            # measured -- with a 5s worst case -- so doing it inline stalled
+            # every other connection, physical devices included, behind one
+            # local one. The socket still has to be read while it is open,
+            # which is why the work starts now rather than at serialise time;
+            # only the *waiting* is deferred.
+            future = _SOCKET_LOOKUP_POOL.submit(_pid_from_local_socket, writer)
+            _client_process_info[self.client.id] = {"future": future}
+            return
         if pid is not None:
             _client_process_info[self.client.id] = {
                 "pid": pid,
@@ -88,15 +98,43 @@ except Exception:
     pass  # Not available — non-local mode or import failure
 
 
+#: Workers for the socket lookup. Bounded: one thread per in-flight local
+#: connection would be unbounded by anything the proxy controls, and the work
+#: is a short subprocess rather than something worth parallelising widely.
+_SOCKET_LOOKUP_POOL = ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="quern-sock",
+)
+
+
 def _lookup_process_info(client_id: str | None) -> dict | None:
-    """Process info for a client connection, live or just-disconnected."""
+    """Process info for a client connection, live or just-disconnected.
+
+    Resolves a pending socket lookup if one was started at connection time.
+    The result replaces the future so the wait is paid once per connection
+    rather than once per flow on it.
+    """
     if not client_id:
         return None
     info = _client_process_info.get(client_id)
-    if info is not None:
-        return info
-    with _cache_lock:
-        return _recent_process_info.get(client_id)
+    if info is None:
+        with _cache_lock:
+            info = _recent_process_info.get(client_id)
+    if info is None:
+        return None
+    future = info.get("future")
+    if future is not None:
+        try:
+            # Bounded hard. By the time a flow is being serialised the lookup
+            # has had the whole request to finish; waiting longer would trade
+            # a missing attribution for a stalled response, which is the wrong
+            # way round.
+            pid, process_name = future.result(timeout=0.5)
+        except Exception:
+            pid = process_name = None
+        info.clear()
+        info["pid"] = pid
+        info["process_name"] = process_name
+    return info
 
 
 # ---------------------------------------------------------------------------
@@ -181,8 +219,17 @@ def _pid_from_local_socket(writer) -> tuple[int | None, str | None]:
 # PID → Android emulator serial
 # ---------------------------------------------------------------------------
 
-# qemu pid -> "emulator-5554"
-_emulator_serial_cache: dict[int, str] = {}
+# qemu pid -> ("emulator-5554", monotonic time it was resolved)
+#
+# Time-limited and bounded, because a pid is not a stable name for a device.
+# An emulator exits, the OS reuses its pid for a different QEMU instance on a
+# different console port, and an unexpiring cache answers with the old serial
+# -- attributing a flow to the wrong device with `device_of` calling it firm.
+# The window is narrow and the failure is silent, which is the combination
+# worth spending a re-lookup on.
+_emulator_serial_cache: OrderedDict[int, tuple[str, float]] = OrderedDict()
+_SERIAL_CACHE_TTL = 60.0
+_SERIAL_CACHE_MAX = 256
 # Console ports live in this range; the emulator takes an even one for the
 # console and the next odd one for adb, which is why the serial is the even
 # one. Bounding the search stops an unrelated listener being read as a serial.
@@ -200,9 +247,11 @@ def _emulator_serial_for_pid(pid: int) -> str | None:
     The `-avd <name>` on its command line is the friendlier identifier but not
     the one quern keys on, so the port is what is returned.
     """
+    now = time.monotonic()
     with _cache_lock:
-        if pid in _emulator_serial_cache:
-            return _emulator_serial_cache[pid]
+        hit = _emulator_serial_cache.get(pid)
+        if hit is not None and now - hit[1] < _SERIAL_CACHE_TTL:
+            return hit[0]
     try:
         result = subprocess.run(
             ["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", "-sTCP:LISTEN", "-Fn"],
@@ -217,7 +266,9 @@ def _emulator_serial_for_pid(pid: int) -> str | None:
             return None
         serial = f"emulator-{console[0]}"
         with _cache_lock:
-            _emulator_serial_cache[pid] = serial
+            _emulator_serial_cache[pid] = (serial, now)
+            while len(_emulator_serial_cache) > _SERIAL_CACHE_MAX:
+                _emulator_serial_cache.popitem(last=False)
         return serial
     except Exception:
         return None

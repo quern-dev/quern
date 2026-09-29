@@ -621,6 +621,7 @@ def _flow_completeness(
     *,
     simulator_udid: str | None = None,
     client_ip: str | None = None,
+    device_serial: str | None = None,
 ) -> dict:
     """`truncated` and `complete_after` for an answer drawn from the flow store.
 
@@ -629,10 +630,14 @@ def _flow_completeness(
     Narrowed by the device the caller filtered on, so another device's
     traffic being shed does not flag this one's.
     """
-    through = flow_store.evicted_through(simulator_udid=simulator_udid, client_ip=client_ip)
+    through = flow_store.evicted_through(
+        simulator_udid=simulator_udid, client_ip=client_ip,
+        device_serial=device_serial,
+    )
     return {
         "truncated": not flow_store.is_complete_since(
             since, simulator_udid=simulator_udid, client_ip=client_ip,
+            device_serial=device_serial,
         ),
         "complete_after": through,
     }
@@ -653,6 +658,7 @@ async def query_flows(
     until: UtcDatetime | None = None,
     device_id: str = "",
     simulator_udid: str | None = None,
+    device_serial: str | None = None,
     client_ip: str | None = None,
     detail: str = Query(default="full", pattern=r"^(full|summary)$"),
     limit: int = Query(default=100, ge=1, le=1000),
@@ -676,6 +682,7 @@ async def query_flows(
         until=until,
         device_id=device_id,
         simulator_udid=simulator_udid,
+        device_serial=device_serial,
         client_ip=client_ip,
         limit=limit,
         offset=offset,
@@ -692,6 +699,7 @@ async def query_flows(
     # scoping `since` to the window that matters (#318 review).
     completeness = _flow_completeness(
         flow_store, since, simulator_udid=simulator_udid, client_ip=client_ip,
+        device_serial=device_serial,
     )
 
     if detail == "summary":
@@ -725,6 +733,7 @@ async def flow_summary(
     host: str | None = None,
     since_cursor: str | None = None,
     simulator_udid: str | None = None,
+    device_serial: str | None = None,
     client_ip: str | None = None,
 ) -> FlowSummaryResponse:
     """Get an LLM-optimized summary of recent HTTP traffic."""
@@ -773,12 +782,14 @@ async def flow_summary(
 
     summary = generate_flow_summary(
         flows, window=window, host=host,
-        simulator_udid=simulator_udid, client_ip=client_ip,
+        simulator_udid=simulator_udid, device_serial=device_serial,
+        client_ip=client_ip,
     )
     summary.cursor = make_arrival_cursor(flow_store.clock, upto)
     summary.cursor_reset = cursor_reset
     completeness = _flow_completeness(
         flow_store, since_ts, simulator_udid=simulator_udid, client_ip=client_ip,
+        device_serial=device_serial,
     )
     if arrival_after is not None:
         # Exact, because the store evicts in arrival order -- and narrowed by

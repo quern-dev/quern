@@ -37,7 +37,13 @@ def _device_keys(
     if simulator_udid:
         keys.append(f"sim:{simulator_udid}")
     if device_serial:
-        keys.append(f"dev:{device_serial}")
+        # Alone, deliberately. A serial is an exact device identity, while an
+        # emulator's `client_ip` is the *host's* address and its mark covers
+        # every emulator on the machine. Combining them -- callers take the
+        # max over the keys -- would let another device's evictions decide
+        # this one's completeness, which is the contamination the serial
+        # exists to end.
+        return keys + [f"dev:{device_serial}"]
     if client_ip:
         keys.append(f"ip:{client_ip}")
     return keys
@@ -189,13 +195,17 @@ class FlowStore:
         *,
         simulator_udid: str | None = None,
         client_ip: str | None = None,
+        device_serial: str | None = None,
     ) -> bool:
         """Does the store still hold every flow stamped at or after `since`?
 
         True is a guarantee. False means a flow stamped inside the window was
         evicted, not necessarily one a given filter would have matched.
         """
-        through = self.evicted_through(simulator_udid=simulator_udid, client_ip=client_ip)
+        through = self.evicted_through(
+            simulator_udid=simulator_udid, client_ip=client_ip,
+            device_serial=device_serial,
+        )
         if through is None:
             return True
         return since is not None and since > through
@@ -314,6 +324,8 @@ class FlowStore:
             if params.has_error is True and flow.error is None:
                 continue
             if params.has_error is False and flow.error is not None:
+                continue
+            if params.device_serial and flow.device_serial != params.device_serial:
                 continue
             if params.simulator_udid and flow.simulator_udid != params.simulator_udid:
                 continue

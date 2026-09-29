@@ -176,3 +176,73 @@ class TestAttributionSurvivesTheClientHangingUp:
     def test_an_unknown_client_is_not_invented(self, addon):
         assert addon._lookup_process_info("never-seen") is None
         assert addon._lookup_process_info(None) is None
+
+
+class TestTwoEmulatorsBehindOneAddressStayApart:
+    """The case the serial exists for. Both emulators arrive as the host, so
+    every `client_ip`-based narrowing sees one device where there are two."""
+
+    @staticmethod
+    def _flow(serial, fid, ts):
+        from server.models import FlowRecord, FlowRequest
+
+        return FlowRecord(
+            id=fid, timestamp=ts, device_serial=serial,
+            client_ip="192.168.1.189",
+            request=FlowRequest(
+                method="GET", url="http://x/y", host="x", path="/y",
+            ),
+        )
+
+    async def test_a_query_narrows_to_one_emulator(self):
+        from datetime import UTC, datetime
+
+        from server.models import FlowQueryParams
+        from server.proxy.flow_store import FlowStore
+
+        store = FlowStore(max_size=10)
+        now = datetime.now(UTC)
+        for serial, fid in (("emulator-5554", "f1"), ("emulator-5556", "f2"),
+                            ("emulator-5556", "f3")):
+            await store.add(self._flow(serial, fid, now))
+
+        flows, _ = await store.query(FlowQueryParams(device_serial="emulator-5556"))
+        assert {f.id for f in flows} == {"f2", "f3"}
+
+    async def test_client_ip_cannot_narrow_between_them(self):
+        """Not a limitation being worked around -- the reason the serial is
+        there. Filtering by the address both of them carry returns both, and
+        would return the host's own traffic too."""
+        from datetime import UTC, datetime
+
+        from server.models import FlowQueryParams
+        from server.proxy.flow_store import FlowStore
+
+        store = FlowStore(max_size=10)
+        now = datetime.now(UTC)
+        await store.add(self._flow("emulator-5554", "f1", now))
+        await store.add(self._flow("emulator-5556", "f2", now))
+
+        flows, _ = await store.query(FlowQueryParams(client_ip="192.168.1.189"))
+        assert len(flows) == 2
+
+    async def test_one_emulators_eviction_does_not_truncate_the_others_answer(self):
+        """The completeness half, and the subtler one. Eviction marks were
+        keyed by `sim:` and `ip:` only, so both emulators shared the host's
+        mark: shedding one device's traffic flagged the other's answer as
+        truncated. A serial stands alone as a key now rather than being
+        combined with the shared address."""
+        from datetime import UTC, datetime, timedelta
+
+        from server.proxy.flow_store import FlowStore
+
+        store = FlowStore(max_size=2)
+        base = datetime.now(UTC)
+        await store.add(self._flow("emulator-5554", "old", base))
+        await store.add(self._flow("emulator-5556", "b", base + timedelta(seconds=1)))
+        # Pushes the 5554 flow out.
+        await store.add(self._flow("emulator-5556", "c", base + timedelta(seconds=2)))
+
+        since = base + timedelta(seconds=1)
+        assert store.is_complete_since(since, device_serial="emulator-5556")
+        assert not store.is_complete_since(base, device_serial="emulator-5554")

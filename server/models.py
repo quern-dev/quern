@@ -719,6 +719,9 @@ class FlowQueryParams(BaseModel):
     #: is attributed on time with a caveat. Wrong-and-silent vs honest.
     device_id: str = ""
     simulator_udid: str | None = None
+    #: An Android emulator's exact identity. Filtering by `client_ip` cannot
+    #: narrow to one emulator -- they all arrive as the host (#262).
+    device_serial: str | None = None
     client_ip: str | None = None
     detail: Literal["full", "summary"] = "full"
     limit: int = Field(default=100, ge=1, le=1000)
