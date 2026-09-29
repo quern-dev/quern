@@ -515,6 +515,15 @@ case_gui_node_message() {
     skip "GUI-style node message: no interpreter in the sandbox install"
     return 0
   fi
+  # The fixture puts its node on PATH from `.zshrc`, so `probe` has to reach it
+  # through a zsh login shell. Without zsh the probe reports SKIPPED, nothing is
+  # found anywhere, and "Not installed" is the *correct* answer -- so the case
+  # would fail while the code under test is fine. A skip says that; a red
+  # assertion would send the next reader after a bug that is not there.
+  if [[ ! -x /bin/zsh ]]; then
+    skip "GUI-style node message: /bin/zsh is not available to reach the fixture"
+    return 0
+  fi
 
   # A home of our own, with a node reachable only through `.zshrc` -- the #339
   # arrangement, built rather than detected. An earlier version of this case
