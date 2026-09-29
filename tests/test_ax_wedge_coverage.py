@@ -365,8 +365,12 @@ class TestACancelledReadDoesNotLeakItsChild:
         # rather than hanging, and the cancel below would have been racing.
         await asyncio.wait_for(entered.wait(), timeout=5)
         task.cancel()
+        # Bounded. If a handler swallows the cancel instead of re-raising, the
+        # fake's `communicate()` never returns -- `release` is never set -- and
+        # an unbounded `await task` would hang here rather than failing. The
+        # rule this test exists under applies to the test itself.
         with pytest.raises(asyncio.CancelledError):
-            await task
+            await asyncio.wait_for(task, timeout=5)
         return proc
 
     async def test_ax_recovery_run_kills_and_reaps_on_cancel(self, monkeypatch):

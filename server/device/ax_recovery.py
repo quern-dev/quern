@@ -105,7 +105,7 @@ def looks_poisoned(elements: list[dict]) -> bool:
     return not (el.get("AXLabel") or el.get("label") or "")
 
 
-async def _reap(proc) -> None:
+async def _reap(proc: asyncio.subprocess.Process) -> None:
     """Wait for a killed child, so it does not linger as a zombie.
 
     Shielded and bounded: this runs while a `CancelledError` is in flight, so
