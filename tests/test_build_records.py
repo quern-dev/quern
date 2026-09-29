@@ -67,16 +67,21 @@ def _dsym(where: Path, name: str, *uuids: uuid.UUID) -> Path:
 
 
 class FakeDsymutil:
-    def __init__(self, code=0, err="", raises=None):
+    def __init__(self, code=0, err="", raises=None, empty=False):
         self.calls: list[list[str]] = []
-        self.code, self.err, self.raises = code, err, raises
+        self.code, self.err, self.raises, self.empty = code, err, raises, empty
 
     async def __call__(self, argv):
         self.calls.append(argv)
         if self.raises:
             raise self.raises
         out = Path(argv[argv.index("-o") + 1])
-        (out / "Contents" / "Resources" / "DWARF").mkdir(parents=True)
+        dwarf = out / "Contents" / "Resources" / "DWARF"
+        dwarf.mkdir(parents=True)
+        if not self.empty:
+            # As dsymutil does: a DWARF file named after the binary, with its UUID.
+            src = Path(argv[2])
+            (dwarf / src.name).write_bytes(src.read_bytes())
         return self.code, self.err
 
     @property
@@ -624,3 +629,45 @@ class TestPluginValidationFlag:
         found = [a for a in seen if a in ("-skipPackagePluginValidation", "-skipMacroValidation")]
         assert found == flags
         assert seen[-1] == "build"
+
+
+class TestTheDwarfFile:
+    """What `atos -o` takes. Given MyApp.app.dSYM, which holds two, atos read
+    the wrong one and resolved a real phone crash to nothing."""
+
+    def test_each_binary_names_its_own_file_in_a_shared_dsym(self, tmp_path):
+        app = _app(tmp_path)
+        dsym = _dsym(app.parent, "MyApp.app.dSYM", U_APP, U_MAIN)
+        dwarf = dsym / "Contents" / "Resources" / "DWARF"
+        (dwarf / "bin0").rename(dwarf / "MyApp.debug.dylib")
+        (dwarf / "bin1").rename(dwarf / "MyApp")
+        record = _record(app, tmp_path / "records", FakeDsymutil())
+        by = {b.path: b for b in record.binaries}
+        inside = "MyApp.app.dSYM/Contents/Resources/DWARF/"
+        assert by["MyApp.debug.dylib"].dwarf.endswith(inside + "MyApp.debug.dylib")
+        assert by["MyApp"].dwarf.endswith(inside + "MyApp")
+        assert Path(by["MyApp.debug.dylib"].dwarf).is_file()
+
+    def test_a_dsym_made_here_names_its_file(self, tmp_path):
+        record = _record(_app(tmp_path), tmp_path / "records", FakeDsymutil())
+        app_bin = next(b for b in record.binaries if b.path == "MyApp.debug.dylib")
+        assert app_bin.dwarf == app_bin.dsym + "/Contents/Resources/DWARF/MyApp.debug.dylib"
+        assert Path(app_bin.dwarf).is_file()
+
+    def test_a_dsym_without_the_binarys_dwarf_is_an_error(self, tmp_path):
+        root = tmp_path / "records"
+        record = _record(_app(tmp_path), root, FakeDsymutil(empty=True))
+        app_bin = next(b for b in record.binaries if b.path == "MyApp.debug.dylib")
+        assert app_bin.dsym == app_bin.dwarf == ""
+        assert "no DWARF file with this binary's UUID" in app_bin.dsym_error
+        assert not (root / record.build_id / "dSYMs" / "MyApp.debug.dylib.dSYM").exists()
+
+    def test_expiry_clears_it(self, tmp_path):
+        root = tmp_path / "records"
+        recs = [_stored(root, n) for n in range(11)]
+        old = recs[-1]
+        old.binaries[0].dwarf = old.binaries[0].dsym + "/Contents/Resources/DWARF/MyApp"
+        (root / old.build_id / "record.json").write_text(old.model_dump_json())
+        build_records.prune(root, now=NOW)
+        [expired] = [r for r in build_records.load_all(root) if r.build_id == old.build_id]
+        assert expired.binaries[0].dwarf == "" and expired.dsyms_expired

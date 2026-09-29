@@ -582,6 +582,12 @@ class BuildBinary(BaseModel):
                     "A vendored framework's names its vendor's build machine.",
     )
     dsym: str = Field(default="", description="The dSYM kept for it (device builds)")
+    dwarf: str = Field(
+        default="",
+        description="The DWARF file inside `dsym` that is this binary's: what `atos -o` takes. "
+                    "One dSYM can cover several binaries, and atos given the bundle may read "
+                    "the wrong one and resolve nothing.",
+    )
     dsym_error: str = Field(default="", description="Why a dSYM could not be made")
     dsym_warnings: list[str] = Field(
         default_factory=list,

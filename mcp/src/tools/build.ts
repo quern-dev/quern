@@ -28,7 +28,8 @@ is recorded, and the summary names the record: bundle id, version, configuration
 binary's UUID, which is how a crash report names what it ran. For a device build, dSYMs are kept
 too -- made for the app's own code, copied where Xcode or a vendor made one -- for the newest 10
 device builds per scheme, so a crash from this build can be symbolicated after later builds
-overwrite DerivedData.
+overwrite DerivedData. Each binary's \`dwarf\` is the file inside its dSYM to pass to
+\`atos -o\`: one dSYM can cover several binaries, and atos given the bundle resolves nothing.
 
 A failed build names its cause, including failures outside compilation (signing, provisioning).
 A project whose Swift package plug-in or macro has not been approved in Xcode is refused by

@@ -115,7 +115,7 @@ async def record_build(
     except OSError as e:
         shutil.rmtree(partial, ignore_errors=True)
         for b in record.binaries:
-            b.dsym = ""
+            b.dsym = b.dwarf = ""
         record.error = f"the record could not be written to {root}: {e}"
         logger.warning("Build record %s not written: %s", build_id, e)
     return record
@@ -199,9 +199,8 @@ async def _keep_dsyms(
         target = out / name
         try:
             if have is not None and have in copied:
-                binary.dsym = copied[have]
-                continue
-            if have is not None:
+                pass                        # copied already, for another binary
+            elif have is not None:
                 out.mkdir(parents=True, exist_ok=True)
                 await asyncio.to_thread(shutil.copytree, have, target)
                 copied[have] = str(recorded_as / name)
@@ -224,11 +223,28 @@ async def _keep_dsyms(
                     binary.dsym_warnings = warnings[:3]
             else:
                 continue
+            # The file `atos -o` takes. A dSYM can cover several binaries, and
+            # atos given the bundle picked the wrong one and resolved nothing
+            # (live, on a phone crash against MyApp.app.dSYM).
+            dwarf = await asyncio.to_thread(_dwarf_for, target, uuids)
+            if not dwarf:
+                raise RuntimeError("the dSYM holds no DWARF file with this binary's UUID")
         except (OSError, RuntimeError, TimeoutError) as e:
-            shutil.rmtree(target, ignore_errors=True)
+            if have is None or have not in copied:
+                shutil.rmtree(target, ignore_errors=True)
             binary.dsym_error = str(e) or type(e).__name__
             continue
         binary.dsym = str(recorded_as / name)
+        binary.dwarf = str(recorded_as / name / dwarf)
+
+
+def _dwarf_for(dsym: Path, uuids: set[str]) -> str:
+    """The DWARF file in `dsym` covering `uuids`, relative to it; "" if none."""
+    for dwarf in sorted((dsym / "Contents" / "Resources" / "DWARF").glob("*")):
+        m = macho.read(dwarf)
+        if m is not None and uuids and uuids <= set(m.uuids.values()):
+            return str(dwarf.relative_to(dsym))
+    return ""
 
 
 def _existing_dsyms(products: Path) -> dict[Path, set[str]]:
@@ -327,7 +343,7 @@ def prune(root: Path | None = None, *, now: datetime | None = None,
             logger.warning("Could not remove dSYMs of %s: %s", record.build_id, e)
             continue
         for b in record.binaries:
-            b.dsym = ""
+            b.dsym = b.dwarf = ""
         record.dsyms_expired = True
         try:
             _write(record, directory)
