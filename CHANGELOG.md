@@ -5,7 +5,7 @@ All notable changes to Quern are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.22.0] - 2026-09-29
 
 ### Added
 - **quern records every build it makes (#326, step 2).** `build_and_install` built each scheme into one DerivedData directory, which the next build overwrote, and kept nothing else: by the time a phone's crash was read, the binary it ran and the object files holding its debug information were gone. Each successful build now leaves a record in `~/.quern/build-records/`, returned in `build_records` and named in the summary the MCP tool shows: bundle id, version, build number, configuration, platform, where it was installed, and each binary's UUID per architecture, which is how a crash report names the binaries it ran. A device build also keeps dSYMs, made straight after the build while DerivedData still matches it. They are made for the binaries this build compiled, recognised by debug maps naming object files on this Mac: six vendored frameworks in the production app tested carry maps naming their vendors' build machines. A dSYM Xcode or a vendor already made is copied when its UUIDs match, once for every binary it covers. Measured on a production app: about 6 s and 185 MB when `dsymutil` has to run, and `atos` against the result resolves the test iPhone's crash to `AppDelegate.swift:13`. Each binary also records `dwarf`, the file inside its dSYM that `atos -o` takes: an `.app.dSYM` can hold two, and `atos` given the bundle resolved a real phone crash to nothing. dSYMs are kept for the newest 10 device builds of each scheme, and records for 30 days. A simulator build gets the record alone: macOS already puts file and line in a simulator's crash report. A dSYM that cannot be made is said on the record and in the summary, and never fails a build that installed.
@@ -48,6 +48,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 - **`/video-test` is gone, and with it an unauthenticated route that served the API key.** The page was a browser test harness for MJPEG streaming added in March, and it was in `PUBLIC_PATHS` -- so it needed no bearer token -- while interpolating the live key into its JavaScript at two separate points. Since `--host` defaults to `0.0.0.0`, one unauthenticated GET from anywhere on the network returned the credential for every other endpoint, and left no failed-auth line behind because there was no auth to fail. Deleted rather than patched: the thing it tested now has better front ends in `quern-media`'s own index page and the preview app, and a public page has to justify holding a secret. Four documentation claims that it was a valid public path went with it, and a test now fails if the path is ever returned to `PUBLIC_PATHS`. Reported and fixed as #283.
+
+### Notes
+
+- **The accessibility-bridge recovery covers one read path, not all of them.**
+  The #66 recovery added in 0.15.0 — restarting a simulator's
+  `CoreSimulatorBridge` after XCUITest leaves it holding a stale mach-port
+  cache — is wired into `SimBridgeBackend.describe_all` and nowhere else.
+  `describe_all_nested`, `describe_point` and the whole idb backend are
+  uncovered; idb does not import the detector at all. That matters on any
+  machine where sim-bridge cannot run and idb is the fallback — Xcode earlier
+  than 26, or an Intel Mac — because there the wedge #66 describes is simply
+  unhandled. Nothing changed here; it is recorded because it was measured
+  during this cycle and the shipped detector was confirmed to fire unchanged on
+  a real captured idb wedge tree, so the gap is a wiring gap rather than a
+  detector gap. Tracked as #337 for 0.23.0, together with invalidating the
+  300ms UI cache on recovery, which can otherwise serve a pre-wedge tree that
+  reads healthy while every probe behind it fails.
 
 ## [0.21.0] - 2026-09-23
 
@@ -631,6 +648,7 @@ First versioned release — MVP with iOS and Android support.
 - `quern --version` command.
 
 [Unreleased]: https://github.com/quern-dev/quern/compare/v0.21.0...main
+[0.22.0]: https://github.com/quern-dev/quern/releases/tag/v0.22.0
 [0.21.0]: https://github.com/quern-dev/quern/releases/tag/v0.21.0
 [0.20.0]: https://github.com/quern-dev/quern/releases/tag/v0.20.0
 [0.19.0]: https://github.com/quern-dev/quern/releases/tag/v0.19.0
