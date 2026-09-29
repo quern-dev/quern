@@ -254,7 +254,7 @@ holds in `flow_store`. `flows_captured` is only what survived.
 | `terminate_app` | POST | `/api/v1/device/app/terminate` | Terminate app |
 | `uninstall_app` | POST | `/api/v1/device/app/uninstall` | Uninstall app |
 | `list_apps` | GET | `/api/v1/device/app/list` | List installed apps |
-| `build_and_install` | POST | `/api/v1/device/build-and-install` | Build an Xcode scheme and install it on one or more devices |
+| `build_and_install` | POST | `/api/v1/device/build-and-install` | Build an Xcode scheme and install it on one or more devices. Each successful build is recorded in `build_records` and in `~/.quern/build-records/`: bundle id, version, configuration and each binary's UUID, kept after the next build overwrites DerivedData. A device build also keeps dSYMs of the binaries this build compiled, and those Xcode or a vendor supplied with matching UUIDs, for the newest 10 device builds of each scheme; records are kept 30 days. Each binary's `dwarf` is the file inside its dSYM to pass to `atos -o`: one dSYM can cover several binaries (`MyApp.app.dSYM` holds the app and its `.debug.dylib`), and `atos` given the bundle can read the wrong one and resolve nothing. A dSYM that could not be made is said per binary (`dsym_error`), and never fails the build. `skip_plugin_validation=true` builds even when a Swift package plug-in or macro has not been approved in Xcode (`-skipPackagePluginValidation -skipMacroValidation`); it is off by default, and a build refused for that says so in its errors |
 
 ### UI interaction
 
