@@ -119,7 +119,14 @@ class IdbBackend:
 
         # Time the communication (waiting for output)
         t3 = time.perf_counter()
-        stdout, stderr = await proc.communicate()
+        try:
+            stdout, stderr = await proc.communicate()
+        except asyncio.CancelledError:
+            # A read can now be cancelled by the recovery deadline, which this
+            # never had to survive before. Without the kill the `idb` child
+            # outlives the request that asked for it (review of #343).
+            proc.kill()
+            raise
         t4 = time.perf_counter()
         logger.info(
             f"[PERF IDB] subprocess communicate: "

@@ -113,6 +113,13 @@ async def _run(*args: str, timeout: float = 5.0) -> tuple[int, str]:
     except TimeoutError:
         proc.kill()
         return 1, ""
+    except asyncio.CancelledError:
+        # `reread_after_recovery` runs this under a deadline, so a cancel here
+        # is routine rather than exceptional -- and a cancel left the `pgrep`
+        # or `lsof` running, once per poll, on the path that fires when a
+        # simulator is already unwell (review of #343).
+        proc.kill()
+        raise
     return proc.returncode or 0, out.decode(errors="replace")
 
 

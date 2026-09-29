@@ -310,3 +310,49 @@ class TestSimBridgeNestedHealsToo:
         await backend.describe_all_nested(UDID)
 
         assert resets == []
+
+
+class TestACancelledReadDoesNotLeakItsChild:
+    """The recovery deadline cancels whatever it is awaiting, which these two
+    subprocess helpers never had to survive before. A cancel that does not kill
+    the child leaves a real `pgrep`, `lsof` or `idb` running past the request
+    that asked for it -- on the path that fires when a simulator is already
+    unwell, so once per poll.
+
+    Spawns a genuinely long-lived process rather than asserting on a mock: the
+    thing being checked is that an OS process is gone, and only an OS process
+    can show that.
+    """
+
+    async def test_ax_recovery_run_kills_on_cancel(self):
+        import asyncio as aio
+
+        from server.device import ax_recovery as axr
+
+        started: list = []
+        real_exec = aio.create_subprocess_exec
+
+        async def capture(*args, **kwargs):
+            proc = await real_exec(*args, **kwargs)
+            started.append(proc)
+            return proc
+
+        axr.asyncio.create_subprocess_exec = capture
+        try:
+            task = aio.ensure_future(axr._run("/bin/sleep", "30", timeout=30))
+            await aio.sleep(0.3)
+            task.cancel()
+            with pytest.raises(aio.CancelledError):
+                await task
+        finally:
+            axr.asyncio.create_subprocess_exec = real_exec
+
+        assert started, "nothing was spawned, so nothing was proved"
+        proc = started[0]
+        # Bounded: if the kill is dropped, `sleep 30` outlives this wait and
+        # the assertion fails rather than the test hanging for 30s.
+        try:
+            await aio.wait_for(proc.wait(), timeout=5)
+        except TimeoutError:
+            pytest.fail("the cancelled child was still running 5s later")
+        assert proc.returncode is not None
