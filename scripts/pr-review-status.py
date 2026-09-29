@@ -27,6 +27,11 @@ is available. Both are read here: the PR is reported pending *with that reason
 and time*, and is not asked about again until the time has passed. (Earlier the
 wording was "You've used all free OSS reviews for now".)
 
+**A refusal is not proof that nothing is running.** With usage-based reviews
+enabled the banner tracks the *included* allowance only, so a paid review can
+be in progress while it still quotes a wait. `coveredCommitId` is the
+authoritative signal and is polled here even after a refusal.
+
 A rate-limited head can still have every thread resolved -- CodeRabbit closes
 threads whose fixes it can see without running a review -- so "0 unresolved"
 is not evidence the head was reviewed.
@@ -380,15 +385,21 @@ def _reply_after(number: int, since: str) -> str:
 _MAX_ASKS = 2
 
 
-def _reviewed_by_asking(number: int, timeout: float = 600.0) -> str:
+def _reviewed_by_asking(number: int, head: str, timeout: float = 600.0) -> str:
     """Ask whether the head commit is reviewed, and wait if a review starts.
 
     Returns "reviewed", "rate_limited", or "timeout".
+
+    The coverage marker is polled alongside the reply because it is the
+    authoritative signal and the reply is not: a clean review posts no body,
+    and since usage-based reviews were enabled a refusal no longer proves that
+    nothing is running.
     """
     since = _ask_for_review(number)
     asks = 1
     deadline = time.monotonic() + timeout
     print(f"  asked CodeRabbit about #{number}; waiting for its reply…", flush=True)
+    refused = False
 
     while time.monotonic() < deadline:
         time.sleep(20)
@@ -396,14 +407,23 @@ def _reviewed_by_asking(number: int, timeout: float = 600.0) -> str:
         if _ALREADY_REVIEWED in reply or _FINISHED in reply:
             return "reviewed"
         if _RATE_LIMITED in reply:
-            return "rate_limited"
+            # Not a stop signal any more. The banner tracks the *included*
+            # allowance, so with usage-based reviews on, a paid review can be
+            # under way while it still quotes a wait -- measured 2026-09-29,
+            # the coverage marker moved about six minutes after the ask while
+            # the banner still said 29 minutes. Returning here abandoned a
+            # review already running, and the caller then backed off for a
+            # window that had nothing to do with it. Noted and kept watching.
+            refused = True
+        if _summary_verdict(number, head)[0] == "reviewed":
+            return "reviewed"
         if _TRIGGERED in reply and asks < _MAX_ASKS:
             # A review is running. It leaves a review object only if it finds
             # something, so the way to learn it finished is to ask again — once.
             time.sleep(60)
             since = _ask_for_review(number)
             asks += 1
-    return "timeout"
+    return "rate_limited" if refused else "timeout"
 
 
 def status(number: int, ask: bool = False) -> tuple[str, str]:
@@ -519,7 +539,7 @@ def _status(number: int, ask: bool = False) -> tuple[str, str]:
                 note = _rate_limit_note(_LIFTS_AT.get(number))
             elif ask:
                 note = ""
-                outcome = _reviewed_by_asking(number)
+                outcome = _reviewed_by_asking(number, head)
                 if outcome == "reviewed":
                     reviewed = pushed
                 elif outcome == "rate_limited":
