@@ -69,7 +69,13 @@ enum Recovery: Equatable {
         case .repair:
             return "The server would not start. Opening Terminal will run doctor and try again."
         case .setUp:
-            return "There is no quern command to run. Opening Terminal will install it."
+            // Deliberately not "will install it": `script(.setUp)` *prints* the
+            // installer one-liner rather than running it, on the grounds that
+            // fetching and running an installer is a bigger step than a click
+            // on an alert should take. Promising the install was harmless while
+            // OK was the default button and this was the second one; it is not
+            // now that Return triggers it.
+            return "There is no quern command to run. Opening Terminal will show you how to install it."
         }
     }
 
@@ -294,6 +300,28 @@ enum FailureAlert {
     /// to resize or scroll (#339). The output now goes in a scrollable
     /// accessory view; this is the short part that must always be visible, so
     /// it leads with the next action rather than ending with it.
+    /// Both halves of the alert: what it *says*, and what it *shows*.
+    ///
+    /// One function taking the detail and returning both is what makes the
+    /// #339 invariant testable. `text(guidance:hasDetail:recovery:)` below
+    /// takes a `Bool`, so a test asserting "the body does not contain the log"
+    /// was asserting it about a function that never saw the log -- true by
+    /// construction and therefore worth nothing. Review mutated the real fix
+    /// four ways, including restoring the original bug, and all four passed.
+    ///
+    /// The body must never contain the detail: it sets the window height, and
+    /// `informativeText` neither scrolls nor bounds. The accessory is the
+    /// detail verbatim, or nil when there is none.
+    static func parts(detail: String, guidance: String?, recovery: Recovery?)
+        -> (body: String, accessory: String?)
+    {
+        let trimmed = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (
+            body: text(guidance: guidance, hasDetail: !trimmed.isEmpty, recovery: recovery),
+            accessory: trimmed.isEmpty ? nil : trimmed
+        )
+    }
+
     static func text(guidance: String?, hasDetail: Bool, recovery: Recovery?) -> String {
         var parts: [String] = []
         let trimmed = guidance?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

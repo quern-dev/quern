@@ -614,6 +614,40 @@ class TestCheckNode:
         assert "terminal" in result.detail.lower(), "says where it will work"
         assert "/x/login/node" in result.detail, "names where it did find one"
 
+    def test_a_node_elsewhere_that_is_too_old_is_not_called_reachable(self):
+        """A Node 18 in the login shell is a different problem with different
+        advice, and setup *could* fix it by putting a reachable 22 on the
+        search path — so claiming "installed, just not reachable" suppresses
+        the one thing that would have worked."""
+        from server.lifecycle import node_env
+
+        sites = _sites(here=("missing", None))
+        sites[1] = node_env.NodeSite("login shell", "someone", node_env.TOO_OLD,
+                                     "/Users/u/.nvm/versions/node/v18.20.4/bin/node", "v18.20.4")
+        sites[2] = node_env.NodeSite("non-interactive shell", "someone", node_env.TOO_OLD,
+                                     "/Users/u/.nvm/versions/node/v18.20.4/bin/node", "v18.20.4")
+        sites[3] = node_env.NodeSite("GUI apps", "someone", node_env.MISSING, None, None)
+        sites[4] = node_env.NodeSite("the Quern app", "someone", node_env.MISSING, None, None)
+
+        result = check_node(sites)
+
+        assert "not reachable" not in result.message, result.message
+        assert result.fixable, "an install is genuinely the fix here"
+
+    def test_a_broken_node_elsewhere_is_not_called_reachable(self):
+        """An asdf shim with no version selected exits non-zero, so it is
+        UNUSABLE with a path. It is broken everywhere, not invisible here."""
+        from server.lifecycle import node_env
+
+        sites = _sites(here=("missing", None))
+        for i in (1, 2, 3, 4):
+            sites[i] = node_env.NodeSite(sites[i].place, "someone", node_env.UNUSABLE,
+                                         "/Users/u/.asdf/shims/node", None)
+
+        result = check_node(sites)
+
+        assert "not reachable" not in result.message, result.message
+
     def test_it_names_the_manager_when_it_can(self):
         """Which tool put it there is the difference between a user recognising
         their own setup and reading a generic complaint."""

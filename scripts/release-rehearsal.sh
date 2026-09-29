@@ -510,29 +510,39 @@ case_gui_node_message() {
     skip "GUI-style node message: the update case did not leave an install"
     return 0
   fi
-  # Only meaningful where a login shell actually has a node to be unreachable
-  # *from*. With none anywhere, "Not installed" is the correct answer and this
-  # case would assert the opposite.
-  if ! "$SHELL" -lic 'command -v node' >/dev/null 2>&1; then
-    skip "GUI-style node message: no node in a login shell, so nothing to be hidden from"
-    return 0
-  fi
-
-  # `check_node` specifically, not `doctor`: doctor renders node_env's per-site
-  # breakdown and never calls this function, so grepping its output would have
-  # tested a different code path and said nothing about the message that
-  # shipped wrong. Found by running it.
   local py="$install/.venv/bin/python"
   if [[ ! -x "$py" ]]; then
     skip "GUI-style node message: no interpreter in the sandbox install"
     return 0
   fi
 
+  # A home of our own, with a node reachable only through `.zshrc` -- the #339
+  # arrangement, built rather than detected. An earlier version of this case
+  # asked the *developer's* login shell whether it had a node and then measured
+  # a sandbox home that never had one, so on the very machines this bug came
+  # from the precheck passed, the measurement found nothing anywhere, and the
+  # case failed the fix it was written to protect. Verify the claim, not its
+  # neighbour.
+  local h="$WORK/node/gui-message"
+  mkdir -p "$h/state"
+  # Inlined rather than calling make_fake_node: that helper is defined further
+  # down the file than this case runs, so calling it here would be a
+  # "command not found" at the moment the case executes.
+  mkdir -p "$h/nodebin"
+  printf '#!/bin/sh\n[ "$1" = "--version" ] && { echo "v22.9.0"; exit 0; }\nexit 0\n' \
+    > "$h/nodebin/node"
+  chmod +x "$h/nodebin/node"
+  : > "$h/.zshenv"
+  echo 'export PATH="$HOME/nodebin:$PATH"' > "$h/.zshrc"
+
+  # `check_node` specifically, not `doctor`: doctor renders node_env's per-site
+  # breakdown and never calls this function, so grepping its output would test
+  # a different path and say nothing about the message that shipped wrong.
   set +e
   env -i \
-    HOME="$sb/home" \
-    QUERN_STATE_DIR="$sb/state" \
-    SHELL="$SHELL" \
+    HOME="$h" \
+    QUERN_STATE_DIR="$h/state" \
+    SHELL=/bin/zsh \
     PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
     "$py" -c 'import sys
 sys.path.insert(0, sys.argv[1])
@@ -541,33 +551,42 @@ r = check_node()
 print("status:", r.status)
 print("message:", r.message)
 print("fixable:", r.fixable)
-print("detail:", (r.detail or "").replace("\n", " "))' "$install" > "$sb/gui-node.log" 2>&1
+print("detail:", (r.detail or "").replace("\n", " "))' "$install" > "$h/gui-node.log" 2>&1
+  local rc=$?
   set -e
 
-  if grep -qi "not reachable from here" "$sb/gui-node.log"; then
-    ok "it says the node is unreachable rather than missing"
-  else
-    bad "no 'not reachable' in the GUI-context check — see $sb/gui-node.log"
-    sed -n '1,8p' "$sb/gui-node.log" | sed 's/^/      /'
+  # Checked first: every assertion below is a grep, and a grep over a traceback
+  # answers "absent" for all of them -- so a crash would read as three passes.
+  if [[ $rc -ne 0 ]]; then
+    bad "the GUI-context check exited $rc — see $h/gui-node.log"
+    sed -n '1,12p' "$h/gui-node.log" | sed 's/^/      /'
+    return "$failures"
   fi
 
-  # The specific regression: the old message. Checked separately so a report
-  # that somehow says both still fails.
-  if grep -qi "message:.*Not installed" "$sb/gui-node.log"; then
+  if grep -qi "not reachable from here" "$h/gui-node.log"; then
+    ok "it says the node is unreachable rather than missing"
+  else
+    bad "no 'not reachable' in the GUI-context check — see $h/gui-node.log"
+    sed -n '1,8p' "$h/gui-node.log" | sed 's/^/      /'
+  fi
+
+  # The specific regression: the old message.
+  if grep -qi "message:.*Not installed" "$h/gui-node.log"; then
     bad "still reports Node as not installed when a shell has one"
   else
     ok "it does not claim Node is missing"
   fi
 
   # Offering `brew install node` here would add a second node to work around
-  # the first being invisible, which fixes nothing.
-  if grep -qi "fixable: False" "$sb/gui-node.log"; then
+  # the first being invisible, which fixes nothing. `run_setup` gates its
+  # prompt on this flag.
+  if grep -qi "fixable: False" "$h/gui-node.log"; then
     ok "and does not offer to install another one"
   else
     bad "it still offers an install as the fix"
   fi
 
-  if grep -qi "terminal" "$sb/gui-node.log"; then
+  if grep -qi "terminal" "$h/gui-node.log"; then
     ok "and says where it will work"
   else
     bad "the report never mentions running it from a terminal"

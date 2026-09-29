@@ -473,8 +473,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // path did not.
                 switch code {
                 case QuernCLI.notFoundStatus:
+                    // `output` here is prose built by QuernCLI.run, not command
+                    // output -- it names the path and says to run setup. As a
+                    // detail it would sit in a monospaced box while the body
+                    // said only "The full output is below."
                     self.reportFailure("Could not find the quern command",
-                                       detail: output)
+                                       detail: "", guidance: output)
                 case QuernCLI.timedOutStatus:
                     self.reportFailure(
                         "The update check did not finish",
@@ -513,7 +517,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func updateInTerminal() {
         lifecycle.clearUpdateRecovery()
-        TerminalUpdate.open { [weak self] error in
+        let reason: TerminalReason
+        if case .updateInTerminal(_, let r) = UpdateMenuItem.forStaged(
+            latestVersion: nil, install: InstallKind.current) { reason = r }
+        else { reason = .gitInstall }
+        TerminalUpdate.open(reason: reason) { [weak self] error in
             guard let error else { return }
             self?.reportFailure("Could not open Terminal to update",
                                 detail: error,
@@ -529,7 +537,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func openRecovery(_ recovery: Recovery) {
         recovery.open { [weak self] error in
             guard let error else { return }
-            self?.reportFailure("Could not open Terminal", detail: error)
+            // Also prose: a TerminalScript failure description.
+            self?.reportFailure("Could not open Terminal", detail: "", guidance: error)
         }
     }
 
@@ -635,11 +644,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let alert = NSAlert()
             alert.alertStyle = .warning
             alert.messageText = message
-            let trimmed = detail.trimmingCharacters(in: .whitespacesAndNewlines)
-            alert.informativeText = FailureAlert.text(
-                guidance: guidance, hasDetail: !trimmed.isEmpty, recovery: recovery
-            )
-            if !trimmed.isEmpty { alert.accessoryView = Self.detailView(trimmed) }
+            // Both halves from one place, so what goes where is decided by a
+            // function a test can drive rather than by these four lines.
+            let parts = FailureAlert.parts(detail: detail, guidance: guidance,
+                                           recovery: recovery)
+            alert.informativeText = parts.body
+            if let accessory = parts.accessory {
+                alert.accessoryView = Self.detailView(accessory)
+            }
+            let trimmed = parts.accessory ?? ""
             let buttons = FailureAlert.buttons(
                 detail: trimmed,
                 hasLog: FileManager.default.fileExists(atPath: Self.serverLog.path),

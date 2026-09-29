@@ -76,9 +76,18 @@ enum TerminalUpdate {
     /// shell probably has `quern` on PATH, but "probably" is the thing this
     /// whole feature exists to stop relying on. `TerminalScript.wrap` leaves
     /// the window open afterwards.
-    static func script(quern: String) -> String {
-        TerminalScript.wrap(title: "update a git install", body: [
-            "echo \"Updating Quern (git install)...\"",
+    /// `reason` only changes the words. `quern update` handles both install
+    /// kinds itself, so the script is the same either way -- but a release
+    /// install sent here because its node is hidden was being told it was a git
+    /// checkout, which is a confusing thing to read while following advice.
+    static func script(quern: String, reason: TerminalReason = .gitInstall) -> String {
+        let why: String
+        switch reason {
+        case .gitInstall: why = "git install"
+        case .nodeManagedElsewhere(let manager): why = "Node is managed by \(manager)"
+        }
+        return TerminalScript.wrap(title: "update quern (\(why))", body: [
+            "echo \"Updating Quern (\(why))...\"",
             "echo",
             "\(shellQuote(quern)) update",
             "status=$?",
@@ -95,12 +104,15 @@ enum TerminalUpdate {
 
     /// Write the script and open it in Terminal. `completion` receives an
     /// error description, or nil once Terminal has it.
-    static func open(completion: @escaping (String?) -> Void) {
+    static func open(reason: TerminalReason = .gitInstall,
+                     completion: @escaping (String?) -> Void)
+    {
         guard let quern = QuernCLI.resolve()?.path else {
             completion("Could not find the quern command. Run `quern setup` in a terminal.")
             return
         }
-        TerminalScript.open(name: "quern-update.command", contents: script(quern: quern),
+        TerminalScript.open(name: "quern-update.command",
+                            contents: script(quern: quern, reason: reason),
                             completion: completion)
     }
 }
@@ -127,16 +139,29 @@ enum NodeVisibility: Equatable {
     /// and routing it to Terminal would only move the same failure.
     case absent
 
-    /// Directories a manager keeps, newest style first. Mirrors the markers in
-    /// `server/lifecycle/node_env.py`, which does the same job server-side.
+    /// Directories a manager keeps in `$HOME`.
+    ///
+    /// Related to `node_env._MANAGER_PATHS` but deliberately not the same list,
+    /// and the difference is not drift: that one classifies a path `probe`
+    /// already found, this one guesses from a directory existing. So brew,
+    /// MacPorts, nix and `n` are absent here on purpose -- they install into
+    /// `/opt/homebrew/bin` or `/usr/local/bin`, which are on
+    /// `QuernCLI.searchPath`, so a node from them reads `.visible` and never
+    /// reaches this list.
+    ///
+    /// Ordering only picks the label when two are installed; a stale `~/.nvm`
+    /// beside a live fnm says "nvm", which is one word in a menu title.
     static let managerMarkers: [(String, String)] = [
         (".local/share/mise", "mise"),
         (".asdf", "asdf"),
+        (".nodenv", "nodenv"),
         (".volta", "volta"),
         (".nvm", "nvm"),
         (".local/state/fnm_multishells", "fnm"),
         ("Library/Application Support/fnm", "fnm"),
         (".fnm", "fnm"),
+        ("Library/pnpm", "pnpm"),
+        (".local/share/pnpm", "pnpm"),
     ]
 
     static func check(

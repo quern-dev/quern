@@ -114,16 +114,38 @@ enum RecoveryTests {
             Harness.expect(FailureAlertButton.fixInTerminal(.repair).title, "Fix in Terminal", "title")
         }
 
-        Harness.test("the alert's own text never carries the output") {
-            // The output goes in a scrollable accessory view. Whatever ends up
-            // in `informativeText` sets the window height, so a log there is
-            // what put the buttons off-screen.
+        Harness.test("the output goes to the accessory and never to the body") {
+            // This asserts on `parts`, which *takes* the detail. The earlier
+            // version asked `text(guidance:hasDetail:recovery:)`, which takes a
+            // Bool -- so "the body does not contain the log" was true of a
+            // function that had never seen the log, and four mutations of the
+            // real fix (including restoring the original bug) passed it.
             let log = String(repeating: "npm ERR! something went wrong\n", count: 400)
-            let text = FailureAlert.text(guidance: nil, hasDetail: true, recovery: .repair)
-            Harness.expect(!text.contains("npm ERR!"), "no output in the body")
-            Harness.expect(text.contains(Recovery.repair.explanation), "leads with the next action")
-            Harness.expect(text.contains("below"), "points at the detail")
-            Harness.expect(log.count > text.count * 10, "the log dwarfs the body it is kept out of")
+            let p = FailureAlert.parts(detail: log, guidance: nil, recovery: .repair)
+
+            Harness.expect(!p.body.contains("npm ERR!"), "body is free of the output")
+            Harness.expect(p.accessory == log.trimmingCharacters(in: .whitespacesAndNewlines),
+                           "the accessory is the output, verbatim")
+            Harness.expect(p.body.contains(Recovery.repair.explanation), "leads with the next action")
+            Harness.expect(p.body.contains("below"), "points at the detail")
+            // The body sets the window height; that is the whole defect.
+            Harness.expect(p.body.count < 400, "body stays short whatever the output is")
+        }
+
+        Harness.test("no output means no accessory, and no dangling pointer to one") {
+            let p = FailureAlert.parts(detail: "   \n  ", guidance: nil, recovery: nil)
+            Harness.expect(p.accessory == nil, "whitespace is not output")
+            Harness.expect(!p.body.contains("below"), "and the body does not promise one")
+            Harness.expect(p.body, "Run `quern status` to see what state it is in.", "fallback")
+        }
+
+        Harness.test("prose passed as guidance reaches the body, not the box") {
+            // The `quern not found` path passes prose. As a detail it sat in a
+            // monospaced box while the body said only "the full output is below".
+            let prose = "The Quern app looks for ~/.local/bin/quern. Run setup once."
+            let p = FailureAlert.parts(detail: "", guidance: prose, recovery: .setUp)
+            Harness.expect(p.body.hasPrefix(prose), "prose leads the body")
+            Harness.expect(p.accessory == nil, "and nothing is boxed")
         }
 
         Harness.test("guidance wins over the recovery's own line, and survives alone") {

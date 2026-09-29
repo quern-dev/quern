@@ -1819,9 +1819,17 @@ def check_node(sites: list | None = None) -> CheckResult:
         #
         # `probe` has already asked the other places, so the evidence is here
         # rather than inferred from a directory that happens to exist.
+        # `== OK`, not "not missing". TOO_OLD and UNUSABLE both carry a path
+        # and would read as "installed, just not reachable here", which is
+        # wrong twice over: a Node 18 in the login shell is a different problem
+        # with different advice, and an asdf shim with no version selected is
+        # broken everywhere rather than merely invisible. `node_env.fix_for`
+        # already has the right words for both, and this branch would shadow
+        # them. UNKNOWN is excluded by the same test rather than incidentally
+        # by `site.path`.
         elsewhere = [
             site for site in sites[1:]
-            if site.status not in (node_env.MISSING, node_env.SKIPPED) and site.path
+            if site.status == node_env.OK and site.path
         ]
         if elsewhere:
             found = elsewhere[0]
@@ -2864,7 +2872,14 @@ def run_setup(assume_yes: bool = False) -> int:
     report.add(check_mitmdump())
 
     node_result = check_node()
-    if node_result.status == CheckStatus.MISSING:
+    # `fixable`, not just MISSING. A node that exists and is merely unreachable
+    # from here is MISSING *to this process*, and installing a second one does
+    # not make the first visible -- under `-y` it would silently do exactly
+    # that. The check says whether an install is the answer; this asks it
+    # rather than re-deciding. Without this the report contradicted itself:
+    # "installed by fnm, but not reachable from here" above, and "Node.js not
+    # found. Install via Homebrew?" a few lines below.
+    if node_result.status == CheckStatus.MISSING and node_result.fixable:
         if _prompt_yn("    Node.js not found. Install via Homebrew?"):
             if _brew_install("node"):
                 node_result = check_node()  # re-check
