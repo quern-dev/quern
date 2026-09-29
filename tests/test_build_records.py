@@ -497,31 +497,44 @@ class TestCancellation:
         asyncio.run(go())
         assert list((tmp_path / "records").iterdir()) == []
 
-    def test_the_child_is_killed_not_left_running(self):
-        procs = []
-        real = asyncio.create_subprocess_exec
+    def test_the_child_is_killed_not_left_running(self, monkeypatch):
+        """No real process: a fake whose communicate() never returns, as a
+        dsymutil still running when the request is cancelled."""
 
-        async def spy(*args, **kwargs):
-            procs.append(await real(*args, **kwargs))
+        class Proc:
+            returncode = None
+            killed = False
+
+            async def communicate(self):
+                await asyncio.sleep(3600)
+
+            def kill(self):
+                self.killed, self.returncode = True, -9
+
+            async def wait(self):
+                return self.returncode
+
+        procs: list[Proc] = []
+
+        async def fake_exec(*args, **kwargs):
+            procs.append(Proc())
             return procs[-1]
 
-        async def go():
-            asyncio.create_subprocess_exec = spy
-            try:
-                task = asyncio.create_task(build_records._run(["sleep", "30"]))
-                for _ in range(1000):           # bounded: 10 s, then fail
-                    if procs:
-                        break
-                    await asyncio.sleep(0.01)
-                assert procs, "sleep was never started"
-                task.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await task
-            finally:
-                asyncio.create_subprocess_exec = real
-            return procs[0].returncode
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
 
-        assert asyncio.run(go()) is not None
+        async def go():
+            task = asyncio.create_task(build_records._run(["xcrun", "dsymutil", "x"]))
+            for _ in range(1000):           # bounded: 10 s, then fail
+                if procs:
+                    break
+                await asyncio.sleep(0.01)
+            assert procs, "the child was never started"
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(go())
+        assert procs[0].killed
 
 
 class TestRetentionHardening:
