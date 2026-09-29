@@ -839,3 +839,23 @@ class TestRun:
 
         asyncio.run(go())
         assert procs and procs[0].killed
+
+
+class TestSettledIsSettled:
+    def test_a_retry_does_not_ask_atos_again_for_a_settled_image(self, tmp_path):
+        """Its compiler-generated frame still lacks a line; that is the answer."""
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        report = _report()
+        report.images.append(CrashImage(name="Widget.debug.dylib", uuid=str(uuid.uuid4()),
+                                        base=0x200000000, path=APP_PATH, arch="arm64"))
+        report.frames.append(CrashFrame(image="Widget.debug.dylib", offset=4, symbol="w()",
+                                        app=True))
+        lines = dict(GOOD)
+        lines[CELL_AT] = "Cell.pressed() (in MyApp.debug.dylib) (/<compiler-generated>:0)"
+        tools = FakeTools(lines=lines, mdfind="")
+        finder = symbolicate.SymbolFinder(tmp_path / "records", tools)
+        _run([report], finder)                      # Widget misses: not done
+        _run([report], finder)
+        assert len(tools.atos) == 1
+        assert [e.image for e in report.symbols].count("MyApp.debug.dylib") == 1
