@@ -57,6 +57,21 @@ The following build commands failed:
 (1 failure)
 """
 
+# Real shape, from a Geocaching simulator build on a stale DerivedData: the
+# only errors it printed had no column.
+STALE_MODULE = """\
+<unknown>:0: error: file '/dd/Products/AppsFlyerLib.framework/Headers/AppsFlyerLib.h' has been \
+modified since the module file '/dd/SwiftExplicitPrecompiledModules/AppsFlyerLib.pcm' was built
+<unknown>:0: error: file '/dd/Products/AppsFlyerLib.framework/Headers/AppsFlyerLib.h' has been \
+modified since the module file '/dd/SwiftExplicitPrecompiledModules/AppsFlyerLib.pcm' was built
+** BUILD FAILED **
+
+The following build commands failed:
+\tSwiftCompile normal x86_64 Compiling\\ A.swift,\\ B.swift """ + "/src/X.swift " * 40 + """
+\tBuilding workspace Geocaching with scheme Internal and configuration Debug
+(2 failures)
+"""
+
 NOTHING_READABLE = """\
 ** BUILD FAILED **
 
@@ -110,6 +125,17 @@ class TestWhatFailed:
         assert error.file == "/Volumes/src/Geocaching.xcodeproj"
         assert error.message.startswith('No signing certificate "iOS Development" found')
         assert error.line is None
+
+    async def test_the_compilers_placeless_form_is_read_once(self):
+        result = await _parse(STALE_MODULE)
+        [error] = result.errors
+        assert error.file == "" and "has been modified since the module file" in error.message
+
+    async def test_a_failed_step_is_cut_short(self):
+        text = STALE_MODULE.replace("<unknown>:0: error:", "<unknown>:0: note:")
+        [error] = (await _parse(text)).errors
+        assert error.message.startswith("SwiftCompile normal x86_64")
+        assert len(error.message) < 240 and "…" in error.message
 
     async def test_a_failure_with_nothing_readable_still_says_it_failed(self):
         """Never "0 errors" for a failed build."""

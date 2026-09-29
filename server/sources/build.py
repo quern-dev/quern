@@ -48,11 +48,16 @@ BUILD_STATUS_RE = re.compile(r"\*\*\s+BUILD\s+(SUCCEEDED|FAILED)\s+\*\*")
 # project file (`/src/App.xcodeproj: error: No signing certificate "iOS
 # Development" found`). DIAGNOSTIC_RE wants file:line:col, so both parsed as
 # nothing and a failed build read "0 errors" -- the second measured on
-# Geocaching's device build. The path excludes ":", so a file:line:col line
-# cannot match here too.
+# Geocaching's device build. And the compiler's own placeless form,
+# `<unknown>:0: error: file '...' has been modified since the module file`,
+# which a stale DerivedData produces -- one Geocaching simulator build printed
+# nothing else. The path excludes ":", so a file:line:col line cannot match
+# here too.
 LOCATIONLESS_ERROR_RE = re.compile(
-    r"^(?:(?:xcodebuild|(/[^:\n]+)): )?error: (.+?)\s*$", re.MULTILINE,
+    r"^(?:(?:xcodebuild|<unknown>|(/[^:\n]+))(?::\d+)?: )?error: (.+?)\s*$", re.MULTILINE,
 )
+#: A failed step names every file of a compile batch; past this it is noise.
+MAX_STEP_CHARS = 200
 UNREADABLE_FAILURE = (
     "xcodebuild reported the build failed but printed no error quern could read; "
     "build it in Xcode, or run xcodebuild and read its output, to see why"
@@ -324,6 +329,8 @@ class BuildAdapter(BaseSourceAdapter):
         # error(s)", which names no cause. Say what xcodebuild says failed.
         if not succeeded and not errors:
             for step in _failed_commands(content):
+                if len(step) > MAX_STEP_CHARS:
+                    step = step[:MAX_STEP_CHARS].rstrip() + "…"
                 message = f"{step} failed"
                 if _VALIDATION_RE.match(step):
                     message += f": {PLUGIN_VALIDATION_HINT}"
