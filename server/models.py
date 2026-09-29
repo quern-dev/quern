@@ -339,6 +339,8 @@ class ImageSymbols(BaseModel):
     frames_resolved: int = 0
     frames_total: int = 0
     note: str = Field(default="", description="Why it was not symbolicated, or only partly")
+    #: atos has answered for it: a later read keeps this entry, not asks again.
+    settled: bool = Field(default=False, exclude=True)
 
 
 class CrashImage(BaseModel):

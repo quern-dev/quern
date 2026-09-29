@@ -270,6 +270,12 @@ def load_all(root: Path | None = None) -> list[BuildRecord]:
     return [record for record, _ in _load(root or RECORDS_DIR)[0]]
 
 
+def load_with_unreadable(root: Path | None = None) -> tuple[list[BuildRecord], int]:
+    """Every complete record, newest first, and how many could not be read."""
+    records, unreadable = _load(root or RECORDS_DIR)
+    return [record for record, _ in records], len(unreadable)
+
+
 def _load(root: Path) -> tuple[list[tuple[BuildRecord, Path]], list[Path]]:
     """(readable records with the directory each was read from, newest first;
     directories whose record could not be read)."""

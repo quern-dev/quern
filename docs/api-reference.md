@@ -135,10 +135,12 @@ address itself a `fatalError`'s own frame resolves to compiler-generated code. `
 for that UUID, a build whose dSYMs have expired, Spotlight or `atos` unavailable.
 Only the crashed app's own frames that lack a line are sent, so a simulator's
 report, which macOS usually symbolicates, costs nothing unless one of them does,
-and Android reports and the Mac's own processes are left alone. A report is
-symbolicated on the first read that returns it and kept, until the server restarts;
-one that failed because `atos` or Spotlight could not be asked is tried again on
-the next read, and a definite "no match" is not. `symbolicate=false` skips it.
+and Android reports and the Mac's own processes are left alone. An image is
+settled once `atos` has answered for it, and kept until the server restarts; an
+image whose symbols were not found, or could not be read, is looked up again on the
+next read (a records scan and one Spotlight query), so a build or an index that
+appears later is picked up. `symbolicate=false` does no new work; frames an earlier
+read resolved stay resolved.
 
 A frame counts as the app's when:
 - **iOS:** its binary is inside the app bundle.

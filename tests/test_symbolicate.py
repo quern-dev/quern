@@ -379,17 +379,6 @@ class TestTheRoute:
 class TestRetry:
     """A report is done only when every image got a definite answer."""
 
-    def test_a_failed_atos_is_tried_again(self, tmp_path):
-        dsym = _dsym(tmp_path / "d", U_APP)
-        _record(tmp_path / "records", dsym)
-        report = _report()
-        failing = FakeTools(lines=GOOD, atos_code=1)
-        _run([report], symbolicate.SymbolFinder(tmp_path / "records", failing))
-        assert not report.symbolicated and report.app_frame.file == ""
-        _run([report], symbolicate.SymbolFinder(tmp_path / "records", FakeTools(lines=GOOD)))
-        assert report.symbolicated and report.app_frame.line == 170
-        assert len(report.symbols) == 1 and report.symbols[0].note == ""   # replaced, not added
-
     def test_spotlight_that_could_not_be_asked_is_tried_again(self, tmp_path):
         report = _report()
         broken = FakeTools(mdfind_raises=FileNotFoundError(2, "No such file", "mdfind"))
@@ -404,15 +393,6 @@ class TestRetry:
 
         _run([report], symbolicate.SymbolFinder(tmp_path / "records", run))
         assert not report.symbolicated and "mdfind exited 1" in report.symbols[0].note
-
-    def test_a_definite_miss_is_done(self, tmp_path):
-        tools = FakeTools(mdfind="")
-        finder = symbolicate.SymbolFinder(tmp_path / "records", tools)
-        report = _report()
-        _run([report], finder)
-        _run([report], finder)
-        assert report.symbolicated
-        assert [c[0] for c in tools.calls].count("mdfind") == 1
 
     def test_an_unexpected_error_is_said_and_tried_again(self, tmp_path, monkeypatch):
         dsym = _dsym(tmp_path / "d", U_APP)
@@ -457,22 +437,6 @@ class TestConcurrency:
 
 
 class TestUnreadableHits:
-    def test_an_unreadable_spotlight_hit_does_not_stop_the_next(self, tmp_path, monkeypatch):
-        good = _dsym(tmp_path / "DerivedData", U_APP)
-        blocked = tmp_path / "Documents" / "Old.dSYM"
-        real = symbolicate.build_records.dwarf_for
-
-        def dwarf_for(dsym, uuids):
-            if dsym == blocked:
-                raise PermissionError(1, "Operation not permitted", str(dsym))
-            return real(dsym, uuids)
-
-        monkeypatch.setattr(symbolicate.build_records, "dwarf_for", dwarf_for)
-        tools = FakeTools(lines=GOOD, mdfind=f"{blocked}\n{good}\n")
-        report = _report()
-        _run([report], symbolicate.SymbolFinder(tmp_path / "records", tools))
-        assert report.symbols[0].source == "spotlight" and report.app_frame.line == 170
-
     def test_a_record_whose_dsym_is_gone_says_so(self, tmp_path):
         dsym = _dsym(tmp_path / "d", U_APP)
         _record(tmp_path / "records", dsym)
@@ -661,3 +625,217 @@ class TestMore:
         tools = FakeTools()
         _run([report], symbolicate.SymbolFinder(tmp_path / "records", tools))
         assert tools.calls == [] and report.symbols == []
+
+
+# ── second review ────────────────────────────────────────────────────────────
+
+
+class TestWhatSettles:
+    """An image is settled once atos has answered for it; nothing else is."""
+
+    def test_atos_that_could_not_run_is_tried_again(self, tmp_path):
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+
+        async def missing(argv):
+            raise FileNotFoundError(2, "No such file", "xcrun")
+
+        report = _report()
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", missing))
+        assert not report.symbolicated
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", FakeTools(lines=GOOD)))
+        assert report.symbolicated and report.app_frame.line == 170
+        assert len(report.symbols) == 1 and report.symbols[0].note == ""   # replaced, not added
+
+    def test_atos_that_refused_is_settled(self, tmp_path):
+        """It would refuse again: a dSYM for another architecture, say."""
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        tools = FakeTools(lines=GOOD, atos_code=1)
+        finder = symbolicate.SymbolFinder(tmp_path / "records", tools)
+        report = _report()
+        _run([report], finder)
+        _run([report], finder)
+        assert report.symbolicated and len(tools.atos) == 1
+        assert "atos exited 1" in report.symbols[0].note
+
+    def test_a_miss_is_looked_up_on_the_next_read(self, tmp_path):
+        """A build made after the crash was read can supply it."""
+        tools = FakeTools(mdfind="")
+        finder = symbolicate.SymbolFinder(tmp_path / "records", tools)
+        report = _report()
+        _run([report], finder)
+        assert not report.symbolicated
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        tools.lines = GOOD
+        _run([report], finder)
+        assert report.symbolicated and report.app_frame.line == 170
+
+    def test_a_retry_keeps_the_images_that_had_settled(self, tmp_path):
+        """Two images; Spotlight fails for the second. Retrying dropped the
+        first's entry, because its frames had their lines by then."""
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        report = _report()
+        widget = str(uuid.uuid4())
+        report.images.append(CrashImage(name="Widget.debug.dylib", uuid=widget,
+                                        base=0x200000000, path=APP_PATH, arch="arm64"))
+        report.frames.append(CrashFrame(image="Widget.debug.dylib", offset=4, symbol="w()",
+                                        app=True))
+        broken = FakeTools(lines=GOOD, mdfind_raises=FileNotFoundError(2, "gone", "mdfind"))
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", broken))
+        assert not report.symbolicated
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", FakeTools(lines=GOOD)))
+        by = {e.image: e for e in report.symbols}
+        assert by["MyApp.debug.dylib"].source == "build_record"
+        mine = by["MyApp.debug.dylib"]
+        assert (mine.frames_resolved, mine.frames_total) == (2, 2)
+        assert set(by) == {"MyApp.debug.dylib", "Widget.debug.dylib"}
+
+
+class TestUnreadable:
+    def test_an_unreadable_spotlight_hit_is_said_and_the_next_tried(self, tmp_path):
+        """A real unreadable dSYM: neither dwarf_for nor macho.read raises for
+        one, they find nothing, so it is the hit that yields nothing."""
+        blocked = _dsym(tmp_path / "Documents", U_APP)
+        good = _dsym(tmp_path / "DerivedData", U_APP)
+        dwarf_dir = blocked / "Contents" / "Resources" / "DWARF"
+        dwarf_dir.chmod(0)
+        try:
+            tools = FakeTools(lines=GOOD, mdfind=f"{blocked}\n{good}\n")
+            report = _report()
+            _run([report], symbolicate.SymbolFinder(tmp_path / "records", tools))
+            assert report.symbols[0].source == "spotlight" and report.app_frame.line == 170
+            only = FakeTools(mdfind=f"{blocked}\n")
+            second = _report()
+            second.crash_id = "c2"
+            _run([second], symbolicate.SymbolFinder(tmp_path / "records", only))
+            assert "could not be read" in second.symbols[0].note and not second.symbolicated
+        finally:
+            dwarf_dir.chmod(0o755)
+
+    def test_an_unreadable_record_is_said_and_not_settled(self, tmp_path):
+        root = tmp_path / "records"
+        (root / "broken").mkdir(parents=True)
+        (root / "broken" / "record.json").write_text("{not json")
+        report = _report()
+        _run([report], symbolicate.SymbolFinder(root, FakeTools(mdfind="")))
+        assert "1 of quern's build records could not be read" in report.symbols[0].note
+        assert not report.symbolicated
+
+
+class TestRaces:
+    def test_a_removed_dsym_read_by_many_at_once(self, tmp_path):
+        """The stale-cache delete came after an await: two of four got KeyError."""
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        finder = symbolicate.SymbolFinder(tmp_path / "records", FakeTools(lines=GOOD, mdfind=""))
+        _run([_report()], finder)
+        import shutil
+        shutil.rmtree(dsym)
+        reports = []
+        for i in range(4):
+            r = _report()
+            r.crash_id = f"r{i}"
+            reports.append(r)
+        _run(reports, finder)
+        assert all("KeyError" not in r.symbols[0].note for r in reports)
+
+    def test_a_cancelled_caller_does_not_cancel_the_others(self, tmp_path):
+        started = asyncio.Event()
+
+        async def slow_mdfind(argv):
+            started.set()
+            await asyncio.sleep(0.2)
+            return 0, "", ""
+
+        finder = symbolicate.SymbolFinder(tmp_path / "records", slow_mdfind)
+
+        async def go():
+            first = asyncio.create_task(finder.find(str(U_APP)))
+            await asyncio.wait_for(started.wait(), timeout=10)
+            second = asyncio.create_task(finder.find(str(U_APP)))
+            await asyncio.sleep(0)
+            first.cancel()
+            return await asyncio.wait_for(second, timeout=10)
+
+        result = asyncio.run(go())
+        assert result.found is None                    # answered, not cancelled
+
+    def test_a_lock_is_not_held_after_its_last_user(self, tmp_path):
+        finder = symbolicate.SymbolFinder(tmp_path / "records", FakeTools(mdfind=""))
+        _run([_report()], finder)
+        import gc
+        gc.collect()
+        assert len(finder._report_locks) == 0
+
+
+class TestAddresses:
+    def test_a_negative_address_is_not_passed_to_atos(self, tmp_path):
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        report = _report()
+        report.frames[2].offset = -BASE - 0x100
+        tools = FakeTools(lines=GOOD)
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", tools))
+        assert all(not a.startswith("-") for a in tools.atos[0][8:])
+        assert "1 had addresses below the image's load address" in report.symbols[0].note
+
+
+class TestCountingNamesAndOffsets:
+    def test_a_frame_that_gained_a_name_and_a_line_is_not_name_only(self, tmp_path):
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        report = _report()
+        report.frames[1].symbol = ""            # stripped, gains both
+        lines = dict(GOOD)
+        lines[CELL_AT] = "Cell.pressed() (in MyApp.debug.dylib) (/<compiler-generated>:0)"
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", FakeTools(lines=lines)))
+        [entry] = report.symbols
+        assert "got a function name only" not in entry.note
+
+    def test_the_same_name_keeps_the_phones_offset(self, tmp_path):
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        report = _report()
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", FakeTools(lines=GOOD)))
+        assert report.frames[1].symbol_offset == 252
+        assert "+ 252 (Menu.swift:170)" in report.top_frames[1]
+
+
+class TestRun:
+    def test_a_cancelled_atos_is_killed(self, monkeypatch):
+        class Proc:
+            returncode = None
+            killed = False
+
+            async def communicate(self):
+                await asyncio.sleep(3600)
+
+            def kill(self):
+                self.killed, self.returncode = True, -9
+
+            async def wait(self):
+                return self.returncode
+
+        procs = []
+
+        async def fake_exec(*args, **kwargs):
+            procs.append(Proc())
+            return procs[-1]
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+        async def go():
+            task = asyncio.create_task(symbolicate._run(["xcrun", "atos"]))
+            for _ in range(1000):
+                if procs:
+                    break
+                await asyncio.sleep(0.01)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(go())
+        assert procs and procs[0].killed

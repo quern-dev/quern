@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import weakref
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -89,9 +90,6 @@ class Found:
 class Lookup:
     found: Found | None
     note: str = ""
-    #: The answer is final: symbols found, or definitely not on this Mac.
-    #: False when a tool could not be asked, so the report is tried again.
-    definite: bool = True
 
 
 class SymbolFinder:
@@ -99,23 +97,30 @@ class SymbolFinder:
 
     A hit is cached for the server's life, while its DWARF file is still
     there: a UUID names one build forever, but retention can remove the dSYM.
-    A miss is not cached, because a build made later may supply it. One
-    lookup per UUID is in flight at a time, and one symbolication per report.
+    A miss is not cached, here or on the report: a build made later, an index
+    that catches up, a dSYM that becomes readable may all supply it, and
+    looking again costs a records scan and one Spotlight query. One lookup per
+    UUID is in flight at a time, and one symbolication per report.
     """
 
     def __init__(self, records_root: Path | None = None, run: Runner | None = None) -> None:
         self.records_root = records_root
         self._run = run
         self._found: dict[str, Found] = {}
-        self._inflight: dict[str, asyncio.Future[Lookup]] = {}
-        self._report_locks: dict[str, asyncio.Lock] = {}
+        self._inflight: dict[str, asyncio.Task[Lookup]] = {}
+        # Held weakly: one per crash ever read would otherwise never be freed.
+        self._report_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+            weakref.WeakValueDictionary())
 
     @property
     def run(self) -> Runner:
         return self._run or _run            # looked up now, so a test's patch applies
 
     def report_lock(self, crash_id: str) -> asyncio.Lock:
-        return self._report_locks.setdefault(crash_id, asyncio.Lock())
+        lock = self._report_locks.get(crash_id)
+        if lock is None:
+            lock = self._report_locks[crash_id] = asyncio.Lock()
+        return lock
 
     async def find(self, uuid: str, misses: dict[str, Lookup] | None = None) -> Lookup:
         """Where its symbols are. `misses` holds this read's misses, so ten
@@ -130,45 +135,40 @@ class SymbolFinder:
         if cached is not None:
             if await asyncio.to_thread(_is_file, cached.dwarf):
                 return Lookup(cached)
-            del self._found[wanted]          # its dSYM was removed since
-        pending = self._inflight.get(wanted)
-        if pending is not None:
-            return await asyncio.shield(pending)
-        future: asyncio.Future[Lookup] = asyncio.get_running_loop().create_future()
-        self._inflight[wanted] = future
-        try:
-            result = await self._look(wanted)
-        except BaseException as e:
-            future.set_exception(e)
-            future.exception()               # retrieved: no "never retrieved" warning
-            raise
-        else:
-            future.set_result(result)
-            if result.found is not None:
-                self._found[wanted] = result.found
-            elif misses is not None:
-                misses[wanted] = result
-            return result
-        finally:
-            del self._inflight[wanted]
+            if self._found.get(wanted) is cached:  # not one stored meanwhile
+                del self._found[wanted]              # its dSYM was removed since
+        task = self._inflight.get(wanted)
+        if task is None:
+            # Its own task, awaited through a shield: a caller that is
+            # cancelled stops waiting, and does not cancel everyone else's
+            # lookup of the same UUID with it.
+            task = asyncio.create_task(self._look(wanted))
+            self._inflight[wanted] = task
+            task.add_done_callback(lambda _t: self._inflight.pop(wanted, None))
+        result = await asyncio.shield(task)
+        if result.found is not None:
+            self._found[wanted] = result.found
+        elif misses is not None:
+            misses[wanted] = result
+        return result
 
     async def _look(self, uuid: str) -> Lookup:
         found, record_note = await asyncio.to_thread(self._from_records, uuid)
         if found is not None:
             return Lookup(found)
         # A record that cannot help does not end the search: Xcode may hold a copy.
-        found, spotlight_note, definite = await self._from_spotlight(uuid)
+        found, spotlight_note = await self._from_spotlight(uuid)
         if found is not None:
             return Lookup(found)
-        notes = [n for n in (record_note, spotlight_note) if n]
-        return Lookup(None, "; ".join(notes), definite)
+        return Lookup(None, "; ".join(n for n in (record_note, spotlight_note) if n))
 
     def _from_records(self, uuid: str) -> tuple[Found | None, str]:
+        records, unreadable = build_records.load_with_unreadable(self.records_root)
         notes: list[str] = []
-        try:
-            records = build_records.load_all(self.records_root)
-        except OSError as e:
-            return None, f"quern's build records could not be read ({e})"
+        if unreadable:
+            # One of them may be the build that crashed: said, and the report
+            # is looked at again next time rather than settled as a miss.
+            notes.append(f"{unreadable} of quern's build records could not be read")
         for record in records:
             for binary in record.binaries:
                 if uuid not in {normalise_uuid(u) for u in binary.uuids.values()}:
@@ -179,48 +179,41 @@ class SymbolFinder:
                                  f"keep them")
                     continue
                 dwarf = binary.dwarf
-                try:
-                    if not dwarf and binary.dsym:
-                        # A record made before `dwarf` was kept: find it by UUID.
-                        inside = build_records.dwarf_for(Path(binary.dsym), {uuid})
-                        dwarf = str(Path(binary.dsym) / inside) if inside else ""
-                    if dwarf and Path(dwarf).is_file():
-                        return Found(Path(dwarf), "build_record", record.build_id), ""
-                except OSError as e:
-                    notes.append(f"build {record.build_id}'s dSYM could not be read ({e})")
-                    continue
+                if not dwarf and binary.dsym:
+                    # A record made before `dwarf` was kept: find it by UUID.
+                    inside = build_records.dwarf_for(Path(binary.dsym), {uuid})
+                    dwarf = str(Path(binary.dsym) / inside) if inside else ""
+                if dwarf and _is_file(Path(dwarf)):
+                    return Found(Path(dwarf), "build_record", record.build_id), ""
                 if binary.dsym or binary.dwarf:
                     notes.append(f"build {record.build_id} made this binary, but its dSYM "
-                                 f"is no longer where the record says")
-        return None, "; ".join(dict.fromkeys(notes))
+                                 f"is no longer where the record says, or cannot be read")
+        return None, "; ".join(notes)
 
-    async def _from_spotlight(self, uuid: str) -> tuple[Found | None, str, bool]:
-        """(found, note, whether the answer is definite)."""
+    async def _from_spotlight(self, uuid: str) -> tuple[Found | None, str]:
         try:
             code, out, err = await self.run(["mdfind", f"com_apple_xcode_dsym_uuids == {uuid}"])
         except (OSError, TimeoutError) as e:
-            return None, f"Spotlight could not be asked ({type(e).__name__}: {e})", False
+            return None, f"Spotlight could not be asked ({type(e).__name__}: {e})"
         if code != 0:
-            why = f"mdfind exited {code}: {err.strip()[:120]}"
-            return None, f"Spotlight could not be asked ({why})", False
-        unreadable = []
+            return None, f"Spotlight could not be asked (mdfind exited {code}: {err.strip()[:120]})"
+        listed = []
         for line in out.splitlines():
             if not line.strip():
                 continue
             dsym = Path(line.strip())
-            try:
-                # One unreadable hit -- a dSYM in a protected folder raises on
-                # Python 3.13 -- must not stop the next one being tried.
-                inside = await asyncio.to_thread(build_records.dwarf_for, dsym, {uuid})
-            except OSError as e:
-                unreadable.append(f"{dsym} ({type(e).__name__})")
-                continue
+            # Neither this nor macho.read raises for a file it cannot open --
+            # it finds nothing -- so a hit that yields nothing is kept to say.
+            inside = await asyncio.to_thread(build_records.dwarf_for, dsym, {uuid})
             if inside:
-                return Found(dsym / inside, "spotlight"), "", True
-        if unreadable:
-            where = ", ".join(unreadable)
-            return None, f"Spotlight found dSYMs that could not be read: {where}", True
-        return None, "", True
+                return Found(dsym / inside, "spotlight"), ""
+            listed.append(str(dsym))
+        if listed:
+            # Spotlight says these hold the UUID: reading nothing from them
+            # means they could not be read, not that they lack it.
+            return None, f"Spotlight lists dSYMs with this UUID that could not be read: " \
+                         f"{', '.join(listed[:3])}"
+        return None, ""
 
 
 def _is_file(path: Path) -> bool:
@@ -244,9 +237,10 @@ async def symbolicate_many(
     """Symbolicate each report that has not been, in place.
 
     Never raises for a tool that is missing or fails: the image's entry in
-    `symbols` says so, and the report keeps what it had. A report is marked
-    done only when every image got a definite answer, so one that failed for
-    want of a working atos or Spotlight is tried again on the next read.
+    `symbols` says so, and the report keeps what it had. An image is settled
+    once atos has answered for it, and a report once all its images are; an
+    image with no symbols found yet is looked up again on the next read, so a
+    build, an index or a readable copy that appears later is picked up.
     """
     gate = asyncio.Semaphore(concurrency)
     misses: dict[str, Lookup] = {}
@@ -277,8 +271,12 @@ def _exact_frames(report: CrashReport) -> set[tuple[str, int | None]]:
 async def _symbolicate(
     report: CrashReport, finder: SymbolFinder, misses: dict[str, Lookup] | None = None,
 ) -> bool:
-    """Symbolicate one report; return whether every answer was definite."""
+    """Symbolicate one report; return whether every image is settled."""
     images = {i.name: i for i in report.images}
+    # Settled images keep their entries: a retry after a partial failure
+    # rebuilt the list from frames still lacking a line, and dropped the entry
+    # of every image that had resolved -- its frames had their lines by then.
+    settled = {e.image: e for e in report.symbols if e.settled}
     # The app frame may lie past the cap on `frames`; it is its own object.
     frames = list(report.frames) + ([report.app_frame] if report.app_frame else [])
     by_image: dict[str, list[CrashFrame]] = {}
@@ -286,10 +284,12 @@ async def _symbolicate(
         if _needs_it(f, images.get(f.image)):
             by_image.setdefault(f.image, []).append(f)
     exact = _exact_frames(report)
-    entries: list[ImageSymbols] = []
-    definite = True
+    entries: list[ImageSymbols] = list(settled.values())
+    done = True
     try:
         for name, todo in by_image.items():
+            if name in settled:
+                continue
             image = images[name]
             # By place, not by object: the app frame is also in `frames`, and
             # counting it twice read "3 of 4" for a crash with three frames.
@@ -297,30 +297,31 @@ async def _symbolicate(
                                  frames_total=len({f.offset for f in todo}))
             entries.append(entry)
             try:
-                definite &= await _one_image(image, todo, exact, entry, finder, misses)
+                entry.settled = await _one_image(image, todo, exact, entry, finder, misses)
             except Exception as e:  # noqa: BLE001 -- the report is still a report
                 logger.exception("Symbolicating %s in %s failed", name, report.crash_id)
                 entry.note = f"symbolication failed: {type(e).__name__}: {e}"
-                definite = False
+            done &= entry.settled
     finally:
         # Also on cancellation: what did resolve is shown consistently, and
         # the next attempt replaces these entries rather than adding to them.
         report.symbols = entries
         top = report.frames[:crash_frames.TOP_FRAMES]
         report.top_frames = [crash_frames.format_frame(f) for f in top]
-    return definite
+    return done
 
 
 async def _one_image(
     image: CrashImage, todo: list[CrashFrame], exact: set[tuple[str, int | None]],
     entry: ImageSymbols, finder: SymbolFinder, misses: dict[str, Lookup] | None = None,
 ) -> bool:
-    """Symbolicate one image's frames; return whether the answer was definite."""
+    """Symbolicate one image's frames; return whether it is settled: atos
+    answered, so asking again would give the same answer."""
     lookup = await finder.find(image.uuid, misses)
     if lookup.found is None:
         entry.note = lookup.note or (f"no symbols on this Mac for {image.name} {entry.uuid}: no "
                                      f"build record or indexed dSYM has that UUID")
-        return lookup.definite
+        return False
     found = lookup.found
     entry.source, entry.build_id, entry.dwarf = found.source, found.build_id, str(found.dwarf)
 
@@ -333,6 +334,14 @@ async def _one_image(
         back = 0 if (f.image, f.offset) in exact else 1
         return image.base + f.offset - back, back
 
+    # A negative address -- a malformed report, or a text report whose image
+    # base is past the frame -- would reach atos as an option ('-0x10') and
+    # fail every frame of the image with it.
+    invalid = [f for f in todo if address(f)[0] < 0]
+    todo = [f for f in todo if address(f)[0] >= 0]
+    if not todo:
+        entry.note = "the report gives this image's frames addresses below its load address"
+        return True
     wanted = sorted({address(f)[0] for f in todo})
     argv = ["xcrun", "atos", "-o", str(found.dwarf), "-arch", image.arch or "arm64",
             "-l", hex(image.base), *(hex(a) for a in wanted)]
@@ -342,14 +351,16 @@ async def _one_image(
         entry.note = f"atos could not run: {type(e).__name__}: {e}"
         return False
     if code != 0:
+        # atos ran and refused -- a dSYM for another architecture, say.
+        # Asking again gives the same answer, at most of a second a read.
         entry.note = f"atos exited {code}: {err.strip()[:160]}"
-        return False
+        return True
     lines = out.splitlines()
     if len(lines) != len(wanted):
         # One line per address, in order: anything else cannot be matched up
         # safely, and a wrong line is worse than none.
         entry.note = f"atos gave {len(lines)} lines for {len(wanted)} addresses"
-        return False
+        return True
     answers = dict(zip(wanted, (_parse(line) for line in lines), strict=True))
 
     with_line: set[int] = set()
@@ -378,7 +389,9 @@ async def _one_image(
         name_only = len(named - with_line)
         entry.note = (f"{missing} of {entry.frames_total} frames have no source line in its "
                       f"symbols (compiler-generated code, or not in them at all)"
-                      + (f"; {name_only} got a function name only" if name_only else ""))
+                      + (f"; {name_only} got a function name only" if name_only else "")
+                      + (f"; {len(invalid)} had addresses below the image's load address"
+                         if invalid else ""))
     return True
 
 

@@ -553,7 +553,7 @@ export function registerLogTools(server: McpServer): void {
       symbolicate: z
         .union([z.boolean(), z.enum(["true", "false"]).transform((v) => v === "true")])
         .optional()
-        .describe("Resolve a device report's app frames to function, file and line against the build that crashed (on by default). Most of a second per image the first time; kept after, until the server restarts. A report that failed because atos or Spotlight could not be asked is tried again."),
+        .describe("Resolve a device report's app frames to function, file and line against the build that crashed (on by default). Most of a second per image the first time; kept after, until the server restarts. An image whose symbols were not found is looked up again on the next read, so a build made later is picked up."),
     }),
   }, async ({ limit, since, udid, days, detail, include_raw, symbolicate }) => {
       try {
