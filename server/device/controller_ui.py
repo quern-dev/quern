@@ -2738,10 +2738,17 @@ class DeviceControllerUI:
             self._invalidate_ui_cache(resolved)  # scrolling changes the viewport
             if found is None:
                 return {
+                    "udid": resolved,
+                    "backend": self.backend_that_served(resolved),
                     "status": "not_found",
                     "detail": f"Element not found after scrolling ({target})",
                 }
-            return {"status": "ok", "element": found}
+            return {
+                "udid": resolved,
+                "backend": self.backend_that_served(resolved),
+                "status": "ok",
+                "element": found,
+            }
 
         # iOS (physical WDA + simulator)
         el = await self._ios_scroll_to_element(
@@ -2750,11 +2757,15 @@ class DeviceControllerUI:
         self._invalidate_ui_cache(resolved)  # scrolling changes the viewport
         if el is None:
             return {
+                "udid": resolved,
+                "backend": self.backend_that_served(resolved),
                 "status": "not_found",
                 "detail": f"Element not found after scrolling ({target})",
             }
         cx, cy = get_tap_point(el)
         return {
+            "udid": resolved,
+            "backend": self.backend_that_served(resolved),
             "status": "ok",
             "element": {
                 "label": el.label,

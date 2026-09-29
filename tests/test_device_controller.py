@@ -1837,7 +1837,10 @@ class TestScrollToElement:
         ctrl._ui_backend = MagicMock(return_value=backend)
 
         result = await ctrl.scroll_to_element(identifier="button_log", max_swipes=5)
-        assert result == {"status": "ok", "element": element}
+        assert result["status"] == "ok"
+        assert result["element"] == element
+        assert result["udid"] == "emulator-5554"
+        assert "backend" in result
         backend.scroll_into_view.assert_called_once_with(
             "emulator-5554", identifier="button_log", label=None, max_swipes=5,
         )
@@ -2372,3 +2375,42 @@ class TestAResponseSaysWhichBackendServedIt:
         ctrl._device_type_cache["SIM-1"] = DeviceType.SIMULATOR
         ctrl._sim_bridge_ok = False
         assert ctrl.backend_that_served("SIM-1") == "idb"
+
+
+class TestScrollReportsTheBackendThatSwept:
+    """Review of #236 found this reporting the wrong half.
+
+    The route computed it from `result.get("udid") or body.udid`. No return
+    path of `scroll_to_element` set `udid`, and MCP callers routinely omit
+    it — so the argument was `None`, `backend_that_served` short-circuited
+    past `_last_read_backend`, and it answered with whatever would be
+    selected *now* for the active device. A 300s re-probe flip between the
+    sweep and the response is exactly when an agent is investigating, and
+    exactly when that reported the wrong backend, while `get_ui_tree`
+    reported the right one for the same device.
+    """
+
+    async def test_it_reports_what_swept_not_what_is_selected_now(self):
+        ctrl = DeviceController()
+        # Driven through the Android delegate rather than the iOS sweep:
+        # both build the result the same way, and the precedence being
+        # pinned here -- what read, over what would be selected -- does not
+        # depend on the platform. Mocking the whole sweep would test the
+        # mocks.
+        ctrl._device_type_cache["SIM-1"] = DeviceType.ANDROID_EMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value="SIM-1")
+        ctrl._invalidate_ui_cache = MagicMock()
+        ctrl._last_read_backend["SIM-1"] = "sim-bridge"
+        ctrl._sim_bridge_ok = False        # the probe has since flipped
+
+        backend = MagicMock()
+        backend.scroll_into_view = AsyncMock(return_value={"label": "Log"})
+        ctrl._ui_backend = MagicMock(return_value=backend)
+
+        result = await ctrl.scroll_to_element(identifier="log", max_swipes=3)
+
+        assert result["backend"] == "sim-bridge", result
+        assert result["udid"] == "SIM-1", (
+            "the resolved udid must travel with the result; the route used to "
+            "have no way to ask which device was swept"
+        )

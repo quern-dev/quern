@@ -848,6 +848,12 @@ class TestTheAdvisoryReachesTheCaller:
         from server.device.controller import DeviceController
 
         controller = DeviceController.__new__(DeviceController)
+        # `__new__` skips __init__, so anything the code under test reads
+        # has to be supplied here. Responses now name the backend that served
+        # them; pre-populating the read record matches production, where
+        # tap_element has located the element before it returns, and keeps
+        # this stub from having to grow the whole `_backend_name` chain.
+        controller._last_read_backend = {"SIM": "sim-bridge"}
         controller._input_checked = {}
         return controller
 
