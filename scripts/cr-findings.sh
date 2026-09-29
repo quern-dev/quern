@@ -197,30 +197,67 @@ elif declared and not real and not noise:
 # the mirror case: an `[OPEN]` thread for a finding already fixed and pushed.
 #
 # So the one comparison that separates those cases gets printed here: the
-# newest review *with a body* against the head commit's push time. Empty-bodied
-# reviews are the artifact GitHub creates when CodeRabbit resolves a thread,
-# and counting them is how `pr-review-status.py` once called unread commits
-# reviewed.
+# commit CodeRabbit's coverage marker names against the PR's head commit. The
+# marker (`final_review_risk_coverage` in the summary comment) is the one trace
+# every completed review leaves, a clean one included, and it names a commit,
+# so no clock is involved.
+#
+# This used to compare the newest review *with a body* against the newest
+# commit's date, and that was wrong three ways (2026-09-28):
+#   - A clean re-review creates no review object at all, only the marker and a
+#     "Review finished" reply, so #331's reviewed head read STALE.
+#   - `committedDate` is when the commit was made, not when it was pushed. A
+#     commit made before a review of the previous head lands, and pushed after
+#     it, read "at or after the head commit" -- all clear on unread code.
+#   - Any author's review counted, so a person's comment after a push did too.
+# The last two failed in the direction this section exists to catch.
+#
+# Trusted one way only, as in `pr-review-status.py`: equal to the head means
+# reviewed. The marker lags a review in progress, so a different commit proves
+# nothing either way -- it is reported as unconfirmed, not as stale.
 #
 # Advisory, deliberately. `scripts/pr-review-status.py` is the gate and decides
-# merges; this only makes the staleness visible to someone reading findings,
+# merges; this only makes the coverage visible to someone reading findings,
 # which is where they already are when the question occurs to them.
 echo
 echo "── review coverage ──"
-gh pr view "$N" --repo "$REPO" --json reviews,commits \
-  --jq '{
-      reviewed: ([.reviews[]? | select((.body // "") != "") | .submittedAt] | max),
-      pushed:   ([.commits[]?.committedDate] | max)
-    } | "\(.reviewed // "never")\t\(.pushed // "unknown")"' \
-| while IFS=$'\t' read -r reviewed pushed; do
-    echo "  newest review with a body: $reviewed"
-    echo "  head commit pushed:        $pushed"
-    if [ "$reviewed" = "never" ]; then
-      echo "  => NOT REVIEWED. An empty findings list above means nothing yet."
-    elif [[ "$reviewed" < "$pushed" ]]; then
-      echo "  => STALE: commits landed after the last review. The findings above"
-      echo "     describe older code; ask for '@coderabbitai full review'."
-    else
-      echo "  => the newest review is at or after the head commit."
-    fi
-  done
+HEAD_SHA="$(gh pr view "$N" --repo "$REPO" --json headRefOid --jq .headRefOid)"
+gh api "repos/$OWNER/$NAME/issues/$N/comments?per_page=100" --paginate \
+  --jq '.[] | select(.user.id==136622811 and .user.login=="coderabbitai[bot]")
+        | "\u0000CR-COMMENT\u0000" + .body' \
+| HEAD_SHA="$HEAD_SHA" PR="$N" python3 -c '
+import json, os, re, sys
+
+head = os.environ["HEAD_SHA"].strip()
+comments = [c for c in sys.stdin.read().split("\x00CR-COMMENT\x00") if c.strip()]
+summary = next((c for c in comments
+                if "auto-generated comment: summarize by coderabbit.ai" in c), None)
+covered = ""
+if summary is not None:
+    m = re.search(r"final_review_risk_coverage:(\{[^\n]*?\})\s*-->", summary)
+    try:
+        marker = json.loads(m.group(1)) if m else {}
+    except json.JSONDecodeError:
+        marker = {}
+    if isinstance(marker, dict) and marker.get("kind") == "reviewed":
+        covered = str(marker.get("coveredCommitId") or "")
+
+shown_head = head[:10] or "(could not be read)"
+shown_covered = covered[:10] or "nothing recorded"
+print(f"  head commit:     {shown_head}")
+print(f"  review covered:  {shown_covered}")
+if not head:
+    print("  => UNKNOWN: the head commit could not be read, so nothing is confirmed.")
+elif covered == head:
+    print("  => REVIEWED: the head commit has been reviewed.")
+elif summary is None:
+    print("  => NOT REVIEWED: CodeRabbit has posted no summary on this PR. An empty")
+    print("     findings list above means nothing yet.")
+else:
+    what = ("no completed review is recorded" if not covered
+            else "the last recorded review covered an earlier commit")
+    print(f"  => NOT CONFIRMED: {what}, so the findings above")
+    pr = os.environ["PR"]
+    print(f"     may not describe the head. `scripts/pr-review-status.py {pr} --ask`")
+    print("     requests the review.")
+'
