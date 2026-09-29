@@ -37,6 +37,32 @@ A plain `pytest` run does **not** collect these: `pyproject.toml` sets
 `integration` onto everything in this directory automatically, so a new test
 cannot leak into the unit suite by forgetting a decorator.
 
+### When the whole iOS UI tier goes red at once
+
+Check for input suppression before reading it as a product bug. Xcode 27's
+Device Hub claims a simulator's touch, button and keyboard services, and once it
+has them quern's taps and keystrokes are *accepted and discarded* — so a typing
+test fails with a well-formed 500 saying the field's value did not change, which
+is exactly what a real typing bug looks like.
+
+Quern detects it. The server log carries
+`com.apple.coredevice.dtuhidd.active=1` with the explanation, and one call takes
+the services back:
+
+```shell
+curl -X POST "$URL/api/v1/device/ui/restore-input" \
+  -H "X-API-Key: $KEY" -d '{"udid":"<full UDID>"}'
+```
+
+It answers `was_suppressed` so you can tell "it was holding them" from "that was
+not the problem", and it restarts SpringBoard, which kills running apps — the
+fixtures relaunch the probe, so that costs nothing here.
+
+Measured 2026-09-29: five iOS typing and clearing tests failed under
+suppression and all ten passed immediately after restoring input, with no code
+change. Pass the **full** UDID; the log truncates to the first segment, and
+handing that back gets `Invalid device` from simctl.
+
 ### Pointing at a different server
 
 | Variable | Effect |
