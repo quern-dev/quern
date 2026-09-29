@@ -2278,3 +2278,97 @@ class TestARequestedSkeletonIsNotCalledDegraded:
 
         assert "degraded" not in summary, summary
         assert "source_timed_out" not in summary, summary
+
+
+class TestASimulatorIsDrivenByTheBackendThatWasChosen:
+    """#236: nothing held the simulator routing in place.
+
+    `_ui_backend` picks sim-bridge for a simulator when `_sim_bridge_ok`,
+    and idb otherwise. dev-d6 proved with a mutant that replacing the whole
+    branch with `return self.idb` -- so sim-bridge is never used at all --
+    left `tests/test_device_controller.py` green, because `_sim_bridge_ok`
+    starts False and nothing in that file ever set it.
+
+    Measured before writing these: on a machine with a booted simulator the
+    production routing is *correct* -- `_ui_backend` returns IdbBackend
+    before the probe and SimBridgeBackend after, and the probe runs at
+    start-up and again every 300s (#179). So this is insurance against a
+    regression, not a live defect. What makes the regression worth insuring
+    against is that it would be invisible: the two backends differ in ways
+    the tool descriptions state -- sim-bridge holds a swipe to the end,
+    idb flings and steps about a quarter of the screen against
+    seven-tenths -- so a silent fall-back shows up as scrolling that
+    overshoots, not as anything red.
+    """
+
+    @staticmethod
+    def _sim(ctrl, udid="SIM-1"):
+        ctrl._device_type_cache[udid] = DeviceType.SIMULATOR
+        return udid
+
+    def test_a_simulator_uses_sim_bridge_when_it_is_available(self):
+        ctrl = DeviceController()
+        udid = self._sim(ctrl)
+        ctrl._sim_bridge_ok = True
+        assert ctrl._ui_backend(udid) is ctrl.sim_bridge
+
+    def test_a_simulator_falls_back_to_idb_when_it_is_not(self):
+        ctrl = DeviceController()
+        udid = self._sim(ctrl)
+        ctrl._sim_bridge_ok = False
+        assert ctrl._ui_backend(udid) is ctrl.idb
+
+    def test_the_name_follows_the_choice(self):
+        """`_backend_name` reads `_ui_backend`'s answer rather than
+        re-deciding, which is what #186 fixed. Pinned so it stays that way."""
+        ctrl = DeviceController()
+        udid = self._sim(ctrl)
+        ctrl._sim_bridge_ok = True
+        assert ctrl._backend_name(udid) == "sim-bridge"
+        ctrl._sim_bridge_ok = False
+        assert ctrl._backend_name(udid) == "idb"
+
+    def test_a_physical_device_is_unaffected_by_the_probe(self):
+        ctrl = DeviceController()
+        udid = "00008030-PHONE"
+        ctrl._device_type_cache[udid] = DeviceType.DEVICE
+        for ok in (True, False):
+            ctrl._sim_bridge_ok = ok
+            assert ctrl._ui_backend(udid) is ctrl.wda_client
+
+
+class TestAResponseSaysWhichBackendServedIt:
+    """The half of #236 with a user.
+
+    An agent seeing a sweep behave oddly could not tell "sim-bridge, and my
+    expectation was wrong" from "silently fell back to idb". `_backend_name`
+    existed but was only ever attached to *errors* (#186), so the answer was
+    available exactly when the call had already failed.
+    """
+
+    async def test_the_summary_names_the_backend(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "SIM-1"
+        ctrl._device_type_cache["SIM-1"] = DeviceType.SIMULATOR
+        ctrl._sim_bridge_ok = True
+        ctrl.sim_bridge.describe_all = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
+
+        summary, _elements, _udid = await ctrl.get_screen_summary()
+        assert summary["backend"] == "sim-bridge", summary
+
+    def test_it_reports_the_backend_that_read_not_the_one_selected_now(self):
+        """A periodic re-probe can flip the choice between the read and the
+        response. Only the read knows which one did the work -- the same
+        argument `_last_read_backend` was added for."""
+        ctrl = DeviceController()
+        ctrl._device_type_cache["SIM-1"] = DeviceType.SIMULATOR
+        ctrl._last_read_backend["SIM-1"] = "sim-bridge"
+        ctrl._sim_bridge_ok = False          # the probe has since flipped
+
+        assert ctrl.backend_that_served("SIM-1") == "sim-bridge"
+
+    def test_with_no_read_yet_it_reports_what_would_be_selected(self):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["SIM-1"] = DeviceType.SIMULATOR
+        ctrl._sim_bridge_ok = False
+        assert ctrl.backend_that_served("SIM-1") == "idb"

@@ -143,6 +143,7 @@ async def get_ui_elements(
                 "elements": [e.model_dump(**dump_kwargs) for e in elements],
                 "element_count": len(elements),
                 "udid": resolved_udid,
+                "backend": controller.backend_that_served(resolved_udid),
             }
             # `element_count` here has the same problem it has on the summary:
             # a tree read that timed out falls back to a container skeleton,
@@ -662,6 +663,15 @@ async def scroll_to_element(request: Request, body: ScrollToElementRequest):
             ),
             what="scroll_to_element",
         )
+        # This tool's own description tells the caller that a simulator
+        # swipe is held to the end on sim-bridge and flings on idb, covering
+        # seven-tenths of the screen against a quarter. Saying which one ran
+        # is what makes that difference checkable rather than folklore.
+        if isinstance(result, dict):
+            result.setdefault(
+                "backend",
+                controller.backend_that_served(result.get("udid") or body.udid),
+            )
         if result.get("status") == "not_found":
             raise HTTPException(status_code=404, detail=result)
         return result

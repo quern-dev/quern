@@ -294,6 +294,34 @@ class DeviceControllerUI:
     #: later. See #186.
     _last_read_backend: dict[str, str]
 
+    def backend_that_served(self, udid: str | None) -> str:
+        """Which backend did this device's last UI read, for the caller.
+
+        The same precedence the error paths use: what actually did the work
+        if a read has happened, else what would be selected now.
+
+        Public because the *answer* is useful to an agent, not just to an
+        error message. A simulator is driven by sim-bridge or, where that is
+        unavailable, by idb -- and they behave differently in ways the tool
+        descriptions state: sim-bridge can hold a swipe at the end so a list
+        stops where the finger does, idb cannot and flings, stepping about a
+        quarter of the screen against sim-bridge's seven-tenths. Until now
+        that difference was only ever reported on failure (#186 put the name
+        on errors), so an agent whose sweep overshot could not tell "this is
+        sim-bridge and my expectation was wrong" from "this silently fell
+        back to idb". Both look like a scroll that went too far.
+
+        Nobody needs to *choose* the backend -- that is quern's job, and it
+        is done from a probe at start-up and re-probed every 300s (#179).
+        This exists so that when something behaves unexpectedly, the first
+        question an investigator asks has an answer in the response.
+        """
+        if udid is not None:
+            served = self._last_read_backend.get(udid)
+            if served:
+                return served
+        return self._backend_name(udid)
+
     def _backend_name(self, udid: str) -> str:
         """What the backend driving this device calls itself.
 
@@ -1757,6 +1785,10 @@ class DeviceControllerUI:
                 mode=mode,
             )
         summary = generate_screen_summary(elements, max_elements=max_elements)
+        # Which backend produced this. Cheap, and the first thing anyone
+        # investigating unexpected UI behaviour wants to know -- see
+        # `backend_that_served`.
+        summary["backend"] = self.backend_that_served(resolved)
 
         # A tree read that timed out falls back to a container skeleton,
         # which is often empty -- and an empty result is exactly what a blank
