@@ -567,6 +567,51 @@ class WarningGroup(BaseModel):
     files: list[str] = Field(default_factory=list)
 
 
+class BuildBinary(BaseModel):
+    """One Mach-O file in a built app, as a crash report would name it."""
+
+    path: str = Field(
+        description="Relative to the .app: 'MyApp.debug.dylib', 'Frameworks/X.framework/X'",
+    )
+    uuids: dict[str, str] = Field(
+        default_factory=dict, description="UUID per architecture, as crash reports print it",
+    )
+    built_here: bool = Field(
+        default=False,
+        description="Compiled by this build: its debug map names object files on this Mac. "
+                    "A vendored framework's names its vendor's build machine.",
+    )
+    dsym: str = Field(default="", description="The dSYM kept for it (device builds)")
+    dsym_error: str = Field(default="", description="Why a dSYM could not be made")
+    dsym_warnings: list[str] = Field(
+        default_factory=list,
+        description="dsymutil's warnings: the dSYM was kept but may be incomplete",
+    )
+
+
+class BuildRecord(BaseModel):
+    """A build quern made, kept after the next build overwrites DerivedData (#326)."""
+
+    build_id: str
+    created_at: datetime
+    project_path: str
+    scheme: str
+    configuration: str
+    platform: str = Field(description="'iphoneos' or 'iphonesimulator'")
+    app_path: str = Field(description="Where the .app was built; the next build replaces it")
+    bundle_id: str = ""
+    version: str = Field(default="", description="CFBundleShortVersionString")
+    build_number: str = Field(default="", description="CFBundleVersion")
+    binaries: list[BuildBinary] = Field(default_factory=list)
+    installed_on: list[str] = Field(default_factory=list)
+    dsyms_expired: bool = Field(
+        default=False,
+        description="Its dSYMs were removed: only the newest device builds of a scheme keep them",
+    )
+    error: str = Field(default="", description="The record could not be written")
+    notes: list[str] = Field(default_factory=list)
+
+
 class BuildResult(BaseModel):
     """Parsed result from an xcodebuild invocation."""
 

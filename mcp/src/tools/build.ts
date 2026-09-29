@@ -23,7 +23,11 @@ Pick one and call again.
 Pre-install check: if the device OS is below the app's MinimumOSVersion, that device is
 skipped with a clear error rather than a cryptic installer failure.
 
-Returns per-device install results plus per-architecture build results.`,
+Returns per-device install results plus per-architecture build results. Each successful build
+is recorded, and the summary names the record: bundle id, version, configuration and every
+binary's UUID, which is how a crash report names what it ran. For a device build, dSYMs of the
+app's own code are kept too (the newest 10 device builds per scheme), so a crash from this
+build can be symbolicated after later builds overwrite DerivedData.`,
     inputSchema: strictParams({
       project_path: z.string().describe(
         "Path to the .xcodeproj, .xcworkspace, or a directory containing one."
