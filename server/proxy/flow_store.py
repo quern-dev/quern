@@ -20,11 +20,24 @@ from server.storage.fanout import Fanout, Missed
 MAX_DEVICE_KEYS = 256
 
 
-def _device_keys(simulator_udid: str | None, client_ip: str | None) -> list[str]:
-    """The keys a flow's device is recorded under, one per field it carries."""
+def _device_keys(
+    simulator_udid: str | None,
+    client_ip: str | None,
+    device_serial: str | None = None,
+) -> list[str]:
+    """The keys a flow's device is recorded under, one per field it carries.
+
+    `device_serial` is not optional in spirit even though it defaults: an
+    emulator's `client_ip` is the *host's* address, so without its own key
+    every emulator on a machine shares one eviction mark with every other and
+    with the host itself, and a narrowed delta would report another device's
+    evictions as its own (#262).
+    """
     keys = []
     if simulator_udid:
         keys.append(f"sim:{simulator_udid}")
+    if device_serial:
+        keys.append(f"dev:{device_serial}")
     if client_ip:
         keys.append(f"ip:{client_ip}")
     return keys
@@ -111,7 +124,7 @@ class FlowStore:
         at = gone.timestamp
         if self._evicted_through is None or at > self._evicted_through:
             self._evicted_through = at
-        for key in _device_keys(gone.simulator_udid, gone.client_ip):
+        for key in _device_keys(gone.simulator_udid, gone.client_ip, gone.device_serial):
             previous = self._evicted_through_by_device.pop(key, None)
             # Re-inserted, so dict order is least recently evicted first.
             self._evicted_through_by_device[key] = (
@@ -137,13 +150,14 @@ class FlowStore:
 
     def last_evicted_seq_for(
         self, *, simulator_udid: str | None = None, client_ip: str | None = None,
+        device_serial: str | None = None,
     ) -> int:
         """`last_evicted_seq`, narrowed to flows carrying these values.
 
         Unnarrowed, it is the global one. A trimmed device's number lives on
         in the floor, so trimming can only make a delta more cautious.
         """
-        keys = _device_keys(simulator_udid, client_ip)
+        keys = _device_keys(simulator_udid, client_ip, device_serial)
         if not keys:
             return self._last_evicted_seq
         seqs = [self._evicted_seq_by_device.get(k, 0) for k in keys]
@@ -151,13 +165,14 @@ class FlowStore:
 
     def evicted_through(
         self, *, simulator_udid: str | None = None, client_ip: str | None = None,
+        device_serial: str | None = None,
     ) -> datetime | None:
         """The newest timestamp of any evicted flow, or None if none were.
 
         With `simulator_udid` or `client_ip`, only evictions of flows carrying
         that value count -- the way the same filter narrows a query.
         """
-        keys = _device_keys(simulator_udid, client_ip)
+        keys = _device_keys(simulator_udid, client_ip, device_serial)
         if not keys:
             return self._evicted_through
         stamps = [

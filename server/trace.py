@@ -299,12 +299,20 @@ def log_identified_by(entry: LogEntry) -> IdentifiedBy:
 def device_of(flow: FlowRecord, ip_map: dict[str, tuple[str, bool]]) -> tuple[str | None, bool]:
     """Which device a flow came from, and whether that is firmly known.
 
-    `simulator_udid` is resolved from the client's pid and is exact. Falling
-    back to `client_ip` is how physical devices are identified at all, and it
-    carries whatever staleness the recorded mapping has.
+    `simulator_udid` and `device_serial` are both resolved from the client's
+    pid and are exact -- one by walking to a `launchd_sim` ancestor, the other
+    by asking which process owns the socket. Falling back to `client_ip` is how
+    physical devices are identified at all, and it carries whatever staleness
+    the recorded mapping has.
+
+    `client_ip` deliberately does not get a chance at an emulator: its flows
+    arrive carrying the *host's* address, so every emulator on a machine looks
+    like the same device, and like the machine itself (#262).
     """
     if flow.simulator_udid:
         return flow.simulator_udid, True
+    if flow.device_serial:
+        return flow.device_serial, True
     if flow.client_ip and flow.client_ip in ip_map:
         udid, fresh = ip_map[flow.client_ip]
         return udid, fresh

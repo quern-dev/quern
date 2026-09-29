@@ -631,7 +631,7 @@ class ProxyAdapter(BaseSourceAdapter):
         for existing in self._tls_rejections:
             if existing.sni == sni and existing.client_ip == client_ip and (
                 existing.simulator_udid == data.get("simulator_udid")
-            ):
+            ) and existing.device_serial == data.get("device_serial"):
                 existing.count += 1
                 existing.last_at = at
                 if alert and not existing.alert:
@@ -649,6 +649,7 @@ class ProxyAdapter(BaseSourceAdapter):
             source_process=data.get("source_process"),
             source_pid=data.get("source_pid"),
             simulator_udid=data.get("simulator_udid"),
+            device_serial=data.get("device_serial"),
             count=1, first_at=at, last_at=at,
         ))
         logger.warning(
@@ -826,6 +827,7 @@ class ProxyAdapter(BaseSourceAdapter):
                 source_process=data.get("source_process"),
                 source_pid=data.get("source_pid"),
                 simulator_udid=data.get("simulator_udid"),
+                device_serial=data.get("device_serial"),
                 client_ip=data.get("client_ip"),
             )
         except Exception as e:

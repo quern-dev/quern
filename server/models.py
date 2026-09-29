@@ -685,6 +685,15 @@ class FlowRecord(BaseModel):
         default=None,
         description="Simulator UDID if traffic came from a simulator",
     )
+    device_serial: str | None = Field(
+        default=None,
+        description=(
+            "Android emulator serial (e.g. emulator-5554), resolved from the "
+            "process that opened the connection. Exact, like simulator_udid, "
+            "and for the same reason -- an emulator's flows carry the host's "
+            "address, so client_ip cannot tell two of them apart (#262)."
+        ),
+    )
     client_ip: str | None = Field(
         default=None,
         description="Client IP address (for physical device identification)",
@@ -916,6 +925,10 @@ class TlsRejection(BaseModel):
     source_process: str | None = None
     source_pid: int | None = None
     simulator_udid: str | None = None
+    #: Android emulator serial. Without it a rejection from an
+    #: emulator reads "Client <host ip>", naming the machine
+    #: rather than the device, and two emulators fold together.
+    device_serial: str | None = None
     """Resolved the way flows are, and the only fields that name a simulator."""
     alert: str | None = None
     """The TLS alert, verbatim. `unknown ca` means the CA; others may not."""
