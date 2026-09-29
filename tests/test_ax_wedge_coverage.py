@@ -361,16 +361,27 @@ class TestACancelledReadDoesNotLeakItsChild:
 
         monkeypatch.setattr(module.asyncio, "create_subprocess_exec", fake_exec)
         task = asyncio.ensure_future(call())
-        # Bounded: if the helper never reaches `communicate()` this fails here
-        # rather than hanging, and the cancel below would have been racing.
-        await asyncio.wait_for(entered.wait(), timeout=5)
-        task.cancel()
-        # Bounded. If a handler swallows the cancel instead of re-raising, the
-        # fake's `communicate()` never returns -- `release` is never set -- and
-        # an unbounded `await task` would hang here rather than failing. The
-        # rule this test exists under applies to the test itself.
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(task, timeout=5)
+        try:
+            # Bounded: if the helper never reaches `communicate()` this fails
+            # here rather than hanging, and the cancel below would have been
+            # racing the spawn.
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            task.cancel()
+
+            # `asyncio.wait` rather than `wait_for`, deliberately. `wait_for`
+            # cancels on timeout and then *awaits* the task, so a handler that
+            # blocks during its own cleanup hangs the test -- the failure this
+            # bound exists to prevent, reintroduced by the bound. `wait`
+            # returns the still-pending set and leaves it alone.
+            done, pending = await asyncio.wait({task}, timeout=5)
+            assert not pending, "cancellation cleanup did not finish in 5s"
+            with pytest.raises(asyncio.CancelledError):
+                task.result()
+        finally:
+            # Let the fake's `communicate()` go, whatever happened above, so a
+            # failing assertion does not strand the task for the whole session.
+            release.set()
+            task.cancel()
         return proc
 
     async def test_ax_recovery_run_kills_and_reaps_on_cancel(self, monkeypatch):
