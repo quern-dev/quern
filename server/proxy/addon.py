@@ -129,6 +129,15 @@ def _lookup_process_info(client_id: str | None) -> dict | None:
             # a missing attribution for a stalled response, which is the wrong
             # way round.
             pid, process_name = future.result(timeout=0.5)
+        except TimeoutError:
+            # Still running -- leave the future in place. Replacing it with
+            # `None` here made one slow lookup poison the connection: the
+            # first flow recorded the failure, and every later flow on the
+            # same connection stayed unattributed even after the lookup had
+            # finished. The pool has four workers, so a burst of local
+            # connections queues and this is reachable rather than
+            # theoretical.
+            return None
         except Exception:
             pid = process_name = None
         info.clear()
@@ -169,6 +178,9 @@ def _is_local_address(ip: str) -> bool:
 
 
 def _pid_from_local_socket(writer) -> tuple[int | None, str | None]:
+    # `writer` is mitmproxy's `asyncio.StreamWriter`; left untyped because
+    # this module is loaded by `mitmdump -s` rather than imported, and adding
+    # an `asyncio` import purely for an annotation pulls it into that path.
     """The process that opened this connection, when it came from this host.
 
     Returns `(None, None)` for anything it cannot establish, which is the
@@ -236,6 +248,25 @@ _SERIAL_CACHE_MAX = 256
 _CONSOLE_PORT_RANGE = range(5554, 5684, 2)
 
 
+def _is_emulator_process(pid: int) -> bool:
+    """Whether this pid is actually an Android emulator.
+
+    Checked by command line rather than by the port it listens on, because the
+    port range is shared with whatever else a developer happens to run. The
+    emulator is a QEMU binary launched with `-avd <name>`, and both halves are
+    on its argv.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return False
+    command = result.stdout
+    return "qemu" in command.lower() and "-avd" in command
+
+
 def _emulator_serial_for_pid(pid: int) -> str | None:
     """`emulator-5554` for the QEMU process serving that emulator.
 
@@ -263,6 +294,13 @@ def _emulator_serial_for_pid(pid: int) -> str | None:
         }
         console = sorted(p for p in ports if p in _CONSOLE_PORT_RANGE)
         if not console:
+            return None
+        if not _is_emulator_process(pid):
+            # A port in the range is a hint, not proof. Anything else
+            # listening on an even port between 5554 and 5682 would otherwise
+            # be handed an `emulator-NNNN` serial, and `device_of` treats a
+            # serial as *firm* attribution -- so the wrong answer would be
+            # reported with more confidence than the right one.
             return None
         serial = f"emulator-{console[0]}"
         with _cache_lock:

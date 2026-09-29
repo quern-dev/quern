@@ -799,6 +799,8 @@ class WaitForFlowRequest(BaseModel):
     status_max: int | None = None
     has_error: bool | None = None
     simulator_udid: str | None = None
+    #: An Android emulator's exact identity (#262).
+    device_serial: str | None = None
     client_ip: str | None = None
     timeout: float = Field(default=10, ge=0.1, le=60)
     interval: float = Field(default=0.5, ge=0.1, le=5)

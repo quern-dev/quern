@@ -24,8 +24,20 @@ def _device_keys(
     simulator_udid: str | None,
     client_ip: str | None,
     device_serial: str | None = None,
+    *,
+    for_lookup: bool = False,
 ) -> list[str]:
     """The keys a flow's device is recorded under, one per field it carries.
+
+    Recording and looking up want different answers, and an earlier version
+    of this returned the lookup answer to both. A serial-bearing emulator flow
+    was then recorded *only* under `dev:` -- so a capture session filtered by
+    `client_ip` alone still matched that flow, because `_filter` compares the
+    address it carries, while its completeness check looked for `ip:` and
+    found nothing. It reported `truncated: false` after the matching flow had
+    been evicted, which is the wrong answer in the dangerous direction.
+
+    So: record under every key the flow carries, and narrow only when asked.
 
     `device_serial` is not optional in spirit even though it defaults: an
     emulator's `client_ip` is the *host's* address, so without its own key
@@ -37,13 +49,13 @@ def _device_keys(
     if simulator_udid:
         keys.append(f"sim:{simulator_udid}")
     if device_serial:
-        # Alone, deliberately. A serial is an exact device identity, while an
-        # emulator's `client_ip` is the *host's* address and its mark covers
-        # every emulator on the machine. Combining them -- callers take the
-        # max over the keys -- would let another device's evictions decide
-        # this one's completeness, which is the contamination the serial
-        # exists to end.
-        return keys + [f"dev:{device_serial}"]
+        keys.append(f"dev:{device_serial}")
+        if for_lookup:
+            # A *lookup* narrowed by serial wants only the serial. Callers
+            # take the max over the keys, so including the host address --
+            # which every emulator on the machine shares -- would let another
+            # device's evictions decide this one's completeness.
+            return keys
     if client_ip:
         keys.append(f"ip:{client_ip}")
     return keys
@@ -163,7 +175,9 @@ class FlowStore:
         Unnarrowed, it is the global one. A trimmed device's number lives on
         in the floor, so trimming can only make a delta more cautious.
         """
-        keys = _device_keys(simulator_udid, client_ip, device_serial)
+        keys = _device_keys(
+            simulator_udid, client_ip, device_serial, for_lookup=True,
+        )
         if not keys:
             return self._last_evicted_seq
         seqs = [self._evicted_seq_by_device.get(k, 0) for k in keys]
@@ -178,7 +192,9 @@ class FlowStore:
         With `simulator_udid` or `client_ip`, only evictions of flows carrying
         that value count -- the way the same filter narrows a query.
         """
-        keys = _device_keys(simulator_udid, client_ip, device_serial)
+        keys = _device_keys(
+            simulator_udid, client_ip, device_serial, for_lookup=True,
+        )
         if not keys:
             return self._evicted_through
         stamps = [

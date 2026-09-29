@@ -204,10 +204,14 @@ Use this after triggering a UI action to observe the resulting network request w
         .describe(
           "Filter by simulator UDID (only flows from this simulator)"
         ),
+      device_serial: z
+        .string()
+        .optional()
+        .describe("Wait only for flows from this Android emulator (e.g. emulator-5554). client_ip cannot narrow to one — every emulator on a host arrives as the host."),
       client_ip: z
         .string()
         .optional()
-        .describe("Filter by client IP address (physical device identification)"),
+        .describe("Filter by client IP address (physical devices). Does not narrow to one Android emulator."),
       timeout: z
         .coerce.number()
         .min(0.1)
@@ -229,6 +233,7 @@ Use this after triggering a UI action to observe the resulting network request w
     status_max,
     has_error,
     simulator_udid,
+    device_serial,
     client_ip,
     timeout,
     interval,
@@ -243,6 +248,7 @@ Use this after triggering a UI action to observe the resulting network request w
       if (has_error !== undefined) body.has_error = has_error;
       if (simulator_udid !== undefined)
         body.simulator_udid = simulator_udid;
+      if (device_serial !== undefined) body.device_serial = device_serial;
       if (client_ip !== undefined) body.client_ip = client_ip;
       body.timeout = timeout;
       body.interval = interval;

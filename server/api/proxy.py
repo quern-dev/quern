@@ -797,6 +797,7 @@ async def flow_summary(
         # filtered delta, the always-on flag #318 removed (review of #317).
         completeness["truncated"] = flow_store.last_evicted_seq_for(
             simulator_udid=simulator_udid, client_ip=client_ip,
+            device_serial=device_serial,
         ) > arrival_after
     summary.truncated = completeness["truncated"]
     summary.complete_after = completeness["complete_after"]
@@ -913,6 +914,7 @@ async def wait_for_flow(request: Request, body: WaitForFlowRequest) -> WaitForFl
                 status_max=body.status_max,
                 has_error=body.has_error,
                 simulator_udid=body.simulator_udid,
+                device_serial=body.device_serial,
                 client_ip=body.client_ip,
                 since=effective_since,
                 limit=1,

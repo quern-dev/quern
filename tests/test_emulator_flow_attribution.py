@@ -52,34 +52,63 @@ class TestTheSerialComesFromTheConsolePort:
     no call to adb. Measured: the QEMU process for `Pixel_6_Dev` listens on
     5554 and 5555, and adb calls it `emulator-5554`."""
 
+    @staticmethod
+    def _proc(addon, monkeypatch, *, ports, command):
+        """Answer `lsof` with `ports` and `ps` with `command`.
+
+        Two different questions go through `subprocess.run` here — which ports
+        the pid listens on, and whether it is an emulator at all — and a mock
+        that answers both with the same string cannot tell them apart.
+        """
+        def run(args, **kwargs):
+            out = command if args[0] == "ps" else "".join(
+                f"n127.0.0.1:{p}\n" for p in ports
+            )
+            return type("R", (), {"stdout": out, "returncode": 0})()
+
+        monkeypatch.setattr(addon.subprocess, "run", run)
+
+    QEMU = "/path/qemu-system-aarch64-headless -avd Pixel_6_Dev -no-window"
+
     def test_the_lower_even_port_in_range_is_the_serial(self, addon, monkeypatch):
-        monkeypatch.setattr(addon.subprocess, "run", lambda *a, **k: type(
-            "R", (), {"stdout": "n127.0.0.1:5554\nn127.0.0.1:5555\n", "returncode": 0},
-        )())
+        self._proc(addon, monkeypatch, ports=(5554, 5555), command=self.QEMU)
         assert addon._emulator_serial_for_pid(999) == "emulator-5554"
 
     def test_a_second_emulator_gets_its_own_serial(self, addon, monkeypatch):
-        monkeypatch.setattr(addon.subprocess, "run", lambda *a, **k: type(
-            "R", (), {"stdout": "n127.0.0.1:5556\nn127.0.0.1:5557\n", "returncode": 0},
-        )())
+        self._proc(addon, monkeypatch, ports=(5556, 5557), command=self.QEMU)
         assert addon._emulator_serial_for_pid(998) == "emulator-5556"
 
     def test_a_process_listening_outside_the_range_is_not_an_emulator(
         self, addon, monkeypatch,
     ):
-        """The negative control. Without a bounded range any process with a
-        listening socket would be read as a device — the proxy itself listens,
-        and so does every other server on the machine."""
-        monkeypatch.setattr(addon.subprocess, "run", lambda *a, **k: type(
-            "R", (), {"stdout": "n*:9183\nn127.0.0.1:8080\n", "returncode": 0},
-        )())
+        """Without a bounded range any process with a listening socket would
+        be read as a device — the proxy itself listens, and so does every
+        other server on the machine."""
+        self._proc(addon, monkeypatch, ports=(9183, 8080), command=self.QEMU)
         assert addon._emulator_serial_for_pid(997) is None
 
-    def test_nothing_listening_is_not_an_emulator(self, addon, monkeypatch):
-        monkeypatch.setattr(addon.subprocess, "run", lambda *a, **k: type(
-            "R", (), {"stdout": "", "returncode": 0},
-        )())
+    def test_a_non_emulator_in_the_range_is_refused(self, addon, monkeypatch):
+        """The port range is shared with whatever else a developer runs. A
+        port in it is a hint, not proof — and `device_of` treats a serial as
+        *firm*, so a wrong answer here is reported with more confidence than a
+        right one elsewhere."""
+        self._proc(
+            addon, monkeypatch, ports=(5560, 5561),
+            command="/usr/local/bin/some-dev-server --port 5560",
+        )
         assert addon._emulator_serial_for_pid(996) is None
+
+    def test_nothing_listening_is_not_an_emulator(self, addon, monkeypatch):
+        self._proc(addon, monkeypatch, ports=(), command=self.QEMU)
+        assert addon._emulator_serial_for_pid(995) is None
+
+    def test_a_qemu_without_an_avd_is_refused(self, addon, monkeypatch):
+        """Both halves are required: a bare QEMU is not an Android emulator."""
+        self._proc(
+            addon, monkeypatch, ports=(5554,),
+            command="/usr/bin/qemu-system-x86_64 -hda disk.img",
+        )
+        assert addon._emulator_serial_for_pid(994) is None
 
 
 class TestTheSocketLookupPicksTheRightEndOfTheConnection:
@@ -332,3 +361,131 @@ class TestTheConfidenceReportedMatchesTheAttribution:
                 f"{flow.device_serial=} {flow.simulator_udid=} {flow.client_ip=}: "
                 f"device_of says {udid!r}, identified_by says {reported}"
             )
+
+
+class TestRecordingAndLookupAreNotTheSameQuestion:
+    """An earlier fix made the serial "stand alone" as a key, which was right
+    for looking up and wrong for recording.
+
+    A serial-bearing flow was then recorded *only* under `dev:` — so a capture
+    session filtered by `client_ip` alone still matched it, because the filter
+    compares the address the flow carries, while its completeness check looked
+    for `ip:` and found nothing. It reported `truncated: false` after the
+    matching flow had been evicted: the wrong answer, in the direction this
+    whole area exists to prevent."""
+
+    def test_recording_uses_every_key_the_flow_carries(self):
+        from server.proxy.flow_store import _device_keys
+
+        keys = _device_keys(None, "192.168.1.189", "emulator-5554")
+        assert "dev:emulator-5554" in keys
+        assert "ip:192.168.1.189" in keys
+
+    def test_a_serial_narrowed_lookup_uses_only_the_serial(self):
+        """The host address is shared by every emulator on the machine, and
+        callers take the max over the keys — so including it would let another
+        device's evictions decide this one's completeness."""
+        from server.proxy.flow_store import _device_keys
+
+        keys = _device_keys(
+            None, "192.168.1.189", "emulator-5554", for_lookup=True,
+        )
+        assert keys == ["dev:emulator-5554"]
+
+    async def test_a_serial_narrowed_lookup_ignores_the_shared_mark(self):
+        """Through the store rather than through `_device_keys`.
+
+        Asserting the helper returns one key says nothing about whether the
+        call sites ask for that — verified by mutation: dropping
+        `for_lookup=True` at both call sites left the direct test green. One
+        emulator's eviction leaves a mark on the host address both of them
+        carry, so an un-narrowed lookup reports the *other* emulator's answer
+        as truncated when nothing of its was lost.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        from server.models import FlowRecord, FlowRequest
+        from server.proxy.flow_store import FlowStore
+
+        def flow(fid, serial, ts):
+            return FlowRecord(
+                id=fid, timestamp=ts, device_serial=serial,
+                client_ip="192.168.1.189",
+                request=FlowRequest(method="GET", url="http://x/", host="x", path="/"),
+            )
+
+        store = FlowStore(max_size=2)
+        base = datetime.now(UTC)
+        await store.add(flow("a-old", "emulator-5554", base))
+        await store.add(flow("b-1", "emulator-5556", base + timedelta(seconds=10)))
+        # Evicts `a-old`, leaving a mark on both `dev:emulator-5554` and the
+        # shared `ip:192.168.1.189`.
+        await store.add(flow("b-2", "emulator-5556", base + timedelta(seconds=20)))
+
+        # Both filters, because that is what the API passes: `_flow_completeness`
+        # forwards `simulator_udid`, `client_ip` *and* `device_serial`
+        # together. Narrowing has nothing to do if the caller only ever sends
+        # the serial -- which is why an earlier version of this test could not
+        # see the call sites dropping it.
+        assert store.is_complete_since(
+            base, device_serial="emulator-5556", client_ip="192.168.1.189",
+        )
+        # 5554 did lose something over that span.
+        assert not store.is_complete_since(
+            base, device_serial="emulator-5554", client_ip="192.168.1.189",
+        )
+
+    async def test_an_ip_filtered_answer_still_sees_the_eviction(self):
+        """The regression itself. A caller filtering only by `client_ip`
+        matches emulator flows, so it must be told when one was evicted."""
+        from datetime import UTC, datetime, timedelta
+
+        from server.models import FlowRecord, FlowRequest
+        from server.proxy.flow_store import FlowStore
+
+        def flow(fid, ts):
+            return FlowRecord(
+                id=fid, timestamp=ts, device_serial="emulator-5554",
+                client_ip="192.168.1.189",
+                request=FlowRequest(method="GET", url="http://x/", host="x", path="/"),
+            )
+
+        store = FlowStore(max_size=1)
+        base = datetime.now(UTC)
+        await store.add(flow("old", base))
+        await store.add(flow("new", base + timedelta(seconds=1)))
+
+        assert not store.is_complete_since(base, client_ip="192.168.1.189")
+
+
+class TestASlowLookupDoesNotPoisonTheConnection:
+    """`_lookup_process_info` waits 0.5s on the future. Replacing it with
+    `None` on timeout meant the first flow recorded the failure and every
+    later flow on the same connection stayed unattributed even after the
+    lookup had finished. The pool has four workers, so a burst of local
+    connections queues and this is reachable."""
+
+    def test_a_timeout_leaves_the_future_in_place(self, addon):
+        from concurrent.futures import Future
+
+        pending = Future()
+        addon._client_process_info["slow"] = {"future": pending}
+
+        assert addon._lookup_process_info("slow") is None
+        assert "future" in addon._client_process_info["slow"]
+
+        pending.set_result((4242, "qemu-system-aarch64-headless"))
+        info = addon._lookup_process_info("slow")
+        assert info["pid"] == 4242
+
+    def test_a_finished_lookup_is_recorded_once(self, addon):
+        from concurrent.futures import Future
+
+        done = Future()
+        done.set_result((7, "qemu"))
+        addon._client_process_info["fast"] = {"future": done}
+
+        assert addon._lookup_process_info("fast")["pid"] == 7
+        # The future is gone, so the wait is paid once per connection rather
+        # than once per flow on it.
+        assert "future" not in addon._client_process_info["fast"]
