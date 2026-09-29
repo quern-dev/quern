@@ -1273,28 +1273,44 @@ def _usb_controller(phones, usb):
 
 class TestUdidMapping:
     async def test_list_devices_populates_mapping(self):
-        """list_devices() should correlate devicectl and usbmux names."""
-        ctrl = DeviceController()
-        ctrl.simctl.list_devices = AsyncMock(return_value=[])
-        ctrl.devicectl.list_devices = AsyncMock(
-            return_value=[
-                DeviceInfo(
-                    udid="B34C4EE9-CORE-DEVICE-UUID",
-                    name="iPhone 11",
-                    state=DeviceState.BOOTED,
-                    device_type=DeviceType.DEVICE,
-                    os_version="iOS 18.4",
-                ),
-            ]
-        )
-        ctrl.usbmux.list_devices = AsyncMock(return_value=[])
-        ctrl.usbmux.get_usb_devices = AsyncMock(
-            return_value=[("00008030-AABBCCDDEEFF", "iPhone 11")]
+        """list_devices() maps a CoreDevice UUID to its USB UDID.
+
+        Through `_usb_controller`, so the fake devicectl records the hardware
+        UDID as an alias the way the real one does. Written without that, this
+        passed by matching *names* -- which is the fallback #323 removed, so
+        the test was exercising the path that no longer exists rather than the
+        exact match it is named for."""
+        ctrl = _usb_controller(
+            {"B34C4EE9-CORE-DEVICE-UUID": ("iPhone 11", "00008030-AABBCCDDEEFF", "usb")},
+            usb=[("00008030-AABBCCDDEEFF", "iPhone 11")],
         )
 
         await ctrl.list_devices()
 
         assert ctrl._usbmux_udid_map["B34C4EE9-CORE-DEVICE-UUID"] == "00008030-AABBCCDDEEFF"
+
+    async def test_a_phone_with_no_hardware_udid_is_not_matched_by_name(self):
+        """The fallback #323 removed, pinned so it cannot come back quietly.
+
+        Every condition it needed is set up here: devicectl lists the phone
+        with no hardware UDID, and its name is unique on both sides and matches
+        exactly one usbmux entry. Before the removal this mapped; now it must
+        not, because a name is not an identity -- two phones called "iPhone",
+        which is the default, could be handed each other's UDID, and a crash
+        pull then filed one phone's reports under the other on disk.
+
+        Measured on devicectl 642.16 (Xcode 27): every paired physical device
+        reports `hardwareProperties.udid`, so nothing reaches this state."""
+        ctrl = _usb_controller(
+            {"CORE-NO-HARDWARE-UDID": ("iPhone", None, "usb")},
+            usb=[("00008030-SOMEUSBUDID", "iPhone")],
+        )
+
+        await ctrl.list_devices()
+
+        assert "CORE-NO-HARDWARE-UDID" not in ctrl._usbmux_udid_map, (
+            "a phone with no hardware UDID was matched to a usbmux device by name"
+        )
 
     async def test_get_libimobiledevice_udid_cached(self):
         """get_libimobiledevice_udid returns cached value without refreshing."""
@@ -1311,23 +1327,11 @@ class TestUdidMapping:
         ctrl.simctl.list_devices.assert_not_called()
 
     async def test_get_libimobiledevice_udid_refreshes_on_miss(self):
-        """get_libimobiledevice_udid refreshes device list on cache miss."""
-        ctrl = DeviceController()
-        ctrl.simctl.list_devices = AsyncMock(return_value=[])
-        ctrl.devicectl.list_devices = AsyncMock(
-            return_value=[
-                DeviceInfo(
-                    udid="NEW-CORE-UUID",
-                    name="iPhone 15 Pro",
-                    state=DeviceState.BOOTED,
-                    device_type=DeviceType.DEVICE,
-                    os_version="iOS 18.4",
-                ),
-            ]
-        )
-        ctrl.usbmux.list_devices = AsyncMock(return_value=[])
-        ctrl.usbmux.get_usb_devices = AsyncMock(
-            return_value=[("00008030-NEWDEVICE", "iPhone 15 Pro")]
+        """A cache miss re-lists, and the alias recorded by that listing is
+        what resolves the lookup."""
+        ctrl = _usb_controller(
+            {"NEW-CORE-UUID": ("iPhone 15 Pro", "00008030-NEWDEVICE", "usb")},
+            usb=[("00008030-NEWDEVICE", "iPhone 15 Pro")],
         )
 
         result = await ctrl.get_libimobiledevice_udid("NEW-CORE-UUID")
