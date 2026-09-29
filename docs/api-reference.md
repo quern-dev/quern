@@ -127,16 +127,18 @@ a stripped build. So each app image is matched by UUID, first to quern's build
 records (`build_and_install` to a device keeps dSYMs), then to a dSYM Spotlight
 indexed (`mdfind "com_apple_xcode_dsym_uuids == <UUID>"`: Xcode's DerivedData and
 archives), and its frames are resolved with `atos`. Every frame but the crashing
-thread's top one is a return address and is looked up one byte before it, as crash
-tools do: at the address itself a `fatalError`'s own frame resolves to
-compiler-generated code. `symbols` says, per image, where the symbols came from
+thread's top one, and the frame a signal interrupted (just below `_sigtramp`), is a
+return address and is looked up one byte before it, as crash tools do: at the
+address itself a `fatalError`'s own frame resolves to compiler-generated code. `symbols` says, per image, where the symbols came from
 (`source`, `build_id`, `dwarf`), how many frames gained a line
 (`frames_resolved` of `frames_total`), and otherwise why not: no match on this Mac
 for that UUID, a build whose dSYMs have expired, Spotlight or `atos` unavailable.
-Only frames in the app bundle that lack a line are sent, so a simulator's report,
-which macOS already symbolicates, and Android reports are left as they are. Each
-report is symbolicated once, on the first read that returns it.
-`symbolicate=false` skips it.
+Only the crashed app's own frames that lack a line are sent, so a simulator's
+report, which macOS usually symbolicates, costs nothing unless one of them does,
+and Android reports and the Mac's own processes are left alone. A report is
+symbolicated on the first read that returns it and kept, until the server restarts;
+one that failed because `atos` or Spotlight could not be asked is tried again on
+the next read, and a definite "no match" is not. `symbolicate=false` skips it.
 
 A frame counts as the app's when:
 - **iOS:** its binary is inside the app bundle.

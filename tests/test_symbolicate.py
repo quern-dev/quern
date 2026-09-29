@@ -251,9 +251,21 @@ class TestWhatIsLeftAlone:
         _run([report], symbolicate.SymbolFinder(tmp_path / "records", tools))
         assert tools.calls == [] and report.symbols == []
 
-    def test_an_image_outside_an_app_bundle(self, tmp_path):
+    def test_frames_that_are_not_the_apps(self, tmp_path):
+        """Decided from the crashed app's own bundle, so SpringBoard's or a
+        Mac app's frames in someone else's report are not looked up."""
         tools = FakeTools()
-        report = _report(app_image_path="/usr/lib/libMyApp.dylib")
+        report = _report()
+        for f in report.frames:
+            f.app = False
+        report.app_frame = None
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", tools))
+        assert tools.calls == []
+
+    def test_the_macs_own_crash_is_not_symbolicated(self, tmp_path):
+        tools = FakeTools()
+        report = _report()
+        report.mac_process = True
         _run([report], symbolicate.SymbolFinder(tmp_path / "records", tools))
         assert tools.calls == []
 
@@ -359,3 +371,239 @@ class TestTheRoute:
         [crash] = (await _latest(crash_app, symbolicate="false"))["crashes"]
         assert tools.calls == [] and crash["symbols"] == []
         assert crash["app_frame"]["file"] == ""
+
+
+# ── review of 9fc0aa9 ────────────────────────────────────────────────────────
+
+
+class TestRetry:
+    """A report is done only when every image got a definite answer."""
+
+    def test_a_failed_atos_is_tried_again(self, tmp_path):
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        report = _report()
+        failing = FakeTools(lines=GOOD, atos_code=1)
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", failing))
+        assert not report.symbolicated and report.app_frame.file == ""
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", FakeTools(lines=GOOD)))
+        assert report.symbolicated and report.app_frame.line == 170
+        assert len(report.symbols) == 1 and report.symbols[0].note == ""   # replaced, not added
+
+    def test_spotlight_that_could_not_be_asked_is_tried_again(self, tmp_path):
+        report = _report()
+        broken = FakeTools(mdfind_raises=FileNotFoundError(2, "No such file", "mdfind"))
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", broken))
+        assert not report.symbolicated
+
+    def test_mdfind_exiting_non_zero_is_not_definite(self, tmp_path):
+        report = _report()
+
+        async def run(argv):
+            return 1, "", "mdfind: boom"
+
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", run))
+        assert not report.symbolicated and "mdfind exited 1" in report.symbols[0].note
+
+    def test_a_definite_miss_is_done(self, tmp_path):
+        tools = FakeTools(mdfind="")
+        finder = symbolicate.SymbolFinder(tmp_path / "records", tools)
+        report = _report()
+        _run([report], finder)
+        _run([report], finder)
+        assert report.symbolicated
+        assert [c[0] for c in tools.calls].count("mdfind") == 1
+
+    def test_an_unexpected_error_is_said_and_tried_again(self, tmp_path, monkeypatch):
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+
+        def broken(line):
+            raise KeyError("boom")
+
+        monkeypatch.setattr(symbolicate, "_parse", broken)
+        report = _report()
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", FakeTools(lines=GOOD)))
+        [entry] = report.symbols
+        assert "symbolication failed: KeyError" in entry.note and not report.symbolicated
+        assert entry.image == "MyApp.debug.dylib"
+
+
+class TestConcurrency:
+    def test_two_reads_at_once_symbolicate_once(self, tmp_path):
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        tools = FakeTools(lines=GOOD)
+        finder = symbolicate.SymbolFinder(tmp_path / "records", tools)
+        report = _report()
+
+        async def both():
+            await asyncio.gather(symbolicate.symbolicate_many([report], finder),
+                                 symbolicate.symbolicate_many([report], finder))
+
+        asyncio.run(both())
+        assert len(tools.atos) == 1 and len(report.symbols) == 1
+
+    def test_one_lookup_per_uuid_in_flight(self, tmp_path):
+        """Ten reports missing the same UUID asked Spotlight ten times."""
+        tools = FakeTools(mdfind="")
+        reports = []
+        for i in range(10):
+            r = _report()
+            r.crash_id = f"c{i}"
+            reports.append(r)
+        _run(reports, symbolicate.SymbolFinder(tmp_path / "records", tools))
+        assert [c[0] for c in tools.calls].count("mdfind") == 1
+
+
+class TestUnreadableHits:
+    def test_an_unreadable_spotlight_hit_does_not_stop_the_next(self, tmp_path, monkeypatch):
+        good = _dsym(tmp_path / "DerivedData", U_APP)
+        blocked = tmp_path / "Documents" / "Old.dSYM"
+        real = symbolicate.build_records.dwarf_for
+
+        def dwarf_for(dsym, uuids):
+            if dsym == blocked:
+                raise PermissionError(1, "Operation not permitted", str(dsym))
+            return real(dsym, uuids)
+
+        monkeypatch.setattr(symbolicate.build_records, "dwarf_for", dwarf_for)
+        tools = FakeTools(lines=GOOD, mdfind=f"{blocked}\n{good}\n")
+        report = _report()
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", tools))
+        assert report.symbols[0].source == "spotlight" and report.app_frame.line == 170
+
+    def test_a_record_whose_dsym_is_gone_says_so(self, tmp_path):
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        import shutil
+        shutil.rmtree(dsym)
+        report = _report()
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", FakeTools(mdfind="")))
+        assert "its dSYM is no longer where the record says" in report.symbols[0].note
+
+    def test_a_cached_hit_whose_dsym_was_removed_is_looked_up_again(self, tmp_path):
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        tools = FakeTools(lines=GOOD, mdfind="")
+        finder = symbolicate.SymbolFinder(tmp_path / "records", tools)
+        _run([_report()], finder)
+        import shutil
+        shutil.rmtree(dsym)
+        second = _report()
+        second.crash_id = "c2"
+        _run([second], finder)
+        assert "no longer where the record says" in second.symbols[0].note
+        assert len(tools.atos) == 1
+
+
+class TestUuids:
+    def test_a_crash_text_reports_dashless_uuid_matches(self, tmp_path):
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        report = _report()
+        report.images[1].uuid = U_APP.hex                 # `<ea0d22d897a1...>`
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", FakeTools(lines=GOOD)))
+        assert report.symbols[0].source == "build_record"
+        assert report.symbols[0].uuid == str(U_APP).upper()
+
+    @pytest.mark.parametrize("bad", ["*", 'EA0D"22D8', "not-a-uuid"])
+    def test_something_that_is_not_a_uuid_never_reaches_mdfind(self, tmp_path, bad):
+        tools = FakeTools()
+        report = _report()
+        report.images[1].uuid = bad
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", tools))
+        assert tools.calls == [] and "is not a UUID" in report.symbols[0].note
+
+
+class TestTheInterruptedFrame:
+    def test_the_frame_below_sigtramp_is_exact(self, tmp_path):
+        """A crash reporter's handler sits on top; the frame it interrupted is
+        the faulting instruction, and a byte before it can be the previous line."""
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        report = _report()
+        report.frames[0:1] = [
+            CrashFrame(image="libsystem_platform.dylib", offset=10, symbol="handler"),
+            CrashFrame(image="libsystem_platform.dylib", offset=20, symbol="_sigtramp"),
+        ]
+        tools = FakeTools(lines={BASE + 0x1000: GOOD[CLOSURE_AT], CELL_AT: GOOD[CELL_AT]})
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", tools))
+        asked = [int(a, 16) for a in tools.atos[0][8:]]
+        assert BASE + 0x1000 in asked and CLOSURE_AT not in asked
+
+
+class TestOffsetsAndNames:
+    def test_the_offset_is_from_the_real_address(self, tmp_path):
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        report = _report()
+        report.frames[2].symbol = ""               # stripped
+        lines = dict(GOOD)
+        lines[CELL_AT] = "Cell.pressed() (in MyApp.debug.dylib) + 40"
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", FakeTools(lines=lines)))
+        cell = report.frames[2]
+        assert (cell.symbol, cell.symbol_offset) == ("Cell.pressed()", 41)
+
+    def test_a_name_without_a_line_is_not_counted_as_resolved(self, tmp_path):
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        report = _report()
+        report.frames[2].symbol = ""
+        lines = dict(GOOD)
+        lines[CELL_AT] = "Cell.pressed() (in MyApp.debug.dylib) + 40"
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", FakeTools(lines=lines)))
+        [entry] = report.symbols
+        assert entry.frames_resolved == 1 and "1 got a function name only" in entry.note
+
+    def test_a_different_name_drops_the_phones_offset(self, tmp_path):
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        report = _report()
+        lines = dict(GOOD)
+        lines[CLOSURE_AT] = "inlined.thing() (in MyApp.debug.dylib) (Menu.swift:170)"
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", FakeTools(lines=lines)))
+        assert report.frames[1].symbol == "inlined.thing()"
+        assert report.frames[1].symbol_offset is None
+
+    def test_the_images_arch_is_passed(self, tmp_path):
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        report = _report()
+        report.images[1].arch = "arm64e"
+        tools = FakeTools(lines=GOOD)
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", tools))
+        assert tools.atos[0][5] == "arm64e"
+
+
+class TestTheAppFramePastTheCap:
+    def test_it_is_symbolicated_and_counted_once(self, tmp_path):
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        report = _report()
+        report.app_frame = CrashFrame(image="MyApp.debug.dylib", offset=0x3000,
+                                      symbol="deep()", app=True)
+        lines = dict(GOOD)
+        lines[BASE + 0x3000 - 1] = "deep() (in MyApp.debug.dylib) (Deep.swift:9)"
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", FakeTools(lines=lines)))
+        assert (report.app_frame.file, report.app_frame.line) == ("Deep.swift", 9)
+        assert report.symbols[0].frames_total == 3
+
+
+class TestPartialFailure:
+    def test_top_frames_follow_what_did_resolve(self, tmp_path, monkeypatch):
+        """Two images; the second raises. The first's lines still show."""
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        report = _report()
+        report.images.append(CrashImage(name="Widget.debug.dylib", uuid=str(uuid.uuid4()),
+                                        base=0x200000000, path=APP_PATH, arch="arm64"))
+        report.frames.append(CrashFrame(image="Widget.debug.dylib", offset=4, symbol="w()",
+                                        app=True))
+        tools = FakeTools(lines=GOOD, mdfind_raises=RuntimeError("index broken"))
+        finder = symbolicate.SymbolFinder(tmp_path / "records", tools)
+        _run([report], finder)
+        assert "(Menu.swift:170)" in report.top_frames[1]
+        widget = next(e for e in report.symbols if e.image == "Widget.debug.dylib")
+        assert "symbolication failed: RuntimeError" in widget.note
+        assert not report.symbolicated
