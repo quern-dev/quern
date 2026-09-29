@@ -139,6 +139,33 @@ enum RecoveryTests {
             Harness.expect(p.body, "Run `quern status` to see what state it is in.", "fallback")
         }
 
+        Harness.test("the detail view is bounded and scrollable whatever it holds") {
+            // `parts` decides *what* is shown; this is *how*. Review mutated
+            // three things here -- dropping the accessory, making the text view
+            // non-resizable, and restoring an unbounded height -- and the suite
+            // passed all three, because nothing called this function.
+            for text in ["", "one line",
+                         String(repeating: "npm ERR! failed\n", count: 4000)] {
+                let view = AppDelegate.detailView(text)
+                Harness.expect(view.frame.height <= 200,
+                               "height is fixed, not driven by \(text.count) chars")
+                Harness.expect(view.frame.width <= 600, "width is fixed too")
+                guard let scroll = view as? NSScrollView else {
+                    Harness.expect(false, "not a scroll view"); continue
+                }
+                Harness.expect(scroll.hasVerticalScroller, "can be scrolled")
+                guard let tv = scroll.documentView as? NSTextView else {
+                    Harness.expect(false, "no text view"); continue
+                }
+                Harness.expect(tv.string, text, "holds the text verbatim")
+                // Without this the content is clipped and the scroller is inert,
+                // which looks like a bounded view and loses the output.
+                Harness.expect(tv.isVerticallyResizable, "the document can grow")
+                Harness.expect(!tv.isEditable, "read-only")
+                Harness.expect(tv.isSelectable, "selectable — this is why Copy is not the only way out")
+            }
+        }
+
         Harness.test("prose passed as guidance reaches the body, not the box") {
             // The `quern not found` path passes prose. As a detail it sat in a
             // monospaced box while the body said only "the full output is below".
