@@ -781,10 +781,14 @@ class DeviceController(DeviceControllerUI):
         # devicectl listed without a hardware UDID, pending a measurement on
         # Xcode 27 (#323). Measured, and removed: devicectl 642.16 reports
         # `hardwareProperties.udid` for every paired physical device, as 518.31
-        # did, so the fallback was unreachable -- confirmed at runtime against
-        # a wired iPhone and two on Wi-Fi, each of which had an alias and so
-        # skipped it. Nothing paired but disconnected was on hand; 26.5's
-        # sample covered that case and this one did not.
+        # did, so the fallback was unreachable -- confirmed at runtime, each
+        # phone having an alias and so skipping it. Across all three states a
+        # paired device can be in: wired, on Wi-Fi, and disconnected. The last
+        # was checked by taking a phone off the network, which devicectl then
+        # lists with no `transportType` at all and `tunnelState: unavailable`,
+        # and it still carried its UDID. That state matters most, because the
+        # alias has to come from pairing rather than from a live connection for
+        # any of this to hold.
         #
         # A listed phone that matches nothing now loses its old mapping: one
         # unplugged since, and now on Wi-Fi, kept it and was pulled over a USB
