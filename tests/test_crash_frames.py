@@ -713,6 +713,10 @@ class TestWhoseCrashItIs:
         assert report.device_id == "00000000-0000-0000-0000-00000000000B"
         assert report.mac_process is False
 
+    def test_a_malformed_udid_in_the_path_is_not_a_device(self):
+        path = "/x/CoreSimulator/Devices/------------------------------------/data/MyApp.app/MyApp"
+        assert crash_frames.simulator_udid(path) == ""
+
     def test_the_apps_path_wins_over_the_coalition(self):
         assert crash_frames.simulator_udid(
             "/x/CoreSimulator/Devices/00000000-0000-0000-0000-00000000000A/data/MyApp.app/MyApp",
@@ -721,6 +725,8 @@ class TestWhoseCrashItIs:
 
     @pytest.mark.parametrize("coalition", [
         "com.apple.CoreSimulator.SimDevice.not-a-udid", "com.example.agent",
+        "com.apple.CoreSimulator.SimDevice.------------------------------------",
+        "com.apple.CoreSimulator.SimDevice.00000000000000000000000000000000-000",
         "xcom.apple.CoreSimulator.SimDevice.00000000-0000-0000-0000-00000000000B",
     ])
     def test_only_a_simulator_coalition_places_it(self, coalition):

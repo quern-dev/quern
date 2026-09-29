@@ -242,9 +242,12 @@ def _bundle_dir(proc_path: str) -> str:
     return m.group(1) if m else ""
 
 
-_SIMULATOR = re.compile(r"/CoreSimulator/Devices/([0-9A-Fa-f-]{36})/")
+#: A UDID in its canonical shape: a malformed one would be recorded as the
+#: report's device and match no device, dropping it from every list.
+_UDID = r"([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})"
+_SIMULATOR = re.compile(r"/CoreSimulator/Devices/" + _UDID + "/")
 #: `coalitionName`, which a simulator's system processes carry too.
-_SIMULATOR_COALITION = re.compile(r"com\.apple\.CoreSimulator\.SimDevice\.([0-9A-Fa-f-]{36})$")
+_SIMULATOR_COALITION = re.compile(r"com\.apple\.CoreSimulator\.SimDevice\." + _UDID + "$")
 #: The header's `platform`: iOS, tvOS, watchOS and visionOS simulators.
 _SIMULATOR_PLATFORMS = {7, 8, 9, 12}
 
