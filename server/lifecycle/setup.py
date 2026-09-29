@@ -1810,6 +1810,64 @@ def check_node(sites: list | None = None) -> CheckResult:
             )
     here = sites[0]
     if here.status == node_env.MISSING:
+        # "Not installed" is wrong when it is installed and merely unreachable
+        # from *this* process, which is the ordinary case for a GUI launch: a
+        # node from fnm or nvm lives in a directory no static PATH can name,
+        # and fnm's contains the pid of the shell that asked for it. A user met
+        # this as a failed update reporting Node missing on a machine whose
+        # every shell has Node 22 (#339).
+        #
+        # `probe` has already asked the other places, so the evidence is here
+        # rather than inferred from a directory that happens to exist.
+        # `== OK`, not "not missing". TOO_OLD and UNUSABLE both carry a path
+        # and would read as "installed, just not reachable here", which is
+        # wrong twice over: a Node 18 in the login shell is a different problem
+        # with different advice, and an asdf shim with no version selected is
+        # broken everywhere rather than merely invisible. `node_env.fix_for`
+        # already has the right words for both, and this branch would shadow
+        # them. UNKNOWN is excluded by the same test rather than incidentally
+        # by `site.path`.
+        elsewhere = [
+            site for site in sites[1:]
+            if site.status == node_env.OK and site.path
+        ]
+        if elsewhere:
+            found = elsewhere[0]
+            manager = node_env.manager_of(found.path)
+            named = f" by {manager}" if manager else ""
+            # Where to send them depends on where it was actually found.
+            # `elsewhere[0]` is usually the login shell, and then "run it from a
+            # terminal" is right -- but probe also reports GUI apps and the
+            # Quern app, and if one of those is the only place with a node then
+            # a terminal has none either. Advice that names the wrong place is
+            # worse than none: it sends someone to a shell that will fail the
+            # same way.
+            if "shell" in found.place.lower():
+                where = (
+                    "Run this from a terminal, where your own environment is -- a GUI "
+                    "launch gets launchd's PATH and reads no shell startup files, so it "
+                    "cannot see it."
+                )
+            else:
+                where = (
+                    f"A terminal will not help: the node is visible to {found.place.lower()} "
+                    f"and not to a shell. Point this process at it with an absolute path, "
+                    f"or put a node on PATH for everything."
+                )
+            return CheckResult(
+                name="Node.js",
+                status=CheckStatus.MISSING,
+                message=f"installed{named}, but not reachable from here",
+                # Deliberately not `fixable`: offering to brew install would
+                # put a second node on the machine to work around the first
+                # one being invisible, which is not a fix.
+                fixable=False,
+                detail=(
+                    f"Found at {found.path} for {found.place.lower()}, and not on this "
+                    f"process's PATH.\n{where}\n"
+                    f"{quern_cmd()} doctor shows each place a node is picked."
+                ),
+            )
         return CheckResult(
             name="Node.js",
             status=CheckStatus.MISSING,
@@ -2831,7 +2889,14 @@ def run_setup(assume_yes: bool = False) -> int:
     report.add(check_mitmdump())
 
     node_result = check_node()
-    if node_result.status == CheckStatus.MISSING:
+    # `fixable`, not just MISSING. A node that exists and is merely unreachable
+    # from here is MISSING *to this process*, and installing a second one does
+    # not make the first visible -- under `-y` it would silently do exactly
+    # that. The check says whether an install is the answer; this asks it
+    # rather than re-deciding. Without this the report contradicted itself:
+    # "installed by fnm, but not reachable from here" above, and "Node.js not
+    # found. Install via Homebrew?" a few lines below.
+    if node_result.status == CheckStatus.MISSING and node_result.fixable:
         if _prompt_yn("    Node.js not found. Install via Homebrew?"):
             if _brew_install("node"):
                 node_result = check_node()  # re-check

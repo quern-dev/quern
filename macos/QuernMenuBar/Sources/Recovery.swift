@@ -56,6 +56,29 @@ enum Recovery: Equatable {
 
     var buttonTitle: String { "Fix in Terminal" }
 
+    /// One line saying what the button will do, for the alert's own text.
+    ///
+    /// The alert used to put the whole command output where this goes, which
+    /// is how its buttons ended up off-screen (#339). The output is worth
+    /// keeping, but it is not what the reader needs first -- the next action
+    /// is.
+    var explanation: String {
+        switch self {
+        case .finishUpdate:
+            return "The update stopped partway. Opening Terminal will run setup and restart the server."
+        case .repair:
+            return "The server would not start. Opening Terminal will run doctor and try again."
+        case .setUp:
+            // Deliberately not "will install it": `script(.setUp)` *prints* the
+            // installer one-liner rather than running it, on the grounds that
+            // fetching and running an installer is a bigger step than a click
+            // on an alert should take. Promising the install was harmless while
+            // OK was the default button and this was the second one; it is not
+            // now that Return triggers it.
+            return "There is no quern command to run. Opening Terminal will show you how to install it."
+        }
+    }
+
     /// Distinct per case, because two of these can be on the menu at once: an
     /// update that stopped partway leaves the server up or down, and a start
     /// that then fails records its own. Two rows reading "Troubleshoot in
@@ -246,19 +269,71 @@ enum FailureAlertButton: Equatable {
 }
 
 enum FailureAlert {
-    /// Fix in Terminal comes straight after OK: it is the next step, where
-    /// Copy and Open Log are for reading about it.
+    /// Fix in Terminal comes **first** when there is one, because NSAlert makes
+    /// the first button the default and Return triggers it.
     ///
-    /// This used to argue against a Terminal button -- running a command on a
-    /// click, picking a terminal, and an Automation prompt. The last is gone
-    /// (`TerminalScript` opens a document), and the first two are the point:
-    /// the scripts run fixed quern commands in a window the user watches, and
-    /// any password prompt appears there, in front of them.
+    /// It used to come second, after OK. That was defensible while the alert
+    /// was readable; it was not once the alert could grow past the screen. A
+    /// user met a window whose buttons were all below the bottom edge, and the
+    /// only thing reachable was Return -- which discarded the error, because OK
+    /// was the default. The remedy was on screen in spirit and unreachable in
+    /// fact (#339). Whichever way the height bug is fixed, the key that always
+    /// works should do the useful thing.
+    ///
+    /// Running a command on Return is safe here: the scripts are fixed quern
+    /// commands, they open a Terminal window the user watches, and any password
+    /// prompt appears there in front of them.
     static func buttons(detail: String, hasLog: Bool, recovery: Recovery?) -> [FailureAlertButton] {
-        var buttons: [FailureAlertButton] = [.ok]
+        var buttons: [FailureAlertButton] = []
         if let recovery { buttons.append(.fixInTerminal(recovery)) }
+        buttons.append(.ok)
         if !detail.isEmpty { buttons.append(.copy) }
         if hasLog { buttons.append(.openLog) }
         return buttons
+    }
+
+    /// What the alert says in its own body -- never the command output.
+    ///
+    /// `NSAlert.informativeText` does not scroll and cannot be bounded, so it
+    /// sets the window's height. Given an install log it produced a window
+    /// taller than the display, with its buttons off the bottom edge and no way
+    /// to resize or scroll (#339). The output now goes in a scrollable
+    /// accessory view; this is the short part that must always be visible, so
+    /// it leads with the next action rather than ending with it.
+    /// Both halves of the alert: what it *says*, and what it *shows*.
+    ///
+    /// One function taking the detail and returning both is what makes the
+    /// #339 invariant testable. `text(guidance:hasDetail:recovery:)` below
+    /// takes a `Bool`, so a test asserting "the body does not contain the log"
+    /// was asserting it about a function that never saw the log -- true by
+    /// construction and therefore worth nothing. Review mutated the real fix
+    /// four ways, including restoring the original bug, and all four passed.
+    ///
+    /// The body must never contain the detail: it sets the window height, and
+    /// `informativeText` neither scrolls nor bounds. The accessory is the
+    /// detail verbatim, or nil when there is none.
+    static func parts(detail: String, guidance: String?, recovery: Recovery?)
+        -> (body: String, accessory: String?)
+    {
+        let trimmed = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (
+            body: text(guidance: guidance, hasDetail: !trimmed.isEmpty, recovery: recovery),
+            accessory: trimmed.isEmpty ? nil : trimmed
+        )
+    }
+
+    static func text(guidance: String?, hasDetail: Bool, recovery: Recovery?) -> String {
+        var parts: [String] = []
+        let trimmed = guidance?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmed.isEmpty {
+            parts.append(trimmed)
+        } else if let recovery {
+            parts.append(recovery.explanation)
+        } else if !hasDetail {
+            // Nothing to show and nothing to offer: say what would tell them.
+            parts.append("Run `quern status` to see what state it is in.")
+        }
+        if hasDetail { parts.append("The full output is below.") }
+        return parts.joined(separator: "\n\n")
     }
 }

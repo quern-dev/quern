@@ -98,14 +98,111 @@ enum RecoveryTests {
             Harness.expect(lines(script(.repair, quern: nil)).contains("'quern' start"), "fallback")
         }
 
-        Harness.test("every failure alert with a recovery offers it second") {
+        Harness.test("a failure alert offers its recovery first, so Return takes it") {
+            // First is the default button, and Return triggers it. The whole
+            // point of #339: when the alert grew past the screen edge, Return
+            // was the only reachable control and it discarded the error.
             let with = FailureAlert.buttons(detail: "boom", hasLog: true, recovery: .repair)
-            Harness.expect(with, [.ok, .fixInTerminal(.repair), .copy, .openLog], "full set")
+            Harness.expect(with, [.fixInTerminal(.repair), .ok, .copy, .openLog], "full set")
+            Harness.expect(with.first, .fixInTerminal(.repair), "recovery is the default")
             Harness.expect(FailureAlert.buttons(detail: "", hasLog: false, recovery: .setUp),
-                           [.ok, .fixInTerminal(.setUp)], "minimal")
+                           [.fixInTerminal(.setUp), .ok], "minimal")
             Harness.expect(FailureAlert.buttons(detail: "boom", hasLog: false, recovery: nil),
                            [.ok, .copy], "no recovery, no button")
+            Harness.expect(FailureAlert.buttons(detail: "", hasLog: false, recovery: nil).first,
+                           .ok, "with nothing to offer, OK is still the default")
             Harness.expect(FailureAlertButton.fixInTerminal(.repair).title, "Fix in Terminal", "title")
+        }
+
+        Harness.test("the output goes to the accessory and never to the body") {
+            // This asserts on `parts`, which *takes* the detail. The earlier
+            // version asked `text(guidance:hasDetail:recovery:)`, which takes a
+            // Bool -- so "the body does not contain the log" was true of a
+            // function that had never seen the log, and four mutations of the
+            // real fix (including restoring the original bug) passed it.
+            let log = String(repeating: "npm ERR! something went wrong\n", count: 400)
+            let p = FailureAlert.parts(detail: log, guidance: nil, recovery: .repair)
+
+            Harness.expect(!p.body.contains("npm ERR!"), "body is free of the output")
+            Harness.expect(p.accessory == log.trimmingCharacters(in: .whitespacesAndNewlines),
+                           "the accessory is the output, verbatim")
+            Harness.expect(p.body.contains(Recovery.repair.explanation), "leads with the next action")
+            Harness.expect(p.body.contains("below"), "points at the detail")
+            // The body sets the window height; that is the whole defect.
+            Harness.expect(p.body.count < 400, "body stays short whatever the output is")
+        }
+
+        Harness.test("no output means no accessory, and no dangling pointer to one") {
+            let p = FailureAlert.parts(detail: "   \n  ", guidance: nil, recovery: nil)
+            Harness.expect(p.accessory == nil, "whitespace is not output")
+            Harness.expect(!p.body.contains("below"), "and the body does not promise one")
+            Harness.expect(p.body, "Run `quern status` to see what state it is in.", "fallback")
+        }
+
+        Harness.test("the detail view is bounded and scrollable whatever it holds") {
+            // `parts` decides *what* is shown; this is *how*. Review mutated
+            // three things here -- dropping the accessory, making the text view
+            // non-resizable, and restoring an unbounded height -- and the suite
+            // passed all three, because nothing called this function.
+            for text in ["", "one line",
+                         String(repeating: "npm ERR! failed\n", count: 4000)] {
+                let view = AppDelegate.detailView(text)
+                Harness.expect(view.frame.height <= 200,
+                               "height is fixed, not driven by \(text.count) chars")
+                Harness.expect(view.frame.width <= 600, "width is fixed too")
+                guard let scroll = view as? NSScrollView else {
+                    Harness.expect(false, "not a scroll view"); continue
+                }
+                Harness.expect(scroll.hasVerticalScroller, "can be scrolled")
+                guard let tv = scroll.documentView as? NSTextView else {
+                    Harness.expect(false, "no text view"); continue
+                }
+                Harness.expect(tv.string, text, "holds the text verbatim")
+                // Without this the content is clipped and the scroller is inert,
+                // which looks like a bounded view and loses the output.
+                Harness.expect(tv.isVerticallyResizable, "the document can grow")
+                Harness.expect(!tv.isEditable, "read-only")
+                Harness.expect(tv.isSelectable, "selectable — this is why Copy is not the only way out")
+            }
+        }
+
+        Harness.test("prose passed as guidance reaches the body, not the box") {
+            // The `quern not found` path passes prose. As a detail it sat in a
+            // monospaced box while the body said only "the full output is below".
+            let prose = "The Quern app looks for ~/.local/bin/quern. Run setup once."
+            let p = FailureAlert.parts(detail: "", guidance: prose, recovery: .setUp)
+            Harness.expect(p.body.hasPrefix(prose), "prose leads the body")
+            Harness.expect(p.accessory == nil, "and nothing is boxed")
+        }
+
+        Harness.test("guidance wins over the recovery's own line, and survives alone") {
+            let both = FailureAlert.text(guidance: "Run it in a terminal.",
+                                         hasDetail: true, recovery: .repair)
+            Harness.expect(both.hasPrefix("Run it in a terminal."), "guidance leads")
+            Harness.expect(!both.contains(Recovery.repair.explanation), "and replaces the default")
+
+            let alone = FailureAlert.text(guidance: "Run it in a terminal.",
+                                          hasDetail: false, recovery: nil)
+            Harness.expect(alone, "Run it in a terminal.", "no detail, no pointer to one")
+
+            let blank = FailureAlert.text(guidance: "   ", hasDetail: false, recovery: .setUp)
+            Harness.expect(blank, Recovery.setUp.explanation, "whitespace is not guidance")
+        }
+
+        Harness.test("with nothing to say, the alert still says what would tell them") {
+            Harness.expect(FailureAlert.text(guidance: nil, hasDetail: false, recovery: nil),
+                           "Run `quern status` to see what state it is in.", "fallback")
+            // With output present the fallback is noise -- the output is the answer.
+            Harness.expect(FailureAlert.text(guidance: nil, hasDetail: true, recovery: nil),
+                           "The full output is below.", "detail speaks for itself")
+        }
+
+        Harness.test("every recovery explains itself in one line") {
+            for recovery in [Recovery.finishUpdate, .repair, .setUp] {
+                Harness.expect(!recovery.explanation.isEmpty, "non-empty")
+                Harness.expect(!recovery.explanation.contains("\n"), "one line")
+                Harness.expect(recovery.explanation.count < 120, "short enough to always fit")
+            }
         }
 
         Harness.test("a failed start right after an update interrupts; a login start does not") {

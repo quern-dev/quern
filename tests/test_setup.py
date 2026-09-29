@@ -590,10 +590,105 @@ class TestCheckNode:
         assert result.status == CheckStatus.OK
         assert "v22" in result.message
 
-    def test_not_installed(self):
-        result = check_node(_sites(here=("missing", None)))
+    def test_not_installed_anywhere_is_offered_a_fix(self):
+        """Genuinely absent: installing one is the right offer."""
+        result = check_node(_sites(
+            here=("missing", None), login=("missing", None),
+            script=("missing", None), gui=("missing", None), app=("missing", None),
+        ))
         assert result.status == CheckStatus.MISSING
         assert result.fixable
+        assert "Not installed" in result.message
+
+    def test_missing_here_but_present_in_a_shell_says_so_instead(self):
+        """#339. The user's machine had Node 22 in every shell and none for a
+        GUI launch, and setup reported "Not installed" — so the report named
+        the wrong problem, and offering to install a second one would not have
+        fixed the first being invisible."""
+        result = check_node(_sites(here=("missing", None)))
+
+        assert result.status == CheckStatus.MISSING
+        assert not result.fixable, "installing another node does not make this one reachable"
+        assert "not reachable" in result.message
+        assert "Not installed" not in result.message
+        assert "terminal" in result.detail.lower(), "says where it will work"
+        assert "/x/login/node" in result.detail, "names where it did find one"
+
+    def test_it_does_not_send_you_to_a_terminal_that_has_no_node_either(self):
+        """`probe` reports GUI apps and the Quern app as well as the shells. If
+        one of those is the only place with a node, a terminal has none — and
+        advice naming the wrong place is worse than none, because it sends
+        someone to a shell that fails the same way."""
+        from server.lifecycle import node_env
+
+        sites = _sites(here=("missing", None))
+        sites[1] = node_env.NodeSite("login shell", "someone", node_env.MISSING, None, None)
+        sites[2] = node_env.NodeSite("non-interactive shell", "someone",
+                                     node_env.MISSING, None, None)
+        # Only GUI apps can see one, e.g. via `launchctl config user path`.
+        sites[3] = node_env.NodeSite("GUI apps", "someone", node_env.OK,
+                                     "/opt/node/bin/node", "v22.1.0")
+
+        result = check_node(sites)
+
+        assert "not reachable" in result.message
+        assert "Run this from a terminal" not in result.detail, result.detail
+        assert "will not help" in result.detail, result.detail
+        assert "gui apps" in result.detail.lower(), "names where it is visible"
+
+    def test_a_login_shell_node_still_says_to_use_a_terminal(self):
+        """The ordinary #339 case keeps the advice that works."""
+        result = check_node(_sites(here=("missing", None)))
+
+        assert "Run this from a terminal" in result.detail, result.detail
+
+    def test_a_node_elsewhere_that_is_too_old_is_not_called_reachable(self):
+        """A Node 18 in the login shell is a different problem with different
+        advice, and setup *could* fix it by putting a reachable 22 on the
+        search path — so claiming "installed, just not reachable" suppresses
+        the one thing that would have worked."""
+        from server.lifecycle import node_env
+
+        sites = _sites(here=("missing", None))
+        sites[1] = node_env.NodeSite("login shell", "someone", node_env.TOO_OLD,
+                                     "/Users/u/.nvm/versions/node/v18.20.4/bin/node", "v18.20.4")
+        sites[2] = node_env.NodeSite("non-interactive shell", "someone", node_env.TOO_OLD,
+                                     "/Users/u/.nvm/versions/node/v18.20.4/bin/node", "v18.20.4")
+        sites[3] = node_env.NodeSite("GUI apps", "someone", node_env.MISSING, None, None)
+        sites[4] = node_env.NodeSite("the Quern app", "someone", node_env.MISSING, None, None)
+
+        result = check_node(sites)
+
+        assert "not reachable" not in result.message, result.message
+        assert result.fixable, "an install is genuinely the fix here"
+
+    def test_a_broken_node_elsewhere_is_not_called_reachable(self):
+        """An asdf shim with no version selected exits non-zero, so it is
+        UNUSABLE with a path. It is broken everywhere, not invisible here."""
+        from server.lifecycle import node_env
+
+        sites = _sites(here=("missing", None))
+        for i in (1, 2, 3, 4):
+            sites[i] = node_env.NodeSite(sites[i].place, "someone", node_env.UNUSABLE,
+                                         "/Users/u/.asdf/shims/node", None)
+
+        result = check_node(sites)
+
+        assert "not reachable" not in result.message, result.message
+
+    def test_it_names_the_manager_when_it_can(self):
+        """Which tool put it there is the difference between a user recognising
+        their own setup and reading a generic complaint."""
+        from server.lifecycle import node_env
+
+        sites = _sites(here=("missing", None))
+        sites[1] = node_env.NodeSite(
+            "login shell", "someone", node_env.OK,
+            "/Users/u/.local/state/fnm_multishells/800_1789/bin/node", "v22.1.0",
+        )
+        result = check_node(sites)
+
+        assert "fnm" in result.message, result.message
 
     def test_node_20_is_a_warning_not_a_pass(self):
         """The old test asserted v20 was OK; the MCP wrapper refuses it."""

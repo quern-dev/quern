@@ -307,9 +307,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                             install: InstallKind.current) {
             case .restartToUpdate(let title):
                 menu.addItem(action(title, #selector(restartToUpdate)))
-            case .updateInTerminal(let title):
+            case .updateInTerminal(let title, let reason):
                 menu.addItem(action(title, #selector(updateInTerminal)))
-                menu.addItem(action("Why Terminal? (git install)", #selector(openInstallDocs)))
+                menu.addItem(action(reason.menuTitle, #selector(openInstallDocs)))
             }
         } else if !checkingForUpdates {
             // Always offered when there is nothing staged. The item above is
@@ -473,14 +473,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // path did not.
                 switch code {
                 case QuernCLI.notFoundStatus:
+                    // `output` here is prose built by QuernCLI.run, not command
+                    // output -- it names the path and says to run setup. As a
+                    // detail it would sit in a monospaced box while the body
+                    // said only "The full output is below."
                     self.reportFailure("Could not find the quern command",
-                                       detail: output)
+                                       detail: "", guidance: output)
                 case QuernCLI.timedOutStatus:
                     self.reportFailure(
                         "The update check did not finish",
-                        detail: output + "\n\nThis usually means the network "
-                            + "is not answering. Try again, or run "
-                            + "`quern check-updates` in a terminal to see why."
+                        detail: output,
+                        guidance: "This usually means the network is not answering. "
+                            + "Try again, or run `quern check-updates` in a terminal "
+                            + "to see why."
                     )
                 default:
                     self.reportFailure("Could not check for updates", detail: output)
@@ -512,10 +517,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func updateInTerminal() {
         lifecycle.clearUpdateRecovery()
-        TerminalUpdate.open { [weak self] error in
+        let reason: TerminalReason
+        if case .updateInTerminal(_, let r) = UpdateMenuItem.forStaged(
+            latestVersion: nil, install: InstallKind.current) { reason = r }
+        else { reason = .gitInstall }
+        TerminalUpdate.open(reason: reason) { [weak self] error in
             guard let error else { return }
             self?.reportFailure("Could not open Terminal to update",
-                                detail: error + "\n\nRun `quern update` in a terminal instead.")
+                                detail: error,
+                                guidance: "Run `quern update` in a terminal instead.")
         }
     }
 
@@ -527,7 +537,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func openRecovery(_ recovery: Recovery) {
         recovery.open { [weak self] error in
             guard let error else { return }
-            self?.reportFailure("Could not open Terminal", detail: error)
+            // Also prose: a TerminalScript failure description.
+            self?.reportFailure("Could not open Terminal", detail: "", guidance: error)
         }
     }
 
@@ -594,15 +605,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// path out of a modal they cannot copy from.
     static var serverLog: URL { StateReader.quernDir.appendingPathComponent("server.log") }
 
-    private func reportFailure(_ message: String, detail: String, recovery: Recovery? = nil) {
+    /// A bounded, scrollable view for command output.
+    ///
+    /// The output used to go in `informativeText`, which neither scrolls nor
+    /// caps its height -- so an install log made the alert taller than the
+    /// screen and put its own buttons out of reach (#339). A scroll view has a
+    /// fixed size whatever it contains, and as a bonus the text is selectable,
+    /// which `informativeText` is not.
+    static func detailView(_ text: String) -> NSView {
+        let width: CGFloat = 460
+        let height: CGFloat = 150
+
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        textView.string = text
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.drawsBackground = false
+        textView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        textView.textContainer?.widthTracksTextView = true
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.borderType = .bezelBorder
+        scroll.documentView = textView
+        // Show the end: a failure's reason is at the bottom of its output, and
+        // the reader should not have to scroll to the thing that just happened.
+        textView.scrollToEndOfDocument(nil)
+        return scroll
+    }
+
+    private func reportFailure(_ message: String, detail: String,
+                               guidance: String? = nil, recovery: Recovery? = nil) {
         DispatchQueue.main.async { [weak self] in
             let alert = NSAlert()
             alert.alertStyle = .warning
             alert.messageText = message
-            let trimmed = detail.trimmingCharacters(in: .whitespacesAndNewlines)
-            alert.informativeText = trimmed.isEmpty
-                ? "Run `quern status` to see what state it is in."
-                : trimmed
+            // Both halves from one place, so what goes where is decided by a
+            // function a test can drive rather than by these four lines.
+            let parts = FailureAlert.parts(detail: detail, guidance: guidance,
+                                           recovery: recovery)
+            alert.informativeText = parts.body
+            if let accessory = parts.accessory {
+                alert.accessoryView = Self.detailView(accessory)
+            }
+            let trimmed = parts.accessory ?? ""
             let buttons = FailureAlert.buttons(
                 detail: trimmed,
                 hasLog: FileManager.default.fileExists(atPath: Self.serverLog.path),

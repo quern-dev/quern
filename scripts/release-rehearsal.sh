@@ -491,6 +491,124 @@ failures=$((failures + $?))
 set -e
 
 # --------------------------------------------------------------------------
+step "What a GUI-context setup says when it cannot see the user's node"
+# --------------------------------------------------------------------------
+# #339: a release install's update failed reporting "Node.js: Not installed" on
+# a machine with Node 22 in every shell. Node was installed by fnm, whose
+# directory contains the pid of the shell that asked for it, so no static PATH
+# can reach it -- and a GUI launch has launchd's PATH and reads no startup
+# files. The report named the wrong problem, and the advice that would have
+# fixed it was in the part of an over-tall alert that was off the screen.
+#
+# The assertion is about the *message*, because that is what shipped wrong.
+# "Not installed" sends someone to install a second node, which does not make
+# the first one reachable.
+case_gui_node_message() {
+  failures=0
+  local sb="$WORK/git-update" install="$WORK/git-update/install"
+  if [[ ! -x "$install/quern" ]]; then
+    skip "GUI-style node message: the update case did not leave an install"
+    return 0
+  fi
+  local py="$install/.venv/bin/python"
+  if [[ ! -x "$py" ]]; then
+    skip "GUI-style node message: no interpreter in the sandbox install"
+    return 0
+  fi
+  # The fixture puts its node on PATH from `.zshrc`, so `probe` has to reach it
+  # through a zsh login shell. Without zsh the probe reports SKIPPED, nothing is
+  # found anywhere, and "Not installed" is the *correct* answer -- so the case
+  # would fail while the code under test is fine. A skip says that; a red
+  # assertion would send the next reader after a bug that is not there.
+  if [[ ! -x /bin/zsh ]]; then
+    skip "GUI-style node message: /bin/zsh is not available to reach the fixture"
+    return 0
+  fi
+
+  # A home of our own, with a node reachable only through `.zshrc` -- the #339
+  # arrangement, built rather than detected. An earlier version of this case
+  # asked the *developer's* login shell whether it had a node and then measured
+  # a sandbox home that never had one, so on the very machines this bug came
+  # from the precheck passed, the measurement found nothing anywhere, and the
+  # case failed the fix it was written to protect. Verify the claim, not its
+  # neighbour.
+  local h="$WORK/node/gui-message"
+  mkdir -p "$h/state"
+  # Inlined rather than calling make_fake_node: that helper is defined further
+  # down the file than this case runs, so calling it here would be a
+  # "command not found" at the moment the case executes.
+  mkdir -p "$h/nodebin"
+  printf '#!/bin/sh\n[ "$1" = "--version" ] && { echo "v22.9.0"; exit 0; }\nexit 0\n' \
+    > "$h/nodebin/node"
+  chmod +x "$h/nodebin/node"
+  : > "$h/.zshenv"
+  echo 'export PATH="$HOME/nodebin:$PATH"' > "$h/.zshrc"
+
+  # `check_node` specifically, not `doctor`: doctor renders node_env's per-site
+  # breakdown and never calls this function, so grepping its output would test
+  # a different path and say nothing about the message that shipped wrong.
+  set +e
+  env -i \
+    HOME="$h" \
+    QUERN_STATE_DIR="$h/state" \
+    SHELL=/bin/zsh \
+    PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$py" -c 'import sys
+sys.path.insert(0, sys.argv[1])
+from server.lifecycle.setup import check_node
+r = check_node()
+print("status:", r.status)
+print("message:", r.message)
+print("fixable:", r.fixable)
+print("detail:", (r.detail or "").replace("\n", " "))' "$install" > "$h/gui-node.log" 2>&1
+  local rc=$?
+  set -e
+
+  # Checked first: every assertion below is a grep, and a grep over a traceback
+  # answers "absent" for all of them -- so a crash would read as three passes.
+  if [[ $rc -ne 0 ]]; then
+    bad "the GUI-context check exited $rc — see $h/gui-node.log"
+    sed -n '1,12p' "$h/gui-node.log" | sed 's/^/      /'
+    return "$failures"
+  fi
+
+  if grep -qi "not reachable from here" "$h/gui-node.log"; then
+    ok "it says the node is unreachable rather than missing"
+  else
+    bad "no 'not reachable' in the GUI-context check — see $h/gui-node.log"
+    sed -n '1,8p' "$h/gui-node.log" | sed 's/^/      /'
+  fi
+
+  # The specific regression: the old message.
+  if grep -qi "message:.*Not installed" "$h/gui-node.log"; then
+    bad "still reports Node as not installed when a shell has one"
+  else
+    ok "it does not claim Node is missing"
+  fi
+
+  # Offering `brew install node` here would add a second node to work around
+  # the first being invisible, which fixes nothing. `run_setup` gates its
+  # prompt on this flag.
+  if grep -qi "fixable: False" "$h/gui-node.log"; then
+    ok "and does not offer to install another one"
+  else
+    bad "it still offers an install as the fix"
+  fi
+
+  if grep -qi "terminal" "$h/gui-node.log"; then
+    ok "and says where it will work"
+  else
+    bad "the report never mentions running it from a terminal"
+  fi
+  return "$failures"
+}
+
+set +e
+( case_gui_node_message )
+failures=$((failures + $?))
+set -e
+
+# --------------------------------------------------------------------------
 step "The MCP wrapper the candidate ships"
 # --------------------------------------------------------------------------
 # What every agent client actually runs. A wrapper that cannot answer
