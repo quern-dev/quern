@@ -607,3 +607,57 @@ class TestPartialFailure:
         widget = next(e for e in report.symbols if e.image == "Widget.debug.dylib")
         assert "symbolication failed: RuntimeError" in widget.note
         assert not report.symbolicated
+
+
+class TestMore:
+    def test_a_broken_mdfind_is_asked_once_per_read(self, tmp_path):
+        tools = FakeTools(mdfind_raises=FileNotFoundError(2, "No such file", "mdfind"))
+        reports = []
+        for i in range(6):
+            r = _report()
+            r.crash_id = f"c{i}"
+            reports.append(r)
+        _run(reports, symbolicate.SymbolFinder(tmp_path / "records", tools))
+        assert [c[0] for c in tools.calls].count("mdfind") == 1
+        assert not any(r.symbolicated for r in reports)
+
+    def test_a_cancelled_read_leaves_nothing_to_add_to(self, tmp_path):
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        started = asyncio.Event()
+
+        async def hang(argv):
+            started.set()
+            await asyncio.sleep(3600)
+
+        report = _report()
+
+        async def go():
+            task = asyncio.create_task(symbolicate.symbolicate_many(
+                [report], symbolicate.SymbolFinder(tmp_path / "records", hang)))
+            await asyncio.wait_for(started.wait(), timeout=10)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(go())
+        assert not report.symbolicated
+        assert [e.image for e in report.symbols] == ["MyApp.debug.dylib"]
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", FakeTools(lines=GOOD)))
+        assert len(report.symbols) == 1 and report.app_frame.line == 170
+
+    def test_a_frame_without_an_offset_is_not_sent(self, tmp_path):
+        report = _report()
+        for f in report.frames:
+            f.offset = None
+        report.app_frame = None
+        tools = FakeTools()
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", tools))
+        assert tools.calls == [] and report.symbols == []
+
+    def test_an_image_without_a_uuid_is_not_looked_up(self, tmp_path):
+        report = _report()
+        report.images[1].uuid = ""
+        tools = FakeTools()
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", tools))
+        assert tools.calls == [] and report.symbols == []

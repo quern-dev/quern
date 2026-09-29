@@ -118,9 +118,9 @@ class SymbolFinder:
         return self._report_locks.setdefault(crash_id, asyncio.Lock())
 
     async def find(self, uuid: str, misses: dict[str, Lookup] | None = None) -> Lookup:
-        """Where its symbols are. `misses` holds this read's definite misses,
-        so ten reports of one unsymbolicatable build ask Spotlight once, while
-        the next read still asks again."""
+        """Where its symbols are. `misses` holds this read's misses, so ten
+        reports of one unsymbolicatable build ask Spotlight once -- and a broken
+        mdfind is not asked ten times -- while the next read asks again."""
         wanted = normalise_uuid(uuid)
         if not wanted:
             return Lookup(None, f"{uuid!r} is not a UUID, so it cannot be matched to a build")
@@ -146,7 +146,7 @@ class SymbolFinder:
             future.set_result(result)
             if result.found is not None:
                 self._found[wanted] = result.found
-            elif result.definite and misses is not None:
+            elif misses is not None:
                 misses[wanted] = result
             return result
         finally:
