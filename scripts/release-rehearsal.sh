@@ -1517,10 +1517,32 @@ case_clone_with_local_changes() {
   make_stubs "$sb/bin"
   prepare_clone "$sb/install"
 
+  # The edited file has to be one the incoming commit *also* changes, or there
+  # is nothing for the fast-forward to refuse: `git pull --ff-only` only
+  # declines when an uncommitted change would be overwritten, so a local edit
+  # to a file the candidate leaves alone pulls cleanly and the update correctly
+  # exits 0.
+  #
+  # This used to hardcode README.md and so passed or failed on whether a given
+  # release happened to touch it. It did at 0.22.0 and did not at 0.22.1, and
+  # the case went red against a product that was behaving correctly. Pick the
+  # file from the actual diff instead, so the refusal is a property of the
+  # scenario rather than of the release.
+  #
+  # --diff-filter=M, because the file must exist in the clone: one added by the
+  # candidate is not there to edit.
+  local target
+  target="$(git -C "$ROOT" diff --name-only --diff-filter=M "$PREV" "$CANDIDATE" \
+            -- '*.md' '*.py' '*.toml' 2>/dev/null | head -1)"
+  if [[ -z "$target" || ! -f "$sb/install/$target" ]]; then
+    skip "dirty clone: no file modified by both this release and present in the clone"
+    return 0
+  fi
+
   # One stray edit is all it takes, and it is the user's work: the only
   # unacceptable outcome here is losing it.
   local marker="# a local edit the update must not discard"
-  printf '%s\n' "$marker" >> "$sb/install/README.md"
+  printf '%s\n' "$marker" >> "$sb/install/$target"
 
   set +e
   ( cd "$sb/install" && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
@@ -1531,7 +1553,7 @@ case_clone_with_local_changes() {
   if grep -qi "local changes" "$sb/update.log"; then
     ok "it says local changes are in the way"
   else
-    bad "the update did not explain that local changes blocked it"
+    bad "the update did not explain that local changes blocked it (edited $target)"
     tail -n 15 "$sb/update.log" | sed 's/^/      /'
   fi
   grep -qi "stash" "$sb/update.log" \
@@ -1539,7 +1561,7 @@ case_clone_with_local_changes() {
     || bad "it does not say how to proceed"
 
   # The load-bearing one.
-  if grep -qF "$marker" "$sb/install/README.md"; then
+  if grep -qF "$marker" "$sb/install/$target"; then
     ok "the local edit is still there"
   else
     bad "the update discarded uncommitted work"
