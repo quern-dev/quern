@@ -226,7 +226,7 @@ async def _keep_dsyms(
             # The file `atos -o` takes. A dSYM can cover several binaries, and
             # atos given the bundle picked the wrong one and resolved nothing
             # (live, on a phone crash against MyApp.app.dSYM).
-            dwarf = await asyncio.to_thread(_dwarf_for, target, uuids)
+            dwarf = await asyncio.to_thread(dwarf_for, target, uuids)
             if not dwarf:
                 raise RuntimeError("the dSYM holds no DWARF file with this binary's UUID")
         except (OSError, RuntimeError, TimeoutError) as e:
@@ -238,7 +238,7 @@ async def _keep_dsyms(
         binary.dwarf = str(recorded_as / name / dwarf)
 
 
-def _dwarf_for(dsym: Path, uuids: set[str]) -> str:
+def dwarf_for(dsym: Path, uuids: set[str]) -> str:
     """The DWARF file in `dsym` covering `uuids`, relative to it; "" if none."""
     for dwarf in sorted((dsym / "Contents" / "Resources" / "DWARF").glob("*")):
         m = macho.read(dwarf)

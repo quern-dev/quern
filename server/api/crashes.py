@@ -25,6 +25,7 @@ from server.models import (
     UtcDatetime,
 )
 from server.sources import ios_crash
+from server.sources import symbolicate as symbolication
 from server.sources.android_dropbox import DropboxPullError, pull_dropbox
 from server.sources.crash import DIAGNOSTIC_REPORTS_DIR
 
@@ -72,6 +73,14 @@ async def get_latest_crashes(
             "by default: about a thousand tokens of JSON per crash."
         ),
     ),
+    symbolicate: bool = Query(
+        default=True,
+        description=(
+            "Resolve a device report's app frames to function, file and line against "
+            "the build that crashed, found by UUID in quern's build records or a dSYM "
+            "Spotlight indexed. `symbols` says where from, or that nothing matched."
+        ),
+    ),
 ) -> CrashLatestResponse:
     """Return recent crash reports.
 
@@ -116,6 +125,11 @@ async def get_latest_crashes(
     reports = sorted(reports, key=lambda r: r.timestamp, reverse=True)
     total = len(reports)
     limited = reports[:limit]
+    if symbolicate:
+        # The stored reports, in place: each is symbolicated once, on the first
+        # read that returns it, not at parse -- a restart re-reads 30 days of
+        # pulled reports, and atos costs most of a second an image.
+        await symbolication.symbolicate_many(limited, _symbol_finder(request))
     # Compact by default: where it crashed, why, and the top frames. The full
     # frames and images are a few kilobytes a crash, which at the default limit
     # of ten swamped the answer -- more than the raw text it replaced.
@@ -128,6 +142,14 @@ async def get_latest_crashes(
         limited = [r.model_copy(update=trimmed) for r in limited]
 
     return CrashLatestResponse(crashes=limited, total=total, pull=pull)
+
+
+def _symbol_finder(request: Request) -> symbolication.SymbolFinder:
+    """One per server, so a UUID's symbols are looked up once."""
+    finder = getattr(request.app.state, "symbol_finder", None)
+    if finder is None:
+        finder = request.app.state.symbol_finder = symbolication.SymbolFinder()
+    return finder
 
 
 async def _resolve(controller: DeviceController, udid: str) -> tuple[str, DeviceType | None]:

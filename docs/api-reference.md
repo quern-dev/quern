@@ -121,6 +121,23 @@ frames, and the app's `bundle_id`, `app_version` and `build_version`.
   load address of each binary they point into). Symbolicating a frame needs these.
 - **`include_raw=true`** adds `raw_text`.
 
+**A device report is symbolicated against the build that crashed.** The phone
+names a Debug build's functions but records no file or line, and names nothing in
+a stripped build. So each app image is matched by UUID, first to quern's build
+records (`build_and_install` to a device keeps dSYMs), then to a dSYM Spotlight
+indexed (`mdfind "com_apple_xcode_dsym_uuids == <UUID>"`: Xcode's DerivedData and
+archives), and its frames are resolved with `atos`. Every frame but the crashing
+thread's top one is a return address and is looked up one byte before it, as crash
+tools do: at the address itself a `fatalError`'s own frame resolves to
+compiler-generated code. `symbols` says, per image, where the symbols came from
+(`source`, `build_id`, `dwarf`), how many frames gained a line
+(`frames_resolved` of `frames_total`), and otherwise why not: no match on this Mac
+for that UUID, a build whose dSYMs have expired, Spotlight or `atos` unavailable.
+Only frames in the app bundle that lack a line are sent, so a simulator's report,
+which macOS already symbolicates, and Android reports are left as they are. Each
+report is symbolicated once, on the first read that returns it.
+`symbolicate=false` skips it.
+
 A frame counts as the app's when:
 - **iOS:** its binary is inside the app bundle.
 - **Android native:** it was installed with the app.

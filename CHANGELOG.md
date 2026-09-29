@@ -5,6 +5,11 @@ All notable changes to Quern are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **A phone's crash is symbolicated against the build that crashed (#326, step 3).** A device report names the app's code by image UUID and offset: a Debug build's function names, but no file or line, and nothing at all for a stripped build. `get_latest_crash` now matches each app image by UUID to one of quern's build records, whose dSYMs `build_and_install` keeps, or else to a dSYM Spotlight indexed in Xcode's DerivedData or archives, and resolves the frames with `atos`. `symbols` says where each image's symbols came from, or that nothing on this Mac matched that UUID; the nearest build is never used, since it is not the build that crashed. Verified on an iPhone: a crash forced through a Debug build's debug menu reported its crashing closure with no line, and now reports `DebugMenuPresenter.swift:170`, the line of the `fatalError()`. Frames other than the crashing thread's top one are return addresses and are looked up one byte before them: at the address itself `atos` put that same frame at `<compiler-generated>:0`. Each report is symbolicated once, on the first read that returns it, and `symbolicate=false` skips it.
+
 ## [0.22.1] - 2026-09-29
 
 ### Fixed
