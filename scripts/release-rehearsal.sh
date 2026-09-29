@@ -491,6 +491,96 @@ failures=$((failures + $?))
 set -e
 
 # --------------------------------------------------------------------------
+step "What a GUI-context setup says when it cannot see the user's node"
+# --------------------------------------------------------------------------
+# #339: a release install's update failed reporting "Node.js: Not installed" on
+# a machine with Node 22 in every shell. Node was installed by fnm, whose
+# directory contains the pid of the shell that asked for it, so no static PATH
+# can reach it -- and a GUI launch has launchd's PATH and reads no startup
+# files. The report named the wrong problem, and the advice that would have
+# fixed it was in the part of an over-tall alert that was off the screen.
+#
+# The assertion is about the *message*, because that is what shipped wrong.
+# "Not installed" sends someone to install a second node, which does not make
+# the first one reachable.
+case_gui_node_message() {
+  failures=0
+  local sb="$WORK/git-update" install="$WORK/git-update/install"
+  if [[ ! -x "$install/quern" ]]; then
+    skip "GUI-style node message: the update case did not leave an install"
+    return 0
+  fi
+  # Only meaningful where a login shell actually has a node to be unreachable
+  # *from*. With none anywhere, "Not installed" is the correct answer and this
+  # case would assert the opposite.
+  if ! "$SHELL" -lic 'command -v node' >/dev/null 2>&1; then
+    skip "GUI-style node message: no node in a login shell, so nothing to be hidden from"
+    return 0
+  fi
+
+  # `check_node` specifically, not `doctor`: doctor renders node_env's per-site
+  # breakdown and never calls this function, so grepping its output would have
+  # tested a different code path and said nothing about the message that
+  # shipped wrong. Found by running it.
+  local py="$install/.venv/bin/python"
+  if [[ ! -x "$py" ]]; then
+    skip "GUI-style node message: no interpreter in the sandbox install"
+    return 0
+  fi
+
+  set +e
+  env -i \
+    HOME="$sb/home" \
+    QUERN_STATE_DIR="$sb/state" \
+    SHELL="$SHELL" \
+    PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$py" -c 'import sys
+sys.path.insert(0, sys.argv[1])
+from server.lifecycle.setup import check_node
+r = check_node()
+print("status:", r.status)
+print("message:", r.message)
+print("fixable:", r.fixable)
+print("detail:", (r.detail or "").replace("\n", " "))' "$install" > "$sb/gui-node.log" 2>&1
+  set -e
+
+  if grep -qi "not reachable from here" "$sb/gui-node.log"; then
+    ok "it says the node is unreachable rather than missing"
+  else
+    bad "no 'not reachable' in the GUI-context check — see $sb/gui-node.log"
+    sed -n '1,8p' "$sb/gui-node.log" | sed 's/^/      /'
+  fi
+
+  # The specific regression: the old message. Checked separately so a report
+  # that somehow says both still fails.
+  if grep -qi "message:.*Not installed" "$sb/gui-node.log"; then
+    bad "still reports Node as not installed when a shell has one"
+  else
+    ok "it does not claim Node is missing"
+  fi
+
+  # Offering `brew install node` here would add a second node to work around
+  # the first being invisible, which fixes nothing.
+  if grep -qi "fixable: False" "$sb/gui-node.log"; then
+    ok "and does not offer to install another one"
+  else
+    bad "it still offers an install as the fix"
+  fi
+
+  if grep -qi "terminal" "$sb/gui-node.log"; then
+    ok "and says where it will work"
+  else
+    bad "the report never mentions running it from a terminal"
+  fi
+  return "$failures"
+}
+
+set +e
+( case_gui_node_message )
+failures=$((failures + $?))
+set -e
+
+# --------------------------------------------------------------------------
 step "The MCP wrapper the candidate ships"
 # --------------------------------------------------------------------------
 # What every agent client actually runs. A wrapper that cannot answer

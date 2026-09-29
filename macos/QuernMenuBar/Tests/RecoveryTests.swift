@@ -98,14 +98,62 @@ enum RecoveryTests {
             Harness.expect(lines(script(.repair, quern: nil)).contains("'quern' start"), "fallback")
         }
 
-        Harness.test("every failure alert with a recovery offers it second") {
+        Harness.test("a failure alert offers its recovery first, so Return takes it") {
+            // First is the default button, and Return triggers it. The whole
+            // point of #339: when the alert grew past the screen edge, Return
+            // was the only reachable control and it discarded the error.
             let with = FailureAlert.buttons(detail: "boom", hasLog: true, recovery: .repair)
-            Harness.expect(with, [.ok, .fixInTerminal(.repair), .copy, .openLog], "full set")
+            Harness.expect(with, [.fixInTerminal(.repair), .ok, .copy, .openLog], "full set")
+            Harness.expect(with.first, .fixInTerminal(.repair), "recovery is the default")
             Harness.expect(FailureAlert.buttons(detail: "", hasLog: false, recovery: .setUp),
-                           [.ok, .fixInTerminal(.setUp)], "minimal")
+                           [.fixInTerminal(.setUp), .ok], "minimal")
             Harness.expect(FailureAlert.buttons(detail: "boom", hasLog: false, recovery: nil),
                            [.ok, .copy], "no recovery, no button")
+            Harness.expect(FailureAlert.buttons(detail: "", hasLog: false, recovery: nil).first,
+                           .ok, "with nothing to offer, OK is still the default")
             Harness.expect(FailureAlertButton.fixInTerminal(.repair).title, "Fix in Terminal", "title")
+        }
+
+        Harness.test("the alert's own text never carries the output") {
+            // The output goes in a scrollable accessory view. Whatever ends up
+            // in `informativeText` sets the window height, so a log there is
+            // what put the buttons off-screen.
+            let log = String(repeating: "npm ERR! something went wrong\n", count: 400)
+            let text = FailureAlert.text(guidance: nil, hasDetail: true, recovery: .repair)
+            Harness.expect(!text.contains("npm ERR!"), "no output in the body")
+            Harness.expect(text.contains(Recovery.repair.explanation), "leads with the next action")
+            Harness.expect(text.contains("below"), "points at the detail")
+            Harness.expect(log.count > text.count * 10, "the log dwarfs the body it is kept out of")
+        }
+
+        Harness.test("guidance wins over the recovery's own line, and survives alone") {
+            let both = FailureAlert.text(guidance: "Run it in a terminal.",
+                                         hasDetail: true, recovery: .repair)
+            Harness.expect(both.hasPrefix("Run it in a terminal."), "guidance leads")
+            Harness.expect(!both.contains(Recovery.repair.explanation), "and replaces the default")
+
+            let alone = FailureAlert.text(guidance: "Run it in a terminal.",
+                                          hasDetail: false, recovery: nil)
+            Harness.expect(alone, "Run it in a terminal.", "no detail, no pointer to one")
+
+            let blank = FailureAlert.text(guidance: "   ", hasDetail: false, recovery: .setUp)
+            Harness.expect(blank, Recovery.setUp.explanation, "whitespace is not guidance")
+        }
+
+        Harness.test("with nothing to say, the alert still says what would tell them") {
+            Harness.expect(FailureAlert.text(guidance: nil, hasDetail: false, recovery: nil),
+                           "Run `quern status` to see what state it is in.", "fallback")
+            // With output present the fallback is noise -- the output is the answer.
+            Harness.expect(FailureAlert.text(guidance: nil, hasDetail: true, recovery: nil),
+                           "The full output is below.", "detail speaks for itself")
+        }
+
+        Harness.test("every recovery explains itself in one line") {
+            for recovery in [Recovery.finishUpdate, .repair, .setUp] {
+                Harness.expect(!recovery.explanation.isEmpty, "non-empty")
+                Harness.expect(!recovery.explanation.contains("\n"), "one line")
+                Harness.expect(recovery.explanation.count < 120, "short enough to always fit")
+            }
         }
 
         Harness.test("a failed start right after an update interrupts; a login start does not") {

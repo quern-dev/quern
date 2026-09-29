@@ -105,16 +105,95 @@ enum TerminalUpdate {
     }
 }
 
+/// Whether this process can see a `node`, and what to say if it cannot.
+///
+/// A release install was assumed not to need Node at all, because the tarball
+/// ships `mcp/dist` prebuilt. True of the *build* and false of the *check*:
+/// `quern setup` runs `check_node()`, which reports MISSING, and the update
+/// fails naming Node on a machine where Node is installed and working (#339).
+///
+/// No static PATH can fix it. fnm's node lives in a directory containing the
+/// pid of the shell that asked for it -- `~/.local/state/fnm_multishells/
+/// 800_1789402185835/bin/node` on the machine this was found on -- so there is
+/// nothing for `QuernCLI.searchPath` to add. Terminal is not a workaround here,
+/// it is the answer: that is where the user's own environment is.
+enum NodeVisibility: Equatable {
+    case visible
+    /// Not on our PATH, and a version manager is installed that would explain
+    /// why. Named so the menu can say which one.
+    case managedElsewhere(String)
+    /// Not on our PATH and no manager found, so Terminal probably will not help
+    /// either. Left alone: the ordinary "Node is not installed" case is real,
+    /// and routing it to Terminal would only move the same failure.
+    case absent
+
+    /// Directories a manager keeps, newest style first. Mirrors the markers in
+    /// `server/lifecycle/node_env.py`, which does the same job server-side.
+    static let managerMarkers: [(String, String)] = [
+        (".local/share/mise", "mise"),
+        (".asdf", "asdf"),
+        (".volta", "volta"),
+        (".nvm", "nvm"),
+        (".local/state/fnm_multishells", "fnm"),
+        ("Library/Application Support/fnm", "fnm"),
+        (".fnm", "fnm"),
+    ]
+
+    static func check(
+        home: String = FileManager.default.homeDirectoryForCurrentUser.path,
+        searchPath: [String]? = nil,
+        isExecutable: (String) -> Bool = { FileManager.default.isExecutableFile(atPath: $0) },
+        exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) -> NodeVisibility {
+        let dirs = searchPath ?? QuernCLI.searchPath(home: home)
+        if dirs.contains(where: { isExecutable("\($0)/node") }) { return .visible }
+        for (suffix, name) in managerMarkers where exists("\(home)/\(suffix)") {
+            return .managedElsewhere(name)
+        }
+        return .absent
+    }
+
+    /// Whether the GUI should decline to update and hand over to Terminal.
+    var needsTerminal: Bool {
+        if case .managedElsewhere = self { return true }
+        return false
+    }
+}
+
+/// Why an update is being sent to Terminal, so the menu can say so. The git
+/// case has said "Why Terminal? (git install)" for a while; a reason the user
+/// cannot guess is worse, not better, so the Node case says which manager.
+enum TerminalReason: Equatable {
+    case gitInstall
+    case nodeManagedElsewhere(String)
+
+    var menuTitle: String {
+        switch self {
+        case .gitInstall: return "Why Terminal? (git install)"
+        case .nodeManagedElsewhere(let manager): return "Why Terminal? (Node is managed by \(manager))"
+        }
+    }
+}
+
 /// What the menu offers for a staged update. Separate from the menu so a test
 /// can drive the decision rather than rebuilding it.
 enum UpdateMenuItem: Equatable {
     case restartToUpdate(String)
-    case updateInTerminal(String)
+    case updateInTerminal(String, TerminalReason)
 
-    static func forStaged(latestVersion: String?, install: InstallKind) -> UpdateMenuItem {
+    /// A git install is checked first. When both apply the git reason is the
+    /// one to show: it is the property of the install, true on every machine,
+    /// where the Node one is a property of this launch.
+    static func forStaged(latestVersion: String?, install: InstallKind,
+                          node: NodeVisibility = .check()) -> UpdateMenuItem
+    {
         let suffix = latestVersion.map { " — v\($0)" } ?? ""
-        return install.isGit
-            ? .updateInTerminal("Update in Terminal…" + suffix)
-            : .restartToUpdate("Restart to Update" + suffix)
+        if install.isGit {
+            return .updateInTerminal("Update in Terminal…" + suffix, .gitInstall)
+        }
+        if case .managedElsewhere(let manager) = node {
+            return .updateInTerminal("Update in Terminal…" + suffix, .nodeManagedElsewhere(manager))
+        }
+        return .restartToUpdate("Restart to Update" + suffix)
     }
 }

@@ -1810,6 +1810,39 @@ def check_node(sites: list | None = None) -> CheckResult:
             )
     here = sites[0]
     if here.status == node_env.MISSING:
+        # "Not installed" is wrong when it is installed and merely unreachable
+        # from *this* process, which is the ordinary case for a GUI launch: a
+        # node from fnm or nvm lives in a directory no static PATH can name,
+        # and fnm's contains the pid of the shell that asked for it. A user met
+        # this as a failed update reporting Node missing on a machine whose
+        # every shell has Node 22 (#339).
+        #
+        # `probe` has already asked the other places, so the evidence is here
+        # rather than inferred from a directory that happens to exist.
+        elsewhere = [
+            site for site in sites[1:]
+            if site.status not in (node_env.MISSING, node_env.SKIPPED) and site.path
+        ]
+        if elsewhere:
+            found = elsewhere[0]
+            manager = node_env.manager_of(found.path)
+            named = f" by {manager}" if manager else ""
+            return CheckResult(
+                name="Node.js",
+                status=CheckStatus.MISSING,
+                message=f"installed{named}, but not reachable from here",
+                # Deliberately not `fixable`: offering to brew install would
+                # put a second node on the machine to work around the first
+                # one being invisible, which is not a fix.
+                fixable=False,
+                detail=(
+                    f"Found at {found.path} for {found.place.lower()}, and not on this "
+                    f"process's PATH. Run this from a terminal, where your own "
+                    f"environment is -- a GUI launch gets launchd's PATH and reads no "
+                    f"shell startup files, so it cannot see it.\n"
+                    f"{quern_cmd()} doctor shows each place a node is picked."
+                ),
+            )
         return CheckResult(
             name="Node.js",
             status=CheckStatus.MISSING,

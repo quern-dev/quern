@@ -99,7 +99,12 @@ enum QuernCLI {
 
     /// The PATH handed to the child, so it can find python/git/etc. even when
     /// launched from a GUI context (which has a minimal PATH).
-    private static func searchPath(home: String) -> [String] {
+    ///
+    /// Not private: `NodeVisibility` asks whether a `node` is reachable, and it
+    /// has to ask about *this* list. Answering from a different one could
+    /// report a node the child will not find, which is precisely the failure it
+    /// exists to detect (#339).
+    static func searchPath(home: String) -> [String] {
         let extra = ["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
         let current = ProcessInfo.processInfo.environment["PATH"] ?? ""
         return extra + current.split(separator: ":").map(String.init)

@@ -590,10 +590,43 @@ class TestCheckNode:
         assert result.status == CheckStatus.OK
         assert "v22" in result.message
 
-    def test_not_installed(self):
-        result = check_node(_sites(here=("missing", None)))
+    def test_not_installed_anywhere_is_offered_a_fix(self):
+        """Genuinely absent: installing one is the right offer."""
+        result = check_node(_sites(
+            here=("missing", None), login=("missing", None),
+            script=("missing", None), gui=("missing", None), app=("missing", None),
+        ))
         assert result.status == CheckStatus.MISSING
         assert result.fixable
+        assert "Not installed" in result.message
+
+    def test_missing_here_but_present_in_a_shell_says_so_instead(self):
+        """#339. The user's machine had Node 22 in every shell and none for a
+        GUI launch, and setup reported "Not installed" — so the report named
+        the wrong problem, and offering to install a second one would not have
+        fixed the first being invisible."""
+        result = check_node(_sites(here=("missing", None)))
+
+        assert result.status == CheckStatus.MISSING
+        assert not result.fixable, "installing another node does not make this one reachable"
+        assert "not reachable" in result.message
+        assert "Not installed" not in result.message
+        assert "terminal" in result.detail.lower(), "says where it will work"
+        assert "/x/login/node" in result.detail, "names where it did find one"
+
+    def test_it_names_the_manager_when_it_can(self):
+        """Which tool put it there is the difference between a user recognising
+        their own setup and reading a generic complaint."""
+        from server.lifecycle import node_env
+
+        sites = _sites(here=("missing", None))
+        sites[1] = node_env.NodeSite(
+            "login shell", "someone", node_env.OK,
+            "/Users/u/.local/state/fnm_multishells/800_1789/bin/node", "v22.1.0",
+        )
+        result = check_node(sites)
+
+        assert "fnm" in result.message, result.message
 
     def test_node_20_is_a_warning_not_a_pass(self):
         """The old test asserted v20 was OK; the MCP wrapper refuses it."""
