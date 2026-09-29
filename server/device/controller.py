@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections import Counter
 
 from server import logging_ext
 from server.device.adb import AdbBackend
@@ -778,12 +777,14 @@ class DeviceController(DeviceControllerUI):
         # It used to correlate names, and two phones sharing one ("iPhone" is
         # the default) could map to each other's UDID -- so a crash pull filed
         # one phone's reports under the other, on disk once pulls kept a
-        # directory per phone.
-        #
-        # By name only as a fallback, for a phone devicectl listed without a
-        # hardware UDID, with its name unique on both sides and a UDID no other
-        # phone matched. Every paired device measured under Xcode 26.5 reports
-        # one; Xcode 27 is not yet measured, the only reason this remains (#323).
+        # directory per phone. A name fallback survived that change for phones
+        # devicectl listed without a hardware UDID, pending a measurement on
+        # Xcode 27 (#323). Measured, and removed: devicectl 642.16 reports
+        # `hardwareProperties.udid` for every paired physical device, as 518.31
+        # did, so the fallback was unreachable -- confirmed at runtime against
+        # a wired iPhone and two on Wi-Fi, each of which had an alias and so
+        # skipped it. Nothing paired but disconnected was on hand; 26.5's
+        # sample covered that case and this one did not.
         #
         # A listed phone that matches nothing now loses its old mapping: one
         # unplugged since, and now on Wi-Fi, kept it and was pulled over a USB
@@ -793,8 +794,6 @@ class DeviceController(DeviceControllerUI):
         usbmux_failed = usb_answer is None
         usb_devices = usb_answer or []
         usb_udids = {udid for udid, _ in usb_devices}
-        usb_names = Counter(name for _, name in usb_devices if name)
-        name_counts = Counter(d.name for d in physical_devices)
         hardware = {d.udid: [s for s in spellings_of(d.udid) if s != d.udid]
                     for d in physical_devices}
         matched: dict[str, str] = {}
@@ -805,14 +804,6 @@ class DeviceController(DeviceControllerUI):
                 exact = hardware[d.udid][0]
             if exact:
                 matched[d.udid] = exact
-        taken = set(matched.values())
-        for d in physical_devices:
-            if (d.udid in matched or hardware[d.udid] or name_counts[d.name] != 1
-                    or usb_names[d.name] != 1):
-                continue
-            by_name = next(u for u, n in usb_devices if n == d.name)
-            if by_name not in taken:
-                matched[d.udid] = by_name
         for d in physical_devices:
             if d.udid in matched:
                 self._usbmux_udid_map[d.udid] = matched[d.udid]
