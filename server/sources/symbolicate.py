@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import weakref
 from collections.abc import Awaitable, Callable, Iterable
@@ -182,8 +183,12 @@ class SymbolFinder:
             return read.records
 
     async def _look(self, uuid: str, read: Read) -> Lookup:
-        records = await self._records(read)
-        found, record_note = await asyncio.to_thread(self._from_records, uuid, records)
+        try:
+            records = await self._records(read)
+            found, record_note = await asyncio.to_thread(self._from_records, uuid, records)
+        except OSError as e:
+            # The records failing does not stop Spotlight being asked.
+            found, record_note = None, f"quern's build records could not be read ({e})"
         if found is not None:
             return Lookup(found)
         # A record that cannot help does not end the search: Xcode may hold a copy.
@@ -243,8 +248,9 @@ class SymbolFinder:
         if listed:
             # Spotlight says these hold the UUID: reading nothing from them
             # means they could not be read, not that they lack it.
-            return None, f"Spotlight lists dSYMs with this UUID that could not be read: " \
-                         f"{', '.join(listed[:3])}"
+            where = ", ".join(listed[:3])
+            return None, (f"Spotlight lists dSYMs or archives with this UUID that could not "
+                          f"be read: {where}")
         return None, ""
 
 
@@ -261,6 +267,12 @@ def _dwarf_in_hit(hit: Path, uuid: str) -> Path | None:
         if inside:
             return dsym / inside
     return None
+
+
+def _readable(path: Path) -> bool:
+    """There and readable: atos failing on a file it cannot read is not atos
+    answering, and a chmod-000 DWARF passes `is_file`."""
+    return _is_file(path) and os.access(path, os.R_OK)
 
 
 def _is_file(path: Path) -> bool:
@@ -404,9 +416,9 @@ async def _one_image(
         # xcrun never ran it (72: no such tool; 69: the Xcode licence is not
         # accepted, typical right after an update), nor when the dSYM went
         # between the lookup and the call (retention, after a new build).
-        if code in _XCRUN_DID_NOT_RUN or "xcrun: error" in err:
-            return False
-        return await asyncio.to_thread(_is_file, found.dwarf)
+        if code < 0 or code in _XCRUN_DID_NOT_RUN or "xcrun: error" in err:
+            return False                     # killed, or never run at all
+        return await asyncio.to_thread(_readable, found.dwarf)
     lines = out.splitlines()
     if len(lines) != len(wanted):
         # One line per address, in order: anything else cannot be matched up

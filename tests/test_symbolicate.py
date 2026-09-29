@@ -989,3 +989,60 @@ class TestOneRead:
 
         asyncio.run(go())
         assert not [c for c in seen if "never retrieved" in c.get("message", "")]
+
+
+# ── fourth review ────────────────────────────────────────────────────────────
+
+
+class TestLastFew:
+    def test_an_unsearchable_parent_is_not_no_records(self, tmp_path):
+        """3.14 answered is_dir() False and globbed nothing: "no records"."""
+        from server.device import build_records
+        parent = tmp_path / "state"
+        (parent / "build-records").mkdir(parents=True)
+        parent.chmod(0)
+        try:
+            records, unreadable, listable = build_records.load_with_unreadable(
+                parent / "build-records")
+            assert (records, listable) == ([], False)
+        finally:
+            parent.chmod(0o755)
+
+    def test_a_records_failure_still_asks_spotlight(self, tmp_path, monkeypatch):
+        good = _dsym(tmp_path / "DerivedData", U_APP)
+
+        def broken(root=None):
+            raise PermissionError(13, "Permission denied", str(root))
+
+        monkeypatch.setattr(symbolicate.build_records, "load_with_unreadable", broken)
+        tools = FakeTools(lines=GOOD, mdfind=f"{good}\n")
+        report = _report()
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", tools))
+        assert report.symbols[0].source == "spotlight" and report.app_frame.line == 170
+
+    def test_atos_failing_on_an_unreadable_dwarf_is_not_settled(self, tmp_path):
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        dwarf = dsym / "Contents" / "Resources" / "DWARF" / "bin0"
+
+        async def run(argv):
+            dwarf.chmod(0)
+            return 1, "", "atos cannot load symbols for the file"
+
+        try:
+            report = _report()
+            _run([report], symbolicate.SymbolFinder(tmp_path / "records", run))
+            assert not report.symbolicated
+        finally:
+            dwarf.chmod(0o644)
+
+    def test_atos_killed_by_a_signal_is_not_settled(self, tmp_path):
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+
+        async def run(argv):
+            return -9, "", ""
+
+        report = _report()
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", run))
+        assert not report.symbolicated

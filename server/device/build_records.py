@@ -277,7 +277,15 @@ def load_with_unreadable(root: Path | None = None) -> tuple[list[BuildRecord], i
     cannot be read returns nothing rather than raising, which reads as "no
     records" -- the directory is checked first so it is not."""
     root = root or RECORDS_DIR
-    if root.is_dir() and not os.access(root, os.R_OK | os.X_OK):
+    try:
+        root.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return [], 0, True                   # asked: nothing recorded yet
+    except OSError:
+        # An unsearchable parent: 3.13 raises from is_dir(), 3.14 answers
+        # False and globs nothing -- "no records", said of records it never saw.
+        return [], 0, False
+    if not os.access(root, os.R_OK | os.X_OK):
         return [], 0, False
     records, unreadable = _load(root)
     return [record for record, _ in records], len(unreadable), True
