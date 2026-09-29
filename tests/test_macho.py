@@ -1,7 +1,7 @@
 """The Mach-O reader behind build records (#326), on bytes built here.
 
-Checked against the real thing once, by hand: all 22 binaries of a Geocaching
-device build gave the same UUIDs as `dwarfdump --uuid`, including fat system
+Checked against the real thing once, by hand: all 22 binaries of a production
+app's device build gave the same UUIDs as `dwarfdump --uuid`, including fat system
 binaries (`/bin/ls`), and the debug maps found were exactly the app's, the
 widget's and the extension's -- plus six vendored frameworks whose maps name
 their vendors' build machines, which is why object paths are returned.

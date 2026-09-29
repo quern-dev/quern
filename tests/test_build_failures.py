@@ -1,11 +1,11 @@
 """A failed build names what failed, even when nothing failed to compile.
 
-`build_and_install` reported Geocaching's device build as "Build failed.
+`build_and_install` reported a production app's device build as "Build failed.
 iphoneos: 0 error(s)." (2026-09-28). The cause was a SwiftLint build plug-in
 xcodebuild would not run unapproved, and xcodebuild says so only as a failed
 step, not an `error:` line. Signing and provisioning failures are `error:`
 lines with no file:line:col, which the parser also skipped. The output below
-is the real one, from Xcode 26.5.
+is the real one, from Xcode 26.5, with the app's names replaced.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ Validate plug-in “SwiftLintBuildToolPlugin” in package “swiftlintplugins�
 The following build commands failed:
 \tValidate plug-in “SwiftLintBuildToolPlugin” in package “swiftlintplugins”
 \teyJ0eXBlIjp7IndvcmtzcGFjZSI6e319fQ==
-\tBuilding workspace Geocaching with scheme Internal and configuration Debug
+\tBuilding workspace MyApp with scheme MyApp and configuration Debug
 (3 failures)
 """
 
@@ -45,30 +45,30 @@ The following build commands failed:
 # Real, from the same build once the plug-in was let through: this Mac had no
 # signing identity. Written against the project file, with no line.
 NO_CERTIFICATE = """\
-/Volumes/src/Geocaching.xcodeproj: error: No signing certificate "iOS Development" found: No \
-"iOS Development" signing certificate matching team ID "8SSDY9WB6W" with a private key was \
-found. (in target 'Geocaching' from project 'Geocaching')
+/Volumes/src/MyApp.xcodeproj: error: No signing certificate "iOS Development" found: No \
+"iOS Development" signing certificate matching team ID "ABCDE12345" with a private key was \
+found. (in target 'MyApp' from project 'MyApp')
 note: Run script build phase 'Run Script (SwiftLint)' will be run during every build
 ** BUILD FAILED **
 
 
 The following build commands failed:
-\tBuilding workspace Geocaching with scheme Internal and configuration Debug
+\tBuilding workspace MyApp with scheme MyApp and configuration Debug
 (1 failure)
 """
 
-# Real shape, from a Geocaching simulator build on a stale DerivedData: the
+# Real shape, from a production app's simulator build on a stale DerivedData: the
 # only errors it printed had no column.
 STALE_MODULE = """\
-<unknown>:0: error: file '/dd/Products/AppsFlyerLib.framework/Headers/AppsFlyerLib.h' has been \
-modified since the module file '/dd/SwiftExplicitPrecompiledModules/AppsFlyerLib.pcm' was built
-<unknown>:0: error: file '/dd/Products/AppsFlyerLib.framework/Headers/AppsFlyerLib.h' has been \
-modified since the module file '/dd/SwiftExplicitPrecompiledModules/AppsFlyerLib.pcm' was built
+<unknown>:0: error: file '/dd/Products/VendorSDK.framework/Headers/VendorSDK.h' has been \
+modified since the module file '/dd/SwiftExplicitPrecompiledModules/VendorSDK.pcm' was built
+<unknown>:0: error: file '/dd/Products/VendorSDK.framework/Headers/VendorSDK.h' has been \
+modified since the module file '/dd/SwiftExplicitPrecompiledModules/VendorSDK.pcm' was built
 ** BUILD FAILED **
 
 The following build commands failed:
 \tSwiftCompile normal x86_64 Compiling\\ A.swift,\\ B.swift """ + "/src/X.swift " * 40 + """
-\tBuilding workspace Geocaching with scheme Internal and configuration Debug
+\tBuilding workspace MyApp with scheme MyApp and configuration Debug
 (2 failures)
 """
 
@@ -77,7 +77,7 @@ NOTHING_READABLE = """\
 
 
 The following build commands failed:
-\tBuilding workspace Geocaching with scheme Internal and configuration Debug
+\tBuilding workspace MyApp with scheme MyApp and configuration Debug
 (1 failure)
 """
 
@@ -122,7 +122,7 @@ class TestWhatFailed:
     async def test_an_error_against_the_project_file_keeps_it_as_the_file(self):
         result = await _parse(NO_CERTIFICATE)
         [error] = result.errors
-        assert error.file == "/Volumes/src/Geocaching.xcodeproj"
+        assert error.file == "/Volumes/src/MyApp.xcodeproj"
         assert error.message.startswith('No signing certificate "iOS Development" found')
         assert error.line is None
 
@@ -172,7 +172,7 @@ class TestHowItReads:
         await BuildAdapter(on_entry=collect).parse_build_output(NO_CERTIFICATE)
         [entry] = entries
         assert entry.message.startswith(
-            '/Volumes/src/Geocaching.xcodeproj: No signing certificate "iOS Development"')
+            '/Volumes/src/MyApp.xcodeproj: No signing certificate "iOS Development"')
         assert ":None" not in entry.message
 
     @pytest.mark.parametrize("text", [PLUGIN_REFUSED, SIGNING])

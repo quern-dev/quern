@@ -2,7 +2,7 @@
 
 No Xcode runs here: bundles are made of synthetic Mach-O bytes, and `dsymutil`
 is a fake that writes a dSYM-shaped directory. Measured once by hand on a real
-Geocaching device build: `dsymutil` on its 117 MB .debug.dylib takes 5.4 s and
+production app's device build: `dsymutil` on its 117 MB .debug.dylib takes 5.4 s and
 gives a 160 MB dSYM, and `atos` against that dSYM resolves the phone's crash
 frame to `AppDelegate.swift:13`.
 """
@@ -50,7 +50,7 @@ def _app(tmp_path: Path, name="MyApp") -> Path:
     (app / f"{name}.debug.dylib").write_bytes(thin(U_APP, objects=own))
     (app / name).write_bytes(thin(U_MAIN))
     (app / "Frameworks" / "Vendor.framework" / "Vendor").write_bytes(
-        thin(U_VENDOR, objects=("/data/sandcastle/boxes/vendor/Vendor.o",)))
+        thin(U_VENDOR, objects=("/build/vendor-ci/Vendor/Intermediates/Vendor.o",)))
     (app / "Frameworks" / "Plain.framework" / "Plain").write_bytes(thin(U_PLAIN))
     (app / "Assets.car").write_bytes(b"not a binary")
     (app / "Frameworks" / "Plain.framework" / "Current").symlink_to("Plain")

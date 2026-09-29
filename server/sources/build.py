@@ -48,9 +48,9 @@ BUILD_STATUS_RE = re.compile(r"\*\*\s+BUILD\s+(SUCCEEDED|FAILED)\s+\*\*")
 # project file (`/src/App.xcodeproj: error: No signing certificate "iOS
 # Development" found`). DIAGNOSTIC_RE wants file:line:col, so both parsed as
 # nothing and a failed build read "0 errors" -- the second measured on
-# Geocaching's device build. And the compiler's own placeless form,
+# a production app's device build. And the compiler's own placeless form,
 # `<unknown>:0: error: file '...' has been modified since the module file`,
-# which a stale DerivedData produces -- one Geocaching simulator build printed
+# which a stale DerivedData produces -- one production app's simulator build printed
 # nothing else. The path excludes ":", so a file:line:col line cannot match
 # here too.
 LOCATIONLESS_ERROR_RE = re.compile(

@@ -9,11 +9,11 @@ binaries it ran.
 
 For a device build it also keeps dSYMs, straight after the build while
 DerivedData still matches it. Where Xcode made one (`dwarf-with-dsym`, or a
-vendored framework's) and its UUIDs match, it is copied: Geocaching's Internal
-scheme does, and recording takes 0.4 s and about 200 MB. Where it did not
+vendored framework's) and its UUIDs match, it is copied: the production app
+measured here does, and recording takes 0.4 s and about 200 MB. Where it did not
 (`DEBUG_INFORMATION_FORMAT=dwarf`, the Debug default), the DWARF is still in
 the object files the next build replaces, and `dsymutil` makes one: about 6 s
-and 185 MB for Geocaching's 117 MB .debug.dylib. Either way `atos` then
+and 185 MB for a 117 MB .debug.dylib. Either way `atos` then
 resolves a phone's crash to `AppDelegate.swift:13`. A simulator build gets the
 record alone, because macOS already writes file and line into a simulator's
 crash report.
@@ -42,11 +42,11 @@ logger = logging.getLogger(__name__)
 
 RECORDS_DIR = CONFIG_DIR / "build-records"
 #: dSYMs are kept for this many of the newest device builds of each scheme --
-#: about 1.8 GB for Geocaching. An older record stays, marked as expired.
+#: about 1.8 GB for the production app measured. An older record stays, marked as expired.
 KEEP_DSYMS_PER_SCHEME = 10
 #: Records themselves are a few KB, kept as long as crash copies are.
 RECORD_RETENTION_DAYS = 30
-DSYMUTIL_TIMEOUT = 300  # s; Geocaching's 117 MB .debug.dylib takes 5.4
+DSYMUTIL_TIMEOUT = 300  # s; a 117 MB .debug.dylib took 5.4
 _PARTIAL = ".partial"
 
 #: A `.partial` untouched this long is a recording that died. Generous: a

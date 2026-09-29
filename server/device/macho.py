@@ -4,10 +4,10 @@ A crash report names each binary by UUID, so a build is matched to a crash by
 the UUIDs of the binaries it produced. And a binary built from source by that
 build carries a *debug map* -- `N_OSO` symbols naming the object files that
 hold its DWARF -- which is what `dsymutil` turns into a dSYM. Having one is not
-enough: the Facebook SDK and AppsFlyer frameworks in Geocaching ship with maps
-naming object files on their vendors' build machines. So the objects' paths are
+enough: six vendored frameworks in a production app measured here ship with
+maps naming object files on their vendors' build machines. So the objects' paths are
 returned, for the caller to check exist. A binary with no map at all makes
-`dsymutil` exit 0 with a warning and write an empty dSYM (measured: MapLibre),
+`dsymutil` exit 0 with a warning and write an empty dSYM (measured on a vendored framework),
 which is why none of this is inferred from what `dsymutil` says.
 
 Read with the standard library alone, so it needs no Xcode and a test can build
@@ -153,7 +153,7 @@ def _thin(data, base: int, size: int) -> Slice:
                 raise ValueError("the symbol table runs past its slice")
             # n_type is the fifth byte of every nlist entry: a strided slice
             # reads the lot at C speed, where a loop over 497,000 symbols
-            # (Geocaching's .debug.dylib) would not. Only the N_OSO entries,
+            # (a production app's .debug.dylib) would not. Only the N_OSO entries,
             # 2,668 of them there, are then visited one by one.
             types = bytes(data[start + 4:start + nsyms * nlist_size:nlist_size])
             i = types.find(N_OSO)
