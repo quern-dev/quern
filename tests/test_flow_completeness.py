@@ -21,13 +21,15 @@ from tests.test_flow_store import _make_flow
 HEADERS = {"Authorization": "Bearer test-key-12345"}
 
 
-def _flow(flow_id, *, ago_s=0.0, udid=None, ip=None, host="api.example.com", path="/v1/x"):
+def _flow(flow_id, *, ago_s=0.0, udid=None, ip=None, serial=None,
+          host="api.example.com", path="/v1/x"):
     flow = _make_flow(
         flow_id=flow_id, host=host, path=path,
         timestamp=datetime.now(UTC) - timedelta(seconds=ago_s),
     )
     flow.simulator_udid = udid
     flow.client_ip = ip
+    flow.device_serial = serial
     return flow
 
 
@@ -274,6 +276,42 @@ class TestWaitForFlow:
 
         assert data["matched"] is False
         assert data["truncated"] is False
+
+    async def test_another_emulators_eviction_does_not_flag_this_wait(self, app):
+        """The wait forwarded `device_serial` to the query but not to its own
+        completeness check, so the check got no keys at all and fell back to
+        the global eviction mark: any other device shedding traffic made this
+        one's timeout read `truncated` (#262, review of #333).
+
+        No `client_ip` here on purpose -- that is the caller the bug needed,
+        and the one an agent writes when it knows the serial.
+        """
+        await _flood(app.state.flow_store, 6, serial="emulator-5554")
+
+        data = (await _call(app, "POST", "/api/v1/proxy/flows/wait",
+                            json={"path_contains": "/login",
+                                  "device_serial": "emulator-5556",
+                                  "timeout": 0.2, "interval": 0.1})).json()
+
+        assert data["matched"] is False
+        # emulator-5556 has sent nothing and lost nothing.
+        assert data["truncated"] is False
+        assert data["complete_after"] is None
+
+    async def test_a_match_reports_only_this_emulators_mark(self, app):
+        """Same omission on the matched branch, where it lands in
+        `complete_after` -- a mark for traffic this device never sent."""
+        store = app.state.flow_store
+        await _flood(store, 6, serial="emulator-5554")        # one eviction
+        await store.add(_flow("hit", serial="emulator-5556", path="/login"))
+
+        data = (await _call(app, "POST", "/api/v1/proxy/flows/wait",
+                            json={"path_contains": "/login",
+                                  "device_serial": "emulator-5556",
+                                  "timeout": 0.5, "interval": 0.1})).json()
+
+        assert data["matched"] is True
+        assert data["complete_after"] is None
 
 
 class TestCaptureSession:

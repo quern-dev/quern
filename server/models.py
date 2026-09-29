@@ -685,6 +685,15 @@ class FlowRecord(BaseModel):
         default=None,
         description="Simulator UDID if traffic came from a simulator",
     )
+    device_serial: str | None = Field(
+        default=None,
+        description=(
+            "Android emulator serial (e.g. emulator-5554), resolved from the "
+            "process that opened the connection. Exact, like simulator_udid, "
+            "and for the same reason -- an emulator's flows carry the host's "
+            "address, so client_ip cannot tell two of them apart (#262)."
+        ),
+    )
     client_ip: str | None = Field(
         default=None,
         description="Client IP address (for physical device identification)",
@@ -710,6 +719,9 @@ class FlowQueryParams(BaseModel):
     #: is attributed on time with a caveat. Wrong-and-silent vs honest.
     device_id: str = ""
     simulator_udid: str | None = None
+    #: An Android emulator's exact identity. Filtering by `client_ip` cannot
+    #: narrow to one emulator -- they all arrive as the host (#262).
+    device_serial: str | None = None
     client_ip: str | None = None
     detail: Literal["full", "summary"] = "full"
     limit: int = Field(default=100, ge=1, le=1000)
@@ -746,6 +758,9 @@ class CaptureStartRequest(BaseModel):
     hosts: list[str] | None = None
     exclude_hosts: list[str] | None = None
     simulator_udid: str | None = None
+    #: An Android emulator's exact identity, for the same reason as on
+    #: `FlowQueryParams`: every emulator on a host arrives as the host (#262).
+    device_serial: str | None = None
     client_ip: str | None = None
     detail: Literal["full", "summary"] = "full"
 
@@ -784,6 +799,8 @@ class WaitForFlowRequest(BaseModel):
     status_max: int | None = None
     has_error: bool | None = None
     simulator_udid: str | None = None
+    #: An Android emulator's exact identity (#262).
+    device_serial: str | None = None
     client_ip: str | None = None
     timeout: float = Field(default=10, ge=0.1, le=60)
     interval: float = Field(default=0.5, ge=0.1, le=5)
@@ -899,13 +916,27 @@ class TlsRejection(BaseModel):
     become. `tls_failed_client` fires for *every* client-side rejection, and an
     untrusted CA is only one of the reasons.
 
-    `alert` is why that distinction survives. A device that does not trust the
-    CA says `unknown ca`; a certificate-pinned app on a device that trusts it
-    perfectly well refuses too, and reporting that as "this device does not
-    trust the CA" sends someone to reinstall a certificate that was never the
-    problem. Pinning is L3 in docs/proposals/cert-trust-model.md and produces
-    the identical symptom, so the alert text is the only thing separating them
-    and is kept verbatim rather than interpreted.
+    `alert` is kept verbatim rather than interpreted, because the reason
+    matters: a certificate-pinned app on a device that trusts the CA perfectly
+    well refuses too, and reporting that as "this device does not trust the
+    CA" sends someone to reinstall a certificate that was never the problem.
+    Pinning is L3 in docs/proposals/cert-trust-model.md and produces the
+    identical symptom.
+
+    **The alert does not separate those two on Android, and an earlier version
+    of this docstring said it did.** Measured 2026-09-28 across two emulators:
+    113 rejections, every one of them `certificate unknown` -- not `unknown
+    ca` -- while the CA was simply not installed. Installing it turned those
+    same endpoints into captured, decrypted flows, which is what proves they
+    were trust failures rather than pinning. Two endpoints kept refusing
+    afterwards (`accounts.google.com`, and one of two connections to
+    `update.googleapis.com` -- two clients in one emulator, one pinning and
+    one not), and they said `certificate unknown` as well.
+
+    So on Android both causes produce the same alert, and the thing that
+    separates them is whether the refusal survives the CA being trusted. The
+    iOS side is unmeasured; the old claim may well hold there. Do not branch
+    on the alert text to decide which cause it was.
     """
 
     sni: str | None = None
@@ -916,9 +947,18 @@ class TlsRejection(BaseModel):
     source_process: str | None = None
     source_pid: int | None = None
     simulator_udid: str | None = None
+    #: Android emulator serial. Without it a rejection from an
+    #: emulator reads "Client <host ip>", naming the machine
+    #: rather than the device, and two emulators fold together.
+    device_serial: str | None = None
     """Resolved the way flows are, and the only fields that name a simulator."""
     alert: str | None = None
-    """The TLS alert, verbatim. `unknown ca` means the CA; others may not."""
+    """The TLS alert, verbatim and uninterpreted.
+
+    Not a cause. On Android an untrusted CA and a pinned client both say
+    `certificate unknown` -- measured -- so this narrows the possibilities
+    without deciding between them.
+    """
     count: int = 1
     """Handshakes refused for this (host, device) pair."""
     first_at: str | None = None
