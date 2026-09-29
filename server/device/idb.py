@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from server.config import CONFIG_DIR, quern_cmd
-from server.device import probing
+from server.device import ax_recovery, probing
 from server.device.tool_probe import probe_command
 from server.models import DeviceError
 
@@ -119,7 +119,15 @@ class IdbBackend:
 
         # Time the communication (waiting for output)
         t3 = time.perf_counter()
-        stdout, stderr = await proc.communicate()
+        try:
+            stdout, stderr = await proc.communicate()
+        except asyncio.CancelledError:
+            # A read can now be cancelled by the recovery deadline, which this
+            # never had to survive before. Without the kill the `idb` child
+            # outlives the request that asked for it (review of #343).
+            proc.kill()
+            await ax_recovery._reap(proc)
+            raise
         t4 = time.perf_counter()
         logger.info(
             f"[PERF IDB] subprocess communicate: "
@@ -164,6 +172,7 @@ class IdbBackend:
         snapshot_depth: int | None = None,
         source_timeout: float | None = None,
         probe: bool = True,
+        _recovered: bool = False,
     ) -> list[dict]:
         """Get all UI accessibility elements as raw dicts.
 
@@ -259,10 +268,21 @@ class IdbBackend:
             f"total={(end-start)*1000:.1f}ms, elements={len(flat)}"
         )
 
-        return flat
+        # The XCUITest wedge reaches idb identically -- #66 recorded it against
+        # raw `idb ui describe-all`, and the shipped detector fires on idb's
+        # own output unchanged (measured, #337). Until now only sim-bridge
+        # healed it, so an Xcode < 26 or Intel machine had it unhandled.
+        return await ax_recovery.reread_after_recovery(
+            udid, flat,
+            lambda: self.describe_all(
+                udid, snapshot_depth=snapshot_depth,
+                source_timeout=source_timeout, probe=probe, _recovered=True,
+            ),
+        ) if not _recovered else flat
 
     async def describe_all_nested(
         self, udid: str, *, snapshot_depth: int | None = None,
+        _recovered: bool = False,
     ) -> list[dict]:
         """Get all UI accessibility elements with hierarchy preserved.
 
@@ -289,12 +309,18 @@ class IdbBackend:
                 f"Expected JSON array from describe-all, got {type(data).__name__}",
                 tool="idb",
             )
-        return data
+        return await ax_recovery.reread_after_recovery(
+            udid, data,
+            lambda: self.describe_all_nested(
+                udid, snapshot_depth=snapshot_depth, _recovered=True,
+            ),
+        ) if not _recovered else data
 
     async def describe_all_flat(
         self, udid: str, *,
         snapshot_depth: int | None = None,
         source_timeout: float | None = None,
+        _recovered: bool = False,
     ) -> list[dict]:
         """Get UI elements using flat mode — designed for the custom companion.
 
@@ -356,7 +382,13 @@ class IdbBackend:
             f"raw={len(data)}, deduped={len(flat)}"
         )
 
-        return flat
+        return await ax_recovery.reread_after_recovery(
+            udid, flat,
+            lambda: self.describe_all_flat(
+                udid, snapshot_depth=snapshot_depth,
+                source_timeout=source_timeout, _recovered=True,
+            ),
+        ) if not _recovered else flat
 
     async def describe_point(self, udid: str, x: float, y: float) -> dict | None:
         """Get the UI element at specific coordinates.

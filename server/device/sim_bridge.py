@@ -608,27 +608,47 @@ class SimBridgeBackend:
             # Once only. If the tree still looks poisoned after a reset, the
             # cause is something else and retrying would just be a slower way to
             # return the same answer.
-            if not _recovered and ax_recovery.looks_poisoned(flat):
-                if await ax_recovery.reset_bridge(udid):
-                    return await self.describe_all(
-                        udid,
-                        snapshot_depth=snapshot_depth,
-                        source_timeout=source_timeout,
-                        probe=probe,
-                        _recovered=True,
-                    )
-
-            return flat
+            if _recovered:
+                return flat
+            # Inside `admit()` deliberately. The bound is re-entrant by design
+            # (see `admit`), so the re-read passes straight through rather than
+            # queueing for a fresh slot. Recovering from outside would re-admit
+            # and could raise `SimBridgeSaturatedError` on a read that has
+            # never been able to -- a new failure mode in exchange for nothing
+            # (review of #337).
+            return await ax_recovery.reread_after_recovery(
+                udid, flat,
+                lambda: self.describe_all(
+                    udid,
+                    snapshot_depth=snapshot_depth,
+                    source_timeout=source_timeout,
+                    probe=probe,
+                    _recovered=True,
+                ),
+            )
 
     async def describe_all_nested(
         self,
         udid: str,
         *,
         snapshot_depth: int | None = None,
+        _recovered: bool = False,
     ) -> list[dict]:
         """Return nested tree with children arrays preserved (no probing)."""
         async with self._mgr.admit():
-            return await self._fetch_nested(udid)
+            nested = await self._fetch_nested(udid)
+            # A wedge reaches this read as readily as the flat one -- same
+            # bridge, same stale cache. Inside `admit()` for the same reason as
+            # `describe_all` above: the bound is re-entrant, so the re-read
+            # does not queue for a second slot.
+            if _recovered:
+                return nested
+            return await ax_recovery.reread_after_recovery(
+                udid, nested,
+                lambda: self.describe_all_nested(
+                    udid, snapshot_depth=snapshot_depth, _recovered=True,
+                ),
+            )
 
     async def _fetch_nested(self, udid: str) -> list[dict]:
         result = await self._send(

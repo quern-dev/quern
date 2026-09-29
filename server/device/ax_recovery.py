@@ -1,7 +1,7 @@
 """Recover a simulator's accessibility bridge after XCUITest poisons it (#66).
 
 Any XCUITest or WDA run against a simulator leaves `CoreSimulatorBridge` with a
-stale mach-port cache, after which a foregrounded app reports a single bare
+stale mach-port cache, after which affected apps report a single bare
 `Application` element. `os_log` names it directly:
 
     CoreSimulatorBridge [com.apple.Accessibility:AXRuntimeCommon]
@@ -11,31 +11,49 @@ The empty tree looks exactly like every landmark on every screen drifting at
 once, which is a long way from the truth and sends people editing knowledge
 bases that are fine.
 
-**How wide the damage spreads is measured two ways and unresolved.** #66
-reported it simulator-wide -- Safari broken while never under test, only
-SpringBoard reading normally. A later run on Xcode 27 / iOS 18.6, stated to be
-the same device model and runtime build as one of #66's rows, found *another
-app* healthy in the same interval: the app under test at one element while
-Settings read a healthy 17, alternating repeatedly. Note what that does and
-does not establish -- Settings was fine, which #66 does not claim otherwise;
-Safari, the app #66 names, was never read. Both are measurements, so at
-least one of three things is true -- the behaviour changed between Xcode
-versions, #66 generalised from a smaller sample than it reads like, or the
-radius depends on something neither run controlled (which app, launch order,
-whether Safari had ever been foregrounded in that boot). The third is the only
-reading under which both are correct, and the check that separates it is
-reading Safari specifically, since Safari is the app #66 names.
+**What gets hit is decided by process lifetime, not by which app it is.** A
+process already holding a live accessibility connection when the cache goes
+stale keeps reading normally; any process that connects afterwards gets the
+poisoned lookup. Measured over eight runs on Xcode 27.0 / iPhone 16 Pro /
+iOS 18.6 (22G86):
+
+    Safari foregrounded before the test run    3/3 healthy,  5 elements
+    Safari first launched after it             3/3 poisoned, 1 element
+    Safari foregrounded before, then           2/2 poisoned, 1 element
+      terminated and relaunched after
+
+The third row is the one that settles it: same app, same boot, same wedged
+bridge, opposite answers either side of a restart.
+
+This reconciles two readings that looked contradictory. #66 reported the damage
+simulator-wide, having sampled Safari after the run; a later check found
+another app healthy, having sampled it before. Both measurements were correct
+and neither generalises -- they differ in *when* the app they sampled was
+launched, which is the variable neither controlled. It also explains #66's note
+that SpringBoard alone kept reading: SpringBoard is the one process that never
+restarts.
+
+The practical consequence is not that the wedge is common but that **which side
+of it you land on is invisible to the caller.** Reads here do not launch
+anything -- `controller_ui.py` has no launch call -- so an agent that launches
+an app and then reads it gets the poisoned side, while one that attaches to an
+app already running, or reads after a person opened it by hand, gets the
+healthy one. Same call, same response shape, opposite answers, decided by a
+process lifetime nothing in the API reports.
 
 None of this changes what the recovery does: it fires on the signature in the
-tree it was given, whatever else is or is not affected. Do not restate either
-blast radius as settled without measuring again.
+tree it was given, whatever else is or is not affected.
 
 There is no reload path: the port cache belongs to the AX runtime loaded into
 the process, the bridge holds no handle to invalidate it, and `SIGHUP` is not
-handled. Kill and respawn is the only lever — and it is enough, because the
-bridge is launchd-on-demand, so the next query brings it back against a fresh
-cache. Measured at ~1s, including with six simulators booted at load average
-672, so recovery does not degrade under a loaded pool.
+handled. Kill and respawn is the only lever, and it is enough — but **not
+immediately**, which this used to claim. "The next query brings it back against
+a fresh cache" is wrong: `reset_bridge` returns when the kill lands, 0.07s
+measured, while the replacement process appears at +0.66s and its cache answers
+at +0.80s to +1.29s. A re-read issued straight after the kill gets the *same*
+poisoned tree, so recovery reported success and delivered nothing. See
+`reread_after_recovery`, which watches for both. Recovery does not degrade under
+a loaded pool: measured with six simulators booted at load average 672.
 
 One bridge exists per booted simulator, so this is scoped to the simulator that
 needs it and leaves the others undisturbed.
@@ -44,8 +62,10 @@ needs it and leaves the others undisturbed.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
+from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -70,10 +90,31 @@ def looks_poisoned(elements: list[dict]) -> bool:
     el = elements[0]
     if el.get("type") != "Application":
         return False
+    # A nested read is *always* one root, so `len != 1` above can never fire on
+    # one and the whole decision falls to the frame and label. A root with
+    # children has told us something, whatever its own frame says -- and a
+    # wedged bridge reports no children at all. Without this the nested paths
+    # rest on two attributes of a single element, and a 0x0 unlabelled root
+    # over real content would SIGKILL the bridge on a healthy screen
+    # (review of #337).
+    if el.get("children"):
+        return False
     frame = el.get("frame") or {}
     if (frame.get("width") or 0) or (frame.get("height") or 0):
         return False
     return not (el.get("AXLabel") or el.get("label") or "")
+
+
+async def _reap(proc: asyncio.subprocess.Process) -> None:
+    """Wait for a killed child, so it does not linger as a zombie.
+
+    Shielded and bounded: this runs while a `CancelledError` is in flight, so
+    an unprotected await would be cancelled before the wait completed, and an
+    unbounded one would hold up the cancellation it is cleaning up after.
+    Best effort by design -- failing to reap is not worth masking the cancel.
+    """
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=1.0)
 
 
 async def _run(*args: str, timeout: float = 5.0) -> tuple[int, str]:
@@ -85,7 +126,113 @@ async def _run(*args: str, timeout: float = 5.0) -> tuple[int, str]:
     except TimeoutError:
         proc.kill()
         return 1, ""
+    except asyncio.CancelledError:
+        # `reread_after_recovery` runs this under a deadline, so a cancel here
+        # is routine rather than exceptional -- and a cancel left the `pgrep`
+        # or `lsof` running, once per poll, on the path that fires when a
+        # simulator is already unwell (review of #343).
+        proc.kill()
+        await _reap(proc)
+        raise
     return proc.returncode or 0, out.decode(errors="replace")
+
+
+#: Ceiling on the whole recovery, not a wait anyone expects to spend. Both
+#: phases below watch for something real; this only bounds how long they may
+#: watch for. Measured on a real wedge: the replacement process appears at
+#: +0.66s and reads come good at +0.80s, +1.27s and +1.29s, so this is roughly
+#: three times the slowest observed.
+_RESPAWN_BUDGET = 4.0
+#: Phase 1 polls `bridge_pids_for`, which runs an `lsof` per matching pid,
+#: so this is a compromise rather than as-fast-as-possible: the respawn
+#: takes ~0.66s, and a quarter-second poll finds it in two or three calls
+#: instead of a dozen (review of #337).
+_RESPAWN_POLL = 0.25
+
+
+async def reread_after_recovery(
+    udid: str,
+    tree: list[dict],
+    reread: Callable[[], Awaitable[list[dict]]],
+    *,
+    budget: float | None = None,
+) -> list[dict]:
+    """`tree`, or a fresh read taken once a reset bridge is answering again.
+
+    The decision lives here rather than at each read, because there are five of
+    them across two backends and a copied condition drifts -- which is how
+    `describe_all` ended up the only path with any recovery at all (#337).
+
+    **Re-reading immediately does not work, and used to be what happened.**
+    `reset_bridge` returns as soon as the kill lands -- 0.07s measured -- while
+    the bridge takes about a second to come back usable. Against a real wedge
+    the immediate retry read the *same* poisoned tree and handed it back as the
+    answer, so a path that looked covered healed nothing.
+
+    Nothing here sleeps a guessed interval. Two things are watched instead:
+
+    1. **The replacement process.** `bridge_pids_for` shows a new pid at +0.66s
+       measured, without anything having read the tree -- launchd brings it
+       back on its own rather than waiting to be asked.
+    2. **The tree itself**, because the pid is necessary and not sufficient:
+       the process is up before its cache answers, and reads came good at
+       +0.80s to +1.29s. Only a read proves the recovery, so a read decides.
+
+    `budget` is a ceiling on both phases together, not an expected wait.
+
+    `reread` must not itself recover, or a bridge that stays wedged recurses.
+    Every caller passes a read with its own `_recovered=True`.
+    """
+    if not looks_poisoned(tree):
+        return tree
+
+    # Read at call time rather than bound as a default, so the ceiling stays a
+    # module constant one place can change.
+    budget = _RESPAWN_BUDGET if budget is None else budget
+
+    before = set(await bridge_pids_for(udid))
+    if not await reset_bridge(udid):
+        return tree
+
+    # One read after the kill happens regardless: the caller's tree was read
+    # from the bridge we just killed, so returning it would make the reset
+    # unobservable. `budget` bounds the *waiting*, and the wall clock bounds
+    # the whole thing -- checking a deadline between awaits does not bound an
+    # await that hangs, and both a `bridge_pids_for` (an `lsof` per pid, ten
+    # seconds each) and a tree read can outlast the budget on their own
+    # (review of #337).
+    best = tree
+    try:
+        async with asyncio.timeout(budget):
+            # Phase 1: wait for the replacement, so the first re-read is not
+            # spent confirming what `ps` already knows.
+            while True:
+                if set(await bridge_pids_for(udid)) - before:
+                    break
+                await asyncio.sleep(_RESPAWN_POLL)
+
+            # Phase 2: the authoritative one.
+            while True:
+                best = await reread()
+                if not looks_poisoned(best):
+                    return best
+                await asyncio.sleep(_RESPAWN_POLL)
+    except TimeoutError:
+        pass
+
+    if best is tree:
+        # The budget went entirely on watching, so nothing has been read since
+        # the kill. One read, unbounded like any other read this backend makes,
+        # rather than handing back a tree from a process that no longer exists.
+        best = await reread()
+    if looks_poisoned(best):
+        # Still wedged after a reset and the full budget: the cause is
+        # something else, and the poisoned tree is the honest answer.
+        logger.warning(
+            "accessibility bridge for %s still wedged %.1fs after a reset",
+            udid, budget,
+        )
+    return best
 
 
 async def bridge_pids_for(udid: str) -> list[int]:
