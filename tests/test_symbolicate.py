@@ -1046,3 +1046,28 @@ class TestLastFew:
         report = _report()
         _run([report], symbolicate.SymbolFinder(tmp_path / "records", run))
         assert not report.symbolicated
+
+
+# ── CodeRabbit on #341 ───────────────────────────────────────────────────────
+
+
+class TestTopFramesAreTheReportsUntilSomethingChanges:
+    def test_an_android_reports_raw_lines_are_kept(self, tmp_path):
+        """Its top_frames are tombstone lines; rebuilding them from `frames`
+        dropped the frame number and the library's path."""
+        from server.sources.android_dropbox import device_zone, parse_dropbox
+
+        text = (Path(__file__).parent / "fixtures" / "android_dropbox"
+                / "system_app_native_crash.dropbox").read_text()
+        [report] = parse_dropbox(text, serial="s", zone=device_zone("America/Los_Angeles", ""))
+        raw = list(report.top_frames)
+        tools = FakeTools()
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", tools))
+        assert report.top_frames == raw and raw[0].startswith("#00 pc")
+        assert tools.calls == []
+
+    def test_a_miss_leaves_them_too(self, tmp_path):
+        report = _report()
+        report.top_frames = ["the report's own text"]
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", FakeTools(mdfind="")))
+        assert report.top_frames == ["the report's own text"]

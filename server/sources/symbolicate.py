@@ -342,9 +342,14 @@ async def _symbolicate(
     for f in frames:
         if _needs_it(f, images.get(f.image)):
             by_image.setdefault(f.image, []).append(f)
+    if not by_image and not settled:
+        # Nothing to do, and nothing touched: an Android report's top_frames
+        # are its raw tombstone lines, which rebuilding from `frames` replaced.
+        return True
     exact = _exact_frames(report)
     entries: list[ImageSymbols] = list(settled.values())
     done = True
+    before = [(f.symbol, f.symbol_offset, f.file, f.line) for f in report.frames]
     try:
         for name, todo in by_image.items():
             if name in settled:
@@ -365,8 +370,12 @@ async def _symbolicate(
         # Also on cancellation: what did resolve is shown consistently, and
         # the next attempt replaces these entries rather than adding to them.
         report.symbols = entries
-        top = report.frames[:crash_frames.TOP_FRAMES]
-        report.top_frames = [crash_frames.format_frame(f) for f in top]
+        after = [(f.symbol, f.symbol_offset, f.file, f.line) for f in report.frames]
+        if after != before:
+            # Only when a frame changed: top_frames is the report's own text
+            # until then, which for Android is not what format_frame writes.
+            top = report.frames[:crash_frames.TOP_FRAMES]
+            report.top_frames = [crash_frames.format_frame(f) for f in top]
     return done
 
 
