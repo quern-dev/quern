@@ -282,8 +282,18 @@ class IdentifiedBy(enum.StrEnum):
 def identified_by(
     flow: FlowRecord, ip_map: dict[str, tuple[str, bool]],
 ) -> IdentifiedBy:
-    """Which regime identified this flow's device. Mirrors `device_of`."""
-    if flow.simulator_udid:
+    """Which regime identified this flow's device. Mirrors `device_of`.
+
+    "Mirrors" is load-bearing and was briefly untrue: `device_of` learned to
+    read `device_serial` and this did not, so an emulator's flow was
+    attributed to the right device and then reported as `unidentified` --
+    the caller told to weight it as guesswork when it was exact.
+    """
+    if flow.simulator_udid or flow.device_serial:
+        # Both are resolved from the client's pid, which is what `PROCESS`
+        # means. The route differs -- a `launchd_sim` ancestor for a
+        # simulator, the process owning the socket for an emulator -- but the
+        # confidence is the same, and it is confidence this field reports.
         return IdentifiedBy.PROCESS
     if flow.client_ip and flow.client_ip in ip_map:
         _, fresh = ip_map[flow.client_ip]

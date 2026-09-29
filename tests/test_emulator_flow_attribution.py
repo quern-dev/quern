@@ -277,3 +277,58 @@ class TestAnAndroidRejectionIsRecognisedAtAll:
         network — and reporting those as refusals buries the real signal."""
         for alert in ("close notify", "handshake failure", "internal error"):
             assert alert not in addon._CERT_REJECTION_ALERTS
+
+
+class TestTheConfidenceReportedMatchesTheAttribution:
+    """`identified_by` says it mirrors `device_of`, and briefly did not.
+
+    `device_of` learned to read `device_serial` and this did not, so an
+    emulator's flow was attributed to the right device and then reported as
+    `unidentified` — telling the caller to weight as guesswork something that
+    was resolved from the client's pid. Two functions that must agree, in two
+    places, with only a docstring saying so."""
+
+    @staticmethod
+    def _flow(**kw):
+        from datetime import UTC, datetime
+
+        from server.models import FlowRecord, FlowRequest
+
+        return FlowRecord(
+            id="f", timestamp=datetime.now(UTC),
+            request=FlowRequest(method="GET", url="http://x/", host="x", path="/"),
+            **kw,
+        )
+
+    def test_an_emulator_flow_is_reported_as_exact(self):
+        from server.trace import IdentifiedBy, identified_by
+
+        flow = self._flow(device_serial="emulator-5554", client_ip="192.168.1.189")
+        assert identified_by(flow, {}) is IdentifiedBy.PROCESS
+
+    def test_a_simulator_flow_still_is(self):
+        from server.trace import IdentifiedBy, identified_by
+
+        assert identified_by(self._flow(simulator_udid="ABC"), {}) is IdentifiedBy.PROCESS
+
+    def test_the_two_functions_agree_on_every_shape(self):
+        """The mirror stated as a test rather than a comment. A flow that
+        `device_of` can place must not be reported as unidentified, and one it
+        cannot must not be reported as exact."""
+        from server.trace import IdentifiedBy, device_of, identified_by
+
+        ip_map = {"10.0.0.5": ("phone-udid", True)}
+        shapes = [
+            self._flow(device_serial="emulator-5554", client_ip="192.168.1.189"),
+            self._flow(simulator_udid="ABC"),
+            self._flow(client_ip="10.0.0.5"),
+            self._flow(client_ip="192.168.1.189"),
+            self._flow(),
+        ]
+        for flow in shapes:
+            udid, _ = device_of(flow, ip_map)
+            reported = identified_by(flow, ip_map)
+            assert (udid is not None) == (reported is not IdentifiedBy.UNIDENTIFIED), (
+                f"{flow.device_serial=} {flow.simulator_udid=} {flow.client_ip=}: "
+                f"device_of says {udid!r}, identified_by says {reported}"
+            )

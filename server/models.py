@@ -758,6 +758,9 @@ class CaptureStartRequest(BaseModel):
     hosts: list[str] | None = None
     exclude_hosts: list[str] | None = None
     simulator_udid: str | None = None
+    #: An Android emulator's exact identity, for the same reason as on
+    #: `FlowQueryParams`: every emulator on a host arrives as the host (#262).
+    device_serial: str | None = None
     client_ip: str | None = None
     detail: Literal["full", "summary"] = "full"
 

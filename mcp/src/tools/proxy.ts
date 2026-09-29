@@ -8,7 +8,7 @@ export function registerProxyTools(server: McpServer): void {
   server.registerTool("query_flows", {
     description: `Query captured HTTP flows from the network proxy. Filter by host, method, status code, and more.
 
-For physical devices, filter by client_ip to isolate that device's traffic — the recorded IP is in proxy_status cert_setup[udid].wifi_proxy_configs[ssid].client_ip. If filtering by client_ip returns nothing, check proxy_status for that device: wifi_proxy_stale:true means the proxy address on the device needs updating; a mismatched client_ip means the device got a new DHCP lease and record_device_proxy_config should be called again with the updated IP. If the result has \`truncated: true\`, flows in the window were evicted from the store (it holds 5,000) before you asked, so an empty or short answer -- or a \`total\` -- does NOT mean the request never happened; \`complete_after\` says from when the answer is whole. Pass \`since\` (e.g. just before the action you triggered) to ask only about the window you care about: evictions from before it do not flag the answer.`,
+For an Android emulator, filter by device_serial (e.g. emulator-5554): its traffic is NATed by the host, so every emulator on the machine arrives carrying the host's own address and client_ip cannot tell two of them apart, or either from the host. For physical devices, filter by client_ip to isolate that device's traffic — the recorded IP is in proxy_status cert_setup[udid].wifi_proxy_configs[ssid].client_ip. If filtering by client_ip returns nothing, check proxy_status for that device: wifi_proxy_stale:true means the proxy address on the device needs updating; a mismatched client_ip means the device got a new DHCP lease and record_device_proxy_config should be called again with the updated IP. If the result has \`truncated: true\`, flows in the window were evicted from the store (it holds 5,000) before you asked, so an empty or short answer -- or a \`total\` -- does NOT mean the request never happened; \`complete_after\` says from when the answer is whole. Pass \`since\` (e.g. just before the action you triggered) to ask only about the window you care about: evictions from before it do not flag the answer.`,
     inputSchema: strictParams({
       host: z.string().optional().describe("Filter by hostname (single host; use hosts for multiple)"),
       hosts: z.array(z.string()).optional().describe("Filter to flows matching any of these hostnames"),
@@ -34,10 +34,14 @@ For physical devices, filter by client_ip to isolate that device's traffic — t
         .string()
         .optional()
         .describe("Filter by simulator UDID (only flows from this simulator)"),
+      device_serial: z
+        .string()
+        .optional()
+        .describe("Filter to flows from this Android emulator (e.g. emulator-5554). Use this rather than client_ip for an emulator: every emulator on a host shares the host's address, so client_ip cannot tell two apart, or either from the host."),
       client_ip: z
         .string()
         .optional()
-        .describe("Filter by client IP address (physical device identification)"),
+        .describe("Filter by client IP address (physical devices). Does not narrow to a single Android emulator — use device_serial."),
       since: z
         .string()
         .optional()
@@ -68,6 +72,7 @@ For physical devices, filter by client_ip to isolate that device's traffic — t
     status_max,
     has_error,
     simulator_udid,
+    device_serial,
     client_ip,
     since,
     until,
@@ -86,6 +91,7 @@ For physical devices, filter by client_ip to isolate that device's traffic — t
         status_max,
         has_error,
         simulator_udid,
+        device_serial,
         client_ip,
         since,
         until,
@@ -126,19 +132,21 @@ Use exclude_hosts to filter out analytics/SDK noise (Firebase, AppsFlyer, Facebo
       hosts: z.array(z.string()).optional().describe("Only capture flows to these hosts"),
       exclude_hosts: z.array(z.string()).optional().describe("Exclude flows to these hosts (analytics, SDKs, etc.)"),
       simulator_udid: z.string().optional().describe("Filter to flows from this simulator"),
-      client_ip: z.string().optional().describe("Filter by client IP (physical devices)"),
+      device_serial: z.string().optional().describe("Filter to flows from this Android emulator (e.g. emulator-5554)"),
+      client_ip: z.string().optional().describe("Filter by client IP (physical devices). Does not narrow to one Android emulator."),
       detail: z
         .enum(["full", "summary"])
         .default("summary")
         .describe("Detail level for flows on stop: 'summary' (default, compact) or 'full' (includes headers/bodies)"),
     }),
-  }, async ({ id, hosts, exclude_hosts, simulator_udid, client_ip, detail }) => {
+  }, async ({ id, hosts, exclude_hosts, simulator_udid, device_serial, client_ip, detail }) => {
     try {
       const body: Record<string, unknown> = { detail };
       if (id !== undefined) body.id = id;
       if (hosts !== undefined) body.hosts = hosts;
       if (exclude_hosts !== undefined) body.exclude_hosts = exclude_hosts;
       if (simulator_udid !== undefined) body.simulator_udid = simulator_udid;
+      if (device_serial !== undefined) body.device_serial = device_serial;
       if (client_ip !== undefined) body.client_ip = client_ip;
       const data = await apiRequest("POST", "/api/v1/proxy/capture/start", undefined, body);
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
@@ -640,7 +648,7 @@ refusal exists to prevent.`,
   server.registerTool("get_flow_summary", {
     description: `Get an LLM-optimized summary of recent HTTP traffic. Groups by host, shows errors, slow requests, and overall statistics. Supports cursor-based polling for efficient delta updates.
 
-For physical devices, pass client_ip to isolate that device's traffic — the recorded IP is in proxy_status cert_setup[udid].wifi_proxy_configs[ssid].client_ip. If no flows appear, check proxy_status: wifi_proxy_stale:true means the device proxy needs reconfiguring; a mismatched client_ip means the device's IP changed and record_device_proxy_config should be called again with the new IP. If \`truncated\` is true, flows in the window were evicted and the counts may be low. The cursor follows arrival order: a delta returns every flow that finished since the last summary, including requests that started before it. If \`cursor_reset\` is true, the cursor could not be honoured (the server restarted, or the cursor is ahead of anything the server has numbered) and the result covers the window instead; a string that is not a cursor is refused with an error.`,
+For an Android emulator, pass device_serial (e.g. emulator-5554) — its traffic arrives as the host's address, so client_ip cannot narrow to one emulator. For physical devices, pass client_ip to isolate that device's traffic — the recorded IP is in proxy_status cert_setup[udid].wifi_proxy_configs[ssid].client_ip. If no flows appear, check proxy_status: wifi_proxy_stale:true means the device proxy needs reconfiguring; a mismatched client_ip means the device's IP changed and record_device_proxy_config should be called again with the new IP. If \`truncated\` is true, flows in the window were evicted and the counts may be low. The cursor follows arrival order: a delta returns every flow that finished since the last summary, including requests that started before it. If \`cursor_reset\` is true, the cursor could not be honoured (the server restarted, or the cursor is ahead of anything the server has numbered) and the result covers the window instead; a string that is not a cursor is refused with an error.`,
     inputSchema: strictParams({
       window: z
         .enum(["30s", "1m", "5m", "15m", "1h"])
@@ -660,18 +668,23 @@ For physical devices, pass client_ip to isolate that device's traffic — the re
         .string()
         .optional()
         .describe("Filter to flows from a specific simulator UDID"),
+      device_serial: z
+        .string()
+        .optional()
+        .describe("Filter to flows from this Android emulator (e.g. emulator-5554). Use this rather than client_ip for an emulator: every emulator on a host shares the host's address, so client_ip cannot tell two apart, or either from the host."),
       client_ip: z
         .string()
         .optional()
-        .describe("Filter by client IP address (physical device identification)"),
+        .describe("Filter by client IP address (physical devices). Does not narrow to a single Android emulator — use device_serial."),
     }),
-  }, async ({ window, host, since_cursor, simulator_udid, client_ip }) => {
+  }, async ({ window, host, since_cursor, simulator_udid, device_serial, client_ip }) => {
     try {
       const data = await apiRequest("GET", "/api/v1/proxy/flows/summary", {
         window,
         host,
         since_cursor,
         simulator_udid,
+        device_serial,
         client_ip,
       });
 
