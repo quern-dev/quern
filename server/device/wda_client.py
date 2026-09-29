@@ -12,6 +12,8 @@ Connection strategy:
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import enum
 import logging
 import time
 from dataclasses import dataclass
@@ -74,6 +76,52 @@ SOURCE_TIMEOUT = 10.0
 # derive the budget from the first successful /source per device and delete
 # these constants, which is the open half of #170.
 SOURCE_TIMEOUT_SLOW = 20.0
+
+#: How many times to ask `/status` after a `/source` timeout. Not what
+#: decides hung-versus-busy -- `WdaLiveness` does that -- but enough that a
+#: runner recovering from a restart, which can refuse one ping and answer
+#: the next, is not judged on a single sample.
+SOURCE_TIMEOUT_PING_ATTEMPTS = 4
+
+#: Seconds between those pings. A constant so a test can drive the retry
+#: without paying for it.
+SOURCE_TIMEOUT_PING_GAP = 1.0
+
+class WdaLiveness(enum.Enum):
+    """What a liveness probe established about a runner.
+
+    Three states rather than a boolean, because the restart decision needs
+    to tell "did not answer" from "is not there". WDA serialises, so a
+    `/source` big enough to outlast the probe window queues every `/status`
+    behind it -- a runner that answers nothing can be perfectly healthy.
+
+    Returned rather than stored. An earlier version kept the evidence in a
+    `dict[udid, bool]` on the client and review found three faults in it at
+    once: an early return skipped the per-call reset so a later probe
+    inherited an older one's verdict, nothing ever cleared it -- not
+    `close()`, not `_drop_connection`, not `_restart_wda` -- and the name
+    said "last ping" while the value meant "any of four". None of those are
+    possible for a value that is computed and handed back.
+    """
+
+    #: Answered 200. Healthy.
+    ALIVE = "alive"
+    #: Accepted the connection but did not finish in time. Busy, not dead --
+    #: and busy is what a long tree read looks like from outside.
+    BUSY = "busy"
+    #: Nothing usable is listening: refused, reset, never completed a
+    #: handshake, or answering something other than 200 every time.
+    GONE = "gone"
+
+
+#: `(udid, seconds)` for the tree read on this task, or None if it succeeded.
+#:
+#: Per-task rather than per-device: two callers can read one device at once,
+#: and a device-keyed record belongs to whichever finished last. See
+#: `WdaBackend._note_source_timeout`.
+_LAST_SOURCE_READ: contextvars.ContextVar[tuple[str, float] | None] = (
+    contextvars.ContextVar("quern_last_source_read", default=None)
+)
 # WDA default is 50 — 25 resolves most screens;
 # skeleton fallback handles dense maps
 SNAPSHOT_MAX_DEPTH = 25
@@ -264,6 +312,10 @@ class WdaBackend:
         self._current_depth: dict[str, int] = {}
         # Per-device lock for session creation (prevents parallel _ensure_session races)
         self._session_locks: dict[str, asyncio.Lock] = {}
+        #: Seconds the last `/source` ran before timing out, per device, or
+        #: absent once a read succeeds. Read by the summary so a fallback is
+        #: reported rather than passed off as the screen -- see
+        #: `_note_source_timeout`.
 
     def _source_timeout(self, udid: str) -> float:
         """Return the /source timeout for a device, extended for slower chips.
@@ -837,24 +889,135 @@ class WdaBackend:
 
         return resp
 
-    async def _is_wda_responsive(self, udid: str) -> bool:
-        """Quick /status ping to check if WDA is still alive (2s timeout)."""
+    def _note_source_timeout(self, udid: str, seconds: float) -> None:
+        """Record that *this* tree read timed out and fell back.
+
+        The fallback returns a container skeleton, which is frequently empty
+        -- and an empty result is exactly what a genuinely blank screen
+        returns. `element_count: 0` with no error is the reason #170 took a
+        long time to diagnose: every symptom said the device was fine and
+        the screen was empty, when the read had simply not finished.
+
+        Scoped to the read rather than the device. It began as a
+        `dict[udid, seconds]`, which is wrong under concurrency and was
+        caught in review: two callers can read one device at once, and the
+        device-wide entry belongs to whichever finished last. A timed-out
+        read whose neighbour then succeeded returned a fallback with no
+        `degraded` at all, and a successful read could be labelled degraded
+        by its neighbour's failure. Both are worse than the bug this field
+        exists to report, because they are wrong rather than merely silent.
+
+        A `ContextVar` is the right scope: asyncio copies the context per
+        task, so each request carries its own answer and no lock is needed.
+        The udid travels with it so a value set for one device cannot be
+        read back for another.
+        """
+        _LAST_SOURCE_READ.set((udid, seconds))
+
+    def _clear_source_timeout(self, udid: str) -> None:
+        """Record that this read succeeded, so nothing reports it degraded."""
+        _LAST_SOURCE_READ.set(None)
+
+    def source_timed_out(self, udid: str) -> float | None:
+        """Seconds *this caller's* tree read burned before falling back."""
+        seen = _LAST_SOURCE_READ.get()
+        if seen is None:
+            return None
+        seen_udid, seconds = seen
+        return seconds if seen_udid == udid else None
+
+    async def probe_wda(
+        self, udid: str, *, attempts: int = 1, timeout: float = 2.0,
+        gap: float | None = None,
+    ) -> WdaLiveness:
+        """What `/status` says about this runner.
+
+        One 2s ping by default, which is the right question for "is this
+        thing alive at all".
+
+        `attempts` exists for the caller that has just had a *different*
+        endpoint time out. A runner part-way through building a large
+        accessibility tree can miss a 2s ping while being perfectly healthy
+        -- `/source` on an iPhone 11 measures 10.19-10.35s under Xcode 27 --
+        and the old single ping declared that runner hung. The cost of being
+        wrong is not a retry: `_restart_wda` reinstalls the runner through
+        `xcodebuild`, so a slow read destroyed the device's automation
+        rather than degrading it (#170).
+
+        Asking more than once is not what distinguishes busy from dead --
+        review established that no window can, because WDA serialises and a
+        long enough tree queues every ping behind it. The verdict does that.
+        The extra attempts buy something narrower: a runner recovering from
+        a restart can refuse one ping and answer the next, and one ping
+        would have called that gone.
+
+        Cost: nothing when the runner answers, since the first attempt does
+        not sleep. About nine seconds otherwise -- and that is now paid on
+        every timed-out read that will *not* restart, which is the common
+        case, so it is a real cost rather than a prelude to a reinstall.
+        """
         conn = self._connections.get(udid)
         if not conn:
-            # No cached connection — try to resolve base URL without full reconnect
             try:
                 base_url = await self._get_base_url(udid)
             except DeviceError:
-                return False
+                # Not even addressable. The strongest evidence available that
+                # there is nothing to talk to -- and the old code returned a
+                # bare False here, which the caller could not tell from "did
+                # not answer in time".
+                return WdaLiveness.GONE
         else:
             base_url = conn.base_url
 
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(f"{base_url}/status", timeout=2.0)
-                return resp.status_code == 200
-        except Exception:
-            return False
+        pause = SOURCE_TIMEOUT_PING_GAP if gap is None else gap
+        saw_busy = False
+        for attempt in range(max(1, attempts)):
+            if attempt:
+                await asyncio.sleep(pause)
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(f"{base_url}/status", timeout=timeout)
+                    if resp.status_code == 200:
+                        return WdaLiveness.ALIVE
+                    # Answering, but not with anything usable. Persistent
+                    # non-200 is a state this file has met before: a runner
+                    # returning 500 leaked eleven port-forwards (#296), and
+                    # the two other reachability probes here both require a
+                    # 200. A single bad status is not enough, which is why
+                    # this does not set `saw_busy` and does not return.
+            except httpx.ConnectTimeout:
+                # A handshake that never completed. Nothing accepted the
+                # connection, which is this criterion's own definition of
+                # gone, even though httpx files it under TimeoutException.
+                pass
+            except httpx.TimeoutException:
+                # Read/write/pool: something accepted the connection and is
+                # taking its time. That is exactly what a runner serialising
+                # a large /source behind this ping looks like.
+                saw_busy = True
+            except httpx.TransportError:
+                # Refused, reset, protocol error: nothing usable is there.
+                pass
+            except Exception:  # noqa: BLE001
+                # An unknown failure is not evidence of death, and the cost
+                # of being wrong here is a reinstall.
+                saw_busy = True
+
+        # Any evidence that something accepted a connection outweighs the
+        # rest. A runner that refuses one ping mid-restart and then answers
+        # slowly is recovering, not gone -- restarting it there is the bug
+        # this whole change exists to remove.
+        return WdaLiveness.BUSY if saw_busy else WdaLiveness.GONE
+
+    async def _is_wda_responsive(
+        self, udid: str, *, attempts: int = 1, timeout: float = 2.0,
+        gap: float | None = None,
+    ) -> bool:
+        """Whether WDA answered `/status`. See `probe_wda` for the detail."""
+        probe = await self.probe_wda(
+            udid, attempts=attempts, timeout=timeout, gap=gap,
+        )
+        return probe is WdaLiveness.ALIVE
 
     async def _restart_wda(self, udid: str) -> None:
         """Stop and restart the WDA driver for a device, clearing cached connection."""
@@ -1056,13 +1219,34 @@ class WdaBackend:
                 elapsed, udid[:8],
             )
 
-            # Check if WDA is hung (common with MapKit/large trees)
-            if not await self._is_wda_responsive(udid):
+            # A slow /source is not evidence of a hung runner, and the
+            # recovery is expensive enough that guessing wrong is worse than
+            # the fault: `_restart_wda` reinstalls through xcodebuild. So the
+            # runner gets several chances to answer, spread over a window
+            # wider than the read that just timed out -- it may still be
+            # finishing that very tree.
+            self._note_source_timeout(udid, elapsed / 1000)
+            # GONE, not merely un-ALIVE. WDA serialises, so a tree that
+            # outlasts the probe window queues every ping behind it -- and a
+            # rule that restarts once a clock runs out reinstalls a healthy
+            # runner no matter how long the clock is.
+            liveness = await self.probe_wda(
+                udid, attempts=SOURCE_TIMEOUT_PING_ATTEMPTS,
+            )
+            if liveness is WdaLiveness.GONE:
                 logger.warning("WDA hung on %s, restarting driver...", udid[:8])
                 await self._restart_wda(udid)
+            else:
+                logger.warning(
+                    "wda /source timed out on %s but the runner is %s, not "
+                    "gone; leaving it alone and falling back to element "
+                    "queries",
+                    udid[:8], liveness.value,
+                )
 
             return await self.build_screen_skeleton(udid)
 
+        self._clear_source_timeout(udid)
         data = resp.json()
         # WDA returns {"value": {...tree...}, "sessionId": ...}
         tree = data.get("value", data)
@@ -1110,13 +1294,30 @@ class WdaBackend:
                 elapsed, udid[:8],
             )
 
-            if not await self._is_wda_responsive(udid):
+            # Identical reasoning to `describe_all` above, and this route had
+            # none of it until a review asked which call site the fix forgot.
+            # `get_ui_tree(children_of=...)` reaches only here, so a nested
+            # read on a slow-but-healthy runner reinstalled it exactly as the
+            # flat read used to.
+            self._note_source_timeout(udid, elapsed / 1000)
+            # Same criterion as the flat read above.
+            nested_liveness = await self.probe_wda(
+                udid, attempts=SOURCE_TIMEOUT_PING_ATTEMPTS,
+            )
+            if nested_liveness is WdaLiveness.GONE:
                 logger.warning("WDA hung on %s, restarting driver...", udid[:8])
                 await self._restart_wda(udid)
+            else:
+                logger.warning(
+                    "wda /source timed out on %s (nested) but the runner is "
+                    "%s, not gone; leaving it alone",
+                    udid[:8], nested_liveness.value,
+                )
 
             # Fallback returns flat list — no hierarchy, but better than an error
             return await self.build_screen_skeleton(udid)
 
+        self._clear_source_timeout(udid)
         data = resp.json()
         tree = data.get("value", data)
 

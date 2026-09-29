@@ -970,8 +970,13 @@ class TestDescribeAllTimeoutFallback:
                 assert result[0]["type"] == "TabBar"
                 assert result[1]["AXLabel"] == "Home"
 
-    async def test_describe_all_timeout_restarts_hung_wda(self):
+    async def test_describe_all_timeout_restarts_hung_wda(self, monkeypatch):
         """When /source times out AND /status times out, restart WDA then skeleton fallback."""
+        from server.device import wda_client as _wc
+
+        # The post-timeout check now retries, so without this the test pays
+        # three real seconds of gap and becomes the slowest in the suite.
+        monkeypatch.setattr(_wc, "SOURCE_TIMEOUT_PING_GAP", 0.0)
         backend = _make_session_backend()
         backend._device_os_versions["test-udid"] = "iOS 17.4"
 
@@ -983,7 +988,11 @@ class TestDescribeAllTimeoutFallback:
                 raise httpx.ReadTimeout("timed out")
             if "/status" in url:
                 if not restarted:
-                    raise httpx.ReadTimeout("WDA hung")
+                    # ConnectError, not ReadTimeout: a timeout means
+                    # something accepted the connection and is busy, which
+                    # no longer justifies reinstalling the runner. Nothing
+                    # listening is what "hung" now has to mean.
+                    raise httpx.ConnectError("connection refused")
                 return MagicMock(status_code=200)
             return MagicMock(status_code=200)
 
@@ -3469,3 +3478,513 @@ class TestAFailedForwardIsNotLeft:
 
         assert got is None, "a completed drop claimed to be superseded"
         assert proc.killed
+
+
+class TestASlowSourceDoesNotDestroyTheRunner:
+    """#170: a `/source` timeout used to reinstall a healthy runner.
+
+    Measured on a physical iPhone 11 (iOS 26.6.2) where `/source` takes
+    10.19-10.35s under Xcode 27 -- 7.52s was the pre-rebuild figure, and the
+    constants' own comment records it being overtaken twice. The old code
+    pinged `/status` once with a 2s budget, and a runner
+    part-way through building that tree can miss it -- so quern concluded it
+    was hung and called `_restart_wda`, which goes through
+    `xcodebuild test-without-building` and reinstalls the runner. One second
+    of latency turned a slow read into an unautomatable device, and the
+    recovery was worse than the fault.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_busy_runner_that_answers_late_is_left_alone(self, monkeypatch):
+        from server.device import wda_client as wc
+
+        # No real waiting between pings.
+        monkeypatch.setattr(wc, "SOURCE_TIMEOUT_PING_GAP", 0.0)
+
+        backend = _make_session_backend()
+        backend._device_os_versions["test-udid"] = "iOS 17.4"
+        pings = []
+
+        async def mock_get(url, **kwargs):
+            if "/source" in url:
+                raise httpx.ReadTimeout("still building the tree")
+            if "/status" in url:
+                pings.append(1)
+                # Busy for the first two asks, then free -- which is what a
+                # runner finishing a 7.5s tree actually looks like.
+                if len(pings) < 3:
+                    raise httpx.ReadTimeout("busy")
+                return MagicMock(status_code=200)
+            return MagicMock(status_code=200)
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=mock_get)
+            mock_client.post = AsyncMock(
+                return_value=MagicMock(
+                    status_code=200, json=MagicMock(return_value={"value": []})
+                )
+            )
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            with patch(
+                "server.device.wda.stop_driver", new_callable=AsyncMock
+            ) as mock_stop, patch(
+                "server.device.wda.start_driver", new_callable=AsyncMock
+            ) as mock_start, patch.object(
+                backend, "build_screen_skeleton", new_callable=AsyncMock, return_value=[]
+            ):
+                await backend.describe_all("test-udid")
+
+        # The assertion that matters: nothing was destroyed.
+        mock_stop.assert_not_called()
+        mock_start.assert_not_called()
+        assert len(pings) >= 3, f"gave up after {len(pings)} pings"
+
+    @pytest.mark.asyncio
+    async def test_a_runner_that_only_times_out_is_never_restarted(self, monkeypatch):
+        """The heart of the fix, and the case a longer window cannot cover.
+
+        WDA serialises, so a `/source` big enough to outlast the ping window
+        queues every `/status` behind it -- and a rule that restarts once a
+        clock runs out reinstalls a healthy runner however generous the
+        clock is. A timeout means something accepted the connection; only a
+        refused or reset connection says nothing is there.
+
+        Mutation-proved: dropping the refusal requirement, or treating a
+        timeout as a refusal, both passed the suite before this existed.
+        """
+        from server.device import wda_client as _wc
+
+        monkeypatch.setattr(_wc, "SOURCE_TIMEOUT_PING_GAP", 0.0)
+        backend = _make_session_backend()
+        backend._device_os_versions["test-udid"] = "iOS 17.4"
+
+        async def mock_get(url, **kwargs):
+            # Everything times out; nothing is refused.
+            raise httpx.ReadTimeout("busy building a very large tree")
+
+        with patch("httpx.AsyncClient") as cls:
+            mc = AsyncMock()
+            mc.get = AsyncMock(side_effect=mock_get)
+            mc.post = AsyncMock(return_value=MagicMock(
+                status_code=200, json=MagicMock(return_value={"value": []})))
+            mc.__aenter__ = AsyncMock(return_value=mc)
+            mc.__aexit__ = AsyncMock(return_value=False)
+            cls.return_value = mc
+            with patch(
+                "server.device.wda.stop_driver", new_callable=AsyncMock
+            ) as mock_stop, patch(
+                "server.device.wda.start_driver", new_callable=AsyncMock,
+                return_value={"ready": True},
+            ) as mock_start, patch.object(
+                backend, "build_screen_skeleton", new_callable=AsyncMock, return_value=[]
+            ):
+                await backend.describe_all("test-udid")
+
+        mock_stop.assert_not_called()
+        mock_start.assert_not_called()
+
+    async def test_the_nested_read_also_spares_a_merely_slow_runner(self, monkeypatch):
+        """Its sibling. The restart criterion has two call sites."""
+        from server.device import wda_client as _wc
+
+        monkeypatch.setattr(_wc, "SOURCE_TIMEOUT_PING_GAP", 0.0)
+        backend = _make_session_backend()
+        backend._device_os_versions["test-udid"] = "iOS 17.4"
+
+        async def mock_get(url, **kwargs):
+            raise httpx.ReadTimeout("busy")
+
+        with patch("httpx.AsyncClient") as cls:
+            mc = AsyncMock()
+            mc.get = AsyncMock(side_effect=mock_get)
+            mc.post = AsyncMock(return_value=MagicMock(
+                status_code=200, json=MagicMock(return_value={"value": []})))
+            mc.__aenter__ = AsyncMock(return_value=mc)
+            mc.__aexit__ = AsyncMock(return_value=False)
+            cls.return_value = mc
+            with patch(
+                "server.device.wda.stop_driver", new_callable=AsyncMock
+            ) as mock_stop, patch(
+                "server.device.wda.start_driver", new_callable=AsyncMock,
+                return_value={"ready": True},
+            ), patch.object(
+                backend, "build_screen_skeleton", new_callable=AsyncMock, return_value=[]
+            ):
+                await backend.describe_all_nested("test-udid")
+
+        mock_stop.assert_not_called()
+
+    async def test_a_genuinely_hung_runner_is_still_restarted(self, monkeypatch):
+        """The behaviour that must survive: patience is not surrender."""
+        from server.device import wda_client as wc
+
+        monkeypatch.setattr(wc, "SOURCE_TIMEOUT_PING_GAP", 0.0)
+
+        backend = _make_session_backend()
+        backend._device_os_versions["test-udid"] = "iOS 17.4"
+
+        async def mock_get(url, **kwargs):
+            if "/source" in url:
+                raise httpx.ReadTimeout("timed out")
+            # Refused, not slow -- the only thing that now justifies a
+            # restart, because WDA serialises and a long tree makes every
+            # ping time out no matter how patient the window is.
+            raise httpx.ConnectError("connection refused")
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=mock_get)
+            mock_client.post = AsyncMock(
+                return_value=MagicMock(
+                    status_code=200, json=MagicMock(return_value={"value": []})
+                )
+            )
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            with patch(
+                "server.device.wda.stop_driver", new_callable=AsyncMock
+            ) as mock_stop, patch(
+                "server.device.wda.start_driver", new_callable=AsyncMock,
+                # A dict, not a bare AsyncMock: `_restart_wda` reads
+                # `result.get("ready")`, and a coroutine is truthy -- so the
+                # "started but not responsive" branch never ran and pytest
+                # warned that a coroutine was never awaited.
+                return_value={"ready": True},
+            ), patch.object(
+                backend, "build_screen_skeleton", new_callable=AsyncMock, return_value=[]
+            ):
+                await backend.describe_all("test-udid")
+
+        mock_stop.assert_called_once_with("test-udid")
+
+
+class TestATimedOutReadIsNotPassedOffAsTheScreen:
+    """#170's hardest part to diagnose: the fallback returns a skeleton,
+    frequently empty, and an empty result is what a blank screen returns.
+    `element_count: 0` with no error sent the reader looking at the app."""
+
+    @pytest.mark.asyncio
+    async def test_the_timeout_is_recorded_for_the_caller(self, monkeypatch):
+        from server.device import wda_client as wc
+
+        monkeypatch.setattr(wc, "SOURCE_TIMEOUT_PING_GAP", 0.0)
+        backend = _make_session_backend()
+        backend._device_os_versions["test-udid"] = "iOS 17.4"
+
+        assert backend.source_timed_out("test-udid") is None
+
+        async def mock_get(url, **kwargs):
+            if "/source" in url:
+                raise httpx.ReadTimeout("timed out")
+            return MagicMock(status_code=200)
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=mock_get)
+            mock_client.post = AsyncMock(
+                return_value=MagicMock(
+                    status_code=200, json=MagicMock(return_value={"value": []})
+                )
+            )
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            with patch.object(
+                backend, "build_screen_skeleton", new_callable=AsyncMock, return_value=[]
+            ):
+                await backend.describe_all("test-udid")
+
+        recorded = backend.source_timed_out("test-udid")
+        assert recorded is not None, "a timed-out read left no trace for the caller"
+        assert recorded >= 0
+
+    @pytest.mark.asyncio
+    async def test_a_successful_read_clears_it(self):
+        """Otherwise one slow read makes every later screen look degraded."""
+        backend = _make_session_backend()
+        backend._note_source_timeout("test-udid", 7.52)
+        assert backend.source_timed_out("test-udid") == 7.52
+
+        tree = {"value": {"type": "Application", "children": []}}
+
+        async def mock_get(url, **kwargs):
+            return MagicMock(status_code=200, json=MagicMock(return_value=tree))
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=mock_get)
+            mock_client.post = AsyncMock(
+                return_value=MagicMock(
+                    status_code=200, json=MagicMock(return_value={"value": []})
+                )
+            )
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            await backend.describe_all("test-udid")
+
+        assert backend.source_timed_out("test-udid") is None
+
+
+class TestTheNestedReadGotTheSameTreatment:
+    """`describe_all_nested` carried #170 verbatim after `describe_all` was
+    fixed: one 2s ping, restart on failure, no record of the timeout.
+
+    Found by a review agent asked only which call site the fix forgot --
+    the third consecutive PR here where the answer was a sibling route.
+    `get_ui_tree(children_of=...)` is the only way in, and it is a live MCP
+    tool, so the unfixed path was reachable in one call.
+    """
+
+    @staticmethod
+    def _client(mock_get):
+        backend = _make_session_backend()
+        backend._device_os_versions["test-udid"] = "iOS 17.4"
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=mock_get)
+        mock_client.post = AsyncMock(
+            return_value=MagicMock(
+                status_code=200, json=MagicMock(return_value={"value": []})
+            )
+        )
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        return backend, mock_client
+
+    async def test_a_busy_runner_is_not_restarted_on_a_nested_read(self, monkeypatch):
+        from server.device import wda_client as _wc
+
+        monkeypatch.setattr(_wc, "SOURCE_TIMEOUT_PING_GAP", 0.0)
+        pings = []
+
+        async def mock_get(url, **kwargs):
+            if "/source" in url:
+                raise httpx.ReadTimeout("still building")
+            if "/status" in url:
+                pings.append(1)
+                if len(pings) < 3:
+                    raise httpx.ReadTimeout("busy")
+                return MagicMock(status_code=200)
+            return MagicMock(status_code=200)
+
+        backend, mock_client = self._client(mock_get)
+        with patch("httpx.AsyncClient") as cls:
+            cls.return_value = mock_client
+            with patch(
+                "server.device.wda.stop_driver", new_callable=AsyncMock
+            ) as mock_stop, patch(
+                "server.device.wda.start_driver", new_callable=AsyncMock,
+                return_value={"ready": True},
+            ) as mock_start, patch.object(
+                backend, "build_screen_skeleton", new_callable=AsyncMock, return_value=[]
+            ):
+                await backend.describe_all_nested("test-udid")
+
+        mock_stop.assert_not_called()
+        mock_start.assert_not_called()
+        assert len(pings) >= 3, f"gave up after {len(pings)} pings"
+
+    async def test_a_nested_timeout_is_recorded(self, monkeypatch):
+        from server.device import wda_client as _wc
+
+        monkeypatch.setattr(_wc, "SOURCE_TIMEOUT_PING_GAP", 0.0)
+
+        async def mock_get(url, **kwargs):
+            if "/source" in url:
+                raise httpx.ReadTimeout("timed out")
+            return MagicMock(status_code=200)
+
+        backend, mock_client = self._client(mock_get)
+        with patch("httpx.AsyncClient") as cls:
+            cls.return_value = mock_client
+            with patch.object(
+                backend, "build_screen_skeleton", new_callable=AsyncMock, return_value=[]
+            ):
+                await backend.describe_all_nested("test-udid")
+
+        assert backend.source_timed_out("test-udid") is not None
+
+    async def test_a_successful_nested_read_clears_a_stale_note(self):
+        """Otherwise a note from an earlier flat timeout outlives the problem
+        and reports a healthy screen as degraded -- measured by the review."""
+        tree = {"value": {"type": "Application", "children": []}}
+
+        async def mock_get(url, **kwargs):
+            return MagicMock(status_code=200, json=MagicMock(return_value=tree))
+
+        backend, mock_client = self._client(mock_get)
+        backend._note_source_timeout("test-udid", 10.2)
+
+        with patch("httpx.AsyncClient") as cls:
+            cls.return_value = mock_client
+            await backend.describe_all_nested("test-udid")
+
+        assert backend.source_timed_out("test-udid") is None
+
+    async def test_one_readers_success_does_not_clear_anothers_timeout(self):
+        """The record is per-read, not per-device.
+
+        It began as `dict[udid, seconds]`, which belongs to whichever of two
+        concurrent readers finished last: a timed-out read whose neighbour
+        then succeeded returned a fallback with no `degraded`, and a
+        successful read could be labelled degraded by its neighbour's
+        failure. Both are wrong rather than merely silent, which is worse
+        than the bug the field exists to report. Found in review.
+        """
+        backend = _make_session_backend()
+
+        async def timed_out_reader():
+            backend._note_source_timeout("test-udid", 12.0)
+            await asyncio.sleep(0.02)          # the neighbour runs here
+            return backend.source_timed_out("test-udid")
+
+        async def successful_reader():
+            await asyncio.sleep(0.01)
+            backend._clear_source_timeout("test-udid")
+            return backend.source_timed_out("test-udid")
+
+        timed_out, ok = await asyncio.gather(timed_out_reader(), successful_reader())
+
+        assert timed_out == 12.0, "a neighbour's success erased this read's timeout"
+        assert ok is None, "a neighbour's timeout marked this read degraded"
+
+    async def test_a_record_for_one_device_is_not_read_back_for_another(self):
+        backend = _make_session_backend()
+        backend._note_source_timeout("device-a", 11.0)
+        assert backend.source_timed_out("device-a") == 11.0
+        assert backend.source_timed_out("device-b") is None
+
+
+class TestWhatTheLivenessProbeConcludes:
+    """`probe_wda` returns its verdict rather than storing it.
+
+    The stored version had three faults at once, all found in one review:
+    an early return skipped the per-call reset so a later probe inherited
+    an older verdict; nothing ever cleared the flag -- not `close()`, not
+    `_drop_connection`, not `_restart_wda`; and the name said "last ping"
+    while the value meant "any of four". A computed value has none of
+    those failure modes available to it.
+    """
+
+    @staticmethod
+    def _backend(side_effect):
+        backend = _make_session_backend()
+        mc = AsyncMock()
+        mc.get = AsyncMock(side_effect=side_effect)
+        mc.__aenter__ = AsyncMock(return_value=mc)
+        mc.__aexit__ = AsyncMock(return_value=False)
+        return backend, mc
+
+    async def _probe(self, monkeypatch, side_effect, attempts=4):
+        from server.device import wda_client as _wc
+
+        monkeypatch.setattr(_wc, "SOURCE_TIMEOUT_PING_GAP", 0.0)
+        backend, mc = self._backend(side_effect)
+        with patch("httpx.AsyncClient") as cls:
+            cls.return_value = mc
+            return await backend.probe_wda("test-udid", attempts=attempts)
+
+    async def test_a_200_is_alive(self, monkeypatch):
+        from server.device.wda_client import WdaLiveness
+
+        async def ok(url, **kw):
+            return MagicMock(status_code=200)
+
+        assert await self._probe(monkeypatch, ok) is WdaLiveness.ALIVE
+
+    async def test_read_timeouts_are_busy_not_gone(self, monkeypatch):
+        """The case a longer window can never resolve."""
+        from server.device.wda_client import WdaLiveness
+
+        async def slow(url, **kw):
+            raise httpx.ReadTimeout("still building")
+
+        assert await self._probe(monkeypatch, slow) is WdaLiveness.BUSY
+
+    async def test_a_refused_connection_is_gone(self, monkeypatch):
+        from server.device.wda_client import WdaLiveness
+
+        async def refused(url, **kw):
+            raise httpx.ConnectError("refused")
+
+        assert await self._probe(monkeypatch, refused) is WdaLiveness.GONE
+
+    async def test_a_connect_timeout_is_gone(self, monkeypatch):
+        """httpx files it under TimeoutException, but a handshake that never
+        completed means nothing accepted -- which is the criterion."""
+        from server.device.wda_client import WdaLiveness
+
+        async def never(url, **kw):
+            raise httpx.ConnectTimeout("no handshake")
+
+        assert await self._probe(monkeypatch, never) is WdaLiveness.GONE
+
+    async def test_persistent_non_200_is_gone(self, monkeypatch):
+        """A runner answering 500 forever is answering nothing usable; this
+        file already records one leaking eleven port-forwards (#296), and
+        its other two reachability probes both require a 200."""
+        from server.device.wda_client import WdaLiveness
+
+        async def broken(url, **kw):
+            return MagicMock(status_code=500)
+
+        assert await self._probe(monkeypatch, broken) is WdaLiveness.GONE
+
+    async def test_one_refusal_then_busy_is_busy(self, monkeypatch):
+        """A runner that refuses mid-restart and then answers slowly is
+        recovering. Restarting it there is the bug this change removes."""
+        from server.device.wda_client import WdaLiveness
+
+        calls = []
+
+        async def recovering(url, **kw):
+            calls.append(1)
+            if len(calls) == 1:
+                raise httpx.ConnectError("mid-restart")
+            raise httpx.ReadTimeout("back, and busy")
+
+        assert await self._probe(monkeypatch, recovering) is WdaLiveness.BUSY
+
+    async def test_an_unresolvable_base_url_is_gone(self, monkeypatch):
+        """The strongest evidence there is nothing to talk to. The old code
+        returned a bare False here, indistinguishable from 'did not answer',
+        and left the stored flag untouched from a previous call."""
+        from server.device.wda_client import WdaLiveness
+
+        backend = _make_session_backend()
+        backend._connections.clear()
+
+        async def no_url(_udid):
+            raise DeviceError("no forward", tool="wda")
+
+        monkeypatch.setattr(backend, "_get_base_url", no_url)
+        assert await backend.probe_wda("test-udid") is WdaLiveness.GONE
+
+    async def test_a_verdict_cannot_leak_between_calls(self, monkeypatch):
+        """The stale-state failure, made impossible rather than guarded."""
+        from server.device import wda_client as _wc
+        from server.device.wda_client import WdaLiveness
+
+        monkeypatch.setattr(_wc, "SOURCE_TIMEOUT_PING_GAP", 0.0)
+        backend, mc = self._backend(None)
+        state = {"mode": "refused"}
+
+        async def varying(url, **kw):
+            if state["mode"] == "refused":
+                raise httpx.ConnectError("refused")
+            return MagicMock(status_code=200)
+
+        mc.get = AsyncMock(side_effect=varying)
+        with patch("httpx.AsyncClient") as cls:
+            cls.return_value = mc
+            assert await backend.probe_wda("test-udid", attempts=2) is WdaLiveness.GONE
+            state["mode"] = "ok"
+            assert await backend.probe_wda("test-udid", attempts=2) is WdaLiveness.ALIVE

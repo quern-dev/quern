@@ -113,9 +113,11 @@ async def get_ui_elements(
     with _action("get_ui_tree", category="device.read") as act:
         act.detail = f"mode={mode}" + (f" children_of={children_of}" if children_of else "")
         try:
+            asked_for_skeleton = False
             if strategy == "skeleton":
                 resolved_udid = await controller.resolve_udid(udid)
                 if controller._is_physical(resolved_udid):
+                    asked_for_skeleton = True
                     raw = await controller.wda_client.build_screen_skeleton(resolved_udid)
                     from server.device.ui_elements import parse_elements
                     elements = parse_elements(raw)
@@ -137,11 +139,36 @@ async def get_ui_elements(
             act.udid = resolved_udid
             act.detail += f", {len(elements)} elements"
             dump_kwargs = {} if include_raw else {"exclude": {"extra_attrs"}}
-            return {
+            body = {
                 "elements": [e.model_dump(**dump_kwargs) for e in elements],
                 "element_count": len(elements),
                 "udid": resolved_udid,
             }
+            # `element_count` here has the same problem it has on the summary:
+            # a tree read that timed out falls back to a container skeleton,
+            # and a small count is indistinguishable from a simple screen.
+            # `get_ui_tree` is a separate route from `get_screen_summary`, so
+            # it needs telling separately -- #170 was diagnosed twice over
+            # because only the log knew.
+            # Skipped for a skeleton the caller asked for. That read never
+            # touches `/source`, so a note left by an earlier timeout is still
+            # sitting there and would tell them their deliberate choice had
+            # timed out. `get_screen_summary` got this guard; this route is
+            # its sibling and did not, which is the same omission the review
+            # of this PR found in `describe_all_nested`.
+            backend = None if asked_for_skeleton else getattr(
+                controller, "wda_client", None
+            )
+            timed_out = getattr(backend, "source_timed_out", None)
+            seconds = timed_out(resolved_udid) if callable(timed_out) else None
+            if seconds is not None:
+                body["source_timed_out"] = True
+                body["degraded"] = (
+                    f"The accessibility tree read timed out after {seconds:.1f}s, "
+                    "so this is a partial fallback rather than the tree. Retry "
+                    "with a larger source_timeout."
+                )
+            return body
         except DeviceError as e:
             raise _handle_device_error(e)
 

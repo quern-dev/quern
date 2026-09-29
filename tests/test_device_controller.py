@@ -615,6 +615,56 @@ class TestGetScreenSummary:
         assert summary["element_count"] == 4
 
 
+class TestADegradedReadSaysSo:
+    """#170: a `/source` timeout falls back to a container skeleton, which is
+    often empty -- and an empty result is exactly what a blank screen
+    returns. `element_count: 0` with no error is why that issue took a whole
+    session to diagnose: every symptom pointed at the app.
+
+    The warning existed in the server log. A caller driving quern over MCP
+    sees the JSON body and nothing else, which is this repo's rule about a
+    check worth making being worth delivering.
+    """
+
+    async def test_a_timed_out_read_is_reported_on_the_summary(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl.idb.describe_all = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
+        # The backend reports that its last read timed out and fell back.
+        ctrl.idb.source_timed_out = lambda _udid: 7.52
+
+        summary, _elements, _udid = await ctrl.get_screen_summary()
+
+        assert summary.get("source_timed_out") is True, summary
+        assert "7.5" in summary.get("degraded", ""), summary["degraded"]
+        assert "source_timeout" in summary["degraded"], (
+            "the note should say how to get a real read"
+        )
+
+    async def test_a_healthy_read_carries_no_degraded_note(self):
+        """Otherwise the note is noise and gets ignored where it matters."""
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl.idb.describe_all = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
+        ctrl.idb.source_timed_out = lambda _udid: None
+
+        summary, _elements, _udid = await ctrl.get_screen_summary()
+
+        assert "degraded" not in summary, summary
+        assert "source_timed_out" not in summary, summary
+
+    async def test_a_backend_without_the_hook_is_not_an_error(self):
+        """u2 and sim-bridge do not have one; the summary must still work."""
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl.idb.describe_all = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
+        assert not hasattr(ctrl.idb, "source_timed_out")
+
+        summary, _elements, _udid = await ctrl.get_screen_summary()
+        assert summary["element_count"] == 4
+        assert "degraded" not in summary
+
+
 class TestTap:
     async def test_tap_delegates_to_idb(self):
         ctrl = DeviceController()
@@ -2204,3 +2254,27 @@ class TestAMissingToolIsNotAnError:
         taking a UDID raised, whatever it was really doing."""
         ctrl = self._ctrl("simctl")
         assert await ctrl.resolve_udid("AAAA-1111") == "AAAA-1111"
+
+
+class TestARequestedSkeletonIsNotCalledDegraded:
+    """`strategy="skeleton"` never touches `/source`, so a note left by an
+    earlier timeout is still sitting there -- and the summary told a caller
+    who deliberately chose a skeleton that their read had timed out and to
+    retry with a larger source_timeout.
+
+    The agent guide recommends that strategy for exactly the dense screens
+    that produce the timeouts, so it is the ordinary sequence.
+    """
+
+    async def test_a_deliberate_skeleton_carries_no_degraded_note(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl._is_physical = lambda _u: True
+        ctrl.wda_client.build_screen_skeleton = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
+        # A stale note from an earlier read that did time out.
+        ctrl.wda_client.source_timed_out = lambda _u: 20.0
+
+        summary, _elements, _udid = await ctrl.get_screen_summary(strategy="skeleton")
+
+        assert "degraded" not in summary, summary
+        assert "source_timed_out" not in summary, summary

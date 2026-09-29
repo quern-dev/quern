@@ -1746,7 +1746,8 @@ class DeviceControllerUI:
             mode: 'flat' to use flat idb output (for custom companion). Default uses nested.
         """
         resolved = await self.resolve_udid(udid)
-        if strategy == "skeleton" and self._is_physical(resolved):
+        asked_for_skeleton = strategy == "skeleton" and self._is_physical(resolved)
+        if asked_for_skeleton:
             raw = await self.wda_client.build_screen_skeleton(resolved)
             elements = parse_elements(raw)
         else:
@@ -1755,7 +1756,35 @@ class DeviceControllerUI:
                 source_timeout=source_timeout,
                 mode=mode,
             )
-        return generate_screen_summary(elements, max_elements=max_elements), elements, resolved
+        summary = generate_screen_summary(elements, max_elements=max_elements)
+
+        # A tree read that timed out falls back to a container skeleton,
+        # which is often empty -- and an empty result is exactly what a blank
+        # screen returns. Saying so here is the difference between "this
+        # screen has nothing on it" and "we did not manage to read it", which
+        # #170 spent a long session failing to tell apart. The log line was
+        # already there; a caller driving this over MCP never sees the log.
+        # Read off the backend that did the work rather than re-deciding --
+        # `_last_read_backend` exists at the top of this file for the same
+        # reason (#186). Skipped entirely for a skeleton the caller asked
+        # for: that read never touches `/source`, so a note left by an
+        # earlier timeout would still be sitting there and would tell them
+        # their deliberate choice had timed out. The agent guide recommends
+        # `strategy: "skeleton"` for exactly the dense screens that produce
+        # these timeouts, so it is the likely sequence rather than a corner.
+        backend = None if asked_for_skeleton else self._ui_backend(resolved)
+        timed_out = getattr(backend, "source_timed_out", None)
+        seconds = timed_out(resolved) if callable(timed_out) else None
+        if seconds is not None:
+            summary["source_timed_out"] = True
+            summary["degraded"] = (
+                f"The accessibility tree read timed out after {seconds:.1f}s, so "
+                "this is a partial fallback rather than the screen. Element "
+                "counts are not trustworthy. Retry with a larger "
+                "source_timeout."
+            )
+
+        return summary, elements, resolved
 
     async def _warn_if_input_is_suppressed(self, resolved: str) -> None:
         """Say once per device when Device Hub holds its input services.
