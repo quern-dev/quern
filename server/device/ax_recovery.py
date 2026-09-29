@@ -46,10 +46,14 @@ tree it was given, whatever else is or is not affected.
 
 There is no reload path: the port cache belongs to the AX runtime loaded into
 the process, the bridge holds no handle to invalidate it, and `SIGHUP` is not
-handled. Kill and respawn is the only lever — and it is enough, because the
-bridge is launchd-on-demand, so the next query brings it back against a fresh
-cache. Measured at ~1s, including with six simulators booted at load average
-672, so recovery does not degrade under a loaded pool.
+handled. Kill and respawn is the only lever, and it is enough — but **not
+immediately**, which this used to claim. "The next query brings it back against
+a fresh cache" is wrong: `reset_bridge` returns when the kill lands, 0.07s
+measured, while the replacement process appears at +0.66s and its cache answers
+at +0.80s to +1.29s. A re-read issued straight after the kill gets the *same*
+poisoned tree, so recovery reported success and delivered nothing. See
+`reread_after_recovery`, which watches for both. Recovery does not degrade under
+a loaded pool: measured with six simulators booted at load average 672.
 
 One bridge exists per booted simulator, so this is scoped to the simulator that
 needs it and leaves the others undisturbed.
@@ -60,7 +64,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import time
 from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
@@ -119,7 +122,11 @@ async def _run(*args: str, timeout: float = 5.0) -> tuple[int, str]:
 #: +0.66s and reads come good at +0.80s, +1.27s and +1.29s, so this is roughly
 #: three times the slowest observed.
 _RESPAWN_BUDGET = 4.0
-_RESPAWN_POLL = 0.1
+#: Phase 1 polls `bridge_pids_for`, which runs an `lsof` per matching pid,
+#: so this is a compromise rather than as-fast-as-possible: the respawn
+#: takes ~0.66s, and a quarter-second poll finds it in two or three calls
+#: instead of a dozen (review of #337).
+_RESPAWN_POLL = 0.25
 
 
 async def reread_after_recovery(
@@ -166,29 +173,45 @@ async def reread_after_recovery(
     if not await reset_bridge(udid):
         return tree
 
-    deadline = time.monotonic() + budget
+    # One read after the kill happens regardless: the caller's tree was read
+    # from the bridge we just killed, so returning it would make the reset
+    # unobservable. `budget` bounds the *waiting*, and the wall clock bounds
+    # the whole thing -- checking a deadline between awaits does not bound an
+    # await that hangs, and both a `bridge_pids_for` (an `lsof` per pid, ten
+    # seconds each) and a tree read can outlast the budget on their own
+    # (review of #337).
+    best = tree
+    try:
+        async with asyncio.timeout(budget):
+            # Phase 1: wait for the replacement, so the first re-read is not
+            # spent confirming what `ps` already knows.
+            while True:
+                if set(await bridge_pids_for(udid)) - before:
+                    break
+                await asyncio.sleep(_RESPAWN_POLL)
 
-    # Phase 1: wait for the replacement, so the first re-read is not spent
-    # confirming what `ps` already knows. Cheap next to a tree read.
-    while time.monotonic() < deadline:
-        if set(await bridge_pids_for(udid)) - before:
-            break
-        await asyncio.sleep(_RESPAWN_POLL)
+            # Phase 2: the authoritative one.
+            while True:
+                best = await reread()
+                if not looks_poisoned(best):
+                    return best
+                await asyncio.sleep(_RESPAWN_POLL)
+    except TimeoutError:
+        pass
 
-    # Phase 2: the authoritative one.
-    while True:
-        fresh = await reread()
-        if not looks_poisoned(fresh):
-            return fresh
-        if time.monotonic() >= deadline:
-            # Still wedged after a reset and the full budget: the cause is
-            # something else, and the poisoned tree is the honest answer.
-            logger.warning(
-                "accessibility bridge for %s still wedged %.1fs after a reset",
-                udid, budget,
-            )
-            return fresh
-        await asyncio.sleep(_RESPAWN_POLL)
+    if best is tree:
+        # The budget went entirely on watching, so nothing has been read since
+        # the kill. One read, unbounded like any other read this backend makes,
+        # rather than handing back a tree from a process that no longer exists.
+        best = await reread()
+    if looks_poisoned(best):
+        # Still wedged after a reset and the full budget: the cause is
+        # something else, and the poisoned tree is the honest answer.
+        logger.warning(
+            "accessibility bridge for %s still wedged %.1fs after a reset",
+            udid, budget,
+        )
+    return best
 
 
 async def bridge_pids_for(udid: str) -> list[int]:

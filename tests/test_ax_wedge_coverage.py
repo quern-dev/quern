@@ -13,6 +13,7 @@ from the docstring would prove the detector matches the docstring.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -128,6 +129,19 @@ async def _value(v):
     return v
 
 
+async def _bounded(coro, seconds=10.0):
+    """Run `coro` under an independent deadline.
+
+    The recursion-guard tests below assert that a *missing* guard is caught.
+    Without a bound of their own they inherit the one under test: losing
+    `_recovered=True` gives every recursion a fresh recovery budget, so the
+    assertion is never reached and the test hangs instead of failing. As per
+    the path instruction -- a test that blocks forever when the guard it
+    checks is removed is not checking it (review of #337).
+    """
+    return await asyncio.wait_for(coro, timeout=seconds)
+
+
 def _respawning_pids(monkeypatch):
     """`bridge_pids_for` as it really behaves: the old pid until the kill, a
     different one after. A constant would make the pid wait spin for the whole
@@ -227,7 +241,7 @@ class TestIdbHealsOnEveryReader:
         monkeypatch.setattr("server.device.probing.probe_container",
                             lambda *a, **k: _empty())
 
-        out = await getattr(backend, method)(UDID)
+        out = await _bounded(getattr(backend, method)(UDID))
 
         assert len(resets) == 1
         assert ax_recovery.looks_poisoned(out)
@@ -266,12 +280,18 @@ class TestSimBridgeNestedHealsToo:
             return WEDGED
 
         monkeypatch.setattr(SimBridgeBackend, "_fetch_nested", fetch)
-        _respawning_pids(monkeypatch)
+        monkeypatch.setattr(ax_recovery, "_RESPAWN_BUDGET", 0.3)
+        state = _respawning_pids(monkeypatch)
         resets = []
-        monkeypatch.setattr(ax_recovery, "reset_bridge",
-                            lambda u: resets.append(u) or _true())
 
-        out = await backend.describe_all_nested(UDID, _recovered=False)
+        async def kill(udid):
+            resets.append(udid)
+            state["killed"] = True   # or phase 1 waits out the budget
+            return True
+
+        monkeypatch.setattr(ax_recovery, "reset_bridge", kill)
+
+        out = await _bounded(backend.describe_all_nested(UDID, _recovered=False))
 
         assert len(resets) == 1, f"reset {len(resets)} times, not once"
         assert ax_recovery.looks_poisoned(out)
