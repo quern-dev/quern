@@ -1094,3 +1094,42 @@ class TestScrollToElement:
                 headers=auth_headers,
             )
         assert resp.status_code == 422
+
+
+class TestGetUiTreeDoesNotCallARequestedSkeletonDegraded:
+    """The sibling of the same guard on `get_screen_summary`.
+
+    `strategy="skeleton"` never reads `/source`, so a note left by an earlier
+    timeout is still recorded — and `get_ui_tree` reported it, telling a
+    caller who deliberately chose a skeleton that their read had timed out.
+    Found by review on #329; the summary path had the guard and this one did
+    not.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_requested_skeleton_carries_no_degraded_note(
+        self, app, auth_headers, mock_controller
+    ):
+        from httpx import ASGITransport, AsyncClient
+
+        mock_controller._is_physical = lambda _u: True
+        mock_controller.resolve_udid = AsyncMock(return_value="PHYS-1")
+        from unittest.mock import MagicMock
+
+        mock_controller.wda_client = MagicMock()
+        mock_controller.wda_client.build_screen_skeleton = AsyncMock(return_value=[])
+        # A stale record from an earlier read that really did time out.
+        mock_controller.wda_client.source_timed_out = lambda _u: 20.0
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get(
+                "/api/v1/device/ui",
+                params={"udid": "PHYS-1", "strategy": "skeleton"},
+                headers=auth_headers,
+            )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert "degraded" not in body, body
+        assert "source_timed_out" not in body, body
