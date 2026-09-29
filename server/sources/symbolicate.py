@@ -28,7 +28,7 @@ import logging
 import re
 import weakref
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from server.device import build_records
@@ -47,6 +47,9 @@ _WITH_LINE = re.compile(
     r"^(?P<sym>.+?) \(in (?P<image>.+?)\) \((?P<file>[^()]+):(?P<line>\d+)\)$")
 #: `-[UIView layoutSubviews] (in UIKitCore) + 12`
 _WITH_OFFSET = re.compile(r"^(?P<sym>.+?) \(in (?P<image>.+?)\) \+ (?P<off>\d+)$")
+#: xcrun's own failures, before atos ran: "unable to find utility" (72, checked)
+#: and the unaccepted Xcode licence (69).
+_XCRUN_DID_NOT_RUN = {69, 72}
 _UUID = re.compile(r"^[0-9A-Fa-f]{8}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{4}-?"
                    r"[0-9A-Fa-f]{12}$")
 
@@ -92,6 +95,17 @@ class Lookup:
     note: str = ""
 
 
+@dataclass
+class Read:
+    """What one read of get_latest_crash learns once and shares: its misses,
+    so ten reports of one unsymbolicatable build ask Spotlight once, and the
+    build records, parsed once rather than once per UUID looked up."""
+
+    misses: dict[str, Lookup] = field(default_factory=dict)
+    records: tuple[list, int, bool] | None = None
+    records_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
 class SymbolFinder:
     """Where a UUID's symbols are on this Mac.
 
@@ -122,15 +136,16 @@ class SymbolFinder:
             lock = self._report_locks[crash_id] = asyncio.Lock()
         return lock
 
-    async def find(self, uuid: str, misses: dict[str, Lookup] | None = None) -> Lookup:
-        """Where its symbols are. `misses` holds this read's misses, so ten
-        reports of one unsymbolicatable build ask Spotlight once -- and a broken
-        mdfind is not asked ten times -- while the next read asks again."""
+    async def find(self, uuid: str, read: Read | None = None) -> Lookup:
+        """Where its symbols are. A read's misses are kept for the rest of it
+        -- a broken mdfind is not asked ten times -- and the next read asks
+        again."""
+        read = read or Read()
         wanted = normalise_uuid(uuid)
         if not wanted:
             return Lookup(None, f"{uuid!r} is not a UUID, so it cannot be matched to a build")
-        if misses is not None and wanted in misses:
-            return misses[wanted]
+        if wanted in read.misses:
+            return read.misses[wanted]
         cached = self._found.get(wanted)
         if cached is not None:
             if await asyncio.to_thread(_is_file, cached.dwarf):
@@ -142,18 +157,33 @@ class SymbolFinder:
             # Its own task, awaited through a shield: a caller that is
             # cancelled stops waiting, and does not cancel everyone else's
             # lookup of the same UUID with it.
-            task = asyncio.create_task(self._look(wanted))
+            task = asyncio.create_task(self._look(wanted, read))
             self._inflight[wanted] = task
-            task.add_done_callback(lambda _t: self._inflight.pop(wanted, None))
+            task.add_done_callback(lambda t: self._done(wanted, t))
         result = await asyncio.shield(task)
         if result.found is not None:
             self._found[wanted] = result.found
-        elif misses is not None:
-            misses[wanted] = result
+        else:
+            read.misses[wanted] = result
         return result
 
-    async def _look(self, uuid: str) -> Lookup:
-        found, record_note = await asyncio.to_thread(self._from_records, uuid)
+    def _done(self, wanted: str, task: asyncio.Task[Lookup]) -> None:
+        self._inflight.pop(wanted, None)
+        if not task.cancelled():
+            # Retrieved here: a waiter cancelled before it finished stops
+            # listening, and an exception nobody reads is logged at exit.
+            task.exception()
+
+    async def _records(self, read: Read) -> tuple[list, int, bool]:
+        async with read.records_lock:
+            if read.records is None:
+                read.records = await asyncio.to_thread(
+                    build_records.load_with_unreadable, self.records_root)
+            return read.records
+
+    async def _look(self, uuid: str, read: Read) -> Lookup:
+        records = await self._records(read)
+        found, record_note = await asyncio.to_thread(self._from_records, uuid, records)
         if found is not None:
             return Lookup(found)
         # A record that cannot help does not end the search: Xcode may hold a copy.
@@ -162,9 +192,11 @@ class SymbolFinder:
             return Lookup(found)
         return Lookup(None, "; ".join(n for n in (record_note, spotlight_note) if n))
 
-    def _from_records(self, uuid: str) -> tuple[Found | None, str]:
-        records, unreadable = build_records.load_with_unreadable(self.records_root)
+    def _from_records(self, uuid: str, loaded: tuple[list, int, bool]) -> tuple[Found | None, str]:
+        records, unreadable, listable = loaded
         notes: list[str] = []
+        if not listable:
+            notes.append("quern's build records directory could not be read")
         if unreadable:
             # One of them may be the build that crashed: said, and the report
             # is looked at again next time rather than settled as a miss.
@@ -201,19 +233,34 @@ class SymbolFinder:
         for line in out.splitlines():
             if not line.strip():
                 continue
-            dsym = Path(line.strip())
+            hit = Path(line.strip())
             # Neither this nor macho.read raises for a file it cannot open --
             # it finds nothing -- so a hit that yields nothing is kept to say.
-            inside = await asyncio.to_thread(build_records.dwarf_for, dsym, {uuid})
-            if inside:
-                return Found(dsym / inside, "spotlight"), ""
-            listed.append(str(dsym))
+            found = await asyncio.to_thread(_dwarf_in_hit, hit, uuid)
+            if found is not None:
+                return Found(found, "spotlight"), ""
+            listed.append(str(hit))
         if listed:
             # Spotlight says these hold the UUID: reading nothing from them
             # means they could not be read, not that they lack it.
             return None, f"Spotlight lists dSYMs with this UUID that could not be read: " \
                          f"{', '.join(listed[:3])}"
         return None, ""
+
+
+def _dwarf_in_hit(hit: Path, uuid: str) -> Path | None:
+    """The DWARF file for `uuid` in what Spotlight returned: a dSYM, or the
+    root of an `.xcarchive` holding it (measured: an archived build's UUID
+    finds the archive, not the dSYM in its `dSYMs/`). Archives are what
+    TestFlight and App Store builds leave behind."""
+    candidates = [hit]
+    if hit.suffix == ".xcarchive":
+        candidates += sorted((hit / "dSYMs").glob("*.dSYM"))
+    for dsym in candidates:
+        inside = build_records.dwarf_for(dsym, {uuid})
+        if inside:
+            return dsym / inside
+    return None
 
 
 def _is_file(path: Path) -> bool:
@@ -243,13 +290,13 @@ async def symbolicate_many(
     build, an index or a readable copy that appears later is picked up.
     """
     gate = asyncio.Semaphore(concurrency)
-    misses: dict[str, Lookup] = {}
+    read = Read()
 
     async def one(report: CrashReport) -> None:
         async with gate, finder.report_lock(report.crash_id):
             if report.symbolicated:           # done while this one waited
                 return
-            report.symbolicated = await _symbolicate(report, finder, misses)
+            report.symbolicated = await _symbolicate(report, finder, read)
 
     await asyncio.gather(*(one(r) for r in reports if not r.symbolicated and not r.mac_process))
 
@@ -269,7 +316,7 @@ def _exact_frames(report: CrashReport) -> set[tuple[str, int | None]]:
 
 
 async def _symbolicate(
-    report: CrashReport, finder: SymbolFinder, misses: dict[str, Lookup] | None = None,
+    report: CrashReport, finder: SymbolFinder, read: Read | None = None,
 ) -> bool:
     """Symbolicate one report; return whether every image is settled."""
     images = {i.name: i for i in report.images}
@@ -297,7 +344,7 @@ async def _symbolicate(
                                  frames_total=len({f.offset for f in todo}))
             entries.append(entry)
             try:
-                entry.settled = await _one_image(image, todo, exact, entry, finder, misses)
+                entry.settled = await _one_image(image, todo, exact, entry, finder, read)
             except Exception as e:  # noqa: BLE001 -- the report is still a report
                 logger.exception("Symbolicating %s in %s failed", name, report.crash_id)
                 entry.note = f"symbolication failed: {type(e).__name__}: {e}"
@@ -313,11 +360,11 @@ async def _symbolicate(
 
 async def _one_image(
     image: CrashImage, todo: list[CrashFrame], exact: set[tuple[str, int | None]],
-    entry: ImageSymbols, finder: SymbolFinder, misses: dict[str, Lookup] | None = None,
+    entry: ImageSymbols, finder: SymbolFinder, read: Read | None = None,
 ) -> bool:
     """Symbolicate one image's frames; return whether it is settled: atos
     answered, so asking again would give the same answer."""
-    lookup = await finder.find(image.uuid, misses)
+    lookup = await finder.find(image.uuid, read)
     if lookup.found is None:
         entry.note = lookup.note or (f"no symbols on this Mac for {image.name} {entry.uuid}: no "
                                      f"build record or indexed dSYM has that UUID")
@@ -351,10 +398,15 @@ async def _one_image(
         entry.note = f"atos could not run: {type(e).__name__}: {e}"
         return False
     if code != 0:
-        # atos ran and refused -- a dSYM for another architecture, say.
-        # Asking again gives the same answer, at most of a second a read.
         entry.note = f"atos exited {code}: {err.strip()[:160]}"
-        return True
+        # Settled only when atos itself answered -- a dSYM for another
+        # architecture, say -- so asking again gives the same answer. Not when
+        # xcrun never ran it (72: no such tool; 69: the Xcode licence is not
+        # accepted, typical right after an update), nor when the dSYM went
+        # between the lookup and the call (retention, after a new build).
+        if code in _XCRUN_DID_NOT_RUN or "xcrun: error" in err:
+            return False
+        return await asyncio.to_thread(_is_file, found.dwarf)
     lines = out.splitlines()
     if len(lines) != len(wanted):
         # One line per address, in order: anything else cannot be matched up
@@ -384,14 +436,17 @@ async def _one_image(
             f.file, f.line = file, line
             with_line.add(f.offset)
     entry.frames_resolved = len(with_line)
-    missing = entry.frames_total - entry.frames_resolved
+    bad = len({f.offset for f in invalid})
+    missing = entry.frames_total - entry.frames_resolved - bad
+    notes = []
     if missing:
         name_only = len(named - with_line)
-        entry.note = (f"{missing} of {entry.frames_total} frames have no source line in its "
-                      f"symbols (compiler-generated code, or not in them at all)"
-                      + (f"; {name_only} got a function name only" if name_only else "")
-                      + (f"; {len(invalid)} had addresses below the image's load address"
-                         if invalid else ""))
+        notes.append(f"{missing} of {entry.frames_total} frames have no source line in its "
+                     f"symbols (compiler-generated code, or not in them at all)"
+                     + (f"; {name_only} got a function name only" if name_only else ""))
+    if bad:
+        notes.append(f"{bad} of {entry.frames_total} had addresses below the image's load address")
+    entry.note = "; ".join(notes)
     return True
 
 

@@ -780,7 +780,9 @@ class TestAddresses:
         tools = FakeTools(lines=GOOD)
         _run([report], symbolicate.SymbolFinder(tmp_path / "records", tools))
         assert all(not a.startswith("-") for a in tools.atos[0][8:])
-        assert "1 had addresses below the image's load address" in report.symbols[0].note
+        note = report.symbols[0].note
+        assert "1 of 2 had addresses below the image's load address" in note
+        assert "have no source line" not in note           # counted once, not twice
 
 
 class TestCountingNamesAndOffsets:
@@ -859,3 +861,131 @@ class TestSettledIsSettled:
         _run([report], finder)
         assert len(tools.atos) == 1
         assert [e.image for e in report.symbols].count("MyApp.debug.dylib") == 1
+
+
+# ── third review ─────────────────────────────────────────────────────────────
+
+
+class TestArchives:
+    def test_an_archive_root_from_spotlight_is_looked_inside(self, tmp_path):
+        """Measured: an archived build's UUID finds the .xcarchive, not the
+        dSYM in its dSYMs/ -- and TestFlight builds leave only an archive."""
+        archive = tmp_path / "Archives" / "MyApp 29-09-2026, 10.04.xcarchive"
+        _dsym(archive / "dSYMs", U_APP)
+        tools = FakeTools(lines=GOOD, mdfind=f"{archive}\n")
+        report = _report()
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", tools))
+        assert report.symbols[0].source == "spotlight" and report.app_frame.line == 170
+        assert "dSYMs/MyApp.app.dSYM" in report.symbols[0].dwarf
+
+
+class TestXcrunDidNotRun:
+    @pytest.mark.parametrize("code, err", [
+        (72, "xcrun: error: unable to find utility \"atos\", not a developer tool or in PATH"),
+        (69, "You have not agreed to the Xcode license agreements."),
+        (1, "xcrun: error: invalid active developer path"),
+    ])
+    def test_it_is_not_settled(self, tmp_path, code, err):
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+
+        async def run(argv):
+            return code, "", err
+
+        report = _report()
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", run))
+        assert not report.symbolicated and f"atos exited {code}" in report.symbols[0].note
+
+    def test_a_dsym_removed_before_the_call_is_not_settled(self, tmp_path):
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        import shutil
+
+        async def run(argv):
+            shutil.rmtree(dsym)                  # retention, after a new build
+            return 1, "", "atos cannot load symbols for the file"
+
+        report = _report()
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", run))
+        assert not report.symbolicated
+
+
+class TestSettlesAnyway:
+    def test_a_line_count_mismatch_settles(self, tmp_path):
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        tools = FakeTools(lines=GOOD, atos_extra=1)
+        finder = symbolicate.SymbolFinder(tmp_path / "records", tools)
+        report = _report()
+        _run([report], finder)
+        _run([report], finder)
+        assert report.symbolicated and len(tools.atos) == 1
+
+    def test_addresses_all_below_the_load_address_settle(self, tmp_path):
+        dsym = _dsym(tmp_path / "d", U_APP)
+        _record(tmp_path / "records", dsym)
+        report = _report()
+        for f in report.frames:
+            f.offset = -BASE - 0x100
+        report.app_frame = report.frames[1]
+        tools = FakeTools(lines=GOOD)
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", tools))
+        assert report.symbolicated and tools.atos == []
+        assert "below its load address" in report.symbols[0].note
+
+
+class TestOneRead:
+    def test_the_records_are_read_once_per_read(self, tmp_path, monkeypatch):
+        """Once per UUID was seconds a read with a month of records."""
+        calls = []
+        real = symbolicate.build_records.load_with_unreadable
+
+        def spy(root=None):
+            calls.append(root)
+            return real(root)
+
+        monkeypatch.setattr(symbolicate.build_records, "load_with_unreadable", spy)
+        reports = []
+        for i in range(5):
+            r = _report()
+            r.crash_id = f"c{i}"
+            r.images[1].uuid = str(uuid.uuid4())       # five builds, none here
+            reports.append(r)
+        _run(reports, symbolicate.SymbolFinder(tmp_path / "records", FakeTools(mdfind="")))
+        assert len(calls) == 1
+
+    def test_an_unreadable_records_directory_is_said(self, tmp_path):
+        root = tmp_path / "records"
+        root.mkdir()
+        root.chmod(0)
+        try:
+            report = _report()
+            _run([report], symbolicate.SymbolFinder(root, FakeTools(mdfind="")))
+            assert "build records directory could not be read" in report.symbols[0].note
+        finally:
+            root.chmod(0o755)
+
+    def test_no_exception_is_left_unretrieved(self, tmp_path):
+        """A caller cancelled while the lookup later raised: logged at exit."""
+        seen = []
+        started = asyncio.Event()
+
+        async def boom(argv):
+            started.set()
+            await asyncio.sleep(0.05)
+            raise RuntimeError("index broken")
+
+        finder = symbolicate.SymbolFinder(tmp_path / "records", boom)
+
+        async def go():
+            asyncio.get_running_loop().set_exception_handler(lambda loop, ctx: seen.append(ctx))
+            first = asyncio.create_task(finder.find(str(U_APP)))
+            await asyncio.wait_for(started.wait(), timeout=10)
+            first.cancel()
+            await asyncio.sleep(0.2)
+            import gc
+            gc.collect()
+            await asyncio.sleep(0)
+
+        asyncio.run(go())
+        assert not [c for c in seen if "never retrieved" in c.get("message", "")]
