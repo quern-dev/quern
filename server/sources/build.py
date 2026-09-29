@@ -84,7 +84,10 @@ def _located(diag: BuildDiagnostic) -> str:
     """`file:line:col: message`, or the message alone when it has no place."""
     if not diag.file:
         return diag.message
-    return f"{diag.file}:{diag.line}:{diag.column}: {diag.message}"
+    # From the parts there are: an error against a project file has no line,
+    # and printing "App.xcodeproj:None:None:" read as a parser fault.
+    where = diag.file + "".join(f":{n}" for n in (diag.line, diag.column) if n is not None)
+    return f"{where}: {diag.message}"
 
 
 def _failed_commands(content: str) -> list[str]:

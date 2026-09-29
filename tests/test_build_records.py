@@ -486,7 +486,7 @@ class TestCancellation:
             task = asyncio.create_task(build_records.record_build(
                 _app(tmp_path), project_path="/p", scheme="MyApp", configuration="Debug",
                 platform="iphoneos", root=tmp_path / "records", run=hang))
-            await started.wait()
+            await asyncio.wait_for(started.wait(), timeout=10)
             # Under construction it is only ever a .partial: a process killed
             # now leaves nothing retention would take for a finished record.
             assert [d.name.endswith(".partial") for d in (tmp_path / "records").iterdir()] == [True]
@@ -509,8 +509,11 @@ class TestCancellation:
             asyncio.create_subprocess_exec = spy
             try:
                 task = asyncio.create_task(build_records._run(["sleep", "30"]))
-                while not procs:
+                for _ in range(1000):           # bounded: 10 s, then fail
+                    if procs:
+                        break
                     await asyncio.sleep(0.01)
+                assert procs, "sleep was never started"
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await task
@@ -671,3 +674,20 @@ class TestTheDwarfFile:
         build_records.prune(root, now=NOW)
         [expired] = [r for r in build_records.load_all(root) if r.build_id == old.build_id]
         assert expired.binaries[0].dwarf == "" and expired.dsyms_expired
+
+
+class TestSummaryWording:
+    def test_a_record_that_was_never_made_does_not_say_recorded(self):
+        record = BuildRecord(build_id="", created_at=NOW, project_path="/p", scheme="S",
+                             configuration="Debug", platform="iphoneos", app_path="/a",
+                             error="the build could not be recorded: KeyError: 'x'")
+        line = build_records.summary_line(record)
+        assert line.startswith("Build not recorded (unknown app, Debug): the build could not")
+        assert "Recorded build" not in line
+
+    @pytest.mark.parametrize("n, words", [(1, "1 binary's UUIDs"), (2, "2 binaries' UUIDs")])
+    def test_the_possessive(self, n, words):
+        record = BuildRecord(build_id="b", created_at=NOW, project_path="/p", scheme="S",
+                             configuration="Debug", platform="iphonesimulator", app_path="/a",
+                             binaries=[BuildBinary(path=f"b{i}") for i in range(n)])
+        assert words in build_records.summary_line(record)

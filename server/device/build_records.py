@@ -357,13 +357,18 @@ def summary_line(record: BuildRecord) -> str:
     """One line for the build summary an MCP caller reads."""
     what = " ".join(x for x in (record.bundle_id, record.version,
                                 f"({record.build_number})" if record.build_number else "") if x)
+    if not record.build_id:
+        # Nothing was recorded: "Recorded build : ..." said the opposite first.
+        what = what or "unknown app"
+        return f"Build not recorded ({what}, {record.configuration}): {record.error}."
     head = f"Recorded build {record.build_id}: {what or 'unknown app'}, {record.configuration}"
     if record.error:
         return f"{head} -- {record.error}."
     notes = "".join(f" Note: {n}." for n in record.notes)
     if record.platform != "iphoneos":
         n = len(record.binaries)
-        return f"{head}, {n} binar{'y' if n == 1 else 'ies'}' UUIDs.{notes}"
+        whose = "1 binary's" if n == 1 else f"{n} binaries'"
+        return f"{head}, {whose} UUIDs.{notes}"
     kept = [b for b in record.binaries if b.dsym]
     failed = [b for b in record.binaries if b.dsym_error]
     parts = [f"{head}; symbols kept for {len(kept)} binar{'y' if len(kept) == 1 else 'ies'}"]

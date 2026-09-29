@@ -163,6 +163,18 @@ class TestHowItReads:
         assert entries and not entries[0].message.startswith(":")
         assert ":None" not in entries[0].message
 
+    async def test_an_error_against_a_file_logs_the_file_and_no_line(self):
+        entries = []
+
+        async def collect(entry):
+            entries.append(entry)
+
+        await BuildAdapter(on_entry=collect).parse_build_output(NO_CERTIFICATE)
+        [entry] = entries
+        assert entry.message.startswith(
+            '/Volumes/src/Geocaching.xcodeproj: No signing certificate "iOS Development"')
+        assert ":None" not in entry.message
+
     @pytest.mark.parametrize("text", [PLUGIN_REFUSED, SIGNING])
     async def test_the_summary_has_no_empty_location(self, text):
         from server.api.build_app import BuildAndInstallResponse, _build_install_summary
