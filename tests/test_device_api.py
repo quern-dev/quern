@@ -1133,3 +1133,61 @@ class TestGetUiTreeDoesNotCallARequestedSkeletonDegraded:
         body = resp.json()
         assert "degraded" not in body, body
         assert "source_timed_out" not in body, body
+
+
+class TestEveryUiResponseNamesItsBackend:
+    """Review of #236 proved two of the three advertised fields could be
+    deleted with the whole suite still green — the claim was in the MCP
+    descriptions and in nothing executable.
+
+    These pin the routes. `get_screen_summary` is covered at the controller
+    in test_device_controller.py; these are the ones that were only ever
+    asserted in prose.
+    """
+
+    @staticmethod
+    def _ctrl(mock_controller):
+        mock_controller._last_read_backend = {"SIM-1": "sim-bridge"}
+        mock_controller.resolve_udid = AsyncMock(return_value="SIM-1")
+        mock_controller.backend_that_served = lambda udid: "sim-bridge"
+        return mock_controller
+
+    @pytest.mark.asyncio
+    async def test_get_ui_tree_names_it(self, app, auth_headers, mock_controller):
+        from httpx import ASGITransport, AsyncClient
+
+        c = self._ctrl(mock_controller)
+        c.get_ui_elements = AsyncMock(return_value=([], "SIM-1"))
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get(
+                "/api/v1/device/ui", params={"udid": "SIM-1"}, headers=auth_headers,
+            )
+        assert resp.status_code == 200, resp.text
+        assert resp.json().get("backend") == "sim-bridge", resp.json()
+
+    @pytest.mark.asyncio
+    async def test_wait_for_element_names_it_on_a_timeout(
+        self, app, auth_headers, mock_controller
+    ):
+        """A timeout returns 200 with matched=false — a success response, and
+        the moment someone asks which backend was driving."""
+        from httpx import ASGITransport, AsyncClient
+
+        c = self._ctrl(mock_controller)
+        c.wait_for_element = AsyncMock(
+            return_value=({"matched": False, "polls": 3}, "SIM-1"),
+        )
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/ui/wait-for-element",
+                json={"identifier": "nope", "condition": "exists", "timeout": 1},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["matched"] is False
+        assert body.get("backend") == "sim-bridge", body

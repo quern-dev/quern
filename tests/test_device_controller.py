@@ -1832,13 +1832,22 @@ class TestScrollToElement:
 
         element = {"label": "Log", "identifier": "button_log",
                    "type": "Button", "x": 100, "y": 200}
-        backend = MagicMock()
-        backend.scroll_into_view = AsyncMock(return_value=element)
-        ctrl._ui_backend = MagicMock(return_value=backend)
+        # `_ui_backend` is deliberately left alone so the real Android
+        # routing runs -- mocking it away made this test unable to notice
+        # Android selecting the wrong backend, which is the thing it is
+        # named for. Only the backend's own call is stubbed.
+        ctrl.u2.scroll_into_view = AsyncMock(return_value=element)
 
         result = await ctrl.scroll_to_element(identifier="button_log", max_swipes=5)
-        assert result == {"status": "ok", "element": element}
-        backend.scroll_into_view.assert_called_once_with(
+        assert result["status"] == "ok"
+        assert result["element"] == element
+        assert result["udid"] == "emulator-5554"
+        # The value, not just the key. Asserting presence let the
+        # precedence test next door stand in for Android routing, and that
+        # one mocks `_ui_backend` -- so both could pass with Android
+        # wrongly selecting sim-bridge.
+        assert result["backend"] == "u2"
+        ctrl.u2.scroll_into_view.assert_called_once_with(
             "emulator-5554", identifier="button_log", label=None, max_swipes=5,
         )
 
@@ -2278,3 +2287,179 @@ class TestARequestedSkeletonIsNotCalledDegraded:
 
         assert "degraded" not in summary, summary
         assert "source_timed_out" not in summary, summary
+
+
+class TestASimulatorIsDrivenByTheBackendThatWasChosen:
+    """#236: nothing held the simulator routing in place.
+
+    `_ui_backend` picks sim-bridge for a simulator when `_sim_bridge_ok`,
+    and idb otherwise. dev-d6 proved with a mutant that replacing the whole
+    branch with `return self.idb` -- so sim-bridge is never used at all --
+    left `tests/test_device_controller.py` green, because `_sim_bridge_ok`
+    starts False and nothing in that file ever set it.
+
+    Measured before writing these: on a machine with a booted simulator the
+    production routing is *correct* -- `_ui_backend` returns IdbBackend
+    before the probe and SimBridgeBackend after, and the probe runs at
+    start-up and again every 300s (#179). So this is insurance against a
+    regression, not a live defect. What makes the regression worth insuring
+    against is that it would be invisible: the two backends differ in ways
+    the tool descriptions state -- sim-bridge holds a swipe to the end,
+    idb flings and steps about a quarter of the screen against
+    seven-tenths -- so a silent fall-back shows up as scrolling that
+    overshoots, not as anything red.
+    """
+
+    @staticmethod
+    def _sim(ctrl, udid="SIM-1"):
+        ctrl._device_type_cache[udid] = DeviceType.SIMULATOR
+        return udid
+
+    def test_a_simulator_uses_sim_bridge_when_it_is_available(self):
+        ctrl = DeviceController()
+        udid = self._sim(ctrl)
+        ctrl._sim_bridge_ok = True
+        assert ctrl._ui_backend(udid) is ctrl.sim_bridge
+
+    def test_a_simulator_falls_back_to_idb_when_it_is_not(self):
+        ctrl = DeviceController()
+        udid = self._sim(ctrl)
+        ctrl._sim_bridge_ok = False
+        assert ctrl._ui_backend(udid) is ctrl.idb
+
+    def test_the_name_follows_the_choice(self):
+        """`_backend_name` reads `_ui_backend`'s answer rather than
+        re-deciding, which is what #186 fixed. Pinned so it stays that way."""
+        ctrl = DeviceController()
+        udid = self._sim(ctrl)
+        ctrl._sim_bridge_ok = True
+        assert ctrl._backend_name(udid) == "sim-bridge"
+        ctrl._sim_bridge_ok = False
+        assert ctrl._backend_name(udid) == "idb"
+
+    def test_a_physical_device_is_unaffected_by_the_probe(self):
+        ctrl = DeviceController()
+        udid = "00008030-PHONE"
+        ctrl._device_type_cache[udid] = DeviceType.DEVICE
+        for ok in (True, False):
+            ctrl._sim_bridge_ok = ok
+            assert ctrl._ui_backend(udid) is ctrl.wda_client
+
+
+class TestAResponseSaysWhichBackendServedIt:
+    """The half of #236 with a user.
+
+    An agent seeing a sweep behave oddly could not tell "sim-bridge, and my
+    expectation was wrong" from "silently fell back to idb". `_backend_name`
+    existed but was only ever attached to *errors* (#186), so the answer was
+    available exactly when the call had already failed.
+    """
+
+    async def test_the_summary_names_the_backend(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "SIM-1"
+        ctrl._device_type_cache["SIM-1"] = DeviceType.SIMULATOR
+        ctrl._sim_bridge_ok = True
+        ctrl.sim_bridge.describe_all = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
+
+        summary, _elements, _udid = await ctrl.get_screen_summary()
+        assert summary["backend"] == "sim-bridge", summary
+
+    def test_it_reports_the_backend_that_read_not_the_one_selected_now(self):
+        """A periodic re-probe can flip the choice between the read and the
+        response. Only the read knows which one did the work -- the same
+        argument `_last_read_backend` was added for."""
+        ctrl = DeviceController()
+        ctrl._device_type_cache["SIM-1"] = DeviceType.SIMULATOR
+        ctrl._last_read_backend["SIM-1"] = "sim-bridge"
+        ctrl._sim_bridge_ok = False          # the probe has since flipped
+
+        assert ctrl.backend_that_served("SIM-1") == "sim-bridge"
+
+    def test_with_no_read_yet_it_reports_what_would_be_selected(self):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["SIM-1"] = DeviceType.SIMULATOR
+        ctrl._sim_bridge_ok = False
+        assert ctrl.backend_that_served("SIM-1") == "idb"
+
+
+class TestScrollReportsTheBackendThatSwept:
+    """Review of #236 found this reporting the wrong half.
+
+    The route computed it from `result.get("udid") or body.udid`. No return
+    path of `scroll_to_element` set `udid`, and MCP callers routinely omit
+    it — so the argument was `None`, `backend_that_served` short-circuited
+    past `_last_read_backend`, and it answered with whatever would be
+    selected *now* for the active device. A 300s re-probe flip between the
+    sweep and the response is exactly when an agent is investigating, and
+    exactly when that reported the wrong backend, while `get_ui_tree`
+    reported the right one for the same device.
+    """
+
+    async def test_it_reports_what_swept_not_what_is_selected_now(self):
+        ctrl = DeviceController()
+        # Driven through the Android delegate rather than the iOS sweep:
+        # both build the result the same way, and the precedence being
+        # pinned here -- what read, over what would be selected -- does not
+        # depend on the platform. Mocking the whole sweep would test the
+        # mocks.
+        ctrl._device_type_cache["SIM-1"] = DeviceType.ANDROID_EMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value="SIM-1")
+        ctrl._invalidate_ui_cache = MagicMock()
+        ctrl._last_read_backend["SIM-1"] = "sim-bridge"
+        ctrl._sim_bridge_ok = False        # the probe has since flipped
+
+        backend = MagicMock()
+        backend.scroll_into_view = AsyncMock(return_value={"label": "Log"})
+        ctrl._ui_backend = MagicMock(return_value=backend)
+
+        result = await ctrl.scroll_to_element(identifier="log", max_swipes=3)
+
+        assert result["backend"] == "sim-bridge", result
+        assert result["udid"] == "SIM-1", (
+            "the resolved udid must travel with the result; the route used to "
+            "have no way to ask which device was swept"
+        )
+
+
+class TestANestedReadRecordsItsOwnBackend:
+    """`get_ui_elements_children_of` was the one read path that selected a
+    backend without recording it.
+
+    So `get_ui_tree?children_of=...` reported whichever backend an *earlier*
+    read had used — the stale answer this change exists to remove, surviving
+    on the route nobody looked at. Raised by review after an agent review
+    had already flagged it and I deferred it as out of scope; two reviewers
+    finding the same thing is the argument for closing it.
+    """
+
+    async def test_it_records_the_backend_that_did_this_read(self):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["SIM-1"] = DeviceType.SIMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value="SIM-1")
+        ctrl._sim_bridge_ok = True
+        ctrl.sim_bridge.describe_all_nested = AsyncMock(return_value={})
+        # A stale record from an earlier read on the other backend.
+        ctrl._last_read_backend["SIM-1"] = "idb"
+
+        await ctrl.get_ui_elements_children_of(children_of="Root")
+
+        assert ctrl._last_read_backend["SIM-1"] == "sim-bridge", (
+            "a nested read left an earlier read's backend in place"
+        )
+        assert ctrl.backend_that_served("SIM-1") == "sim-bridge"
+
+    async def test_it_reads_through_the_backend_it_recorded(self):
+        """Recorded and used must be the same object, or the record is a
+        guess. They were two separate `_ui_backend` calls before."""
+        ctrl = DeviceController()
+        ctrl._device_type_cache["SIM-1"] = DeviceType.SIMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value="SIM-1")
+        ctrl._sim_bridge_ok = True
+        ctrl.sim_bridge.describe_all_nested = AsyncMock(return_value={})
+        ctrl.idb.describe_all_nested = AsyncMock(return_value={})
+
+        await ctrl.get_ui_elements_children_of(children_of="Root")
+
+        ctrl.sim_bridge.describe_all_nested.assert_awaited_once()
+        ctrl.idb.describe_all_nested.assert_not_awaited()

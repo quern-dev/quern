@@ -294,6 +294,34 @@ class DeviceControllerUI:
     #: later. See #186.
     _last_read_backend: dict[str, str]
 
+    def backend_that_served(self, udid: str | None) -> str:
+        """Which backend did this device's last UI read, for the caller.
+
+        The same precedence the error paths use: what actually did the work
+        if a read has happened, else what would be selected now.
+
+        Public because the *answer* is useful to an agent, not just to an
+        error message. A simulator is driven by sim-bridge or, where that is
+        unavailable, by idb -- and they behave differently in ways the tool
+        descriptions state: sim-bridge can hold a swipe at the end so a list
+        stops where the finger does, idb cannot and flings, stepping about a
+        quarter of the screen against sim-bridge's seven-tenths. Until now
+        that difference was only ever reported on failure (#186 put the name
+        on errors), so an agent whose sweep overshot could not tell "this is
+        sim-bridge and my expectation was wrong" from "this silently fell
+        back to idb". Both look like a scroll that went too far.
+
+        Nobody needs to *choose* the backend -- that is quern's job, and it
+        is done from a probe at start-up and re-probed every 300s (#179).
+        This exists so that when something behaves unexpectedly, the first
+        question an investigator asks has an answer in the response.
+        """
+        if udid is not None:
+            served = self._last_read_backend.get(udid)
+            if served:
+                return served
+        return self._backend_name(udid)
+
     def _backend_name(self, udid: str) -> str:
         """What the backend driving this device calls itself.
 
@@ -1487,7 +1515,16 @@ class DeviceControllerUI:
         then returns its flattened descendants as parsed UIElements.
         """
         resolved = await self.resolve_udid(udid)
-        nested = await self._ui_backend(resolved).describe_all_nested(
+        # Selected once and recorded, the same way `get_ui_elements` does it.
+        # This was the one read path that did neither, so `get_ui_tree`
+        # with `children_of` reported whichever backend an *earlier* read
+        # had used -- the stale answer this whole change exists to remove,
+        # surviving on the one route nobody looked at.
+        backend = self._ui_backend(resolved)
+        self._last_read_backend[resolved] = getattr(
+            backend, "TOOL_NAME", "unknown",
+        )
+        nested = await backend.describe_all_nested(
             resolved, snapshot_depth=snapshot_depth,
         )
         child_dicts = find_children_of(
@@ -1757,6 +1794,10 @@ class DeviceControllerUI:
                 mode=mode,
             )
         summary = generate_screen_summary(elements, max_elements=max_elements)
+        # Which backend produced this. Cheap, and the first thing anyone
+        # investigating unexpected UI behaviour wants to know -- see
+        # `backend_that_served`.
+        summary["backend"] = self.backend_that_served(resolved)
 
         # A tree read that timed out falls back to a container skeleton,
         # which is often empty -- and an empty result is exactly what a blank
@@ -2706,10 +2747,17 @@ class DeviceControllerUI:
             self._invalidate_ui_cache(resolved)  # scrolling changes the viewport
             if found is None:
                 return {
+                    "udid": resolved,
+                    "backend": self.backend_that_served(resolved),
                     "status": "not_found",
                     "detail": f"Element not found after scrolling ({target})",
                 }
-            return {"status": "ok", "element": found}
+            return {
+                "udid": resolved,
+                "backend": self.backend_that_served(resolved),
+                "status": "ok",
+                "element": found,
+            }
 
         # iOS (physical WDA + simulator)
         el = await self._ios_scroll_to_element(
@@ -2718,11 +2766,15 @@ class DeviceControllerUI:
         self._invalidate_ui_cache(resolved)  # scrolling changes the viewport
         if el is None:
             return {
+                "udid": resolved,
+                "backend": self.backend_that_served(resolved),
                 "status": "not_found",
                 "detail": f"Element not found after scrolling ({target})",
             }
         cx, cy = get_tap_point(el)
         return {
+            "udid": resolved,
+            "backend": self.backend_that_served(resolved),
             "status": "ok",
             "element": {
                 "label": el.label,

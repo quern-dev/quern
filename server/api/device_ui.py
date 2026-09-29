@@ -143,6 +143,7 @@ async def get_ui_elements(
                 "elements": [e.model_dump(**dump_kwargs) for e in elements],
                 "element_count": len(elements),
                 "udid": resolved_udid,
+                "backend": controller.backend_that_served(resolved_udid),
             }
             # `element_count` here has the same problem it has on the summary:
             # a tree read that timed out falls back to a container skeleton,
@@ -274,6 +275,12 @@ async def wait_for_element(request: Request, body: WaitForElementRequest):
                 mode=body.mode,
             )
             result["udid"] = resolved_udid
+            # A read happened, so say which backend did it. This route's own
+            # description argues a timeout is when extra context is worth
+            # carrying, and "the element never appeared" is exactly the kind
+            # of odd-but-not-error result where the next question is which
+            # backend was driving.
+            result["backend"] = controller.backend_that_served(resolved_udid)
             act.udid = resolved_udid
             # A wait that timed out is not a failure -- the caller asked
             # whether the condition held within a window, and "no" is an
@@ -474,6 +481,13 @@ async def tap_element(request: Request, body: TapElementRequest):
                 what="tap_element",
             )
 
+            # A read happened either way, and with `scroll_to_find` this
+            # runs the same held-swipe sweep as `scroll_to_element` -- so the
+            # backend matters here for the same reason, and a not-found is
+            # when someone asks.
+            if isinstance(result, dict) and "backend" not in result:
+                result["backend"] = controller.backend_that_served(resolved)
+
             # Element not found — return 404 with screen context. The 404 is
             # what tells _action this was `not_found` rather than a failure.
             if result.get("status") == "not_found":
@@ -662,6 +676,13 @@ async def scroll_to_element(request: Request, body: ScrollToElementRequest):
             ),
             what="scroll_to_element",
         )
+        # `backend` comes from the controller, which has the resolved udid
+        # and has just done the reads. Computing it here needed an argument
+        # the result never carried and the caller usually omits, so it fell
+        # back to `_backend_name(None)` -- what would be selected *now*, for
+        # whatever `_active_udid` happens to be. That is precisely the stale
+        # answer `_last_read_backend` exists to avoid, on the one tool whose
+        # description sells the field hardest.
         if result.get("status") == "not_found":
             raise HTTPException(status_code=404, detail=result)
         return result
