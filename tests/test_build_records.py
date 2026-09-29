@@ -482,6 +482,9 @@ class TestCancellation:
                 _app(tmp_path), project_path="/p", scheme="MyApp", configuration="Debug",
                 platform="iphoneos", root=tmp_path / "records", run=hang))
             await started.wait()
+            # Under construction it is only ever a .partial: a process killed
+            # now leaves nothing retention would take for a finished record.
+            assert [d.name.endswith(".partial") for d in (tmp_path / "records").iterdir()] == [True]
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
