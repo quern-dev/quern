@@ -933,6 +933,7 @@ async def wait_for_flow(request: Request, body: WaitForFlowRequest) -> WaitForFl
                     truncated=False,
                     complete_after=flow_store.evicted_through(
                         simulator_udid=body.simulator_udid, client_ip=body.client_ip,
+                        device_serial=body.device_serial,
                     ),
                 )
 
@@ -946,6 +947,7 @@ async def wait_for_flow(request: Request, body: WaitForFlowRequest) -> WaitForFl
                 _flow_completeness(
                     flow_store, effective_since,
                     simulator_udid=body.simulator_udid, client_ip=body.client_ip,
+                    device_serial=body.device_serial,
                 )
                 if flow_store is not None else {}
             )

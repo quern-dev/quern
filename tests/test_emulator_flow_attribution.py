@@ -22,6 +22,7 @@ See #262.
 from __future__ import annotations
 
 import importlib.util
+import threading
 from pathlib import Path
 
 import pytest
@@ -471,10 +472,23 @@ class TestASlowLookupDoesNotPoisonTheConnection:
         pending = Future()
         addon._client_process_info["slow"] = {"future": pending}
 
-        assert addon._lookup_process_info("slow") is None
-        assert "future" in addon._client_process_info["slow"]
+        # Bounded deliberately. `_lookup_process_info` waits on the future
+        # with a 0.5s timeout; take that timeout away and the call blocks
+        # forever on a future nothing has set, so this test would hang rather
+        # than fail -- and a test that hangs when the guard it checks is
+        # removed is not checking it. The timer resolves the future at 2s,
+        # four times the timeout, so a missing guard returns the result and
+        # the assertion below fails instead (review).
+        late = (4242, "qemu-system-aarch64-headless")
+        threading.Timer(2.0, pending.set_result, [late]).start()
 
-        pending.set_result((4242, "qemu-system-aarch64-headless"))
+        assert addon._lookup_process_info("slow") is None
+        # The point: the entry keeps the future rather than recording the
+        # failure, so the connection is not poisoned for every later flow.
+        assert addon._client_process_info["slow"]["future"] is pending
+
+        # And once the lookup does finish, the same connection attributes.
+        assert pending.result(timeout=5) == late
         info = addon._lookup_process_info("slow")
         assert info["pid"] == 4242
 

@@ -105,7 +105,7 @@ class CaptureSessionManager:
             "truncated": not flow_store.is_complete_since(
                 session.start_time,
                 simulator_udid=session.simulator_udid, client_ip=session.client_ip,
-            device_serial=session.device_serial,
+                device_serial=session.device_serial,
             ),
             "complete_after": through,
         }
