@@ -102,6 +102,24 @@ async def _run(*args: str, timeout: float = 5.0) -> tuple[int, str]:
     return proc.returncode or 0, out.decode(errors="replace")
 
 
+async def should_retry(udid: str, tree: list[dict], already_recovered: bool) -> bool:
+    """Whether `tree` is a wedge worth re-reading, having just healed it.
+
+    The decision lives here rather than being written out at each read, because
+    there are four of them across two backends and a copy of this is a copy
+    that drifts -- which is how `describe_all` ended up the only path with any
+    recovery at all (#337).
+
+    `already_recovered` is the recursion guard and every caller must thread it:
+    the retry re-enters the same read, so without it a bridge that stays wedged
+    loops. Once only -- if the tree still looks poisoned after a reset the
+    cause is something else, and retrying is a slower way to the same answer.
+    """
+    if already_recovered or not looks_poisoned(tree):
+        return False
+    return await reset_bridge(udid)
+
+
 async def bridge_pids_for(udid: str) -> list[int]:
     """PIDs of the CoreSimulatorBridge serving this simulator.
 

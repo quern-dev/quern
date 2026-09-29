@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from server.config import CONFIG_DIR, quern_cmd
-from server.device import probing
+from server.device import ax_recovery, probing
 from server.device.tool_probe import probe_command
 from server.models import DeviceError
 
@@ -164,6 +164,7 @@ class IdbBackend:
         snapshot_depth: int | None = None,
         source_timeout: float | None = None,
         probe: bool = True,
+        _recovered: bool = False,
     ) -> list[dict]:
         """Get all UI accessibility elements as raw dicts.
 
@@ -259,10 +260,21 @@ class IdbBackend:
             f"total={(end-start)*1000:.1f}ms, elements={len(flat)}"
         )
 
+        # The XCUITest wedge reaches idb identically -- #66 recorded it against
+        # raw `idb ui describe-all`, and the shipped detector fires on idb's
+        # own output unchanged (measured, #337). Until now only sim-bridge
+        # healed it, so an Xcode < 26 or Intel machine had it unhandled.
+        if await ax_recovery.should_retry(udid, flat, _recovered):
+            return await self.describe_all(
+                udid, snapshot_depth=snapshot_depth,
+                source_timeout=source_timeout, probe=probe, _recovered=True,
+            )
+
         return flat
 
     async def describe_all_nested(
         self, udid: str, *, snapshot_depth: int | None = None,
+        _recovered: bool = False,
     ) -> list[dict]:
         """Get all UI accessibility elements with hierarchy preserved.
 
@@ -289,12 +301,17 @@ class IdbBackend:
                 f"Expected JSON array from describe-all, got {type(data).__name__}",
                 tool="idb",
             )
+        if await ax_recovery.should_retry(udid, data, _recovered):
+            return await self.describe_all_nested(
+                udid, snapshot_depth=snapshot_depth, _recovered=True,
+            )
         return data
 
     async def describe_all_flat(
         self, udid: str, *,
         snapshot_depth: int | None = None,
         source_timeout: float | None = None,
+        _recovered: bool = False,
     ) -> list[dict]:
         """Get UI elements using flat mode — designed for the custom companion.
 
@@ -355,6 +372,12 @@ class IdbBackend:
             f"total={(end-start)*1000:.1f}ms, "
             f"raw={len(data)}, deduped={len(flat)}"
         )
+
+        if await ax_recovery.should_retry(udid, flat, _recovered):
+            return await self.describe_all_flat(
+                udid, snapshot_depth=snapshot_depth,
+                source_timeout=source_timeout, _recovered=True,
+            )
 
         return flat
 

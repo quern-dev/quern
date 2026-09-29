@@ -608,15 +608,14 @@ class SimBridgeBackend:
             # Once only. If the tree still looks poisoned after a reset, the
             # cause is something else and retrying would just be a slower way to
             # return the same answer.
-            if not _recovered and ax_recovery.looks_poisoned(flat):
-                if await ax_recovery.reset_bridge(udid):
-                    return await self.describe_all(
-                        udid,
-                        snapshot_depth=snapshot_depth,
-                        source_timeout=source_timeout,
-                        probe=probe,
-                        _recovered=True,
-                    )
+            if await ax_recovery.should_retry(udid, flat, _recovered):
+                return await self.describe_all(
+                    udid,
+                    snapshot_depth=snapshot_depth,
+                    source_timeout=source_timeout,
+                    probe=probe,
+                    _recovered=True,
+                )
 
             return flat
 
@@ -625,10 +624,20 @@ class SimBridgeBackend:
         udid: str,
         *,
         snapshot_depth: int | None = None,
+        _recovered: bool = False,
     ) -> list[dict]:
         """Return nested tree with children arrays preserved (no probing)."""
         async with self._mgr.admit():
-            return await self._fetch_nested(udid)
+            nested = await self._fetch_nested(udid)
+        # A wedge reaches this read as readily as the flat one -- it is the
+        # same bridge and the same stale cache -- and a nested root carries the
+        # same signature, so the detector needs no change. Outside `admit()`
+        # because the retry re-enters it (#337).
+        if await ax_recovery.should_retry(udid, nested, _recovered):
+            return await self.describe_all_nested(
+                udid, snapshot_depth=snapshot_depth, _recovered=True,
+            )
+        return nested
 
     async def _fetch_nested(self, udid: str) -> list[dict]:
         result = await self._send(
