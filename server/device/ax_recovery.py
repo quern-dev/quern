@@ -1,7 +1,7 @@
 """Recover a simulator's accessibility bridge after XCUITest poisons it (#66).
 
 Any XCUITest or WDA run against a simulator leaves `CoreSimulatorBridge` with a
-stale mach-port cache, after which a foregrounded app reports a single bare
+stale mach-port cache, after which affected apps report a single bare
 `Application` element. `os_log` names it directly:
 
     CoreSimulatorBridge [com.apple.Accessibility:AXRuntimeCommon]
@@ -11,24 +11,38 @@ The empty tree looks exactly like every landmark on every screen drifting at
 once, which is a long way from the truth and sends people editing knowledge
 bases that are fine.
 
-**How wide the damage spreads is measured two ways and unresolved.** #66
-reported it simulator-wide -- Safari broken while never under test, only
-SpringBoard reading normally. A later run on Xcode 27 / iOS 18.6, stated to be
-the same device model and runtime build as one of #66's rows, found *another
-app* healthy in the same interval: the app under test at one element while
-Settings read a healthy 17, alternating repeatedly. Note what that does and
-does not establish -- Settings was fine, which #66 does not claim otherwise;
-Safari, the app #66 names, was never read. Both are measurements, so at
-least one of three things is true -- the behaviour changed between Xcode
-versions, #66 generalised from a smaller sample than it reads like, or the
-radius depends on something neither run controlled (which app, launch order,
-whether Safari had ever been foregrounded in that boot). The third is the only
-reading under which both are correct, and the check that separates it is
-reading Safari specifically, since Safari is the app #66 names.
+**What gets hit is decided by process lifetime, not by which app it is.** A
+process already holding a live accessibility connection when the cache goes
+stale keeps reading normally; any process that connects afterwards gets the
+poisoned lookup. Measured over eight runs on Xcode 27.0 / iPhone 16 Pro /
+iOS 18.6 (22G86):
+
+    Safari foregrounded before the test run    3/3 healthy,  5 elements
+    Safari first launched after it             3/3 poisoned, 1 element
+    Safari foregrounded before, then           2/2 poisoned, 1 element
+      terminated and relaunched after
+
+The third row is the one that settles it: same app, same boot, same wedged
+bridge, opposite answers either side of a restart.
+
+This reconciles two readings that looked contradictory. #66 reported the damage
+simulator-wide, having sampled Safari after the run; a later check found
+another app healthy, having sampled it before. Both measurements were correct
+and neither generalises -- they differ in *when* the app they sampled was
+launched, which is the variable neither controlled. It also explains #66's note
+that SpringBoard alone kept reading: SpringBoard is the one process that never
+restarts.
+
+The practical consequence is not that the wedge is common but that **which side
+of it you land on is invisible to the caller.** Reads here do not launch
+anything -- `controller_ui.py` has no launch call -- so an agent that launches
+an app and then reads it gets the poisoned side, while one that attaches to an
+app already running, or reads after a person opened it by hand, gets the
+healthy one. Same call, same response shape, opposite answers, decided by a
+process lifetime nothing in the API reports.
 
 None of this changes what the recovery does: it fires on the signature in the
-tree it was given, whatever else is or is not affected. Do not restate either
-blast radius as settled without measuring again.
+tree it was given, whatever else is or is not affected.
 
 There is no reload path: the port cache belongs to the AX runtime loaded into
 the process, the bridge holds no handle to invalidate it, and `SIGHUP` is not
