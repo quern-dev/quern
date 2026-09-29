@@ -25,7 +25,7 @@ from pathlib import Path
 
 from server.config import CONFIG_DIR
 from server.models import CrashReport, LogEntry, LogLevel, LogSource
-from server.sources import BaseSourceAdapter, EntryCallback, ios_crash
+from server.sources import BaseSourceAdapter, EntryCallback, crash_frames, ios_crash
 
 logger = logging.getLogger(__name__)
 
@@ -606,49 +606,61 @@ class CrashAdapter(BaseSourceAdapter):
             return None
 
         crash_id = uuid.uuid4().hex[:12]
-        proc_name = data.get("procName", "") or data.get("name", "") or path.stem
+        proc_name = _text(data.get("procName"), data.get("name")) or path.stem
 
         if self.process_filter and self.process_filter not in proc_name:
             return None
 
-        # Extract exception info
-        exception = data.get("exception", {})
-        exc_type = exception.get("type", "")
-        exc_codes = exception.get("codes", "")
-        signal_name = exception.get("signal", "")
+        # Extract exception info. Each field as text or absent: a report of an
+        # odd shape still says it crashed.
+        exception = data.get("exception") if isinstance(data.get("exception"), dict) else {}
+        exc_type = _text(exception.get("type"))
+        exc_codes = _text(exception.get("codes"))
+        signal_name = _text(exception.get("signal"))
 
         # Also check top-level for signal
+        termination = data.get("termination") if isinstance(data.get("termination"), dict) else {}
         if not signal_name:
-            signal_name = data.get("termination", {}).get("signal", "")
+            signal_name = _text(termination.get("signal"))
 
-        # Extract top frames from faulting thread
-        top_frames: list[str] = []
-        threads = data.get("threads", [])
-        faulting = data.get("faultingThread", 0)
-        if isinstance(threads, list) and 0 <= faulting < len(threads):
-            thread = threads[faulting]
-            frames = thread.get("frames", [])
-            for frame in frames[:5]:
-                image = frame.get("imageOffset", "")
-                symbol = frame.get("symbol", "")
-                if symbol:
-                    top_frames.append(symbol)
-                elif image:
-                    top_frames.append(str(image))
+        # Where it happened, with each frame's image, offset and source line,
+        # and the images' UUIDs and load addresses (#326). A shape this cannot
+        # read costs the frames, never the report: it parsed before them.
+        try:
+            frames, images, from_exception = crash_frames.ips_frames(data)
+        except (TypeError, ValueError, AttributeError, KeyError):
+            logger.warning("Could not read the frames of %s", path, exc_info=True)
+            frames, images, from_exception = [], [], False
+        bundle = data.get("bundleInfo") if isinstance(data.get("bundleInfo"), dict) else {}
+        killed_by = crash_frames.ips_killed_by(data)
+        # From the whole stack, before it is capped for the response.
+        app_frame = None if killed_by else crash_frames.first_app_frame(frames)
 
         # Timestamp
-        ts_str = data.get("captureTime", "") or data.get("timestamp", "")
+        ts_str = _text(data.get("captureTime"), data.get("timestamp"))
         ts = self._parse_timestamp(ts_str, fallback=_mtime(path))
 
         return CrashReport(
             crash_id=crash_id,
             timestamp=ts,
-            device_id=self.device_id,
+            device_id=crash_frames.simulator_udid(
+                data.get("procPath"), data.get("coalitionName"),
+            ) or self.device_id,
+            mac_process=crash_frames.is_mac_process(header, data),
             process=proc_name,
             exception_type=exc_type,
             exception_codes=exc_codes,
             signal=signal_name,
-            top_frames=top_frames,
+            top_frames=[crash_frames.format_frame(f) for f in frames[:crash_frames.TOP_FRAMES]],
+            frames=frames[:crash_frames.MAX_FRAMES],
+            images=_images_for(images, frames[:crash_frames.MAX_FRAMES], app_frame),
+            frames_from=("exception" if from_exception else "crashing_thread") if frames else "",
+            app_frame=app_frame,
+            reason=crash_frames.ips_reason(data),
+            killed_by=killed_by,
+            bundle_id=_text(header.get("bundleID"), bundle.get("CFBundleIdentifier")),
+            app_version=_text(header.get("app_version"), bundle.get("CFBundleShortVersionString")),
+            build_version=_text(header.get("build_version"), bundle.get("CFBundleVersion")),
             file_path=str(path),
             raw_text=content[:3000],
         )
@@ -657,7 +669,7 @@ class CrashAdapter(BaseSourceAdapter):
         """Parse older-format .crash text crash report."""
         crash_id = uuid.uuid4().hex[:12]
 
-        proc_match = re.search(r"^Process:\s+(\S+)", content, re.MULTILINE)
+        proc_match = crash_frames._TEXT_PROCESS.search(content)
         exc_match = re.search(r"^Exception Type:\s+(.+)$", content, re.MULTILINE)
         codes_match = re.search(r"^Exception Codes:\s+(.+)$", content, re.MULTILINE)
 
@@ -684,18 +696,17 @@ class CrashAdapter(BaseSourceAdapter):
         if sig_match:
             signal_name = sig_match.group(1)
 
-        # Extract top frames from "Thread N Crashed:" section
-        top_frames: list[str] = []
-        crashed_section = re.search(
-            r"Thread \d+ Crashed.*?\n((?:\d+\s+.+\n){1,5})", content
-        )
-        if crashed_section:
-            for line in crashed_section.group(1).strip().split("\n"):
-                parts = line.split(None, 3)
-                if len(parts) >= 4:
-                    top_frames.append(parts[3].strip())
-                elif len(parts) >= 3:
-                    top_frames.append(parts[2].strip())
+        # The crashed thread, and the Binary Images the frames point into.
+        # Only the part after the address was kept, which dropped the image.
+        try:
+            frames, images = crash_frames.crash_text_frames(content)
+        except (TypeError, ValueError, AttributeError):
+            logger.warning("Could not read the frames of %s", path, exc_info=True)
+            frames, images = [], []
+        app_frame = crash_frames.first_app_frame(frames)       # before the cap
+        identifier = re.search(r"^Identifier:\s+(\S+)", content, re.MULTILINE)
+        exe_path = re.search(r"^Path:\s+(\S.*)$", content, re.MULTILINE)
+        version = re.search(r"^Version:\s+(\S+)(?:\s+\((\S+)\))?", content, re.MULTILINE)
 
         # Timestamp
         ts_match = re.search(r"^Date/Time:\s+(.+)$", content, re.MULTILINE)
@@ -706,12 +717,20 @@ class CrashAdapter(BaseSourceAdapter):
         return CrashReport(
             crash_id=crash_id,
             timestamp=ts,
-            device_id=self.device_id,
+            device_id=(crash_frames.simulator_udid(exe_path.group(1)) if exe_path else "")
+            or self.device_id,
             process=proc_name,
             exception_type=exc_type,
             exception_codes=exc_codes,
             signal=signal_name,
-            top_frames=top_frames,
+            top_frames=[crash_frames.format_frame(f) for f in frames[:crash_frames.TOP_FRAMES]],
+            frames=frames[:crash_frames.MAX_FRAMES],
+            images=_images_for(images, frames[:crash_frames.MAX_FRAMES], app_frame),
+            frames_from="crashing_thread" if frames else "",
+            app_frame=app_frame,
+            bundle_id=identifier.group(1) if identifier else "",
+            app_version=version.group(1) if version else "",
+            build_version=(version.group(2) or "") if version else "",
             file_path=str(path),
             raw_text=content[:3000],
         )
@@ -722,9 +741,15 @@ class CrashAdapter(BaseSourceAdapter):
         parts = [f"CRASH: {report.process}"]
         if report.exception_type:
             parts.append(report.exception_type)
-        if report.signal:
+        if report.signal and f"({report.signal})" not in report.exception_type:
+            # An Android native crash's type already names it: "signal 11 (SIGSEGV)".
             parts.append(f"({report.signal})")
-        if report.top_frames:
+        # Where in the app's code, when the report can say; else the top frame.
+        if report.killed_by:
+            parts.append(f"(killed by {report.killed_by})")
+        elif report.app_frame is not None:
+            parts.append(f"in {crash_frames.format_frame(report.app_frame)}")
+        elif report.top_frames:
             parts.append(f"@ {report.top_frames[0]}")
         return " ".join(parts)
 
@@ -790,3 +815,15 @@ def _stamp_copied(target: Path, names: list[str]) -> None:
             os.utime(target / name)     # never creates: a report not copied stays absent
         except OSError:
             continue
+
+
+def _text(*values) -> str:
+    """The first value that is non-empty text; report fields can be anything."""
+    return next((v for v in values if isinstance(v, str) and v), "")
+
+
+def _images_for(images, frames, app_frame):
+    """The images the returned frames point into, and the app frame's --
+    which may lie past the cap, and is the one most worth symbolicating."""
+    names = {f.image for f in frames} | ({app_frame.image} if app_frame else set())
+    return [i for i in images if i.name in names]

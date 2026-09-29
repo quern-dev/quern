@@ -58,6 +58,20 @@ async def get_latest_crashes(
             "phone and are counted in pull.older_on_device."
         ),
     ),
+    detail: bool = Query(
+        default=False,
+        description=(
+            "Include each report's full frames and images (UUID, load address): "
+            "what symbolicating it needs. Off by default: several kilobytes per crash."
+        ),
+    ),
+    include_raw: bool = Query(
+        default=False,
+        description=(
+            "Include each report's raw_text, the start of the report as written. Off "
+            "by default: about a thousand tokens of JSON per crash."
+        ),
+    ),
 ) -> CrashLatestResponse:
     """Return recent crash reports.
 
@@ -83,13 +97,17 @@ async def get_latest_crashes(
 
     reports = crash_adapter.crash_reports
     if udid:
-        # That device's crashes -- plus reports that name no device (a
-        # simulator's crash file does not say which simulator), so nothing that
-        # showed before goes missing. Returning every device's crashes for one
+        # That device's crashes -- plus reports quern cannot place, so nothing
+        # that might be the device's goes missing. Not the Mac's own processes:
+        # they are no device's, and a Mac app's crash sat in every phone's list
+        # (#330). Returning every device's crashes for one
         # device's udid put the emulator's crash at the top of a Pixel's list
         # once Android reports carried their device (#316, live test).
-        device = canonical_device_id(udid)
-        reports = [r for r in reports if not r.device_id or r.device_id == device]
+        # Case-insensitively: a simulator's UDID is read upper-case from the
+        # report's path, and a caller may pass it in lower case.
+        device = canonical_device_id(udid).upper()
+        reports = [r for r in reports if not r.mac_process
+                   and (not r.device_id or r.device_id.upper() == device)]
 
     if since:
         reports = [r for r in reports if r.timestamp >= since]
@@ -98,6 +116,16 @@ async def get_latest_crashes(
     reports = sorted(reports, key=lambda r: r.timestamp, reverse=True)
     total = len(reports)
     limited = reports[:limit]
+    # Compact by default: where it crashed, why, and the top frames. The full
+    # frames and images are a few kilobytes a crash, which at the default limit
+    # of ten swamped the answer -- more than the raw text it replaced.
+    trimmed: dict = {}
+    if not detail:
+        trimmed.update(frames=[], images=[])
+    if not include_raw:
+        trimmed["raw_text"] = ""
+    if trimmed:
+        limited = [r.model_copy(update=trimmed) for r in limited]
 
     return CrashLatestResponse(crashes=limited, total=total, pull=pull)
 

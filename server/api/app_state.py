@@ -46,6 +46,15 @@ def _handle_device_error(e: DeviceError) -> HTTPException:
         return HTTPException(status_code=404, detail=msg)
     if "not found" in msg.lower() and "container" in msg.lower():
         return HTTPException(status_code=404, detail=msg)
+    if "only supported on simulators" in msg:
+        # 400, not 500. Asking for an iOS-simulator operation on an Android
+        # device is a bad request, not a server fault, and `server/api/
+        # device.py` has classified it that way all along -- this module
+        # carries its own copy of this function and never gained the rule, so
+        # the same refusal was a 400 from one endpoint and a 500 from another
+        # depending only on which file the route lived in. #263 predicted
+        # exactly this; a live call against a real phone confirmed it.
+        return HTTPException(status_code=400, detail=msg)
     return HTTPException(status_code=500, detail=f"[{e.tool}] {msg}")
 
 

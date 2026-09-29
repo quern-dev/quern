@@ -1,0 +1,407 @@
+{"app_name": "TypeToSiriWidgetExtension", "timestamp": "2026-09-28 15:15:55.00 -0700", "app_version": "1.0", "slice_uuid": "e703ac7c-129b-3089-8e6f-fe19271f4728", "build_version": "1", "platform": 7, "bundleID": "com.apple.siri.TypeToSiriWidget", "share_with_app_devs": 0, "is_first_party": 1, "bug_type": "309", "os_version": "macOS 26.6.2 (25G83)", "roots_installed": 0, "name": "TypeToSiriWidgetExtension", "incident_id": "00000000-0000-0000-0000-0000000000FD"}
+{
+  "uptime": 2500000,
+  "procRole": "Unspecified",
+  "version": 2,
+  "userID": 501,
+  "deployVersion": 210,
+  "modelCode": "Mac14,10",
+  "coalitionID": 67305,
+  "osVersion": {
+    "train": "macOS 26.6.2",
+    "build": "25G83",
+    "releaseType": "User"
+  },
+  "captureTime": "2026-09-28 15:15:55.3123 -0700",
+  "codeSigningMonitor": 2,
+  "incident": "00000000-0000-0000-0000-0000000000FD",
+  "pid": 78264,
+  "translated": false,
+  "cpuType": "ARM-64",
+  "procLaunch": "2026-09-28 15:15:55.0838 -0700",
+  "procStartAbsTime": 60861739955612,
+  "procExitAbsTime": 60861745430536,
+  "procName": "TypeToSiriWidgetExtension",
+  "procPath": "/Volumes/VOLUME/*/Siri.app/PlugIns/TypeToSiriWidgetExtension.appex/TypeToSiriWidgetExtension",
+  "bundleInfo": {
+    "CFBundleShortVersionString": "1.0",
+    "CFBundleVersion": "1",
+    "CFBundleIdentifier": "com.apple.siri.TypeToSiriWidget"
+  },
+  "parentProc": "launchd_sim",
+  "parentPid": 81981,
+  "coalitionName": "com.apple.CoreSimulator.SimDevice.00000000-0000-0000-0000-00000000000B",
+  "crashReporterKey": "00000000-0000-0000-0000-000000000001",
+  "appleIntelligenceStatus": {
+    "state": "available"
+  },
+  "developerMode": 1,
+  "responsiblePid": 8190,
+  "responsibleProc": "SimulatorTrampoline",
+  "codeSigningID": "com.apple.siri.TypeToSiriWidget",
+  "codeSigningTeamID": "",
+  "codeSigningFlags": 570442241,
+  "codeSigningValidationCategory": 1,
+  "codeSigningTrustLevel": 4294967295,
+  "codeSigningAuxiliaryInfo": 0,
+  "instructionByteStream": {
+    "beforePC": "Jk4BlF/d/5cLTwGU8wMAqiECgFLjTwGUYAAANOADE6qsSAGUUk8BlA==",
+    "atPC": "IAAg1FXd/5cBTwGU9AMAqiECgFLZTwGUgAAANOADE6rhAxSqR0kBlA=="
+  },
+  "bootSessionUUID": "00000000-0000-0000-0000-000000000002",
+  "wakeTime": 225479,
+  "sleepWakeUUID": "00000000-0000-0000-0000-000000000003",
+  "sip": "enabled",
+  "exception": {
+    "codes": "0x0000000000000001, 0x00000001cefabf50",
+    "rawCodes": [
+      1,
+      7767506768
+    ],
+    "type": "EXC_BREAKPOINT",
+    "signal": "SIGTRAP"
+  },
+  "termination": {
+    "flags": 0,
+    "code": 5,
+    "namespace": "SIGNAL",
+    "indicator": "Trace/BPT trap: 5",
+    "byProc": "exc handler",
+    "byPid": 78264
+  },
+  "os_fault": {
+    "process": "TypeToSiriWidgetExtension"
+  },
+  "extMods": {
+    "caller": {
+      "thread_create": 0,
+      "thread_set_state": 0,
+      "task_for_pid": 0
+    },
+    "system": {
+      "thread_create": 0,
+      "thread_set_state": 10,
+      "task_for_pid": 25
+    },
+    "targeted": {
+      "thread_create": 0,
+      "thread_set_state": 0,
+      "task_for_pid": 0
+    },
+    "warnings": 0
+  },
+  "faultingThread": 0,
+  "threads": [
+    {
+      "triggered": true,
+      "id": 182264634,
+      "threadState": {
+        "x": [
+          {
+            "value": 105553140432896
+          },
+          {
+            "value": 8504048731,
+            "objc-selector": "release"
+          },
+          {
+            "value": 8369711896,
+            "symbolLocation": 0,
+            "symbol": "OBJC_CLASS_$_OS_os_log"
+          },
+          {
+            "value": 40
+          },
+          {
+            "value": 4344266880
+          },
+          {
+            "value": 19
+          },
+          {
+            "value": 0
+          },
+          {
+            "value": 0
+          },
+          {
+            "value": 2147483647
+          },
+          {
+            "value": 2147483647
+          },
+          {
+            "value": 105553140384384
+          },
+          {
+            "value": 3
+          },
+          {
+            "value": 3
+          },
+          {
+            "value": 105553140384416
+          },
+          {
+            "value": 8369711896,
+            "symbolLocation": 0,
+            "symbol": "OBJC_CLASS_$_OS_os_log"
+          },
+          {
+            "value": 8369711896,
+            "symbolLocation": 0,
+            "symbol": "OBJC_CLASS_$_OS_os_log"
+          },
+          {
+            "value": 8369711896,
+            "symbolLocation": 0,
+            "symbol": "OBJC_CLASS_$_OS_os_log"
+          },
+          {
+            "value": 6444012700,
+            "symbolLocation": 0,
+            "symbol": "-[OS_object release]"
+          },
+          {
+            "value": 0
+          },
+          {
+            "value": 105553140432896
+          },
+          {
+            "value": 105553140436672
+          },
+          {
+            "value": 0
+          },
+          {
+            "value": 0
+          },
+          {
+            "value": 105553140384064
+          },
+          {
+            "value": 105553128900768
+          },
+          {
+            "value": 0
+          },
+          {
+            "value": 8412233728
+          },
+          {
+            "value": 0
+          },
+          {
+            "value": 0
+          }
+        ],
+        "flavor": "ARM_THREAD_STATE64",
+        "lr": {
+          "value": 7767506768
+        },
+        "cpsr": {
+          "value": 1610616832
+        },
+        "fp": {
+          "value": 6134816144
+        },
+        "sp": {
+          "value": 6134816048
+        },
+        "esr": {
+          "value": 4060086273,
+          "description": "(Breakpoint) brk 1"
+        },
+        "pc": {
+          "value": 7767506768,
+          "matchesCrashFrame": 1
+        },
+        "far": {
+          "value": 0
+        }
+      },
+      "queue": "com.apple.main-thread",
+      "frames": [
+        {
+          "imageOffset": 171856,
+          "symbol": "-[_EXConnectionHandlerExtension willFinishLaunching]",
+          "symbolLocation": 876,
+          "imageIndex": 6
+        },
+        {
+          "imageOffset": 12128,
+          "symbol": "-[_EXRunningExtension willFinishLaunching]",
+          "symbolLocation": 212,
+          "imageIndex": 6
+        },
+        {
+          "imageOffset": 11000,
+          "symbol": "-[_EXRunningExtension resume]",
+          "symbolLocation": 40,
+          "imageIndex": 6
+        },
+        {
+          "imageOffset": 10780,
+          "symbol": "-[_EXRunningExtension startWithArguments:count:]",
+          "symbolLocation": 392,
+          "imageIndex": 6
+        },
+        {
+          "imageOffset": 85892,
+          "symbol": "EXExtensionMain",
+          "symbolLocation": 216,
+          "imageIndex": 6
+        },
+        {
+          "imageOffset": 7489468,
+          "symbol": "NSExtensionMain",
+          "symbolLocation": 172,
+          "imageIndex": 7
+        },
+        {
+          "imageOffset": 5076,
+          "symbol": "start_sim",
+          "symbolLocation": 20,
+          "imageIndex": 1
+        },
+        {
+          "imageOffset": 132324,
+          "symbol": "start",
+          "symbolLocation": 6992,
+          "imageIndex": 5
+        }
+      ]
+    }
+  ],
+  "usedImages": [
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 4332060672,
+      "CFBundleShortVersionString": "1.0",
+      "CFBundleIdentifier": "com.apple.siri.TypeToSiriWidget",
+      "size": 16384,
+      "uuid": "e703ac7c-129b-3089-8e6f-fe19271f4728",
+      "path": "/Volumes/VOLUME/*/Siri.app/PlugIns/TypeToSiriWidgetExtension.appex/TypeToSiriWidgetExtension",
+      "name": "TypeToSiriWidgetExtension",
+      "CFBundleVersion": "1"
+    },
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 4335484928,
+      "size": 311296,
+      "uuid": "d826a6db-b34b-3fe6-bae4-616d689002f3",
+      "path": "/Volumes/VOLUME/*/dyld_sim",
+      "name": "dyld_sim"
+    },
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 4332683264,
+      "size": 49152,
+      "uuid": "7e129155-1748-370c-8edc-d762067a6d9f",
+      "path": "/usr/lib/system/libsystem_platform.dylib",
+      "name": "libsystem_platform.dylib"
+    },
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 4332158976,
+      "size": 245760,
+      "uuid": "26cfe427-c180-3145-8d46-de3129b1cd2a",
+      "path": "/usr/lib/system/libsystem_kernel.dylib",
+      "name": "libsystem_kernel.dylib"
+    },
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 4333371392,
+      "size": 65536,
+      "uuid": "85a501d2-0b0e-3dea-b121-b24119d80cfe",
+      "path": "/usr/lib/system/libsystem_pthread.dylib",
+      "name": "libsystem_pthread.dylib"
+    },
+    {
+      "source": "P",
+      "arch": "arm64e",
+      "base": 4334075904,
+      "size": 737280,
+      "uuid": "74e52480-c2bd-3c8d-812d-95fe2b74a096",
+      "path": "/usr/lib/dyld",
+      "name": "dyld"
+    },
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 7767334912,
+      "CFBundleShortVersionString": "97",
+      "CFBundleIdentifier": "com.apple.ExtensionFoundation",
+      "size": 698816,
+      "uuid": "6644d424-add5-30bd-9431-72fbe41f524d",
+      "path": "/Volumes/VOLUME/*/ExtensionFoundation.framework/ExtensionFoundation",
+      "name": "ExtensionFoundation",
+      "CFBundleVersion": "97"
+    },
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 6451023872,
+      "CFBundleShortVersionString": "6.9",
+      "CFBundleIdentifier": "com.apple.Foundation",
+      "size": 12255424,
+      "uuid": "7b66987f-2255-3900-b2b0-cd3042442981",
+      "path": "/Volumes/VOLUME/*/Foundation.framework/Foundation",
+      "name": "Foundation",
+      "CFBundleVersion": "3603"
+    },
+    {
+      "size": 0,
+      "source": "A",
+      "base": 0,
+      "uuid": "00000000-0000-0000-0000-000000000000"
+    },
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 6444003328,
+      "size": 281536,
+      "uuid": "bab002ae-5676-35a5-8fc6-223f1d704d5d",
+      "path": "/Volumes/VOLUME/*/libdispatch.dylib",
+      "name": "libdispatch.dylib"
+    }
+  ],
+  "sharedCache": {
+    "base": 6442450944,
+    "size": 3910451200,
+    "uuid": "223e7b87-43f1-3969-9e07-906e05335d98"
+  },
+  "vmSummary": "ReadOnly portion of Libraries: Total=1.3G resident=0K(0%) swapped_out_or_unallocated=1.3G(100%)\nWritable regions: Total=705.3M written=1554K(0%) resident=1554K(0%) swapped_out=0K(0%) unallocated=703.7M(100%)\n\n                                VIRTUAL   REGION \nREGION TYPE                        SIZE    COUNT (non-coalesced) \n===========                     =======  ======= \nActivity Tracing                   256K        1 \nKernel Alloc Once                   32K        1 \nMALLOC                           694.2M       22 \nMALLOC guard page                   96K        6 \nSTACK GUARD                       56.0M        3 \nStack                             9264K        3 \n__AUTH_CONST                        32K        1 \n__DATA                            19.0M      516 \n__DATA_CONST                      64.2M      534 \n__DATA_DIRTY                       155K       12 \n__FONT_DATA                        2352        1 \n__LINKEDIT                       687.2M        7 \n__OBJC_RO                         61.3M        1 \n__OBJC_RW                         2728K        1 \n__TEXT                           594.6M      545 \n__TPRO_CONST                       164K        3 \ndyld private memory                2.5G        9 \nmapped file                       7488K        2 \npage table in kernel              1554K        1 \n===========                     =======  ======= \nTOTAL                              4.6G     1669 \n",
+  "legacyInfo": {
+    "threadTriggered": {
+      "queue": "com.apple.main-thread"
+    }
+  },
+  "logWritingSignature": "d9d17c69934713367f35c4a7571e3ce2d6dcd3a6",
+  "bug_type": "309",
+  "roots_installed": 0,
+  "trmStatus": 2048,
+  "trialInfo": {
+    "rollouts": [
+      {
+        "rolloutId": "6813dc6e1e50e5344eb573e9",
+        "factorPackIds": [],
+        "deploymentId": 240000021
+      },
+      {
+        "rolloutId": "642da32dea3b2418c750f848",
+        "factorPackIds": [
+          "66d8b2f77cd4b62688efd2cf"
+        ],
+        "deploymentId": 240000011
+      }
+    ],
+    "experiments": []
+  }
+}

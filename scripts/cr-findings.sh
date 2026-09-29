@@ -29,6 +29,12 @@
 # Docstring Coverage is therefore reported under a separate heading, not hidden
 # -- hiding it would just be a fourth blind spot.
 #
+# That measurement is history, not a current claim: the check was turned off in
+# `.coderabbit.yaml` on 2026-09-28 (`795c9c0`), so the row should stop appearing
+# on new PRs. The filter stays -- it goes inert on its own, and keeps working if
+# anyone re-enables the check. The heading below says "as of" for the same
+# reason a dated measurement stays true while a present-tense one decays.
+#
 # Usage:  scripts/cr-findings.sh <pr-number> [owner/repo]
 set -euo pipefail
 N="${1:?usage: cr-findings.sh <pr-number>}"
@@ -165,7 +171,7 @@ if real:
         print(f"    - {n}")
         if w: print(f"        {w}")
 if noise:
-    print("  known-noisy (fails on ~4 of every 5 merged PRs here; judge, do not reflex-fix):")
+    print("  known-noisy as of 2026-09-25; judge, do not reflex-fix:")
     for n, _ in noise:
         print(f"    - {n}")
 # The count is the real guard. Widening a regex fixes the case you thought of;
@@ -179,4 +185,79 @@ if declared and parsed != declared:
           f"parsed -- something was dropped; read the comment by hand")
 elif declared and not real and not noise:
     print("  tally shows failures but no rows parsed -- read the comment by hand")
+'
+
+# ── how much of this PR has actually been reviewed ───────────────────────────
+#
+# Everything above reports *findings*. None of it reports whether a review has
+# seen the current code, and thread state tracks the last review rather than
+# the head -- which misleads in both directions. On #327 all three threads read
+# `[resolved]` and every section above printed clean, while the two commits
+# carrying the substantive work were entirely unreviewed. Earlier the same week
+# the mirror case: an `[OPEN]` thread for a finding already fixed and pushed.
+#
+# So the one comparison that separates those cases gets printed here: the
+# commit CodeRabbit's coverage marker names against the PR's head commit. The
+# marker (`final_review_risk_coverage` in the summary comment) is the one trace
+# every completed review leaves, a clean one included, and it names a commit,
+# so no clock is involved.
+#
+# This used to compare the newest review *with a body* against the newest
+# commit's date, and that was wrong three ways (2026-09-28):
+#   - A clean re-review creates no review object at all, only the marker and a
+#     "Review finished" reply, so #331's reviewed head read STALE.
+#   - `committedDate` is when the commit was made, not when it was pushed. A
+#     commit made before a review of the previous head lands, and pushed after
+#     it, read "at or after the head commit" -- all clear on unread code.
+#   - Any author's review counted, so a person's comment after a push did too.
+# The last two failed in the direction this section exists to catch.
+#
+# Trusted one way only, as in `pr-review-status.py`: equal to the head means
+# reviewed. The marker lags a review in progress, so a different commit proves
+# nothing either way -- it is reported as unconfirmed, not as stale.
+#
+# Advisory, deliberately. `scripts/pr-review-status.py` is the gate and decides
+# merges; this only makes the coverage visible to someone reading findings,
+# which is where they already are when the question occurs to them.
+echo
+echo "── review coverage ──"
+HEAD_SHA="$(gh pr view "$N" --repo "$REPO" --json headRefOid --jq .headRefOid)"
+gh api "repos/$OWNER/$NAME/issues/$N/comments?per_page=100" --paginate \
+  --jq '.[] | select(.user.id==136622811 and .user.login=="coderabbitai[bot]")
+        | "\u0000CR-COMMENT\u0000" + .body' \
+| HEAD_SHA="$HEAD_SHA" PR="$N" python3 -c '
+import json, os, re, sys
+
+head = os.environ["HEAD_SHA"].strip()
+comments = [c for c in sys.stdin.read().split("\x00CR-COMMENT\x00") if c.strip()]
+summary = next((c for c in comments
+                if "auto-generated comment: summarize by coderabbit.ai" in c), None)
+covered = ""
+if summary is not None:
+    m = re.search(r"final_review_risk_coverage:(\{[^\n]*?\})\s*-->", summary)
+    try:
+        marker = json.loads(m.group(1)) if m else {}
+    except json.JSONDecodeError:
+        marker = {}
+    if isinstance(marker, dict) and marker.get("kind") == "reviewed":
+        covered = str(marker.get("coveredCommitId") or "")
+
+shown_head = head[:10] or "(could not be read)"
+shown_covered = covered[:10] or "nothing recorded"
+print(f"  head commit:     {shown_head}")
+print(f"  review covered:  {shown_covered}")
+if not head:
+    print("  => UNKNOWN: the head commit could not be read, so nothing is confirmed.")
+elif covered == head:
+    print("  => REVIEWED: the head commit has been reviewed.")
+elif summary is None:
+    print("  => NOT REVIEWED: CodeRabbit has posted no summary on this PR. An empty")
+    print("     findings list above means nothing yet.")
+else:
+    what = ("no completed review is recorded" if not covered
+            else "the last recorded review covered an earlier commit")
+    print(f"  => NOT CONFIRMED: {what}, so the findings above")
+    pr = os.environ["PR"]
+    print(f"     may not describe the head. `scripts/pr-review-status.py {pr} --ask`")
+    print("     requests the review.")
 '

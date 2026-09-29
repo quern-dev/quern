@@ -289,15 +289,60 @@ def _rate_limit_note(lifts: float | None) -> str:
     return f"CodeRabbit is rate limited until {stamp}"
 
 
-def _ask_for_review(number: int) -> str:
+def _ever_reviewed(number: int) -> bool:
+    """Whether CodeRabbit has ever completed a review on this PR.
+
+    Any `coveredCommitId` will do -- the question is not whether the *head*
+    was read but whether there is an increment to review forward from.
+
+    A missing summary comment reads as never-reviewed, which is the safe
+    direction: asking for a full pass on a PR that has had one costs a
+    re-read, while asking for an increment on a PR that has had none gets a
+    decline and no review at all.
+    """
+    try:
+        pages = json.loads(gh("api", "--paginate", "--slurp",
+                              f"repos/{REPO}/issues/{number}/comments"))
+    except GhError:
+        # Unreachable GitHub is not evidence of a prior review, and the safe
+        # direction is to ask for the full pass.
+        return False
+    for c in [c for page in pages for c in page]:
+        user = c.get("user") or {}
+        if user.get("id") != CODERABBIT_ID or user.get("login") != CODERABBIT_LOGIN:
+            continue
+        if re.search(r'"coveredCommitId"\s*:\s*"[0-9a-f]{7,40}"', c.get("body", "")):
+            return True
+    return False
+
+
+def _ask_for_review(number: int, *, full: bool | None = None) -> str:
     """Post the request and return GitHub's timestamp for it.
 
     Posted through the API rather than `gh pr comment` so the created_at comes
     back: anchoring the reply search on a local clock invites skew against
     GitHub's, and the anchor decides which replies count.
+
+    `@coderabbitai review` is **incremental**: it reviews forward from the
+    last commit CodeRabbit saw, and once it has seen the tip it declines with
+    "does not re-review already reviewed commits". That is the right request
+    after pushing fixes, and the wrong one on a PR it has never read -- there
+    is no increment, and the reply is a decline rather than a review.
+
+    This is the merge gate, so it was asking in the weaker form exactly when
+    a full pass matters most: a PR whose auto-review-on-open was refused for
+    rate limiting looks reviewed on every surface (`gh pr checks` renders a
+    passing CodeRabbit row for a head it never examined, and an empty
+    findings list is indistinguishable from a clean one) and has had no pass
+    at all. Found on #329, whose open-review was rate limited.
+
+    `full` is worked out from the PR when not given.
     """
+    if full is None:
+        full = not _ever_reviewed(number)
+    body = "@coderabbitai full review" if full else "@coderabbitai review"
     created = json.loads(gh("api", f"repos/{REPO}/issues/{number}/comments",
-                            "-f", "body=@coderabbitai review"))
+                            "-f", f"body={body}"))
     return created.get("created_at", "")
 
 

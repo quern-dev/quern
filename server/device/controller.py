@@ -425,6 +425,61 @@ class DeviceController(DeviceControllerUI):
         """
         return self._device_type(udid) in (DeviceType.ANDROID_EMULATOR, DeviceType.ANDROID_DEVICE)
 
+    #: What an Android caller should do instead, keyed by the operation name
+    #: passed to `_require_simulator`. Three distinct situations, and a
+    #: refusal that conflates them is worth little: *no equivalent exists*,
+    #: *an equivalent exists and quern has not built it*, and *an equivalent
+    #: exists with different semantics*. Saying "no Android equivalent" for
+    #: the second is simply false, and it was -- `run-as <pkg> cat
+    #: shared_prefs/<name>.xml` reads an app's preferences on an unrooted
+    #: phone today, measured.
+    #:
+    #: Absent from this map means the first case: nothing to point at.
+    #: What an Android caller should reach for instead: a noun phrase for
+    #: the capability, the mechanism that provides it, and the issue tracking
+    #: it. Rendered into a sentence below rather than written as one.
+    #:
+    #: Structured, not prose, and that is the whole point. The first version
+    #: of this table was a tutorial -- exact commands, storage layouts,
+    #: caveats -- and three separate reviews each found another sentence in
+    #: it that was not quite true: that `inotifyd` on the prefs *file* works
+    #: (it goes deaf after SharedPreferences' rename-based write), that
+    #: preferences are either SharedPreferences or DataStore (an app can have
+    #: both, and a third can be encrypted), that `-wipe-data` "restarts" an
+    #: emulator (it is a launch flag).
+    #:
+    #: Shortening it was not enough: a mutant replacing an entry with
+    #: "`inotifyd` reports every write reliably, so polling is unnecessary"
+    #: -- a claim already disproved on the hardware -- survived the suite,
+    #: because no test can check prose for truth. Leaving only a noun phrase
+    #: and a mechanism removes the room to assert anything. Operational
+    #: detail belongs in #314, where being wrong fails a test instead of
+    #: reaching a caller.
+    _ANDROID_ALTERNATIVE: dict[str, tuple[str, str, int]] = {
+        "read_app_plist": ("reading an app's own preference files", "run-as", 314),
+        "set_app_plist_value": ("writing an app's own preference files", "run-as", 314),
+        "set_app_plist_values": ("writing an app's own preference files", "run-as", 314),
+        "delete_app_plist_key": ("editing an app's own preference files", "run-as", 314),
+        "diff_app_plist": ("reading an app's own preference files", "run-as", 314),
+        "start_plist_watch": ("watching an app's own files for changes", "inotifyd", 314),
+        "save_app_state": ("archiving an app's own data directory", "run-as", 314),
+        "restore_app_state": ("restoring an app's own data directory", "run-as", 314),
+        "Set hardware keyboard": (
+            "the hardware-keyboard setting", "the hw.keyboard AVD property", 263,
+        ),
+        "Erase": ("wiping an emulator", "the -wipe-data launch flag", 263),
+    }
+
+    #: Entries whose mechanism is `run-as`, which the platform refuses for a
+    #: package that is not debuggable -- measured: a release build answers
+    #: `run-as: package not debuggable`. Derived rather than listed, so the
+    #: two collections cannot drift: an entry that uses `run-as` is scoped by
+    #: construction.
+    @classmethod
+    def _needs_debuggable(cls, operation: str) -> bool:
+        entry = cls._ANDROID_ALTERNATIVE.get(operation)
+        return bool(entry) and entry[1] == "run-as"
+
     def _require_simulator(self, udid: str, operation: str) -> None:
         """Refuse anything that is not known to be an iOS simulator.
 
@@ -446,11 +501,36 @@ class DeviceController(DeviceControllerUI):
         # rewording it wholesale would silently turn every one of these
         # refusals into a 500. The detail is appended rather than substituted.
         if kind in (DeviceType.ANDROID_DEVICE, DeviceType.ANDROID_EMULATOR):
-            detail = (
-                f" {udid} is Android, and quern has no Android equivalent for "
-                "this operation -- it is implemented through simctl, which "
-                "drives iOS simulators only."
-            )
+            entry = self._ANDROID_ALTERNATIVE.get(operation)
+            if entry:
+                capability, mechanism, issue = entry
+                scope = (
+                    "For a debuggable app, or any app on a rootable emulator, "
+                    if self._needs_debuggable(operation) else ""
+                )
+                # Capitalised only when it starts the sentence, since the
+                # scope prefix is itself a sentence opener.
+                phrase = capability if scope else capability[0].upper() + capability[1:]
+                detail = (
+                    f" {udid} is Android. {scope}{phrase} is available "
+                    f"through {mechanism}; quern does not expose it yet -- "
+                    f"see #{issue}."
+                )
+            else:
+                # A claim about quern, not about Android. The previous
+                # wording -- "there is no Android equivalent for this, it is a
+                # simulator-only concept" -- asserted something about the
+                # world, and was false for every operation that reached it:
+                # `Set hardware keyboard` has `hw.keyboard` and
+                # `show_ime_with_hard_keyboard`, and the operations that only
+                # `if` ordering keeps away from here include `Clear app data`,
+                # whose own docstring in this file records being burned by
+                # exactly this claim. quern not having a path is checkable and
+                # stays true; the platform lacking a feature is neither.
+                detail = (
+                    f" {udid} is Android, and quern has no Android path for "
+                    "this -- it is implemented through simctl."
+                )
         elif kind == DeviceType.DEVICE:
             detail = f" {udid} is a physical iOS device."
         else:

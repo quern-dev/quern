@@ -876,8 +876,10 @@ async def test_the_poll_loop_names_the_phone_for_a_file_in_its_directory(tmp_cra
 # failure paths around pulled files (second #316 review)
 # ---------------------------------------------------------------------------
 
-#: Well-formed JSON of the wrong shape: the parser raises AttributeError on it.
-MALFORMED_IPS = '{"bug_type":"309"}\n{"procName":"MyApp","exception": "boom"}'
+#: Well-formed JSON of the wrong shape -- a body that is not an object at all,
+#: which the parser raises on. (An object with odd fields now parses, with
+#: those fields empty: #326.)
+MALFORMED_IPS = '{"bug_type":"309"}\n[1, 2, 3]'
 
 
 @pytest.mark.asyncio
