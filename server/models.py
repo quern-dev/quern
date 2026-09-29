@@ -911,13 +911,27 @@ class TlsRejection(BaseModel):
     become. `tls_failed_client` fires for *every* client-side rejection, and an
     untrusted CA is only one of the reasons.
 
-    `alert` is why that distinction survives. A device that does not trust the
-    CA says `unknown ca`; a certificate-pinned app on a device that trusts it
-    perfectly well refuses too, and reporting that as "this device does not
-    trust the CA" sends someone to reinstall a certificate that was never the
-    problem. Pinning is L3 in docs/proposals/cert-trust-model.md and produces
-    the identical symptom, so the alert text is the only thing separating them
-    and is kept verbatim rather than interpreted.
+    `alert` is kept verbatim rather than interpreted, because the reason
+    matters: a certificate-pinned app on a device that trusts the CA perfectly
+    well refuses too, and reporting that as "this device does not trust the
+    CA" sends someone to reinstall a certificate that was never the problem.
+    Pinning is L3 in docs/proposals/cert-trust-model.md and produces the
+    identical symptom.
+
+    **The alert does not separate those two on Android, and an earlier version
+    of this docstring said it did.** Measured 2026-09-28 across two emulators:
+    113 rejections, every one of them `certificate unknown` -- not `unknown
+    ca` -- while the CA was simply not installed. Installing it turned those
+    same endpoints into captured, decrypted flows, which is what proves they
+    were trust failures rather than pinning. Two endpoints kept refusing
+    afterwards (`accounts.google.com`, and one of two connections to
+    `update.googleapis.com` -- two clients in one emulator, one pinning and
+    one not), and they said `certificate unknown` as well.
+
+    So on Android both causes produce the same alert, and the thing that
+    separates them is whether the refusal survives the CA being trusted. The
+    iOS side is unmeasured; the old claim may well hold there. Do not branch
+    on the alert text to decide which cause it was.
     """
 
     sni: str | None = None
@@ -934,7 +948,12 @@ class TlsRejection(BaseModel):
     device_serial: str | None = None
     """Resolved the way flows are, and the only fields that name a simulator."""
     alert: str | None = None
-    """The TLS alert, verbatim. `unknown ca` means the CA; others may not."""
+    """The TLS alert, verbatim and uninterpreted.
+
+    Not a cause. On Android an untrusted CA and a pinned client both say
+    `certificate unknown` -- measured -- so this narrows the possibilities
+    without deciding between them.
+    """
     count: int = 1
     """Handshakes refused for this (host, device) pair."""
     first_at: str | None = None

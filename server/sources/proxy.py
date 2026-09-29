@@ -617,11 +617,16 @@ class ProxyAdapter(BaseSourceAdapter):
         at = datetime.fromtimestamp(
             data.get("timestamp") or time.time(), tz=UTC,
         ).isoformat()
-        # The alert, verbatim and uninterpreted. `unknown ca` means the device
-        # does not trust our CA; a certificate-pinned app on a device that
-        # trusts it perfectly well refuses too, with a different alert. Dropping
-        # this left both looking identical, and the log then asserted the first
-        # -- sending someone to reinstall a certificate that was never wrong.
+        # The alert, verbatim and uninterpreted. Recorded because a
+        # certificate-pinned app on a device that trusts the CA perfectly well
+        # refuses too, and dropping this left both looking identical, with the
+        # log asserting the first -- sending someone to reinstall a
+        # certificate that was never wrong.
+        #
+        # It narrows the possibilities without deciding between them. "With a
+        # different alert", which this comment used to claim, is false on
+        # Android: measured, an untrusted CA and a pinned client both say
+        # `certificate unknown`. See `TlsRejection` for the measurement.
         alert = (data.get("error") or "").strip() or None
 
         # Collapsed by (host, device). A retrying app produces one of these per

@@ -246,3 +246,34 @@ class TestTwoEmulatorsBehindOneAddressStayApart:
         since = base + timedelta(seconds=1)
         assert store.is_complete_since(since, device_serial="emulator-5556")
         assert not store.is_complete_since(base, device_serial="emulator-5554")
+
+
+class TestAnAndroidRejectionIsRecognisedAtAll:
+    """Android says `certificate unknown` where the docs long assumed
+    `unknown ca`.
+
+    Measured 2026-09-28: 113 rejections across two emulators, every one
+    `certificate unknown`, with the CA simply not installed — installing it
+    turned those same endpoints into captured flows, which is what proves they
+    were trust failures rather than pinning. Two endpoints kept refusing
+    afterwards and said `certificate unknown` too, so the alert does not
+    separate the two causes on Android.
+
+    Detection was never wrong — `_CERT_REJECTION_ALERTS` carries both — but
+    nothing pinned it, and the surrounding comments asserted a distinction the
+    measurement contradicts. Removing `certificate unknown` as a tidy-up would
+    make every Android rejection invisible.
+    """
+
+    def test_the_android_alert_counts_as_a_certificate_rejection(self, addon):
+        assert "certificate unknown" in addon._CERT_REJECTION_ALERTS
+
+    def test_the_ios_style_alert_still_counts(self, addon):
+        assert "unknown ca" in addon._CERT_REJECTION_ALERTS
+
+    def test_an_unrelated_handshake_failure_does_not(self, addon):
+        """The negative control. `tls_failed_client` fires for every
+        client-side failure — a suspended app, a cancelled request, a flaky
+        network — and reporting those as refusals buries the real signal."""
+        for alert in ("close notify", "handshake failure", "internal error"):
+            assert alert not in addon._CERT_REJECTION_ALERTS
