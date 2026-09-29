@@ -126,6 +126,7 @@ class IdbBackend:
             # never had to survive before. Without the kill the `idb` child
             # outlives the request that asked for it (review of #343).
             proc.kill()
+            await ax_recovery._reap(proc)
             raise
         t4 = time.perf_counter()
         logger.info(

@@ -62,6 +62,7 @@ needs it and leaves the others undisturbed.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -104,6 +105,18 @@ def looks_poisoned(elements: list[dict]) -> bool:
     return not (el.get("AXLabel") or el.get("label") or "")
 
 
+async def _reap(proc) -> None:
+    """Wait for a killed child, so it does not linger as a zombie.
+
+    Shielded and bounded: this runs while a `CancelledError` is in flight, so
+    an unprotected await would be cancelled before the wait completed, and an
+    unbounded one would hold up the cancellation it is cleaning up after.
+    Best effort by design -- failing to reap is not worth masking the cancel.
+    """
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=1.0)
+
+
 async def _run(*args: str, timeout: float = 5.0) -> tuple[int, str]:
     proc = await asyncio.create_subprocess_exec(
         *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
@@ -119,6 +132,7 @@ async def _run(*args: str, timeout: float = 5.0) -> tuple[int, str]:
         # or `lsof` running, once per poll, on the path that fires when a
         # simulator is already unwell (review of #343).
         proc.kill()
+        await _reap(proc)
         raise
     return proc.returncode or 0, out.decode(errors="replace")
 

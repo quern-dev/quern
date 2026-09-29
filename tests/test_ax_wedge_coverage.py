@@ -315,44 +315,78 @@ class TestSimBridgeNestedHealsToo:
 class TestACancelledReadDoesNotLeakItsChild:
     """The recovery deadline cancels whatever it is awaiting, which these two
     subprocess helpers never had to survive before. A cancel that does not kill
-    the child leaves a real `pgrep`, `lsof` or `idb` running past the request
-    that asked for it -- on the path that fires when a simulator is already
-    unwell, so once per poll.
+    the child leaves a `pgrep`, `lsof` or `idb` running past the request that
+    asked for it -- on the path that fires when a simulator is already unwell,
+    and once per poll.
 
-    Spawns a genuinely long-lived process rather than asserting on a mock: the
-    thing being checked is that an OS process is gone, and only an OS process
-    can show that.
+    Synchronised on the mock entering `communicate()` rather than on a sleep.
+    The first version waited a fixed 0.3s and then cancelled, which races: a
+    slow spawn means the cancel arrives before the process is recorded, and the
+    test then fails without ever reaching the handler it exists to check
+    (review of #343). It also spawned a real process, which the path
+    instruction forbids -- and the contract being checked is "the handler kills
+    and re-raises", which a mock establishes exactly.
     """
 
-    async def test_ax_recovery_run_kills_on_cancel(self):
-        import asyncio as aio
+    @staticmethod
+    def _fake_proc(entered, release):
+        class FakeProc:
+            returncode = None
 
-        from server.device import ax_recovery as axr
+            def __init__(self):
+                self.killed = False
+                self.waited = False
 
-        started: list = []
-        real_exec = aio.create_subprocess_exec
+            async def communicate(self):
+                entered.set()
+                await release.wait()          # never, in these tests
+                return b"", b""
 
-        async def capture(*args, **kwargs):
-            proc = await real_exec(*args, **kwargs)
-            started.append(proc)
+            def kill(self):
+                self.killed = True
+
+            async def wait(self):
+                self.waited = True
+                return -9
+
+        return FakeProc()
+
+    async def _cancel_while_communicating(self, monkeypatch, module, call):
+        """Start `call`, wait until the fake is inside `communicate()`, cancel."""
+        entered, release = asyncio.Event(), asyncio.Event()
+        proc = self._fake_proc(entered, release)
+
+        async def fake_exec(*_a, **_k):
             return proc
 
-        axr.asyncio.create_subprocess_exec = capture
-        try:
-            task = aio.ensure_future(axr._run("/bin/sleep", "30", timeout=30))
-            await aio.sleep(0.3)
-            task.cancel()
-            with pytest.raises(aio.CancelledError):
-                await task
-        finally:
-            axr.asyncio.create_subprocess_exec = real_exec
+        monkeypatch.setattr(module.asyncio, "create_subprocess_exec", fake_exec)
+        task = asyncio.ensure_future(call())
+        # Bounded: if the helper never reaches `communicate()` this fails here
+        # rather than hanging, and the cancel below would have been racing.
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return proc
 
-        assert started, "nothing was spawned, so nothing was proved"
-        proc = started[0]
-        # Bounded: if the kill is dropped, `sleep 30` outlives this wait and
-        # the assertion fails rather than the test hanging for 30s.
-        try:
-            await aio.wait_for(proc.wait(), timeout=5)
-        except TimeoutError:
-            pytest.fail("the cancelled child was still running 5s later")
-        assert proc.returncode is not None
+    async def test_ax_recovery_run_kills_and_reaps_on_cancel(self, monkeypatch):
+        from server.device import ax_recovery as axr
+
+        proc = await self._cancel_while_communicating(
+            monkeypatch, axr, lambda: axr._run("/bin/sleep", "30", timeout=30),
+        )
+        assert proc.killed, "the cancelled child was never killed"
+        assert proc.waited, "the killed child was never reaped"
+
+    async def test_idb_run_kills_and_reaps_on_cancel(self, monkeypatch):
+        from server.device import idb as idb_module
+
+        backend = IdbBackend()
+        monkeypatch.setattr(IdbBackend, "_resolve_binary", lambda self: "/bin/sleep")
+        monkeypatch.setattr(IdbBackend, "_companion_path", lambda self: None)
+
+        proc = await self._cancel_while_communicating(
+            monkeypatch, idb_module, lambda: backend._run("ui", "describe-all"),
+        )
+        assert proc.killed, "the cancelled idb child was never killed"
+        assert proc.waited, "the killed idb child was never reaped"
