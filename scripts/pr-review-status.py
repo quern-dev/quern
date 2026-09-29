@@ -399,7 +399,6 @@ def _reviewed_by_asking(number: int, head: str, timeout: float = 600.0) -> str:
     asks = 1
     deadline = time.monotonic() + timeout
     print(f"  asked CodeRabbit about #{number}; waiting for its reply…", flush=True)
-    refused = False
 
     while time.monotonic() < deadline:
         time.sleep(20)
@@ -407,23 +406,29 @@ def _reviewed_by_asking(number: int, head: str, timeout: float = 600.0) -> str:
         if _ALREADY_REVIEWED in reply or _FINISHED in reply:
             return "reviewed"
         if _RATE_LIMITED in reply:
-            # Not a stop signal any more. The banner tracks the *included*
-            # allowance, so with usage-based reviews on, a paid review can be
-            # under way while it still quotes a wait -- measured 2026-09-29,
-            # the coverage marker moved about six minutes after the ask while
-            # the banner still said 29 minutes. Returning here abandoned a
-            # review already running, and the caller then backed off for a
-            # window that had nothing to do with it. Noted and kept watching.
-            refused = True
-        if _summary_verdict(number, head)[0] == "reviewed":
-            return "reviewed"
+            # A refusal no longer proves nothing is running: with usage-based
+            # reviews the banner tracks the *included* allowance only, so a
+            # paid review can be under way while it still quotes a wait
+            # (measured 2026-09-29 -- the marker moved about six minutes after
+            # the ask while the banner said 29). So consult the authoritative
+            # marker once before believing it.
+            #
+            # Once, not in a loop. Waiting here is exactly what #207 removed:
+            # the gate polled the full timeout on a reply it already had. It
+            # costs nothing to exit now, because `_status` reads the marker
+            # before asking on every later call -- so a review that lands six
+            # minutes from now is picked up then, without anyone blocking on
+            # it.
+            if _summary_verdict(number, head)[0] == "reviewed":
+                return "reviewed"
+            return "rate_limited"
         if _TRIGGERED in reply and asks < _MAX_ASKS:
             # A review is running. It leaves a review object only if it finds
             # something, so the way to learn it finished is to ask again — once.
             time.sleep(60)
             since = _ask_for_review(number)
             asks += 1
-    return "rate_limited" if refused else "timeout"
+    return "timeout"
 
 
 def status(number: int, ask: bool = False) -> tuple[str, str]:

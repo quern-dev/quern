@@ -58,12 +58,12 @@ def _drive(check, monkeypatch, replies, verdicts):
     return check._reviewed_by_asking(1, HEAD, timeout=80.0)
 
 
-def test_a_refusal_followed_by_the_marker_moving_is_reviewed(check, monkeypatch):
-    """The regression. The banner says rate limited; the review runs anyway."""
+def test_a_refusal_with_the_marker_already_moved_is_reviewed(check, monkeypatch):
+    """The regression. The banner says rate limited; the review ran anyway."""
     outcome = _drive(
         check, monkeypatch,
-        replies=[check._RATE_LIMITED, "", ""],
-        verdicts=["unknown", "unknown", "reviewed"],
+        replies=[check._RATE_LIMITED],
+        verdicts=["reviewed"],
     )
     assert outcome == "reviewed"
 
@@ -87,9 +87,17 @@ def test_silence_without_a_refusal_is_a_timeout_not_a_refusal(check, monkeypatch
     assert outcome == "timeout"
 
 
-def test_the_marker_is_believed_without_any_reply_at_all(check, monkeypatch):
-    """A clean review posts no body, so the reply can stay empty forever."""
-    outcome = _drive(
-        check, monkeypatch, replies=["", ""], verdicts=["unknown", "reviewed"],
-    )
-    assert outcome == "reviewed"
+def test_a_refusal_exits_at_once_rather_than_polling_on(check, monkeypatch):
+    """#207: the gate used to poll the whole timeout on a reply it already had.
+    Consulting the marker must not reintroduce that -- a review landing later
+    is picked up by `_status`, which reads the marker before asking."""
+    polls = {"n": 0}
+
+    def counting(_number, _head):
+        polls["n"] += 1
+        return "unknown", None
+
+    monkeypatch.setattr(check, "_reply_after", lambda *_a: check._RATE_LIMITED)
+    monkeypatch.setattr(check, "_summary_verdict", counting)
+    assert check._reviewed_by_asking(1, HEAD, timeout=80.0) == "rate_limited"
+    assert polls["n"] == 1, "it kept polling after the refusal"
