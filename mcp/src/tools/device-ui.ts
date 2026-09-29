@@ -132,7 +132,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
   });
 
   server.registerTool("wait_for_element", {
-    description: `Wait for an element to satisfy a condition (server-side polling). Eliminates client-side retry loops and reduces API round-trips. Always returns with matched:true/false - timeouts are not errors. Supports conditions: exists, not_exists, visible, enabled, disabled, value_equals, value_contains. On a timeout the response carries screen_context, and with landmarks loaded that names the screen you are actually on (identified_as, confidence) -- a timeout is exactly when that is worth knowing, so you do not have to ask separately.`,
+    description: `Wait for an element to satisfy a condition (server-side polling). Eliminates client-side retry loops and reduces API round-trips. Always returns with matched:true/false - timeouts are not errors. Supports conditions: exists, not_exists, visible, enabled, disabled, value_equals, value_contains. On a timeout the response carries screen_context, and with landmarks loaded that names the screen you are actually on (identified_as, confidence) -- a timeout is exactly when that is worth knowing, so you do not have to ask separately. It also carries "backend", naming which of quern's UI backends did the reads ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone, 'u2' on Android) -- for the same reason: an element that never appeared is the kind of odd-but-not-error result where the next question is what was driving the device.`,
     inputSchema: strictParams({
       label: z
         .string()
@@ -400,6 +400,8 @@ If coordinate taps are not landing on the expected element, use take_annotated_s
     description: `Find a UI element by label or accessibility identifier and tap its center. Returns "ambiguous" with match list if multiple elements match — use element_type (e.g., "Button", "TextField", "StaticText") to narrow results.
 
 This is the PREFERRED way to tap UI elements. Use get_screen_summary first to discover element labels/identifiers, then use this tool. Avoid using coordinate-based tap unless this tool cannot find the element.
+
+Success and not-found responses both carry "backend", naming which of quern's UI backends did the work ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone, 'u2' on Android). With scroll_to_find this runs the same held-swipe sweep as scroll_to_element, where the two simulator backends differ, so it is worth checking before concluding the element is absent.
 
 Label matching modes (mutually exclusive — use only one):
 - label: exact match (case-insensitive)

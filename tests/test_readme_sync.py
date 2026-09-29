@@ -842,7 +842,11 @@ def test_tool_descriptions_name_backends_the_code_can_emit():
 
     # The names the descriptions claim, from the sentence that lists them.
     claimed = set()
-    for sentence in re.findall(r'carries "backend":[^)]*\)', src):
+    # Both spellings in use: `carries "backend": which of...` and
+    # `carries "backend", naming which of...`. A regex that matched only the
+    # first silently stopped covering two descriptions the moment they were
+    # added -- found by adding them.
+    for sentence in re.findall(r'carr(?:ies|y) "backend"[:,][^)]*\)', src):
         claimed.update(re.findall(r"'([a-z0-9-]+)'", sentence))
     assert claimed, "no documented backend names found; the guard is vacuous"
 
