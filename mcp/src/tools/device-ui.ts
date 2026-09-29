@@ -451,7 +451,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
       include_screen_context: z
         .boolean()
         .default(false)
-        .describe("Include a screen summary in the response after the tap completes. Useful for verifying navigation. With landmarks loaded it also tries to identify the screen you landed on, so you do not need a follow-up get_screen_summary?identify=true: confidence is 'exact', 'ambiguous' (candidates lists them) or 'none', and identified_as is null when nothing matched. Nothing is added when no landmarks are loaded."),
+        .describe("Include a screen summary in the response after the tap completes. Useful for verifying navigation. With landmarks loaded it also tries to identify the screen you landed on, so you do not need a follow-up get_screen_summary?identify=true: confidence is 'exact', 'ambiguous' (candidates lists them) or 'none', and identified_as is null when nothing matched. Nothing is added when no landmarks are loaded. The summary carries \"backend\", naming which of quern's UI backends read the screen ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone, 'u2' on Android) -- worth checking if the screen you landed on is not the one you expected."),
       capture_screenshots: z
         .boolean()
         .default(false)
@@ -724,7 +724,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
       include_screen_context: z
         .boolean()
         .default(false)
-        .describe("Include a screen summary in the response after typing. Useful for detecting autocorrect issues. With landmarks loaded it also tries to identify the screen you landed on, so you do not need a follow-up get_screen_summary?identify=true: confidence is 'exact', 'ambiguous' (candidates lists them) or 'none', and identified_as is null when nothing matched. Nothing is added when no landmarks are loaded."),
+        .describe("Include a screen summary in the response after typing. Useful for detecting autocorrect issues. With landmarks loaded it also tries to identify the screen you landed on, so you do not need a follow-up get_screen_summary?identify=true: confidence is 'exact', 'ambiguous' (candidates lists them) or 'none', and identified_as is null when nothing matched. Nothing is added when no landmarks are loaded. The summary carries \"backend\", naming which of quern's UI backends read the screen ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone, 'u2' on Android) -- worth checking if the screen you landed on is not the one you expected."),
       capture_screenshots: z
         .boolean()
         .default(false)

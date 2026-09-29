@@ -826,7 +826,14 @@ def test_tool_descriptions_name_backends_the_code_can_emit():
     from pathlib import Path
 
     root = Path(__file__).resolve().parent.parent
-    src = (root / "mcp" / "src" / "tools" / "device-ui.ts").read_text()
+    # Both files: `include_screen_context` on launch_app and open_url lives
+    # in device.ts, and scanning only device-ui.ts left those claims
+    # uncovered -- the same "the guard did not cover what I just added"
+    # miss as the comma spelling below.
+    src = "".join(
+        (root / "mcp" / "src" / "tools" / f"{name}.ts").read_text()
+        for name in ("device-ui", "device")
+    )
 
     # The names the backends actually report.
     real = set()
@@ -846,7 +853,7 @@ def test_tool_descriptions_name_backends_the_code_can_emit():
     # `carries "backend", naming which of...`. A regex that matched only the
     # first silently stopped covering two descriptions the moment they were
     # added -- found by adding them.
-    for sentence in re.findall(r'carr(?:ies|y) "backend"[:,][^)]*\)', src):
+    for sentence in re.findall(r'carr(?:ies|y) \\?"backend\\?"[:,][^)]*\)', src):
         claimed.update(re.findall(r"'([a-z0-9-]+)'", sentence))
     assert claimed, "no documented backend names found; the guard is vacuous"
 
