@@ -531,12 +531,14 @@ class TestRetentionHardening:
     def test_the_ten_are_counted_per_project_as_well_as_scheme(self, tmp_path):
         root = tmp_path / "records"
         mine = [_stored(root, n) for n in range(10)]
-        for n in range(3):
-            r = _stored(root, 50 + n)
+        theirs = []
+        for n in range(3):                  # newer than all of mine
+            r = _stored(root, -1 - n)
             r.project_path = "/src/other"
             (root / r.build_id / "record.json").write_text(r.model_dump_json())
+            theirs.append(r)
         build_records.prune(root, now=NOW)
-        assert all((root / r.build_id / "dSYMs").is_dir() for r in mine)
+        assert all((root / r.build_id / "dSYMs").is_dir() for r in mine + theirs)
 
     def test_a_partial_is_never_listed(self, tmp_path):
         root = tmp_path / "records"
