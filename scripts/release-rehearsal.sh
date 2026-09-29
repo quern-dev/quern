@@ -1151,12 +1151,42 @@ restore_developer_server() {
   DEV_SERVER_STOPPED=""
   DEV_SERVER_RESTARTED=1
   printf "  restarting your quern\n"
-  "$HOME/.local/bin/quern" start >/dev/null 2>&1 || true
+  # From the install root, never from wherever the rehearsal happens to be
+  # running. `quern` execs `<root>/.venv/bin/python -m server`, and `-m` puts
+  # the *caller's* cwd ahead of the editable install on `sys.path` -- so a
+  # server started from inside a worktree imports `server` from that worktree.
+  # This ran from one, the worktree was deleted after its PR merged, and the
+  # developer's daemon was left rooted in a directory that no longer existed:
+  # healthy on /health, and raising ImportError on the first module it had not
+  # already loaded. Found by the conformance suite, as 23 UI failures that
+  # looked like stale tests.
+  #
+  # The wrapper names its own root, so ask it rather than guessing; `$HOME` is
+  # the fallback, and works for the same reason -- no `server/` package there,
+  # so the editable install wins.
+  local root
+  root="$(sed -n 's/^# Points to: //p' "$HOME/.local/bin/quern" 2>/dev/null | head -1)"
+  [[ -d "$root" ]] || root="$HOME"
+  ( cd "$root" && "$HOME/.local/bin/quern" start ) >/dev/null 2>&1 || true
   sleep 3
   if curl -fsS --max-time 10 http://127.0.0.1:9100/health >/dev/null 2>&1; then
     ok "your server was stopped for this case and is back"
   else
     bad "your server was stopped for this case and did NOT come back — start it with: quern start"
+  fi
+
+  # Answering /health is not enough. A server rooted in a directory that later
+  # disappears keeps answering /health from modules it already imported, and
+  # raises ImportError on the first one it has not -- so it reads healthy and
+  # is broken, which is this repo's standing failure shape. Check where it is
+  # actually standing, not just that it replies.
+  local pid cwd
+  pid="$(lsof -nP -iTCP:9100 -sTCP:LISTEN -t 2>/dev/null | head -1)"
+  cwd="$(lsof -a -p "${pid:-0}" -d cwd -Fn 2>/dev/null | grep '^n' | sed 's/^n//')"
+  if [[ -n "$cwd" && -d "$cwd" ]]; then
+    ok "and is rooted in a directory that exists ($cwd)"
+  else
+    bad "your server is rooted in ${cwd:-<unknown>}, which does not exist — it will ImportError on the next module it needs"
   fi
 }
 
