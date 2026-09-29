@@ -5,6 +5,13 @@ All notable changes to Quern are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.1] - 2026-09-29
+
+### Fixed
+
+- **A failed update opened a window taller than the screen, and blamed the wrong thing (#339).** Reported from a 0.22.0 tarball install. The alert put the whole install log in `NSAlert.informativeText`, which neither scrolls nor caps its height, so the window grew to fit it — measured at 6,534 pt on a 1,410 pt display, with every button below the bottom edge. The only reachable control was Return, and Return was **OK**, which discarded the error; **Fix in Terminal**, the one button that would have worked, was off-screen. The advice that would have explained it was there too, at the end of the detail, which is to say at the bottom of a window with no bottom. The output now goes in a bounded, scrollable, selectable box, the actionable sentence leads, and the recovery is the default button — so Return takes the way out instead of throwing it away.
+- **"Node.js not installed", on a machine where Node was installed and working.** A GUI launch gets launchd's PATH and reads no shell startup files, so a Node from fnm, nvm, Volta, asdf or mise is invisible to it — and no longer search path can fix that, because fnm keeps its node in a directory named after the pid of the shell that asked for it. Setup reported it MISSING and offered to install another one, which would not have made the first reachable, and under `-y` would have silently done it. It now distinguishes "missing everywhere" from "missing from *this* process" using evidence the probe already had, names the manager, says where it did find one, and is not offered as installable. The advice follows where it was found: a shell gets "run this from a terminal", while a node visible only to GUI apps is told a terminal will not help. The menu declines the update and names the manager, the way a git install already declines and says why. A genuinely absent Node is unchanged — Terminal would not help, and routing it there only moves the same failure.
+
 ## [0.22.0] - 2026-09-29
 
 ### Added
@@ -648,6 +655,7 @@ First versioned release — MVP with iOS and Android support.
 - `quern --version` command.
 
 [Unreleased]: https://github.com/quern-dev/quern/compare/v0.21.0...main
+[0.22.1]: https://github.com/quern-dev/quern/releases/tag/v0.22.1
 [0.22.0]: https://github.com/quern-dev/quern/releases/tag/v0.22.0
 [0.21.0]: https://github.com/quern-dev/quern/releases/tag/v0.21.0
 [0.20.0]: https://github.com/quern-dev/quern/releases/tag/v0.20.0
