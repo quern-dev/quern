@@ -1089,6 +1089,77 @@ release_default_ports() {
   DECOY_PID=""
 }
 
+# The developer's own quern, stopped for the one case that needs the default
+# ports, and put back afterwards.
+#
+# That case tests `quern start` reclaiming its port, which means it has to use
+# 9100/9101 -- a `QUERN_STATE_DIR` does not enter into the reclaim decision, so
+# the case cannot be moved onto spare ports without testing something else. It
+# used to skip whenever a server held them, which on the maintainer's machine
+# was always, so the case that most directly covers "an update while the server
+# is running" was the one that never ran. Skips are not passes, and this one was
+# skipping on every release.
+#
+# Stopping is safe to automate because the release takes priority over whatever
+# the server is doing -- said explicitly, 2026-09-29 -- but it is *not* safe to
+# automate against a process we have not identified. Only a listener whose pid
+# matches `~/.quern/state.json` is stopped; anything else means somebody else's
+# program is on that port, and the case skips as before.
+#
+# The in-memory flow store is lost. `config.json` restores the local-capture
+# list and `active-device.json` the active device, so nothing else is.
+DEV_SERVER_STOPPED=""
+#: Sticky, unlike DEV_SERVER_STOPPED, which the restore clears. The final
+#: safety check runs long afterwards and needs to know a restart happened at
+#: all, not whether one is outstanding.
+DEV_SERVER_RESTARTED=""
+
+stop_developer_server() {
+  DEV_SERVER_STOPPED=""
+  local pid
+  pid="$(lsof -nP -iTCP:9100 -sTCP:LISTEN -t 2>/dev/null | head -1)"
+  [[ -z "$pid" ]] && return 0          # free already; nothing to do
+
+  # Identify before acting. state.json is the only thing that says the listener
+  # is ours rather than a coincidence on a common port.
+  local statepid
+  statepid="$(python3 -c '
+import json, os, sys
+p = os.path.expanduser("~/.quern/state.json")
+try:
+    print(json.load(open(p)).get("pid", ""))
+except Exception:
+    print("")' 2>/dev/null)"
+  if [[ -z "$statepid" || "$pid" != "$statepid" ]]; then
+    printf "  note: %s holds 9100 and is not the quern in ~/.quern/state.json — leaving it alone\n" "$pid"
+    return 1
+  fi
+
+  printf "  stopping your quern (pid %s) so the running-server case can use 9100/9101\n" "$pid"
+  "$HOME/.local/bin/quern" stop >/dev/null 2>&1 || true
+  sleep 2
+  if [[ -n "$(lsof -nP -iTCP:9100 -sTCP:LISTEN -t 2>/dev/null)" ]]; then
+    printf "  warning: 9100 is still held after stop; not proceeding\n"
+    return 1
+  fi
+  DEV_SERVER_STOPPED=1
+  return 0
+}
+
+restore_developer_server() {
+  [[ -n "$DEV_SERVER_STOPPED" ]] || return 0
+  DEV_SERVER_STOPPED=""
+  DEV_SERVER_RESTARTED=1
+  printf "  restarting your quern\n"
+  "$HOME/.local/bin/quern" start >/dev/null 2>&1 || true
+  sleep 3
+  if curl -fsS --max-time 10 http://127.0.0.1:9100/health >/dev/null 2>&1; then
+    ok "your server was stopped for this case and is back"
+  else
+    bad "your server was stopped for this case and did NOT come back — start it with: quern start"
+  fi
+}
+
 case_running_server_update() {
   failures=0   # a subshell copy: a case reports only its own
   local sb="$WORK/running-update"
@@ -1096,7 +1167,12 @@ case_running_server_update() {
   make_stubs "$sb/bin"
 
   if ! hold_default_ports "$sb"; then
-    skip "running-server update: 9100/9101 are already taken, most likely by your own quern — this case would restart onto them and kill it. Stop your server and re-run to exercise it."
+    # Reached only when something that is *not* your quern holds the ports:
+    # `stop_developer_server` has already cleared ours by the time this runs.
+    # Killing an unidentified listener is not something a release script should
+    # do, so this still declines -- but it now names what is in the way rather
+    # than assuming it is yours.
+    skip "running-server update: 9100/9101 are held by a process that is not the quern in ~/.quern/state.json — $(lsof -nP -iTCP:9100 -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1, $2}'). Free them and re-run to exercise it."
     return 0
   fi
 
@@ -1174,9 +1250,14 @@ except Exception:
   return "$failures"
 }
 
+# Stop/restore sit outside the subshell on purpose: the case can return from
+# several places, and a restore inside it would be one `return` away from
+# leaving the developer's server down.
 set +e
+stop_developer_server
 ( case_running_server_update )
 failures=$((failures + $?))
+restore_developer_server
 set -e
 
 # --------------------------------------------------------------------------
@@ -1702,6 +1783,20 @@ if [[ -z "$REAL_PID" ]]; then
   ok "no server of yours was running to disturb"
 elif kill -0 "$REAL_PID" 2>/dev/null; then
   ok "your own server (pid $REAL_PID) is still running"
+elif [[ -n "$DEV_SERVER_RESTARTED" ]]; then
+  # A different pid is the expected outcome, not a casualty: the running-server
+  # case stops the server deliberately and starts it again, so the question
+  # stops being "is that pid alive" and becomes "is a server serving".
+  #
+  # Checked here as well as at the restart, because this is the line a reader
+  # trusts at the end of a run -- and a guard that cannot tell a deliberate
+  # restart from a kill would either cry wolf on every release or, if someone
+  # silenced it, stop noticing the kill it exists for.
+  if curl -fsS --max-time 10 http://127.0.0.1:9100/health >/dev/null 2>&1; then
+    ok "your own server was stopped for the running-server case and is serving again"
+  else
+    bad "your own server was stopped for the running-server case and is NOT back — run: quern start"
+  fi
 else
   # `quern start` reclaims a port by killing the quern-looking process that
   # holds it, and does not consult QUERN_STATE_DIR when deciding.
