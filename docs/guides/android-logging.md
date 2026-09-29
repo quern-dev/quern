@@ -37,7 +37,8 @@ If you know which tag your code uses, tell your agent: **"Show me logs with tag 
 
 ## Tips
 
-- **Your agent clears the logcat buffer** when it starts capture, so you won't see stale entries from before your session.
+- **Capture starts from now, and leaves the device's log alone.** Quern reads from the newest line onward, so you won't see stale entries from before your session. It no longer clears the device's logcat buffer to get there, so Android Studio or a bug report taken afterwards still has the full history.
+- **Crashes are picked out for you.** A Java crash (`FATAL EXCEPTION`), a native crash (`Fatal signal`) or an ANR also becomes a crash entry, stored where high-volume logging cannot push it out. Ask your agent for errors, or for logs with source `crash`.
 - **Multi-line messages** (stack traces) are handled — they show up as connected entries, not separate lines.
 - **Logcat's buffer is limited** (~256KB on emulators). High-volume logging wraps quickly. Tell your agent to start capturing *before* you reproduce the issue, not after.
 - **Process filtering is client-side** on Android (unlike iOS where it's subprocess-level). This means all log entries are still captured and parsed, just filtered in Quern's pipeline. Still fast enough for normal use, but heavier than iOS process filtering.

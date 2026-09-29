@@ -6,6 +6,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from server.api.actions import logged_action
 from server.device.app_state import (
     delete_state,
     get_checkpoint_plist_path,
@@ -29,7 +30,7 @@ from server.models import (
 )
 
 router = APIRouter(prefix="/api/v1/device/app/state", tags=["app-state"])
-logger = logging.getLogger("quern-debug-server.api")
+logger = logging.getLogger(__name__)
 
 
 def _get_controller(request: Request):
@@ -45,6 +46,15 @@ def _handle_device_error(e: DeviceError) -> HTTPException:
         return HTTPException(status_code=404, detail=msg)
     if "not found" in msg.lower() and "container" in msg.lower():
         return HTTPException(status_code=404, detail=msg)
+    if "only supported on simulators" in msg:
+        # 400, not 500. Asking for an iOS-simulator operation on an Android
+        # device is a bad request, not a server fault, and `server/api/
+        # device.py` has classified it that way all along -- this module
+        # carries its own copy of this function and never gained the rule, so
+        # the same refusal was a 400 from one endpoint and a 500 from another
+        # depending only on which file the route lived in. #263 predicted
+        # exactly this; a live call against a real phone confirmed it.
+        return HTTPException(status_code=400, detail=msg)
     return HTTPException(status_code=500, detail=f"[{e.tool}] {msg}")
 
 
@@ -54,6 +64,7 @@ def _handle_device_error(e: DeviceError) -> HTTPException:
 
 
 @router.post("/save")
+@logged_action("save_app_state", category="device.action")
 async def save_app_state(request: Request, body: SaveAppStateRequest):
     """Save a named checkpoint of the app's state (data container + app groups).
 
@@ -78,6 +89,7 @@ async def save_app_state(request: Request, body: SaveAppStateRequest):
 
 
 @router.post("/restore")
+@logged_action("restore_app_state", category="device.action")
 async def restore_app_state(request: Request, body: RestoreAppStateRequest):
     """Restore a named checkpoint. Terminates the app and re-resolves live container paths.
 
@@ -100,6 +112,7 @@ async def restore_app_state(request: Request, body: RestoreAppStateRequest):
 
 
 @router.get("/list")
+@logged_action("list_app_states", category="device.read")
 async def list_app_states(
     request: Request,
     bundle_id: str = Query(..., description="App bundle identifier"),
@@ -110,6 +123,7 @@ async def list_app_states(
 
 
 @router.delete("/{label}")
+@logged_action("delete_app_state", category="device.action")
 async def delete_app_state(
     request: Request,
     label: str,
@@ -129,6 +143,7 @@ async def delete_app_state(
 
 
 @router.get("/plist")
+@logged_action("read_app_plist", category="device.read")
 async def read_app_plist(
     request: Request,
     bundle_id: str = Query(...),
@@ -162,6 +177,7 @@ async def read_app_plist(
 
 
 @router.post("/plist")
+@logged_action("set_app_plist_value", category="device.action")
 async def set_app_plist_value(request: Request, body: SetAppPlistValueRequest):
     """Set a plist key in an app container."""
     controller = _get_controller(request)
@@ -187,6 +203,7 @@ async def set_app_plist_value(request: Request, body: SetAppPlistValueRequest):
 
 
 @router.post("/plist/batch")
+@logged_action("set_app_plist_values", category="device.action")
 async def set_app_plist_values(request: Request, body: SetAppPlistValuesRequest):
     """Set multiple plist keys in one call."""
     controller = _get_controller(request)
@@ -223,6 +240,7 @@ async def set_app_plist_values(request: Request, body: SetAppPlistValuesRequest)
 
 
 @router.get("/plist/diff")
+@logged_action("diff_app_plist", category="device.read")
 async def diff_app_plist(
     request: Request,
     bundle_id: str = Query(...),
@@ -267,6 +285,7 @@ async def diff_app_plist(
 
 
 @router.delete("/plist/key")
+@logged_action("delete_app_plist_key", category="device.action")
 async def delete_app_plist_key(request: Request, body: DeleteAppPlistKeyRequest):
     """Remove a key from a plist in an app container."""
     controller = _get_controller(request)
@@ -300,6 +319,7 @@ def _watch_key(udid: str, container: str, plist_path: str) -> str:
 
 
 @router.post("/plist/watch/start")
+@logged_action("start_plist_watch", category="logs")
 async def start_plist_watch(request: Request, body: StartPlistWatchRequest):
     """Start polling a plist file and emitting changes as log entries."""
     from server.sources.plist_watcher import PlistWatcherAdapter
@@ -350,6 +370,7 @@ async def start_plist_watch(request: Request, body: StartPlistWatchRequest):
 
 
 @router.post("/plist/watch/stop")
+@logged_action("stop_plist_watch", category="logs")
 async def stop_plist_watch(request: Request, body: StopPlistWatchRequest):
     """Stop polling a plist file."""
     controller = _get_controller(request)
@@ -385,6 +406,7 @@ async def get_plist_watch_config_endpoint():
 
 
 @router.post("/plist/watch/configure")
+@logged_action("configure_plist_watch", category="logs")
 async def configure_plist_watch(body: ConfigurePlistWatchRequest):
     """Save persistent plist watch config for a bundle_id.
 
@@ -405,6 +427,7 @@ async def configure_plist_watch(body: ConfigurePlistWatchRequest):
 
 
 @router.delete("/plist/watch/configure")
+@logged_action("clear_plist_watch_config_endpoint", category="logs")
 async def clear_plist_watch_config_endpoint(body: ClearPlistWatchConfigRequest):
     """Remove persistent plist watch config for a bundle_id."""
     from server.config import clear_plist_watch_config

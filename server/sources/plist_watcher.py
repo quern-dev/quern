@@ -15,7 +15,7 @@ from server.device.plist import diff_plists, read_plist
 from server.models import LogEntry, LogLevel, LogSource
 from server.sources import BaseSourceAdapter
 
-logger = logging.getLogger("quern-debug-server.plist-watcher")
+logger = logging.getLogger(__name__)
 
 # Values longer than this are truncated in log messages
 _MAX_VALUE_LEN = 120

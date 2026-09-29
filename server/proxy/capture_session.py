@@ -14,7 +14,7 @@ from server.models import (
 )
 from server.proxy.flow_store import FlowStore
 
-logger = logging.getLogger("quern-debug-server.capture-session")
+logger = logging.getLogger(__name__)
 
 
 class CaptureSession:
@@ -22,7 +22,7 @@ class CaptureSession:
 
     __slots__ = (
         "id", "start_time", "hosts", "exclude_hosts",
-        "simulator_udid", "client_ip", "detail",
+        "simulator_udid", "device_serial", "client_ip", "detail",
     )
 
     def __init__(
@@ -32,6 +32,7 @@ class CaptureSession:
         hosts: list[str] | None,
         exclude_hosts: list[str] | None,
         simulator_udid: str | None,
+        device_serial: str | None,
         client_ip: str | None,
         detail: str,
     ) -> None:
@@ -40,6 +41,7 @@ class CaptureSession:
         self.hosts = hosts
         self.exclude_hosts = exclude_hosts
         self.simulator_udid = simulator_udid
+        self.device_serial = device_serial
         self.client_ip = client_ip
         self.detail = detail
 
@@ -63,6 +65,7 @@ class CaptureSessionManager:
             hosts=request.hosts,
             exclude_hosts=request.exclude_hosts,
             simulator_udid=request.simulator_udid,
+            device_serial=request.device_serial,
             client_ip=request.client_ip,
             detail=request.detail or "full",
         )
@@ -85,11 +88,27 @@ class CaptureSessionManager:
             hosts=session.hosts,
             exclude_hosts=session.exclude_hosts,
             simulator_udid=session.simulator_udid,
+            device_serial=session.device_serial,
             client_ip=session.client_ip,
-            device_id="",  # don't filter by device_id (default is "default")
+            device_id="",  # unscoped: do not filter by device
             limit=1000,
         )
         flows, total = await flow_store.query(params)
+        # Flows evicted during the session were part of it. Without this the
+        # response counted what survived and presented it as everything the
+        # bracketed action caused (#318).
+        through = flow_store.evicted_through(
+            simulator_udid=session.simulator_udid, client_ip=session.client_ip,
+            device_serial=session.device_serial,
+        )
+        completeness = {
+            "truncated": not flow_store.is_complete_since(
+                session.start_time,
+                simulator_udid=session.simulator_udid, client_ip=session.client_ip,
+                device_serial=session.device_serial,
+            ),
+            "complete_after": through,
+        }
 
         # Build by_host breakdown
         host_counts: dict[str, int] = {}
@@ -126,6 +145,7 @@ class CaptureSessionManager:
                 total_flows=total,
                 flow_summaries=summaries,
                 by_host=by_host,
+                **completeness,
             )
 
         logger.info(
@@ -138,6 +158,7 @@ class CaptureSessionManager:
             total_flows=total,
             flows=flows,
             by_host=by_host,
+            **completeness,
         )
 
     def _cleanup_expired(self) -> None:

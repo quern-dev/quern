@@ -61,14 +61,75 @@ enum InstallKindTests {
         }
 
         Harness.test("git installs are offered Terminal, releases a restart") {
+            // `node:` is passed explicitly everywhere: its default reads the
+            // real machine, and a test that did that would be a report about
+            // whoever ran it.
             let git = InstallKind.git(URL(fileURLWithPath: "/c", isDirectory: true))
-            Harness.expect(UpdateMenuItem.forStaged(latestVersion: "0.18.5", install: git),
-                           .updateInTerminal("Update in Terminal… — v0.18.5"), "git")
-            Harness.expect(UpdateMenuItem.forStaged(latestVersion: "0.18.5", install: .release(release)),
+            Harness.expect(UpdateMenuItem.forStaged(latestVersion: "0.18.5", install: git,
+                                                    node: .visible),
+                           .updateInTerminal("Update in Terminal… — v0.18.5", .gitInstall), "git")
+            Harness.expect(UpdateMenuItem.forStaged(latestVersion: "0.18.5",
+                                                    install: .release(release), node: .visible),
                            .restartToUpdate("Restart to Update — v0.18.5"), "release")
             // Unknown keeps today's behaviour rather than guessing git.
-            Harness.expect(UpdateMenuItem.forStaged(latestVersion: nil, install: .unknown),
+            Harness.expect(UpdateMenuItem.forStaged(latestVersion: nil, install: .unknown,
+                                                    node: .visible),
                            .restartToUpdate("Restart to Update"), "unknown")
+        }
+
+        Harness.test("a release install whose node is managed goes to Terminal, naming the manager") {
+            // The #339 case: node exists and works in every shell, and this
+            // launch cannot see it, so the update fails naming Node.
+            Harness.expect(UpdateMenuItem.forStaged(latestVersion: "0.22.1",
+                                                    install: .release(release),
+                                                    node: .managedElsewhere("fnm")),
+                           .updateInTerminal("Update in Terminal… — v0.22.1",
+                                             .nodeManagedElsewhere("fnm")), "fnm")
+            Harness.expect(TerminalReason.nodeManagedElsewhere("fnm").menuTitle,
+                           "Why Terminal? (Node is managed by fnm)", "says which one")
+        }
+
+        Harness.test("a genuinely absent node is not sent to Terminal") {
+            // Terminal would not help: there is no node there either. Routing it
+            // would move the same failure somewhere the user has to type.
+            Harness.expect(UpdateMenuItem.forStaged(latestVersion: nil,
+                                                    install: .release(release), node: .absent),
+                           .restartToUpdate("Restart to Update"), "absent stays put")
+            Harness.expect(NodeVisibility.absent.needsTerminal, false, "absent")
+            Harness.expect(NodeVisibility.visible.needsTerminal, false, "visible")
+            Harness.expect(NodeVisibility.managedElsewhere("nvm").needsTerminal, true, "managed")
+        }
+
+        Harness.test("a git install reports the git reason even when node is also hidden") {
+            // Both apply. Git is the property of the install and true on every
+            // machine; the node one is a property of this launch.
+            let git = InstallKind.git(URL(fileURLWithPath: "/c", isDirectory: true))
+            Harness.expect(UpdateMenuItem.forStaged(latestVersion: nil, install: git,
+                                                    node: .managedElsewhere("fnm")),
+                           .updateInTerminal("Update in Terminal…", .gitInstall), "git wins")
+        }
+
+        Harness.test("node is looked for on the same PATH the child will get") {
+            let home = "/home/u"
+            // Present on the app's own search path.
+            Harness.expect(NodeVisibility.check(home: home, searchPath: ["/opt/homebrew/bin"],
+                                                isExecutable: { $0 == "/opt/homebrew/bin/node" },
+                                                exists: { _ in false }),
+                           .visible, "found")
+            // Absent, but fnm's per-shell directory is on disk -- the real case.
+            Harness.expect(NodeVisibility.check(home: home, searchPath: ["/usr/bin"],
+                                                isExecutable: { _ in false },
+                                                exists: { $0 == "\(home)/.local/state/fnm_multishells" }),
+                           .managedElsewhere("fnm"), "fnm multishells")
+            Harness.expect(NodeVisibility.check(home: home, searchPath: ["/usr/bin"],
+                                                isExecutable: { _ in false },
+                                                exists: { $0 == "\(home)/.nvm" }),
+                           .managedElsewhere("nvm"), "nvm")
+            // Nothing anywhere.
+            Harness.expect(NodeVisibility.check(home: home, searchPath: ["/usr/bin"],
+                                                isExecutable: { _ in false },
+                                                exists: { _ in false }),
+                           .absent, "nothing")
         }
 
         Harness.test("the Terminal script runs the wrapper it was given, quoted") {

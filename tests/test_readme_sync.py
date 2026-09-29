@@ -809,3 +809,56 @@ def test_a_paren_inside_a_real_string_is_still_ignored():
     """The original reason this scanner exists -- `.describe()` prose."""
     src = 'strictParams({ a: z.boolean().describe("(default: false)") })'
     assert _balanced(src, src.index("(")) == len(src) - 1
+
+
+def test_tool_descriptions_name_backends_the_code_can_emit():
+    """The `backend` field's documented values must be real TOOL_NAMEs.
+
+    The first version of those descriptions said `uiautomator2` on Android
+    while `U2Backend.TOOL_NAME` is `u2`, so the field existed precisely to
+    be checked and the documented value never appeared. An agent matching
+    on it concludes "not Android" or "field missing".
+
+    Nothing else compares description prose to the code: this file parses
+    tool names and input schemas, never the text.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    # Both files: `include_screen_context` on launch_app and open_url lives
+    # in device.ts, and scanning only device-ui.ts left those claims
+    # uncovered -- the same "the guard did not cover what I just added"
+    # miss as the comma spelling below.
+    src = "".join(
+        (root / "mcp" / "src" / "tools" / f"{name}.ts").read_text()
+        for name in ("device-ui", "device")
+    )
+
+    # The names the backends actually report.
+    real = set()
+    for mod in ("u2_client", "wda_client", "sim_bridge", "idb"):
+        text = (root / "server" / "device" / f"{mod}.py").read_text()
+        # Either a literal, or the module constant sim_bridge assigns from.
+        real.update(re.findall(r'TOOL_NAME\s*=\s*"([^"]+)"', text))
+        real.update(re.findall(r'^_TOOL\s*=\s*"([^"]+)"', text, re.M))
+    assert len(real) >= 4, (
+        f"expected a TOOL_NAME per backend, found {sorted(real)} -- this "
+        "guard passes vacuously if the scan misses one"
+    )
+
+    # The names the descriptions claim, from the sentence that lists them.
+    claimed = set()
+    # Both spellings in use: `carries "backend": which of...` and
+    # `carries "backend", naming which of...`. A regex that matched only the
+    # first silently stopped covering two descriptions the moment they were
+    # added -- found by adding them.
+    for sentence in re.findall(r'carr(?:ies|y) \\?"backend\\?"[:,][^)]*\)', src):
+        claimed.update(re.findall(r"'([a-z0-9-]+)'", sentence))
+    assert claimed, "no documented backend names found; the guard is vacuous"
+
+    unknown = claimed - real
+    assert not unknown, (
+        f"tool descriptions name backends the code never emits: {sorted(unknown)}. "
+        f"Real TOOL_NAMEs: {sorted(real)}"
+    )

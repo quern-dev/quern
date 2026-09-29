@@ -360,3 +360,4 @@ class TestBackwardCompat:
                 proc.kill()
                 proc.wait()
             _kill_server()
+

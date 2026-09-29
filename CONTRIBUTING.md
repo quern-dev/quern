@@ -30,32 +30,6 @@ AI Agent (Claude Code, Cursor, etc.)
 
 The MCP server is intentionally thin — just translates tool calls into HTTP requests. All logic lives in the Python server.
 
-## Project structure
-
-```text
-server/              Python FastAPI server (the core)
-  api/               Route handlers: logs, proxy, device, device_pool, builds, crashes
-  sources/           Log source adapters (syslog, oslog, crash, build, simulator)
-  proxy/             mitmproxy addon, flow store, system proxy management
-  device/            Simulator control (simctl, idb), device pool, screenshots
-  processing/        Pipeline: classifier → deduplicator → summarizer
-  storage/           Ring buffer
-  lifecycle/         Daemon mode, state.json, port scanning, watchdog
-mcp/                 TypeScript MCP-to-HTTP adapter
-examples/            Example scripts for HTTP API automation
-tests/               pytest suite + fixtures
-docs/                Agent guide
-```
-
-## Tech stack
-
-- Python 3.11+ / FastAPI / uvicorn
-- TypeScript / Node.js 18+ (MCP wrapper)
-- mitmproxy 10+ (network interception)
-- Pillow (screenshots)
-- xcrun simctl + idb (simulator control)
-- macOS `log` command (OSLog capture)
-
 ## Running it
 
 Use the `./quern` wrapper script:
@@ -163,15 +137,89 @@ the copy to trust, and the one to update.
   `gh pr view <n> --json isDraft` before starting a merge, and treat an empty
   findings list as a question rather than an answer.
 
-- **Merging a PR: use `scripts/merge-pr.sh <number>`**, not `gh pr merge`. `.coderabbit.yaml` sets `auto_review.enabled: true` with `auto_incremental_review: false`, so a review fires when a PR is *opened* and never again — **pushing to an open PR does not trigger one**. That is deliberate: review runs are capped per hour, and re-reviewing every push spends the budget on intermediate states nobody merges. The consequence is that an "0 unresolved threads" reading goes stale the moment you push, not because a new review contradicted it but because the code moved out from under it, and it still reads exactly like all-clear. The script refuses to merge unless the newest review is newer than the newest commit, and internally runs `pr-review-status.py --ask`, which requests the missing review when the head has moved past it. `--force` overrides deliberately. `scripts/pr-review-status.py` is the same check on its own; don't pipe it if you care about the exit code — `| sed` or `| tee` reports the pipe's status, not the script's, which reads as success.
+- **Merging a PR: use `scripts/merge-pr.sh <number>`**, not `gh pr merge`. `.coderabbit.yaml` sets `auto_review.enabled: true` with `auto_incremental_review: false`, so a review fires when a PR is *opened* and never again — **pushing to an open PR does not trigger one**. That is deliberate: review runs are rate limited, and re-reviewing every push spends the budget on intermediate states nobody merges. The consequence is that an "0 unresolved threads" reading goes stale the moment you push, not because a new review contradicted it but because the code moved out from under it, and it still reads exactly like all-clear. The script refuses to merge unless the newest review is newer than the newest commit, and internally runs `pr-review-status.py --ask`, which requests the missing review when the head has moved past it. `--force` overrides deliberately. `scripts/pr-review-status.py` is the same check on its own; don't pipe it if you care about the exit code — `| sed` or `| tee` reports the pipe's status, not the script's, which reads as success.
 
   **When reviews are rate limited, it says so and stops.** CodeRabbit answers the request with "Review rate limited" within seconds. The script used to treat that as no answer, poll out its whole ten-minute timeout in silence, and report only "still awaiting review" — twice on #202 (#207). It now reports the limit and when it lifts, reads the summary comment first so a limit already on the page costs no comment, and does not ask again before that time. Note what a rate-limited head looks like: CodeRabbit still resolves the threads whose fixes it can see, so the PR shows zero open findings on a commit no review has read. #199 and #202 both merged in that state.
+
+  **The allowance is a rolling budget, and CodeRabbit states it.** This was recorded here as one review per hour, which is wrong. Every review comment carries a *Recent review info* block giving both the remaining budget and the current rate — measured 2026-09-24: "3 reviews are currently available. Your included PR review attempts over the past 7 days set your current allowance at 5 reviews per hour." So the rate is derived from recent usage rather than fixed, which is why observed intervals varied wildly that week (a refusal quoting 25 minutes, a banner quoting 39, two grants eleven minutes apart, one granted immediately).
+
+  Read the number rather than inferring it. Note what "attempts" means in that sentence: the reviews CodeRabbit *accepted*, not the requests it turned away. A refused ask is free and does not meter, so retry rather than computing when a window *should* have reopened, and read the acknowledgement body — `Action not completed` is the refusal, and the walkthrough's "Review limit reached" banner is a stale edit that lies. The budget is shared across PRs and across agents, so never ask on two at once, and ask the sessions working other open PRs before taking a slot.
+
+  **A clean-looking PR page is not evidence of a review.** Three PRs opened during a limited window on 2026-09-23 showed `CLEAN` with zero unresolved threads and had never been reviewed at all — the auto-review-on-open was refused and nothing said so. The reliable check is the coverage marker, which must equal your head:
+
+  ```sh
+  gh api "repos/quern-dev/quern/issues/<N>/comments?per_page=100" --paginate \
+    -q '.[] | select(.user.login=="coderabbitai[bot]") | .body' \
+    | grep -oE 'coveredCommitId":"[a-f0-9]+' | tail -1
+  ```
+
+  If it does not match, ask for `@coderabbitai full review` rather than the plain form, which reviews forward from the last commit it saw. Measured: the plain form did cover a four-commit gap on #164. The case to distrust is a force-push, where the commit the last review covered no longer exists in the branch — re-read the marker afterwards rather than assuming.
+
+  **The marker matching is not the same as "no findings", and a green
+  CodeRabbit status is not either.** There is a third place findings live,
+  besides inline threads and review bodies: the **pre-merge checks** table in
+  the walkthrough *issue comment*. A PR can have zero reviews and zero review
+  comments and still be carrying findings there. Measured on #309 — a coverage
+  marker equal to head, `cr-findings.sh` printing two empty sections, and a
+  table reading `❌ 2` with a real out-of-scope finding in it. Running the
+  script against #306 as a control (14 reviews, 14 review comments) is what
+  established the empty output was a blind spot rather than a clean bill.
+  `scripts/cr-findings.sh` now reads that table too.
+
+  Two things make this hard to notice from the PR page. First, **CodeRabbit
+  reports through the legacy commit-status API, not check-runs**, so
+  `commits/<sha>/check-runs` — the right query for CI — never returns a
+  CodeRabbit row at all, and reading its absence as "no review" is wrong. Use
+  `commits/<sha>/status` for CodeRabbit and `check-runs` for CI; `gh pr checks`
+  merges both and shows them as one list.
+
+  Second, and worse: **that status says `success` / `Review completed` even when
+  CodeRabbit's own pre-merge checks failed.** It is a genuine, current status on
+  that exact commit — not a stale row carried from an earlier push — it simply
+  does not depend on the checks. Measured twice: #309's `72faef2` carried
+  `❌ 2` and got `success` two seconds after the table was published, and
+  #305 merged on a head with `❌ 1`. So `CodeRabbit pass` is not a statement
+  about findings.
+
+  **But treat a failing table as a question, not a wall.** Measured over the 28
+  most recently merged PRs (2026-09-25): 23 merged with a failing tally, and
+  **Docstring Coverage was failing in all 23** — against an 80% threshold
+  nothing in this repo meets. Only two carried anything else: #277 (Out of Scope
+  Changes) and #275 (Title check, *Inconclusive*). So 21 of the 23 were the
+  noise alone. A signal red on four of every five merges carries no information,
+  and that is exactly why the two real ones went unseen — one of them merged past
+  the same day by a session that correctly reported "zero open findings" from
+  every check then available to it. `cr-findings.sh` sorts Docstring Coverage
+  under its own heading rather than hiding it, because hiding it would be a
+  fourth blind spot.
+
+  Note the status column has at least three values — `⚠️ Warning`,
+  `❓ Inconclusive`, `✅ Passed`. #275 is the reason that matters: a tally of
+  `❌ 2` with only one Warning row means the other failure is spelled
+  differently, and a parser matching one spelling drops it. Treat anything that
+  is not a pass as worth reading.
 
 ## Design decisions worth knowing
 
 - **State file is the contract.** All consumers discover the server via `~/.quern/state.json`. Never hardcode ports.
 - **Cursor-based summaries.** `/logs/summary` and `/proxy/flows/summary` return a `cursor` for delta updates. Critical for token-efficient AI workflows.
 - **Template-based summaries, not LLM-generated.** No external API calls needed.
+- **A warning only the server log carries has not been delivered.** The caller
+  driving quern over MCP sees the JSON body and nothing else, so a condition
+  that changes what a result *means* belongs on the response. Quern detected
+  Xcode 27's Device Hub taking a simulator's input services, and logged it —
+  while returning `{"status": "ok"}` for taps that were accepted and
+  discarded, to the one audience that could act on it and could not see it.
+  The log line is for the person reading afterwards; the response field is for
+  the agent deciding what to do next. A check worth making is worth
+  delivering.
+- **Report the outcome, not the request.** `simctl launch` reports the launch
+  it was *asked* for and hands back a pid, so `launch_app` reported success
+  for apps that never started -- on iOS 27, any app that has not adopted the
+  UIScene lifecycle. The failure then surfaced several calls later as
+  `tap_element` finding no element, which sends the reader somewhere unrelated
+  to the cause. Where a tool can confirm the state it claims to have produced,
+  confirm it.
 - **Hybrid proxy storage.** Summary log entries go in the ring buffer (so log queries include network events). Full flow records go in a separate FlowStore.
 - **Mock/intercept patterns use mitmproxy filter syntax.** Valid operators: `~d` (domain), `~u` (URL), `~m` (method), `~c` (status code), `~b` (body), etc. Note: `~p` (path) does NOT exist — use `~u` for path matching.
 - **Server-side filter validation.** Invalid mitmproxy filter patterns are rejected with 400 before reaching the addon.
@@ -295,9 +343,43 @@ tmp=$(mktemp -d); git archive --format=tar HEAD | tar -x -C "$tmp"
 # run the suite from inside $tmp with this checkout's .venv/bin/python
 ```
 
+**`HEAD` is the commit you are standing on, which on a fix branch is the
+fix.** This line used to say only `HEAD`, and following it literally on
+`fix/296-...` extracted the *fixed* source, ran the new tests against it, and
+reported 5/5 green — read as "these tests do not detect the bug" when the truth
+was "this copy does not contain the bug". It cost a round of disbelief before a
+review agent reproduced the same false reading from the same line.
+
+To mutate *against the pre-fix state*, take the branch point rather than
+counting commits back:
+
+```sh
+base=$(git merge-base origin/main HEAD)
+tmp=$(mktemp -d); git archive --format=tar "$base" | tar -x -C "$tmp"
+```
+
+`HEAD~1` is **not** it, except by luck. The first version of this very
+paragraph said `HEAD~1`, and CodeRabbit pointed out on the PR carrying it that
+the branch had two commits by then — so `HEAD~1` was the fix commit and the
+advice reproduced the bug it was written to prevent. Third time the same
+mistake was made in one change, which is the argument for a form that does not
+depend on how many commits you happen to have.
+
+So assert the copy is what you think before believing a green run — grep the
+extract for a symbol the fix introduced and stop if it is there. A mutation
+harness that cannot tell "the bug is absent" from "the test is blind" is the
+same can't-fail check this file warns about, aimed at the check itself.
+
 Clear `__pycache__` between mutations: a same-size swap can leave stale bytecode,
 and the false result reads as "my fix does not work" while the source in front of
 you says otherwise.
+
+And note the archive root wins over cwd. `tests/__init__.py` exists, so pytest
+puts the extract's root on `sys.path` ahead of the directory you launched from
+— which is what makes this recipe work at all. It does **not** hold for a
+script run by path: `python /abs/path/script.py` puts the *script's* directory
+at `sys.path[0]`, and the editable install then resolves `server` to the
+primary checkout rather than to the tree you meant.
 
 ### Agent review runs in a worktree
 
@@ -317,9 +399,171 @@ and the Swift build cache under `CONFIG_DIR/bin` are shared from every checkout,
 so an agent that runs the app rather than the tests still needs
 `QUERN_STATE_DIR` and usually a sandboxed `HOME`.
 
+`QUERN_STATE_DIR` redirects `~/.quern` and **not** `~/.mitmproxy`. The proxy CA
+is shared from every checkout, which cuts both ways: live-testing capture from
+a worktree works against an already-trusted simulator without installing a
+second root CA, and a worktree cannot be assumed to have a CA of its own.
+
+**The media suite runs `--no-parallel`, and that is not caution.** CI runners
+are VMs where VideoToolbox falls back to software encoding, and 72 tests at
+once on three cores made every real-time deadline in the suite miss. The
+failures read as corruption rather than contention -- the tell was a
+diagnostic message naming a timeout, not the assertion that fired. Keep the
+flag, and suspect contention before correctness when a timing test fails only
+on CI.
+
+Nor does it isolate the **SwiftPM build lock**. A `swift test` that is killed
+can leave `swift-test` and `swiftpm-testing-helper` processes holding the lock
+on a shared `--scratch-path`, and the next run then blocks for its full 600s
+timeout -- which looks exactly like the hang you were trying to fix. Before
+believing a Swift hang:
+
+```sh
+pgrep -fl "swift-test|swiftpm-testing-helper"
+```
+
+**`git worktree remove` can half-succeed, and only its exit code says so.** It
+deregisters the worktree, deletes most of the tree, and then refuses a
+directory something else has written into -- a Finder `.DS_Store` is enough.
+What is left is files with no git record of them: `git worktree list` shows the
+worktree gone and `git worktree prune` finds nothing to do, because there is
+nothing left to prune. Measured once at 85 files and 6.7MB. So check the
+directory, not the registration:
+
+```sh
+git worktree remove --force "$d"; [ -d "$d" ] && echo "STILL THERE: $d"
+```
+
+That only helps the session doing the removing. To audit afterwards -- or when
+someone else removed it and nobody saw the exit code -- the three checks
+disagree, which is the point:
+
+```sh
+git worktree list                 # the registration
+ls -A .claude/worktrees/          # the directory
+ls -A .git/worktrees/             # git's admin dirs, one per live worktree
+```
+
+A `.DS_Store` in the *parent* is harmless; the hazard needs one inside the tree
+being removed. Expect them either way -- Finder writes them wherever anyone
+looks, so the trigger is ambient rather than unlucky.
+
+**None of those find a `git archive` copy.** Mutation testing works from
+extracted tarballs, which are not worktrees and never appear in any of the
+three. A cleanup sweep that reports "none of the worktrees are mine" can be
+true and incomplete at the same time; scratch copies want their own pass.
+
+**Nor do they find a process the removed tree left running.** Deleting a
+worktree does not stop what it started, and a `mitmdump` outlives its tree
+happily: one was found here still serving an addon from
+`quern-dev69-274-.../server/proxy/addon.py` **two days** after that directory
+ceased to exist, holding port 9301. Nothing in `worktree list`, the directory
+listing, `.git/worktrees/`, or a `quern-scratch` pass can see it, and it
+occupies a port a later session may pick.
+
+```sh
+pgrep -fl "mitmdump|swift-test|swiftpm-testing-helper"
+lsof -a -p <pid> -d cwd -Fn          # the process's cwd
+```
+
+A process whose **cwd no longer exists** is a strong orphan signal on its own,
+and it catches shell loops, which have no `-s <addon>` path to check. Two
+lessons came out of the same find, both worth more than the cleanup:
+
+- **A running process is not evidence of a live session.** A listening port
+  feels like stronger proof than a stale directory name because it is present
+  tense; it is the same creation-time hint with a PID attached. Reading one as a
+  live peer led to deferring to a session that had ended days earlier. Ask
+  `ListAgents`, which is the only signal about *now*.
+- **A monitor must not treat "I don't know" as "not yet".** A second orphan was
+  a poll loop watching two PRs, using `gh pr view` with no `--repo` — so it
+  resolved the repository from a cwd that cleanup had deleted underneath it.
+  Every query failed, every failure counted as "still open", and the loop could
+  never conclude: ~1,500 iterations over two days for PRs that had merged.
+  **Removing the worktree is what made it immortal.** So always pass `--repo`
+  rather than depending on cwd, and count consecutive failures and exit
+  non-zero — a monitor that dies complaining beats one that never returns. The
+  same rule as "a failed check must never read as a passing one", one level up.
+
+And keep the sweep narrow. Globbing `quern-*` under `/tmp` returns log files,
+`QUERN_STATE_DIR` directories and stray markdown, which reads as a pile of
+findings and is an artefact of the question. The one that answers it is "a
+directory with `server/` and `tests/` and no registration".
+
+`PYTHONPATH=$PWD` is redundant when running from inside a worktree: cwd already
+precedes site-packages. Harmless, but it implies the import needs help it does
+not, which is worth not teaching.
+
+### Naming a worktree
+
+`~/Dev/quern-<session>-<what>` for worktrees, `~/Dev/quern-scratch/<session>-<what>/`
+for mutation copies. The reasoning, and how to move or sweep them, is in
+[`.claude/skills/quern-worktrees/SKILL.md`](.claude/skills/quern-worktrees/SKILL.md)
+-- read it before creating, moving or deleting one.
+
 Give reviewers the failure mode to hunt, not just the diff. The briefs that found
 real defects named this repo's habit — tests that pass for the wrong reason — and
 listed concrete recent examples to calibrate against.
+
+### The primary checkout stays on `main`
+
+`/Volumes/Home/jham/Dev/quern` is the venv host and the reference tree. Branch
+work happens in worktrees -- there are usually a dozen -- and the primary is
+not one of them. Several sessions share this machine, and whoever checks a
+branch out there silently changes the ground under everyone else.
+
+The reason is not tidiness. `~/.local/bin/quern` is
+`exec <primary>/.venv/bin/python -m server "$@"`, and `-m` puts the *caller's*
+cwd ahead of the editable install on `sys.path`. So resolution follows the
+directory you are standing in:
+
+```text
+from /tmp                 -> <primary>/server/__init__.py
+from ~/Dev/quern-hid      -> ~/Dev/quern-hid/server/__init__.py
+```
+
+Two things follow, and they pull in opposite directions.
+
+**The primary is what `quern` means when you are not standing in a worktree**,
+which is where a person invokes it from -- their own terminal, their own
+daemon. A branch left checked out there is running on their machine, as the
+command they type and the server they have up. That is the state to avoid.
+
+**A worktree needs no exception for live-testing.** `cd <worktree> && quern
+start -f` runs *that* worktree's server on the primary's venv, no venv of its
+own. So "live-test before opening a PR" is satisfied without ever moving the
+primary, which is the objection this rule otherwise invites.
+
+**And the same command in two directories runs different code, with nothing
+to say so.** `quern status` from a worktree and from `~` are not the same
+program. That is this project's recurring shape -- working and broken look
+identical -- so when a result surprises you, check where you are standing
+before you believe it.
+
+The corollary for anything that is *not* source: a worktree isolates the tree
+and nothing else, so `~/.quern`, `~/.local/bin/quern` and the MCP
+registrations are still shared. See the worktree notes above.
+
+### The Linux job is a backstop, not a readiness signal
+
+CI runs the suite on `ubuntu-latest` as well as macOS. Two things to know, and
+the full reasoning is in the job's own comment in `.github/workflows/ci.yml`
+and in [`docs/linux-support-plan.md`](docs/linux-support-plan.md).
+
+**It catches tests that reach the real machine.** The first Linux run failed 44,
+and 41 were one bug: `list_devices` caught `DeviceError` but not the `OSError` a
+missing binary actually raises. On a Mac those tests shelled out to a real
+`xcrun`, got a list their fake UDID was not in, and passed regardless — the
+house habit, caught by a runner that simply does not have the tool. When this
+job goes red it is usually right, and usually about a macOS assumption that has
+just entered shared code. Fix the assumption. A platform skip is correct only
+when the thing under test is genuinely macOS-only; `tests/test_release_source.py`
+holds the one precedent and states the bar.
+
+**Green does not mean quern runs on Linux.** Most of the suite mocks its
+subprocesses, so a pass says the Python is portable, not the product. The server
+has never been started on Linux. Do not cite a green matrix as evidence the port
+works.
 
 ## Where the API is documented
 

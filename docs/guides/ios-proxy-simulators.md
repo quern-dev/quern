@@ -16,7 +16,7 @@ Your agent will make sure the proxy certificate is installed on the simulator, e
 
 Local capture uses mitmproxy's macOS System Extension to transparently intercept traffic from specific processes. Safari and WebKit networking are enabled by default (configured in `~/.quern/config.json`). When you start debugging an app, ask your agent to add your app's process name to the capture list.
 
-Say **add**, and check what comes back. Setting the list replaces it, so an agent that sends only your app's name drops the web-view defaults, and page traffic quietly stops being captured. Quern reports what a change removed — in the response, in the server log, and on the CLI — but the request itself is perfectly valid, so nothing refuses it.
+Say **add**, and check what comes back. The web-view minimum (`MobileSafari`, `com.apple.WebKit.Networking`) is kept for you, so naming your app no longer loses page traffic — but everything else is set rather than merged, so an agent that sends only your app's name still drops anything else you had. Quern reports what a change added and removed on the response (`capture_added`, `capture_removed`), and the CLI prints both. The server log carries **removals only** — an addition is not logged — so read the response rather than the log if you want to know what was kept for you. The request itself is valid either way, so nothing refuses it.
 
 **Why this is the right default:**
 - Your Mac's browser and other apps are unaffected
@@ -84,7 +84,7 @@ Local capture adds minimal overhead — a few milliseconds per request for the T
 
 **No traffic appearing:**
 - Ask your agent to check the proxy status. It reports every handshake a client refused — the host, which simulator and process refused it, and the TLS alert. That is the direct evidence, and it says which of the two causes below you have
-- Make sure local capture includes your app's process name. Setting that list replaces it, so adding your app may have removed the web-view defaults
+- Make sure local capture includes your app's process name. The web-view defaults are kept for you, but anything else you had named is replaced rather than merged
 - Check if your app uses certificate pinning
 
 **Traffic appears but bodies are encrypted/empty:**

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build Quern.app from the Swift sources with swiftc (no Xcode/SwiftPM needed).
 #
-# Mirrors the compile-on-demand pattern used for tools/ios-preview.swift, but
+# Mirrors the compile-on-demand pattern used for tools/ios-preview/main.swift, but
 # assembles a full .app bundle suitable for signing + notarization.
 #
 # Usage:

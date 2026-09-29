@@ -108,7 +108,7 @@ class ProxyAdapter(BaseSourceAdapter):
 
     def __init__(
         self,
-        device_id: str = "default",
+        device_id: str = "",
         on_entry: EntryCallback | None = None,
         flow_store: FlowStore | None = None,
         listen_host: str = "0.0.0.0",
@@ -447,13 +447,32 @@ class ProxyAdapter(BaseSourceAdapter):
         })
         return updated
 
-    async def clear_mock(self, rule_id: str | None = None) -> None:
-        """Remove a specific mock rule or all mock rules."""
+    async def clear_mock(self, rule_id: str | None = None) -> int:
+        """Remove a specific mock rule or all of them. Returns how many went.
+
+        The count is what makes a deletion checkable. Without it the endpoint
+        could not tell "removed it" from "it was never there", and answered
+        `200 {"status": "deleted"}` for an id that had never been a rule --
+        while `PATCH` on the same id answered 404. A caller tearing down rules
+        by id could not detect that it had failed to remove one, and a leaked
+        mock does not sit there inertly: it goes on matching real traffic
+        (#182).
+
+        The command is still sent when nothing matched locally. The list here
+        is the record, but the addon holds its own copy, and a clear for a
+        rule it does not have is a no-op -- so sending covers the drift case
+        at no cost, and the return value describes *this* record rather than
+        what the addon did with it.
+        """
         if rule_id:
+            before = len(self._mock_rules)
             self._mock_rules = [r for r in self._mock_rules if r["rule_id"] != rule_id]
+            removed = before - len(self._mock_rules)
         else:
+            removed = len(self._mock_rules)
             self._mock_rules.clear()
         await self.send_command({"action": "clear_mock", "rule_id": rule_id})
+        return removed
 
     # -------------------------------------------------------------------
     # Bypass convenience methods
@@ -598,11 +617,16 @@ class ProxyAdapter(BaseSourceAdapter):
         at = datetime.fromtimestamp(
             data.get("timestamp") or time.time(), tz=UTC,
         ).isoformat()
-        # The alert, verbatim and uninterpreted. `unknown ca` means the device
-        # does not trust our CA; a certificate-pinned app on a device that
-        # trusts it perfectly well refuses too, with a different alert. Dropping
-        # this left both looking identical, and the log then asserted the first
-        # -- sending someone to reinstall a certificate that was never wrong.
+        # The alert, verbatim and uninterpreted. Recorded because a
+        # certificate-pinned app on a device that trusts the CA perfectly well
+        # refuses too, and dropping this left both looking identical, with the
+        # log asserting the first -- sending someone to reinstall a
+        # certificate that was never wrong.
+        #
+        # It narrows the possibilities without deciding between them. "With a
+        # different alert", which this comment used to claim, is false on
+        # Android: measured, an untrusted CA and a pinned client both say
+        # `certificate unknown`. See `TlsRejection` for the measurement.
         alert = (data.get("error") or "").strip() or None
 
         # Collapsed by (host, device). A retrying app produces one of these per
@@ -612,7 +636,7 @@ class ProxyAdapter(BaseSourceAdapter):
         for existing in self._tls_rejections:
             if existing.sni == sni and existing.client_ip == client_ip and (
                 existing.simulator_udid == data.get("simulator_udid")
-            ):
+            ) and existing.device_serial == data.get("device_serial"):
                 existing.count += 1
                 existing.last_at = at
                 if alert and not existing.alert:
@@ -630,6 +654,7 @@ class ProxyAdapter(BaseSourceAdapter):
             source_process=data.get("source_process"),
             source_pid=data.get("source_pid"),
             simulator_udid=data.get("simulator_udid"),
+            device_serial=data.get("device_serial"),
             count=1, first_at=at, last_at=at,
         ))
         logger.warning(
@@ -807,6 +832,7 @@ class ProxyAdapter(BaseSourceAdapter):
                 source_process=data.get("source_process"),
                 source_pid=data.get("source_pid"),
                 simulator_udid=data.get("simulator_udid"),
+                device_serial=data.get("device_serial"),
                 client_ip=data.get("client_ip"),
             )
         except Exception as e:

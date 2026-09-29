@@ -168,6 +168,9 @@ The server prints connection info on startup — URL, API key, and proxy port. A
 | `last-update-check` | When the automatic check last ran, so it runs at most once a day |
 | `last-update.json` | What `quern update` last did — updated, nothing to do, or failed |
 | `installed-by-setup.json` | Packages installed by `quern setup` — used by `quern uninstall` |
+| `tool-sites.json` | Where `quern setup` found each external tool, so a later run can tell a moved install from a missing one |
+| `build-records/` | One directory per build (`<build id>/record.json`), plus a device build's dSYMs, so a crash can be symbolised against the binary that produced it |
+| `crashes/` | Crash reports the watcher collects; a phone's own pulls go in `crashes/devices/<device id>/` so two devices' reports cannot be confused |
 | `api-key` | Persistent API key |
 | `server.log` | Daemon log output |
 
@@ -347,7 +350,7 @@ Captures from multiple sources simultaneously, deduplicates, and stores in a rin
 | Physical device logs | `pymobiledevice3 syslog` | os_log, Logger, NSLog from physical devices | On-demand (`start_device_logging`) |
 | Android device / emulator logs | `adb logcat` | App and system logs from Android devices and emulators, tagged `source="logcat"` | On-demand (`start_device_logging`) |
 | Simulator logs | `simctl log stream` | os_log, Logger, NSLog from simulators | On-demand (`start_simulator_logging`) |
-| Crash reports | `idevicecrashreport` | Parsed crash reports with stack traces | Always on |
+| Crash reports | `pymobiledevice3 crash` (iPhone), `dumpsys dropbox` (Android) | Parsed crash reports with stack traces | Always on |
 | Build output | `xcodebuild` | Errors, warnings, test results | Always on |
 | Device syslog (legacy) | `idevicesyslog` | Unfiltered system + app log messages | Opt-in (`--syslog`) |
 | macOS unified log | `log stream` | os_log from any host Mac process | On-demand (`start_oslog_streaming`) |
@@ -378,10 +381,10 @@ Spawns `mitmdump` as a subprocess to capture HTTP/HTTPS traffic (port 9101 by de
 
 Local capture requires approving the **Mitmproxy Redirector** system extension in **System Settings > Privacy & Security** on first use.
 
-With no arguments, `enable-local-capture` captures web traffic — `MobileSafari` and `com.apple.WebKit.Networking`. Naming processes **replaces** that list rather than adding to it, so pass everything you want captured:
+With no arguments, `enable-local-capture` captures web traffic — `MobileSafari` and `com.apple.WebKit.Networking`. Naming processes **keeps that minimum and adds yours**, because a webview's requests leave through WebKit and an OAuth hand-off goes through Safari:
 
 ```bash
-quern enable-local-capture MyApp                                # your app, and nothing else
+quern enable-local-capture MyApp                                # your app, plus the web-view minimum
 quern enable-local-capture MyApp com.apple.WebKit.Networking    # your app and web views
 ```
 
@@ -398,7 +401,7 @@ Manage iOS simulators and physical devices, and interact with running apps.
 - **Device management** — list, boot, shutdown, and erase simulators; discover physical devices and Android emulators
 - **App management** — install, launch, terminate, uninstall, list apps; build an Xcode scheme and install it across several devices in one call
 - **Screenshots** — capture with configurable scale and format, annotated screenshots with accessibility overlays, and screenshot timelines that auto-capture after every UI action so a whole run can be reviewed frame by frame
-- **Live preview** — real-time video windows for USB-connected physical devices, independently per-device
+- **Live preview** — real-time video windows for USB-connected physical devices and booted simulators, independently per-device
 <!-- TODO: Annotated screenshot example — show a real app with the accessibility overlay
      ![Annotated screenshot](docs/images/annotated-screenshot.png)
 -->
@@ -424,6 +427,8 @@ quern start -f               # Foreground
 quern stop                   # Graceful shutdown
 quern restart                # Stop + start
 quern status                 # Show PID, URL, uptime, tool availability
+quern url                    # Print the server's base URL, for scripts
+quern env                    # Print shell exports: eval "$(quern env)"
 quern doctor                 # Read-only diagnostics: device tools, venv, tool versions, service health
 quern doctor --fix           # ...and reconcile the venv with pyproject.toml (venv only)
 quern capture-env            # Write an environment report to attach to a bug report
@@ -462,18 +467,18 @@ quern tunneld <cmd>          # Manage the tunneld LaunchDaemon (install/uninstal
 
 ## MCP Tools
 
-109 tools available via MCP. All tools are lazy-loaded and won't hog your context just by connecting the MCP. They are lightweight API wrappers and are easy for the Agent to use.
+113 tools available via MCP. All tools are lazy-loaded and won't hog your context just by connecting the MCP. They are lightweight API wrappers and are easy for the Agent to use.
 
 | Category | Tools |
 |----------|-------|
 | Server | `ensure_server` |
 | Updates | `update_quern`, `set_update_channel` |
-| Logs | `tail_logs`, `query_logs`, `get_log_summary`, `get_errors`, `get_build_result`, `parse_build_output`, `get_latest_crash`, `set_log_filter`, `get_log_filter`, `list_log_sources`, `start_simulator_logging`, `stop_simulator_logging`, `start_device_logging`, `stop_device_logging`, `start_oslog_streaming`, `stop_oslog_streaming` |
+| Logs | `tail_logs`, `query_logs`, `get_log_summary`, `get_errors`, `get_build_result`, `parse_build_output`, `get_latest_crash`, `clear_crashes`, `clear_device_crashes`, `set_log_filter`, `get_log_filter`, `list_log_sources`, `get_trace`, `start_simulator_logging`, `stop_simulator_logging`, `start_device_logging`, `stop_device_logging`, `start_oslog_streaming`, `stop_oslog_streaming` |
 | Network | `query_flows`, `wait_for_flow`, `get_flow_detail`, `get_flow_summary`, `start_capture_session`, `stop_capture_session`, `proxy_status`, `start_proxy`, `stop_proxy`, `proxy_setup_guide`, `verify_proxy_setup`, `install_proxy_cert`, `record_device_proxy_config`, `set_local_capture`, `set_bypass`, `clear_bypass` |
 | System Proxy | `configure_system_proxy`, `unconfigure_system_proxy` |
 | Intercept & Mock | `set_intercept`, `clear_intercept`, `list_held_flows`, `release_flow`, `replay_flow`, `set_mock`, `list_mocks`, `update_mock`, `clear_mocks` |
 | Device | `list_devices`, `boot_device`, `shutdown_device`, `erase_device`, `install_app`, `launch_app`, `terminate_app`, `uninstall_app`, `list_apps`, `build_and_install` |
-| UI | `get_ui_tree`, `get_element_state`, `wait_for_element`, `get_screen_summary`, `tap`, `tap_element`, `swipe`, `scroll_to_element`, `type_text`, `clear_text`, `press_button`, `get_web_content`, `wait_for_settle` |
+| UI | `get_ui_tree`, `get_element_state`, `wait_for_element`, `get_screen_summary`, `tap`, `tap_element`, `swipe`, `scroll_to_element`, `type_text`, `clear_text`, `press_button`, `get_web_content`, `wait_for_settle`, `restore_simulator_input` |
 | Screenshots | `take_screenshot`, `take_annotated_screenshot`, `start_screenshot_timeline`, `stop_screenshot_timeline`, `get_screenshot_timeline` |
 | Device Config | `set_location`, `open_url`, `grant_permission`, `set_locale`, `set_hardware_keyboard`, `set_font_scale`, `set_display_density` |
 | App State | `save_app_state`, `restore_app_state`, `list_app_states`, `delete_app_state` |
@@ -491,7 +496,7 @@ reference — every tool, the endpoint behind it, and the endpoints that have no
 tool — lives in **[`docs/api-reference.md`](docs/api-reference.md)**.
 
 All endpoints require `Authorization: Bearer <key>` except `/`, `/health`,
-`/api/v1/health`, `/tools`, `/docs`, `/redoc`, `/openapi.json`, `/video-test`,
+`/api/v1/health`, `/tools`, `/docs`, `/redoc`, `/openapi.json`,
 and `/api/v1/proxy/cert`. The key is at `~/.quern/api-key`; the server's URL and
 port are in `~/.quern/state.json`.
 

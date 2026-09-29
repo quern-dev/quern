@@ -13,7 +13,7 @@ from typing import Any
 from server.config import CONFIG_DIR
 from server.models import DeviceError
 
-logger = logging.getLogger("quern-debug-server.u2")
+logger = logging.getLogger(__name__)
 
 # Path to our forked Quern Driver APK (AdbKeyboard IME only, no launcher icon)
 _QUERN_DRIVER_APK = CONFIG_DIR / "bin" / "quern-driver.apk"
@@ -247,6 +247,11 @@ class U2Backend:
     DeviceControllerUI can delegate to it for Android devices.
     """
 
+    #: What this backend calls itself in an error. The dispatcher reads it
+    #: off whichever backend it selected, so an error can no longer name a
+    #: tool that was never involved (#186).
+    TOOL_NAME = "u2"
+
     def __init__(self) -> None:
         self._devices: dict[str, object] = {}  # serial → u2.Device
 
@@ -287,6 +292,10 @@ class U2Backend:
         udid: str,
         snapshot_depth: int | None = None,
         source_timeout: float | None = None,
+        # Accepted for interface parity with SimBridgeBackend and IdbBackend,
+        # and ignored: uiautomator's dump is complete, so there is
+        # nothing to probe and nothing for the caller to switch off.
+        probe: bool = True,
     ) -> list[dict]:
         """Get all UI elements as a flat list of idb-compatible dicts."""
 

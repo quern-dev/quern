@@ -131,7 +131,7 @@ class TestARateLimitedReplyIsAnAnswer:
         """The bug: this polled for the whole timeout."""
         fake = _install(gate, monkeypatch, Fake(_summary(), answer="Review rate limited."))
         started = gate.time.monotonic()
-        assert gate._reviewed_by_asking(202, timeout=600) == "rate_limited"
+        assert gate._reviewed_by_asking(202, HEAD, timeout=600) == "rate_limited"
         assert gate.time.monotonic() - started < 60, "it waited out the timeout"
         assert fake.asks == 1
 
@@ -156,7 +156,7 @@ class TestARateLimitedReplyIsAnAnswer:
 
     def test_a_finished_review_is_still_recognised(self, gate, monkeypatch):
         _install(gate, monkeypatch, Fake(_summary(), answer="Review finished."))
-        assert gate._reviewed_by_asking(202, timeout=600) == "reviewed"
+        assert gate._reviewed_by_asking(202, HEAD, timeout=600) == "reviewed"
 
 
 class TestThePageIsReadBeforeAsking:

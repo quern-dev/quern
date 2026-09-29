@@ -11,6 +11,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from server.api.actions import action, logged_action
+from server.device.devicectl import canonical_device_id
 from server.models import (
     CertInstallRequest,
     CertStatusResponse,
@@ -31,10 +33,60 @@ _logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/proxy", tags=["proxy"])
 
-# Device types that support automated cert install. Physical iOS and physical
-# Android require manual flows (Settings > VPN & Device Management for iOS,
-# system partition modification for Android) and are excluded from batch installs.
-_INSTALLABLE_CERT_TYPES = {DeviceType.SIMULATOR, DeviceType.ANDROID_EMULATOR}
+async def _can_install_cert(controller, udid: str, device_type) -> tuple[bool, str | None]:
+    """Whether quern can install a system certificate, and why not if it cannot.
+
+    The question is *rootability*, not device kind, and on Android the two do
+    not line up. Measured across #299's matrix: a Google Play emulator is
+    `ANDROID_EMULATOR` and cannot be rooted, so the old type test started an
+    install that dies partway with `adbd cannot run as root in production
+    builds`; a dev-keys emulator reached over TCP was classified
+    `ANDROID_DEVICE` and refused, though `adb root` on that very serial
+    returns `uid=0(root)`. Four of eight rows wrong, in both directions.
+
+    iOS is unchanged, because there the type *is* the capability: a simulator
+    takes a cert through `simctl keychain`, a physical device cannot be
+    automated at all.
+    """
+    if device_type == DeviceType.SIMULATOR:
+        return True, None
+    if device_type == DeviceType.DEVICE:
+        return False, (
+            "Automated cert install is not supported for physical iOS "
+            "devices. Install the cert manually: Settings > General > "
+            "VPN & Device Management > select the mitmproxy profile > "
+            "Install. Then enable trust under Settings > General > "
+            "About > Certificate Trust Settings."
+        )
+    if device_type in (DeviceType.ANDROID_EMULATOR, DeviceType.ANDROID_DEVICE):
+        rootable = await controller.adb.is_rootable(udid)
+        if rootable:
+            return True, None
+        if rootable is None:
+            return False, (
+                f"quern could not read the build properties of {udid}, so it "
+                "cannot tell whether a certificate can be installed. The "
+                "device may still be booting. This is not a refusal on the "
+                "merits -- try again once it has settled."
+            )
+        return False, (
+            f"{udid} is not rootable, so a system certificate cannot be "
+            "installed on it — this is a property of the build (release-keys, "
+            "not debuggable), not of whether it is an emulator. Use a Google "
+            "APIs emulator image, or trust the cert at the app level with "
+            "networkSecurityConfig. Routing the device through the proxy does "
+            "not need a certificate and works either way: POST "
+            "/api/v1/proxy/device-proxy-config with apply=true."
+        )
+    # Unknown kind. Allowed through deliberately, and this is the reachable
+    # branch rather than dead code: this gate is an *early, better error*, not
+    # the enforcement point. `cert_manager` refuses on its own terms -- it
+    # asks `is_rootable` for Android and fails on simctl for iOS -- so
+    # refusing here on "I have not listed this device" would invent a
+    # restriction out of quern's own ignorance, and break a caller naming a
+    # device it knows about before any enumeration has run.
+    _logger.debug("Cert eligibility for %s is unknown; deferring to cert_manager", udid)
+    return True, None
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +159,7 @@ async def cert_status(request: Request) -> CertStatusResponse:
 
 
 @router.post("/cert/verify", response_model=CertVerifyResponse)
+@logged_action("verify_cert", category="proxy")
 async def verify_cert(request: Request, body: CertVerifyRequest) -> CertVerifyResponse:
     """Verify certificate installation on simulators and physical devices.
 
@@ -355,19 +408,25 @@ async def _verify_physical_device(
 async def install_cert(
     request: Request, body: CertInstallRequest | None = None,
 ) -> dict:
-    """Install mitmproxy CA certificate on simulator(s) and emulator(s).
+    """Install the mitmproxy CA certificate on eligible devices.
+
+    Eligibility is *rootability* on Android and device kind on iOS, not
+    "simulators and emulators" -- a Google Play emulator cannot take a system
+    cert and a rootable phone can (#299).
 
     Idempotent - skips devices that already have the cert installed
     unless force=True.
 
-    Physical iOS and Android devices are excluded — their cert install
-    flows are manual (iOS: Settings > VPN & Device Management; Android:
-    system partition modification) and not handled by this endpoint.
+    Eligibility is *rootability* on Android and device kind on iOS (#299).
+    Physical iOS is excluded — its flow is manual, via Settings > VPN &
+    Device Management. Android is not excluded by kind: a Google Play
+    emulator cannot take a system cert and a rootable phone can, so the
+    question asked is whether `adb root` will work, not what the device is.
 
     Resolution order when no UDID is supplied:
         1. Active device (set via resolve_device) → install on it.
-        2. Otherwise → install on all booted simulators and Android
-           emulators (physical devices are filtered out).
+        2. Otherwise → install on every booted device that is eligible,
+           naming the ones that are not and why.
 
     Args:
         body.udid: Specific device UDID. If None, follows the resolution
@@ -405,65 +464,96 @@ async def install_cert(
         # Single target — if we know its type and it's not installable, refuse
         # early with a clear message rather than letting it fall into a cryptic
         # simctl "Invalid device" error.
+        # `.get()` yields None for a udid quern has never listed, and the
+        # gate used to be skipped entirely in that case -- so an unknown or
+        # non-canonically-spelled udid went straight to the install it should
+        # have been refused. The unknown branch inside `_can_install_cert`
+        # existed for this and was unreachable from here.
+        # Two sources, because the map only holds what the last enumeration
+        # saw: a caller naming a device by a spelling `list_devices` did not
+        # return still deserves the better error. `isinstance` guards the
+        # second, so a mock or a junk value cannot pose as a device kind.
         target_type = device_type_map.get(target_udid)
-        if target_type is not None and target_type not in _INSTALLABLE_CERT_TYPES:
-            if target_type == DeviceType.DEVICE:
-                guidance = (
-                    "Automated cert install is not supported for physical iOS "
-                    "devices. Install the cert manually: Settings > General > "
-                    "VPN & Device Management > select the mitmproxy profile > "
-                    "Install. Then enable trust under Settings > General > "
-                    "About > Certificate Trust Settings."
-                )
-            else:  # ANDROID_DEVICE
-                guidance = (
-                    "Automated cert install is not supported for physical "
-                    "Android devices — system cert installation requires root "
-                    "and direct system partition modification. Use a rootable "
-                    "Google APIs emulator for HTTPS interception, or configure "
-                    "the cert at the app level via networkSecurityConfig."
-                )
+        if target_type is None:
+            cached = controller._device_type(target_udid)
+            if isinstance(cached, DeviceType):
+                target_type = cached
+        ok, guidance = await _can_install_cert(controller, target_udid, target_type)
+        if not ok:
             raise HTTPException(status_code=400, detail=guidance)
         udids = [target_udid]
+        # Named on both paths so the response shape does not depend on which
+        # one ran: a single explicit target skips nothing by construction.
+        skipped = []
     else:
         from server.models import DeviceState
 
-        udids = [
-            d.udid for d in all_devices
-            if d.state == DeviceState.BOOTED
-            and d.device_type in _INSTALLABLE_CERT_TYPES
-        ]
+        # Rootability is a per-device probe, so the batch asks each booted
+        # candidate rather than filtering on type. One `getprop` each, and
+        # only for devices that are already booted.
+        udids = []
+        skipped: list[str] = []
+        for d in all_devices:
+            if d.state != DeviceState.BOOTED:
+                continue
+            ok, why = await _can_install_cert(controller, d.udid, d.device_type)
+            if ok:
+                udids.append(d.udid)
+            elif why:
+                skipped.append(f"{d.udid}: {why}")
 
     if not udids:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "No booted simulators or Android emulators found to install on. "
-                "Physical devices are not eligible for automated cert install."
-            ),
-        )
+        # Says which devices were considered and why each was passed over,
+        # rather than asserting a category. "No booted simulators or Android
+        # emulators found" was false the moment eligibility stopped following
+        # device kind: a booted Google Play emulator is an Android emulator
+        # and is still refused, and a rootable phone is now eligible though
+        # the old text called physical devices ineligible. The per-device
+        # reason also carries the retry guidance for a device still booting,
+        # which the batch loop used to discard.
+        detail = "No eligible devices to install on."
+        if skipped:
+            detail += " Considered:\n" + "\n".join(f"  - {s}" for s in skipped)
+        else:
+            detail += " No booted devices were found at all."
+        raise HTTPException(status_code=400, detail=detail)
 
-    # Install on each device
+    # Install on each device.
+    #
+    # One action entry per device rather than per call: this can touch several
+    # at once, and a trace joins on a single resolved udid. An entry naming
+    # three devices would not join to any of them.
     results = []
     for udid in udids:
-        try:
-            name = device_name_map.get(udid, "Unknown Device")
-            was_installed = await cert_manager.install_cert(
-                controller, udid, force=body.force, device_name=name,
-            )
-            results.append({
-                "udid": udid,
-                "status": "installed" if was_installed else "already_installed",
-                "success": True,
-            })
-        except Exception as e:
-            _logger.error(f"Failed to install cert on {udid}: {e}")
-            results.append({
-                "udid": udid,
-                "status": "failed",
-                "success": False,
-                "error": str(e),
-            })
+        with action("install_proxy_cert", category="proxy") as act:
+            act.udid = udid
+            try:
+                name = device_name_map.get(udid, "Unknown Device")
+                act.detail = name
+                was_installed = await cert_manager.install_cert(
+                    controller, udid, force=body.force, device_name=name,
+                )
+                # Already-installed is a real outcome worth telling apart in a
+                # trace: it is the difference between "this call changed the
+                # device" and "this call did nothing", and both return success.
+                if not was_installed:
+                    act.detail += ", already installed"
+                results.append({
+                    "udid": udid,
+                    "status": "installed" if was_installed else "already_installed",
+                    "success": True,
+                })
+            except Exception as e:
+                # Not re-raised: the other devices still get their turn. The
+                # action entry is what records that this one did not.
+                act.outcome = "failed"
+                act.detail = f"{act.detail}: {e}" if act.detail else str(e)
+                results.append({
+                    "udid": udid,
+                    "status": "failed",
+                    "success": False,
+                    "error": str(e),
+                })
 
     success_count = sum(1 for r in results if r["success"])
     return {
@@ -471,6 +561,14 @@ async def install_cert(
         "succeeded": success_count,
         "failed": len(results) - success_count,
         "devices": results,
+        #: Booted devices the batch passed over, and why. Computed and then
+        #: dropped unless *nothing* was eligible, so a mixed batch -- one
+        #: simulator installed, one non-rootable phone skipped -- reported
+        #: unqualified success and the caller had no way to learn a device had
+        #: been left out. The docstring promised this; only the empty case
+        #: delivered it. Empty list rather than absent, so a caller can read
+        #: it without knowing which path ran.
+        "skipped": skipped,
     }
 
 
@@ -481,11 +579,100 @@ async def install_cert(
 
 class RecordDeviceProxyRequest(BaseModel):
     udid: str
-    ssid: str  # Wi-Fi network name (visible at top of Settings > Wi-Fi)
-    client_ip: str | None = None  # Device's LAN IP (Settings > Wi-Fi > network > IP Address)
+    #: Optional on Android, where quern reads it from the device. Still
+    #: required in practice on iOS, where a human is doing the configuring and
+    #: is looking at the screen anyway.
+    ssid: str | None = None
+    #: The device's own LAN address. Optional for the same reason: on Android
+    #: `ip route get` answers it, and a human typing it is what makes Android
+    #: flows unattributable (#262).
+    client_ip: str | None = None
+    #: Apply the proxy to the device, not merely record that someone else did.
+    #: Android only -- quern can write the setting over adb. On iOS this is
+    #: refused rather than silently ignored, because a caller that asked for
+    #: the device to be configured and got a 200 would reasonably believe it
+    #: was.
+    apply: bool = False
+    #: Unset the device's proxy and forget every config recorded for it. The
+    #: half #265 records as missing entirely: the setting lives in the global
+    #: settings provider and survives reboots, so without this it is the
+    #: device's configuration until something else changes it -- and a device
+    #: pointed at a proxy that is no longer listening has no working network
+    #: at all. Android only, and refused alongside `apply`.
+    clear: bool = False
+
+
+def _bound_loopback_only(adapter) -> bool:
+    """Whether the proxy listens only on loopback.
+
+    `listen_host` is caller-reconfigurable (`POST /proxy/config`), and a proxy
+    rebound to 127.0.0.1 is reachable from the Mac and from no device at all.
+    Without this the response reports `applied: true` and a field named
+    `proxy_reachable_at` for an address nothing on the network can use.
+    """
+    host = getattr(adapter, "listen_host", None) if adapter else None
+    return host in ("127.0.0.1", "localhost", "::1")
+
+
+def _reattach_hint(
+    reattached: bool | None, *, cleared: bool = False, networked: bool = False,
+) -> str | None:
+    """What to do when the bounce did not bring the network back.
+
+    Measured on a physical Pixel 3 XL: `svc wifi disable/enable` sometimes
+    reassociates and sometimes leaves the interface NO-CARRIER indefinitely --
+    not reattached within 60s, where the wait in `reattach_network` is 10s.
+    The setting is still written and survives a reboot, so the device is
+    configured but not yet capturing, and it has no working network until it
+    rejoins. Saying so is the difference between a caller that fixes it and
+    one that reports the proxy as broken.
+    """
+    if reattached is not False:
+        return None
+    if networked:
+        # A different fact entirely from "the bounce failed": nothing was
+        # attempted, on purpose. Telling this caller to retry would invite
+        # them to strand the device by hand.
+        return (
+            "The setting is written, but quern did not bounce Wi-Fi: adb "
+            "reaches this device over the network, and the bounce would cut "
+            "that connection. It takes effect the next time the device "
+            "attaches to Wi-Fi."
+        )
+    if cleared:
+        # No "call clear" here: that is what just happened, and advising it
+        # again would send a caller round a loop that cannot help.
+        return (
+            "The proxy is unset, but the Wi-Fi bounce did not bring the "
+            "network back. Reconnect the device (Settings > Wi-Fi, tap the "
+            "network) to restore it."
+        )
+    return (
+        "The Wi-Fi bounce did not bring the network back. The setting is "
+        "written and will take effect when the device rejoins. Reconnect it "
+        "(Settings > Wi-Fi, tap the network), or POST again with clear=true "
+        "to unset the proxy."
+    )
+
+
+async def _read_device_proxy(controller, udid: str) -> tuple[str | None, bool]:
+    """The device's current proxy, and whether the read actually happened.
+
+    Two facts, because `None` alone conflates them: a device with no proxy set
+    and a device that could not be asked look identical, and on the clear path
+    the first is success while the second is no evidence at all. A read-back
+    failure is not worth failing the write over -- the write already
+    succeeded -- but it must not be allowed to masquerade as confirmation.
+    """
+    try:
+        return await controller.adb.get_http_proxy(udid), True
+    except Exception:
+        _logger.debug("Could not read back the proxy on %s", udid, exc_info=True)
+        return None, False
 
 
 @router.post("/device-proxy-config")
+@logged_action("record_device_proxy_config_endpoint", category="proxy")
 async def record_device_proxy_config_endpoint(
     body: RecordDeviceProxyRequest,
     request: Request,
@@ -497,11 +684,106 @@ async def record_device_proxy_config_endpoint(
     provided. Call this after completing Wi-Fi proxy setup in device Settings.
     """
     from server.lifecycle.state import detect_host_ip_for_subnet, detect_local_ip
-    from server.proxy.cert_state import record_device_proxy_config
+    from server.proxy.cert_state import (
+        forget_device_proxy_configs,
+        record_device_proxy_config,
+    )
+
+    controller = request.app.state.device_controller
+    is_android = controller._is_android(body.udid)
+
+    if body.apply and body.clear:
+        raise HTTPException(
+            status_code=400,
+            detail="apply and clear are opposites; pass one or neither.",
+        )
+
+    if body.clear and not is_android:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "clear is only supported on Android. On iOS the Wi-Fi proxy is "
+                "removed by hand in Settings."
+            ),
+        )
+
+    if body.clear:
+        # Before the SSID work below: clearing needs no network name, and
+        # demanding one would make a device that has dropped off Wi-Fi --
+        # exactly what a bad proxy causes -- impossible to put right.
+        try:
+            await controller.adb.clear_http_proxy(body.udid)
+        except Exception as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not clear the proxy on {body.udid}: {e}",
+            ) from e
+        forgotten = forget_device_proxy_configs(canonical_device_id(body.udid))
+        reattached = await controller.adb.reattach_network(body.udid)
+        cleared_proxy, cleared_ok = await _read_device_proxy(controller, body.udid)
+        return {
+            "udid": body.udid,
+            "cleared": True,
+            # Same keys as the apply path, so a client can read `applied`
+            # without first working out which flag it sent. Divergent shapes
+            # between two branches of one endpoint are a KeyError waiting for
+            # whichever branch the caller did not test.
+            "applied": False,
+            "recorded": False,
+            "ssid": None,
+            "wifi_proxy_host": None,
+            "wifi_proxy_port": None,
+            "client_ip": None,
+            "detected": None,
+            "proxy_reachable_at": None,
+            "proxy_bound_locally_only": _bound_loopback_only(
+                getattr(request.app.state, "proxy_adapter", None)
+            ),
+            "forgot_ssids": forgotten,
+            "network_reattached": reattached,
+            "hint": _reattach_hint(
+                reattached, cleared=True,
+                networked=controller.adb.is_network_transport(body.udid),
+            ),
+            #: Read back from the device rather than inferred from the call
+            #: returning. None here is the success case.
+            "device_proxy": cleared_proxy,
+            #: True only when the device was actually asked and answered that
+            #: it holds nothing. A read that failed returns None here rather
+            #: than borrowing the success value.
+            "proxy_verified": (cleared_proxy is None) if cleared_ok else None,
+        }
+
+    if body.apply and not is_android:
+        # Refused rather than ignored. A caller that asked for the device to be
+        # configured and received a 200 would reasonably believe it had been.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "apply is only supported on Android, where quern can write the "
+                "setting over adb. On iOS the Wi-Fi proxy is configured by hand "
+                "in Settings; call this without apply to record what you set."
+            ),
+        )
+
+    # Asked for, not typed in. Both are readable over adb, and a human reading
+    # them off a screen is what has kept Android flows unattributable (#262).
+    client_ip = body.client_ip
+    ssid = body.ssid
+    detected: list[str] = []
+    if is_android:
+        if not client_ip:
+            client_ip = await controller.adb.get_lan_ip(body.udid)
+            if client_ip:
+                detected.append("client_ip")
+        if not ssid:
+            ssid = await controller.adb.get_wifi_ssid(body.udid)
+            if ssid:
+                detected.append("ssid")
 
     proxy_host = None
-    if body.client_ip:
-        proxy_host = detect_host_ip_for_subnet(body.client_ip)
+    if client_ip:
+        proxy_host = detect_host_ip_for_subnet(client_ip)
     if not proxy_host:
         proxy_host = detect_local_ip()
     if not proxy_host:
@@ -510,13 +792,142 @@ async def record_device_proxy_config_endpoint(
     adapter = getattr(request.app.state, "proxy_adapter", None)
     port = adapter.listen_port if adapter else 9101
 
-    record_device_proxy_config(body.udid, body.ssid, proxy_host, port, client_ip=body.client_ip)
+    if body.apply and not getattr(adapter, "is_running", False):
+        # `listen_port` survives the adapter stopping, so without this the
+        # endpoint would write a port nothing is listening on, bounce Wi-Fi,
+        # read the value back, and report `proxy_verified: true` -- every
+        # signal in the response agreeing that a device just lost its network.
+        # The guide says a device pointed at a proxy that is gone has no
+        # working network; declining to create that state is the other half of
+        # saying so.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The proxy is not running, so pointing a device at it would "
+                "leave the device without a working network. Start the proxy "
+                "first, then apply."
+            ),
+        )
+
+    if not ssid and not body.apply:
+        # The config is keyed by SSID. Without one there is nowhere to put it,
+        # and inventing a key would make the record unfindable.
+        #
+        # Only the *record* needs one, though. `settings put global http_proxy`
+        # is one setting for the whole device and is not tied to a network --
+        # which is exactly why `clear` has never required an SSID, and why
+        # requiring one here refused to configure a phone on Ethernet, a phone
+        # that had dropped off Wi-Fi, or any device whose `dumpsys wifi` quern
+        # cannot read. The device write happens either way and `recorded` says
+        # whether anything was filed.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No Wi-Fi network name. Pass ssid, or connect the device to "
+                "Wi-Fi so quern can read it."
+            ),
+        )
+
+    # Canonicalised before it is stored. `_ip_map` feeds these keys straight
+    # into `owns()`, so a config recorded under the spelling Xcode shows never
+    # joined the actions logged under the other -- which is precisely the
+    # damage `_identity_aliases` was added to end, left unfixed on the half
+    # that writes. Worse after `GET /trace?udid=` began canonicalising its
+    # query: the flows stopped matching either spelling, and the caller saw an
+    # action with an empty `flows` list, which reads as "the app made no
+    # requests".
+    # No device-list refresh here, deliberately.
+    #
+    # An earlier version warmed the alias map first, so a cold map would not
+    # store the raw udid. That was wrong twice over: every unrecognised udid
+    # triggered a full simctl+devicectl+usbmux+adb enumeration, with no
+    # negative cache, so a caller passing distinct unknown udids could spin the
+    # device stack (CWE-400); and when the refresh *failed* it swallowed the
+    # error and wrote the raw udid anyway -- a permanently wrong key that
+    # survives discovery recovering.
+    #
+    # `ip_to_udid` canonicalises on read instead, which fixes the cold case,
+    # the failed case, and every file written before canonicalisation existed.
+    # Canonicalising here as well is belt and braces: it costs nothing when the
+    # map is warm, which it is on any server that has listed devices.
+    applied = False
+    reattached: bool | None = None
+    if body.apply:
+        try:
+            await controller.adb.set_http_proxy(body.udid, proxy_host, port)
+            applied = True
+        except Exception as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not set the proxy on {body.udid}: {e}",
+            ) from e
+        # Not optional. The setting is read when the network attaches, so on a
+        # device that is already connected this call alone changes nothing --
+        # measured at zero proxied requests before the bounce and twenty
+        # after. Reporting success without it would be reporting the request
+        # rather than the outcome.
+        reattached = await controller.adb.reattach_network(body.udid)
+
+    device_proxy, read_ok = (
+        await _read_device_proxy(controller, body.udid) if applied else (None, False)
+    )
+
+    recorded = bool(ssid)
+    if recorded:
+        record_device_proxy_config(
+            canonical_device_id(body.udid), ssid, proxy_host, port,
+            client_ip=client_ip,
+        )
     return {
         "udid": body.udid,
-        "ssid": body.ssid,
+        "ssid": ssid,
         "wifi_proxy_host": proxy_host,
         "wifi_proxy_port": port,
-        "client_ip": body.client_ip,
+        "client_ip": client_ip,
+        #: What quern worked out for itself, so a caller can tell a detected
+        #: value from one it supplied.
+        "detected": detected or None,
+        "applied": applied,
+        #: Whether anything was filed under an SSID. False means the device was
+        #: configured but quern has no per-network record of it, which is the
+        #: honest outcome for a device it could not read a network name from.
+        "recorded": recorded,
+        #: Always present, so a caller need not know which flag it sent.
+        "cleared": False,
+        #: None when nothing was applied. False means the setting was written
+        #: but the network did not come back -- which is the case where the
+        #: device is configured and not yet capturing, and saying "applied"
+        #: alone would hide it.
+        "network_reattached": reattached,
+        #: Actionable rather than merely accurate: None unless the bounce
+        #: failed, in which case it names the two ways out.
+        "hint": _reattach_hint(
+            reattached, networked=controller.adb.is_network_transport(body.udid),
+        ),
+        #: Whether the proxy is bound somewhere the device can actually
+        #: reach. A loopback bind is reachable from the Mac and from nothing
+        #: else, so the address below would be one the device can never use --
+        #: and the field naming it cannot say so on its own.
+        "proxy_bound_locally_only": _bound_loopback_only(adapter),
+        #: Named so a hosting misconfiguration is diagnosable. If the device
+        #: cannot reach this address, that is the thing to check, and a caller
+        #: should not have to infer which address quern chose.
+        "proxy_reachable_at": f"{proxy_host}:{port}",
+        #: What the device actually holds, read back over adb rather than
+        #: inferred from `set_http_proxy` returning without raising. None when
+        #: nothing was applied. Asserting something positive happened is the
+        #: point: a write that silently did not take looks exactly like one
+        #: that did.
+        "device_proxy": device_proxy,
+        #: Whether the device actually holds what quern set. Reporting the two
+        #: values and leaving the comparison to the caller is how a write that
+        #: did not take goes unnoticed -- the caller who would spot it is the
+        #: one who already suspects a problem. None when nothing was applied,
+        #: and None when the read-back itself failed, which is not evidence
+        #: either way.
+        "proxy_verified": (
+            (device_proxy == f"{proxy_host}:{port}") if read_ok else None
+        ),
     }
 
 

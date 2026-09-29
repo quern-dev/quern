@@ -24,14 +24,16 @@ def test_find_sockets_returns_newest_first(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         webinspector,
-        "SIM_SOCKET_GLOB",
-        str(tmp_path / "com.apple.launchd.*" / "com.apple.webinspectord_sim.socket"),
+        "SIM_SOCKET_GLOBS",
+        (str(tmp_path / "com.apple.launchd.*" / "com.apple.webinspectord_sim.socket"),),
     )
     assert webinspector.find_simulator_sockets() == [str(newer), str(older)]
 
 
 def test_find_sockets_empty_when_none_present(tmp_path, monkeypatch):
-    monkeypatch.setattr(webinspector, "SIM_SOCKET_GLOB", str(tmp_path / "nope" / "*.socket"))
+    monkeypatch.setattr(
+        webinspector, "SIM_SOCKET_GLOBS", (str(tmp_path / "nope" / "*.socket"),),
+    )
     assert webinspector.find_simulator_sockets() == []
 
 
@@ -42,8 +44,8 @@ async def test_connect_reports_how_many_candidates_were_dead(tmp_path, monkeypat
     dead.write_text("")
     monkeypatch.setattr(
         webinspector,
-        "SIM_SOCKET_GLOB",
-        str(tmp_path / "com.apple.launchd.*" / "com.apple.webinspectord_sim.socket"),
+        "SIM_SOCKET_GLOBS",
+        (str(tmp_path / "com.apple.launchd.*" / "com.apple.webinspectord_sim.socket"),),
     )
 
     inspector = webinspector.SimulatorWebInspector()
@@ -184,3 +186,71 @@ async def test_a_service_that_fails_to_close_still_releases_the_socket():
     await inspector.close()
     assert sock.closed
     assert inspector._service is None
+
+
+def test_both_socket_directories_are_searched(tmp_path, monkeypatch):
+    """#184: Xcode 27 publishes the socket under /private/var/tmp, and quern
+    looked only in /private/tmp — so every candidate it found predated the
+    upgrade and `get_web_content` had no transport at all.
+
+    Measured on the machine that reported it: 11 dead sockets in the old
+    directory, and the live one in the new.
+    """
+    old_dir = tmp_path / "private" / "tmp" / "com.apple.launchd.OLD"
+    new_dir = tmp_path / "private" / "var" / "tmp" / "com.apple.launchd.NEW"
+    old = old_dir / "com.apple.webinspectord_sim.socket"
+    new = new_dir / "com.apple.webinspectord_sim.socket"
+    for p in (old, new):
+        p.parent.mkdir(parents=True)
+        p.write_text("")
+    os.utime(old, (1_000, 1_000))
+    os.utime(new, (2_000, 2_000))
+
+    monkeypatch.setattr(webinspector, "SIM_SOCKET_GLOBS", (
+        str(tmp_path / "private" / "var" / "tmp" / "com.apple.launchd.*"
+            / "com.apple.webinspectord_sim.socket"),
+        str(tmp_path / "private" / "tmp" / "com.apple.launchd.*"
+            / "com.apple.webinspectord_sim.socket"),
+    ))
+
+    found = webinspector.find_simulator_sockets()
+    assert str(new) in found, "the new location was not searched"
+    assert str(old) in found, "the old location stopped being searched"
+    assert found == [str(new), str(old)], "not newest-first across both"
+
+
+def test_a_socket_found_by_both_patterns_is_listed_once(tmp_path, monkeypatch):
+    """The two patterns can overlap on a machine where one path is a symlink
+    to the other; a duplicate would be dialled twice for no reason."""
+    sock = tmp_path / "com.apple.launchd.AAA" / "com.apple.webinspectord_sim.socket"
+    sock.parent.mkdir(parents=True)
+    sock.write_text("")
+    pattern = str(tmp_path / "com.apple.launchd.*" / "com.apple.webinspectord_sim.socket")
+    monkeypatch.setattr(webinspector, "SIM_SOCKET_GLOBS", (pattern, pattern))
+
+    assert webinspector.find_simulator_sockets() == [str(sock)]
+
+
+def test_both_real_socket_directories_are_configured():
+    """The bug was the constant, not the search.
+
+    Quern looked only under `/private/tmp` while Xcode 27 publishes the
+    socket under `/private/var/tmp` (#184). Every test above patches
+    `SIM_SOCKET_GLOBS`, so none of them can see that — this one asserts the
+    shipped value, and it is the one that fails if the new location is
+    dropped again.
+
+    Measured on the reporting machine: 11 stale sockets in the old
+    directory, the live one in the new, and launchd naming the new path via
+    `launchctl print system/com.apple.webinspectord`.
+    """
+    globs = webinspector.SIM_SOCKET_GLOBS
+    assert any(g.startswith("/private/var/tmp/") for g in globs), (
+        f"the Xcode 27 location is not searched: {globs}"
+    )
+    assert any(g.startswith("/private/tmp/") for g in globs), (
+        f"the pre-Xcode-27 location stopped being searched: {globs}"
+    )
+    assert all(
+        g.endswith("/com.apple.webinspectord_sim.socket") for g in globs
+    ), f"a pattern does not name the socket: {globs}"

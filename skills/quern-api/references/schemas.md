@@ -315,10 +315,17 @@ Both flat and nested body shapes are accepted:
 No params. Returns list of active mock rules.
 
 ### DELETE /api/v1/proxy/mocks
-No params. Clears all mock rules.
+No params. Clears all mock rules. Succeeds on an empty set; `count` says how
+many were removed.
+
+### DELETE /api/v1/proxy/mocks/{rule_id}
+Path param: `rule_id`. Removes one rule. **404 `Mock rule not found: {rule_id}`
+if no such rule exists** — a rule you did not remove is still matching traffic,
+so teardown can check this rather than assume.
 
 ### PATCH /api/v1/proxy/mocks/{rule_id}
-Path param: `rule_id`. Body: same shape as POST (fields to update).
+Path param: `rule_id`. Body: same shape as POST (fields to update). 404 with the
+same detail if no such rule exists.
 
 ---
 

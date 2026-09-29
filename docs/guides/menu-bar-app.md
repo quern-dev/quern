@@ -192,7 +192,17 @@ which you have, on the **Install** row.
 
 **Release install** (the `curl … | bash` installer, in `~/.local/share/quern`):
 **Restart to Update** does everything from the menu. The release ships its MCP
-wrapper already built, so updating needs nothing from your shell.
+wrapper already built, so updating does not need to run npm.
+
+It can still need your shell for a different reason. Setup checks that a Node is
+*present* — the MCP wrapper is run by your editor, not by the build — and an app
+started from the Dock or at login cannot see a Node installed by fnm, nvm,
+Volta, asdf or mise. When that is the case the item becomes **Update in
+Terminal…**, with a **Why Terminal?** line naming the manager, and the update
+runs where your own environment is. This is not something a longer search path
+could fix: fnm keeps its node in a directory named after the shell that asked
+for it, so the path is different in every shell and exists in none of them for a
+GUI app.
 
 **Git install** (a clone you ran `./quern setup` in): the item is **Update in
 Terminal…**, which opens a Terminal window running `quern update`. A git
@@ -221,17 +231,28 @@ quern stop
 curl -fsSL https://quern.dev/install.sh | bash
 ```
 
-The installer puts Quern in `~/.local/share/quern` and runs setup from there.
-Setup re-points the `quern` command at the new install, re-registers your MCP
-clients, and installs the matching Quern app. Open a new terminal (or run
+The installer puts Quern in `~/.local/share/quern`, runs setup from there and
+then runs `quern mcp-install`. Setup re-points the `quern` command at the new
+install and installs the matching Quern app; the separate `mcp-install` step
+is what re-points your MCP clients. Open a new terminal (or run
 `rehash`) so your shell picks up the change, then check that Settings now says
 **Release**.
 
 Your settings, API key and device state live in `~/.quern` and are kept. The
 clone is left where it was. Delete it if you don't need it.
 
-To go back to the clone, run `./quern setup` inside it. That points `quern` and
-your MCP clients at the clone again.
+To go back to the clone, run both of these inside it:
+
+```bash
+./quern setup
+./quern mcp-install
+```
+
+Setup re-points the `quern` command; `mcp-install` re-points your MCP clients.
+Setup does not do the second, so running it alone leaves your clients launching
+the release install's wrapper while the command runs from the clone — the two
+then disagree about which quern you are using, and the MCP side is the one you
+will not notice.
 
 ## Quitting
 

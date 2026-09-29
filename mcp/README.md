@@ -52,7 +52,8 @@ The launcher is a tiny CommonJS file that checks the Node version and prints a c
 
 | Environment Variable | Default | Description |
 |---|---|---|
-| `QUERN_DEBUG_SERVER_URL` | `http://127.0.0.1:9100` | Python server URL |
+| `QUERN_SERVER_URL` | from `~/.quern/state.json` | Python server URL. `eval "$(quern env)"` sets it |
+| `QUERN_DEBUG_SERVER_URL` | — | Deprecated alias for the above, from the prototype's name |
 
 The server URL and API key are discovered automatically from `~/.quern/state.json` and `~/.quern/api-key`.
 

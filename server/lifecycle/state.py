@@ -56,7 +56,15 @@ class ServerState(TypedDict, total=False):
 def read_state() -> ServerState | None:
     """Read state.json with shared file lock.
 
-    Returns None if the file doesn't exist or contains invalid JSON.
+    Returns None if the file doesn't exist, contains invalid JSON, or holds
+    something that is not an object.
+
+    That last one is the boundary this function exists to be. Every caller
+    tests the result with `if not state` and then reaches for `.get()`, so a
+    file holding `[1]` -- valid JSON, truthy, no `.get` -- turned a corrupt
+    state file into an `AttributeError` out of `quern url`, `quern env` and
+    `quern restart` alike. Normalising here fixes every consumer at once;
+    each of them guarding separately is how one gets missed.
     """
     if not STATE_FILE.exists():
         return None
@@ -72,7 +80,14 @@ def read_state() -> ServerState | None:
 
         if not content.strip():
             return None
-        return json.loads(content)
+        state = json.loads(content)
+        if not isinstance(state, dict):
+            logger.warning(
+                "State file is %s, not an object — ignoring it",
+                type(state).__name__,
+            )
+            return None
+        return state
     except (json.JSONDecodeError, OSError) as e:
         logger.warning("Failed to read state file: %s", e)
         return None

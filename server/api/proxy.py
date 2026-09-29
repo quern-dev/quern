@@ -11,6 +11,8 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, HTTPException, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
+from server.api.actions import logged_action
+from server.config import with_capture_minimum
 from server.lifecycle.state import (
     detect_current_ssid,
     detect_host_ip_for_subnet,
@@ -35,17 +37,25 @@ from server.models import (
     StartProxyRequest,
     SystemProxyInfo,
     SystemProxyRestoreInfo,
+    UtcDatetime,
     WaitForFlowRequest,
     WaitForFlowResponse,
     WifiProxyNetworkConfig,
 )
-from server.processing.summarizer import WINDOW_DURATIONS, parse_cursor
+from server.processing.summarizer import WINDOW_DURATIONS
 from server.proxy.summary import generate_flow_summary
 from server.proxy.system_proxy import (
     SystemProxySnapshot,
     detect_and_configure,
     restore_system_proxy,
 )
+from server.storage.arrival import (
+    ArrivalCursor,
+    TimestampCursor,
+    make_arrival_cursor,
+    parse_any_cursor,
+)
+from server.storage.fanout import DropNotice
 
 _proxy_logger = logging.getLogger(__name__)
 
@@ -212,8 +222,13 @@ async def _get_proxy_status(
     network_state_dict = monitor_state.as_dict() if monitor_state else None
 
     if adapter is None:
+        # The store outlives a stopped proxy and still answers flow queries,
+        # so what it holds and lost is reported here too. This branch used to
+        # omit even `flows_captured`, reading 0 over a store full of flows.
         return ProxyStatusResponse(
             status="stopped",
+            flows_captured=flow_store.size if flow_store else 0,
+            flow_store=flow_store.stats() if flow_store else None,
             local_capture=local_capture,
             local_ip=local_ip,
             local_ips=local_ips,
@@ -231,6 +246,7 @@ async def _get_proxy_status(
             listen_host=adapter.listen_host,
             error=adapter._error,
             flows_captured=flow_store.size if flow_store else 0,
+            flow_store=flow_store.stats() if flow_store else None,
             active_intercept=adapter._intercept_pattern,
             held_flows_count=len(adapter._held_flows),
             tls_rejections=list(adapter._tls_rejections),
@@ -253,6 +269,7 @@ async def _get_proxy_status(
             listen_host=adapter.listen_host,
             started_at=adapter.started_at,
             flows_captured=flow_store.size if flow_store else 0,
+            flow_store=flow_store.stats() if flow_store else None,
             active_intercept=adapter._intercept_pattern,
             held_flows_count=len(adapter._held_flows),
             tls_rejections=list(adapter._tls_rejections),
@@ -273,6 +290,7 @@ async def _get_proxy_status(
         port=adapter.listen_port,
         listen_host=adapter.listen_host,
         flows_captured=flow_store.size if flow_store else 0,
+        flow_store=flow_store.stats() if flow_store else None,
         local_capture=local_capture,
         local_ip=local_ip,
         local_ips=local_ips,
@@ -320,6 +338,7 @@ async def proxy_status(
 
 
 @router.post("/start", response_model=ProxyStatusResponse)
+@logged_action("start_proxy", category="proxy")
 async def start_proxy(
     request: Request, body: StartProxyRequest | None = None,
 ) -> ProxyStatusResponse:
@@ -387,6 +406,7 @@ async def start_proxy(
 
 
 @router.post("/stop")
+@logged_action("stop_proxy", category="proxy")
 async def stop_proxy(request: Request) -> dict:
     """Stop the mitmproxy network capture and restore system proxy if configured."""
     import asyncio
@@ -494,6 +514,7 @@ async def _ensure_ca_is_trusted(request: Request, *, skip: bool = False) -> None
 
 
 @router.post("/configure-system", response_model=SystemProxyInfo)
+@logged_action("configure_system", category="proxy")
 async def configure_system(
     request: Request, body: ConfigureSystemProxyRequest | None = None,
 ) -> SystemProxyInfo:
@@ -548,6 +569,7 @@ async def configure_system(
 
 
 @router.post("/unconfigure-system", response_model=SystemProxyRestoreInfo)
+@logged_action("unconfigure_system", category="proxy")
 async def unconfigure_system(request: Request) -> SystemProxyRestoreInfo:
     """Restore macOS system proxy to its pre-Quern state."""
     import asyncio
@@ -593,6 +615,34 @@ async def unconfigure_system(request: Request) -> SystemProxyRestoreInfo:
 # ---------------------------------------------------------------------------
 
 
+def _flow_completeness(
+    flow_store,
+    since: datetime | None,
+    *,
+    simulator_udid: str | None = None,
+    client_ip: str | None = None,
+    device_serial: str | None = None,
+) -> dict:
+    """`truncated` and `complete_after` for an answer drawn from the flow store.
+
+    The store evicts its oldest flows at capacity and, until #318, nothing
+    reading it could tell "no such request" from "that request was evicted".
+    Narrowed by the device the caller filtered on, so another device's
+    traffic being shed does not flag this one's.
+    """
+    through = flow_store.evicted_through(
+        simulator_udid=simulator_udid, client_ip=client_ip,
+        device_serial=device_serial,
+    )
+    return {
+        "truncated": not flow_store.is_complete_since(
+            since, simulator_udid=simulator_udid, client_ip=client_ip,
+            device_serial=device_serial,
+        ),
+        "complete_after": through,
+    }
+
+
 @router.get("/flows", response_model=FlowQueryResponse)
 async def query_flows(
     request: Request,
@@ -604,10 +654,11 @@ async def query_flows(
     status_min: int | None = None,
     status_max: int | None = None,
     has_error: bool | None = None,
-    since: datetime | None = None,
-    until: datetime | None = None,
-    device_id: str = "default",
+    since: UtcDatetime | None = None,
+    until: UtcDatetime | None = None,
+    device_id: str = "",
     simulator_udid: str | None = None,
+    device_serial: str | None = None,
     client_ip: str | None = None,
     detail: str = Query(default="full", pattern=r"^(full|summary)$"),
     limit: int = Query(default=100, ge=1, le=1000),
@@ -631,6 +682,7 @@ async def query_flows(
         until=until,
         device_id=device_id,
         simulator_udid=simulator_udid,
+        device_serial=device_serial,
         client_ip=client_ip,
         limit=limit,
         offset=offset,
@@ -638,6 +690,17 @@ async def query_flows(
 
     flows, total = await flow_store.query(params)
     has_more = (offset + limit) < total
+    # No exemption for a full first page, deliberately. Its flows are the
+    # newest N and all present, but `total` and `has_more` count only what
+    # survived: with 8 matching flows and 3 evicted, `limit=5` answered
+    # "total 5, has_more false, truncated false" -- all of them, nothing lost.
+    # `tail` on the log tools is an explicit request for "the newest N"; this
+    # is the default mode of every flow query. The way to a clean answer is
+    # scoping `since` to the window that matters (#318 review).
+    completeness = _flow_completeness(
+        flow_store, since, simulator_udid=simulator_udid, client_ip=client_ip,
+        device_serial=device_serial,
+    )
 
     if detail == "summary":
         from server.models import FlowSummaryItem
@@ -657,10 +720,10 @@ async def query_flows(
             for f in flows
         ]
         return FlowQueryResponse(
-            flow_summaries=summaries, total=total, has_more=has_more,
+            flow_summaries=summaries, total=total, has_more=has_more, **completeness,
         )
 
-    return FlowQueryResponse(flows=flows, total=total, has_more=has_more)
+    return FlowQueryResponse(flows=flows, total=total, has_more=has_more, **completeness)
 
 
 @router.get("/flows/summary", response_model=FlowSummaryResponse)
@@ -670,6 +733,7 @@ async def flow_summary(
     host: str | None = None,
     since_cursor: str | None = None,
     simulator_udid: str | None = None,
+    device_serial: str | None = None,
     client_ip: str | None = None,
 ) -> FlowSummaryResponse:
     """Get an LLM-optimized summary of recent HTTP traffic."""
@@ -681,22 +745,73 @@ async def flow_summary(
         )
 
     now = datetime.now(UTC)
+    # Snapshot before reading, and read only up to it. Defensive today -- the
+    # store's lock is never held across an await -- but it keeps the delta
+    # exact if that changes.
+    upto = flow_store.clock.now
+    cursor = parse_any_cursor(since_cursor) if since_cursor else None
+    if since_cursor and cursor is None:
+        raise HTTPException(status_code=400, detail="Invalid cursor")
+    # A cursor from another run, or one ahead of anything this store has
+    # numbered -- mangled or invented, since no real cursor can be -- cannot
+    # be honoured. Read as-is, the second answered "nothing new" with every
+    # flag clean (review of #317).
+    cursor_reset = isinstance(cursor, ArrivalCursor) and (
+        cursor.boot != flow_store.clock.boot or cursor.seq > upto
+    )
+    arrival_after: int | None = None
 
-    # Determine time boundary from cursor or window
-    if since_cursor:
-        since_ts = parse_cursor(since_cursor)
-        if since_ts is None:
-            raise HTTPException(status_code=400, detail="Invalid cursor")
-        flows = await flow_store.get_since(since_ts)
+    if isinstance(cursor, ArrivalCursor) and not cursor_reset:
+        # Every flow that finished since the last summary. The timestamp
+        # cursor this replaces was the newest *request start* seen, so any
+        # request still running when a summary was taken finished with an
+        # earlier stamp and no delta ever returned it -- routine for an app
+        # with overlapping requests (#317).
+        arrival_after = cursor.seq
+        since_ts = None
+        flows = await flow_store.flows_between(cursor.seq, upto)
+    elif isinstance(cursor, TimestampCursor):
+        # An old cursor: read as it always was. The response carries an
+        # arrival cursor, so the next call is exact.
+        since_ts = cursor.at
+        flows = await flow_store.get_since(since_ts, upto)
     else:
         duration = WINDOW_DURATIONS.get(window, timedelta(minutes=5))
         since_ts = now - duration
-        flows = await flow_store.get_since(since_ts)
+        flows = await flow_store.get_since(since_ts, upto)
 
-    return generate_flow_summary(
+    summary = generate_flow_summary(
         flows, window=window, host=host,
-        simulator_udid=simulator_udid, client_ip=client_ip,
+        simulator_udid=simulator_udid, device_serial=device_serial,
+        client_ip=client_ip,
     )
+    summary.cursor = make_arrival_cursor(flow_store.clock, upto)
+    summary.cursor_reset = cursor_reset
+    completeness = _flow_completeness(
+        flow_store, since_ts, simulator_udid=simulator_udid, client_ip=client_ip,
+        device_serial=device_serial,
+    )
+    if arrival_after is not None:
+        # Exact, because the store evicts in arrival order -- and narrowed by
+        # device like the window path, or another device's flood flags every
+        # filtered delta, the always-on flag #318 removed (review of #317).
+        completeness["truncated"] = flow_store.last_evicted_seq_for(
+            simulator_udid=simulator_udid, client_ip=client_ip,
+            device_serial=device_serial,
+        ) > arrival_after
+    summary.truncated = completeness["truncated"]
+    summary.complete_after = completeness["complete_after"]
+    if summary.truncated:
+        # In the prose too: it is what a reader takes in first, and counts
+        # presented as whole when they are not are the misreading at issue.
+        summary.summary = (
+            "Flows that finished since the last summary were evicted before "
+            "this summary, so the counts below may be low. "
+            if arrival_after is not None else
+            "Flows in this window were evicted before this summary, so the "
+            "counts below may be low. "
+        ) + summary.summary
+    return summary
 
 
 @router.get("/flows/stream")
@@ -733,11 +848,20 @@ async def stream_flows(
             }
             return
 
-        queue = flow_store.subscribe()
+        # With the client's filter, so flows it did not ask for never take a
+        # slot and are never counted as missed.
+        queue = flow_store.subscribe(matches_filter)
+        notice = DropNotice()
         try:
             while True:
                 if await request.is_disconnected():
                     break
+                # A client that fell behind used to be unsubscribed without a
+                # word while its heartbeats carried on, so the stream looked
+                # live and merely quiet, for good. Now it loses only what did
+                # not fit, and is told how much (#255).
+                if (due := notice.due(flow_store.missed(queue))) is not None:
+                    yield {"event": "dropped", "data": json.dumps(due)}
                 try:
                     flow = await asyncio.wait_for(
                         queue.get(), timeout=15.0,
@@ -754,6 +878,7 @@ async def stream_flows(
                         "data": json.dumps({
                             "time": datetime.now(UTC).isoformat(),
                             "store_size": flow_store.size,
+                            "total_dropped": flow_store.dropped(queue),
                         }),
                     }
         finally:
@@ -763,6 +888,7 @@ async def stream_flows(
 
 
 @router.post("/flows/wait", response_model=WaitForFlowResponse)
+@logged_action("wait_for_flow", category="proxy")
 async def wait_for_flow(request: Request, body: WaitForFlowRequest) -> WaitForFlowResponse:
     """Block until a flow matching the filters appears, or timeout."""
     import asyncio
@@ -788,31 +914,55 @@ async def wait_for_flow(request: Request, body: WaitForFlowRequest) -> WaitForFl
                 status_max=body.status_max,
                 has_error=body.has_error,
                 simulator_udid=body.simulator_udid,
+                device_serial=body.device_serial,
                 client_ip=body.client_ip,
                 since=effective_since,
                 limit=1,
             )
             flows, _ = await flow_store.query(params)
             if flows:
+                # Found, so nothing was missed that matters -- but the mark is
+                # still reported as it is. Null means "nothing was evicted",
+                # and saying that after evictions would be a false statement
+                # sitting next to a true answer (review).
                 return WaitForFlowResponse(
                     matched=True,
                     flow=flows[0],
                     elapsed_seconds=round(time.monotonic() - start, 3),
                     polls=polls,
+                    truncated=False,
+                    complete_after=flow_store.evicted_through(
+                        simulator_udid=body.simulator_udid, client_ip=body.client_ip,
+                        device_serial=body.device_serial,
+                    ),
                 )
 
         elapsed = time.monotonic() - start
         if elapsed >= body.timeout:
+            # A timeout is "it never came" only if the store kept everything
+            # that arrived since the wait began. On a busy proxy a matching
+            # flow can arrive and be evicted between two polls, and the wait
+            # then reported that the request never happened (#318).
+            completeness = (
+                _flow_completeness(
+                    flow_store, effective_since,
+                    simulator_udid=body.simulator_udid, client_ip=body.client_ip,
+                    device_serial=body.device_serial,
+                )
+                if flow_store is not None else {}
+            )
             return WaitForFlowResponse(
                 matched=False,
                 elapsed_seconds=round(elapsed, 3),
                 polls=polls,
+                **completeness,
             )
 
         await asyncio.sleep(body.interval)
 
 
 @router.post("/capture/start", response_model=CaptureStartResponse)
+@logged_action("start_capture", category="proxy")
 async def start_capture(request: Request, body: CaptureStartRequest) -> CaptureStartResponse:
     """Start a capture session to bracket a UI action and isolate its flows."""
     manager = request.app.state.capture_sessions
@@ -824,6 +974,7 @@ async def start_capture(request: Request, body: CaptureStartRequest) -> CaptureS
 
 
 @router.post("/capture/stop", response_model=CaptureStopResponse)
+@logged_action("stop_capture", category="proxy")
 async def stop_capture(request: Request, body: CaptureStopRequest) -> CaptureStopResponse:
     """Stop a capture session and return the flows captured during that window."""
     manager = request.app.state.capture_sessions
@@ -847,7 +998,16 @@ async def get_flow(request: Request, flow_id: str) -> FlowRecord:
 
     flow = await flow_store.get(flow_id)
     if flow is None:
-        raise HTTPException(status_code=404, detail=f"Flow {flow_id} not found")
+        detail = f"Flow {flow_id} not found"
+        # Not found and evicted look the same from here; say which is possible.
+        # An id taken from an earlier query is exactly what eviction removes.
+        if flow_store.evicted:
+            detail += (
+                f". The store has evicted {flow_store.evicted} flows at its "
+                f"capacity of {flow_store.max_size}, oldest first, so this one "
+                "may have been evicted rather than never captured."
+            )
+        raise HTTPException(status_code=404, detail=detail)
     return flow
 
 
@@ -857,6 +1017,7 @@ async def get_flow(request: Request, flow_id: str) -> FlowRecord:
 
 
 @router.post("/filter")
+@logged_action("set_proxy_filter", category="proxy")
 async def set_proxy_filter(request: Request, body: dict) -> dict[str, str]:
     """Set a host filter on the proxy addon."""
     proxy_adapter = request.app.state.proxy_adapter
@@ -878,6 +1039,7 @@ async def set_proxy_filter(request: Request, body: dict) -> dict[str, str]:
 
 
 @router.post("/local-capture", response_model=ProxyStatusResponse)
+@logged_action("set_local_capture", category="proxy")
 async def set_local_capture(
     request: Request, body: LocalCaptureRequest,
 ) -> ProxyStatusResponse:
@@ -895,6 +1057,14 @@ async def set_local_capture(
     # FastAPI rejects a missing or non-list `processes` with 422 before this
     # runs; only the empty-string filtering is left to do.
     processes = [p for p in body.processes if p]
+
+    # Widened unless the caller said `only`. Naming an app used to replace the
+    # list, silently dropping the process its web traffic actually leaves
+    # through -- and the result was zero flows with no error, which reads
+    # exactly like an app that made no requests.
+    added_defaults: list[str] = []
+    if not body.only:
+        processes, added_defaults = with_capture_minimum(processes)
 
     adapter = request.app.state.proxy_adapter
     if adapter is None:
@@ -922,8 +1092,9 @@ async def set_local_capture(
     removed = [p for p in previous if p not in processes]
     if removed:
         _proxy_logger.warning(
-            "local_capture no longer includes %s (replaced by %s). "
-            "Setting the list replaces it; pass every process you want captured.",
+            "local_capture no longer includes %s (now %s). The web-view "
+            "minimum is kept for you; everything else is set rather than "
+            "merged, so pass every process you want captured.",
             ", ".join(removed), ", ".join(processes) or "nothing",
         )
 
@@ -933,6 +1104,18 @@ async def set_local_capture(
     # Persist to config
     from server.config import set_local_capture_processes
     set_local_capture_processes(processes)
+
+    # `state.json` too, because `quern status` reads it and would otherwise
+    # report the list as it was at boot. That matters most for
+    # `local_capture_added`: start-up records what *it* added, and leaving
+    # that behind after a runtime change lists processes beneath a capture
+    # list that no longer contains them -- a stale record presented as
+    # current fact, which is the failure this file already warns about for
+    # certificate trust. Both fields move together or neither should.
+    update_state(
+        local_capture=processes,
+        local_capture_added=added_defaults or [],
+    )
 
     # Restart proxy if running to apply new mode
     was_running = adapter.is_running
@@ -949,4 +1132,11 @@ async def set_local_capture(
     except Exception:
         _proxy_logger.debug("Could not update state file", exc_info=True)
 
-    return await _get_proxy_status(request)
+    status = await _get_proxy_status(request)
+    # Carried on the response, not only in the log. The mistake this guards
+    # against -- naming an app and losing its web traffic -- produces zero
+    # flows and no error, so the moment of the call is the only place a
+    # caller can still connect cause to effect.
+    status.capture_added = added_defaults or None
+    status.capture_removed = removed or None
+    return status

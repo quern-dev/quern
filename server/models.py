@@ -3,10 +3,45 @@
 from __future__ import annotations
 
 import enum
-from datetime import datetime
-from typing import Literal
+from datetime import UTC, date, datetime
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AfterValidator, BaseModel, Field, field_validator, model_validator
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    """Read a naive datetime as UTC.
+
+    `?since=2026-09-21T12:00:00` is valid ISO 8601 and FastAPI parses it to a
+    *naive* datetime. Everything it is compared against here is UTC-aware, so
+    the comparison raises `TypeError: can't compare offset-naive and
+    offset-aware datetimes` and a well-formed request comes back as HTTP 500.
+
+    **`replace`, not `astimezone`.** `replace(tzinfo=UTC)` reads the wall
+    clock the caller sent as UTC. `astimezone(UTC)` would read it as the
+    *server's* local time and convert -- silently shifting the window by the
+    machine's offset and returning the wrong rows rather than an error. The
+    two are identical when the server runs in UTC, which is what CI does, so
+    the wrong one passes every test unless the timezone is pinned to
+    something else. See #259, where that cost an hour twice in one sitting.
+
+    Naive is accepted rather than rejected because it is valid ISO 8601 and
+    every hand-typed query omits the offset. Refusing it would turn a
+    500 into a 422 without helping anyone.
+    """
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
+
+
+#: A datetime query parameter or field that tolerates a missing offset.
+#:
+#: Use this for **every** new datetime input. The per-handler
+#: `if x.tzinfo is None` is what left six endpoints returning 500 on a
+#: well-formed request while three others had been fixed one at a time --
+#: the eighth would have been missed too. Annotating the type means a new
+#: endpoint inherits the behaviour instead of having to remember it.
+UtcDatetime = Annotated[datetime, AfterValidator(_as_utc)]
 
 
 class LogLevel(str, enum.Enum):
@@ -50,17 +85,73 @@ class LogEntry(BaseModel):
     id: str = Field(description="Unique entry identifier")
     timestamp: datetime
     device_id: str = Field(
-        default="default",
-        description="Device identifier (for future multi-device)",
+        default="",
+        description=(
+            "Which device this came from, or empty when it came from no "
+            "device -- build output, quern's own logging. Never a sentinel "
+            "that looks like a device: the previous default of 'default' "
+            "passed every truthiness check and failed every equality one, so "
+            "app log lines were silently treated as belonging to a device "
+            "called 'default' and matched nothing. Every consumer already "
+            "reads this as 'unknown, do not filter' when it is empty."
+        ),
     )
     process: str = Field(default="", description="Process name (e.g., 'MyApp')")
     subsystem: str = Field(default="", description="OSLog subsystem (e.g., 'com.myapp.networking')")
-    category: str = Field(default="", description="OSLog category (e.g., 'auth')")
+    category: str = Field(
+        default="",
+        description=(
+            "For device sources, the OSLog category (e.g. 'auth'). For quern's "
+            "own entries, what quern was doing -- see server/logging_ext."
+        ),
+    )
     pid: int | None = Field(default=None, description="Process ID")
     level: LogLevel = LogLevel.INFO
     message: str
     source: LogSource
     raw: str = Field(default="", description="Original unparsed line, preserved for debugging")
+
+    # --- the action log -----------------------------------------------------
+    # One entry per completed quern action, so a trace is a query rather than
+    # a reading exercise. Empty on every other entry, including quern's own
+    # non-action logging. See docs/proposals/logging-spec.md.
+    action: str = Field(
+        default="",
+        description="The operation that completed, e.g. 'tap_element'",
+    )
+    udid: str = Field(
+        default="",
+        description=(
+            "The *resolved* target device. Deliberately separate from "
+            "`device_id`, which is 'server' for every server-side entry and "
+            "routes entries to buffers."
+        ),
+    )
+    duration_ms: int | None = Field(
+        default=None, description="How long the action took, once it is over",
+    )
+    started_monotonic: float | None = Field(
+        default=None,
+        description=(
+            "When the action began, on time.monotonic() -- the same base as "
+            "mach absolute time, which is what video capture stamps frames "
+            "with. Given directly so a caller aligning against a recording "
+            "needs no wall-clock conversion and inherits none of its drift. "
+            "The end is this plus duration_ms, measured on the same clock."
+        ),
+    )
+    outcome: str = Field(
+        default="",
+        description=(
+            "How the action ended. 'ok' worked; 'failed' means the caller did "
+            "not get what they asked for; 'suspect' means quern did it and the "
+            "result should not be trusted, such as typing that reported "
+            "success into a field still empty; 'cancelled' means the caller "
+            "disconnected part-way; 'not_found' and 'ambiguous' are answers "
+            "rather than faults; 'started' marks a begin entry, which carries "
+            "no duration. The list lives in server/logging_ext.OUTCOMES."
+        ),
+    )
     repeat_count: int = Field(
         default=1,
         description="Number of occurrences this entry represents. "
@@ -71,10 +162,11 @@ class LogEntry(BaseModel):
 class LogQueryParams(BaseModel):
     """Parameters for historical log queries."""
 
-    since: datetime | None = None
-    until: datetime | None = None
+    since: UtcDatetime | None = None
+    until: UtcDatetime | None = None
     level: LogLevel | None = None
     process: str | None = None
+    category: str | None = None
     source: LogSource | None = None
     search: str | None = None
     device_id: str | None = None
@@ -108,7 +200,11 @@ class SourceStatus(BaseModel):
     id: str
     type: str
     status: str  # "streaming", "watching", "stopped", "error"
-    device_id: str = "default"
+    #: Empty, never `"default"`. A sentinel that is not a udid compares
+    #: unequal to every real one, so `owns()` reads it as FOREIGN and the
+    #: trace silently discards the entry; empty reads as UNKNOWN_WORK, which
+    #: is attributed on time with a caveat. Wrong-and-silent vs honest.
+    device_id: str = ""
     entries_captured: int = 0
     started_at: datetime | None = None
     error: str | None = None
@@ -129,8 +225,59 @@ class TopIssue(BaseModel):
     resolved: bool = False
 
 
-class LogSummaryResponse(BaseModel):
+class Completeness(BaseModel):
+    """Whether an answer drawn from a fixed-size store can be trusted whole.
+
+    The log buffers and the flow store evict their oldest entries at
+    capacity, so "nothing matched" and "everything that matched is gone" used
+    to come back identical: `total: 0` either way. An agent reading the first
+    concluded the second -- confidently, and wrongly -- which is the failure
+    #255, #313 and #318 describe. These fields separate them, on every log
+    and flow answer that can be cut short.
+    """
+
+    truncated: bool = Field(
+        default=False,
+        description=(
+            "True when entries stamped inside the requested window were "
+            "evicted before this call, so the result -- including any count "
+            "-- may be missing some. It says 'may', not 'is': the evicted "
+            "entries are not known to match this query's other filters. False "
+            "is a guarantee that nothing in the window was lost, with one "
+            "exception: for a log tail (the newest N), false means only that "
+            "the entries returned really are the newest N. Removals made by a "
+            "filter change are not evictions; the call that changed the filter "
+            "reports them as `purged`. To get a clean answer, ask about a "
+            "window that starts after `complete_after`, or capture less (a "
+            "narrower filter at the source) so the store turns over less often. "
+            "On a summary delta (`since_cursor`) the window is \"arrived since "
+            "the cursor\": true means something that arrived after it was "
+            "evicted before this call."
+        ),
+    )
+    complete_after: datetime | None = Field(
+        default=None,
+        description=(
+            "Nothing stamped after this time has been evicted, so a window "
+            "starting later is complete. Null only when nothing relevant was "
+            "ever evicted."
+        ),
+    )
+
+
+class LogSummaryResponse(Completeness):
     """Response from GET /api/v1/logs/summary."""
+
+    cursor_reset: bool = Field(
+        default=False,
+        description=(
+            "True when the `since_cursor` passed in could not be honoured -- "
+            "it came from before a server restart, is ahead of anything this "
+            "server has numbered, or is not a cursor -- so this summary covers "
+            "the requested window instead of the delta. Entries between the "
+            "old cursor and that window are not in it."
+        ),
+    )
 
     window: str
     generated_at: datetime
@@ -142,7 +289,7 @@ class LogSummaryResponse(BaseModel):
     top_issues: list[TopIssue]
 
 
-class LogErrorsResponse(BaseModel):
+class LogErrorsResponse(Completeness):
     """Response from GET /api/v1/logs/errors."""
 
     entries: list[LogEntry]
@@ -154,13 +301,81 @@ class LogErrorsResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class CrashFrame(BaseModel):
+    """One frame of the crashing thread, as structured as the report allows."""
+
+    image: str = Field(
+        default="", description="The binary: 'MyApp.debug.dylib', 'UIKitCore', 'libc.so'",
+    )
+    offset: int | None = Field(
+        default=None,
+        description="Offset into the image (iOS imageOffset; Android pc). With the image's "
+                    "load address, what a symbolicator needs.",
+    )
+    symbol: str = Field(default="", description="Function, where the report names it")
+    symbol_offset: int | None = Field(default=None, description="Bytes into `symbol`")
+    file: str = Field(default="", description="Source file, where the report has it")
+    line: int | None = Field(default=None, description="Source line, where the report has it")
+    app: bool = Field(default=False, description="In the app's own code, not the OS's")
+    build_id: str = Field(
+        default="",
+        description="Android native: the library's BuildId. With `image`, which of `images` "
+                    "this is: two libraries can share a name.",
+    )
+
+
+class ImageSymbols(BaseModel):
+    """How one image's frames in a crash were symbolicated (#326)."""
+
+    image: str
+    uuid: str = ""
+    source: str = Field(
+        default="",
+        description="'build_record' (a build quern made), 'spotlight' (a dSYM Spotlight "
+                    "indexed: DerivedData, Xcode archives), or '' when none was found",
+    )
+    build_id: str = Field(default="", description="The build record, when it came from one")
+    dwarf: str = Field(default="", description="The DWARF file atos read")
+    frames_resolved: int = 0
+    frames_total: int = 0
+    note: str = Field(default="", description="Why it was not symbolicated, or only partly")
+    #: atos has answered for it: a later read keeps this entry, not asks again.
+    settled: bool = Field(default=False, exclude=True)
+
+
+class CrashImage(BaseModel):
+    """A binary a crash frame points into: what symbolicating it needs."""
+
+    name: str
+    uuid: str = ""
+    base: int | None = Field(default=None, description="Load address")
+    path: str = ""
+    arch: str = ""
+
+
 class CrashReport(BaseModel):
     """A parsed crash report."""
 
     crash_id: str = Field(description="Unique crash identifier")
     timestamp: datetime
-    device_id: str = "default"
+    #: Empty, never `"default"`. A sentinel that is not a udid compares
+    #: unequal to every real one, so `owns()` reads it as FOREIGN and the
+    #: trace silently discards the entry; empty reads as UNKNOWN_WORK, which
+    #: is attributed on time with a caveat. Wrong-and-silent vs honest.
+    device_id: str = ""
     process: str = Field(default="", description="Crashed process name")
+    pid: int | None = Field(
+        default=None, description="Crashed process ID, where the report gives it",
+    )
+    kind: str = Field(
+        default="crash",
+        description=(
+            "What failed: 'crash' (an iOS crash, or an Android Java crash), "
+            "'native_crash' (an Android native crash), or 'anr' (an Android app "
+            "that stopped responding -- not a crash strictly, but the app dying "
+            "from the user's point of view)."
+        ),
+    )
     exception_type: str = Field(default="", description="e.g. EXC_BAD_ACCESS")
     exception_codes: str = Field(default="", description="e.g. KERN_INVALID_ADDRESS at 0x0")
     signal: str = Field(default="", description="e.g. SIGSEGV")
@@ -169,7 +384,164 @@ class CrashReport(BaseModel):
         description="Top stack frames from crashing thread",
     )
     file_path: str = Field(default="", description="Path to the raw crash file on disk")
-    raw_text: str = Field(default="", description="First portion of raw crash content")
+    raw_text: str = Field(
+        default="",
+        description=(
+            "First portion of raw crash content. In get_latest_crash only with include_raw."
+        ),
+    )
+    app_frame: CrashFrame | None = Field(
+        default=None,
+        description=(
+            "Where in the app's own code it happened: the first app frame of the "
+            "exception's backtrace or the crashing thread, not counting a crash "
+            "reporter's signal handler or the app's entry point. None when the "
+            "crash never reached the app's code, or when another process ended the "
+            "app (see killed_by)."
+        ),
+    )
+    reason: str = Field(
+        default="",
+        description=(
+            "The report's own words for why: iOS's application-specific information "
+            "(an uncaught exception's reason), Android's abort message or root "
+            "cause. A Swift fatalError's message is in the app's log, not here."
+        ),
+    )
+    killed_by: str = Field(
+        default="",
+        description=(
+            "The process that sent the signal that ended the app, when it was not "
+            "the app itself (a kill from a shell, or devicectl). Its frames then say "
+            "where it was waiting, not what went wrong, and app_frame is null. A "
+            "watchdog or memory termination is not counted: its frames are where it "
+            "hung, and its explanation is in reason. .ips reports only."
+        ),
+    )
+    frames_from: str = Field(
+        default="",
+        description=(
+            "What `frames` is: 'exception' (an uncaught exception's backtrace; a Java "
+            "crash's trace and its causes), 'crashing_thread', or 'main_thread' (an ANR)"
+        ),
+    )
+    frames: list[CrashFrame] = Field(
+        default_factory=list,
+        description="The frames, innermost first. In get_latest_crash only with detail=true.",
+    )
+    images: list[CrashImage] = Field(
+        default_factory=list,
+        description=(
+            "The binaries those frames point into: UUID (Android: BuildId) and load "
+            "address (iOS). In get_latest_crash only with detail=true."
+        ),
+    )
+    bundle_id: str = ""
+    app_version: str = ""
+    build_version: str = ""
+    mac_process: bool = Field(
+        default=False,
+        description=(
+            "A crash of one of this Mac's own processes, not a simulator's or a "
+            "device's. Listed only when get_latest_crash is not given a udid."
+        ),
+    )
+    symbols: list[ImageSymbols] = Field(
+        default_factory=list,
+        description=(
+            "Where the app's frames were symbolicated from, per image, or why they "
+            "could not be: a device report names the app's code by UUID and offset, "
+            "and only the matching build's dSYM turns that into function and line."
+        ),
+    )
+    #: Set once symbolication has run, so a report is not handed to atos again.
+    symbolicated: bool = Field(default=False, exclude=True)
+
+
+class OpenCrashDialog(BaseModel):
+    process: str
+    kind: Literal["crash", "anr"]
+
+
+class CrashPullStatus(BaseModel):
+    """What happened when `get_latest_crash` was asked to pull from a device.
+
+    Said on the response because a pull that could not be made used to look
+    exactly like one that found nothing: the iOS pull returned an empty list
+    for a missing tool, a timeout or a phone on Wi-Fi only, and Android had no
+    pull at all (#316).
+    """
+
+    udid: str
+    platform: Literal["ios", "android"] | None = Field(
+        default=None, description="Which pull was used; null if none could be chosen.",
+    )
+    status: Literal["pulled", "skipped", "failed"] = Field(
+        description=(
+            "'pulled': the device was asked and answered (it may have had "
+            "nothing new). 'skipped': it could not be asked, for the stated "
+            "reason. 'failed': it was asked and the pull went wrong. Only "
+            "'pulled' means the crash list reflects the device."
+        ),
+    )
+    new_reports: int = Field(default=0, description="Reports this pull added.")
+    reason: str | None = Field(default=None, description="Why it was skipped or failed.")
+    window_days: int | None = Field(
+        default=None,
+        description="iPhone only: how far back the pull reached, in days.",
+    )
+    older_on_device: int | None = Field(
+        default=None,
+        description=(
+            "iPhone only: reports on the phone older than the window, not "
+            "pulled. Pass a larger `days` to include them, or clear them from "
+            "the phone with clear_device_crashes."
+        ),
+    )
+    oldest_on_device: date | None = Field(
+        default=None, description="iPhone only: the oldest report date on the phone.",
+    )
+    note: str | None = Field(
+        default=None,
+        description="What the pull left behind, when that is worth knowing.",
+    )
+    open_dialogs: list[OpenCrashDialog] | None = Field(
+        default=None,
+        description=(
+            "Android only: processes showing a crash ('keeps stopping') dialog "
+            "right now (kind 'crash'), or that Android is treating as not "
+            "responding (kind 'anr') -- from the moment it notices, about 13s "
+            "before the ANR dialog and its report appear (measured, API 32), "
+            "until the dialog is answered. While a crash dialog is open, Android drops "
+            "every further crash of that process -- no report, no log line -- "
+            "so 'no new reports' does not mean it stopped crashing; dismiss "
+            "the dialog or force-stop the app. [] means none; null means it "
+            "was not checked (iOS, or a pull that could not run at all) or could "
+            "not be read. A pull that failed on some DropBox tags still checks."
+        ),
+    )
+
+
+class ClearCrashesResponse(BaseModel):
+    udid: str | None = Field(default=None, description="The device cleared; null for all.")
+    files_removed: int = Field(description="Report files deleted from the Mac.")
+    reports_removed: int = Field(description="Reports dropped from quern's list.")
+    errors: list[str] = Field(
+        default_factory=list, description="Files that could not be deleted, and why.",
+    )
+
+
+class ClearDeviceCrashesRequest(BaseModel):
+    udid: str = Field(min_length=1, description="The iPhone to clear.")
+
+
+class ClearDeviceCrashesResponse(BaseModel):
+    udid: str
+    removed: int = Field(description="Crash reports deleted from the phone.")
+    remaining: int = Field(description="Crash reports still on the phone afterwards.")
+    failed: list[str] = Field(
+        default_factory=list, description="Reports the phone would not delete.",
+    )
 
 
 class CrashLatestResponse(BaseModel):
@@ -177,6 +549,9 @@ class CrashLatestResponse(BaseModel):
 
     crashes: list[CrashReport]
     total: int
+    #: Present when a `udid` was given: whether its crashes were actually
+    #: fetched, and if not, why. Null when no pull was asked for.
+    pull: CrashPullStatus | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +596,65 @@ class WarningGroup(BaseModel):
     files: list[str] = Field(default_factory=list)
 
 
+class BuildBinary(BaseModel):
+    """One Mach-O file in a built app, as a crash report would name it."""
+
+    path: str = Field(
+        description="Relative to the .app: 'MyApp.debug.dylib', 'Frameworks/X.framework/X'",
+    )
+    uuids: dict[str, str] = Field(
+        default_factory=dict, description="UUID per architecture, as crash reports print it",
+    )
+    built_here: bool = Field(
+        default=False,
+        description="Compiled by this build: its debug map names object files on this Mac. "
+                    "A vendored framework's names its vendor's build machine.",
+    )
+    dsym: str = Field(default="", description="The dSYM kept for it (device builds)")
+    dwarf: str = Field(
+        default="",
+        description="The DWARF file inside `dsym` that is this binary's: what `atos -o` takes. "
+                    "One dSYM can cover several binaries, and atos given the bundle may read "
+                    "the wrong one and resolve nothing.",
+    )
+    dsym_error: str = Field(default="", description="Why a dSYM could not be made")
+    dsym_warnings: list[str] = Field(
+        default_factory=list,
+        description="dsymutil's warnings: the dSYM was kept but may be incomplete",
+    )
+
+
+class BuildRecord(BaseModel):
+    """A build quern made, kept after the next build overwrites DerivedData (#326)."""
+
+    build_id: str
+    created_at: datetime
+    project_path: str
+    scheme: str
+    configuration: str
+    platform: str = Field(description="'iphoneos' or 'iphonesimulator'")
+    app_path: str = Field(description="Where the .app was built; the next build replaces it")
+    bundle_id: str = ""
+    executable: str = Field(default="", description="CFBundleExecutable")
+    version: str = Field(default="", description="CFBundleShortVersionString")
+    build_number: str = Field(default="", description="CFBundleVersion")
+    binaries: list[BuildBinary] = Field(default_factory=list)
+    installed_on: list[str] = Field(default_factory=list)
+    dsyms_expired: bool = Field(
+        default=False,
+        description="Its dSYMs were removed: only the newest device builds of a scheme keep them",
+    )
+    error: str = Field(default="", description="The record could not be written")
+    notes: list[str] = Field(default_factory=list)
+
+    @field_validator("created_at")
+    @classmethod
+    def _aware(cls, value: datetime) -> datetime:
+        # A record without an offset read as naive, and comparing it with the
+        # aware ones raised TypeError in retention -- on every build after.
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+
+
 class BuildResult(BaseModel):
     """Parsed result from an xcodebuild invocation."""
 
@@ -241,7 +675,7 @@ class BuildResult(BaseModel):
                 loc = err.file
                 if err.line:
                     loc += f":{err.line}"
-                parts.append(f"  {loc}: {err.message}")
+                parts.append(f"  {loc}: {err.message}" if loc else f"  {err.message}")
             if len(self.errors) > 5:
                 parts.append(f"  ... and {len(self.errors) - 5} more")
             return "\n".join(parts)
@@ -316,7 +750,11 @@ class FlowRecord(BaseModel):
 
     id: str = Field(description="Unique flow identifier")
     timestamp: datetime
-    device_id: str = "default"
+    #: Empty, never `"default"`. A sentinel that is not a udid compares
+    #: unequal to every real one, so `owns()` reads it as FOREIGN and the
+    #: trace silently discards the entry; empty reads as UNKNOWN_WORK, which
+    #: is attributed on time with a caveat. Wrong-and-silent vs honest.
+    device_id: str = ""
     request: FlowRequest
     response: FlowResponse | None = None
     timing: FlowTiming = Field(default_factory=FlowTiming)
@@ -335,6 +773,15 @@ class FlowRecord(BaseModel):
         default=None,
         description="Simulator UDID if traffic came from a simulator",
     )
+    device_serial: str | None = Field(
+        default=None,
+        description=(
+            "Android emulator serial (e.g. emulator-5554), resolved from the "
+            "process that opened the connection. Exact, like simulator_udid, "
+            "and for the same reason -- an emulator's flows carry the host's "
+            "address, so client_ip cannot tell two of them apart (#262)."
+        ),
+    )
     client_ip: str | None = Field(
         default=None,
         description="Client IP address (for physical device identification)",
@@ -352,10 +799,17 @@ class FlowQueryParams(BaseModel):
     status_min: int | None = None
     status_max: int | None = None
     has_error: bool | None = None
-    since: datetime | None = None
-    until: datetime | None = None
-    device_id: str = "default"
+    since: UtcDatetime | None = None
+    until: UtcDatetime | None = None
+    #: Empty, never `"default"`. A sentinel that is not a udid compares
+    #: unequal to every real one, so `owns()` reads it as FOREIGN and the
+    #: trace silently discards the entry; empty reads as UNKNOWN_WORK, which
+    #: is attributed on time with a caveat. Wrong-and-silent vs honest.
+    device_id: str = ""
     simulator_udid: str | None = None
+    #: An Android emulator's exact identity. Filtering by `client_ip` cannot
+    #: narrow to one emulator -- they all arrive as the host (#262).
+    device_serial: str | None = None
     client_ip: str | None = None
     detail: Literal["full", "summary"] = "full"
     limit: int = Field(default=100, ge=1, le=1000)
@@ -376,7 +830,7 @@ class FlowSummaryItem(BaseModel):
     total_ms: float | None = None
 
 
-class FlowQueryResponse(BaseModel):
+class FlowQueryResponse(Completeness):
     """Response from flow query endpoint."""
 
     flows: list[FlowRecord] = []
@@ -392,6 +846,9 @@ class CaptureStartRequest(BaseModel):
     hosts: list[str] | None = None
     exclude_hosts: list[str] | None = None
     simulator_udid: str | None = None
+    #: An Android emulator's exact identity, for the same reason as on
+    #: `FlowQueryParams`: every emulator on a host arrives as the host (#262).
+    device_serial: str | None = None
     client_ip: str | None = None
     detail: Literal["full", "summary"] = "full"
 
@@ -409,7 +866,7 @@ class CaptureStopRequest(BaseModel):
     session_id: str
 
 
-class CaptureStopResponse(BaseModel):
+class CaptureStopResponse(Completeness):
     """Response from POST /api/v1/proxy/capture/stop."""
 
     session_id: str
@@ -430,13 +887,15 @@ class WaitForFlowRequest(BaseModel):
     status_max: int | None = None
     has_error: bool | None = None
     simulator_udid: str | None = None
+    #: An Android emulator's exact identity (#262).
+    device_serial: str | None = None
     client_ip: str | None = None
     timeout: float = Field(default=10, ge=0.1, le=60)
     interval: float = Field(default=0.5, ge=0.1, le=5)
-    since: datetime | None = None  # defaults to now - 5s if omitted
+    since: UtcDatetime | None = None  # defaults to now - 5s if omitted
 
 
-class WaitForFlowResponse(BaseModel):
+class WaitForFlowResponse(Completeness):
     """Response from POST /api/v1/proxy/flows/wait."""
 
     matched: bool
@@ -474,8 +933,16 @@ class LocalCaptureRequest(BaseModel):
     processes: list[str]
     """Process names to capture. Empty list disables local capture.
 
-    Name the process that makes the requests: Safari's traffic leaves through
-    ``com.apple.WebKit.Networking``, not ``MobileSafari``.
+    `MobileSafari` and `com.apple.WebKit.Networking` are added automatically
+    unless ``only`` is set, because naming just an app captures none of its
+    web traffic and none of an OAuth hand-off to Safari.
+    """
+    only: bool = False
+    """Capture exactly ``processes``, without adding the usual minimum.
+
+    For a caller who means a narrow list. Phrased as what they want rather
+    than as an opinion about our defaults -- ``only: true`` states an intent,
+    where a ``no_defaults`` flag would state a complaint.
     """
     skip_cert_check: bool = False
     """Enable capture even when a booted simulator does not trust the CA.
@@ -537,13 +1004,27 @@ class TlsRejection(BaseModel):
     become. `tls_failed_client` fires for *every* client-side rejection, and an
     untrusted CA is only one of the reasons.
 
-    `alert` is why that distinction survives. A device that does not trust the
-    CA says `unknown ca`; a certificate-pinned app on a device that trusts it
-    perfectly well refuses too, and reporting that as "this device does not
-    trust the CA" sends someone to reinstall a certificate that was never the
-    problem. Pinning is L3 in docs/proposals/cert-trust-model.md and produces
-    the identical symptom, so the alert text is the only thing separating them
-    and is kept verbatim rather than interpreted.
+    `alert` is kept verbatim rather than interpreted, because the reason
+    matters: a certificate-pinned app on a device that trusts the CA perfectly
+    well refuses too, and reporting that as "this device does not trust the
+    CA" sends someone to reinstall a certificate that was never the problem.
+    Pinning is L3 in docs/proposals/cert-trust-model.md and produces the
+    identical symptom.
+
+    **The alert does not separate those two on Android, and an earlier version
+    of this docstring said it did.** Measured 2026-09-28 across two emulators:
+    113 rejections, every one of them `certificate unknown` -- not `unknown
+    ca` -- while the CA was simply not installed. Installing it turned those
+    same endpoints into captured, decrypted flows, which is what proves they
+    were trust failures rather than pinning. Two endpoints kept refusing
+    afterwards (`accounts.google.com`, and one of two connections to
+    `update.googleapis.com` -- two clients in one emulator, one pinning and
+    one not), and they said `certificate unknown` as well.
+
+    So on Android both causes produce the same alert, and the thing that
+    separates them is whether the refusal survives the CA being trusted. The
+    iOS side is unmeasured; the old claim may well hold there. Do not branch
+    on the alert text to decide which cause it was.
     """
 
     sni: str | None = None
@@ -554,23 +1035,125 @@ class TlsRejection(BaseModel):
     source_process: str | None = None
     source_pid: int | None = None
     simulator_udid: str | None = None
+    #: Android emulator serial. Without it a rejection from an
+    #: emulator reads "Client <host ip>", naming the machine
+    #: rather than the device, and two emulators fold together.
+    device_serial: str | None = None
     """Resolved the way flows are, and the only fields that name a simulator."""
     alert: str | None = None
-    """The TLS alert, verbatim. `unknown ca` means the CA; others may not."""
+    """The TLS alert, verbatim and uninterpreted.
+
+    Not a cause. On Android an untrusted CA and a pinned client both say
+    `certificate unknown` -- measured -- so this narrows the possibilities
+    without deciding between them.
+    """
     count: int = 1
     """Handshakes refused for this (host, device) pair."""
     first_at: str | None = None
     last_at: str | None = None
 
 
+class TraceFlow(BaseModel):
+    """A request attributed to an action."""
+
+    id: str
+    timestamp: str
+    method: str
+    url: str
+    status: int | None = None
+    source_process: str | None = None
+    #: How this flow's device was established: "process" (exact, resolved from
+    #: the client pid), "client_ip" (a recorded address, still trusted),
+    #: "client_ip_expired" (recorded too long ago to vouch for), or
+    #: "unidentified" (only time connects it to the action).
+    #:
+    #: Said positively rather than left to be inferred from a missing
+    #: `source_process`, which already means both "not a simulator" and "could
+    #: not be resolved". Those deserve different amounts of trust.
+    identified_by: str
+
+
+class TraceLogLine(BaseModel):
+    """A log line attributed to an action."""
+
+    timestamp: str
+    level: str
+    process: str
+    message: str
+    #: "adapter" when the capturing adapter named the device, "unidentified"
+    #: when it did not and only time connects this line to the action.
+    identified_by: str
+
+
+class TracedAction(BaseModel):
+    """One action, and what it caused."""
+
+    action: str
+    udid: str
+    outcome: str
+    duration_ms: int | None = None
+    category: str
+    started_at: str
+    finished_at: str
+    started_monotonic: float | None = None
+    detail: str
+    flows: list[TraceFlow] = []
+    logs: list[TraceLogLine] = []
+    overlaps: list[str] = []
+    caveats: list[str] = []
+
+
+class ClockAnchor(BaseModel):
+    """Wall and monotonic read together, so a recording made alongside this
+    trace can be aligned against it."""
+
+    wall: str
+    monotonic: float
+
+
+class TraceResponse(BaseModel):
+    """Response from GET /api/v1/trace.
+
+    The four `*_over_limit` / `*_truncated` fields are the point of having a
+    model at all: they are how a caller tells an incomplete answer from a
+    quiet one, and leaving them to an untyped dict is how one of them would
+    quietly stop being returned.
+    """
+
+    since: str
+    udid: str | None = None
+    clock_anchor: ClockAnchor
+    actions: list[TracedAction] = []
+    proxy_running: bool
+    log_window_truncated: bool
+    logs_over_limit: bool
+    actions_over_limit: bool
+    action_window_truncated: bool
+    flows_over_limit: bool
+    flow_window_truncated: bool
+
+
 class ProxyStatusResponse(BaseModel):
     """Response from GET /api/v1/proxy/status."""
 
     status: str  # "running", "stopped", "error"
+    #: What `POST /proxy/local-capture` just changed, and nothing on the
+    #: plain status read. The caller who made the change is the one who needs
+    #: to see it, and a server log entry is not where they are looking: an
+    #: agent reads the response body and nothing else.
+    capture_added: list[str] | None = None
+    capture_removed: list[str] | None = None
     port: int = 9101
     listen_host: str = "0.0.0.0"
     started_at: datetime | None = None
+    #: Flows held right now -- what survived, not what arrived. On a busy
+    #: proxy the store turns over and this stays at capacity while traffic is
+    #: lost; `flow_store` says how much.
     flows_captured: int = 0
+    #: The flow store's capacity, intake, evictions and the span it still
+    #: holds, so capture outrunning the store is visible rather than inferred
+    #: from queries coming back short (#318).
+    flow_store: dict[str, Any] | None = None
     active_filter: str | None = None
     active_intercept: str | None = None
     held_flows_count: int = 0
@@ -658,8 +1241,20 @@ class SlowRequest(BaseModel):
     status_code: int | None = None
 
 
-class FlowSummaryResponse(BaseModel):
+class FlowSummaryResponse(Completeness):
     """Response from GET /api/v1/proxy/flows/summary."""
+
+    cursor_reset: bool = Field(
+        default=False,
+        description=(
+            "True when the `since_cursor` passed in could not be honoured -- "
+            "it came from before a server restart, or is ahead of anything "
+            "this server has numbered -- so this summary covers the requested "
+            "window instead of the delta. Flows between the old cursor and "
+            "that window are not in it. A string that is not a cursor at all "
+            "is refused with 400 rather than reset."
+        ),
+    )
 
     window: str
     generated_at: datetime
@@ -689,7 +1284,11 @@ class FlowEvent(BaseModel):
     duration_ms: float | None = None
     request_size: int = 0
     response_size: int = 0
-    device_id: str = "default"
+    #: Empty, never `"default"`. A sentinel that is not a udid compares
+    #: unequal to every real one, so `owns()` reads it as FOREIGN and the
+    #: trace silently discards the entry; empty reads as UNKNOWN_WORK, which
+    #: is attributed on time with a caveat. Wrong-and-silent vs honest.
+    device_id: str = ""
     simulator_udid: str | None = None
     source_process: str | None = None
 
@@ -892,7 +1491,10 @@ class DeviceInfo(BaseModel):
     os_version: str = ""
     runtime: str = ""
     is_available: bool = True
-    connection_type: str = ""  # "usb", "wifi", or "" for simulators
+    #: How quern reaches this device. iOS: "usb" or "wifi". Android:
+    #: "usb", "emulator" (the local console) or "tcp" (`adb connect`).
+    #: Empty for simulators and for devices that are not attached.
+    connection_type: str = ""
     device_family: str = ""  # "iPhone", "iPad", "Apple Watch", "Apple TV", or ""
     # True for simulators; physical devices: True when
     # reachable (tunnel not "unavailable")
@@ -1152,6 +1754,24 @@ class ScreenLandmarks(BaseModel):
 
     screen: str  # screen name
     landmarks: list[Landmark]
+    #: Whether this screen can scroll. `None` means nobody has said.
+    #:
+    #: Recorded rather than detected because it cannot be detected: the
+    #: accessibility tree quern reads exposes interactive leaves, not
+    #: containers. Measured on a simulator, Settings and Safari both scroll
+    #: and both report zero scroll containers in `type` and in `role`. So
+    #: `tap_element` had to *swipe* to find out, which is two real gestures on
+    #: a screen that cannot scroll -- and the second of them is the
+    #: pull-to-refresh and sheet-dismiss gesture. See #274.
+    #:
+    #: Tri-state on purpose. `False` is not a synonym for unknown: it lets a
+    #: miss say "this screen does not scroll, the element is not here" instead
+    #: of suggesting a retry that cannot help.
+    #:
+    #: A hint, never a gate -- an explicit `scroll_to_find=True` overrides it,
+    #: so a wrong entry costs a slowdown rather than making an element
+    #: unreachable.
+    scrollable: bool | None = None
 
 
 class LoadLandmarksRequest(BaseModel):
@@ -1159,7 +1779,20 @@ class LoadLandmarksRequest(BaseModel):
 
     app: str  # app identifier (e.g. bundle ID)
     source: str | None = None  # path to knowledge base directory
-    landmarks: dict[str, list[dict]] | None = None  # inline: screen_name -> landmarks
+    #: Inline knowledge: screen_name -> landmarks.
+    #:
+    #: Either a bare list of landmarks, or a mapping carrying the screen's own
+    #: properties alongside them:
+    #:
+    #:     {"Home": [{"element": "Button", "label": "OK"}]}
+    #:     {"Home": {"scrollable": true, "landmarks": [...]}}
+    #:
+    #: The second form exists because a screen has properties that are not
+    #: landmarks -- `scrollable` first -- and the list form has nowhere to put
+    #: them. Both are accepted: the list form is what every existing caller
+    #: sends, and a knowledge base that could express scrollability in a file
+    #: but not inline would be an asymmetry found later and by surprise.
+    landmarks: dict[str, list[dict] | dict] | None = None
 
 
 class IdentifyRequest(BaseModel):
@@ -1180,6 +1813,12 @@ class TapRequest(BaseModel):
     udid: str | None = None
 
 
+class RestoreInputRequest(BaseModel):
+    """Request body for POST /device/ui/restore-input."""
+
+    udid: str | None = None
+
+
 class TapElementRequest(BaseModel):
     """Request body for POST /device/ui/tap-element."""
 
@@ -1192,7 +1831,11 @@ class TapElementRequest(BaseModel):
     skip_stability_check: bool = False  # Skip for static elements (tab bars, nav bars)
     source_timeout: float | None = None  # Override WDA /source timeout (1-60s)
     value: str | None = None  # For switches: "0"=off, "1"=on. Skips tap if matched.
-    scroll_to_find: bool = True  # Scroll an off-screen target into view, then tap
+    #: Tri-state. `True` always sweeps, `False` never, and unset (the default)
+    #: asks the knowledge base and sweeps only on a screen recorded as
+    #: `scrollable: true`. Previously defaulted to `True`, which swiped screens
+    #: that cannot scroll -- see #274 and `ScreenLandmarks.scrollable`.
+    scroll_to_find: bool | None = None
     include_screen_context: bool = False
     capture_screenshots: bool = False
     settle_delay: float = Field(default=1.0, ge=0, le=10)

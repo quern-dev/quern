@@ -7,7 +7,7 @@ export function registerDeviceUITools(server: McpServer): void {
   server.registerTool("get_ui_tree", {
     description: `Get the full accessibility tree (all UI elements) from the current screen. Optionally scope to children of a specific element using children_of.
 
-Pass include_raw=true when debugging the platform normalizer itself — e.g., to see whether an Android node carries selected="true" or some other source attribute that didn't make it into our canonical fields. Each element gains an extra_attrs dict of the raw source attributes from the underlying provider (uiautomator2 XML on Android; iOS not yet populated). Default false to keep payloads small.`,
+Pass include_raw=true when debugging the platform normalizer itself — e.g., to see whether an Android node carries selected="true" or some other source attribute that didn't make it into our canonical fields. Each element gains an extra_attrs dict of the raw source attributes from the underlying provider (uiautomator2 XML on Android; iOS not yet populated). Default false to keep payloads small.\n\nThe response carries "backend": which of quern's UI backends actually did the work ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone, 'u2' on Android). You do not choose it and normally need not care -- quern probes at start-up and re-probes periodically. It is there for when behaviour surprises you: the simulator backends differ in ways that show up as odd results rather than errors, so "backend" is the first thing to check before assuming the app did something unexpected.`,
     inputSchema: strictParams({
       udid: z
         .string()
@@ -132,7 +132,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
   });
 
   server.registerTool("wait_for_element", {
-    description: `Wait for an element to satisfy a condition (server-side polling). Eliminates client-side retry loops and reduces API round-trips. Always returns with matched:true/false - timeouts are not errors. Supports conditions: exists, not_exists, visible, enabled, disabled, value_equals, value_contains.`,
+    description: `Wait for an element to satisfy a condition (server-side polling). Eliminates client-side retry loops and reduces API round-trips. Always returns with matched:true/false - timeouts are not errors. Supports conditions: exists, not_exists, visible, enabled, disabled, value_equals, value_contains. On a timeout the response carries screen_context, and with landmarks loaded that names the screen you are actually on (identified_as, confidence) -- a timeout is exactly when that is worth knowing, so you do not have to ask separately. It also carries "backend", naming which of quern's UI backends did the reads ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone, 'u2' on Android) -- for the same reason: an element that never appeared is the kind of odd-but-not-error result where the next question is what was driving the device.`,
     inputSchema: strictParams({
       label: z
         .string()
@@ -243,7 +243,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
   server.registerTool("get_screen_summary", {
     description: `Get an LLM-optimized text description of the current screen, including interactive elements and their locations. Uses smart truncation with prioritization (buttons with identifiers > form inputs > generic buttons > static text). Navigation chrome (tab bars, nav bars) is always included regardless of limit.
 
-This is the recommended first step before interacting with UI. Use this to discover element labels and identifiers, then use tap_element to tap by name instead of coordinates.`,
+This is the recommended first step before interacting with UI. Use this to discover element labels and identifiers, then use tap_element to tap by name instead of coordinates.\n\nThe response carries "backend": which of quern's UI backends actually did the work ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone, 'u2' on Android). You do not choose it and normally need not care -- quern probes at start-up and re-probes periodically. It is there for when behaviour surprises you: the simulator backends differ in ways that show up as odd results rather than errors, so "backend" is the first thing to check before assuming the app did something unexpected.`,
     inputSchema: strictParams({
       max_elements: z
         .coerce.number()
@@ -289,6 +289,50 @@ This is the recommended first step before interacting with UI. Use this to disco
         mode,
         identify,
       });
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  });
+
+  server.registerTool("restore_simulator_input", {
+    description: `Take a simulator's touch, button and keyboard services back from Xcode 27's Device Hub, when taps and keystrokes are being accepted but nothing on screen changes.
+
+Xcode 27 attaches a guest HID daemon to every booted simulator, and the guest answers by disconnecting the legacy input services quern drives. Every tap, swipe, keystroke and button press is then accepted and discarded, while reads, screenshots and app launches keep working — so the device looks healthy and the screen simply never changes. The keyboard is lost whenever the daemon has attached; touch and buttons depend on the boot order, so typing can fail while tapping still works.
+
+RESTARTS SPRINGBOARD: apps running on the simulator are killed, and the device returns to its home screen in a few seconds. Nothing is reinstalled and the simulator does not reboot.
+
+Not needed for a simulator quern booted itself — that path restores the services before anything is running. Use this for a simulator that was already booted, typically one booted while Xcode or its Device Hub was open.`,
+    inputSchema: strictParams({
+      udid: z
+        .string()
+        .optional()
+        .describe("Target device UDID (defaults to active device)"),
+    }),
+  }, async ({ udid }) => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (udid) body.udid = udid;
+
+      const data = await apiRequest(
+        "POST",
+        "/api/v1/device/ui/restore-input",
+        undefined,
+        body
+      );
 
       return {
         content: [
@@ -357,10 +401,14 @@ If coordinate taps are not landing on the expected element, use take_annotated_s
 
 This is the PREFERRED way to tap UI elements. Use get_screen_summary first to discover element labels/identifiers, then use this tool. Avoid using coordinate-based tap unless this tool cannot find the element.
 
+Success and not-found responses both carry "backend", naming which of quern's UI backends did the work ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone, 'u2' on Android). With scroll_to_find this runs the same held-swipe sweep as scroll_to_element, where the two simulator backends differ, so it is worth checking before concluding the element is absent.
+
 Label matching modes (mutually exclusive — use only one):
 - label: exact match (case-insensitive)
 - label_contains: substring match (case-insensitive) — useful for elements with long, dynamic labels
-- label_prefix: prefix match (case-insensitive) — useful when the label starts with a stable string but has variable content after`,
+- label_prefix: prefix match (case-insensitive) — useful when the label starts with a stable string but has variable content after
+
+When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen is recorded as scrollable, or (on Android) you did not pass false — an absent target is swept for, which can take a while. Abandoning the call stops that: if your client times out and disconnects, the server stops driving the device instead of sweeping on for a caller that has gone, so the device is free for your next call.`,
     inputSchema: strictParams({
       label: z
         .string()
@@ -398,12 +446,12 @@ Label matching modes (mutually exclusive — use only one):
         .describe('For switches/toggles: desired value ("1" = on, "0" = off). Checks current state first and skips the tap if already set. Returns status "already_set" if no tap was needed.'),
       scroll_to_find: z
         .boolean()
-        .default(true)
-        .describe("If the element isn't in the current view, scroll it into view (via the no-dump swipe loop) and then tap. Supported on Android and iOS. Set false to fail fast without scrolling. Note the cost of leaving this on: asking for an element that does not exist at all is indistinguishable from one that is merely off-screen, so the search runs until the request times out (~60s) and reads like a hung server rather than a missing element. When you are checking whether something is present, pass false."),
+        .optional()
+        .describe("If the element isn't in the current view, scroll it into view (the same swipe loop as scroll_to_element) and then tap. On iOS, leave unset and quern decides from the knowledge base: it sweeps only on a screen recorded as `scrollable: true`, and otherwise fails fast. On Android unset still sweeps — the selector path scrolls without consulting the knowledge base, which is unchanged behaviour. Pass true to force the sweep on an unrecorded screen, false to never sweep. On iOS the default was previously true, which swept screens that cannot scroll at all — two real gestures, the second of them the pull-to-refresh and sheet-dismiss drag. Note the cost of forcing it on: an element that does not exist is indistinguishable from one merely off-screen, so the search sweeps the whole list before giving up, which on a long list or a physical device can take a minute and reads like a hung server. The not_found response carries a `scroll` object saying which of these happened and whether the screen was touched, and -- with landmarks loaded -- names the screen you are actually on under screen_context.identified_as. It is omitted when the full-tree read failed, because identifying against a partial tree names a screen confidently and wrongly."),
       include_screen_context: z
         .boolean()
         .default(false)
-        .describe("Include a screen summary in the response after the tap completes. Useful for verifying navigation."),
+        .describe("Include a screen summary in the response after the tap completes. Useful for verifying navigation. With landmarks loaded it also tries to identify the screen you landed on, so you do not need a follow-up get_screen_summary?identify=true: confidence is 'exact', 'ambiguous' (candidates lists them) or 'none', and identified_as is null when nothing matched. Nothing is added when no landmarks are loaded. The summary carries \"backend\", naming which of quern's UI backends read the screen ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone, 'u2' on Android) -- worth checking if the screen you landed on is not the one you expected."),
       capture_screenshots: z
         .boolean()
         .default(false)
@@ -426,7 +474,14 @@ Label matching modes (mutually exclusive — use only one):
       if (udid) body.udid = udid;
       if (source_timeout) body.source_timeout = source_timeout;
       if (value !== undefined) body.value = value;
-      if (scroll_to_find === false) body.scroll_to_find = false;
+      // Both values forwarded, and undefined deliberately omitted. This read
+      // `=== false` while the schema had `.default(true)`, when omitting true
+      // was right because true *was* the server default. With the schema now
+      // optional, unset and true produced an identical body -- so
+      // `scroll_to_find: true` never reached the server, and the retry quern
+      // itself recommends ("retry with scroll_to_find=true") returned a
+      // byte-identical response and looped.
+      if (scroll_to_find !== undefined) body.scroll_to_find = scroll_to_find;
       if (include_screen_context) body.include_screen_context = true;
       if (capture_screenshots) body.capture_screenshots = true;
       if (settle_delay !== undefined) body.settle_delay = settle_delay;
@@ -596,7 +651,7 @@ Label matching modes (mutually exclusive — use only one):
   });
 
   server.registerTool("scroll_to_element", {
-    description: `Scroll a scrollable container until an element is in view, WITHOUT tapping it. Resolve by identifier or label. Supported on Android and iOS (simulator + physical). Drives a bounded swipe loop that re-checks the target by selector after each swipe — no full UI-tree dump, so it avoids the dump-induced scroll a tree read can cause. Android covers View RecyclerView, Compose LazyColumn, and Compose-in-ScrollView. iOS handles both scroller shapes: a directional swipe toward a located-but-off-screen target in laid-out ScrollViews, and a blind down-then-up sweep for lazy/recycled lists where rows drop out of the tree; rows scrolled under the nav/status bar are rejected rather than counted as already visible. Returns the element's on-screen position once visible; 404 if it never appears within the swipe budget.`,
+    description: `Scroll a scrollable container until an element is in view, WITHOUT tapping it. Resolve by identifier or label. Supported on Android and iOS (simulator + physical). Android drives a bounded swipe loop that re-checks the target by selector after each swipe, with no full UI-tree dump, so it avoids the dump-induced scroll a tree read can cause there. Android covers View RecyclerView, Compose LazyColumn, and Compose-in-ScrollView. On iOS, where reading the tree has no side effects, each swipe is followed by a full tree read that both looks for the target and shows whether the list moved. On a simulator each swipe is held at the end so the list stops where the finger does, and covers as much of the screen as the chrome leaves — about seven-tenths, with both ends kept off the navigation bar, an app's own header and the tab bar, because those handle a drag that starts on them. The idb fallback cannot hold a swipe, so it still flings and steps a quarter of the screen. On a physical device WDA's swipe returns only once the app is idle, so one read after each swipe is enough; on the other paths reads are repeated until two agree, so nothing is judged mid-bounce. A located-but-off-screen target is swiped toward by as much as it needs. A lazy list is swept blind: down until a swipe moves nothing, then up until one moves nothing again. Rows scrolled under the nav/status bar are rejected rather than counted as already visible. The first lookup also reads containers the static tree omits, so a target such as a tab-bar item is found without scrolling at all. On iOS it is bounded by a wall-clock deadline as well as the swipe budget (up to 2x max_swipes down, 3x in all). Returns the element's on-screen position once visible; 404 if it never appears. Abandoning the call stops the sweep. If your client times out and disconnects, the server stops driving the device rather than sweeping on for a caller that has gone — so the device is free for your next call instead of being swiped while you use it. You will not see a status for the abandoned call; you have already gone. The response carries "backend", which is how you tell which of those two simulator behaviours you actually got -- a sweep that overshoots looks the same whether it was sim-bridge behaving unexpectedly or a silent fall-back to idb's fling.`,
     inputSchema: strictParams({
       label: z
         .string()
@@ -669,7 +724,7 @@ Label matching modes (mutually exclusive — use only one):
       include_screen_context: z
         .boolean()
         .default(false)
-        .describe("Include a screen summary in the response after typing. Useful for detecting autocorrect issues."),
+        .describe("Include a screen summary in the response after typing. Useful for detecting autocorrect issues. With landmarks loaded it also tries to identify the screen you landed on, so you do not need a follow-up get_screen_summary?identify=true: confidence is 'exact', 'ambiguous' (candidates lists them) or 'none', and identified_as is null when nothing matched. Nothing is added when no landmarks are loaded. The summary carries \"backend\", naming which of quern's UI backends read the screen ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone, 'u2' on Android) -- worth checking if the screen you landed on is not the one you expected."),
       capture_screenshots: z
         .boolean()
         .default(false)

@@ -427,3 +427,51 @@ def test_enumerate_local_interfaces_handles_ifconfig_failure():
         entries = state_mod.enumerate_local_interfaces()
 
     assert entries == []
+
+
+class TestStateThatIsNotAnObject:
+    """`read_state()` is the boundary every consumer trusts.
+
+    They all test the result with `if not state` and then reach for
+    `.get()`. A file holding `[1]` is valid JSON, truthy, and has no `.get`
+    — so a corrupt state file surfaced as an `AttributeError` out of
+    `quern url`, `quern env` and `quern restart` alike, rather than as the
+    "no server" each of them knows how to report.
+
+    Normalising here fixes every consumer at once. Guarding in each of them
+    is how one gets missed.
+    """
+
+    @pytest.mark.parametrize("content", [
+        "[1]", '["a", "b"]', '"a string"', "42", "true", "null",
+    ])
+    def test_it_reads_as_no_state(self, monkeypatch, tmp_path, content):
+        from server.lifecycle import state as state_mod
+
+        path = tmp_path / "state.json"
+        path.write_text(content)
+        monkeypatch.setattr(state_mod, "STATE_FILE", path)
+        assert state_mod.read_state() is None, f"{content} was taken as state"
+
+    def test_an_object_still_reads(self, monkeypatch, tmp_path):
+        from server.lifecycle import state as state_mod
+
+        path = tmp_path / "state.json"
+        path.write_text('{"server_port": 9137, "pid": 7}')
+        monkeypatch.setattr(state_mod, "STATE_FILE", path)
+        assert state_mod.read_state() == {"server_port": 9137, "pid": 7}
+
+    def test_the_cli_reports_no_server_rather_than_crashing(self, monkeypatch, tmp_path, capsys):
+        """The symptom that sent this looking: a traceback where a one-line
+        'no server' belonged."""
+        import server.__main__ as entry
+        from server.lifecycle import state as state_mod
+
+        path = tmp_path / "state.json"
+        path.write_text("[1]")
+        monkeypatch.setattr(state_mod, "STATE_FILE", path)
+        monkeypatch.setattr(entry.sys, "argv", ["quern", "url"])
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 1
+        assert "No server answering" in capsys.readouterr().err

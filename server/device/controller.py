@@ -6,9 +6,10 @@ import asyncio
 import logging
 import time
 
+from server import logging_ext
 from server.device.adb import AdbBackend
 from server.device.controller_ui import DeviceControllerUI
-from server.device.devicectl import DevicectlBackend
+from server.device.devicectl import DevicectlBackend, canonical_device_id, spellings_of
 from server.device.idb import IdbBackend
 from server.device.pmd3 import Pmd3Backend
 from server.device.screenshots import process_screenshot
@@ -18,9 +19,10 @@ from server.device.u2_client import U2Backend
 from server.device.usbmux import UsbmuxBackend
 from server.device.wda_client import WdaBackend
 from server.lifecycle.state import read_active_udid, write_active_udid
+from server.logging_ext import current_action
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType, UIElement
 
-logger = logging.getLogger("quern-debug-server.device")
+logger = logging.getLogger(__name__)
 
 
 def _display_name(name: str | None, kind: str | None) -> str | None:
@@ -57,6 +59,9 @@ class DeviceController(DeviceControllerUI):
         self.sim_bridge_manager = SimBridgeManager()
         self.sim_bridge = SimBridgeBackend(self.sim_bridge_manager)
         self._sim_bridge_ok = False
+        #: Backend name per device, written by `get_ui_elements` at the
+        #: moment it selects one. See DeviceControllerUI._last_read_backend.
+        self._last_read_backend: dict[str, str] = {}
         #: When `_sim_bridge_ok` was last established, or None if never.
         #:
         #: Latching it at startup and never re-checking is #179: Xcode 27 moved
@@ -114,9 +119,16 @@ class DeviceController(DeviceControllerUI):
         self._cache_hits: int = 0
         self._cache_misses: int = 0
         # Device info cache for screen dimensions
-        self._device_info_cache: dict[str, DeviceInfo] = {}
         # Device type cache: udid -> DeviceType (populated by list_devices)
         self._device_type_cache: dict[str, DeviceType] = {}
+        # Simulators whose input services have been checked this boot.
+        # See server/device/sim_input.py; the check costs a `simctl
+        # spawn` (~0.5s), so it is paid once per device rather than per
+        # tap.
+        self._input_checked: dict[str, bool] = {}
+        # When each device was last asked about an input-service state that
+        # could not be read; see _INPUT_PROBE_COOLDOWN_S.
+        self._input_probe_cooldown: dict[str, float] = {}
         # Device name cache: udid -> human-readable name (populated by
         # list_devices). Only consumer is the active-device sidecar, so that
         # readers outside the server can show a name instead of a UDID.
@@ -130,6 +142,21 @@ class DeviceController(DeviceControllerUI):
 
     @_active_udid.setter
     def _active_udid(self, value: str | None) -> None:
+        # Canonicalised here, not at the ten places that assign it.
+        #
+        # `resolve_udid` canonicalises what it returns, but the active device
+        # is also written directly by `POST /device/active` and by four paths
+        # in `DevicePool`. Those stored the raw udid, so a caller who set the
+        # active device by the spelling Xcode shows got it back uncanonicalised
+        # from branch 2 of `_resolve_udid` -- and once `GET /trace?udid=`
+        # started canonicalising its query, *both* spellings returned nothing.
+        # That is worse than before the canonicalisation existed, and it is the
+        # "empty is indistinguishable from quiet" failure the trace exists to
+        # prevent.
+        #
+        # Fixing the callers would have left the eleventh. This is the one
+        # place the value lands, and it is also what the sidecar persists.
+        value = canonical_device_id(value) if value else value
         # Best-effort name: the cache is filled by list_devices(), which
         # every resolve path runs before landing here, but the pool and the
         # set-active-device API can assign a UDID directly. A miss writes no
@@ -358,52 +385,241 @@ class DeviceController(DeviceControllerUI):
             for site in await collect_sites()
         ]
 
-    def _device_type(self, udid: str) -> DeviceType:
-        """Look up device type from cache. Defaults to simulator if unknown."""
-        return self._device_type_cache.get(udid, DeviceType.SIMULATOR)
+    def _device_type(self, udid: str) -> DeviceType | None:
+        """What kind of device this is, or None if quern has not been told.
+
+        `None` rather than a default, because the default was `SIMULATOR` and
+        it was a guess stated as a fact. Callers then dispatched an unknown
+        UDID -- including the empty string -- to `simctl`, which on an
+        Android-only host or the Linux target of `docs/linux-support-plan.md`
+        means a toolchain that is not installed, so "unsupported device"
+        surfaced as "xcrun not found" (#263).
+
+        It is not hypothetical. Hours after #305 shipped, `apply=true` on a
+        physically attached Pixel 3 XL was refused with "apply is only
+        supported on Android" because the cache was cold; two earlier runs had
+        passed only because something else warmed it first.
+
+        Use `_ensure_device_type_cached()` first if the answer matters.
+        """
+        return self._device_type_cache.get(udid)
 
     def _is_physical(self, udid: str) -> bool:
+        """Whether this is a physical *iOS* device, positively known to be.
+
+        False for an unknown udid, which is a change: `_device_type` used to
+        answer `SIMULATOR` for a cache miss and this compared against `DEVICE`,
+        so an unknown device read as "not physical" for the same reason it
+        read as "a simulator" -- a guess. It is now the absence of an answer.
+        Warm with `_ensure_device_type_cached` where that distinction matters.
+        """
         return self._device_type(udid) == DeviceType.DEVICE
 
     def _is_android(self, udid: str) -> bool:
+        """Whether this is an Android device or emulator, positively known.
+
+        Both kinds, because almost every caller wants "does this go to adb?".
+        Where the two differ -- `emu kill`, `geo fix` -- the question is really
+        about the transport, and `adb.is_console_serial` answers that (#299).
+        """
         return self._device_type(udid) in (DeviceType.ANDROID_EMULATOR, DeviceType.ANDROID_DEVICE)
 
+    #: What an Android caller should do instead, keyed by the operation name
+    #: passed to `_require_simulator`. Three distinct situations, and a
+    #: refusal that conflates them is worth little: *no equivalent exists*,
+    #: *an equivalent exists and quern has not built it*, and *an equivalent
+    #: exists with different semantics*. Saying "no Android equivalent" for
+    #: the second is simply false, and it was -- `run-as <pkg> cat
+    #: shared_prefs/<name>.xml` reads an app's preferences on an unrooted
+    #: phone today, measured.
+    #:
+    #: Absent from this map means the first case: nothing to point at.
+    #: What an Android caller should reach for instead: a noun phrase for
+    #: the capability, the mechanism that provides it, and the issue tracking
+    #: it. Rendered into a sentence below rather than written as one.
+    #:
+    #: Structured, not prose, and that is the whole point. The first version
+    #: of this table was a tutorial -- exact commands, storage layouts,
+    #: caveats -- and three separate reviews each found another sentence in
+    #: it that was not quite true: that `inotifyd` on the prefs *file* works
+    #: (it goes deaf after SharedPreferences' rename-based write), that
+    #: preferences are either SharedPreferences or DataStore (an app can have
+    #: both, and a third can be encrypted), that `-wipe-data` "restarts" an
+    #: emulator (it is a launch flag).
+    #:
+    #: Shortening it was not enough: a mutant replacing an entry with
+    #: "`inotifyd` reports every write reliably, so polling is unnecessary"
+    #: -- a claim already disproved on the hardware -- survived the suite,
+    #: because no test can check prose for truth. Leaving only a noun phrase
+    #: and a mechanism removes the room to assert anything. Operational
+    #: detail belongs in #314, where being wrong fails a test instead of
+    #: reaching a caller.
+    _ANDROID_ALTERNATIVE: dict[str, tuple[str, str, int]] = {
+        "read_app_plist": ("reading an app's own preference files", "run-as", 314),
+        "set_app_plist_value": ("writing an app's own preference files", "run-as", 314),
+        "set_app_plist_values": ("writing an app's own preference files", "run-as", 314),
+        "delete_app_plist_key": ("editing an app's own preference files", "run-as", 314),
+        "diff_app_plist": ("reading an app's own preference files", "run-as", 314),
+        "start_plist_watch": ("watching an app's own files for changes", "inotifyd", 314),
+        "save_app_state": ("archiving an app's own data directory", "run-as", 314),
+        "restore_app_state": ("restoring an app's own data directory", "run-as", 314),
+        "Set hardware keyboard": (
+            "the hardware-keyboard setting", "the hw.keyboard AVD property", 263,
+        ),
+        "Erase": ("wiping an emulator", "the -wipe-data launch flag", 263),
+    }
+
+    #: Entries whose mechanism is `run-as`, which the platform refuses for a
+    #: package that is not debuggable -- measured: a release build answers
+    #: `run-as: package not debuggable`. Derived rather than listed, so the
+    #: two collections cannot drift: an entry that uses `run-as` is scoped by
+    #: construction.
+    @classmethod
+    def _needs_debuggable(cls, operation: str) -> bool:
+        entry = cls._ANDROID_ALTERNATIVE.get(operation)
+        return bool(entry) and entry[1] == "run-as"
+
     def _require_simulator(self, udid: str, operation: str) -> None:
-        """Raise DeviceError if the device is physical (operation not supported)."""
-        if self._is_physical(udid):
-            raise DeviceError(
-                f"{operation} is only supported on simulators",
-                tool="simctl",
+        """Refuse anything that is not known to be an iOS simulator.
+
+        Tests *for* `SIMULATOR` rather than *against* `DEVICE`. The old form
+        rejected only physical iOS, so both Android kinds -- and any unknown
+        UDID -- walked through a guard whose entire purpose was to stop them
+        and were handed to `simctl` with an adb serial. Verified before the
+        change: `ANDROID_DEVICE`, `ANDROID_EMULATOR` and `''` all passed.
+
+        Testing for the allowed kind means a device type added later is
+        refused by default rather than admitted by default, which is the half
+        of this that keeps being true after today (#263).
+        """
+        kind = self._device_type(udid)
+        if kind == DeviceType.SIMULATOR:
+            return
+        # The leading clause is load-bearing: `_handle_device_error` matches
+        # the literal string "only supported on simulators" to return 400, so
+        # rewording it wholesale would silently turn every one of these
+        # refusals into a 500. The detail is appended rather than substituted.
+        if kind in (DeviceType.ANDROID_DEVICE, DeviceType.ANDROID_EMULATOR):
+            entry = self._ANDROID_ALTERNATIVE.get(operation)
+            if entry:
+                capability, mechanism, issue = entry
+                scope = (
+                    "For a debuggable app, or any app on a rootable emulator, "
+                    if self._needs_debuggable(operation) else ""
+                )
+                # Capitalised only when it starts the sentence, since the
+                # scope prefix is itself a sentence opener.
+                phrase = capability if scope else capability[0].upper() + capability[1:]
+                detail = (
+                    f" {udid} is Android. {scope}{phrase} is available "
+                    f"through {mechanism}; quern does not expose it yet -- "
+                    f"see #{issue}."
+                )
+            else:
+                # A claim about quern, not about Android. The previous
+                # wording -- "there is no Android equivalent for this, it is a
+                # simulator-only concept" -- asserted something about the
+                # world, and was false for every operation that reached it:
+                # `Set hardware keyboard` has `hw.keyboard` and
+                # `show_ime_with_hard_keyboard`, and the operations that only
+                # `if` ordering keeps away from here include `Clear app data`,
+                # whose own docstring in this file records being burned by
+                # exactly this claim. quern not having a path is checkable and
+                # stays true; the platform lacking a feature is neither.
+                detail = (
+                    f" {udid} is Android, and quern has no Android path for "
+                    "this -- it is implemented through simctl."
+                )
+        elif kind == DeviceType.DEVICE:
+            detail = f" {udid} is a physical iOS device."
+        else:
+            detail = (
+                f" quern does not recognise {udid or '(empty udid)'}; list "
+                "devices first so it can be identified."
             )
+        raise DeviceError(
+            f"{operation} is only supported on simulators.{detail}",
+            tool="simctl",
+        )
 
     async def _ensure_device_type_cached(self, udid: str) -> None:
         """Populate device type cache if this UDID isn't known yet.
 
         Called lazily when a UDID is used that hasn't been seen via
-        list_devices(). Without this, _is_physical() defaults to simulator
-        and physical devices get routed to idb instead of WDA.
+        list_devices(). Without this the type stays unknown -- it used to
+        default to simulator (#263) -- so physical devices get routed to idb
+        instead of WDA, and operations that ask the type are refused rather
+        than dispatched.
         """
         if udid not in self._device_type_cache:
             logger.debug("Device type unknown for %s, refreshing device list...", udid[:8])
             await self.list_devices()
 
-    async def resolve_udid(self, udid: str | None = None) -> str:
+    async def resolve_udid(
+        self, udid: str | None = None, *, set_active: bool = True,
+    ) -> str:
+        """Resolve which device to target, and tell the action log about it.
+
+        This is the one place that *decides* which device a call goes to, so
+        it is where the action entry learns its udid. Recording it in each
+        handler instead was tried and left most of them blank: the handlers
+        wrapped in a `with action(...)` block set it, and the ~78 decorated
+        with `@logged_action` did not, so a per-device trace silently lost
+        every one of them and their flows fell back to matching on time alone.
+
+        The assignment is a no-op when no action is being recorded.
+        """
+        resolved = await self._resolve_udid(udid, set_active=set_active)
+        current_action().udid = resolved
+        return resolved
+
+    async def _resolve_udid(
+        self, udid: str | None = None, *, set_active: bool = True,
+    ) -> str:
         """Resolve which device to target.
 
         If a DevicePool is attached, attempts pool-based resolution for
         claim-aware, multi-device-friendly behavior. If pool resolution
         fails for any reason, silently falls back to the original logic.
 
+        `set_active=False` resolves without changing which device subsequent
+        unqualified calls go to. It exists so a read that names its own device
+        does not have to bypass this function to dodge the side effect --
+        bypassing is what `screenshot` did, and it silently cost the action log
+        its udid and physical devices their routing.
+
         Resolution order:
-        1. Explicit udid parameter → use it, update active
+        1. Explicit udid parameter → canonicalise it, use it, update active
         2. Stored active_udid → use it
         3. Pool resolution (if pool attached) → best available booted device
         4. Fallback: simple auto-detect (original logic, unchanged)
         """
         if udid:
+            # Warm the caches first: `_ensure_device_type_cached` refreshes the
+            # device list when it does not recognise the udid, and that refresh
+            # is what learns a physical device's other spelling. Canonicalising
+            # before it would look the alias up in an empty map.
             await self._ensure_device_type_cached(udid)
-            self._active_udid = udid
-            return udid
+            canonical = canonical_device_id(udid)
+            if canonical != udid:
+                logger.debug(
+                    "Resolved %s to its canonical identifier %s",
+                    udid[:8], canonical[:8],
+                )
+                # The type cache is keyed on the canonical spelling only, so
+                # `_ensure_device_type_cached(udid)` above is a guaranteed miss
+                # every time a caller names the hardware udid -- a full
+                # simctl+devicectl+usbmux+adb enumeration per call, for a device
+                # already known. Teaching the cache the other spelling is what
+                # stops that; re-running `ensure` on the canonical, which is
+                # what this used to do, was a no-op in every reachable path
+                # (deleting it left all 168 tests green).
+                known = self._device_type_cache.get(canonical)
+                if known is not None:
+                    self._device_type_cache[udid] = known
+            if set_active:
+                self._active_udid = canonical
+            return canonical
 
         if self._active_udid:
             restored = self._active_udid
@@ -417,7 +633,18 @@ class DeviceController(DeviceControllerUI):
             # ran, and the menu bar showed the UDID. The dedup guard makes
             # this a no-op once the name and type have landed.
             self._active_udid = restored
-            return restored
+            # The canonical spelling, not `restored`. `__init__` writes the
+            # persisted udid straight into the backing field -- deliberately,
+            # since restoring is not a change worth writing -- so it bypasses
+            # the setter that canonicalises. A sidecar holding the hardware
+            # udid therefore survives a restart, and this branch returned it
+            # raw on the first call: `resolve_udid` records that on the action,
+            # and trace ownership compares udids exactly, so the action reads
+            # FOREIGN against everything recorded canonically.
+            #
+            # Reproduced: sidecar = hardware udid, `resolve_udid()` returned
+            # the hardware udid while `_active_udid` held the canonical one.
+            return self._active_udid
 
         # Step 3: try pool-based resolution (silent upgrade)
         if self._pool is not None:
@@ -481,24 +708,32 @@ class DeviceController(DeviceControllerUI):
 
     async def list_devices(self) -> list[DeviceInfo]:
         """List all devices (simulators + physical + pre-iOS 17 USB + Android)."""
+        # OSError alongside DeviceError, on every one of these. The backends
+        # raise DeviceError for a tool that ran and refused; a tool that is not
+        # installed never runs, and asyncio.create_subprocess_exec raises
+        # FileNotFoundError -- an OSError, and not a DeviceError. So the handler
+        # that says "simctl unavailable" did not catch simctl being unavailable,
+        # which is the one case it names. On a Mac every binary is present and
+        # nothing noticed; a host without Xcode took the exception through
+        # resolve_udid and out of whatever call warmed the cache.
         try:
             sim_devices = await self.simctl.list_devices()
-        except DeviceError:
+        except (DeviceError, OSError):
             logger.debug("simctl list_devices failed (simctl unavailable)", exc_info=True)
             sim_devices = []
         try:
             physical_devices = await self.devicectl.list_devices()
-        except DeviceError:
+        except (DeviceError, OSError):
             logger.debug("devicectl list_devices failed", exc_info=True)
             physical_devices = []
         try:
             usbmux_devices = await self.usbmux.list_devices()
-        except DeviceError:
+        except (DeviceError, OSError):
             logger.debug("usbmux list_devices failed", exc_info=True)
             usbmux_devices = []
         try:
             android_devices = await self.adb.list_devices()
-        except DeviceError:
+        except (DeviceError, OSError):
             logger.debug("adb list_devices failed", exc_info=True)
             android_devices = []
 
@@ -531,12 +766,53 @@ class DeviceController(DeviceControllerUI):
             if d.name:
                 self._device_name_cache[d.udid] = d.name
 
-        # Build CoreDevice UUID -> libimobiledevice UDID mapping
-        # by correlating device names between devicectl and usbmux
-        usb_name_map = await self.usbmux.get_usb_udid_map()
+        # Build CoreDevice UUID -> libimobiledevice UDID mapping. Exactly,
+        # through the identity aliases devicectl records: its hardware UDID
+        # *is* the USB UDID, so a phone is on USB when usbmux lists one of its
+        # spellings. When usbmux could not be asked at all (pymobiledevice3
+        # missing or timing out), devicectl's own "wired" transport stands in
+        # -- every phone used to read "not on USB" then. Only then: when usbmux
+        # answered without the phone, that answer wins, or a pull would go
+        # ahead against a UDID usbmux does not have.
+        # It used to correlate names, and two phones sharing one ("iPhone" is
+        # the default) could map to each other's UDID -- so a crash pull filed
+        # one phone's reports under the other, on disk once pulls kept a
+        # directory per phone. A name fallback survived that change for phones
+        # devicectl listed without a hardware UDID, pending a measurement on
+        # Xcode 27 (#323). Measured, and removed: devicectl 642.16 reports
+        # `hardwareProperties.udid` for every paired physical device, as 518.31
+        # did, so the fallback was unreachable -- confirmed at runtime, each
+        # phone having an alias and so skipping it. Across all three states a
+        # paired device can be in: wired, on Wi-Fi, and disconnected. The last
+        # was checked by taking a phone off the network, which devicectl then
+        # lists with no `transportType` at all and `tunnelState: unavailable`,
+        # and it still carried its UDID. That state matters most, because the
+        # alias has to come from pairing rather than from a live connection for
+        # any of this to hold.
+        #
+        # A listed phone that matches nothing now loses its old mapping: one
+        # unplugged since, and now on Wi-Fi, kept it and was pulled over a USB
+        # connection that no longer existed. A phone absent from this listing
+        # keeps it, since a failed devicectl call is not evidence of anything.
+        usb_answer = await self.usbmux.get_usb_devices() if physical_devices else []
+        usbmux_failed = usb_answer is None
+        usb_devices = usb_answer or []
+        usb_udids = {udid for udid, _ in usb_devices}
+        hardware = {d.udid: [s for s in spellings_of(d.udid) if s != d.udid]
+                    for d in physical_devices}
+        matched: dict[str, str] = {}
         for d in physical_devices:
-            if d.name in usb_name_map:
-                self._usbmux_udid_map[d.udid] = usb_name_map[d.name]
+            exact = next((s for s in hardware[d.udid] if s in usb_udids), None)
+            if (exact is None and usbmux_failed and d.connection_type == "usb"
+                    and len(hardware[d.udid]) == 1):
+                exact = hardware[d.udid][0]
+            if exact:
+                matched[d.udid] = exact
+        for d in physical_devices:
+            if d.udid in matched:
+                self._usbmux_udid_map[d.udid] = matched[d.udid]
+            else:
+                self._usbmux_udid_map.pop(d.udid, None)
 
         return sim_devices + physical_devices + usbmux_devices + android_devices
 
@@ -548,9 +824,15 @@ class DeviceController(DeviceControllerUI):
 
         Returns None if the device is not USB-connected (e.g. network-only).
         Refreshes the mapping if the UDID isn't found on first lookup.
+
+        Any spelling of the device is accepted. The map is keyed by CoreDevice
+        UUID, and a caller holding the hardware UDID -- the one `idevice_id`,
+        Xcode and Finder show -- was told a phone plugged in over USB was not
+        connected. The alias is re-read after the refresh, because the refresh
+        is what records it on a server that has not listed devices yet.
         """
         # Check the CoreDevice -> libimobiledevice mapping
-        udid = self._usbmux_udid_map.get(coredevice_udid)
+        udid = self._usbmux_udid_map.get(canonical_device_id(coredevice_udid))
         if udid is not None:
             return udid
 
@@ -567,7 +849,7 @@ class DeviceController(DeviceControllerUI):
         # Refresh and try again
         await self.list_devices()
 
-        udid = self._usbmux_udid_map.get(coredevice_udid)
+        udid = self._usbmux_udid_map.get(canonical_device_id(coredevice_udid))
         if udid is not None:
             return udid
 
@@ -588,6 +870,13 @@ class DeviceController(DeviceControllerUI):
         Returns the udid that was booted.
         """
         if udid:
+            # Warm first. `boot` is the one device entry point that does not
+            # go through `resolve_udid`, so nothing else populates the cache
+            # here -- and since `_device_type` stopped guessing `SIMULATOR`
+            # (#263), an unwarmed cache made a perfectly valid simulator
+            # unrecognised and refused by the guard below. `shutdown` and
+            # `erase` are fine because they resolve first.
+            await self._ensure_device_type_cached(udid)
             if self._is_android(udid):
                 raise DeviceError(
                     "Cannot boot Android emulator by serial — use name (AVD name) instead",
@@ -596,6 +885,7 @@ class DeviceController(DeviceControllerUI):
             self._require_simulator(udid, "Boot")
             await self.simctl.boot(udid)
             self._active_udid = udid
+            await self._restore_input_after_boot(udid)
             return udid
 
         if name:
@@ -616,18 +906,107 @@ class DeviceController(DeviceControllerUI):
             target = matches[0]
             await self.simctl.boot(target.udid)
             self._active_udid = target.udid
+            await self._restore_input_after_boot(target.udid)
             return target.udid
 
         raise DeviceError("Either udid or name is required to boot", tool="simctl")
 
+    async def _restore_input_after_boot(self, udid: str) -> None:
+        """Take the input services back, if Xcode 27's Device Hub has them.
+
+        Done here because a simulator quern has just booted is running
+        nothing, so the SpringBoard restart the repair needs costs the caller
+        nothing. On a device that was already booted the same repair would
+        kill whatever the user has open, so there it is offered rather than
+        taken (see `_require_input_can_land`).
+
+        Never fatal to a boot: a simulator that cannot receive input is worth
+        far more than no simulator, and the next input call says so plainly.
+        """
+        from server.device import sim_input
+
+        # A previous boot of this udid may have left a verdict behind, and it
+        # describes a device that no longer exists. Cleared before the probe,
+        # so a boot that cannot read the state leaves nothing stale: otherwise
+        # an old True survives, the first input call skips its probe, and a
+        # simulator whose services were taken never warns.
+        self._input_checked.pop(udid, None)
+        self._input_probe_cooldown.pop(udid, None)
+
+        try:
+            # Device Hub attaches a few seconds after the boot returns, so a
+            # repair applied immediately is undone by an attachment that has
+            # not happened yet. Wait for it, but only when Device Hub is
+            # running -- otherwise there is nothing to wait for.
+            hub_running = await sim_input.device_hub_is_running()
+            if hub_running:
+                suppressed = await sim_input.wait_for_device_hub_to_attach(udid)
+            else:
+                suppressed = await sim_input.legacy_input_is_suppressed(udid)
+            if suppressed:
+                logging_ext.info(
+                    logger,
+                    "Input services on %s are held by Device Hub; restoring "
+                    "them now, while nothing is running", udid[:8],
+                    category="device.lifecycle", udid=udid,
+                )
+                await sim_input.restore_legacy_input(udid)
+            elif suppressed is None:
+                logging_ext.warning(
+                    logger,
+                    "Could not read the input-service state on %s; if taps do "
+                    "nothing, see POST /api/v1/device/ui/restore-input", udid[:8],
+                    category="device.lifecycle", udid=udid,
+                )
+            elif hub_running:
+                # Device Hub is up and never attached within the wait. Either
+                # this runtime predates the handover, or the daemon crashed on
+                # startup and every event will be discarded with no error
+                # (idb's case, which nothing here can distinguish) -- or it is
+                # simply slower than the wait today.
+                logger.info(
+                    "Device Hub is running but never claimed the input services "
+                    "on %s; if taps do nothing, that is where to look", udid[:8],
+                )
+
+            # Cached only where the answer is settled: a repair that worked, or
+            # a healthy simulator on a machine with no Device Hub to change its
+            # mind. An unreadable state, or a wait that timed out with Device
+            # Hub running, leaves it unset so the first input call asks again
+            # -- the cache exists to skip a ~0.5s probe, not to stand in for an
+            # answer nobody got.
+            if suppressed is True or (suppressed is False and not hub_running):
+                self._input_checked[udid] = True
+        except (DeviceError, OSError) as exc:
+            # Left unrecorded on purpose: the next input call re-reads the
+            # state, and a repair that failed partway puts it back to
+            # suppressed, so the warning still fires.
+            logger.warning("Could not restore input services on %s: %s", udid[:8], exc)
+            self._input_checked.pop(udid, None)
+
     async def shutdown(self, udid: str) -> None:
         """Shutdown a simulator or Android emulator."""
         if self._is_android(udid):
-            if self._device_type(udid) == DeviceType.ANDROID_EMULATOR:
+            # The *console*, not the device kind. `adb emu kill` travels only
+            # over the local `emulator-NNNN` serial, so the same AVD reached
+            # over TCP cannot be killed this way even though it is every bit
+            # an emulator -- measured, `adb emu` returns empty there. Asking
+            # the type here would have started issuing console commands down a
+            # connection that cannot carry them the moment the classifier
+            # began recognising TCP-attached emulators correctly.
+            if self.adb.is_console_serial(udid):
                 await self.adb._run_adb_for_device(udid, "emu", "kill")
                 if self._active_udid == udid:
                     self._active_udid = None
                 return
+            if self._device_type(udid) == DeviceType.ANDROID_EMULATOR:
+                raise DeviceError(
+                    f"{udid} is an emulator, but it is attached over TCP and "
+                    "`adb emu kill` needs the local console serial. Shut it "
+                    "down through its `emulator-NNNN` serial, or stop the "
+                    "process hosting it.",
+                    tool="adb",
+                )
             raise DeviceError("Shutdown not supported for physical Android devices", tool="adb")
         self._require_simulator(udid, "Shutdown")
         await self.simctl.shutdown(udid)
@@ -700,6 +1079,12 @@ class DeviceController(DeviceControllerUI):
             await self.simctl.install_app(resolved, app_path)
         return resolved
 
+    #: How long to wait for a launched app to become the application on
+    #: screen. A healthy launch is frontmost well inside this; a refused one
+    #: never is, and the pid decides once it expires.
+    _LAUNCH_FRONTMOST_TIMEOUT_S = 3.0
+    _LAUNCH_FRONTMOST_INTERVAL_S = 0.25
+
     async def launch_app(
         self,
         bundle_id: str,
@@ -713,9 +1098,81 @@ class DeviceController(DeviceControllerUI):
         elif self._is_physical(resolved):
             await self.wda_client.activate_app(resolved, bundle_id)
         else:
-            await self.simctl.launch_app(resolved, bundle_id, env=env)
+            pid = await self.simctl.launch_app(resolved, bundle_id, env=env)
+            self._invalidate_ui_cache(resolved)
+            await self._confirm_the_app_came_up(resolved, bundle_id, pid)
         self._invalidate_ui_cache(resolved)  # UI changed
         return resolved
+
+    async def _confirm_the_app_came_up(
+        self, udid: str, bundle_id: str, pid: int | None,
+    ) -> None:
+        """Fail when the launch was accepted and the app never ran.
+
+        `simctl launch` reports the launch it *requested*. It exits 0 and
+        prints a pid for an app the system then refuses, which on iOS 27 is
+        every app without a scene manifest: UIKit logs "UIScene life cycle is
+        required for apps built with this SDK" and kills it. Quern answered
+        `launched`, the screen stayed on SpringBoard, and every later call
+        failed as "no element found" -- a reason with nothing to do with the
+        cause (#235).
+
+        Waiting on the pid alone cannot be cheap: measured on an iOS 27
+        simulator, the refused process stays alive **2.3s** before the system
+        takes it, so a liveness check that runs before that reports success
+        and one that waits for it costs every launch 2.5s.
+
+        So the signal is the app becoming frontmost, which a healthy launch
+        does in well under a second and a refused one never does. The pid is
+        the tie-breaker for the case that cannot be told apart otherwise: an
+        app still starting looks exactly like one that never will, until you
+        ask whether its process is there.
+        """
+        deadline = time.monotonic() + self._LAUNCH_FRONTMOST_TIMEOUT_S
+        while True:
+            if await self._is_frontmost(udid, bundle_id):
+                return
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(self._LAUNCH_FRONTMOST_INTERVAL_S)
+
+        if self.simctl.process_is_alive(pid):
+            # Slow to draw, not dead. Saying nothing is right: the caller has
+            # `wait_for_element` for readiness, and refusing here would fail
+            # every cold start on a loaded machine.
+            return
+        raise DeviceError(
+            f"{bundle_id} was launched and is not running"
+            f"{await self.simctl.why_launch_failed(udid, bundle_id)}",
+            tool="simctl",
+        )
+
+    async def _is_frontmost(self, udid: str, bundle_id: str) -> bool:
+        """Is that bundle the application on screen?
+
+        Compared on the Application element's label against the app's own
+        `CFBundleName`/`CFBundleDisplayName`, because the accessibility tree
+        names an app the way a person would, not by bundle id. A read that
+        fails answers False; it is retried until the deadline, and the pid
+        decides after that.
+        """
+        name = await self.simctl.app_display_name(udid, bundle_id)
+        if not name:
+            # Not frontmost as far as this check can tell -- which lets the
+            # deadline expire and hands the decision to the pid. Answering
+            # True instead would skip that, and a dead process would report a
+            # successful launch: "cannot tell from the screen" is not the
+            # same as "nothing is wrong", and the process is evidence the
+            # screen is not.
+            return False
+        try:
+            elements, _ = await self.get_ui_elements(
+                udid, use_cache=False, filter_type="Application",
+                probe_containers=False,
+            )
+        except Exception:        # noqa: BLE001 - a read that fails is not a verdict
+            return False
+        return any((e.label or "") == name for e in elements)
 
     async def terminate_app(self, bundle_id: str, udid: str | None = None) -> str:
         """Terminate an app. Returns the resolved udid."""
@@ -762,12 +1219,14 @@ class DeviceController(DeviceControllerUI):
         quality: int = 85,
     ) -> tuple[bytes, str]:
         """Capture and process a screenshot. Returns (image_bytes, media_type)."""
-        # Use resolve_udid for fallback logic but don't change the active device
-        if udid:
-            await self._ensure_device_type_cached(udid)
-            resolved = udid
-        else:
-            resolved = await self.resolve_udid(None)
+        # Through `resolve_udid`, not around it. This short-circuited when
+        # the caller named a device, to avoid changing the active one, and so
+        # skipped everything else that function does: the action log never
+        # learned the udid (fixed once by repeating the assignment here, which
+        # left the bypass in place), and a physical device's second spelling
+        # was never canonicalised, which routed a connected iPhone to simctl.
+        # `set_active=False` buys the same thing without the bypass.
+        resolved = await self.resolve_udid(udid, set_active=False)
         raw_png = await self.raw_screenshot(resolved)
         return process_screenshot(raw_png, format=format, scale=scale, quality=quality)
 
@@ -780,8 +1239,11 @@ class DeviceController(DeviceControllerUI):
         every frame anyway.
         """
         if self._is_android(resolved):
-            # Only wake physical devices — emulator screencap works with screen off
-            if not resolved.startswith("emulator-"):
+            # Only wake physical devices — emulator screencap works with the
+            # screen off. Asks the device type rather than the serial, so an
+            # emulator reached over TCP is not woken needlessly; the prefix
+            # test called that one physical.
+            if self._device_type(resolved) != DeviceType.ANDROID_EMULATOR:
                 await self._ensure_android_screen_on(resolved)
             return await self.adb.screenshot(resolved)
         if self._is_physical(resolved):
@@ -910,8 +1372,18 @@ class DeviceController(DeviceControllerUI):
         return resolved
 
     async def clear_app_data(self, bundle_id: str, udid: str | None = None) -> str:
-        """Clear all app data for a simulator app. Returns the resolved udid."""
+        """Clear all app data for an app. Returns the resolved udid.
+
+        Follows the branch-on-Android-first pattern the rest of this class
+        uses, rather than falling through to a simulator guard. Inverting that
+        guard for #263 turned this from a cryptic simctl failure into a
+        confident false claim -- "only supported on simulators" about a device
+        whose `pm clear` answers `Success`.
+        """
         resolved = await self.resolve_udid(udid)
+        if self._is_android(resolved):
+            await self.adb.clear_app_data(resolved, bundle_id)
+            return resolved
         self._require_simulator(resolved, "Clear app data")
         try:
             await self.simctl.terminate_app(resolved, bundle_id)

@@ -10,6 +10,7 @@ For all other commands, delegates to server.main.cli().
 from __future__ import annotations
 
 import os
+import shlex
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -644,11 +645,16 @@ def _cmd_install_precommit_hook() -> int:
     return 0 if result.status != CheckStatus.ERROR else 1
 
 
+#: Clients `quern mcp-install` can register with. Shared with the dispatch in
+#: `main`, which has to accept these as operands before this command runs.
+MCP_INSTALL_TARGETS = ("claude-code", "claude-desktop", "opencode", "codex", "cursor")
+
+
 def _cmd_mcp_install() -> int:
     """Add quern-debug MCP server to one or more AI tool configs."""
     import argparse
 
-    ALL_TARGETS = ["claude-code", "claude-desktop", "opencode", "codex", "cursor"]
+    ALL_TARGETS = list(MCP_INSTALL_TARGETS)
 
     parser = argparse.ArgumentParser(
         prog="quern mcp-install",
@@ -726,6 +732,7 @@ def _check_args(
     *,
     allowed: tuple[str, ...] = (),
     operands: int = 0,
+    choices: tuple[str, ...] = (),
     usage: Callable[[], None] | None = None,
 ) -> list[str]:
     """Answer `-h`, refuse anything else unrecognised, return the operands.
@@ -741,6 +748,8 @@ def _check_args(
     def default_usage() -> None:
         flags = "".join(f" [{flag}]" for flag in allowed)
         args = "".join(" <value>" for _ in range(operands))
+        if choices:
+            args += f" [{'|'.join(choices)}]..."
         print(f"Usage: quern {command}{flags}{args}")
 
     show = usage or default_usage
@@ -757,12 +766,136 @@ def _check_args(
     # ran a real update, and `quern set-channel stable typo` persisted stable
     # while saying nothing about the word it did not understand. A command
     # that takes no operands says so; one that takes a value says how many.
+    #
+    # `choices` is the variadic case: any number of words from a fixed set.
+    # `mcp-install` takes its targets that way, and counting it as a
+    # zero-operand command refused every target from 0.19.0 on, leaving
+    # `quern mcp-install codex` unable to reach anything but the default.
     ops = [arg for arg in rest if not arg.startswith("-")]
+    if choices:
+        stray = [arg for arg in ops if arg not in choices]
+        if stray:
+            show()
+            print(f"unexpected argument: {stray[0]}", file=sys.stderr)
+            sys.exit(2)
+        return ops
     if len(ops) > operands:
         show()
         print(f"unexpected argument: {ops[operands]}", file=sys.stderr)
         sys.exit(2)
     return ops
+
+
+def _valid_port(value: object) -> int | None:
+    """`value` if it is a usable TCP port, else None.
+
+    `state.json` is a file on disk and can hold anything, including the
+    remains of a server that is long gone. `isinstance(v, int)` is not the
+    test: `True` passes it, because bool subclasses int, and so do 0 and
+    70000. A port nothing can connect to must not reach a URL a script is
+    about to trust.
+    """
+    if type(value) is not int or not (1 <= value <= 65535):
+        return None
+    return value
+
+
+def _server_base_url() -> str | None:
+    """Where a client on this machine should talk to the running server.
+
+    Loopback, never the bind host. The server listens on 0.0.0.0 by default,
+    and a script on this machine should not be sent out to the network and
+    back. The MCP wrapper builds its URL the same way.
+
+    None when nothing is actually answering. A readable state file is not a
+    running server: a crash or a SIGKILL leaves the file behind, and without
+    the health check `quern url` would exit 0 and hand a script a URL that
+    refuses connections -- which is worse than the hardcoded 9100 these
+    commands replaced, because it looks authoritative.
+    """
+    from server.lifecycle.ports import _get_pid_on_port
+    from server.lifecycle.state import is_server_healthy, read_state
+
+    state = read_state()
+    if not state:
+        return None
+    port = _valid_port(state.get("server_port"))
+    if port is None or not is_server_healthy(port):
+        return None
+
+    # Answering /health is not proof of being ours, and `quern env` prints the
+    # API key. Quern records the port it settled on, which is not 9100 when
+    # something else had that first -- so if quern then dies, an untrusted
+    # local process can take the freed port, answer 200, and be handed the key
+    # by a caller that only checked for a pulse.
+    #
+    # The recorded pid is the thing an impostor does not control. Anyone who
+    # can rewrite state.json can read ~/.quern/api-key directly, so this is
+    # not the weak link.
+    recorded = state.get("pid")
+    if isinstance(recorded, int):
+        listener = _get_pid_on_port(port)
+        if listener is not None and listener != recorded:
+            return None
+    return f"http://127.0.0.1:{port}"
+
+
+def _url_usage() -> None:
+    print("Usage: quern url")
+    print()
+    print("Prints the running server's base URL, for scripts:")
+    print()
+    print("    BASE=$(quern url) || exit 1")
+
+
+def _cmd_url() -> int:
+    url = _server_base_url()
+    if url is None:
+        print("No server answering — start it with `quern start`.", file=sys.stderr)
+        return 1
+    print(url)
+    return 0
+
+
+def _env_usage() -> None:
+    print("Usage: quern env")
+    print()
+    print("Prints shell exports for the running server, so a script never has")
+    print("to hardcode a port or read ~/.quern by hand:")
+    print()
+    print('    eval "$(quern env)"')
+    print('    curl -H "Authorization: Bearer $QUERN_API_KEY" "$QUERN_SERVER_URL/health"')
+
+
+def _cmd_env() -> int:
+    """Emit the server's URL and API key as shell exports.
+
+    The `eval "$(quern env)"` shape, as `fnm env` and `docker-machine env`
+    use it: computed when it is asked for, so it cannot go stale the way a
+    file written at start-up would once the server moved to another port.
+
+    Nothing goes to stdout when there is no server. A partial environment is
+    worse than none -- `eval` would set half of it and the script would fail
+    later, somewhere unrelated.
+    """
+    from server.config import API_KEY_FILE
+
+    url = _server_base_url()
+    if url is None:
+        print("No server answering — start it with `quern start`.", file=sys.stderr)
+        return 1
+
+    try:
+        key = API_KEY_FILE.read_text().strip()
+    except OSError:
+        key = ""
+    if not key:
+        print(f"No API key at {API_KEY_FILE} — run `quern setup`.", file=sys.stderr)
+        return 1
+
+    print(f"export QUERN_SERVER_URL={shlex.quote(url)}")
+    print(f"export QUERN_API_KEY={shlex.quote(key)}")
+    return 0
 
 
 def _setup_usage() -> None:
@@ -838,13 +971,21 @@ def main() -> None:
         from server.lifecycle.setup import run_setup
         sys.exit(run_setup(assume_yes=bool({"-y", "--yes"} & set(rest))))
 
+    if len(sys.argv) >= 2 and sys.argv[1] == "url":
+        _check_args("url", sys.argv[2:], usage=_url_usage)
+        sys.exit(_cmd_url())
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "env":
+        _check_args("env", sys.argv[2:], usage=_env_usage)
+        sys.exit(_cmd_env())
+
     if len(sys.argv) >= 2 and sys.argv[1] == "uninstall":
         _check_args("uninstall", sys.argv[2:])
         from server.lifecycle.setup import run_uninstall
         sys.exit(run_uninstall())
 
     if len(sys.argv) >= 2 and sys.argv[1] == "mcp-install":
-        _check_args("mcp-install", sys.argv[2:])
+        _check_args("mcp-install", sys.argv[2:], choices=(*MCP_INSTALL_TARGETS, "all"))
         sys.exit(_cmd_mcp_install())
 
     if len(sys.argv) >= 2 and sys.argv[1] == "grant-full-perms":

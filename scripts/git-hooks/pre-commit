@@ -1,10 +1,25 @@
 #!/usr/bin/env bash
 # Pre-commit hook: run ruff lint check on staged Python files.
 
-# Find the project venv
+# Find the project venv.
+#
+# `--show-toplevel` is the *worktree* root, and a worktree has no .venv -- so
+# in one this skipped silently, every time. That is not theoretical: a branch
+# developed entirely in a worktree reached CI with unsorted imports and a long
+# line, having printed "skipping lint check" on every commit and been ignored.
+#
+# So fall back to the main checkout, which `--git-common-dir` points into.
 VENV_PYTHON="$(git rev-parse --show-toplevel)/.venv/bin/python"
 if [ ! -x "$VENV_PYTHON" ]; then
-    echo "Warning: venv not found, skipping lint check"
+    MAIN_ROOT="$(dirname "$(cd "$(git rev-parse --git-common-dir)" && pwd)")"
+    VENV_PYTHON="$MAIN_ROOT/.venv/bin/python"
+fi
+if [ ! -x "$VENV_PYTHON" ]; then
+    # Loud, and on stderr: the quiet version of this message is what let the
+    # above happen. Still exit 0 -- a contributor without a venv should not be
+    # blocked from committing, they should just know lint did not run.
+    echo "WARNING: no venv found (tried this worktree and the main checkout)." >&2
+    echo "         LINT DID NOT RUN. CI will still check it." >&2
     exit 0
 fi
 

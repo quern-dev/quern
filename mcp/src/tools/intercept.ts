@@ -375,7 +375,7 @@ Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code
   server.registerTool(
     "clear_mocks",
     {
-      description: `Clear mock response rules. If rule_id is provided, removes only that rule. Otherwise removes all mock rules.`,
+      description: `Clear mock response rules. If rule_id is provided, removes only that rule, and errors with 404 if no such rule exists — a rule you did not remove is still matching traffic, so teardown can check this. Omitting rule_id removes all mock rules and succeeds even when there were none -- the response's "count" says how many actually went, so that case is still detectable.`,
       inputSchema: strictParams({
         rule_id: z
           .string()

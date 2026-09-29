@@ -23,6 +23,145 @@ from server.device.web_probing import WebSweepResult
 from server.models import DeviceError, UIElement, WaitCondition
 
 
+def _scroll_report(sweep: dict, requested: bool | None) -> dict:
+    """What happened about scrolling, said positively either way.
+
+    Four cases and they need different things from the reader:
+
+    - a sweep ran: how many swipes, and whether anything moved. The screen may
+      have changed under them.
+    - the caller said no: nothing to add.
+    - the screen is recorded as fixed: the element is not here, and retrying
+      with a sweep cannot help -- saying so saves a wasted round trip.
+    - nobody has said: a sweep might help, so name the retry.
+
+    The last two behave identically and read differently, which is the whole
+    reason `scrollable` is tri-state rather than a boolean.
+    """
+    if sweep.get("attempted"):
+        # `swipes` and `moved` only when something measured them. Android's
+        # `scroll_into_view` reports whether the target appeared and nothing
+        # else, so defaulting these to 0 and False stated two facts it never
+        # established -- and "swiped 0 times, nothing moved" alongside
+        # `attempted: true` is a contradiction the reader has to resolve.
+        # Absent means unmeasured; present means measured.
+        measured = {
+            k: sweep[k] for k in ("swipes", "moved") if k in sweep
+        }
+        return {
+            "attempted": True,
+            **measured,
+            "screen": sweep.get("screen"),
+            "detail": (
+                "the screen was swiped to look for this element, so it may have "
+                "moved or changed since you last read it"
+            ),
+        }
+    if requested is False:
+        return {"attempted": False, "reason": "scroll_to_find=false"}
+    if sweep.get("platform") == "android":
+        # Android's sweep is the selector-based `scroll_into_view` on the fast
+        # path, which no knowledge base gates -- so neither iOS remedy applies
+        # here. `scroll_to_find=true` is already the effective default, and
+        # nothing on this platform reads `scrollable`. Saying either would send
+        # the caller somewhere that cannot help.
+        return {
+            "attempted": False,
+            "reason": "not_searchable",
+            "detail": (
+                "this query did not take the selector path, which is the only "
+                "one that scrolls on Android. Re-run with just label= or "
+                "identifier= -- no element_type or value -- to have quern "
+                "scroll looking for it."
+            ),
+        }
+    if requested is True:
+        # Asked for and not done, which only happens when the search was not
+        # eligible: `scroll_to_element` can only reach an exact label or
+        # identifier, so `label_contains`, `label_prefix` and a bare
+        # `element_type` fall through. Telling that caller to "retry with
+        # scroll_to_find=true" -- which the unknown branch below does -- is
+        # advice they have already taken.
+        return {
+            "attempted": False,
+            "reason": "not_searchable",
+            "detail": (
+                "scrolling can only search for an exact label or identifier, "
+                "so this query was not eligible. Re-run with label= or "
+                "identifier= to have quern scroll looking for it."
+            ),
+        }
+    known = sweep.get("known_scrollable")
+    if known is False:
+        return {
+            "attempted": False,
+            "reason": "screen_not_scrollable",
+            "screen": sweep.get("screen"),
+            "detail": (
+                f"{sweep.get('screen')!r} is recorded as not scrolling, so the "
+                "element is not on it. Scrolling will not find it."
+            ),
+        }
+    if sweep.get("why") == "read_failed":
+        return {
+            "attempted": False,
+            "reason": "screen_unreadable",
+            "detail": (
+                "the screen could not be read, so quern cannot tell which "
+                "screen this is or whether it scrolls. Retry, or pass "
+                "scroll_to_find explicitly."
+            ),
+        }
+    if sweep.get("why") == "needs_page_urls":
+        return {
+            "attempted": False,
+            "reason": "needs_page_urls",
+            "screen": None,
+            "detail": (
+                "this app's screens are identified by web page URL, which the "
+                "scrollability lookup does not read, so it cannot tell whether "
+                "this screen scrolls. Pass scroll_to_find explicitly. "
+                "(`identified_as` on the screen context may still name the "
+                "screen -- identification does read the page listing, so the "
+                "two can disagree about how much is known.)"
+            ),
+        }
+    if sweep.get("why") == "ambiguous":
+        # Distinct from "nobody recorded it", because the fix is different and
+        # the usual cause is mundane: landmarks loaded for two apps at once,
+        # where one screen matches both. Folding this into "unknown" told the
+        # caller to record something they had already recorded.
+        candidates = sweep.get("candidates") or []
+        named = ", ".join(repr(c) for c in candidates)
+        return {
+            "attempted": False,
+            "reason": "screen_ambiguous",
+            "screen": None,
+            # Named, because the remedy needs them. "Load landmarks for one app
+            # at a time" is unactionable if the caller cannot tell which two
+            # collided -- and this list was computed and then dropped on the
+            # way out, so the advice arrived without the one fact it needed.
+            "candidates": candidates,
+            "detail": (
+                f"more than one known screen matches what is on the device"
+                f"{' (' + named + ')' if named else ''}, so quern will not "
+                "guess which one's scrollability applies. Load landmarks for "
+                "one app at a time, or pass scroll_to_find explicitly."
+            ),
+        }
+    return {
+        "attempted": False,
+        "reason": "scrollability_unknown",
+        "screen": sweep.get("screen"),
+        "detail": (
+            "no sweep was attempted because nothing records whether this screen "
+            "scrolls. If the element may be off-screen, retry with "
+            "scroll_to_find=true; to make that automatic, add `scrollable: true` "
+            "to the screen's knowledge-base entry."
+        ),
+    }
+
+
 def _build_screen_context(elements: list[UIElement]) -> dict:
     """Build a lightweight screen context dict from an existing elements list.
 
@@ -71,7 +210,13 @@ def _effective_filter_label(
     """
     return label
 
-logger = logging.getLogger("quern-debug-server.device")
+logger = logging.getLogger(__name__)
+
+
+#: Tools whose failure means the *backend* broke, not that the device
+#: answered. Swallowing one of these turns "I could not look" into "I looked
+#: and found nothing", which downstream reads as a fact about the app.
+_BACKEND_FAILURE_TOOLS = frozenset({"sim-bridge", "idb", "wda", "u2"})
 
 
 class DeviceControllerUI:
@@ -85,8 +230,9 @@ class DeviceControllerUI:
     - self._cache_ttl: float
     - self._cache_hits: int
     - self._cache_misses: int
-    - self._device_info_cache: dict[str, DeviceInfo]
     - self._device_type_cache: dict[str, DeviceType]
+    - self._input_checked: dict[str, bool]
+    - self._input_probe_cooldown: dict[str, float]
     - self.resolve_udid(udid) -> str
     - self._invalidate_ui_cache(udid) -> None
     - self._is_physical(udid) -> bool
@@ -103,31 +249,30 @@ class DeviceControllerUI:
     # treats a target whose top edge is above this inset as not-yet-in-view.
     _TOP_SAFE_INSET = 50  # points
 
+    # Where a sweep swipe may start. The chrome a drag must not begin on is a
+    # fixed number of points on every device, while the endpoints below are
+    # fractions of the screen, so a fraction that clears the chrome on a tall
+    # phone lands on it on a short one.
+    #
+    # Measured: on an 874pt screen the fixture app's header band runs y=62..116,
+    # and 0.13 * 874 = 114 is inside it. Every upward sweep swipe began on the
+    # header, moved nothing, and the sweep reported the list unscrollable and
+    # gave up after two swipes -- from the bottom of a 200-row list, with the
+    # target 180 rows above. A status bar and a large-title navigation bar come
+    # to about 140pt together, which clears it.
+    _TOP_CHROME_CLEARANCE = 140  # points
+    # The same at the other end: a tab bar (49) over a home indicator (34),
+    # with a margin. This one is arithmetic rather than measured -- 0.88 * 667
+    # on an SE-sized screen is 3pt inside a standard tab bar.
+    _BOTTOM_CHROME_CLEARANCE = 100  # points
+
     # Maximum scroll-into-view attempts before giving up
     _MAX_SCROLL_ATTEMPTS = 3
 
-    # Known screen dimensions by device model (portrait orientation)
-    _SCREEN_DIMENSIONS = {
-        "iPhone 16": {"width": 402, "height": 844},
-        "iPhone 16 Plus": {"width": 440, "height": 926},
-        "iPhone 16 Pro": {"width": 402, "height": 852},
-        "iPhone 16 Pro Max": {"width": 440, "height": 926},
-        "iPhone 15": {"width": 402, "height": 844},
-        "iPhone 15 Plus": {"width": 440, "height": 926},
-        "iPhone 15 Pro": {"width": 402, "height": 852},
-        "iPhone 15 Pro Max": {"width": 440, "height": 926},
-    }
-
-    # Known positions for static UI elements
-    # Format: (x_offset, y_offset, anchor)
-    # anchor: "bottom-left" = tab bar, "top-right" = nav bar button
-    _STATIC_ELEMENT_POSITIONS = {
-        "_Profile button in tab bar": (40, 40, "bottom-left"),
-        "_Map button in tab bar": (120, 40, "bottom-left"),
-        "_Activities button in tab bar": (200, 40, "bottom-left"),
-        "_Trackables button in tab bar": (280, 40, "bottom-left"),
-        "_Settings button": (28, 78, "top-right"),  # 28px from right edge, 78px from top
-    }
+    #: How long to wait before asking again about a device whose
+    #: input-service state could not be read. Without it, an unreadable state
+    #: costs a `simctl spawn` on every single input call.
+    _INPUT_PROBE_COOLDOWN_S = 60.0
 
     def _ui_backend(self, udid: str):
         """Return the appropriate UI automation backend for a device.
@@ -143,24 +288,66 @@ class DeviceControllerUI:
             return self.sim_bridge
         return self.idb
 
-    async def _get_screen_dimensions(self, udid: str) -> dict | None:
-        """Get screen dimensions for a device. Returns {"width": int, "height": int} or None."""
-        # Check cache first
-        if udid in self._device_info_cache:
-            device_info = self._device_info_cache[udid]
-            return self._SCREEN_DIMENSIONS.get(device_info.name)
+    #: Backend name per device, written by `get_ui_elements` when it selects
+    #: one. Read by the error paths that follow a read, so the label names the
+    #: backend that did the work rather than whatever is selected a moment
+    #: later. See #186.
+    _last_read_backend: dict[str, str]
 
-        # Fetch device info
-        try:
-            devices = await self.simctl.list_devices()
-            for device in devices:
-                if device.udid == udid:
-                    self._device_info_cache[udid] = device
-                    return self._SCREEN_DIMENSIONS.get(device.name)
-        except Exception:
-            pass
+    def backend_that_served(self, udid: str | None) -> str:
+        """Which backend did this device's last UI read, for the caller.
 
-        return None
+        The same precedence the error paths use: what actually did the work
+        if a read has happened, else what would be selected now.
+
+        Public because the *answer* is useful to an agent, not just to an
+        error message. A simulator is driven by sim-bridge or, where that is
+        unavailable, by idb -- and they behave differently in ways the tool
+        descriptions state: sim-bridge can hold a swipe at the end so a list
+        stops where the finger does, idb cannot and flings, stepping about a
+        quarter of the screen against sim-bridge's seven-tenths. Until now
+        that difference was only ever reported on failure (#186 put the name
+        on errors), so an agent whose sweep overshot could not tell "this is
+        sim-bridge and my expectation was wrong" from "this silently fell
+        back to idb". Both look like a scroll that went too far.
+
+        Nobody needs to *choose* the backend -- that is quern's job, and it
+        is done from a probe at start-up and re-probed every 300s (#179).
+        This exists so that when something behaves unexpectedly, the first
+        question an investigator asks has an answer in the response.
+        """
+        if udid is not None:
+            served = self._last_read_backend.get(udid)
+            if served:
+                return served
+        return self._backend_name(udid)
+
+    def _backend_name(self, udid: str) -> str:
+        """What the backend driving this device calls itself.
+
+        Read off `_ui_backend`'s own answer rather than re-deciding, because
+        a second copy of that if-chain is a copy that drifts. It already had:
+        ten sites in this file hardcoded `tool="idb"` while the dispatcher
+        routed to four different backends, and three more chose between `wda`
+        and `idb` with sim-bridge missing from the choice entirely.
+
+        That was not cosmetic. On Xcode 27 idb is genuinely broken, so an
+        `[idb]` label on an error sim-bridge produced sent the reader to
+        debug a tool that was never involved (#186).
+        """
+        # Falls back to the active device when given None, because that is
+        # what resolution would have picked. Without it, `_is_physical(None)`
+        # defaults to simulator, so an error from a *physical* iPhone driven by
+        # WDA was labelled `sim-bridge` whenever the caller omitted the udid --
+        # which MCP callers routinely do, making the wrong label the default
+        # path. Measured: same device, same failure, `[sim-bridge]` with
+        # udid=None and `[wda]` with it spelled out.
+        #
+        # Deliberately not `await resolve_udid(...)`: this runs on error paths,
+        # and resolution can boot a device. A label is not worth that.
+        return getattr(
+            self._ui_backend(udid or self._active_udid), "TOOL_NAME", "unknown",
+        )
 
     def _is_obscured_by_home_indicator(
         self,
@@ -283,14 +470,123 @@ class DeviceControllerUI:
         )
         return None
 
-    # The progress check runs exactly once, around the first blind swipe.
-    # Repeating it was measured breaking long scrolls: each check costs a tree
-    # read (~1.8s), and inserting that between swipes kills the fling momentum
-    # that successive swipes chain together. With checks on every iteration a
-    # row 60 down went from reliably found in 17s to intermittently not found
-    # at all in 90s. Checking once, before the sweep gets going, costs two reads
-    # and leaves the remaining swipes back to back.
-    _BLIND_PROGRESS_CHECKS = 1
+    #: Wall-clock ceiling for one scroll sweep, whatever the swipe budget says.
+    #:
+    #: A swipe count is not a time bound: the same 75 steps cost 25s or 500s
+    #: depending on what a tree read costs on the day, and #84 produced sweeps
+    #: of 413s and 523s against a caller that had given up at 180s. Past a
+    #: couple of minutes the answer is worthless anyway -- the screen it
+    #: describes has moved on -- so spending longer only occupies a device
+    #: someone else is waiting for.
+    _SCROLL_DEADLINE_S = 120.0
+
+    #: How long a sweep swipe keeps the finger down before lifting. 0.15s was
+    #: enough to stop the fling entirely on iOS 18.6; see doSwipe in
+    #: sim-bridge.swift.
+    _SWIPE_HOLD_S = 0.15
+
+    async def _all_elements_for_context(
+        self,
+        resolved: str,
+        elements: list[UIElement],
+        filter_label: str | None,
+        identifier: str | None,
+        element_type: str | None,
+    ) -> tuple[list[UIElement], bool]:
+        """The whole screen, for identification and for not-found context.
+
+        `elements` may have been read under filters, and a filtered read is not
+        cached -- so it holds only what matched and cannot answer "which screen
+        is this". Falls back to the filtered list rather than failing: partial
+        context beats none, and this is never the thing the caller asked for.
+
+        Returns `(elements, complete)`. The flag is reported rather than
+        inferred from whether the list came back unchanged: the no-filter path
+        legitimately returns the caller's own list, and a mocked
+        `get_ui_elements` returns the same object for both reads, so identity
+        says nothing about whether the read worked. A caller identifying a
+        screen needs "no screen matched" and "quern could not look" to be
+        different answers.
+        """
+        if not (filter_label or identifier or element_type):
+            return elements, True
+        try:
+            full, _ = await self.get_ui_elements(resolved)
+        except Exception:
+            logger.debug("full-tree read for screen context failed", exc_info=True)
+            return elements, False
+        return full, True
+
+    async def _identify_for_miss(self, udid: str, elements: list[UIElement]) -> dict:
+        """Which screen this is, for a response that reports a miss.
+
+        `tap_element` finding nothing and `wait_for_element` timing out are the
+        two responses where a caller most needs to know where it actually is --
+        an action that succeeded implies you are roughly where you meant to be;
+        a miss is exactly when you are lost. Both returned a screen context
+        without identification while the success paths gained it, so one
+        endpoint answered in two shapes and no caller could tell "nothing
+        matched" from "this path does not ask" (#288).
+
+        A callable injected by `main.py`, like `_scrollable_lookup` beside it
+        and for the same reason: the controller has no business knowing what a
+        `LandmarkRegistry` is. Absent -- as in every unit test that builds its
+        own controller -- this adds nothing, which is also what happens when no
+        landmarks are loaded.
+
+        Costs no *UI tree* read. Both call sites already hold the full element
+        list; the comment at the not-found path says it is fetched precisely so
+        identification needs none of its own.
+
+        It can cost one Web Inspector round trip: when a loaded landmark names
+        `web_url_contains`, `identify_for_context` fetches the page listing
+        through the callable passed here. That is the same rule the action
+        responses follow, and it is never paid by a knowledge base without URL
+        landmarks -- but "costs no device read" was wrong as written.
+        """
+        lookup = getattr(self, "_identify_lookup", None)
+        if lookup is None:
+            return {}
+        try:
+            return await lookup(elements, lambda: self.web_page_urls(udid))
+        except Exception:
+            # A knowledge base that cannot answer must not turn a reported miss
+            # into a failed call. The identification is an addition; the miss
+            # report is the answer the caller asked for.
+            logger.debug("identification for a miss failed", exc_info=True)
+            return {}
+
+    def _scrollable_hint(
+        self, elements: list[UIElement],
+    ) -> tuple[bool | None, str | None, str, list[str] | None]:
+        """What the knowledge base says about this screen, if anything.
+
+        `(None, None)` whenever nobody has said -- no registry attached, none
+        loaded, the screen unrecognised, or recognised and silent on the
+        question. Every one of those means the same thing to the caller, so
+        they are not distinguished here.
+
+        A callable, injected by `main.py`, rather than the registry itself.
+        The controller has no business knowing what a `LandmarkRegistry` is --
+        it needs one question answered, and depending on the shape of the
+        answer rather than on the class that produces it keeps the knowledge
+        base at the layer that owns it. It also makes this trivially fakeable,
+        which matters because the real one needs a loaded knowledge base.
+
+        Absent -- as in every unit test that builds its own controller -- the
+        tap behaves as though nothing were recorded.
+        """
+        lookup = getattr(self, "_scrollable_lookup", None)
+        if lookup is None:
+            return None, None, "no_knowledge", None
+        try:
+            hint = lookup(elements)
+        except Exception:
+            # A knowledge base that cannot answer must not break a tap. The
+            # answer it would have given is an optimisation; the tap is not.
+            logger.debug("scrollable lookup failed", exc_info=True)
+            return None, None, "lookup_failed", None
+        return hint.scrollable, hint.screen, hint.reason, hint.candidates
 
     async def _ios_scroll_to_element(
         self,
@@ -299,6 +595,8 @@ class DeviceControllerUI:
         identifier: str | None,
         max_swipes: int,
         target_known_absent: bool = False,
+        deadline_s: float | None = None,
+        report: dict | None = None,
     ) -> UIElement | None:
         """Scroll an iOS scroll container until the target element is on-screen.
 
@@ -313,28 +611,61 @@ class DeviceControllerUI:
           is located but off-screen we know its direction, so we swipe straight
           toward it and stop once its frame stops moving (end of travel).
         - Lazy/recycling scrollers (UITableView / UICollectionView / SwiftUI
-          List) drop off-screen rows from the tree entirely — the target simply
-          isn't matched — so we fall back to a blind sweep, down then up.
+          List) drop off-screen rows from the tree entirely -- the target simply
+          isn't matched -- so we sweep blind: down until the list stops moving,
+          then up until it stops again.
 
-        Returns the on-screen UIElement, or None if it never became visible
-        within the swipe budget.
+        Every swipe is controlled -- held at the end, so the list stops where
+        the finger does -- and covers 75% of the screen, which is less than the
+        visible area, so no row can be passed over. Every read is taken at rest.
+        Together those make a sighting final: the confirm-and-swipe-back logic
+        that #84 needed, because a fling could carry a sighted row away, has
+        nothing left to do and is gone.
+
+        Whether the list moved is judged from the same read that looks for the
+        target: a tree unchanged by a swipe means that end has been reached.
+        That replaced a hit-test check which ran once, before the sweep, and on
+        a physical device cost six full tree reads -- WDA has no hit-test of its
+        own -- while the sweep still spent its whole downward budget swiping at
+        the bottom of a list whose target was above.
+
+        Budget: up to `2 * max_swipes` swipes down and `3 * max_swipes` in all.
+        A controlled swipe travels less than a flung one did, so the downward
+        share is larger than the old even split to keep the reach a given
+        `max_swipes` used to have. The deadline bounds all of it.
+
+        Returns the on-screen UIElement, or None if it never became visible.
+
+        `report`, when given, is filled in with `swipes` and `moved` so the
+        caller can tell the agent that the screen was touched. Every swipe here
+        is a real gesture on a real device -- the upward sweep is the
+        pull-to-refresh and sheet-dismiss drag -- and a caller that gets
+        `not_found` with no mention of them acts next against a screen it does
+        not know has changed. See #274.
         """
-        dims = await self._get_screen_dimensions(resolved)
-        screen_height = dims["height"] if dims else None
-        screen_width = dims["width"] if dims else None
-        if not screen_height or not screen_width:
-            # Physical devices aren't in the dimensions table. Recover the
-            # viewport from the Application element via a *targeted* query
-            # (filter_type) — on physical this routes to a WDA predicate query
-            # for the root element, avoiding the full /source read that can time
-            # out and restart WDA on dense screens.
-            app_els, _ = await self.get_ui_elements(
-                resolved, use_cache=False, filter_type="Application",
-            )
-            app_frame = next((e.frame for e in app_els if e.frame), None)
-            if app_frame:
-                screen_height = screen_height or app_frame["height"]
-                screen_width = screen_width or app_frame["width"]
+        # The viewport comes from the Application element, which is the
+        # device's own answer. A *targeted* query (filter_type) -- on physical
+        # this routes to a WDA predicate query for the root element, avoiding
+        # the full /source read that can time out and restart WDA on dense
+        # screens.
+        #
+        # This used to prefer a table of hardcoded per-model dimensions and
+        # fall back to asking. The table was wrong for every model in it
+        # (#210): it put an iPhone 16 at 402x844, where the device reports
+        # 393x852 -- so the geometry below, which is entirely derived from the
+        # screen, was computed from numbers off by 9pt and 8pt on exactly the
+        # devices the table claimed to know. It has been removed.
+        app_els, _ = await self.get_ui_elements(
+            resolved, use_cache=False, filter_type="Application",
+            # Nothing container probing can reveal is the root element, and
+            # probing is 92% of a simulator tree read (#196). The old table
+            # lookup cost nothing, so this query has to stay cheap to replace
+            # it.
+            probe_containers=False,
+        )
+        app_frame = next((e.frame for e in app_els if e.frame), None)
+        screen_height = app_frame["height"] if app_frame else None
+        screen_width = app_frame["width"] if app_frame else None
         screen_height = screen_height or 852
         screen_width = screen_width or 393
 
@@ -343,50 +674,177 @@ class DeviceControllerUI:
         mid_x = screen_width / 2
         # Swipe endpoints: near the bottom (y_far) and near the top (y_near).
         # Swiping y_far -> y_near reveals content below; y_near -> y_far reveals
-        # content above (mirrors the Android sweep geometry).
-        y_far = screen_height * 0.72
-        y_near = screen_height * 0.30
+        # content above.
+        #
+        # 75% of the screen, which is only safe because the swipe is controlled
+        # (see _swipe): the list moves by about the drag and no further,
+        # measured at 625pt for this 694pt drag on a 932pt screen. That is less
+        # than the visible content area, so every row is on screen after some
+        # swipe. The endpoints stay clear of the chrome a drag must not start
+        # on -- 0.13 is below a collapsed navigation bar, 0.88 above a tab bar.
+        backend = self._ui_backend(resolved)
+        # idb cannot hold a swipe, so its swipes still fling and a read after
+        # one can catch the list in flight. It keeps a settle per step; the
+        # controlled backends do not need one.
+        controlled = getattr(backend, "swipe_is_controlled", True) is not False
+        if controlled:
+            y_far = screen_height * 0.88
+            y_near = screen_height * 0.13
+        else:
+            # A flung swipe travels well past its drag -- 2.6x measured for an
+            # unheld sim-bridge swipe. idb's own factor is unmeasured: its HID
+            # path does not work under Xcode 27, where this was written. A 75%
+            # drag flung 2.6x passes over nearly half the rows of a list, so
+            # idb drags a quarter of the screen, which keeps a fling of up to
+            # ~3x inside the visible area. If idb flings less than that, the
+            # step covers less ground, and its budget is tripled below so the
+            # sweep still reaches the end of a long list.
+            y_far = screen_height * 0.62
+            y_near = screen_height * 0.37
+        # Both endpoints are kept off the chrome. A fraction alone is not
+        # enough: see _TOP_CHROME_CLEARANCE.
+        y_near = max(y_near, self._TOP_CHROME_CLEARANCE)
+        y_far = min(y_far, screen_height - self._BOTTOM_CHROME_CLEARANCE)
+        step = y_far - y_near
+        budget_scale = 1 if controlled else 3
+        # WDA's swipe returns only once the app is idle, so the first read
+        # after it is already at rest -- measured at the end of a list, where a
+        # bounce would show, with nothing moving after the call returned. That
+        # matters because a WDA read is a full /source, 3-7s on a physical
+        # device, and taking each one twice would double the sweep.
+        at_rest = getattr(backend, "swipe_returns_at_rest", False) is True
 
-        async def _fetch() -> UIElement | None:
+        async def _fetch(probe: bool = False) -> UIElement | None:
+            """The cold lookup: filtered, and probing.
+
+            Filtered because on a physical device a filter is a WDA predicate
+            query (~0.3s) where the whole tree is a /source (3-7s), and a target
+            already on screen should cost the former.
+
+            Probing because a caller may ask to scroll to an element that only
+            probing can see -- a tab-bar item is exactly that -- and skipping
+            the probe here would hide it from the one read that could have found
+            it without scrolling at all. The sweep's own reads skip it: the
+            container probe is 92% of a `describe_all` (~200ms fetch against
+            ~3.5s), and what the sweep hunts is a row in a scroll container,
+            always present in the static tree.
+            """
             els, _ = await self.get_ui_elements(
                 resolved, use_cache=False,
                 filter_label=label, filter_identifier=identifier,
+                probe_containers=probe,
+            )
+            return _pick(find_element(els, label=label, identifier=identifier))
+
+        def _pick(matches: list[UIElement]) -> UIElement | None:
+            # A frame-less duplicate listed first used to hide a visible
+            # target entirely: the sweep saw "no frame" and gave up.
+            return next((m for m in matches if m.frame), matches[0] if matches else None)
+
+        def _fingerprint(els: list[UIElement]) -> dict[tuple, list[tuple]]:
+            """Where each element on screen is, keyed by what it is."""
+            where: dict[tuple, list[tuple]] = {}
+            for e in els:
+                if e.frame:
+                    where.setdefault(
+                        (e.type, e.identifier or "", e.label or ""), [],
+                    ).append((round(e.frame["x"]), round(e.frame["y"])))
+            for positions in where.values():
+                positions.sort()
+            return where
+
+        def _moved(before: dict, after: dict) -> bool:
+            """Did the content move between two reads?
+
+            Yes if anything present in both changed position. Identity is
+            (type, id, label), because a lazy list scrolled by a whole number
+            of rows puts different rows at the same positions.
+
+            Also yes if content appeared or disappeared -- a pager or a
+            page-snapping scroll view replaces everything but the chrome, and
+            the chrome never moves -- *unless* the only change is a label
+            changing in place: the same kind of element, with the same id, at
+            the same position, saying something new. That is a running timer
+            or a progress percentage, and counting it as movement stopped end
+            detection outright and kept the at-rest check from ever seeing two
+            reads agree (review of #204: 20 downward swipes at the bottom of a
+            list, 182 reads for one sweep).
+
+            Judged as a share of the screen, not a count: one clock among
+            twenty rows is a clock, but every row replaced in place is a page
+            turning. An absolute limit of two put five "N min ago" labels
+            ticking together straight back into the old failure mode.
+            """
+            if any(before[k] != after[k] for k in before.keys() & after.keys()):
+                return True
+            appeared = [k for k in after if k not in before]
+            in_place = 0
+            for gone in (k for k in before if k not in after):
+                twin = next(
+                    (k for k in appeared
+                     if k[:2] == gone[:2] and after[k] == before[gone]),
+                    None,
+                )
+                if twin is None:
+                    return True
+                appeared.remove(twin)
+                in_place += 1
+            return bool(appeared) or (in_place > 0 and in_place * 4 >= len(before))
+
+        async def _read(probe: bool) -> tuple[UIElement | None, dict]:
+            """The whole tree: the target if it is there, and the fingerprint.
+
+            Unfiltered, because the fingerprint needs everything. On a simulator
+            that is the same ~50ms read. On a physical device it is the /source
+            that a filtered lookup falls back to anyway whenever the target is
+            absent, which inside the sweep is nearly every time.
+            """
+            els, _ = await self.get_ui_elements(
+                resolved, use_cache=False, probe_containers=probe,
             )
             matches = find_element(els, label=label, identifier=identifier)
-            return matches[0] if matches else None
+            return _pick(matches), _fingerprint(els)
 
-        async def _signature() -> tuple | None:
-            """Fingerprint the screen by hit-testing a few points.
+        async def _read_at_rest(probe: bool) -> tuple[UIElement | None, dict]:
+            """Read the screen once it has stopped moving.
 
-            A full tree read costs ~1.8s; a hit-test is ~85ms, so sampling
-            three points either side of one swipe costs about a tenth of a
-            single tree read. The first version of this check used describe_all
-            and cost more than the 30 swipes it was replacing — measured at no
-            net improvement.
+            A controlled swipe leaves nothing moving -- except at the end of a
+            list, where the drag pulls the content past its edge and it snaps
+            back on release. Measured at the bottom of the fixture list: a read
+            straight after release was 91pt from where the rows came to rest.
+            Acting on that read taps the wrong place, and comparing it with the
+            last one reports movement at an end that has been reached.
 
-            Three points rather than one because a single sample can land on
-            fixed chrome: a nav bar or a pinned header never moves, whether or
-            not the content beneath it scrolls.
+            So reads repeat until two agree. That is ~50ms each on a simulator,
+            against ~1.5s for a screenshot settle -- and it is judged on the
+            tree, so a playing video elsewhere on screen does not hold it up.
             """
-            backend = self._ui_backend(resolved)
-            out: list[tuple[str, int]] = []
-            for fraction in (0.35, 0.55, 0.75):
-                try:
-                    hit = await backend.describe_point(
-                        resolved, mid_x, screen_height * fraction,
+            if not controlled:
+                # Clamped to what is left of the deadline. A settle that can
+                # run its full 2.5s after the loop's last deadline check is
+                # 2.5s spent past a deadline the caller was promised; this is
+                # the one step inside an iteration that takes a timeout, so it
+                # is the one that can be told about the deadline.
+                remaining = deadline - time.perf_counter()
+                if remaining > 0:
+                    settle = await self.wait_for_settle(
+                        udid=resolved, timeout=min(2.5, remaining),
                     )
-                except Exception:
-                    return None  # never let the progress check break the scroll
-                if not hit:
-                    out.append(("", -1))
-                    continue
-                frame = hit.get("frame") or {}
-                out.append((
-                    hit.get("AXUniqueId") or hit.get("identifier")
-                    or hit.get("AXLabel") or hit.get("label") or "",
-                    round(frame.get("y", -1)),
-                ))
-            return tuple(out)
+                    if not settle["settled"]:
+                        _note(
+                            "  did not settle before reading "
+                            f"({settle.get('reason')})"
+                        )
+            previous = await _read(probe)
+            if at_rest:
+                return previous
+            for _ in range(5):
+                current = await _read(probe)
+                if not _moved(previous[1], current[1]):
+                    return current
+                previous = current
+            _note("  the screen never came to rest; using the last read")
+            return previous
 
         def _visible(el: UIElement) -> bool:
             # In view = the top edge clears the top chrome (not scrolled under
@@ -400,201 +858,261 @@ class DeviceControllerUI:
             return el.frame["y"] >= top_safe and cy <= bottom_safe
 
         async def _swipe(y1: float, y2: float) -> None:
-            await self._ui_backend(resolved).swipe(resolved, mid_x, y1, mid_x, y2, 0.3)
+            # Held at the end so the list stops where the finger does. Without
+            # it every swipe flung the list 1020pt on iOS 18.6 -- more than the
+            # visible area -- so a row could land under the nav bar after one
+            # swipe and be out of the tree after the next, and the sweep hunted
+            # past it for 105s. Measured with the hold: the drag distance, and
+            # at rest on release.
+            await backend.swipe(
+                resolved, mid_x, y1, mid_x, y2, 0.3, hold=self._SWIPE_HOLD_S,
+            )
             self._invalidate_ui_cache(resolved)
 
-        # tap_element has just run the identical filtered query and found
-        # nothing, so repeating it here spends a full describe_all (~1.8s)
-        # re-learning what the caller already knows. scroll_to_element calls in
-        # cold with no prior read, so it still needs this check.
-        el = None if target_known_absent else await _fetch()
-        if el is not None and _visible(el):
-            return el
+        sweep_trace: list[str] = []
+        sweep_started = time.perf_counter()
+        swipes = 0
+        if report is not None:
+            # Seeded now, not on the way out: every exit from the sweep -- found,
+            # gave up, deadline, exception -- has to leave the caller able to say
+            # what happened to the screen, and only the ones someone remembered
+            # would if this were written at the return.
+            report["swipes"] = 0
+            report["moved"] = False
+        down_budget = max_swipes * 2 * budget_scale
+        total_budget = max_swipes * 3 * budget_scale
+        # Set before the cold lookup, not at the loop, so that lookup falls
+        # inside the budget: it is cheap on a simulator and is not on a physical
+        # device, where a single /source read has been measured at 10.7s.
+        #
+        # The screen-dimension reads above run *before* this and are not
+        # covered. Said plainly because an earlier version of this comment
+        # claimed otherwise.
+        deadline_budget = (
+            self._SCROLL_DEADLINE_S if deadline_s is None else deadline_s
+        )
+        deadline = sweep_started + deadline_budget
 
-        last_cy: float | None = None
-        stalls = 0
-        blind_steps = 0
-        # Progress detection for the blind branch. Sampling costs a tree read,
-        # so it is bounded: a screen that cannot scroll reveals itself in the
-        # first couple of swipes, and after that the cost would be pure waste on
-        # a container that is scrolling perfectly well.
-        # Set on the first blind iteration and compared on the next, so a
-        # static screen costs two swipes rather than the full budget. Seeding it
-        # from the caller's tree was tried and dropped: tap_element's read is
-        # filtered to the missing target, so the list is always empty there.
-        blind_signature: tuple | None = None
-        progress_checked = False
-        blind_down = max_swipes          # sweep down for the first budget...
-        blind_total = max_swipes * 3     # ...then up for twice as long
+        def _note(event: str) -> None:
+            sweep_trace.append(f"{time.perf_counter() - sweep_started:7.2f}s {event}")
+            if report is not None:
+                report["swipes"] = swipes
 
-        for _ in range(max_swipes * 3):
-            if el is not None and el.frame is not None:
-                # Located but off-screen: swipe straight toward it. Direction
-                # mirrors _visible's two out-of-view cases.
-                _, cy = get_tap_point(el)
-                if el.frame["y"] < top_safe:
-                    y1, y2 = y_near, y_far   # clipped above → reveal upper content
-                else:
-                    y1, y2 = y_far, y_near   # below safe area → reveal lower content
-                # End-of-travel guard: frame stopped moving across swipes.
-                if last_cy is not None and abs(cy - last_cy) < 2:
-                    stalls += 1
-                    if stalls >= 2:
-                        logger.info(
-                            "ios scroll-to-element: target off-screen but container "
-                            "won't scroll further (cy=%.0f) — aborting", cy,
-                        )
-                        return None
-                else:
-                    stalls = 0
-                last_cy = cy
-            else:
-                # Not located (recycled/lazy row): blind sweep, down then up.
-                if blind_steps >= blind_total:
-                    return None
-                y1, y2 = (y_far, y_near) if blind_steps < blind_down else (y_near, y_far)
-                blind_steps += 1
-                last_cy = None
-                stalls = 0
-                if blind_steps == 1 and not progress_checked:
-                    # Fingerprint BEFORE the first swipe, so one swipe is enough
-                    # to answer "does anything here move". Capturing it after
-                    # the first swipe instead costs a second swipe to reach the
-                    # same conclusion, and swipes are the visible part.
-                    blind_signature = await _signature()
+        def _finish(element: UIElement) -> UIElement:
+            """Return a found element, and say how it was found if it was slow.
 
-            await _swipe(y1, y2)
+            The trace used to be emitted only on the way out of a failure, which
+            left the worst diagnosable case silent: a sweep that succeeds and
+            takes five times as long as usual logs nothing at all, so the reason
+            has to be reconstructed from scattered [PERF] lines afterwards.
+            Measured on iOS 18.6 -- the same test passed in 24s, 24s and 113s,
+            and only the settle timeouts in between explained the third.
 
-            if el is None and not progress_checked and blind_signature is not None:
-                progress_checked = True
-                signature = await _signature()
-                if signature is not None:
-                    # An unchanged screen after a *downward* swipe is not enough
-                    # to call it static: a list already scrolled to the bottom
-                    # cannot move further down while content above it is still
-                    # reachable. Probe the other direction before concluding,
-                    # otherwise targets above the viewport report not_found.
-                    if signature == blind_signature:
-                        await _swipe(y_near, y_far)
-                        reverse = await _signature()
-                        if reverse is not None and reverse != blind_signature:
-                            blind_signature = reverse  # it moves; carry on
-                            el = await _fetch()
-                            if el is not None and _visible(el):
-                                return el
-                            continue
-                        signature = blind_signature  # neither direction moved
-                    if signature == blind_signature:
-                        # A swipe over scrollable content always moves geometry.
-                        # Identical positions mean nothing scrolled, so the
-                        # remaining budget would repeat this exact no-op.
-                        logger.info(
-                            "ios scroll-to-element: screen unchanged after a swipe "
-                            "— nothing scrollable here, aborting after %d", blind_steps,
-                        )
-                        return None
-                    blind_signature = signature
-
-            el = await _fetch()
-            if el is not None and _visible(el):
-                # Settle and re-confirm: a swipe can leave the container
-                # rubber-banding, so the immediate frame may be an over-scroll
-                # bounce that snaps back out of view. Re-fetching once settled
-                # both rejects that and returns accurate resting coordinates.
-                #
-                # Waited for rather than slept through: a bounce lasts as long
-                # as it lasts, and the constant this replaced was too short --
-                # a real scroll takes ~1100ms to settle against the 300ms that
-                # was slept.
-                #
-                # A screen that never settles is still worth acting on: a
-                # timeline with a playing video never holds still, and refusing
-                # to scroll there would make it unreachable. The coordinates are
-                # then no better than the sleep gave, which is why it is said
-                # out loud rather than passed off as a settled read.
-                stability = await self.wait_for_settle(udid=resolved, timeout=3.0)
-                if not stability["settled"]:
-                    logger.info(
-                        "ios scroll-to-element: screen never settled (%s) — "
-                        "using coordinates that may still be moving",
-                        stability.get("reason"),
-                    )
-                el = await _fetch()
-                if el is not None and _visible(el):
-                    return el
-
-        return None
-
-    async def _try_fast_path_element_check(
-        self,
-        udid: str,
-        identifier: str | None,
-        condition: WaitCondition
-    ) -> tuple[bool, dict | None]:
-        """Try to check element using describe-point instead of describe-all.
-
-        Returns (success: bool, element: dict | None)
-        - (True, element) if fast path succeeded and element matches condition
-        - (False, None) if fast path not applicable or failed
-        """
-        # Only support 'exists' condition for now
-        if condition != WaitCondition.EXISTS:
-            return (False, None)
-
-        # Only works for identifiers, not labels
-        if not identifier:
-            return (False, None)
-
-        # Check if this is a known static element
-        if identifier not in self._STATIC_ELEMENT_POSITIONS:
-            return (False, None)
-
-        # Get screen dimensions
-        dimensions = await self._get_screen_dimensions(udid)
-        if not dimensions:
-            logger.debug(
-                "[FAST PATH] Unknown screen dimensions for device, "
-                "falling back to describe-all"
-            )
-            return (False, None)
-
-        # Calculate coordinates based on anchor
-        x_offset, y_offset, anchor = self._STATIC_ELEMENT_POSITIONS[identifier]
-
-        if anchor == "bottom-left":
-            x = x_offset
-            y = dimensions["height"] - y_offset
-        elif anchor == "top-right":
-            x = dimensions["width"] - x_offset
-            y = y_offset
-        else:
-            logger.warning(f"[FAST PATH] Unknown anchor '{anchor}' for {identifier}")
-            return (False, None)
-
-        logger.info(f"[FAST PATH] Probing {identifier} at ({x}, {y}) instead of describe-all")
-
-        # Probe the point
-        try:
-            element = await self._ui_backend(udid).describe_point(udid, x, y)
-            if not element:
-                logger.debug(f"[FAST PATH] No element at ({x}, {y})")
-                return (True, None)  # Fast path succeeded, but element not found
-
-            # Check if identifier matches
-            found_identifier = element.get("AXUniqueId") or element.get("identifier")
-            if found_identifier == identifier:
-                logger.info(f"[FAST PATH] ✓ Found {identifier} at ({x}, {y})")
-                return (True, element)
-            else:
-                logger.debug(
-                    f"[FAST PATH] Element at ({x}, {y}) is "
-                    f"'{found_identifier}', not '{identifier}'"
+            Threshold is a quarter of the deadline rather than a constant, so it
+            scales if the budget is ever retuned instead of becoming a number
+            nobody revisits.
+            """
+            elapsed = time.perf_counter() - sweep_started
+            if elapsed >= deadline_budget / 4:
+                _note(f"FOUND, but slowly: {elapsed:.1f}s")
+                logger.info(
+                    "ios scroll-to-element: found %s after %d swipe(s) in %.1fs "
+                    "— slower than expected\n  %s",
+                    identifier or label, swipes, elapsed,
+                    "\n  ".join(sweep_trace),
                 )
-                return (True, None)  # Fast path succeeded, wrong element
+            return element
 
-        except Exception as e:
-            logger.debug(f"[FAST PATH] describe-point failed: {e}, falling back")
-            return (False, None)
+        def _give_up(reason: str) -> None:
+            """Log the whole sweep at the point it fails, and say why.
+
+            One block rather than N lines: the interesting thing is the shape of
+            the sweep -- how far each step travelled and what each read saw --
+            and that only reads as a sequence.
+            """
+            _note(f"GIVING UP: {reason}")
+            # swipes, not len(sweep_trace): the trace holds several lines per
+            # swipe, so reporting its length reads as a step count several times
+            # the real one and makes the budget look wrong.
+            logger.info(
+                "ios scroll-to-element: %s after %d swipe(s) in %.1fs, "
+                "target %s\n  %s",
+                reason, swipes, time.perf_counter() - sweep_started,
+                identifier or label, "\n  ".join(sweep_trace),
+            )
+
+        _note(
+            f"start: target={identifier or label!r} max_swipes={max_swipes} "
+            f"budget={down_budget} down, {total_budget} in all "
+            f"screen={screen_width:.0f}x{screen_height:.0f} "
+            f"swipe y {y_far:.0f}->{y_near:.0f}"
+        )
+
+        def _toward(y: float) -> tuple[float, float]:
+            """A swipe that brings a located element's top to just below the
+            top chrome, and no further than one step.
+
+            A full step toward a located row can carry a tall one straight past
+            the window it has to land in: a row of 400pt or more has a visible
+            window shorter than the step, and the sweep oscillated around it.
+            The ~10% a controlled swipe loses to touch slop is added back.
+            """
+            aim = top_safe + 20
+            distance = min(max(abs(y - aim) / 0.9, 80.0), step)
+            if y >= aim:
+                return y_far, y_far - distance
+            return y_near, y_near + distance
+
+        async def _sweep() -> UIElement | None:
+            nonlocal swipes
+            # tap_element has just run the identical filtered query and found
+            # nothing, so repeating it here spends a lookup re-learning what
+            # the caller already knows. scroll_to_element calls in cold with no
+            # prior read, so it still needs this check.
+            if time.perf_counter() >= deadline:
+                _give_up("deadline reached before the first lookup")
+                return None
+            el = None if target_known_absent else await _fetch(probe=True)
+            if el is not None and _visible(el):
+                return _finish(el)
+
+            # The baseline the first swipe is compared against, and the read
+            # that tells whether the sweep can skip probing.
+            #
+            # Skipping it is only sound for a target the static tree can see.
+            # If the cold lookup located the target and a plain read cannot, the
+            # target is probe-only (a tab-bar or nav-bar item), and a sweep that
+            # stops probing loses it after the first swipe and hunts for
+            # something no swiping reveals. Measured in review: 30 swipes and 31
+            # reads where main gave up after 2. So that target keeps probing; it
+            # then stays located, does not move -- chrome does not scroll -- and
+            # the stall check ends the sweep after two swipes, which is the
+            # right answer for an element scrolling cannot bring into view.
+            sweep_probe = False
+            plain, last_fingerprint = await _read(probe=False)
+            if el is not None and plain is None:
+                sweep_probe = True
+                _note("  target is probe-only; the sweep will keep probing")
+            elif plain is not None:
+                el = plain
+                if _visible(el):
+                    return _finish(el)
+
+            going_down = True
+            moved_at_all = False
+            last_cy: float | None = None
+            stalls = 0
+
+            while True:
+                if el is not None and el.frame is None:
+                    # Matched, but with nowhere to be: no swipe changes that,
+                    # and sweeping on spent the whole budget finding it out.
+                    _give_up("the target has no frame, so no swipe can bring it into view")
+                    return None
+                if el is not None and el.frame["height"] / 2 >= bottom_safe - top_safe:
+                    # _visible needs the top below the chrome and the centre
+                    # above the home indicator, which an element this tall can
+                    # never satisfy at once; the sweep swung around it until
+                    # the budget ran out.
+                    _give_up(
+                        f"the target is {el.frame['height']:.0f}pt tall, too tall "
+                        "to be brought fully into view"
+                    )
+                    return None
+                if time.perf_counter() >= deadline:
+                    _give_up(
+                        f"deadline of {deadline - sweep_started:.0f}s reached "
+                        f"after {swipes} swipe(s)"
+                    )
+                    return None
+                if swipes >= total_budget:
+                    _give_up(f"budget of {total_budget} swipes exhausted")
+                    return None
+
+                if el is not None:
+                    # Located but off-screen: swipe toward it, by as much as it
+                    # needs. Direction mirrors _visible's two out-of-view cases.
+                    _, cy = get_tap_point(el)
+                    going_down = el.frame["y"] >= top_safe
+                    # End-of-travel guard: frame stopped moving across swipes.
+                    if last_cy is not None and abs(cy - last_cy) < 2:
+                        stalls += 1
+                        if stalls >= 2:
+                            _give_up(f"container won't scroll further (cy={cy:.0f})")
+                            return None
+                    else:
+                        stalls = 0
+                    last_cy = cy
+                    y1, y2 = _toward(el.frame["y"])
+                    kind = "toward target"
+                else:
+                    # Not located: sweep blind. If the target was located and
+                    # then lost, `going_down` still says which way it was, and
+                    # the sweep carries on that way rather than restarting
+                    # downward -- the restart is how a 105s sweep kept swiping
+                    # away from a row it had seen above it.
+                    last_cy = None
+                    stalls = 0
+                    if going_down and swipes >= down_budget:
+                        going_down = False
+                        _note("  downward budget spent; sweeping up")
+                    y1, y2 = (y_far, y_near) if going_down else (y_near, y_far)
+                    kind = "blind"
+
+                swipes += 1
+                _note(
+                    f"swipe {swipes}/{total_budget} {kind} "
+                    f"({'down' if y1 > y2 else 'up'}) {y1:.0f}->{y2:.0f}"
+                )
+                await _swipe(y1, y2)
+
+                el, fingerprint = await _read_at_rest(sweep_probe)
+                moved = _moved(last_fingerprint, fingerprint)
+                last_fingerprint = fingerprint
+                # Here, not in the one branch that used to set it. `moved` is
+                # computed on every iteration and was only recorded when the
+                # target was still absent, so a sweep that located the target
+                # and kept scrolling toward it reported "nothing moved" --
+                # measured at 3 swipes and 150pt of travel, reported
+                # `{'swipes': 3, 'moved': False}`. Telling a caller the screen
+                # did not move when it did is worse than saying nothing.
+                if report is not None and moved:
+                    report["moved"] = True
+
+                if el is not None and _visible(el):
+                    _note("  found, at rest and visible — returning")
+                    return _finish(el)
+                if el is not None:
+                    _note(
+                        f"  found but not visible (y={el.frame['y']:.0f} "
+                        f"top_safe={top_safe:.0f})" if el.frame
+                        else "  found, but it has no frame"
+                    )
+                    continue
+
+                if moved:
+                    moved_at_all = True
+                    _note("  not in tree")
+                    continue
+
+                # A swipe that changed nothing: that end of the list is reached.
+                if going_down:
+                    going_down = False
+                    _note("  not in tree, and nothing moved: at the bottom; sweeping up")
+                    continue
+                _give_up(
+                    "reached the top without finding it" if moved_at_all
+                    else "screen unchanged after a swipe — nothing scrollable"
+                )
+                return None
+
+        try:
+            return await _sweep()
+        except BaseException as exc:
+            # A read or a swipe failing mid-sweep, or the caller cancelling,
+            # used to take the trace of every step before it down with it.
+            _give_up(f"stopped by {type(exc).__name__}: {exc!r}")
+            raise
 
     async def _wda_direct_query(
         self,
@@ -822,6 +1340,7 @@ class DeviceControllerUI:
         snapshot_depth: int | None = None,
         source_timeout: float | None = None,
         mode: str | None = None,
+        probe_containers: bool = True,
     ) -> tuple[list[UIElement], str]:
         """Native UI elements, plus any web content read by get_web_content.
 
@@ -832,6 +1351,7 @@ class DeviceControllerUI:
         elements, resolved = await self._native_ui_elements(
             udid, use_cache, filter_label, filter_identifier, filter_type,
             snapshot_depth, source_timeout, mode,
+            probe_containers=probe_containers,
         )
         return self._merge_web_overlay(
             resolved, elements,
@@ -849,6 +1369,7 @@ class DeviceControllerUI:
         snapshot_depth: int | None = None,
         source_timeout: float | None = None,
         mode: str | None = None,
+        probe_containers: bool = True,
     ) -> tuple[list[UIElement], str]:
         """Get UI accessibility elements with TTL-based caching and optional filtering.
 
@@ -927,6 +1448,13 @@ class DeviceControllerUI:
             await self._ensure_android_screen_on(resolved)
 
         backend = self._ui_backend(resolved)
+        # Recorded at the one moment it is authoritative: the read's own
+        # selection. Capturing it before the call is stale if the periodic
+        # refresh flips `_sim_bridge_ok` in between, and recomputing it when
+        # the error is built is stale the other way. Only the read knows.
+        self._last_read_backend[resolved] = getattr(
+            backend, "TOOL_NAME", "unknown",
+        )
         if mode == "flat" and hasattr(backend, "describe_all_flat"):
             raw = await backend.describe_all_flat(
                 resolved, snapshot_depth=snapshot_depth,
@@ -936,7 +1464,7 @@ class DeviceControllerUI:
         else:
             raw = await backend.describe_all(
                 resolved, snapshot_depth=snapshot_depth,
-                source_timeout=source_timeout,
+                source_timeout=source_timeout, probe=probe_containers,
             )
 
         # Parse strategy:
@@ -958,7 +1486,15 @@ class DeviceControllerUI:
             # could never satisfy the 300ms TTL. The cache was effectively dead
             # on this path: a not-found did two full reads back to back, the
             # second of them for screen context, both ~1.8s.
-            self._ui_cache[resolved] = (elements, time.time())
+            # Only a fully probed tree goes in. The key is the udid alone, so
+            # an entry cannot say that probing was skipped -- and the sweep
+            # reads with probe_containers=False, which omits the tab-bar and
+            # nav-bar children only probing reveals. Storing that tree served
+            # it to the next caller that asked for probing, inside the 300ms
+            # TTL: tap_element builds screen context immediately after
+            # scroll_to_element returns, which is exactly that window.
+            if probe_containers:
+                self._ui_cache[resolved] = (elements, time.time())
 
             # Apply filters in memory if needed
             if has_filters:
@@ -979,7 +1515,16 @@ class DeviceControllerUI:
         then returns its flattened descendants as parsed UIElements.
         """
         resolved = await self.resolve_udid(udid)
-        nested = await self._ui_backend(resolved).describe_all_nested(
+        # Selected once and recorded, the same way `get_ui_elements` does it.
+        # This was the one read path that did neither, so `get_ui_tree`
+        # with `children_of` reported whichever backend an *earlier* read
+        # had used -- the stale answer this whole change exists to remove,
+        # surviving on the one route nobody looked at.
+        backend = self._ui_backend(resolved)
+        self._last_read_backend[resolved] = getattr(
+            backend, "TOOL_NAME", "unknown",
+        )
+        nested = await backend.describe_all_nested(
             resolved, snapshot_depth=snapshot_depth,
         )
         child_dicts = find_children_of(
@@ -1010,9 +1555,16 @@ class DeviceControllerUI:
         if not any_label and not identifier and not element_type:
             raise DeviceError(
                 "At least one of label, identifier, or element_type is required",
-                tool="idb",
+                tool="quern",
             )
 
+        # Captured before the read, not when the error is built. `_sim_bridge_ok`
+        # is flipped by the periodic refresh and by `/tools`, so a read that went
+        # through sim-bridge can report its no-match as `[idb]` if the flag moved
+        # while `describe_all()` was awaiting. The refresh does not reroute the
+        # in-flight read or change its result -- only the label, which is the one
+        # thing this change exists to get right.
+        backend = self._backend_name(udid)
         elements, resolved = await self.get_ui_elements(udid)
         matches = find_element(
             elements, label=label, label_contains=label_contains,
@@ -1031,7 +1583,7 @@ class DeviceControllerUI:
                 search_desc += f", type='{element_type}'"
             raise DeviceError(
                 f"No element found matching {search_desc}",
-                tool="idb",
+                tool=self._last_read_backend.get(resolved, backend),
             )
 
         # Return first match with match_count if ambiguous
@@ -1073,20 +1625,20 @@ class DeviceControllerUI:
         if not any_label and not identifier and not element_type:
             raise DeviceError(
                 "At least one of label, identifier, or element_type is required",
-                tool="idb",
+                tool="quern",
             )
 
         if timeout > 60:
             raise DeviceError(
                 "Timeout cannot exceed 60 seconds",
-                tool="idb",
+                tool="quern",
             )
 
         if condition in (WaitCondition.VALUE_EQUALS, WaitCondition.VALUE_CONTAINS):
             if value is None:
                 raise DeviceError(
                     f"Condition '{condition}' requires a value parameter",
-                    tool="idb",
+                    tool="quern",
                 )
 
         resolved = await self.resolve_udid(udid)
@@ -1134,7 +1686,7 @@ class DeviceControllerUI:
         if not checker:
             raise DeviceError(
                 f"Unknown condition: {condition}",
-                tool="idb",
+                tool="quern",
             )
 
         # Polling loop
@@ -1145,64 +1697,6 @@ class DeviceControllerUI:
         while True:
             polls += 1
             elapsed = time.time() - start_time
-
-            # Try fast path first (describe-point for known static elements)
-            fast_path_success, fast_path_element = await self._try_fast_path_element_check(
-                resolved, identifier, condition
-            )
-
-            if fast_path_success:
-                # Fast path worked - use the result
-                # Convert raw dict to UIElement if we got one
-                if fast_path_element:
-                    parsed = parse_elements([fast_path_element])
-                    current_element = parsed[0] if parsed else None
-                else:
-                    current_element = None
-
-                last_element = current_element
-
-                # Check condition
-                if checker(current_element):
-                    return (
-                        {
-                            "matched": True,
-                            "elapsed_seconds": round(elapsed, 2),
-                            "polls": polls,
-                            "element": current_element.model_dump() if current_element else None,
-                        },
-                        resolved,
-                    )
-
-                # Condition not met yet, but fast path worked - check timeout
-                if elapsed >= timeout:
-                    # Best-effort screen context + screenshot for fast-path timeout
-                    try:
-                        ctx_elements, _ = await self.get_ui_elements(
-                            resolved, mode=mode,
-                        )
-                        screen_context = _build_screen_context(ctx_elements)
-                    except Exception:
-                        screen_context = {}
-                    screenshot = await _capture_screenshot(
-                        self, resolved, "wait_timeout",
-                    )
-                    if screenshot:
-                        screen_context["screenshot"] = screenshot
-                    return (
-                        {
-                            "matched": False,
-                            "elapsed_seconds": round(elapsed, 2),
-                            "polls": polls,
-                            "last_state": last_element.model_dump() if last_element else None,
-                            "screen_context": screen_context,
-                        },
-                        resolved,
-                    )
-
-                # Wait before next poll
-                await asyncio.sleep(interval)
-                continue
 
             # Fast path not applicable or failed - use traditional describe-all
             # Fetch UI elements with filtering for performance
@@ -1246,6 +1740,9 @@ class DeviceControllerUI:
                         resolved, mode=mode,
                     )
                     screen_context = _build_screen_context(ctx_elements)
+                    screen_context.update(
+                        await self._identify_for_miss(resolved, ctx_elements),
+                    )
                 except Exception:
                     screen_context = {}
                 screenshot = await _capture_screenshot(
@@ -1286,7 +1783,8 @@ class DeviceControllerUI:
             mode: 'flat' to use flat idb output (for custom companion). Default uses nested.
         """
         resolved = await self.resolve_udid(udid)
-        if strategy == "skeleton" and self._is_physical(resolved):
+        asked_for_skeleton = strategy == "skeleton" and self._is_physical(resolved)
+        if asked_for_skeleton:
             raw = await self.wda_client.build_screen_skeleton(resolved)
             elements = parse_elements(raw)
         else:
@@ -1295,11 +1793,104 @@ class DeviceControllerUI:
                 source_timeout=source_timeout,
                 mode=mode,
             )
-        return generate_screen_summary(elements, max_elements=max_elements), elements, resolved
+        summary = generate_screen_summary(elements, max_elements=max_elements)
+        # Which backend produced this. Cheap, and the first thing anyone
+        # investigating unexpected UI behaviour wants to know -- see
+        # `backend_that_served`.
+        summary["backend"] = self.backend_that_served(resolved)
+
+        # A tree read that timed out falls back to a container skeleton,
+        # which is often empty -- and an empty result is exactly what a blank
+        # screen returns. Saying so here is the difference between "this
+        # screen has nothing on it" and "we did not manage to read it", which
+        # #170 spent a long session failing to tell apart. The log line was
+        # already there; a caller driving this over MCP never sees the log.
+        # Read off the backend that did the work rather than re-deciding --
+        # `_last_read_backend` exists at the top of this file for the same
+        # reason (#186). Skipped entirely for a skeleton the caller asked
+        # for: that read never touches `/source`, so a note left by an
+        # earlier timeout would still be sitting there and would tell them
+        # their deliberate choice had timed out. The agent guide recommends
+        # `strategy: "skeleton"` for exactly the dense screens that produce
+        # these timeouts, so it is the likely sequence rather than a corner.
+        backend = None if asked_for_skeleton else self._ui_backend(resolved)
+        timed_out = getattr(backend, "source_timed_out", None)
+        seconds = timed_out(resolved) if callable(timed_out) else None
+        if seconds is not None:
+            summary["source_timed_out"] = True
+            summary["degraded"] = (
+                f"The accessibility tree read timed out after {seconds:.1f}s, so "
+                "this is a partial fallback rather than the screen. Element "
+                "counts are not trustworthy. Retry with a larger "
+                "source_timeout."
+            )
+
+        return summary, elements, resolved
+
+    async def _warn_if_input_is_suppressed(self, resolved: str) -> None:
+        """Say once per device when Device Hub holds its input services.
+
+        Once, because the check costs a `simctl spawn` (~0.5s) and the answer
+        cannot change without a reboot or the repair, both of which clear the
+        record. Not a refusal: the state is not conclusive (see
+        server/device/sim_input.py), and refusing input that would have worked
+        is worse than the warning.
+        """
+        if self._input_checked.get(resolved) is not None:
+            return
+        # A state that cannot be read is not cached, so that a device which
+        # becomes readable is noticed -- but without a cooldown that means a
+        # `simctl spawn` on *every* tap, swipe and keystroke for a device that
+        # never answers. Measured at ~0.11s each against an unknown udid.
+        asked_at = self._input_probe_cooldown.get(resolved)
+        now = time.monotonic()
+        if asked_at is not None and now - asked_at < self._INPUT_PROBE_COOLDOWN_S:
+            return
+        if self._is_android(resolved) or self._is_physical(resolved):
+            self._input_checked[resolved] = True
+            return
+        from server.device import sim_input
+
+        try:
+            suppressed = await sim_input.legacy_input_is_suppressed(resolved)
+        except OSError as exc:
+            logger.debug("Could not read the input-service state: %s", exc)
+            return
+        if suppressed is None:
+            # Asked and got nothing back. Recording that as healthy would
+            # disable the check for this device for the rest of the session on
+            # the strength of one transient failure, so only the cooldown is
+            # recorded: ask again, but not on every keystroke.
+            self._input_probe_cooldown[resolved] = now
+            return
+        self._input_checked[resolved] = not suppressed
+        if suppressed:
+            logger.warning(sim_input.suppressed_input_warning(resolved))
+
+    def input_warning(self, udid: str) -> str | None:
+        """The advisory for a device whose input services were taken, if any.
+
+        `_warn_if_input_is_suppressed` writes this to the server log, which the
+        caller never sees. That is the wrong half of the audience: an agent
+        gets `{"status": "ok"}` back from a tap that was accepted and
+        discarded, which is the exact shape of bug the warning exists to
+        catch. API handlers attach this to the response so the answer travels
+        with the call that is failing.
+
+        Only a recorded state of False qualifies. None means unchecked or
+        unreadable, and inventing an advisory for a device nobody has
+        successfully asked about would warn on every simulator.
+        """
+        if self._input_checked.get(udid) is not False:
+            return None
+        from server.device import sim_input
+
+        return sim_input.suppressed_input_warning(udid)
 
     async def tap(self, x: float, y: float, udid: str | None = None) -> str:
         """Tap at coordinates. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
+        await self._warn_if_input_is_suppressed(resolved)
         await self._ui_backend(resolved).tap(resolved, x, y)
         self._invalidate_ui_cache(resolved)  # UI changed
         return resolved
@@ -1315,7 +1906,7 @@ class DeviceControllerUI:
         skip_stability_check: bool = False,
         source_timeout: float | None = None,
         value: str | None = None,
-        scroll_to_find: bool = True,
+        scroll_to_find: bool | None = None,
     ) -> dict:
         """Find an element by label/identifier and tap its center.
 
@@ -1335,49 +1926,8 @@ class DeviceControllerUI:
             raise DeviceError(
                 "Either label/label_contains/label_prefix or identifier "
                 "is required for tap-element",
-                tool="idb",
+                tool="quern",
             )
-
-        # Fast path: for known static elements, tap directly at known coordinates
-        if identifier and identifier in self._STATIC_ELEMENT_POSITIONS:
-            resolved = await self.resolve_udid(udid)
-            dimensions = await self._get_screen_dimensions(resolved)
-
-            if dimensions:
-                x_offset, y_offset, anchor = self._STATIC_ELEMENT_POSITIONS[identifier]
-
-                if anchor == "bottom-left":
-                    x = x_offset
-                    y = dimensions["height"] - y_offset
-                elif anchor == "top-right":
-                    x = dimensions["width"] - x_offset
-                    y = y_offset
-                else:
-                    logger.warning(
-                        f"[FAST PATH TAP] Unknown anchor '{anchor}' "
-                        f"for {identifier}, falling back"
-                    )
-                    # Fall through to traditional path
-
-                if anchor in ("bottom-left", "top-right"):
-                    logger.info(
-                        f"[FAST PATH TAP] Tapping {identifier} at "
-                        f"calculated coordinates ({x}, {y}) "
-                        f"[anchor={anchor}]"
-                    )
-
-                    # Tap directly without fetching UI tree
-                    await self._ui_backend(resolved).tap(resolved, x, y)
-
-                    return {
-                        "status": "ok",
-                        "tapped": {
-                            "identifier": identifier,
-                            "type": "Button",
-                            "x": x,
-                            "y": y,
-                        },
-                    }
 
         # Android fast path: tap by native selector, skipping the full UI-tree
         # dump. dump_hierarchy() scrolls CoordinatorLayout/RecyclerView content
@@ -1388,6 +1938,20 @@ class DeviceControllerUI:
         # (exact identifier/label, no type/value/substring filters); anything
         # else falls through to the dump-based path below.
         resolved_fast = await self.resolve_udid(udid)
+        await self._warn_if_input_is_suppressed(resolved_fast)
+        # Declared before the Android fast path below, not just before the iOS
+        # block: both of them swipe, and a caller has to be told about either.
+        #
+        # The platform goes in immediately, because a miss that never reaches
+        # either sweep still produces a report -- an Android `tap_element` with
+        # `value` set, or `identifier` plus `element_type`, skips the fast path
+        # and is then skipped by the iOS block too. Without this it was handed
+        # the iOS advice: "add `scrollable: true` to the screen's
+        # knowledge-base entry", on a platform where no path reads that field.
+        sweep: dict = {
+            "attempted": False,
+            "platform": "android" if self._is_android(resolved_fast) else "ios",
+        }
         if (
             self._is_android(resolved_fast)
             and value is None
@@ -1403,7 +1967,22 @@ class DeviceControllerUI:
             # Not in the current view — auto-scroll to it and retry. Uses the
             # selector-based swipe loop (no dump_hierarchy), so it inherits the
             # no-dump-induced-scroll property of the fast path.
-            if tapped is None and scroll_to_find:
+            # `is not False`, so unset keeps Android's existing behaviour.
+            #
+            # The tri-state below is scoped to iOS deliberately. This is the
+            # no-tree-read fast path, and asking the knowledge base costs
+            # exactly the tree read it exists to avoid -- so making Android
+            # default-off here would either degrade it silently or make it slow.
+            # The iOS sweep is the one that prompted #274. Android's
+            # `scroll_into_view` swipes for real too and deserves the same
+            # treatment; it needs a cheaper way to identify the screen first.
+            if tapped is None and scroll_to_find is not False:
+                # Recorded even though the knowledge base is not consulted on
+                # this path: the swipe is just as real, and a response saying
+                # `attempted: False` after the device was swiped is the exact
+                # defect this object exists to prevent, reintroduced on the
+                # other platform.
+                sweep["attempted"] = True
                 found = await backend.scroll_into_view(
                     resolved_fast, identifier=identifier, label=label,
                 )
@@ -1422,7 +2001,16 @@ class DeviceControllerUI:
                     )
             if tapped is not None:
                 self._invalidate_ui_cache(resolved_fast)
-                return {"status": "ok", "tapped": tapped}
+                result = {"status": "ok", "tapped": tapped}
+            # A tap that succeeded only *because* the screen scrolled has
+            # moved the screen, and the caller cannot see that from
+            # `status: ok` alone. Same defect as the Android branch reporting
+            # `attempted: False` -- a gesture the caller cannot see -- on the
+            # path where it is easiest to forget, because nothing went wrong.
+            # Omitted entirely when no sweep ran, so a plain tap is unchanged.
+                if sweep.get("attempted"):
+                    result["scroll"] = _scroll_report(sweep, scroll_to_find)
+                return result
             # Not found even after scrolling — fall through to the dump-based path.
 
         # Traditional path: fetch full UI tree
@@ -1449,22 +2037,72 @@ class DeviceControllerUI:
         # so this is scoped to iOS. Only exact label/identifier can be scrolled
         # to (scroll_to_element's contract); contains/prefix/type-only fall
         # through to not_found.
+        all_elements: list[UIElement] | None = None
+        # Tracked beside the elements, because identification is only honest
+        # against the whole tree. `_all_elements_for_context` falls back to the
+        # *filtered* list when the full read fails, and landmarks compared with
+        # the target's own matches name a confident wrong screen -- the
+        # scrollability path 40 lines down already refuses on this flag, and
+        # this one has to refuse on it too.
+        all_elements_complete: bool = True
         if (
             len(matches) == 0
-            and scroll_to_find
             and not self._is_android(resolved)
             and (label or identifier)
         ):
-            # The miss above is only authoritative if that read reached the
-            # device. With the cache live it can be served from an entry up to
-            # the TTL old, and an element that appeared in that window would be
-            # skipped entirely if the scroll loop also declined to look.
-            scrolled = await self._ios_scroll_to_element(
-                resolved, label=label, identifier=identifier, max_swipes=10,
-                target_known_absent=not served_from_cache,
-            )
-            if scrolled is not None:
-                matches = [scrolled]
+            # Whether to sweep at all. Tri-state: an explicit True or False is
+            # the caller's decision and is obeyed. Unset asks the knowledge
+            # base, and sweeps only on a screen recorded as scrolling.
+            #
+            # The default used to be True, so a miss swiped a screen that could
+            # not scroll -- twice, because "nothing moved going down" does not
+            # distinguish an unscrollable screen from the bottom of a list, and
+            # the second probe is the pull-to-refresh and sheet-dismiss drag.
+            # Detecting it first is not possible: the tree quern reads exposes
+            # interactive leaves, not containers, and Settings and Safari both
+            # scroll while reporting no scroll container at all. So it is
+            # recorded per screen instead of rediscovered per tap. See #274.
+            should_sweep = scroll_to_find
+            if should_sweep is None:
+                # The full tree, which the not-found path below fetches anyway.
+                # Doing it here instead pays for identification and that context
+                # at once, and `identify_screen` needs no device read of its own.
+                all_elements, complete = await self._all_elements_for_context(
+                    resolved, elements, filter_label, identifier, element_type,
+                )
+                all_elements_complete = complete
+                if not complete:
+                    # The full read failed and this is the *filtered* list --
+                    # the target's matches, or nothing. Identifying against it
+                    # would compare landmarks with a handful of elements and
+                    # conclude "no known screen", which reads as "you have not
+                    # recorded this" when the truth is "quern could not look".
+                    hint, screen_name, why, candidates = None, None, "read_failed", None
+                else:
+                    hint, screen_name, why, candidates = self._scrollable_hint(
+                        all_elements,
+                    )
+                should_sweep = hint is True
+                sweep["screen"] = screen_name
+                sweep["known_scrollable"] = hint
+                sweep["why"] = why
+                sweep["candidates"] = candidates
+            if should_sweep:
+                # The miss above is only authoritative if that read reached the
+                # device. With the cache live it can be served from an entry up
+                # to the TTL old, and an element that appeared in that window
+                # would be skipped entirely if the scroll loop also declined to
+                # look.
+                sweep["attempted"] = True
+                scrolled = await self._ios_scroll_to_element(
+                    resolved, label=label, identifier=identifier, max_swipes=10,
+                    target_known_absent=not served_from_cache,
+                    report=sweep,
+                )
+                if scrolled is not None:
+                    matches = [scrolled]
+                # The tree moved, so context gathered before the sweep is stale.
+                all_elements = None
 
         if len(matches) == 0:
             search_desc = (
@@ -1475,15 +2113,24 @@ class DeviceControllerUI:
             )
             if element_type:
                 search_desc += f", type='{element_type}'"
-            # Fetch full (unfiltered) elements for screen context if we used filters
-            if filter_label or identifier or element_type:
-                try:
-                    all_elements, _ = await self.get_ui_elements(resolved)
-                except Exception:
-                    all_elements = elements
-            else:
-                all_elements = elements
+            if all_elements is None:
+                all_elements, all_elements_complete = (
+                    await self._all_elements_for_context(
+                        resolved, elements, filter_label, identifier,
+                        element_type,
+                    )
+                )
             screen_context = _build_screen_context(all_elements)
+            if all_elements_complete:
+                # Only against the whole tree. On a failed full read this is
+                # the filtered list, and identifying against it produces
+                # "identified_as: null, confidence: none" -- "I looked and
+                # recognised nothing" when nothing was looked at -- or worse, a
+                # named match that is simply wrong, because a screen defined by
+                # an absent landmark matches a list that is missing everything.
+                screen_context.update(
+                    await self._identify_for_miss(resolved, all_elements),
+                )
             screenshot = await _capture_screenshot(
                 self, resolved, "tap_not_found",
             )
@@ -1493,6 +2140,14 @@ class DeviceControllerUI:
                 "status": "not_found",
                 "detail": f"No element found matching {search_desc}",
                 "screen_context": screen_context,
+                # Always present, and always says which of the three happened.
+                # A swipe is a real gesture -- the upward sweep is the
+                # pull-to-refresh and sheet-dismiss drag -- so a caller that
+                # cannot see it acts next against a screen it does not know has
+                # moved. And when no sweep ran, the reason decides the caller's
+                # next move: retrying with `scroll_to_find=true` is worth it on
+                # an unknown screen and worthless on one recorded as fixed.
+                "scroll": _scroll_report(sweep, scroll_to_find),
             }
 
         if len(matches) == 1:
@@ -1518,7 +2173,7 @@ class DeviceControllerUI:
                 cx, cy = get_tap_point(el)
                 await self._ui_backend(resolved).tap(resolved, cx, cy)
                 self._invalidate_ui_cache(resolved)
-                return {
+                result = {
                     "status": "ok",
                     "tapped": {
                         "type": el.type, "label": el.label,
@@ -1526,6 +2181,9 @@ class DeviceControllerUI:
                         "source": (el.extra_attrs or {}).get("source"),
                     },
                 }
+                if sweep.get("attempted"):
+                    result["scroll"] = _scroll_report(sweep, scroll_to_find)
+                return result
 
             # Value check for switches/toggles: skip tap if already in desired state
             if value is not None:
@@ -1548,13 +2206,11 @@ class DeviceControllerUI:
             # scroll it into view before tapping.
             screen_height = self._get_screen_height_from_elements(elements)
             screen_width = self._get_screen_width_from_elements(elements)
-            if not screen_height or not screen_width:
-                # Filtered element list may not include the Application element;
-                # fall back to the device dimensions lookup table.
-                dims = await self._get_screen_dimensions(resolved)
-                if dims:
-                    screen_height = screen_height or dims["height"]
-                    screen_width = screen_width or dims["width"]
+            # A filtered element list may not include the Application
+            # element, in which case the height is unknown and the
+            # home-indicator check below is skipped rather than guessed. The
+            # per-model table that used to answer here was wrong for every
+            # model it listed (#210) and has been removed.
             screen_width = screen_width or 393
             if screen_height and self._is_obscured_by_home_indicator(el, screen_height):
                 logger.info(
@@ -1671,6 +2327,8 @@ class DeviceControllerUI:
             if value is not None:
                 result["previous_value"] = el.value or ""
                 result["requested_value"] = value
+            if sweep.get("attempted"):
+                result["scroll"] = _scroll_report(sweep, scroll_to_find)
             return result
 
         # Future enhancement: Retry logic implementation
@@ -2036,6 +2694,7 @@ class DeviceControllerUI:
     ) -> str:
         """Swipe gesture. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
+        await self._warn_if_input_is_suppressed(resolved)
         await self._ui_backend(resolved).swipe(resolved, start_x, start_y, end_x, end_y, duration)
         self._invalidate_ui_cache(resolved)  # UI changed
         return resolved
@@ -2062,13 +2721,23 @@ class DeviceControllerUI:
         Returns {"status": "ok", "element": {...}} once visible, or
         {"status": "not_found", ...} if it never appeared.
         """
+        # Checked before resolving a device, deliberately: rejecting bad
+        # arguments should not first go looking for hardware, and the error is
+        # about the call rather than the device.
+        #
+        # Which is why it is not labelled with a backend. It read `tool="u2"`
+        # unconditionally, so a missing argument on a physical iPhone was
+        # reported as a failure of Android's driver (#186) -- but naming the
+        # backend that *would* have run is equally untrue, because none did.
+        # `quern` follows the existing non-hardware labels like `pool`.
         if not label and not identifier:
             raise DeviceError(
                 "Either label or identifier is required for scroll-to-element",
-                tool="u2",
+                tool="quern",
             )
 
         resolved = await self.resolve_udid(udid)
+        await self._warn_if_input_is_suppressed(resolved)
         target = f"identifier='{identifier}'" if identifier else f"label='{label}'"
 
         if self._is_android(resolved):
@@ -2078,10 +2747,17 @@ class DeviceControllerUI:
             self._invalidate_ui_cache(resolved)  # scrolling changes the viewport
             if found is None:
                 return {
+                    "udid": resolved,
+                    "backend": self.backend_that_served(resolved),
                     "status": "not_found",
                     "detail": f"Element not found after scrolling ({target})",
                 }
-            return {"status": "ok", "element": found}
+            return {
+                "udid": resolved,
+                "backend": self.backend_that_served(resolved),
+                "status": "ok",
+                "element": found,
+            }
 
         # iOS (physical WDA + simulator)
         el = await self._ios_scroll_to_element(
@@ -2090,11 +2766,15 @@ class DeviceControllerUI:
         self._invalidate_ui_cache(resolved)  # scrolling changes the viewport
         if el is None:
             return {
+                "udid": resolved,
+                "backend": self.backend_that_served(resolved),
                 "status": "not_found",
                 "detail": f"Element not found after scrolling ({target})",
             }
         cx, cy = get_tap_point(el)
         return {
+            "udid": resolved,
+            "backend": self.backend_that_served(resolved),
             "status": "ok",
             "element": {
                 "label": el.label,
@@ -2126,6 +2806,7 @@ class DeviceControllerUI:
         which is why it is asked for rather than assumed.
         """
         resolved = await self.resolve_udid(udid)
+        await self._warn_if_input_is_suppressed(resolved)
         if not (label or identifier):
             await self._ui_backend(resolved).type_text(resolved, text)
             self._invalidate_ui_cache(resolved)
@@ -2152,7 +2833,7 @@ class DeviceControllerUI:
                 f"{'unreadable' if after is None else str(len(after)) + ' after'}). "
                 "The tap may not have taken focus, or the field may be "
                 "read-only.",
-                tool="idb",
+                tool=self._backend_name(resolved),
             )
         return {"udid": resolved, "verified": True}
 
@@ -2179,10 +2860,12 @@ class DeviceControllerUI:
         # changed, and typing at stale coordinates would put the text in
         # whatever now occupies them -- which the read-back afterwards, looking
         # up the same selector, would not necessarily notice.
+        # Captured before any await, for the reason given in `get_element`.
+        backend = self._backend_name(udid)
         if self._web_overlay.get(udid):
             with contextlib.suppress(DeviceError):
                 await self.get_web_content(udid=udid)
-        elements, _ = await self.get_ui_elements(udid=udid, use_cache=False)
+        elements, read_udid = await self.get_ui_elements(udid=udid, use_cache=False)
         matches = self._matching_fields(elements, label, identifier)
         if not matches:
             raise DeviceError(
@@ -2190,7 +2873,7 @@ class DeviceControllerUI:
                 # which reads as a broken server rather than a missing field.
                 f"No element found: no text field matching "
                 f"{label or identifier!r} to type into",
-                tool="wda" if self._is_physical(udid) else "idb",
+                tool=self._last_read_backend.get(read_udid, backend),
             )
         return matches[0]
 
@@ -2206,11 +2889,33 @@ class DeviceControllerUI:
         if (target.extra_attrs or {}).get("source") in ("web-inspector", "web-probe"):
             try:
                 await self.get_web_content(udid=udid)
-            except DeviceError:
+            except DeviceError as e:
+                # Same rule as the read below, and this is its sibling four
+                # lines up -- fixed one and left the other, which is the shape
+                # this whole change is about. `get_web_content` does a native
+                # tree read before its Web Inspector handling, so a broken
+                # backend surfaces here first and would be swallowed into
+                # "unreadable".
+                if e.tool in _BACKEND_FAILURE_TOOLS:
+                    raise
                 return None
         try:
             elements, _ = await self.get_ui_elements(udid=udid, use_cache=False)
-        except DeviceError:
+        except DeviceError as e:
+            # A read that could not happen is not a read that found nothing.
+            #
+            # `None` here means "unreadable", and the caller turns that into
+            # "the tap may not have taken focus, or the field may be
+            # read-only" -- a confident misdiagnosis. That was survivable
+            # while sim-bridge raised `RuntimeError` and sailed past this
+            # handler; now that it raises `DeviceError` (#178), a dead bridge
+            # would be reported as a read-only field. Fixing one failure into
+            # a more plausible wrong answer is worse than the failure.
+            #
+            # So a backend that is broken propagates, and only a device that
+            # genuinely answered "nothing matched" reads as unreadable.
+            if e.tool in _BACKEND_FAILURE_TOOLS:
+                raise
             return None
         matches = self._matching_fields(elements, label, identifier)
         return (matches[0].value or "") if matches else None
@@ -2246,6 +2951,7 @@ class DeviceControllerUI:
         accessibility tree does not report it.
         """
         resolved = await self.resolve_udid(udid)
+        await self._warn_if_input_is_suppressed(resolved)
 
         elements, _ = await self.get_ui_elements(udid=resolved)
         text_fields = [
@@ -2259,7 +2965,7 @@ class DeviceControllerUI:
             if not matches:
                 raise DeviceError(
                     f"No text field matching {label or identifier!r} to clear",
-                    tool="wda" if self._is_physical(resolved) else "idb",
+                    tool=self._backend_name(resolved),
                 )
             target = matches[0]
         else:
@@ -2271,9 +2977,9 @@ class DeviceControllerUI:
                 target = text_fields[0]
 
         if target is None or target.frame is None:
-            tool = "wda" if self._is_physical(resolved) else "idb"
             raise DeviceError(
-                "No text field found to clear", tool=tool,
+                "No text field found to clear",
+                tool=self._backend_name(resolved),
             )
 
         cx = target.frame["x"] + target.frame["width"] / 2
@@ -2314,7 +3020,7 @@ class DeviceControllerUI:
                 "keystroke, and the Web Inspector could not reach the page to "
                 "clear it directly. Reload the page, or make the web view "
                 "inspectable.",
-                tool="idb",
+                tool=self._backend_name(resolved),
             )
 
         if remaining and hasattr(backend, "delete_backwards"):
@@ -2332,6 +3038,7 @@ class DeviceControllerUI:
     async def press_button(self, button: str, udid: str | None = None) -> str:
         """Press a hardware button. Returns the resolved udid."""
         resolved = await self.resolve_udid(udid)
+        await self._warn_if_input_is_suppressed(resolved)
         await self._ui_backend(resolved).press_button(resolved, button)
         return resolved
 

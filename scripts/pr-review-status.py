@@ -27,6 +27,11 @@ is available. Both are read here: the PR is reported pending *with that reason
 and time*, and is not asked about again until the time has passed. (Earlier the
 wording was "You've used all free OSS reviews for now".)
 
+**A refusal is not proof that nothing is running.** With usage-based reviews
+enabled the banner tracks the *included* allowance only, so a paid review can
+be in progress while it still quotes a wait. `coveredCommitId` is the
+authoritative signal and is polled here even after a refusal.
+
 A rate-limited head can still have every thread resolved -- CodeRabbit closes
 threads whose fixes it can see without running a review -- so "0 unresolved"
 is not evidence the head was reviewed.
@@ -289,15 +294,60 @@ def _rate_limit_note(lifts: float | None) -> str:
     return f"CodeRabbit is rate limited until {stamp}"
 
 
-def _ask_for_review(number: int) -> str:
+def _ever_reviewed(number: int) -> bool:
+    """Whether CodeRabbit has ever completed a review on this PR.
+
+    Any `coveredCommitId` will do -- the question is not whether the *head*
+    was read but whether there is an increment to review forward from.
+
+    A missing summary comment reads as never-reviewed, which is the safe
+    direction: asking for a full pass on a PR that has had one costs a
+    re-read, while asking for an increment on a PR that has had none gets a
+    decline and no review at all.
+    """
+    try:
+        pages = json.loads(gh("api", "--paginate", "--slurp",
+                              f"repos/{REPO}/issues/{number}/comments"))
+    except GhError:
+        # Unreachable GitHub is not evidence of a prior review, and the safe
+        # direction is to ask for the full pass.
+        return False
+    for c in [c for page in pages for c in page]:
+        user = c.get("user") or {}
+        if user.get("id") != CODERABBIT_ID or user.get("login") != CODERABBIT_LOGIN:
+            continue
+        if re.search(r'"coveredCommitId"\s*:\s*"[0-9a-f]{7,40}"', c.get("body", "")):
+            return True
+    return False
+
+
+def _ask_for_review(number: int, *, full: bool | None = None) -> str:
     """Post the request and return GitHub's timestamp for it.
 
     Posted through the API rather than `gh pr comment` so the created_at comes
     back: anchoring the reply search on a local clock invites skew against
     GitHub's, and the anchor decides which replies count.
+
+    `@coderabbitai review` is **incremental**: it reviews forward from the
+    last commit CodeRabbit saw, and once it has seen the tip it declines with
+    "does not re-review already reviewed commits". That is the right request
+    after pushing fixes, and the wrong one on a PR it has never read -- there
+    is no increment, and the reply is a decline rather than a review.
+
+    This is the merge gate, so it was asking in the weaker form exactly when
+    a full pass matters most: a PR whose auto-review-on-open was refused for
+    rate limiting looks reviewed on every surface (`gh pr checks` renders a
+    passing CodeRabbit row for a head it never examined, and an empty
+    findings list is indistinguishable from a clean one) and has had no pass
+    at all. Found on #329, whose open-review was rate limited.
+
+    `full` is worked out from the PR when not given.
     """
+    if full is None:
+        full = not _ever_reviewed(number)
+    body = "@coderabbitai full review" if full else "@coderabbitai review"
     created = json.loads(gh("api", f"repos/{REPO}/issues/{number}/comments",
-                            "-f", "body=@coderabbitai review"))
+                            "-f", f"body={body}"))
     return created.get("created_at", "")
 
 
@@ -335,10 +385,15 @@ def _reply_after(number: int, since: str) -> str:
 _MAX_ASKS = 2
 
 
-def _reviewed_by_asking(number: int, timeout: float = 600.0) -> str:
+def _reviewed_by_asking(number: int, head: str, timeout: float = 600.0) -> str:
     """Ask whether the head commit is reviewed, and wait if a review starts.
 
     Returns "reviewed", "rate_limited", or "timeout".
+
+    The coverage marker is polled alongside the reply because it is the
+    authoritative signal and the reply is not: a clean review posts no body,
+    and since usage-based reviews were enabled a refusal no longer proves that
+    nothing is running.
     """
     since = _ask_for_review(number)
     asks = 1
@@ -351,6 +406,21 @@ def _reviewed_by_asking(number: int, timeout: float = 600.0) -> str:
         if _ALREADY_REVIEWED in reply or _FINISHED in reply:
             return "reviewed"
         if _RATE_LIMITED in reply:
+            # A refusal no longer proves nothing is running: with usage-based
+            # reviews the banner tracks the *included* allowance only, so a
+            # paid review can be under way while it still quotes a wait
+            # (measured 2026-09-29 -- the marker moved about six minutes after
+            # the ask while the banner said 29). So consult the authoritative
+            # marker once before believing it.
+            #
+            # Once, not in a loop. Waiting here is exactly what #207 removed:
+            # the gate polled the full timeout on a reply it already had. It
+            # costs nothing to exit now, because `_status` reads the marker
+            # before asking on every later call -- so a review that lands six
+            # minutes from now is picked up then, without anyone blocking on
+            # it.
+            if _summary_verdict(number, head)[0] == "reviewed":
+                return "reviewed"
             return "rate_limited"
         if _TRIGGERED in reply and asks < _MAX_ASKS:
             # A review is running. It leaves a review object only if it finds
@@ -420,8 +490,20 @@ def _status(number: int, ask: bool = False) -> tuple[str, str]:
     review_pages = json.loads(gh("api", "--paginate", "--slurp",
                                  f"repos/{REPO}/pulls/{number}/reviews"))
     reviews = [r for page in review_pages for r in page]
+    # Only reviews that said something count. GitHub records a *review* when
+    # CodeRabbit resolves a thread, and that review has an empty body -- so
+    # replying to findings and resolving them, which is how you answer a
+    # review, stamped the push that followed as reviewed. Measured on
+    # 2026-09-19: three PRs read "reviewed, clean" on commits no review had
+    # touched, each satisfied by resolution events landing seconds after the
+    # push. `tests/fixtures/review-state/` holds those states.
+    #
+    # Dropping them does not make a clean pass look unreviewed, because a
+    # clean pass posts no review object at all -- the check has never been
+    # able to see one, and that is what the asking path below is for.
     reviewed = max((ts(r.get("submitted_at")) for r in reviews
-                    if (r.get("user") or {}).get("id") == CODERABBIT_ID), default=0.0)
+                    if (r.get("user") or {}).get("id") == CODERABBIT_ID
+                    and (r.get("body") or "").strip()), default=0.0)
 
     # Whether the newest commit has been reviewed is not inferable from the
     # API, and every proxy tried here was wrong in one direction or the other:
@@ -462,7 +544,7 @@ def _status(number: int, ask: bool = False) -> tuple[str, str]:
                 note = _rate_limit_note(_LIFTS_AT.get(number))
             elif ask:
                 note = ""
-                outcome = _reviewed_by_asking(number)
+                outcome = _reviewed_by_asking(number, head)
                 if outcome == "reviewed":
                     reviewed = pushed
                 elif outcome == "rate_limited":

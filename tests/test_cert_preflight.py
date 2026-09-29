@@ -568,7 +568,11 @@ class TestTheCliCommandIsGatedToo:
         monkeypatch.setattr(main, "read_state", lambda: None)
 
         main._cmd_enable_local_capture(["MyApp"], skip_cert_check=True)
-        assert wrote == [["MyApp"]]
+        # The subject is that the command got past the gate and wrote
+        # something, not what the list contains. Asserting the exact list
+        # pinned the old replace-the-defaults behaviour, so changing that
+        # broke a test about certificates.
+        assert wrote and "MyApp" in wrote[0]
 
     def test_a_trusting_machine_is_not_slowed_into_refusing(self, monkeypatch):
         from server import main
@@ -580,7 +584,11 @@ class TestTheCliCommandIsGatedToo:
         monkeypatch.setattr(main, "read_state", lambda: None)
 
         main._cmd_enable_local_capture(["MyApp"])
-        assert wrote == [["MyApp"]]
+        # The subject is that the command got past the gate and wrote
+        # something, not what the list contains. Asserting the exact list
+        # pinned the old replace-the-defaults behaviour, so changing that
+        # broke a test about certificates.
+        assert wrote and "MyApp" in wrote[0]
 
     def test_disabling_is_never_refused(self, monkeypatch):
         """Clearing the list stops capture. Refusing it would trap someone in
@@ -696,7 +704,11 @@ class TestAutoInstallCertClearsEveryGate:
 
         main._cmd_enable_local_capture(["MyApp"])
 
-        assert wrote == [["MyApp"]], "the CLI refused despite the setting"
+        # The subject is that the command got past the gate and wrote
+        # something, not what the list contains. Asserting the exact list
+        # pinned the old replace-the-defaults behaviour, so changing that
+        # broke a test about certificates.
+        assert wrote and "MyApp" in wrote[0], "the CLI refused despite the setting"
         assert _installs == ["AAAA1111"]
 
     async def test_the_startup_check_installs_instead_of_warning(

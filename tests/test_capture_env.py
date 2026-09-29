@@ -236,10 +236,18 @@ def test_it_still_parses_on_the_oldest_python_it_must_run_on():
 
     candidates = ["/usr/bin/python3", f"python{OLDEST_PYTHON[0]}.{OLDEST_PYTHON[1]}"]
     for candidate in candidates:
-        probe = subprocess.run(
-            [candidate, "-c", "import sys; print(sys.version_info[:2])"],
-            capture_output=True, text=True,
-        )
+        try:
+            probe = subprocess.run(
+                [candidate, "-c", "import sys; print(sys.version_info[:2])"],
+                capture_output=True, text=True,
+            )
+        except OSError:
+            # A candidate that is not installed never runs, so it raises here
+            # rather than returning non-zero -- and the check below only sees
+            # one that ran. On macOS both candidates exist and this never
+            # mattered; on a runner with neither, the raise escaped the loop
+            # before it could reach the skip written for exactly this case.
+            continue
         if probe.returncode != 0:
             continue
         version = eval(probe.stdout.strip())  # noqa: S307 - our own output

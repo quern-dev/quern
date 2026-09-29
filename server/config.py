@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-logger = logging.getLogger("quern-debug-server.config")
+logger = logging.getLogger(__name__)
 
 # Honours QUERN_STATE_DIR, so redirecting it redirects *everything* under
 # ~/.quern -- the api key, config.json, the device pool, crash reports, the
@@ -40,7 +40,16 @@ class ServerConfig:
     host: str = "0.0.0.0"
     port: int = 9100
     ring_buffer_size: int = 10_000
-    default_device_id: str = "default"
+    #: What `device_id` a source gets when it does not know which device it
+    #: is reading. Empty, not a name: a sentinel that looks like a device
+    #: passes every truthiness check and fails every equality one, which is
+    #: how app log lines came to be treated as belonging to a device called
+    #: "default" and matched nothing anywhere.
+    #:
+    #: oslog and crash watch the *host*, so for them this is honest rather
+    #: than a placeholder -- a macOS crash report genuinely belongs to no
+    #: simulator.
+    default_device_id: str = ""
     api_key: str = field(default="", repr=False)
 
     def __post_init__(self) -> None:
@@ -55,6 +64,37 @@ class ServerConfig:
         if API_KEY_FILE.exists():
             key = API_KEY_FILE.read_text().strip()
             if key:
+                # `.strip()` takes control characters off the ends but not out
+                # of the middle, and `isascii()` calls them ASCII -- so a key
+                # with an embedded CR, LF or NUL passes both. No client can
+                # send one: httpx builds the header and then refuses at the
+                # wire with "Illegal header value", naming the character and
+                # not the file. That is the same failure the check below
+                # exists to prevent, so it is the same refusal.
+                control = next(
+                    (c for c in key if ord(c) < 0x20 or ord(c) == 0x7F), None,
+                )
+                if control is not None:
+                    raise ValueError(
+                        f"The API key in {API_KEY_FILE} contains a control "
+                        f"character (0x{ord(control):02x}), which HTTP headers "
+                        "cannot carry, so no client could authenticate. Edit "
+                        "the file, or delete it to have a new key generated."
+                    )
+                if not key.isascii():
+                    # No HTTP client can send it: httpx raises
+                    # UnicodeEncodeError and node's Headers a TypeError, both
+                    # naming a character rather than the file it came from.
+                    # The server would start and refuse every request. This is
+                    # a hand-edited file, so a pasted smart quote is the likely
+                    # cause -- say that here rather than let it present as
+                    # "authentication is broken".
+                    raise ValueError(
+                        f"The API key in {API_KEY_FILE} contains non-ASCII "
+                        "characters, which HTTP headers cannot carry, so no "
+                        "client could authenticate. Edit the file, or delete "
+                        "it to have a new key generated."
+                    )
                 return key
 
         key = secrets.token_urlsafe(32)
@@ -107,6 +147,23 @@ def get_default_device_family() -> str:
 # `quern update` checks against and which GitHub release filter the
 # tarball updater uses (#41).
 # ---------------------------------------------------------------------------
+
+DEFAULT_CRASH_RETENTION_DAYS = 30
+
+
+def get_crash_retention_days() -> int:
+    """Days to keep pulled crash reports on the Mac; 0 keeps them forever (#322).
+
+    `crash_retention_days` in config.json. Anything but a non-negative whole
+    number reads as the default -- a typo should keep the usual behaviour, and
+    never turn into "delete everything now". A bool is not a number here,
+    though Python says it is.
+    """
+    raw = read_user_config().get("crash_retention_days")
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+        return raw
+    return DEFAULT_CRASH_RETENTION_DAYS
+
 
 VALID_UPDATE_CHANNELS = ("stable", "beta")
 DEFAULT_UPDATE_CHANNEL = "stable"
@@ -294,11 +351,44 @@ def get_local_capture_processes() -> list[str]:
     if value is None or value is False:
         return []
     if value is True:
-        # Legacy bool: default to Safari processes
-        return ["MobileSafari", "com.apple.WebKit.Networking"]
+        # Legacy bool: default to the minimum web-capture set
+        return list(CAPTURE_MINIMUM)
     if isinstance(value, list):
         return [str(v) for v in value if v]
     return []
+
+
+#: Always captured alongside whatever a caller names, unless they ask for
+#: exactly their own list.
+#:
+#: `com.apple.WebKit.Networking` is where a webview's requests actually leave.
+#: Naming only the app captures none of its web traffic -- not less of it,
+#: none -- and the result is zero flows with no error, which looks exactly
+#: like an app that made no requests. That mistake is common enough to design
+#: against: it has cost several sessions, including one where it was
+#: misdiagnosed as a broken redirector.
+#:
+#: `MobileSafari` is here for a less obvious reason: an OAuth flow hands off
+#: to real Safari. `ASWebAuthenticationSession` and `SFSafariViewController`
+#: are Safari, so a login journey leaves the app's own processes entirely.
+#: Debugging sign-in without it means watching the interesting half vanish.
+CAPTURE_MINIMUM: tuple[str, ...] = ("MobileSafari", "com.apple.WebKit.Networking")
+
+
+def with_capture_minimum(processes: list[str]) -> tuple[list[str], list[str]]:
+    """Add the minimum capture set to `processes`. Returns (list, added).
+
+    Order is preserved and the caller's own entries come first, so the list
+    still reads as "what I asked for, plus what makes it work".
+
+    An empty list is returned untouched: that means *disable capture*, and
+    quietly turning it into "capture the defaults" would be the opposite of
+    what was asked.
+    """
+    if not processes:
+        return [], []
+    added = [p for p in CAPTURE_MINIMUM if p not in processes]
+    return [*processes, *added], added
 
 
 def set_local_capture_processes(processes: list[str]) -> None:

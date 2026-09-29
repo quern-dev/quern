@@ -1,9 +1,8 @@
 """Recover a simulator's accessibility bridge after XCUITest poisons it (#66).
 
 Any XCUITest or WDA run against a simulator leaves `CoreSimulatorBridge` with a
-stale mach-port cache, after which every foregrounded app reports a single bare
-`Application` element. The app under test is not special — Safari breaks too,
-and only SpringBoard keeps reading normally. `os_log` names it directly:
+stale mach-port cache, after which a foregrounded app reports a single bare
+`Application` element. `os_log` names it directly:
 
     CoreSimulatorBridge [com.apple.Accessibility:AXRuntimeCommon]
         AX Lookup problem - errorCode:1102 error:Unknown service name port
@@ -11,6 +10,25 @@ and only SpringBoard keeps reading normally. `os_log` names it directly:
 The empty tree looks exactly like every landmark on every screen drifting at
 once, which is a long way from the truth and sends people editing knowledge
 bases that are fine.
+
+**How wide the damage spreads is measured two ways and unresolved.** #66
+reported it simulator-wide -- Safari broken while never under test, only
+SpringBoard reading normally. A later run on Xcode 27 / iOS 18.6, stated to be
+the same device model and runtime build as one of #66's rows, found *another
+app* healthy in the same interval: the app under test at one element while
+Settings read a healthy 17, alternating repeatedly. Note what that does and
+does not establish -- Settings was fine, which #66 does not claim otherwise;
+Safari, the app #66 names, was never read. Both are measurements, so at
+least one of three things is true -- the behaviour changed between Xcode
+versions, #66 generalised from a smaller sample than it reads like, or the
+radius depends on something neither run controlled (which app, launch order,
+whether Safari had ever been foregrounded in that boot). The third is the only
+reading under which both are correct, and the check that separates it is
+reading Safari specifically, since Safari is the app #66 names.
+
+None of this changes what the recovery does: it fires on the signature in the
+tree it was given, whatever else is or is not affected. Do not restate either
+blast radius as settled without measuring again.
 
 There is no reload path: the port cache belongs to the AX runtime loaded into
 the process, the bridge holds no handle to invalidate it, and `SIGHUP` is not
@@ -29,7 +47,7 @@ import asyncio
 import logging
 import re
 
-logger = logging.getLogger("quern-debug-server.device")
+logger = logging.getLogger(__name__)
 
 # simctl UDIDs are canonical uppercase UUIDs. Anything else is refused rather
 # than matched loosely: an empty string is a substring of every lsof line, so

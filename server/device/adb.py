@@ -11,7 +11,7 @@ from pathlib import Path
 from server.device.tool_probe import probe_command
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType
 
-logger = logging.getLogger("quern-debug-server.adb")
+logger = logging.getLogger(__name__)
 
 # Short permission name → full Android permission string.
 # Matches the names used by iOS simctl where possible.
@@ -90,6 +90,36 @@ _AM_START_FAILURES = (
 )
 
 
+def _is_wifi_inet_line(line: str) -> bool:
+    """Whether an `ip -4 -o addr show` line is a Wi-Fi interface with an address.
+
+    The name is the test, and it has to be: a phone that dropped off Wi-Fi and
+    fell back to cellular still has an address, on `rmnet_data0`. Matching any
+    non-loopback interface would call that a successful reattach.
+
+    The *presence of an address* is the other half, and it is sufficient here
+    rather than merely convenient. Measured on an LG H932 and a Pixel 3 XL:
+    `svc wifi disable` releases the address, and `ip -4 -o addr show` then
+    prints no `wlan` line at all -- a downed interface does not sit there
+    holding a stale IPv4. The Pixel showed the same from the other direction,
+    `<NO-CARRIER,...> state DOWN` with no `inet` to its name.
+
+    Carrier state would be the more direct question, and it is not available to
+    ask. On the same unrooted phone `ip link show wlan0`,
+    `/sys/class/net/wlan0/carrier` and `.../operstate` all return permission
+    denied to the adb shell user, and unrooted physical phones are the entire
+    point of this feature. A check that cannot run on the target hardware is
+    not a stronger check.
+
+    Format: `30: wlan0    inet 192.168.1.244/24 brd 192.168.1.255 scope global`
+    """
+    parts = line.split()
+    if len(parts) < 3 or "inet" not in parts:
+        return False
+    name = parts[1].rstrip(":")
+    return name.startswith("wlan") and "inet" in parts
+
+
 class AdbBackend:
     """Manages Android devices and emulators via adb subprocess calls."""
 
@@ -102,6 +132,11 @@ class AdbBackend:
             logger.info("adb found at %s", self._adb_path)
         if self._emulator_path:
             logger.info("emulator found at %s", self._emulator_path)
+
+    @property
+    def adb_path(self) -> str | None:
+        """Where adb is, or None if it was not found."""
+        return self._adb_path
 
     async def _run_adb(self, *args: str) -> tuple[str, str]:
         """Run an adb command and return (stdout, stderr).
@@ -244,6 +279,111 @@ class AdbBackend:
         except DeviceError:
             return ""
 
+    async def get_device_properties(self, serial: str) -> dict[str, str]:
+        """Every `getprop` key at once, as a dict.
+
+        One `adb shell getprop` costs less than the three single-property
+        reads it replaces -- measured at 0.032s for all 924 properties on a
+        booted emulator against 0.049s for three individual calls -- because
+        the cost is the adb round trip, not the property lookup.
+
+        Returns an empty dict rather than raising: a device that cannot be
+        shelled (offline, unauthorized, mid-boot) has no properties to report,
+        and that is a normal state during enumeration rather than an error.
+        """
+        try:
+            stdout, _ = await self._run_adb_for_device(serial, "shell", "getprop")
+        except Exception:
+            logger.debug("Could not read properties from %s", serial, exc_info=True)
+            return {}
+        props: dict[str, str] = {}
+        for line in (stdout or "").splitlines():
+            # `[ro.build.tags]: [dev-keys]`
+            if not line.startswith("[") or "]: [" not in line:
+                continue
+            key, _, rest = line[1:].partition("]: [")
+            # Exactly one closing bracket, not every trailing one. `rstrip`
+            # ate them all, so a value that itself ends in `]` came back
+            # truncated -- `[value]]` yielding `value`. No property on the
+            # four attached devices ends that way, so this was latent, and
+            # the test that named it used a fixture with no bracket in it.
+            props[key] = rest[:-1] if rest.endswith("]") else rest
+        return props
+
+    @staticmethod
+    def classify_from_properties(props: dict[str, str]) -> DeviceType | None:
+        """Emulator or physical device, decided by what the device says it is.
+
+        An instance of the rule `server/lifecycle/invocation.py` already
+        states for a different subsystem -- **identity must never decide
+        capability** -- and for the same reason. There, *who called* cannot
+        answer *can I prompt*; here, *what kind of device is this* cannot
+        answer *can it be rooted*. Identity is for wording, which is exactly
+        what it is used for in `_require_simulator`'s refusals.
+
+        The serial is a *transport address*, not a property of the device:
+        `emulator-5554` means "reached via the local emulator console on port
+        5554" and `localhost:5555` means "reached over TCP". Neither says what
+        the thing on the other end is, and classifying on the prefix made one
+        emulator answer two different types depending on which serial you used
+        (#264, #299).
+
+        Measured on a Pixel_6_Dev AVD reachable both ways at once -- every one
+        of these properties is byte-identical across the two transports, which
+        is the point:
+
+            ro.kernel.qemu             1                   1
+            ro.hardware                ranchu              ranchu
+            ro.build.characteristics   emulator            emulator
+            ro.product.model           sdk_gphone64_arm64  sdk_gphone64_arm64
+
+        and on a physical LG H932 all four are absent or unremarkable
+        (`ro.hardware=joan`, `ro.product.model=LG-H932`, no qemu keys).
+
+        Returns None when the device could not be asked, which the caller must
+        distinguish from an answer -- guessing here is what #263 is about.
+
+        A *partial* read is also not an answer. Emptiness alone is too weak a
+        test: a truncated `getprop` that happens to omit the qemu keys would
+        otherwise fall through to "physical device" with full confidence,
+        which is the shape CONTRIBUTING names -- a failed check must never
+        read as a passing one. `ro.build.version.sdk` is the sentinel, present
+        on all five devices measured here (API 28 through 34, phones and
+        emulators, USB and TCP), so its absence means the read did not work
+        rather than that the device lacks it.
+        """
+        if not props or "ro.build.version.sdk" not in props:
+            return None
+        if props.get("ro.kernel.qemu") == "1" or props.get("ro.boot.qemu") == "1":
+            return DeviceType.ANDROID_EMULATOR
+        # `ranchu` is the modern emulator machine type, `goldfish` the older
+        # one. Both are emulator-only and neither appears on a phone.
+        if props.get("ro.hardware", "") in ("ranchu", "goldfish"):
+            return DeviceType.ANDROID_EMULATOR
+        if "emulator" in props.get("ro.build.characteristics", ""):
+            return DeviceType.ANDROID_EMULATOR
+        if props.get("ro.product.model", "").startswith("sdk_"):
+            return DeviceType.ANDROID_EMULATOR
+        return DeviceType.ANDROID_DEVICE
+
+    @staticmethod
+    def is_console_serial(serial: str) -> bool:
+        """Whether this serial is the local emulator-console address.
+
+        The one thing the `emulator-` prefix genuinely does tell you. It is a
+        fact about the *connection*, and using it to decide `emu` routing is
+        correct in a way that using it to decide what the device *is* never
+        was: `emulator-5554` means "reached through the console on port 5554",
+        which is precisely the question `adb emu` cares about.
+
+        This is the only transport test quern needs. An earlier version of
+        this change also shipped an async `has_emulator_console` that ran
+        `adb emu avd name` to *verify* the console answers -- no code ever
+        called it. A probe nothing consults cannot be wrong, which is the same
+        unexercised-surface problem #265 shipped and had to walk back.
+        """
+        return serial.startswith("emulator-")
+
     async def _get_emulator_name(self, serial: str) -> str:
         """Get the AVD name for an emulator."""
         try:
@@ -298,9 +438,42 @@ class AdbBackend:
                 state = DeviceState.SHUTDOWN
                 is_available = False
 
-            # Determine device type
-            is_emulator = serial.startswith("emulator-")
-            device_type = DeviceType.ANDROID_EMULATOR if is_emulator else DeviceType.ANDROID_DEVICE
+            # Ask the device what it is, rather than reading it off the
+            # transport address. `emulator-5554` and `localhost:5555` can be
+            # the same running AVD, and the prefix test called them different
+            # kinds (#264). Properties do not vary by transport; measured
+            # byte-identical across both serials of one emulator.
+            props = await self.get_device_properties(serial) if is_available else {}
+            device_type = self.classify_from_properties(props)
+            if device_type is None:
+                # Offline, unauthorized, or mid-boot: there is no shell to ask,
+                # so the address is the only evidence left. Kept explicitly as
+                # a last resort rather than as the rule, and only reachable for
+                # a device that cannot be used for anything yet anyway.
+                device_type = (
+                    DeviceType.ANDROID_EMULATOR if serial.startswith("emulator-")
+                    else DeviceType.ANDROID_DEVICE
+                )
+            is_emulator = device_type == DeviceType.ANDROID_EMULATOR
+
+            # A *transport* question, deliberately asked of the serial: the
+            # emulator console answers only through the local `emulator-N`
+            # address, so the same AVD over TCP has no AVD name to fetch even
+            # though it is every bit an emulator.
+            has_console = serial.startswith("emulator-")
+
+            # The field iOS already fills in from devicectl and usbmux, and
+            # that Android left empty -- so the transport was visible in the
+            # model for one platform and had to be re-derived from the serial
+            # for the other. `adb devices -l` states it: a `usb:` token for
+            # anything on the wire, nothing for an emulator console or a
+            # `host:port` attachment.
+            if any(p.startswith("usb:") for p in parts[2:]):
+                connection_type = "usb"
+            elif has_console:
+                connection_type = "emulator"
+            else:
+                connection_type = "tcp"
 
             # Extract model from the -l output (e.g. model:Pixel_7)
             model = ""
@@ -316,7 +489,7 @@ class AdbBackend:
 
             # For emulators, always try to resolve the AVD name so we
             # can suppress the duplicate shutdown AVD entry.
-            if is_emulator:
+            if has_console:
                 avd_name = await self._get_emulator_name(serial)
                 if avd_name and avd_name != serial:
                     name = avd_name
@@ -328,13 +501,14 @@ class AdbBackend:
                     running_avd_names.add(name)
 
             if is_available:
+                # From the bulk read above rather than three more round trips.
                 if not is_emulator and not model:
-                    model = await self._get_device_property(serial, "ro.product.model")
+                    model = props.get("ro.product.model", "")
                     if model:
                         name = model
 
-                os_version = await self._get_device_property(serial, "ro.build.version.release")
-                api_level = await self._get_device_property(serial, "ro.build.version.sdk")
+                os_version = props.get("ro.build.version.release", "")
+                api_level = props.get("ro.build.version.sdk", "")
 
             runtime = f"API {api_level}" if api_level else ""
 
@@ -353,6 +527,7 @@ class AdbBackend:
                 os_version=os_version,
                 runtime=runtime,
                 is_available=is_available,
+                connection_type=connection_type,
                 device_family="Android",
             ))
 
@@ -511,10 +686,54 @@ class AdbBackend:
                 ))
         return apps
 
-    async def is_rootable(self, serial: str) -> bool:
-        """Check if the device supports adb root (dev-keys build)."""
+    async def is_rootable(self, serial: str) -> bool | None:
+        """Whether `adb root` can succeed on this device.
+
+        A property of the *device*, not of how it is reached, and not of
+        whether the serial starts with `emulator-`. The cert gate used to ask
+        the type instead, which made this wrong on four of the eight rows in
+        #299's matrix: a Google Play emulator was offered a system-cert
+        install it could never complete, while a genuinely rootable dev-keys
+        emulator was refused one purely for being reached over TCP.
+
+        Measured on that dev-keys AVD through both serials at once --
+        `adb root` then `id` returned `uid=0(root)` on *both*, so the refusal
+        was a false negative about the device, produced by a fact about the
+        wire.
+
+        `ro.debuggable` joins `ro.build.tags` here because either is
+        sufficient: a userdebug build reports `release-keys` yet still permits
+        `adb root`, so testing tags alone under-reports.
+        """
+        props = await self.get_device_properties(serial)
+        tags, debuggable = props.get("ro.build.tags"), props.get("ro.debuggable")
+        if tags == "dev-keys" or debuggable == "1":
+            # Positive evidence is conclusive on its own -- either is
+            # sufficient for `adb root`, so a missing sibling cannot overturn
+            # a yes.
+            return True
+        if tags is not None and debuggable is not None:
+            # Both answered, both negative. The only shape a confident no can
+            # take: `release-keys` alone said nothing about `ro.debuggable`,
+            # and returning False there reported a userdebug build -- which
+            # does permit `adb root` -- as unrootable, blocking an install
+            # that would have worked.
+            return False
+
+        # The keys this question needs, not merely "did the read work". An
+        # earlier fix here used `ro.build.version.sdk` as the sentinel, which
+        # is right for *classification* and wrong here: a read carrying the
+        # sentinel but neither rootability key returned a confident `False`
+        # while a single-property read of the same device answered
+        # `dev-keys`. That is the same "answer invented about data that never
+        # arrived" defect this guard was added to remove, one level in.
         tags = await self._get_device_property(serial, "ro.build.tags")
-        return tags == "dev-keys"
+        debuggable = await self._get_device_property(serial, "ro.debuggable")
+        if not tags and not debuggable:
+            # Nothing answered either way. None, not False: the caller must be
+            # able to tell "not rootable" from "could not ask".
+            return None
+        return tags == "dev-keys" or debuggable == "1"
 
     async def get_api_level(self, serial: str) -> int:
         """Get the device API level as an integer."""
@@ -710,12 +929,235 @@ rm -rf /data/local/tmp/tmp-ca-copy
             return False
 
     async def set_http_proxy(self, serial: str, host: str, port: int) -> None:
-        """Set the global HTTP proxy on the device."""
+        """Set the global HTTP proxy on the device.
+
+        Nothing here is emulator-specific: this is `settings put global` on any
+        Android device, rooted or not, over USB or TCP. The gate that used to
+        restrict it to `ANDROID_EMULATOR` was withholding a universal
+        capability -- and the one genuinely emulator-specific detail, the
+        `10.0.2.2` address, lived inside the block it guarded.
+
+        **The setting is read when the network attaches**, so on its own this
+        does nothing to a device that is already connected. Measured on a
+        physical phone: setting it and then browsing produced zero proxied
+        requests; the same after `reattach_network()` produced twenty. Callers
+        that want it to take effect must reattach.
+        """
         await self._run_adb_for_device(
             serial, "shell", "settings", "put", "global",
             "http_proxy", f"{host}:{port}",
         )
         logger.info("Set HTTP proxy on %s to %s:%d", serial, host, port)
+
+    async def clear_http_proxy(self, serial: str) -> None:
+        """Remove the global HTTP proxy.
+
+        `settings delete` rather than writing `:0`. The written-sentinel form
+        leaves a row saying "proxy: none", which reads to anyone inspecting the
+        device as a deliberate configuration rather than an absence -- and it
+        is what `settings get` returns instead of `null`, so quern could not
+        tell a cleared device from one that had never been set.
+
+        This is the half #265 records as missing entirely: the setting lives in
+        the global settings provider and survives reboots, so without an unset
+        it is the device's configuration until something else changes it.
+        """
+        await self._run_adb_for_device(
+            serial, "shell", "settings", "delete", "global", "http_proxy",
+        )
+        logger.info("Cleared HTTP proxy on %s", serial)
+
+    async def get_http_proxy(self, serial: str) -> str | None:
+        """What the device's global proxy is set to, or None.
+
+        `settings get` prints the string `null` for an unset key, which is not
+        the same as the empty output a failed read gives. Both are reported as
+        None here, deliberately: a caller wanting to know whether the *read*
+        worked should catch the error rather than read a sentinel.
+        """
+        stdout, _ = await self._run_adb_for_device(
+            serial, "shell", "settings", "get", "global", "http_proxy",
+        )
+        value = (stdout or "").strip()
+        return None if value in ("", "null") else value
+
+    @staticmethod
+    def is_network_transport(serial: str) -> bool:
+        """Whether adb reaches this device over TCP rather than USB.
+
+        Two forms reach a device over the network. `adb connect` produces
+        `host:port`. Android 11+ wireless debugging discovered over mDNS
+        produces `adb-<serial>-<suffix>._adb-tls-connect._tcp`, which has no
+        colon at all -- so the `host:port` shape alone called it USB and
+        cleared it to have its Wi-Fi turned off. USB serials are the hardware
+        serial and emulators are `emulator-5554`; neither matches either form.
+
+        This is not cosmetic: `svc wifi disable` on a device whose adb
+        connection runs over that same Wi-Fi severs the control channel
+        mid-call, and the `enable` that would undo it can never arrive. The
+        device is left with Wi-Fi off and no way back that does not involve
+        someone walking over to it.
+        """
+        if "._adb-tls-connect._tcp" in serial or "._adb._tcp" in serial:
+            return True
+        host, sep, port = serial.rpartition(":")
+        return bool(sep and host and port.isdigit())
+
+    async def reattach_network(self, serial: str) -> bool:
+        """Bounce Wi-Fi so a changed proxy setting is picked up.
+
+        Returns whether the device came back with an address.
+
+        Required, not cosmetic: the proxy setting is read when the network
+        attaches, so changing it on a connected device has no effect until
+        something reattaches. This is the step whose absence makes
+        `settings put global http_proxy` look like it does not work, which is
+        almost certainly why the per-SSID Wi-Fi proxy UI has been assumed
+        necessary.
+
+        An emulator has no Wi-Fi -- its network is a QEMU NAT link on `eth0` --
+        so `svc wifi` is a no-op there and this reports False rather than
+        pretending. Emulators pick the setting up without a bounce.
+        """
+        if self.is_network_transport(serial):
+            # Refused, not attempted. Bouncing Wi-Fi here would cut the
+            # connection carrying the command to turn it back on, stranding a
+            # device that may be in another building. The proxy setting is
+            # already written and takes effect when the device next attaches,
+            # so declining costs a delay; going ahead can cost the device.
+            logger.warning(
+                "Not bouncing Wi-Fi on %s: adb reaches it over the network, "
+                "and the bounce would sever that connection", serial,
+            )
+            return False
+        try:
+            await self._run_adb_for_device(serial, "shell", "svc", "wifi", "disable")
+        except Exception:
+            # Ambiguous, not harmless. A nonzero adb exit does not prove the
+            # command had no effect -- it may have disabled Wi-Fi and then
+            # failed to report back -- so returning here could leave the radio
+            # off with nothing left to turn it on. Fall through to the enable
+            # attempts instead, which are idempotent and cost nothing when
+            # Wi-Fi was never actually disturbed.
+            logger.warning(
+                "Disabling Wi-Fi on %s failed; attempting to re-enable in case "
+                "it took effect anyway", serial, exc_info=True,
+            )
+        await asyncio.sleep(1.0)
+        # Retried where `disable` is not, and warned about rather than logged
+        # at debug. `svc wifi enable` is idempotent, and sharing one `try` with
+        # the disable meant a transient adb error between the two left the
+        # device with its radio off -- reported as a failed reattach, with a
+        # hint telling the caller to tap a network on a phone whose Wi-Fi was
+        # no longer on.
+        for attempt in range(3):
+            try:
+                await self._run_adb_for_device(
+                    serial, "shell", "svc", "wifi", "enable",
+                )
+                break
+            except Exception:
+                logger.warning(
+                    "Could not re-enable Wi-Fi on %s (attempt %d of 3)",
+                    serial, attempt + 1, exc_info=True,
+                )
+                await asyncio.sleep(0.5)
+        else:
+            return False
+        # Wait for an address rather than a fixed sleep: the reattach is the
+        # point, and a caller told "done" before the device has a route would
+        # configure a proxy the device cannot yet reach.
+        for _ in range(20):
+            await asyncio.sleep(0.5)
+            try:
+                # Every interface, then filtered by name. Hardcoding `wlan0`
+                # reported a device on `wlan1` as failed while it was working;
+                # accepting any non-loopback address overcorrected, because
+                # `rmnet_data0` means the phone fell back to *cellular* with
+                # Wi-Fi still down, and an emulator's `eth0` is not Wi-Fi at
+                # all. Either way this would confirm a reattach that did not
+                # happen -- which is worse than the original bug, since the
+                # caller stops looking.
+                stdout, _ = await self._run_adb_for_device(
+                    serial, "shell", "ip", "-4", "-o", "addr", "show",
+                )
+            except Exception:
+                continue
+            if any(_is_wifi_inet_line(line) for line in (stdout or "").splitlines()):
+                return True
+        return False
+
+    async def get_wifi_ssid(self, serial: str) -> str | None:
+        """The SSID the device is associated with, or None.
+
+        Saves a caller typing it. `record_device_proxy_config` keys its
+        configs by SSID, and until now a human read it off the device's
+        screen and passed it in.
+        """
+        try:
+            stdout, _ = await self._run_adb_for_device(
+                serial, "shell", "dumpsys", "wifi",
+            )
+        except Exception:
+            logger.debug("Could not read Wi-Fi state on %s", serial, exc_info=True)
+            return None
+        for line in (stdout or "").splitlines():
+            if "mWifiInfo SSID:" not in line:
+                continue
+            rest = line.split("mWifiInfo SSID:", 1)[1].strip()
+            # `WifiInfo.getSSID()` wraps a valid UTF-8 SSID in double quotes,
+            # so the format varies by build: the Pixel 3 XL here emits
+            # `SSID: MonaLisaOverdrive,` bare, while quoted builds emit
+            # `SSID: "MonaLisaOverdrive",`. Splitting on the first comma
+            # handles neither an embedded comma nor the quotes, and the SSID
+            # is the *storage key* -- a stray pair of quotes files one network
+            # under two records and never matches `detect_current_ssid`, which
+            # returns the name unquoted.
+            if rest.startswith('"'):
+                end = rest.find('"', 1)
+                ssid = rest[1:end] if end > 0 else rest[1:]
+            else:
+                # Unquoted: runs to the next field rather than the next comma,
+                # so an SSID containing one survives.
+                ssid = rest.split(", BSSID:", 1)[0].rstrip(",").strip()
+            # `<unknown ssid>` is what an unassociated device reports.
+            if ssid and not ssid.startswith("<"):
+                return ssid
+            return None
+        return None
+
+    async def get_lan_ip(self, serial: str) -> str | None:
+        """The device's own address on the network it routes through.
+
+        `ip route get 8.8.8.8` rather than reading an interface, because it
+        answers the question that matters -- which address this device would
+        use to reach something off-device -- without assuming the interface is
+        called `wlan0`. An emulator answers with its NAT address, which is
+        correct: that is what it would use.
+
+        This is what `record_device_proxy_config` calls `client_ip`, and what
+        flow attribution matches against. Having a human type it is what makes
+        Android flows unattributable today (#262).
+        """
+        try:
+            stdout, _ = await self._run_adb_for_device(
+                serial, "shell", "ip", "route", "get", "8.8.8.8",
+            )
+        except Exception:
+            logger.debug("Could not read the route on %s", serial, exc_info=True)
+            return None
+        # `src` as the last token is not hypothetical -- truncated output ends
+        # wherever the read ended -- and indexing past it raised straight out
+        # of here into a 500. Measured shape on a real device:
+        #   8.8.8.8 via 192.168.1.1 dev wlan0 table 1030 src 192.168.1.244 ...
+        parts = (stdout or "").split()
+        if "src" not in parts:
+            return None
+        idx = parts.index("src") + 1
+        if idx >= len(parts):
+            logger.debug("Route output on %s ended at 'src'", serial)
+            return None
+        return parts[idx] or None
 
     async def is_screen_on(self, serial: str) -> bool:
         """Check if the device screen is on (interactive)."""
@@ -758,6 +1200,35 @@ rm -rf /data/local/tmp/tmp-ca-copy
         # touches app content (secure keyguards still require the passcode).
         await self._run_adb_for_device(serial, "shell", "wm", "dismiss-keyguard")
 
+    async def clear_app_data(self, serial: str, package: str) -> None:
+        """Wipe an app's data, the Android equivalent of `simctl privacy reset`.
+
+        `pm clear` needs no root and works on any device -- verified on an
+        unrooted release-keys Pixel 3 XL, which answered `Success`. Quern
+        refused this outright until #299, telling the caller it was "only
+        supported on simulators" about a device that demonstrably does it.
+
+        Also terminates the app, which `pm clear` does implicitly, so callers
+        do not need a separate stop.
+        """
+        stdout, stderr = await self._run_adb_for_device(
+            serial, "shell", "pm", "clear", package,
+        )
+        out = f"{stdout or ''}{stderr or ''}"
+        if "Success" not in out:
+            # Belt and braces rather than the primary check. Measured on a
+            # Pixel 3 XL, a bad package prints `Failed` *and* exits 1, so
+            # `_run_adb_for_device` raises before this is reached. It stays
+            # because exit-code propagation through `adb shell` is a property
+            # of the adb version rather than of the command -- the pre-shell-v2
+            # protocol did not forward it at all -- so on an older host the
+            # status would be 0 and the output would be the only signal.
+            raise DeviceError(
+                f"Could not clear data for {package} on {serial}: "
+                f"{out.strip() or 'no output'}",
+                tool="adb",
+            )
+
     async def set_location(
         self, serial: str, latitude: float, longitude: float,
         satellites: int = 4,
@@ -768,9 +1239,12 @@ rm -rf /data/local/tmp/tmp-ca-copy
         Note: the emulator console takes longitude first, then latitude.
         A default satellite count of 4 avoids anti-spoof heuristics that flag 0 satellites.
         """
-        if not serial.startswith("emulator-"):
+        if not self.is_console_serial(serial):
             raise DeviceError(
-                "Location simulation is only supported on Android emulators",
+                "Location simulation needs the emulator console, which is "
+                f"reachable only through an `emulator-NNNN` serial, not {serial}. "
+                "The device may well be an emulator; this connection cannot "
+                "carry `adb emu` commands.",
                 tool="adb",
             )
         await self._run_adb_for_device(

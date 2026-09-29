@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from server.device import vision_ocr
 from server.device.probing import DescribePointFn, frame_key
 
-logger = logging.getLogger("quern-debug-server.device")
+logger = logging.getLogger(__name__)
 
 ScreenshotFn = Callable[[], Awaitable[bytes | None]]
 

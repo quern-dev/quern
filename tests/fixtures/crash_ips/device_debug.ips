@@ -1,0 +1,168 @@
+{"app_name": "MyApp", "timestamp": "2026-09-28 08:14:52.00 -0700", "app_version": "1.2.3", "slice_uuid": "4fe4a390-0361-339d-3830-c213b59d37cb", "build_version": "42", "platform": 2, "bundleID": "com.example.myapp", "share_with_app_devs": 0, "is_first_party": 0, "bug_type": "309", "os_version": "iPhone OS 26.5.2 (23F84)", "incident_id": "00000000-0000-0000-0000-0000000000FF", "name": "MyApp"}
+{
+  "procName": "MyApp",
+  "procPath": "/private/var/containers/Bundle/Application/00000000-0000-0000-0000-000000000001/MyApp.app/MyApp",
+  "captureTime": "2026-09-28 08:14:50.4129 -0700",
+  "cpuType": "ARM-64",
+  "exception": {
+    "codes": "0x0000000000000000, 0x0000000000000000",
+    "rawCodes": [
+      0,
+      0
+    ],
+    "type": "EXC_CRASH",
+    "signal": "SIGSEGV"
+  },
+  "termination": {
+    "flags": 0,
+    "code": 11,
+    "namespace": "SIGNAL",
+    "indicator": "Segmentation fault: 11",
+    "byProc": "dtappserviced",
+    "byPid": 4828
+  },
+  "faultingThread": 0,
+  "bundleInfo": {
+    "CFBundleShortVersionString": "1.2.3",
+    "CFBundleVersion": "42",
+    "CFBundleIdentifier": "com.example.myapp"
+  },
+  "threads": [
+    {
+      "triggered": true,
+      "id": 1609261,
+      "queue": "com.apple.main-thread",
+      "frames": [
+        {
+          "imageOffset": 3284,
+          "symbol": "mach_msg2_trap",
+          "symbolLocation": 8,
+          "imageIndex": 1
+        },
+        {
+          "imageOffset": 17164,
+          "symbol": "mach_msg2_internal",
+          "symbolLocation": 76,
+          "imageIndex": 1
+        },
+        {
+          "imageOffset": 16940,
+          "symbol": "mach_msg_overwrite",
+          "symbolLocation": 424,
+          "imageIndex": 1
+        },
+        {
+          "imageOffset": 16504,
+          "symbol": "mach_msg",
+          "symbolLocation": 24,
+          "imageIndex": 1
+        },
+        {
+          "imageOffset": 414532,
+          "symbol": "__CFRunLoopServiceMachPort",
+          "symbolLocation": 160,
+          "imageIndex": 2
+        },
+        {
+          "imageOffset": 193296,
+          "symbol": "__CFRunLoopRun",
+          "symbolLocation": 1188,
+          "imageIndex": 2
+        },
+        {
+          "imageOffset": 189772,
+          "symbol": "_CFRunLoopRunSpecificWithOptions",
+          "symbolLocation": 532,
+          "imageIndex": 2
+        },
+        {
+          "imageOffset": 5272,
+          "symbol": "GSEventRunModal",
+          "symbolLocation": 120,
+          "imageIndex": 3
+        },
+        {
+          "imageOffset": 1184324,
+          "symbol": "-[UIApplication _run]",
+          "symbolLocation": 796,
+          "imageIndex": 4
+        },
+        {
+          "imageOffset": 573784,
+          "symbol": "UIApplicationMain",
+          "symbolLocation": 332,
+          "imageIndex": 4
+        },
+        {
+          "imageOffset": 2813080,
+          "symbol": "__debug_main_executable_dylib_entry_point",
+          "symbolLocation": 64,
+          "imageIndex": 0
+        },
+        {
+          "imageOffset": 19484,
+          "symbol": "start",
+          "symbolLocation": 6928,
+          "imageIndex": 5
+        }
+      ]
+    }
+  ],
+  "usedImages": [
+    {
+      "source": "P",
+      "arch": "arm64",
+      "base": 4488314880,
+      "size": 53264384,
+      "uuid": "3637b8d4-8e34-05db-438c-b42843453ee5",
+      "path": "/private/var/containers/Bundle/Application/00000000-0000-0000-0000-000000000001/MyApp.app/MyApp.debug.dylib",
+      "name": "MyApp.debug.dylib"
+    },
+    {
+      "source": "P",
+      "arch": "arm64e",
+      "base": 9921056768,
+      "size": 244456,
+      "uuid": "683aab26-f209-0546-3a89-967db446fa52",
+      "path": "/usr/lib/system/libsystem_kernel.dylib",
+      "name": "libsystem_kernel.dylib"
+    },
+    {
+      "source": "P",
+      "arch": "arm64e",
+      "base": 6987288576,
+      "size": 5883840,
+      "uuid": "4f10b46c-4e7b-0d84-5b36-3d1f520eb480",
+      "path": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+      "name": "CoreFoundation"
+    },
+    {
+      "source": "P",
+      "arch": "arm64e",
+      "base": 9763627008,
+      "size": 34752,
+      "uuid": "8e4c96a2-167b-4250-6cf6-43d324b47614",
+      "path": "/System/Library/PrivateFrameworks/GraphicsServices.framework/GraphicsServices",
+      "name": "GraphicsServices"
+    },
+    {
+      "source": "P",
+      "arch": "arm64e",
+      "base": 7083782144,
+      "size": 39062912,
+      "uuid": "929d739b-9924-8419-f1b8-66de1887782e",
+      "path": "/System/Library/PrivateFrameworks/UIKitCore.framework/UIKitCore",
+      "name": "UIKitCore"
+    },
+    {
+      "source": "P",
+      "arch": "arm64e",
+      "base": 6932992000,
+      "size": 676224,
+      "uuid": "db3ee3fb-71c5-2fff-43b9-711eb5d2cad3",
+      "path": "/usr/lib/dyld",
+      "name": "dyld"
+    }
+  ],
+  "pid": 4837
+}

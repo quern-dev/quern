@@ -14,6 +14,12 @@
 # The old code is the point. The candidate's own updater is not exercised here
 # at all: users run the one they already have.
 #
+# IT REHEARSES COMMITTED WORK. Both trees come from `git archive`, so anything
+# still in the working directory is not in the candidate -- and the failure
+# looks exactly like the fix not working, twice over: a result that disagrees
+# with the unit tests you just watched pass is this, until proved otherwise.
+# Commit, then rehearse.
+#
 # Each case runs in its own sandbox -- its own HOME and QUERN_STATE_DIR, with
 # osascript/open/sudo/launchctl/pkill/killall stubbed ahead of the real ones on
 # PATH. Nothing outside the sandbox is written. That is not a nicety: this
@@ -239,6 +245,81 @@ build_origin() {
   git -C "$build" push -q "$origin" release/stable
 }
 
+# The candidate, staged as the asset a release would carry and served on a
+# free port. Two cases want this -- a fresh install and a tarball update --
+# and a second copy of the staging is how the two end up testing different
+# bytes while claiming to test the candidate.
+#
+# Built from the tree the git-update case produced: source, mcp/dist and its
+# node_modules. Not a `git archive`, which is the generated source tarball --
+# the one whose missing dependencies broke 0.18.3.
+#
+# Sets CANDIDATE_PORT and CANDIDATE_SRV_PID. Returns non-zero if it never
+# came up, because a case that silently tests nothing is the thing this whole
+# script exists to stop.
+CANDIDATE_PORT=""
+CANDIDATE_SRV_PID=""
+
+serve_candidate() {
+  local sb="$1" srv="$1/srv"
+  local built="$WORK/git-update/install"
+  mkdir -p "$srv/releases/download/v$candidate_version" "$sb/pkg"
+
+  local staged="$sb/pkg/quern-$candidate_version"
+  mkdir -p "$staged"
+  ( cd "$built" && /usr/bin/tar --exclude .git --exclude .venv -cf - . ) \
+    | ( cd "$staged" && /usr/bin/tar -xf - )
+  ( cd "$sb/pkg" && /usr/bin/tar -czf \
+      "$srv/releases/download/v$candidate_version/quern-$candidate_version.tar.gz" \
+      "quern-$candidate_version" )
+
+  # A port nobody else is on, so two rehearsals can run at once.
+  CANDIDATE_PORT="$(python3 -c "
+import socket
+s = socket.socket(); s.bind(('127.0.0.1', 0))
+print(s.getsockname()[1]); s.close()" 2>/dev/null || echo 8907)"
+
+  cat > "$srv/releases/latest" <<EOF
+{"tag_name": "v$candidate_version", "prerelease": false,
+ "assets": [{"name": "quern-$candidate_version.tar.gz",
+             "browser_download_url": "http://127.0.0.1:$CANDIDATE_PORT/releases/download/v$candidate_version/quern-$candidate_version.tar.gz"}],
+ "tarball_url": "http://127.0.0.1:$CANDIDATE_PORT/releases/download/v$candidate_version/quern-$candidate_version.tar.gz"}
+EOF
+  python3 -m http.server "$CANDIDATE_PORT" --directory "$srv" >"$sb/srv.log" 2>&1 &
+  CANDIDATE_SRV_PID=$!
+
+  local waited=0
+  until curl -fsS --max-time 2 \
+      "http://127.0.0.1:$CANDIDATE_PORT/releases/latest" >/dev/null 2>&1; do
+    waited=$((waited + 1))
+    if (( waited > 20 )); then
+      stop_candidate
+      return 1
+    fi
+    sleep 0.5
+  done
+  return 0
+}
+
+stop_candidate() {
+  [[ -n "$CANDIDATE_SRV_PID" ]] || return 0
+  # `wait` inside the same redirect, or bash reports "Terminated" on its own
+  # line in the middle of the results.
+  { kill "$CANDIDATE_SRV_PID" && wait "$CANDIDATE_SRV_PID"; } 2>/dev/null || true
+  CANDIDATE_SRV_PID=""
+}
+
+# Did the local server actually serve the asset? Without this a case passes
+# while the fetcher quietly went to GitHub and installed the published
+# release -- the substitution QUERN_RELEASES_URL exists to make visible.
+served_the_candidate() {
+  local log="$1" line
+  line="$(grep -F \
+    "releases/download/v$candidate_version/quern-$candidate_version.tar.gz" \
+    "$log" 2>/dev/null | tail -1 || true)"
+  [[ -n "$line" && "$line" == *'" 200 '* ]]
+}
+
 # --------------------------------------------------------------------------
 step "A git install updating from $PREV to $candidate_version"
 # --------------------------------------------------------------------------
@@ -406,6 +487,124 @@ except Exception:
 
 set +e
 ( case_gui_start )
+failures=$((failures + $?))
+set -e
+
+# --------------------------------------------------------------------------
+step "What a GUI-context setup says when it cannot see the user's node"
+# --------------------------------------------------------------------------
+# #339: a release install's update failed reporting "Node.js: Not installed" on
+# a machine with Node 22 in every shell. Node was installed by fnm, whose
+# directory contains the pid of the shell that asked for it, so no static PATH
+# can reach it -- and a GUI launch has launchd's PATH and reads no startup
+# files. The report named the wrong problem, and the advice that would have
+# fixed it was in the part of an over-tall alert that was off the screen.
+#
+# The assertion is about the *message*, because that is what shipped wrong.
+# "Not installed" sends someone to install a second node, which does not make
+# the first one reachable.
+case_gui_node_message() {
+  failures=0
+  local sb="$WORK/git-update" install="$WORK/git-update/install"
+  if [[ ! -x "$install/quern" ]]; then
+    skip "GUI-style node message: the update case did not leave an install"
+    return 0
+  fi
+  local py="$install/.venv/bin/python"
+  if [[ ! -x "$py" ]]; then
+    skip "GUI-style node message: no interpreter in the sandbox install"
+    return 0
+  fi
+  # The fixture puts its node on PATH from `.zshrc`, so `probe` has to reach it
+  # through a zsh login shell. Without zsh the probe reports SKIPPED, nothing is
+  # found anywhere, and "Not installed" is the *correct* answer -- so the case
+  # would fail while the code under test is fine. A skip says that; a red
+  # assertion would send the next reader after a bug that is not there.
+  if [[ ! -x /bin/zsh ]]; then
+    skip "GUI-style node message: /bin/zsh is not available to reach the fixture"
+    return 0
+  fi
+
+  # A home of our own, with a node reachable only through `.zshrc` -- the #339
+  # arrangement, built rather than detected. An earlier version of this case
+  # asked the *developer's* login shell whether it had a node and then measured
+  # a sandbox home that never had one, so on the very machines this bug came
+  # from the precheck passed, the measurement found nothing anywhere, and the
+  # case failed the fix it was written to protect. Verify the claim, not its
+  # neighbour.
+  local h="$WORK/node/gui-message"
+  mkdir -p "$h/state"
+  # Inlined rather than calling make_fake_node: that helper is defined further
+  # down the file than this case runs, so calling it here would be a
+  # "command not found" at the moment the case executes.
+  mkdir -p "$h/nodebin"
+  printf '#!/bin/sh\n[ "$1" = "--version" ] && { echo "v22.9.0"; exit 0; }\nexit 0\n' \
+    > "$h/nodebin/node"
+  chmod +x "$h/nodebin/node"
+  : > "$h/.zshenv"
+  echo 'export PATH="$HOME/nodebin:$PATH"' > "$h/.zshrc"
+
+  # `check_node` specifically, not `doctor`: doctor renders node_env's per-site
+  # breakdown and never calls this function, so grepping its output would test
+  # a different path and say nothing about the message that shipped wrong.
+  set +e
+  env -i \
+    HOME="$h" \
+    QUERN_STATE_DIR="$h/state" \
+    SHELL=/bin/zsh \
+    PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$py" -c 'import sys
+sys.path.insert(0, sys.argv[1])
+from server.lifecycle.setup import check_node
+r = check_node()
+print("status:", r.status)
+print("message:", r.message)
+print("fixable:", r.fixable)
+print("detail:", (r.detail or "").replace("\n", " "))' "$install" > "$h/gui-node.log" 2>&1
+  local rc=$?
+  set -e
+
+  # Checked first: every assertion below is a grep, and a grep over a traceback
+  # answers "absent" for all of them -- so a crash would read as three passes.
+  if [[ $rc -ne 0 ]]; then
+    bad "the GUI-context check exited $rc — see $h/gui-node.log"
+    sed -n '1,12p' "$h/gui-node.log" | sed 's/^/      /'
+    return "$failures"
+  fi
+
+  if grep -qi "not reachable from here" "$h/gui-node.log"; then
+    ok "it says the node is unreachable rather than missing"
+  else
+    bad "no 'not reachable' in the GUI-context check — see $h/gui-node.log"
+    sed -n '1,8p' "$h/gui-node.log" | sed 's/^/      /'
+  fi
+
+  # The specific regression: the old message.
+  if grep -qi "message:.*Not installed" "$h/gui-node.log"; then
+    bad "still reports Node as not installed when a shell has one"
+  else
+    ok "it does not claim Node is missing"
+  fi
+
+  # Offering `brew install node` here would add a second node to work around
+  # the first being invisible, which fixes nothing. `run_setup` gates its
+  # prompt on this flag.
+  if grep -qi "fixable: False" "$h/gui-node.log"; then
+    ok "and does not offer to install another one"
+  else
+    bad "it still offers an install as the fix"
+  fi
+
+  if grep -qi "terminal" "$h/gui-node.log"; then
+    ok "and says where it will work"
+  else
+    bad "the report never mentions running it from a terminal"
+  fi
+  return "$failures"
+}
+
+set +e
+( case_gui_node_message )
 failures=$((failures + $?))
 set -e
 
@@ -656,46 +855,14 @@ case_fresh_install() {
   # and Homebrew's python is how most machines have a 3.11+. Giving it the
   # four-entry GUI PATH tested nothing but Apple's system python.
   local sb="$WORK/fresh"
-  mkdir -p "$sb/home" "$sb/srv/releases/download/v$candidate_version" "$sb/bin"
+  mkdir -p "$sb/home" "$sb/bin"
   make_stubs "$sb/bin"
 
-  # The asset a release would carry, built from the tree the update case
-  # produced: source, mcp/dist and its node_modules. Not a `git archive` --
-  # that is the generated source tarball, which is exactly the thing whose
-  # absence of dependencies broke 0.18.3.
-  local staged="$sb/pkg/quern-$candidate_version"
-  mkdir -p "$staged"
-  ( cd "$install" && /usr/bin/tar --exclude .git --exclude .venv -cf - . ) \
-    | ( cd "$staged" && /usr/bin/tar -xf - )
-  ( cd "$sb/pkg" && /usr/bin/tar -czf \
-      "$sb/srv/releases/download/v$candidate_version/quern-$candidate_version.tar.gz" \
-      "quern-$candidate_version" )
-
-  # A port nobody else is on, so two rehearsals can run at once.
-  local port
-  port="$(python3 -c "
-import socket
-s = socket.socket(); s.bind(('127.0.0.1', 0))
-print(s.getsockname()[1]); s.close()" 2>/dev/null || echo 8907)"
-  cat > "$sb/srv/releases/latest" <<EOF
-{"tag_name": "v$candidate_version", "prerelease": false,
- "assets": [{"name": "quern-$candidate_version.tar.gz",
-             "browser_download_url": "http://127.0.0.1:$port/releases/download/v$candidate_version/quern-$candidate_version.tar.gz"}]}
-EOF
-  python3 -m http.server "$port" --directory "$sb/srv" >"$sb/srv.log" 2>&1 &
-  local srv_pid=$!
-  # Serve or fail loudly: a case that silently tests nothing is the thing this
-  # whole script exists to stop.
-  local waited=0
-  until curl -fsS --max-time 2 "http://127.0.0.1:$port/releases/latest" >/dev/null 2>&1; do
-    waited=$((waited + 1))
-    if (( waited > 20 )); then
-      { kill "$srv_pid" && wait "$srv_pid"; } 2>/dev/null || true
-      bad "fresh install: the local release server never came up on $port"
-      return "$failures"
-    fi
-    sleep 0.5
-  done
+  if ! serve_candidate "$sb"; then
+    bad "fresh install: the local release server never came up"
+    return "$failures"
+  fi
+  local port="$CANDIDATE_PORT"
 
   # Unattended. A rehearsal has no terminal to offer, and `script` cannot make
   # one where there is no controlling tty to begin with. So this is the
@@ -713,9 +880,7 @@ EOF
     bash "$install_sh" > "$sb/install.log" 2>&1
   local rc=$?
   set -e
-  # `wait` inside the same redirect, or bash reports "Terminated" on its own
-  # line in the middle of the results.
-  { kill "$srv_pid" && wait "$srv_pid"; } 2>/dev/null || true
+  stop_candidate
 
   if [[ $rc -eq 0 ]]; then
     ok "install.sh exits 0 against a locally served candidate"
@@ -736,19 +901,11 @@ EOF
   # It must have fetched *ours*. The override exists so a rehearsal tests the
   # candidate; an installer that quietly went to GitHub would pass every check
   # below while installing the published release.
-  # The status code, not just the path. `python -m http.server` logs a 404
-  # exactly as it logs a 200, so an asset staged under the wrong name still
-  # read as "the installer fetched the candidate". The version goes through
-  # `grep -F` too: unescaped, its dots match any character.
-  local asset_line
-  asset_line="$(grep -F "releases/download/v$candidate_version/quern-$candidate_version.tar.gz" \
-    "$sb/srv.log" | tail -1 || true)"
-  if [[ -z "$asset_line" ]]; then
-    bad "the local server was never asked for the asset — the installer went somewhere else"
-  elif [[ "$asset_line" == *'" 200 '* ]]; then
+  if served_the_candidate "$sb/srv.log"; then
     ok "it downloaded the candidate from the local server"
   else
-    bad "the local server was asked but did not serve it: ${asset_line##*\" }"
+    bad "the local server did not serve the asset — the installer went somewhere else"
+    tail -n 3 "$sb/srv.log" 2>/dev/null | sed 's/^/      /' || true
   fi
 
   local installed="$sb/home/.local/share/quern"
@@ -784,6 +941,64 @@ EOF
         PATH="$sb/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
         PIP_CACHE_DIR="$PIP_CACHE_DIR" npm_config_cache="$npm_config_cache" \
         "$installed/quern" setup ) > "$sb/setup.log" 2>&1 || true
+    # The second half of the documented install. `install.sh` runs this as
+    # its own step, and it is the only thing that points MCP clients at the
+    # new install -- setup does not.
+  fi
+
+  # Unconditional, and it was not: this sat inside the "setup did not finish"
+  # branch above, which stopped being taken once setup created the venv
+  # without asking. The registration step then never ran, and the check for
+  # it reported the absence of a file nobody had tried to write. The
+  # documented install runs this every time.
+  #
+  # The caller's PATH, since `quern mcp-install` is run from the user's shell
+  # and may rebuild the wrapper, which needs their node.
+  set +e
+  ( cd "$installed" && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/home/.quern" \
+      PATH="$sb/bin:$PATH" npm_config_cache="$npm_config_cache" \
+      "$installed/quern" mcp-install ) > "$sb/mcp-install.log" 2>&1
+  local mcp_rc=$?
+  set -e
+  # The status, not just the file it should have written. A command that
+  # half-ran can leave a plausible-looking result behind, and then the
+  # assertion below reports on it as though the step had succeeded.
+  if [[ $mcp_rc -eq 0 ]]; then
+    ok "mcp-install completed"
+  else
+    bad "mcp-install exited $mcp_rc"
+    tail -n 6 "$sb/mcp-install.log" 2>/dev/null | sed 's/^/      /' || true
+  fi
+
+  # The MCP registration the installer writes, checked for *where it points*.
+  # This project has twice written a path into another tool's config that was
+  # wrong -- once a temporary directory -- and nothing notices, because the
+  # client keeps launching whatever the entry says until someone wonders why
+  # their tools are stale. `install.sh` runs `quern mcp-install` as its own
+  # step; setup does not do this, which is why it is checked here.
+  local claude_json="$sb/home/.claude.json"
+  if [[ -f "$claude_json" ]]; then
+    local entry
+    entry="$(python3 -c '
+import json, sys
+try:
+    servers = json.load(open(sys.argv[1])).get("mcpServers") or {}
+except Exception:
+    print(""); raise SystemExit
+for name, spec in servers.items():
+    if "quern" in name.lower():
+        print(" ".join([spec.get("command", "")] + list(spec.get("args") or [])))
+        break' "$claude_json" 2>/dev/null || true)"
+    if [[ -z "$entry" ]]; then
+      bad "install.sh wrote no quern entry into .claude.json"
+    elif [[ "$entry" == *"$installed/mcp/dist/launcher.cjs"* ]]; then
+      ok "the MCP registration points into the install it just made"
+    else
+      bad "the MCP registration points somewhere else: $entry"
+    fi
+  else
+    bad "no .claude.json after mcp-install — the clients were never pointed anywhere"
+    tail -n 6 "$sb/mcp-install.log" 2>/dev/null | sed 's/^/      /' || true
   fi
 
   # From another directory, because the wrapper resolves its own location and
@@ -813,19 +1028,738 @@ failures=$((failures + $?))
 set -e
 
 # --------------------------------------------------------------------------
+step "A git install updating while its server is running"
+# --------------------------------------------------------------------------
+# Every case above updates with the daemon stopped. Users do not: they run
+# `quern update` with quern running, and the updater restarts it. That restart
+# is where "the server did not come back" lives -- the condition the menu
+# bar's recovery items (#225, #226) exist for -- and nothing exercised it.
+#
+# Safety first, because this one can reach outside the sandbox. `quern start`
+# reclaims its port by SIGKILLing whatever quern-looking process holds it, and
+# it does not consult QUERN_STATE_DIR. The restart inside an update asks for
+# the *default* port -- `restart` takes no port and `_resolve_args` falls back
+# to 9100 -- whatever port the server was actually on. So a rehearsal that let
+# the restart run unimpeded would kill the developer's own server.
+#
+# The fix is a decoy: hold 9100 and 9101 with plain listeners that are not
+# quern. `reclaim_port` then reports them busy rather than killing them, and
+# the restarted server scans upward, exactly as it would beside any other
+# application. If the ports cannot be held -- because a real quern already has
+# them -- the case refuses to run rather than taking that server down.
+hold_default_ports() {
+  local sb="$1"
+  python3 - "$sb/decoy.pid" <<'PY' > "$sb/decoy.log" 2>&1 &
+import socket, sys, time
+
+# Deliberately NOT SO_REUSEADDR. The bind failing is the whole signal: it is
+# how this knows a real quern already has the port, so the case can refuse to
+# run rather than let the restart reclaim it. With SO_REUSEADDR set, binding
+# 127.0.0.1:9100 SUCCEEDS while a server holds 0.0.0.0:9100 -- so the guard
+# reported the ports held, the case ran, and `reclaim_port` (which asks lsof,
+# and finds the real listener) killed the developer's server. Measured: it
+# did, twice.
+held = []
+for port in (9100, 9101):
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", port))
+    except OSError:
+        print(f"could not hold {port}", flush=True)
+        raise SystemExit(1)
+    s.listen(16)
+    held.append(s)
+print("held", flush=True)
+time.sleep(900)
+PY
+  DECOY_PID=$!
+  local waited=0
+  until grep -q "held" "$sb/decoy.log" 2>/dev/null; do
+    if ! kill -0 "$DECOY_PID" 2>/dev/null; then return 1; fi
+    waited=$((waited + 1))
+    (( waited > 20 )) && return 1
+    sleep 0.25
+  done
+  return 0
+}
+
+release_default_ports() {
+  [[ -n "${DECOY_PID:-}" ]] || return 0
+  { kill "$DECOY_PID" && wait "$DECOY_PID"; } 2>/dev/null || true
+  DECOY_PID=""
+}
+
+# The developer's own quern, stopped for the one case that needs the default
+# ports, and put back afterwards.
+#
+# That case tests `quern start` reclaiming its port, which means it has to use
+# 9100/9101 -- a `QUERN_STATE_DIR` does not enter into the reclaim decision, so
+# the case cannot be moved onto spare ports without testing something else. It
+# used to skip whenever a server held them, which on the maintainer's machine
+# was always, so the case that most directly covers "an update while the server
+# is running" was the one that never ran. Skips are not passes, and this one was
+# skipping on every release.
+#
+# Stopping is safe to automate because the release takes priority over whatever
+# the server is doing -- said explicitly, 2026-09-29 -- but it is *not* safe to
+# automate against a process we have not identified. Only a listener whose pid
+# matches `~/.quern/state.json` is stopped; anything else means somebody else's
+# program is on that port, and the case skips as before.
+#
+# The in-memory flow store is lost. `config.json` restores the local-capture
+# list and `active-device.json` the active device, so nothing else is.
+DEV_SERVER_STOPPED=""
+#: Sticky, unlike DEV_SERVER_STOPPED, which the restore clears. The final
+#: safety check runs long afterwards and needs to know a restart happened at
+#: all, not whether one is outstanding.
+DEV_SERVER_RESTARTED=""
+
+stop_developer_server() {
+  DEV_SERVER_STOPPED=""
+  local pid
+  pid="$(lsof -nP -iTCP:9100 -sTCP:LISTEN -t 2>/dev/null | head -1)"
+  [[ -z "$pid" ]] && return 0          # free already; nothing to do
+
+  # Identify before acting. state.json is the only thing that says the listener
+  # is ours rather than a coincidence on a common port.
+  local statepid
+  statepid="$(python3 -c '
+import json, os, sys
+p = os.path.expanduser("~/.quern/state.json")
+try:
+    print(json.load(open(p)).get("pid", ""))
+except Exception:
+    print("")' 2>/dev/null)"
+  if [[ -z "$statepid" || "$pid" != "$statepid" ]]; then
+    printf "  note: %s holds 9100 and is not the quern in ~/.quern/state.json — leaving it alone\n" "$pid"
+    return 1
+  fi
+
+  printf "  stopping your quern (pid %s) so the running-server case can use 9100/9101\n" "$pid"
+  "$HOME/.local/bin/quern" stop >/dev/null 2>&1 || true
+  sleep 2
+  if [[ -n "$(lsof -nP -iTCP:9100 -sTCP:LISTEN -t 2>/dev/null)" ]]; then
+    printf "  warning: 9100 is still held after stop; not proceeding\n"
+    return 1
+  fi
+  DEV_SERVER_STOPPED=1
+  return 0
+}
+
+restore_developer_server() {
+  [[ -n "$DEV_SERVER_STOPPED" ]] || return 0
+  DEV_SERVER_STOPPED=""
+  DEV_SERVER_RESTARTED=1
+  printf "  restarting your quern\n"
+  "$HOME/.local/bin/quern" start >/dev/null 2>&1 || true
+  sleep 3
+  if curl -fsS --max-time 10 http://127.0.0.1:9100/health >/dev/null 2>&1; then
+    ok "your server was stopped for this case and is back"
+  else
+    bad "your server was stopped for this case and did NOT come back — start it with: quern start"
+  fi
+}
+
+case_running_server_update() {
+  failures=0   # a subshell copy: a case reports only its own
+  local sb="$WORK/running-update"
+  mkdir -p "$sb/home" "$sb/state" "$sb/bin"
+  make_stubs "$sb/bin"
+
+  if ! hold_default_ports "$sb"; then
+    # Reached only when something that is *not* your quern holds the ports:
+    # `stop_developer_server` has already cleared ours by the time this runs.
+    # Killing an unidentified listener is not something a release script should
+    # do, so this still declines -- but it now names what is in the way rather
+    # than assuming it is yours.
+    skip "running-server update: 9100/9101 are held by a process that is not the quern in ~/.quern/state.json — $(lsof -nP -iTCP:9100 -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1, $2}'). Free them and re-run to exercise it."
+    return 0
+  fi
+
+  build_origin "$sb/origin.git" "$sb/build"
+  git clone -q -b release/stable "$sb/origin.git" "$sb/install"
+  git -C "$sb/install" reset -q --hard HEAD~1
+
+  export HOME="$sb/home" QUERN_STATE_DIR="$sb/state" PATH="$sb/bin:$PATH"
+
+  python3 -m venv "$sb/install/.venv" > "$sb/venv.log" 2>&1 || true
+  "$sb/install/.venv/bin/pip" install -q -e "$sb/install" > "$sb/pip.log" 2>&1 || true
+
+  # The previous release, running, on ports of its own.
+  set +e
+  ( cd "$sb/install" && "$sb/install/quern" start --port 9190 --proxy-port 9191 ) \
+    > "$sb/start.log" 2>&1
+  local started=$?
+  set -e
+  if [[ $started -ne 0 ]]; then
+    bad "running-server update: $PREV would not start, so there was nothing to update under"
+    tail -n 12 "$sb/start.log" | sed 's/^/      /'
+    release_default_ports
+    return "$failures"
+  fi
+  ok "$PREV's server is up before the update"
+
+  set +e
+  ( cd "$sb/install" && "$sb/install/quern" update ) > "$sb/update.log" 2>&1
+  local rc=$?
+  set -e
+
+  if [[ $rc -eq 0 ]]; then
+    ok "the update exits 0 with the server running"
+  else
+    bad "the update exited $rc — see $sb/update.log"
+    tail -n 20 "$sb/update.log" | sed 's/^/      /'
+  fi
+
+  if grep -q "Traceback (most recent call last)" "$sb/update.log"; then
+    bad "the update printed a traceback"
+  else
+    ok "no traceback"
+  fi
+
+  # The point of the case. A server that does not come back is the state the
+  # menu bar grew a recovery item for, and it is silent from the CLI.
+  local port
+  port="$(python3 -c 'import json,sys
+try:
+    print(json.load(open(sys.argv[1])).get("server_port", ""))
+except Exception:
+    print("")' "$sb/state/state.json" 2>/dev/null || true)"
+  if [[ -z "$port" ]]; then
+    bad "no server_port in state.json — the server did not come back from the update"
+  elif curl -fsS --max-time 15 "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
+    ok "the server came back after the update, on port $port"
+  else
+    bad "nothing answers /health on port $port — the server did not come back"
+  fi
+
+  # It has to come back as the *candidate*, not the version it was.
+  local running
+  running="$(curl -fsS --max-time 15 "http://127.0.0.1:${port:-0}/health" 2>/dev/null \
+    | sed -n 's/.*"version" *: *"\([^"]*\)".*/\1/p' | head -1 || true)"
+  if [[ -z "$running" ]]; then
+    skip "running-server update: /health did not report a version to compare"
+  elif [[ "$running" == "$candidate_version" ]]; then
+    ok "it is serving $candidate_version"
+  else
+    bad "it came back on $running, expected $candidate_version — the restart picked up the old tree"
+  fi
+
+  ( cd "$sb/install" && "$sb/install/quern" stop ) >/dev/null 2>&1 || true
+  release_default_ports
+  return "$failures"
+}
+
+# Stop/restore sit outside the subshell on purpose: the case can return from
+# several places, and a restore inside it would be one `return` away from
+# leaving the developer's server down.
+set +e
+stop_developer_server
+( case_running_server_update )
+failures=$((failures + $?))
+restore_developer_server
+set -e
+
+# --------------------------------------------------------------------------
 step "A tarball install updating from $PREV to $candidate_version"
 # --------------------------------------------------------------------------
-# Needs the *previous* release to honour QUERN_RELEASES_URL, since that is the
-# code doing the fetching, and only 0.18.5 and later do. Until then the old
-# updater would resolve against GitHub and download the published release --
-# rehearsing nothing, while printing the same lines as a real run.
-prev_has_override=0
-git -C "$ROOT" cat-file -e "$PREV:server/lifecycle/releases.py" 2>/dev/null && prev_has_override=1
-if (( prev_has_override )); then
-  skip "tarball update: not implemented yet (the previous release can host it now)"
-else
-  skip "tarball update: $PREV predates QUERN_RELEASES_URL, so its updater would fetch the published release instead of the candidate"
-fi
+# The other half of the #212 case, and the one that went untested longest:
+# a release install fetching the candidate and swapping itself for it, driven
+# by the *previous release's* updater. It needs that release to honour
+# QUERN_RELEASES_URL, since it is the code doing the fetching -- only 0.19.0
+# and later do, so before that this could only have pointed the old updater
+# at GitHub and rehearsed nothing while printing the lines of a real run.
+case_tarball_update() {
+  failures=0   # a subshell copy: a case reports only its own
+  if ! git -C "$ROOT" cat-file -e "$PREV:server/lifecycle/releases.py" 2>/dev/null; then
+    skip "tarball update: $PREV predates QUERN_RELEASES_URL, so its updater would fetch the published release instead of the candidate"
+    return 0
+  fi
+  if [[ ! -d "$WORK/git-update/install/mcp/dist" ]]; then
+    skip "tarball update: the update case left no built tree to package"
+    return 0
+  fi
+
+  local sb="$WORK/tarball-update"
+  mkdir -p "$sb/home/.local/share" "$sb/bin" "$sb/state"
+  make_stubs "$sb/bin"
+
+  # The previous release as a user actually has it: the published asset,
+  # unpacked where install.sh puts it. Not a `git archive` of the tag -- that
+  # has no mcp/dist and no node_modules, so the update would be starting from
+  # a tree no user is running.
+  local prev_version="${PREV#v}"
+  local installed="$sb/home/.local/share/quern"
+  if ! curl -fsSL --max-time 300 -o "$sb/prev.tar.gz" \
+      "https://github.com/quern-dev/quern/releases/download/$PREV/quern-$prev_version.tar.gz"
+  then
+    bad "tarball update: could not download $PREV's asset to update from"
+    return "$failures"
+  fi
+  /usr/bin/tar -xzf "$sb/prev.tar.gz" -C "$sb"
+  mv "$sb/quern-$prev_version" "$installed"
+
+  python3 -m venv "$installed/.venv" > "$sb/venv.log" 2>&1 || true
+  "$installed/.venv/bin/pip" install -q -e "$installed" > "$sb/pip.log" 2>&1 \
+    || bad "tarball update: could not prepare $PREV's venv: $(tail -n 2 "$sb/pip.log" 2>/dev/null | tr '\n' ' ' || true)"
+
+  if ! serve_candidate "$sb"; then
+    bad "tarball update: the local release server never came up"
+    return "$failures"
+  fi
+
+  # The caller's PATH, as the git-update case uses: `quern update` on a
+  # release install is run from the user's shell, so their node is there. The
+  # narrow terminal PATH borrowed from the fresh-install case has no node on a
+  # machine whose node comes from a version manager, and setup then fails for
+  # a reason that is about the sandbox rather than the update. Whether an
+  # update survives a missing node is the Node matrix's question, and it asks
+  # it properly.
+  set +e
+  ( cd "$installed" && env -i \
+      HOME="$sb/home" \
+      QUERN_STATE_DIR="$sb/state" \
+      QUERN_RELEASES_URL="http://127.0.0.1:$CANDIDATE_PORT" \
+      PATH="$sb/bin:$PATH" \
+      PIP_CACHE_DIR="$PIP_CACHE_DIR" npm_config_cache="$npm_config_cache" \
+      "$installed/quern" update ) > "$sb/update.log" 2>&1
+  local rc=$?
+  set -e
+  stop_candidate
+
+  if [[ $rc -eq 0 ]]; then
+    ok "$PREV's updater exits 0 on a tarball install"
+  else
+    bad "$PREV's updater exited $rc — see $sb/update.log"
+    tail -n 25 "$sb/update.log" | sed 's/^/      /'
+  fi
+
+  # It has to have fetched *ours*. Without this the case passes while the
+  # updater quietly resolves against GitHub and installs the published
+  # release, which is the whole reason the override exists.
+  if served_the_candidate "$sb/srv.log"; then
+    ok "it fetched the candidate from the local server, not GitHub"
+  else
+    bad "the local server did not serve the asset — the updater went somewhere else"
+    tail -n 3 "$sb/srv.log" 2>/dev/null | sed 's/^/      /' || true
+  fi
+
+  if grep -q "Traceback (most recent call last)" "$sb/update.log"; then
+    # #212 was exactly this: a traceback after the source had been replaced.
+    bad "the update printed a traceback"
+    grep -A 6 "Traceback (most recent call last)" "$sb/update.log" | sed 's/^/      /'
+  else
+    ok "no traceback"
+  fi
+
+  local landed
+  landed="$(sed -n 's/^version = "\(.*\)"/\1/p' "$installed/pyproject.toml" 2>/dev/null | head -1 || true)"
+  [[ "$landed" == "$candidate_version" ]] \
+    && ok "the install is $candidate_version" \
+    || bad "the install is ${landed:-nothing}, expected $candidate_version"
+
+  # A release install must not need npm at start: the asset ships mcp/dist
+  # already built, and the swap has to preserve that (#193).
+  [[ -f "$installed/mcp/dist/launcher.cjs" ]] \
+    && ok "the swapped tree still has mcp/dist built" \
+    || bad "mcp/dist/launcher.cjs is missing after the swap — the wrapper would need npm"
+
+  local result="$sb/state/last-update.json"
+  if [[ -f "$result" ]]; then
+    if grep -q '"outcome" *: *"updated"' "$result" \
+       && grep -q "\"version\" *: *\"$candidate_version\"" "$result"; then
+      ok "last-update.json records updated → $candidate_version"
+    else
+      bad "last-update.json says $(tr -d '\n' < "$result")"
+    fi
+  else
+    bad "no last-update.json was written"
+  fi
+
+  return "$failures"
+}
+
+set +e
+( case_tarball_update )
+failures=$((failures + $?))
+set -e
+
+# --------------------------------------------------------------------------
+step "Setup with the menu-bar app already running"
+# --------------------------------------------------------------------------
+# #215: every run of setup quit the running app and reopened it, even when
+# there was nothing new to install -- which is every run on a git install.
+# When the reopen failed (macOS error -600, seen during a live update) the app
+# stayed quit, and the only sign was its absence from the menu bar.
+#
+# The app is faked, but the *detection* is not: setup finds it with
+# `pgrep -f <bundle>/Contents/MacOS/QuernMenuBar`, so this puts a real process
+# at that path with that argv. A stubbed pgrep would have tested the stub.
+case_menubar_app_left_running() {
+  failures=0   # a subshell copy: a case reports only its own
+  local install="$WORK/git-update/install"
+  if [[ ! -x "$install/quern" ]]; then
+    skip "menu-bar app: the update case left no install to run setup from"
+    return 0
+  fi
+
+  local sb="$WORK/menubar-running"
+  local app="$sb/home/Applications/Quern.app"
+  mkdir -p "$sb/home" "$sb/state" "$sb/bin" "$app/Contents/MacOS"
+  make_stubs "$sb/bin"
+
+  # Current, so there is nothing to install and nothing setup needs to
+  # replace. A version behind would be a different case: then setup *should*
+  # quit it, and putting both in one test would let either pass for the
+  # other's reason.
+  cat > "$app/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleShortVersionString</key>
+  <string>$candidate_version</string>
+  <key>CFBundleIdentifier</key>
+  <string>dev.quern.QuernMenuBar</string>
+</dict>
+</plist>
+EOF
+  cat > "$app/Contents/MacOS/QuernMenuBar" <<'EOF'
+#!/bin/sh
+# Stands in for the app: what matters is that the *bundle path* is in the
+# argv pgrep matches, and that it stays up.
+#
+# The sleep is a child, and killing this shell orphans it -- fifteen minutes
+# of a stray `sleep` on the developer's machine, which is exactly the litter
+# that made an unrelated test kill a bystander. So the child's pid is
+# recorded for the case to clean up, and this traps the signals it might be
+# stopped with so it usually tidies up after itself first.
+sleep 900 &
+child=$!
+echo "$child" > "${0}.child"
+trap 'kill "$child" 2>/dev/null; exit 0' TERM INT HUP
+wait "$child"
+EOF
+  chmod +x "$app/Contents/MacOS/QuernMenuBar"
+
+  "$app/Contents/MacOS/QuernMenuBar" &
+  local app_pid=$!
+  sleep 0.5
+  if ! kill -0 "$app_pid" 2>/dev/null; then
+    bad "menu-bar app: the stand-in would not stay running"
+    return "$failures"
+  fi
+  # Confirm setup will actually see it, or the case proves nothing.
+  if ! pgrep -f "$app/Contents/MacOS/QuernMenuBar" >/dev/null 2>&1; then
+    kill "$app_pid" 2>/dev/null || true
+    bad "menu-bar app: pgrep cannot see the stand-in, so setup would not either"
+    return "$failures"
+  fi
+  ok "a running app of the current version is in place"
+
+  set +e
+  ( cd "$install" && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
+      PATH="$sb/bin:$PATH" npm_config_cache="$npm_config_cache" \
+      "$install/quern" setup ) > "$sb/setup.log" 2>&1
+  local setup_rc=$?
+  set -e
+
+  # Evidence that setup reached the menu-bar decision at all. Without this,
+  # a setup that died early leaves the app running for the most boring
+  # reason available -- it never got there -- and "setup left it running"
+  # passes on that.
+  if grep -qi "Quern app" "$sb/setup.log"; then
+    ok "setup reached the menu-bar check (rc $setup_rc)"
+  else
+    bad "setup never reported on the Quern app, so the check below proves nothing (rc $setup_rc)"
+    tail -n 8 "$sb/setup.log" 2>/dev/null | sed 's/^/      /' || true
+  fi
+
+  if kill -0 "$app_pid" 2>/dev/null; then
+    ok "setup left it running"
+  else
+    bad "setup quit the app it had nothing to replace (#215)"
+    grep -i "quern app\|menu.bar\|quit" "$sb/setup.log" | head -6 | sed 's/^/      /'
+  fi
+
+  # And it must not have decided to fetch one either: an app that is current
+  # is not an app to reinstall, and a rehearsal that downloads here would be
+  # testing the network.
+  if grep -qi "Fetching the signed menu-bar app\|Downloading" "$sb/setup.log"; then
+    bad "setup went to fetch an app it already had at $candidate_version"
+  else
+    ok "and did not go looking for another one"
+  fi
+
+  kill "$app_pid" 2>/dev/null || true
+  wait "$app_pid" 2>/dev/null || true
+  # Belt as well as braces: if the shell was killed before its trap ran, the
+  # sleep is orphaned and `wait` above cannot see it.
+  # An `if`, not `[[ ... ]] && kill ...`: under `set -e` that one-liner's
+  # status is the whole list's, so an empty $stray ended the case there --
+  # silently, with the parent adding a failure nobody had printed. Exactly
+  # the shape the per-case exit status was introduced to carry, biting the
+  # case that reports it.
+  local stray
+  stray="$(cat "$app/Contents/MacOS/QuernMenuBar.child" 2>/dev/null || true)"
+  if [[ -n "$stray" ]]; then
+    kill "$stray" 2>/dev/null || true
+    # `kill` returns when the signal is delivered, not when the process is
+    # gone, so an immediate `kill -0` can still find it mid-exit and report a
+    # leak that cleanup had handled. A flake in the check would be worse than
+    # the leak it looks for.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      kill -0 "$stray" 2>/dev/null || break
+      sleep 0.1
+    done
+  fi
+  if [[ -n "$stray" ]] && kill -0 "$stray" 2>/dev/null; then
+    bad "the stand-in left $stray running"
+  else
+    ok "the stand-in left nothing behind"
+  fi
+  return "$failures"
+}
+
+set +e
+( case_menubar_app_left_running )
+failures=$((failures + $?))
+set -e
+
+# --------------------------------------------------------------------------
+step "A clone that cannot be fast-forwarded"
+# --------------------------------------------------------------------------
+# Two states a real clone is often in, and in both the update must decline
+# and say what to do -- not pull, not half-pull, and above all not discard
+# work. They share the origin the first case built.
+#
+# `git pull --ff-only` is what runs, so the interesting part is the message:
+# a raw git error tells the user nothing they can act on.
+prepare_clone() {
+  local into="$1"
+  git clone -q -b release/stable "$WORK/git-update/origin.git" "$into"
+  git -C "$into" reset -q --hard HEAD~1
+  python3 -m venv "$into/.venv" > "$into/venv.log" 2>&1 || true
+  "$into/.venv/bin/pip" install -q -e "$into" > "$into/pip.log" 2>&1 || true
+}
+
+case_clone_on_another_branch() {
+  failures=0   # a subshell copy: a case reports only its own
+  if [[ ! -d "$WORK/git-update/origin.git" ]]; then
+    skip "branch clone: the update case left no origin to clone from"
+    return 0
+  fi
+  local sb="$WORK/branch-clone"
+  mkdir -p "$sb/home" "$sb/state" "$sb/bin"
+  make_stubs "$sb/bin"
+  prepare_clone "$sb/install"
+
+  # The ordinary dev-clone state: working on something, not on the channel
+  # branch. Pulling here would track the wrong upstream, so quern reports
+  # what is available and leaves the decision alone (#40).
+  git -C "$sb/install" checkout -q -b my-work
+
+  set +e
+  ( cd "$sb/install" && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
+      PATH="$sb/bin:$PATH" "$sb/install/quern" update ) > "$sb/update.log" 2>&1
+  local rc=$?
+  set -e
+
+  if grep -q "You're on branch" "$sb/update.log" \
+     && grep -q "release/stable" "$sb/update.log"; then
+    ok "it names the branch you are on and the one to switch to"
+  else
+    bad "the update did not explain why it would not pull"
+    tail -n 15 "$sb/update.log" | sed 's/^/      /'
+  fi
+
+  local still
+  still="$(sed -n 's/^version = "\(.*\)"/\1/p' "$sb/install/pyproject.toml" 2>/dev/null | head -1 || true)"
+  [[ "$still" == "$prev_version" ]] \
+    && ok "the clone is left where it was, on $prev_version" \
+    || bad "the clone moved to ${still:-nothing} from a branch it should not have pulled"
+
+  [[ "$(git -C "$sb/install" rev-parse --abbrev-ref HEAD)" == "my-work" ]] \
+    && ok "and still on my-work" \
+    || bad "the update changed the checked-out branch"
+  (( rc == 0 || rc == 2 )) && ok "it exits without claiming failure (rc $rc)" \
+    || ok "it exits $rc"
+  return "$failures"
+}
+
+case_clone_with_local_changes() {
+  failures=0   # a subshell copy: a case reports only its own
+  if [[ ! -d "$WORK/git-update/origin.git" ]]; then
+    skip "dirty clone: the update case left no origin to clone from"
+    return 0
+  fi
+  local sb="$WORK/dirty-clone"
+  mkdir -p "$sb/home" "$sb/state" "$sb/bin"
+  make_stubs "$sb/bin"
+  prepare_clone "$sb/install"
+
+  # The edited file has to be one the incoming commit *also* changes, or there
+  # is nothing for the fast-forward to refuse: `git pull --ff-only` only
+  # declines when an uncommitted change would be overwritten, so a local edit
+  # to a file the candidate leaves alone pulls cleanly and the update correctly
+  # exits 0.
+  #
+  # This used to hardcode README.md and so passed or failed on whether a given
+  # release happened to touch it. It did at 0.22.0 and did not at 0.22.1, and
+  # the case went red against a product that was behaving correctly. Pick the
+  # file from the actual diff instead, so the refusal is a property of the
+  # scenario rather than of the release.
+  #
+  # --diff-filter=M, because the file must exist in the clone: one added by the
+  # candidate is not there to edit.
+  local target
+  target="$(git -C "$ROOT" diff --name-only --diff-filter=M "$PREV" "$CANDIDATE" \
+            -- '*.md' '*.py' '*.toml' 2>/dev/null | head -1)"
+  if [[ -z "$target" || ! -f "$sb/install/$target" ]]; then
+    skip "dirty clone: no file modified by both this release and present in the clone"
+    return 0
+  fi
+
+  # One stray edit is all it takes, and it is the user's work: the only
+  # unacceptable outcome here is losing it.
+  local marker="# a local edit the update must not discard"
+  printf '%s\n' "$marker" >> "$sb/install/$target"
+
+  set +e
+  ( cd "$sb/install" && env -i HOME="$sb/home" QUERN_STATE_DIR="$sb/state" \
+      PATH="$sb/bin:$PATH" "$sb/install/quern" update ) > "$sb/update.log" 2>&1
+  local rc=$?
+  set -e
+
+  if grep -qi "local changes" "$sb/update.log"; then
+    ok "it says local changes are in the way"
+  else
+    bad "the update did not explain that local changes blocked it (edited $target)"
+    tail -n 15 "$sb/update.log" | sed 's/^/      /'
+  fi
+  grep -qi "stash" "$sb/update.log" \
+    && ok "and says what to do about them" \
+    || bad "it does not say how to proceed"
+
+  # The load-bearing one.
+  if grep -qF "$marker" "$sb/install/$target"; then
+    ok "the local edit is still there"
+  else
+    bad "the update discarded uncommitted work"
+  fi
+
+  [[ $rc -ne 0 ]] \
+    && ok "the refusal reaches the exit code (rc $rc)" \
+    || bad "a blocked update exited 0"
+  return "$failures"
+}
+
+set +e
+( case_clone_on_another_branch )
+failures=$((failures + $?))
+( case_clone_with_local_changes )
+failures=$((failures + $?))
+set -e
+
+# --------------------------------------------------------------------------
+step "A channel offering an older release is refused"
+# --------------------------------------------------------------------------
+# 0.18.1's defect: the beta channel resolved to a release three minor
+# versions old and every tarball user was offered it, then pinned there. The
+# guard exists so a wrong answer from the resolver is refused rather than
+# acted on -- and refusing has to be distinguishable from having nothing to
+# do, because rc 2 means "already up to date" and maps to exit 0, which would
+# tell every surface that nothing needed doing.
+#
+# Driven against the *candidate's* updater, unlike the cases above: this is a
+# question about the code that is going out, not the code users are leaving.
+case_downgrade_refused() {
+  failures=0   # a subshell copy: a case reports only its own
+  local installed="$WORK/tarball-update/home/.local/share/quern"
+  if [[ ! -x "$installed/quern" ]]; then
+    skip "downgrade refusal: the tarball-update case left no install to offer a downgrade to"
+    return 0
+  fi
+  local at
+  at="$(sed -n 's/^version = "\(.*\)"/\1/p' "$installed/pyproject.toml" 2>/dev/null | head -1 || true)"
+  if [[ "$at" != "$candidate_version" ]]; then
+    skip "downgrade refusal: that install is ${at:-nothing}, not the candidate"
+    return 0
+  fi
+
+  local sb="$WORK/downgrade"
+  mkdir -p "$sb/home" "$sb/state" "$sb/bin" "$sb/srv/releases"
+  make_stubs "$sb/bin"
+  # The state and home of the install being updated, so the run is the same
+  # one the tarball case left behind rather than a fresh machine.
+  cp -R "$WORK/tarball-update/home/." "$sb/home/" 2>/dev/null || true
+
+  # No asset is staged on purpose. The refusal happens at the version
+  # comparison, before anything is downloaded, so a served tarball here would
+  # only be able to hide a guard that had stopped working.
+  local port
+  port="$(python3 -c "
+import socket
+s = socket.socket(); s.bind(('127.0.0.1', 0))
+print(s.getsockname()[1]); s.close()" 2>/dev/null || echo 8908)"
+  cat > "$sb/srv/releases/latest" <<EOF
+{"tag_name": "$PREV", "prerelease": false,
+ "assets": [{"name": "quern-$prev_version.tar.gz",
+             "browser_download_url": "http://127.0.0.1:$port/releases/download/$PREV/quern-$prev_version.tar.gz"}]}
+EOF
+  python3 -m http.server "$port" --directory "$sb/srv" >"$sb/srv.log" 2>&1 &
+  local srv_pid=$!
+  local waited=0
+  until curl -fsS --max-time 2 "http://127.0.0.1:$port/releases/latest" >/dev/null 2>&1; do
+    waited=$((waited + 1))
+    if (( waited > 20 )); then
+      { kill "$srv_pid" && wait "$srv_pid"; } 2>/dev/null || true
+      bad "downgrade refusal: the local release server never came up"
+      return "$failures"
+    fi
+    sleep 0.5
+  done
+
+  set +e
+  ( cd "$installed" && env -i \
+      HOME="$sb/home" \
+      QUERN_STATE_DIR="$sb/state" \
+      QUERN_RELEASES_URL="http://127.0.0.1:$port" \
+      PATH="$sb/bin:$PATH" \
+      "$installed/quern" update ) > "$sb/update.log" 2>&1
+  local rc=$?
+  set -e
+  { kill "$srv_pid" && wait "$srv_pid"; } 2>/dev/null || true
+
+  if grep -q "Not downgrading" "$sb/update.log"; then
+    ok "it refuses the older release, and says why"
+  else
+    bad "nothing refused $prev_version being offered to $candidate_version"
+    tail -n 15 "$sb/update.log" | sed 's/^/      /'
+  fi
+
+  # Not rc 2. That is NO_OP -- "already up to date" -- and it reaches the
+  # CLI, the menu bar's isNoOp and the result file alike. A refusal is the
+  # opposite: an update was wanted and did not happen.
+  if [[ $rc -eq 0 || $rc -eq 2 ]]; then
+    bad "the refusal exited $rc, which reads as success or as nothing-to-do"
+  else
+    ok "the refusal reaches the exit code (rc $rc)"
+  fi
+
+  local still
+  still="$(sed -n 's/^version = "\(.*\)"/\1/p' "$installed/pyproject.toml" 2>/dev/null | head -1 || true)"
+  [[ "$still" == "$candidate_version" ]] \
+    && ok "the install is untouched at $candidate_version" \
+    || bad "the install is now ${still:-nothing} — it downgraded anyway"
+
+  return "$failures"
+}
+
+set +e
+( case_downgrade_refused )
+failures=$((failures + $?))
+set -e
 
 # --------------------------------------------------------------------------
 step "Nothing outside the sandbox was touched"
@@ -849,6 +1783,20 @@ if [[ -z "$REAL_PID" ]]; then
   ok "no server of yours was running to disturb"
 elif kill -0 "$REAL_PID" 2>/dev/null; then
   ok "your own server (pid $REAL_PID) is still running"
+elif [[ -n "$DEV_SERVER_RESTARTED" ]]; then
+  # A different pid is the expected outcome, not a casualty: the running-server
+  # case stops the server deliberately and starts it again, so the question
+  # stops being "is that pid alive" and becomes "is a server serving".
+  #
+  # Checked here as well as at the restart, because this is the line a reader
+  # trusts at the end of a run -- and a guard that cannot tell a deliberate
+  # restart from a kill would either cry wolf on every release or, if someone
+  # silenced it, stop noticing the kill it exists for.
+  if curl -fsS --max-time 10 http://127.0.0.1:9100/health >/dev/null 2>&1; then
+    ok "your own server was stopped for the running-server case and is serving again"
+  else
+    bad "your own server was stopped for the running-server case and is NOT back — run: quern start"
+  fi
 else
   # `quern start` reclaims a port by killing the quern-looking process that
   # holds it, and does not consult QUERN_STATE_DIR when deciding.

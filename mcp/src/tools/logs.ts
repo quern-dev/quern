@@ -5,6 +5,7 @@ import { z } from "zod";
 import { readStateFile } from "../config.js";
 import { apiRequest } from "../http.js";
 import { strictParams } from "./helpers.js";
+import { type LogQueryAnswer, tailLogsResult } from "./log-responses.js";
 
 export function registerLogTools(server: McpServer): void {
   server.registerTool("ensure_server", {
@@ -214,7 +215,7 @@ export function registerLogTools(server: McpServer): void {
   );
 
   server.registerTool("tail_logs", {
-    description: `Show recent log entries (most recent first). Use this for quick "what just happened?" queries. Defaults to the 50 most recent entries.`,
+    description: `Show recent log entries (most recent first). Use this for quick "what just happened?" queries. Defaults to the 50 most recent entries. If the result has \`truncated: true\`, entries in the window were evicted before you asked, so an empty or short answer does NOT mean nothing happened — \`complete_after\` says from when the answer is whole.`,
     inputSchema: strictParams({
       count: z
         .coerce.number()
@@ -240,15 +241,14 @@ export function registerLogTools(server: McpServer): void {
           process,
           source,
           tail: true,
-        })) as { entries: unknown[] };
+        })) as LogQueryAnswer;
 
-        const entries = data.entries || [];
-
+        // Shaped by a function the test suite runs; see log-responses.ts.
         return {
           content: [
             {
               type: "text" as const,
-              text: JSON.stringify({ entries, total: entries.length }, null, 2),
+              text: JSON.stringify(tailLogsResult(data), null, 2),
             },
           ],
         };
@@ -267,16 +267,16 @@ export function registerLogTools(server: McpServer): void {
   );
 
   server.registerTool("query_logs", {
-    description: `Full-featured log search with time ranges and text search. Use this for investigating specific issues — filter by time, process, level, or search text.`,
+    description: `Full-featured log search with time ranges and text search. Use this for investigating specific issues — filter by time, process, level, or search text. If the result has \`truncated: true\`, entries in the window were evicted before you asked, so an empty or short answer does NOT mean nothing happened — \`complete_after\` says from when the answer is whole.`,
     inputSchema: strictParams({
       since: z
         .string()
         .optional()
-        .describe("Start time (ISO 8601, e.g. 2026-02-08T10:00:00Z)"),
+        .describe("Start time (ISO 8601, e.g. 2026-02-08T10:00:00Z). No offset means UTC."),
       until: z
         .string()
         .optional()
-        .describe("End time (ISO 8601)"),
+        .describe("End time (ISO 8601). No offset means UTC."),
       level: z
         .enum(["debug", "info", "notice", "warning", "error", "fault"])
         .optional()
@@ -331,7 +331,7 @@ export function registerLogTools(server: McpServer): void {
   );
 
   server.registerTool("get_log_summary", {
-    description: `Get an AI-optimized summary of recent log activity. Returns error counts, top issues, and a natural language summary. Supports cursor-based polling for efficient delta updates.`,
+    description: `Get an AI-optimized summary of recent log activity. Returns error counts, top issues, and a natural language summary. Supports cursor-based polling for efficient delta updates. If \`truncated\` is true, entries in the window were evicted and the counts may be low. The cursor follows arrival order: a delta returns everything that arrived since the last summary, including entries stamped earlier (a device clock ahead of the host, a crash report written after the crash). If \`cursor_reset\` is true, the cursor could not be honoured (the server restarted, the cursor is ahead of anything the server has numbered, or it is not a cursor) and the result covers the window instead.`,
     inputSchema: strictParams({
       window: z
         .enum(["30s", "1m", "5m", "15m", "1h"])
@@ -373,12 +373,12 @@ export function registerLogTools(server: McpServer): void {
   );
 
   server.registerTool("get_errors", {
-    description: `Get error-level log entries and crash reports. Useful for quickly finding what's going wrong.`,
+    description: `Get error-level log entries and crash reports. Useful for quickly finding what's going wrong. \`truncated: true\` means error-level entries from the window were evicted before you asked, so an empty list is not proof there were no errors.`,
     inputSchema: strictParams({
       since: z
         .string()
         .optional()
-        .describe("Only errors after this time (ISO 8601)"),
+        .describe("Only errors after this time (ISO 8601). No offset means UTC."),
       limit: z
         .coerce.number()
         .min(1)
@@ -418,7 +418,7 @@ export function registerLogTools(server: McpServer): void {
   );
 
   server.registerTool("get_build_result", {
-    description: `Get the most recent parsed xcodebuild result, including errors, warnings, and test results.`,
+    description: `Get the most recent parsed xcodebuild result, including errors, warnings, and test results. A failed build always names a cause: a location-less error (signing, provisioning), or the steps xcodebuild says failed.`,
     inputSchema: strictParams({}),
   }, async () => {
       try {
@@ -465,7 +465,7 @@ export function registerLogTools(server: McpServer): void {
   );
 
   server.registerTool("parse_build_output", {
-    description: `Parse an xcodebuild log file into structured errors, warnings, and test results. Run xcodebuild however you want (via Bash), pipe output to a file, then hand the file to this tool for structured parsing.`,
+    description: `Parse an xcodebuild log file into structured errors, warnings, and test results. Run xcodebuild however you want (via Bash), pipe output to a file, then hand the file to this tool for structured parsing. Errors include ones with no source location (signing, provisioning), and a build that failed with nothing compiled wrong reports the steps xcodebuild says failed -- a package plug-in xcodebuild would not run unapproved among them, with how to get past it.`,
     inputSchema: strictParams({
       file_path: z
         .string()
@@ -518,7 +518,7 @@ export function registerLogTools(server: McpServer): void {
   );
 
   server.registerTool("get_latest_crash", {
-    description: `Get recent crash reports with parsed exception types, signals, and stack frames.`,
+    description: `Get recent crash reports with parsed exception types, signals, and stack frames. Each report's \`app_frame\` is where in the app's own code it happened -- from an uncaught exception's backtrace when there is one, else the crashing thread, skipping a crash reporter's signal handler and the app's entry point -- with source file and line when the report has them (simulator Debug builds do; a phone names the function for a Debug build, an offset for a stripped one). \`reason\` is the report's own explanation (an uncaught exception's reason; Android's abort message or root cause); a Swift fatalError's message is in the app's log, not the report. \`killed_by\` names another process whose signal ended the app (a kill from a shell or devicectl): then there is no crash site, only where it was waiting. A watchdog keeps its frames -- they are where it hung -- and its explanation goes in \`reason\`. \`top_frames\` is the first few frames as text. A device report's app frames are symbolicated against the build that crashed: matched by UUID to one of quern's build records (a build_and_install to a device keeps its dSYMs), or to a dSYM Spotlight indexed in Xcode's DerivedData or archives, and resolved with atos -- so a phone's crash gets its source file and line, which the phone itself does not record. \`symbols\` says, per image, where they came from, or that nothing on this Mac matched that UUID (never a guess). Pass \`symbolicate=false\` to skip it. Pass \`detail\` for every frame and the images' UUIDs and load addresses. Pass \`udid\` to fetch a device's crashes first: an iPhone over USB (pymobiledevice3), or an Android device or emulator (its DropBox: Java crashes, native crashes, and ANRs -- \`kind\` says which). The response's \`pull\` says whether that fetch happened: 'pulled', 'skipped' (with the reason, e.g. an iPhone not on USB) or 'failed' (with the error). An iPhone pull reaches back \`days\` (default 3) and says what it left on the phone in \`pull.older_on_device\` / \`pull.note\`; pass a larger \`days\` to reach further. Only 'pulled' means the list reflects the device (for an iPhone, within the window); otherwise an empty list is not proof of no crashes (a 'failed' Android pull may still add the reports it could read; a simulator is 'skipped' because its reports are read continuously on the Mac). On Android, \`pull.open_dialogs\` names processes showing a crash dialog, or that Android is treating as not responding ('anr', which starts before its report exists): while a crash dialog is open, Android silently drops that process's further crashes, so dismiss it or force-stop the app before reproducing. With \`udid\`, the list is that device's crashes, plus reports quern cannot place on a device; a simulator's crashes carry its UDID, read from the app's path or, for its system apps, the report's coalition. A crash of one of the Mac's own processes (\`mac_process\`) is listed only without \`udid\`.`,
     inputSchema: strictParams({
       limit: z
         .coerce.number()
@@ -529,19 +529,106 @@ export function registerLogTools(server: McpServer): void {
       since: z
         .string()
         .optional()
-        .describe("Only crashes after this time (ISO 8601)"),
+        .describe("Only crashes after this time (ISO 8601). No offset means UTC."),
       udid: z
         .string()
         .optional()
         .describe("Device UDID to pull fresh crashes from before returning results"),
+      days: z
+        .coerce.number()
+        .int()
+        .min(1)
+        .max(3650)
+        .optional()
+        .describe("iPhone: how far back the pull reaches, in days (default 3). Older reports stay on the phone and are counted in pull.older_on_device."),
+      // A real boolean or the two string spellings, as start_proxy's system_proxy.
+      detail: z
+        .union([z.boolean(), z.enum(["true", "false"]).transform((v) => v === "true")])
+        .optional()
+        .describe("Include each report's full frames and images (UUIDs, load addresses) -- what symbolicating a crash needs. Off by default: several kilobytes per crash."),
+      include_raw: z
+        .union([z.boolean(), z.enum(["true", "false"]).transform((v) => v === "true")])
+        .optional()
+        .describe("Include each report's raw_text, the start of the report as written (about a thousand tokens per crash). Off by default."),
+      symbolicate: z
+        .union([z.boolean(), z.enum(["true", "false"]).transform((v) => v === "true")])
+        .optional()
+        .describe("Resolve a device report's app frames to function, file and line against the build that crashed (on by default). Most of a second per image the first time; kept after, until the server restarts. An image whose symbols were not found is looked up again on the next read, so a build made later is picked up."),
     }),
-  }, async ({ limit, since, udid }) => {
+  }, async ({ limit, since, udid, days, detail, include_raw, symbolicate }) => {
       try {
         const data = await apiRequest("GET", "/api/v1/crashes/latest", {
           limit,
           since,
           udid,
+          days,
+          detail,
+          include_raw,
+          symbolicate,
         });
+
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(data, null, 2) },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.registerTool("clear_crashes", {
+    description: `Delete the crash reports quern has stored on this Mac: one device's (pass \`udid\`) or all of them. Deletes only the copies quern's own pulls wrote, and drops reports from get_latest_crash's list; never deletes anything else in the crash directory, and never ~/Library/Logs/DiagnosticReports, which belongs to the Mac. It does not clear the device: a later get_latest_crash lists again whatever the device still holds within its window (without logging it as a new crash). To remove an iPhone's own reports, use clear_device_crashes. An unknown \`udid\` is an error, not a success.`,
+    inputSchema: strictParams({
+      udid: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Clear only this device's stored reports; omit to clear all"),
+    }),
+  }, async ({ udid }) => {
+      try {
+        const data = await apiRequest("DELETE", "/api/v1/crashes", { udid });
+
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(data, null, 2) },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.registerTool("clear_device_crashes", {
+    description: `PERMANENTLY delete the crash reports on an iPhone (over USB): every .ips/.crash report at the top of its crash directory, recent and old alike. They are gone for Xcode, Finder and anything else that reads them, not only for quern — only call this when the user has asked for the device's crash reports to be removed, for example after get_latest_crash reported a large backlog in pull.older_on_device. DiagnosticLogs (sysdiagnose archives) and other files there are left alone. Returns how many were removed, how many remain, and any the phone would not delete. quern's copies on the Mac stay, subject to the 30-day retention (clear_crashes removes them). Refused for a phone matched to USB by name rather than its hardware UDID, for Android (an unrooted device's crash store can only be read), and for a simulator (its reports are files on the Mac).`,
+    inputSchema: strictParams({
+      udid: z
+        .string()
+        .min(1)
+        .describe("The iPhone whose crash reports to delete"),
+    }),
+  }, async ({ udid }) => {
+      try {
+        const data = await apiRequest("POST", "/api/v1/crashes/device/clear", undefined, { udid });
 
         return {
           content: [
@@ -673,8 +760,66 @@ This eliminates all framework noise (UIKitCore, CFNetwork, Security) and shows o
     }
   );
 
+  server.registerTool("get_trace", {
+    description: `One timeline: what quern did, the network flows each action caused, and the app log lines that arrived while it ran.
+
+Use this when something went wrong and you want the sequence rather than three separate queries — "what happened when I tapped Submit" is one call instead of correlating query_logs and query_flows by eye.
+
+Each action carries its resolved device, outcome and duration. Flows and log lines are attributed to the action whose interval contains them, on the same device.
+
+Flows are attributed to an action if they happen during it, or within a few seconds after it returns — most actions hand work to the device and return before the request goes out. Anything attributed that way is marked in \`caveats\`, because timing is not observed causation.
+
+Every flow and log line carries \`identified_by\`, saying how its device was established: \`process\` (exact — resolved from the client pid: a \`launchd_sim\` ancestor for an iOS simulator, or the process owning the socket for an Android emulator), \`client_ip\` (an address recorded at proxy setup, which DHCP can reassign), \`client_ip_expired\` (recorded longer ago than quern will vouch for), \`adapter\` (a log line the capturing adapter named), or \`unidentified\` (only time connects it to the action). Weight an attribution by that field — it is stated on every item so you never have to infer confidence from a missing one.
+
+Read \`caveats\` and \`overlaps\` before trusting an attribution. Attribution is by device and time, because the proxy is a separate process and nothing quern controls travels with the app's requests. Two actions overlapping on one device cannot be told apart, and that is reported rather than guessed. Simulators under local capture (see set_local_capture) attribute most precisely, because flows carry a UDID resolved from the client process.
+
+With several agents on one server, pass \`udid\` to get only your own device's actions.`,
+    inputSchema: strictParams({
+      since: z
+        .string()
+        .optional()
+        .describe("Start time (ISO 8601). No offset means UTC. Defaults to the last 5 minutes."),
+      udid: z
+        .string()
+        .optional()
+        .describe("Only actions against this device"),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(1000)
+        .optional()
+        .describe("Maximum actions to return (1-1000, default 100)"),
+    }),
+  }, async ({ since, udid, limit }) => {
+      try {
+        const params: Record<string, string | number | boolean | undefined> = {};
+        if (since) params.since = since;
+        if (udid) params.udid = udid;
+        if (limit) params.limit = limit;
+
+        const data = await apiRequest("GET", "/api/v1/trace", params);
+
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(data, null, 2) },
+          ],
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+            },
+          ],
+          isError: true,
+        };
+      }
+  });
+
   server.registerTool("list_log_sources", {
-    description: `List all active log source adapters and their current status (streaming, watching, stopped, error).`,
+    description: `List all active log source adapters and their current status (streaming, watching, stopped, error). \`buffers\` shows what each log buffer holds and what it lost: capacity, evictions by source, and the oldest entry still queryable. A source's \`entries_captured\` is intake, not retention — compare it with \`buffers.logs.evicted\` to see whether capture is outrunning the buffer; if it is, filter at the source with \`process\` or \`subsystem\`.`,
     inputSchema: strictParams({}),
   }, async () => {
       try {

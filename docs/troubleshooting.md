@@ -46,6 +46,42 @@ CoreData: error: Failed to call designated initializer
 **Cause**: CoreData model/migration issue.
 **Fix**: Check data model version, migration mappings, and entity class names.
 
+## Taps and typing do nothing, and every call reports success
+
+On Xcode 27, a booted simulator can accept input and discard it. Tools report
+`{"status": "ok"}`, the tapped element is named back to you, and the screen
+never changes. Reads, screenshots, `open_url` and app launches all keep
+working, so the device looks healthy.
+
+**Why.** Xcode 27 ships a guest HID daemon, `dtuhidd`, and its Device Hub
+attaches it to every booted simulator. The guest answers by disconnecting the
+legacy touch, button and keyboard services quern drives, and never reconnects
+them. The keyboard is lost whenever Device Hub has attached; touch and buttons
+depend on whether the guest's input layer started before or after the
+attachment, so typing can be dead while tapping still works.
+
+**Confirm it:**
+
+```shell
+xcrun simctl spawn <udid> notifyutil -g com.apple.coredevice.dtuhidd.active
+```
+
+`1` means the services were claimed. Note that `1` alone does not prove input
+is dead -- a simulator booted before Device Hub started keeps working -- so use
+it to explain a failure you are already seeing rather than to predict one.
+
+**Fix it:** `restore_simulator_input` (or `POST /api/v1/device/ui/restore-input`).
+This restarts SpringBoard: apps running on the simulator are killed and it
+returns to the home screen in a few seconds. Nothing is reinstalled and the
+simulator does not reboot.
+
+Booting a simulator *through quern* does this for you, before anything is
+running. The case that needs the call is a simulator that was already booted --
+typically one booted while Xcode or its Device Hub was open.
+
+Quitting Device Hub does **not** fix a simulator that is already affected: the
+state persists for the life of that boot.
+
 ## Reading Crash Reports
 
 Simulator crash reports from `~/Library/Logs/DiagnosticReports/` are watched automatically. To suppress the macOS crash dialog (useful on CI), run `defaults write com.apple.CrashReporter DialogType none` or use `quern setup`.

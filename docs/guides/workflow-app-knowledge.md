@@ -61,6 +61,23 @@ After the top level is documented, work through the sub-screens systematically. 
 
 `init_app_knowledge` reports the counts and lists which stubs still need visiting.
 
+### Note Whether Each Screen Scrolls
+
+Do this during the tour, not afterwards. You are already standing on the screen,
+and one swipe answers it — whereas later it costs a navigation back to every
+screen you documented.
+
+> "While you're on each screen, record whether it scrolls — `scrollable: true`
+> or `false` in the frontmatter"
+
+It is not something quern can infer: Settings and Safari both scroll and both
+report zero scroll containers to the accessibility tree, so swiping is the only
+way to find out. Recording it is what lets a later `tap_element` miss say "the
+element is not on this screen" instead of sweeping a screen that cannot move.
+
+Record `false` as deliberately as `true`. Leaving it out is a third state
+meaning "nobody has said", and it is the one that helps least.
+
 ### Alerts as You Find Them
 
 Every time an unexpected modal appears — stop and document it. Don't dismiss it and move on. Alerts are the single highest-value entry type because they're the most common cause of agent failure in future sessions.

@@ -9,6 +9,9 @@ and someone will propose it again. This is the argument against it, and the
 measurement that settled it.
 **Supersedes:** `docs/proposals/hybrid-automation-design-notes.md` and
 `webview-a11y-spike-findings.md`, drafted 2026-08-31 to 09-01 and not merged.
+Those, and the working log alongside them, were deleted rather than merged once
+this shipped; their measured findings are in §4 below and the three questions
+they left unmeasured are #332.
 
 ---
 
@@ -89,10 +92,55 @@ Honest accounting, because the rejected design was not strictly worse:
   devices need the usbmux path, which is a different transport.
 - **A contract-testing idea went with it** — verifying a manifest of testids
   from inside the page — which has no home in the current design.
+- **Vendor webviews are out of reach entirely.** The protocol needs the app to
+  set `isInspectable`, and an SDK that owns its own `WKWebView` never does.
+  Measured on Iterable's in-app message modal, one screen and one moment, two
+  clients:
+
+  | Client | Sees |
+  |---|---|
+  | sim-bridge / idb | **1 element** — a bare `Application` |
+  | WDA (XCTest) | **77 nodes**, 3 WebViews, every probe string |
+
+  So the loss is narrower than it first appears, and in the opposite direction
+  from the rest of this section: accessibility needs no opt-in, and XCTest
+  resolves the content with real types — headings as StaticText, links as
+  **Link**, buttons as **Button**, so they are tappable as well as readable.
+  For a vendor modal that is usually enough; you rarely want DOM identity
+  inside someone else's dialog, you want the dismiss button. What is genuinely
+  gone is DOM access and JS state for any webview the app does not own.
 
 If a future need makes the in-page agent worth revisiting, the thing that
 changed our minds was not the design's merits. It was that a non-invasive
 channel turned out to already exist.
+
+**A collapsed tree has two causes, and they are distinguishable without a
+screenshot.** A presented web modal and a bridge poisoned by XCUITest (#66)
+both reduce the tree to one element, which reads identically at a glance:
+
+| | web modal presented | bridge poisoned (#66) |
+|---|---|---|
+| elements | 1 | 1 |
+| `Application` label | the app's name | **null** |
+| `Application` frame | real bounds | **0x0** |
+
+Worth knowing before concluding a device is broken: the modal case recovers as
+soon as the modal is dismissed, and SpringBoard reads normally throughout.
+
+**Testing a vendor modal needs no vendor.** Iterable fetches in-app messages
+from `GET https://api.iterable.com/api/inApp/getMessages`, so one Quern mock
+conjures a modal on demand — no campaign, no console, no real message. Mock
+`~d api.iterable.com & ~u inApp/getMessages`, return the SDK's own
+`TestInAppPayloadGenerator` schema, relaunch:
+
+```json
+{"inAppMessages":[{"messageId":"probe-msg-1","campaignId":424242,
+  "trigger":{"type":"immediate"},
+  "content":{"html":"<h1>PROBE_HEADING</h1>…<button>PROBE_BUTTON</button>"}}]}
+```
+
+That technique is reusable for any SDK that fetches its content over HTTP, and
+is how the measurement above was taken.
 
 ## 5. Where the code is
 

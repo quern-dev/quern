@@ -867,7 +867,7 @@ def _refresh_update_check() -> None:
     except Exception:
         import logging
 
-        logging.getLogger("quern-debug-server.updater").debug(
+        logging.getLogger(__name__).debug(
             "Could not refresh the update check", exc_info=True,
         )
 

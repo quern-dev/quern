@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -47,7 +47,7 @@ class TestActiveDeviceName:
         ctrl.devicectl.list_devices = AsyncMock(return_value=[])
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
         ctrl.adb.list_devices = AsyncMock(return_value=[])
-        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={})
+        ctrl.usbmux.get_usb_devices = AsyncMock(return_value=[])
 
         await ctrl.resolve_udid("AAAA-1111")
 
@@ -87,7 +87,7 @@ class TestActiveDeviceName:
         ctrl.devicectl.list_devices = AsyncMock(return_value=[])
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
         ctrl.adb.list_devices = AsyncMock(return_value=[])
-        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={})
+        ctrl.usbmux.get_usb_devices = AsyncMock(return_value=[])
 
         assert await ctrl.resolve_udid() == "AAAA-1111"
 
@@ -368,6 +368,7 @@ class TestCheckTools:
 class TestBoot:
     async def test_boot_by_udid(self):
         ctrl = DeviceController()
+        ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
         ctrl.simctl.boot = AsyncMock()
         udid = await ctrl.boot(udid="AAAA-1111")
         ctrl.simctl.boot.assert_called_once_with("AAAA-1111")
@@ -408,6 +409,7 @@ class TestBoot:
 class TestShutdown:
     async def test_shutdown_clears_active(self):
         ctrl = DeviceController()
+        ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
         ctrl._active_udid = "AAAA-1111"
         ctrl.simctl.shutdown = AsyncMock()
         await ctrl.shutdown("AAAA-1111")
@@ -416,6 +418,7 @@ class TestShutdown:
 
     async def test_shutdown_different_device_keeps_active(self):
         ctrl = DeviceController()
+        ctrl._device_type_cache["BBBB-2222"] = DeviceType.SIMULATOR
         ctrl._active_udid = "AAAA-1111"
         ctrl.simctl.shutdown = AsyncMock()
         await ctrl.shutdown("BBBB-2222")
@@ -440,7 +443,15 @@ class TestAppDelegation:
         ctrl = DeviceController()
         ctrl._active_udid = "AAAA-1111"
         ctrl.simctl.launch_app = AsyncMock()
+        # Stubbing only simctl.launch_app left the confirmation running for
+        # real against a udid that does not exist: it shelled out to
+        # `xcrun simctl get_app_container` and polled the full frontmost
+        # deadline, so this delegation test took 4.56s where its siblings take
+        # 0.06s (CodeRabbit on #247). Confirmation is covered on its own in
+        # TestALaunchThatNeverCameUp.
+        ctrl._confirm_the_app_came_up = AsyncMock()
         udid = await ctrl.launch_app("com.example.App")
+        ctrl._confirm_the_app_came_up.assert_awaited_once()
         ctrl.simctl.launch_app.assert_called_once_with("AAAA-1111", "com.example.App", env=None)
         assert udid == "AAAA-1111"
 
@@ -578,7 +589,7 @@ class TestGetUIElements:
         assert elements[0].type == "Application"
         assert elements[1].label == "Settings"
         ctrl.idb.describe_all.assert_called_once_with(
-            "AAAA-1111", snapshot_depth=None, source_timeout=None
+            "AAAA-1111", snapshot_depth=None, source_timeout=None, probe=True
         )
 
     async def test_with_explicit_udid(self):
@@ -588,7 +599,7 @@ class TestGetUIElements:
         elements, udid = await ctrl.get_ui_elements(udid="BBBB-2222")
         assert udid == "BBBB-2222"
         ctrl.idb.describe_all.assert_called_once_with(
-            "BBBB-2222", snapshot_depth=None, source_timeout=None
+            "BBBB-2222", snapshot_depth=None, source_timeout=None, probe=True
         )
 
 
@@ -604,6 +615,56 @@ class TestGetScreenSummary:
         assert summary["element_count"] == 4
 
 
+class TestADegradedReadSaysSo:
+    """#170: a `/source` timeout falls back to a container skeleton, which is
+    often empty -- and an empty result is exactly what a blank screen
+    returns. `element_count: 0` with no error is why that issue took a whole
+    session to diagnose: every symptom pointed at the app.
+
+    The warning existed in the server log. A caller driving quern over MCP
+    sees the JSON body and nothing else, which is this repo's rule about a
+    check worth making being worth delivering.
+    """
+
+    async def test_a_timed_out_read_is_reported_on_the_summary(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl.idb.describe_all = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
+        # The backend reports that its last read timed out and fell back.
+        ctrl.idb.source_timed_out = lambda _udid: 7.52
+
+        summary, _elements, _udid = await ctrl.get_screen_summary()
+
+        assert summary.get("source_timed_out") is True, summary
+        assert "7.5" in summary.get("degraded", ""), summary["degraded"]
+        assert "source_timeout" in summary["degraded"], (
+            "the note should say how to get a real read"
+        )
+
+    async def test_a_healthy_read_carries_no_degraded_note(self):
+        """Otherwise the note is noise and gets ignored where it matters."""
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl.idb.describe_all = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
+        ctrl.idb.source_timed_out = lambda _udid: None
+
+        summary, _elements, _udid = await ctrl.get_screen_summary()
+
+        assert "degraded" not in summary, summary
+        assert "source_timed_out" not in summary, summary
+
+    async def test_a_backend_without_the_hook_is_not_an_error(self):
+        """u2 and sim-bridge do not have one; the summary must still work."""
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl.idb.describe_all = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
+        assert not hasattr(ctrl.idb, "source_timed_out")
+
+        summary, _elements, _udid = await ctrl.get_screen_summary()
+        assert summary["element_count"] == 4
+        assert "degraded" not in summary
+
+
 class TestTap:
     async def test_tap_delegates_to_idb(self):
         ctrl = DeviceController()
@@ -613,6 +674,99 @@ class TestTap:
         udid = await ctrl.tap(100.5, 200.3)
         assert udid == "AAAA-1111"
         ctrl.idb.tap.assert_called_once_with("AAAA-1111", 100.5, 200.3)
+
+
+class TestNoIdentifierIsTappedFromAConstant:
+    """#239: five identifiers were compiled in with fixed coordinates, and a
+    tap for one of them skipped reading the screen entirely.
+
+    The app they were taken from added two tabs, so the stored position for
+    `_Map button in tab bar` came to land on a different tab -- and the call
+    still answered `status: "ok"` naming the identifier it had been asked for,
+    because nothing had been read that could contradict it.
+    """
+
+    #: The identifiers that used to be in `_STATIC_ELEMENT_POSITIONS`, with the
+    #: coordinate each one produced on an "iPhone 16" (height 844 in the
+    #: screen-size table, itself wrong -- see #210).
+    #: `_Settings button` is the one anchored top-right rather than bottom-left,
+    #: so its coordinate was `width - 28, 78` instead of `x, height - 40`.
+    #: Without it here, reinstating only that row of the table would leave every
+    #: test in this class passing — CodeRabbit caught exactly that on #240.
+    WAS_HARDCODED = {
+        "_Profile button in tab bar": (40, 804),
+        "_Map button in tab bar": (120, 804),
+        "_Activities button in tab bar": (200, 804),
+        "_Trackables button in tab bar": (280, 804),
+        "_Settings button": (374, 78),
+    }
+
+    def _tree(self, identifier: str) -> list[dict]:
+        """One element, at a centre no hardcoded point could produce.
+
+        The old x values were 40/120/200/280 and the old y was always 844-40;
+        a centre of (43, 47) collides with none of them, so the assertions
+        below cannot pass by coincidence. An earlier draft used a frame whose
+        centre was exactly 40 and "proved" the Profile case by accident.
+        """
+        return [{
+            "type": "Button",
+            "AXLabel": "Map",
+            "AXUniqueId": identifier,
+            "frame": {"x": 13, "y": 27, "width": 60, "height": 40},
+            "enabled": True,
+            "role": "AXRadioButton",
+            "role_description": "AXTabButton",
+        }]
+
+    @pytest.mark.parametrize("identifier,old_point", sorted(WAS_HARDCODED.items()))
+    async def test_it_is_read_from_the_screen(self, identifier, old_point):
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        # While the removed fast path existed it only fired for devices in a
+        # screen-size table, so proving this test bites meant priming that
+        # table's cache. Both are gone now and there is nothing to prime --
+        # noted because re-running the mutation against an older tree needs
+        # `ctrl._device_info_cache["AAAA-1111"] = SimpleNamespace(name="iPhone 16")`.
+        ctrl.idb.describe_all = AsyncMock(return_value=self._tree(identifier))
+        ctrl.idb.tap = AsyncMock()
+
+        result = await ctrl.tap_element(identifier=identifier, scroll_to_find=False)
+
+        assert result["status"] == "ok"
+        # The element's own centre, not the constant.
+        assert (result["tapped"]["x"], result["tapped"]["y"]) == (43.0, 47.0)
+        assert result["tapped"]["x"] != old_point[0], (
+            f"{identifier} was tapped at its old hardcoded coordinate"
+        )
+        ctrl.idb.tap.assert_called_once_with("AAAA-1111", 43.0, 47.0)
+        # Read from the element, not asserted by the caller.
+        assert result["tapped"]["label"] == "Map"
+
+    @pytest.mark.parametrize("identifier", sorted(WAS_HARDCODED))
+    async def test_an_identifier_that_is_absent_is_not_tapped_anyway(self, identifier):
+        """The constant path did not need the element to be present, or the
+        app to be running. A miss must be a miss.
+
+        Parametrised over every former entry, including the top-right one:
+        naming a single identifier here would let the others be reinstated
+        without a test noticing.
+        """
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl.idb.describe_all = AsyncMock(return_value=[])
+        ctrl.idb.tap = AsyncMock()
+        # The miss path grabs a screenshot for context, which was never
+        # mocked here -- so it shelled out to a real `simctl io` against a
+        # udid that does not exist, and swallowed the error (#272).
+        ctrl.simctl.screenshot = AsyncMock(return_value=b"\x89PNGfake")
+
+        result = await ctrl.tap_element(
+            identifier=identifier, scroll_to_find=False,
+        )
+
+        assert result["status"] != "ok", result
+        ctrl.idb.tap.assert_not_called()
 
 
 class TestTapElement:
@@ -647,8 +801,12 @@ class TestTapElement:
         # iOS taps now scroll-to-find on a miss; simulate the scroll also
         # failing to surface the element so we exercise the not_found path.
         ctrl._ios_scroll_to_element = AsyncMock(return_value=None)
+        # The miss path grabs a screenshot for context, which was never
+        # mocked here -- so it shelled out to a real `simctl io` against a
+        # udid that does not exist, and swallowed the error (#272).
+        ctrl.simctl.screenshot = AsyncMock(return_value=b"\x89PNGfake")
 
-        result = await ctrl.tap_element(label="Nonexistent")
+        result = await ctrl.tap_element(label="Nonexistent", scroll_to_find=True)
         assert result["status"] == "not_found"
         assert "No element found" in result["detail"]
         ctrl._ios_scroll_to_element.assert_awaited_once()
@@ -755,6 +913,7 @@ class TestPressButton:
 class TestSetLocation:
     async def test_set_location_delegates_to_simctl(self):
         ctrl = DeviceController()
+        ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
         ctrl._active_udid = "AAAA-1111"
         ctrl.simctl.set_location = AsyncMock()
 
@@ -766,6 +925,7 @@ class TestSetLocation:
 class TestClearAppData:
     async def test_clear_app_data_terminates_then_clears(self):
         ctrl = DeviceController()
+        ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
         ctrl._active_udid = "AAAA-1111"
         ctrl.simctl.terminate_app = AsyncMock()
         ctrl.simctl.clear_app_data = AsyncMock()
@@ -777,6 +937,7 @@ class TestClearAppData:
 
     async def test_clear_app_data_proceeds_if_not_running(self):
         ctrl = DeviceController()
+        ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
         ctrl._active_udid = "AAAA-1111"
         ctrl.simctl.terminate_app = AsyncMock(
             side_effect=DeviceError("app not running", tool="simctl")
@@ -791,6 +952,7 @@ class TestClearAppData:
 class TestGrantPermission:
     async def test_grant_permission_delegates_to_simctl(self):
         ctrl = DeviceController()
+        ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
         ctrl._active_udid = "AAAA-1111"
         ctrl.simctl.grant_permission = AsyncMock()
 
@@ -1007,6 +1169,30 @@ class TestGetUIElementsWdaDispatch:
         ctrl.wda_client.describe_all.assert_not_called()
 
 
+    async def test_an_unprobed_read_is_not_cached(self):
+        """The sweep reads without probing; the cache key is the udid alone.
+
+        So storing that tree hands a caller that asked for probing a tree with
+        the tab-bar and nav-bar children missing, and nothing in the entry says
+        probing was skipped. tap_element builds screen context right after
+        scroll_to_element returns, inside the 300ms TTL.
+        """
+        ctrl = DeviceController()
+        ctrl._active_udid = "SIM-0001"
+        ctrl._device_type_cache["SIM-0001"] = DeviceType.SIMULATOR
+        ctrl.idb.describe_all = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
+
+        await ctrl.get_ui_elements("SIM-0001", probe_containers=False)
+        assert "SIM-0001" not in ctrl._ui_cache, (
+            "a tree read without container probing was stored in the shared cache"
+        )
+
+        await ctrl.get_ui_elements("SIM-0001", probe_containers=True)
+        assert "SIM-0001" in ctrl._ui_cache, (
+            "a probed read should still be cached"
+        )
+
+
 class TestGetScreenSummaryStrategy:
     """Test strategy parameter on get_screen_summary."""
 
@@ -1059,32 +1245,72 @@ class TestGetScreenSummaryStrategy:
 # ---------------------------------------------------------------------------
 
 
+def _usb_controller(phones, usb):
+    """phones: {coredevice uuid: (name, hardware udid or None[, transport])};
+    usb: usbmux's (udid, name) list. Aliases are recorded by the fake devicectl
+    pass, as the real one records them from `hardwareProperties.udid`. Both
+    are read at each listing, so a test can change them between listings."""
+    from server.device import devicectl
+
+    ctrl = DeviceController()
+    ctrl.simctl.list_devices = AsyncMock(return_value=[])
+
+    async def list_physical():
+        for core, (_, hw, *_) in phones.items():
+            devicectl._remember_identity(core, hw or "")
+        return [
+            DeviceInfo(udid=core, name=spec[0], state=DeviceState.BOOTED,
+                       device_type=DeviceType.DEVICE, os_version="iOS 26.5",
+                       connection_type=spec[2] if len(spec) > 2 else "")
+            for core, spec in phones.items()
+        ]
+
+    ctrl.devicectl.list_devices = list_physical
+    ctrl.usbmux.list_devices = AsyncMock(return_value=[])
+    ctrl.usbmux.get_usb_devices = AsyncMock(side_effect=lambda: None if usb is None else list(usb))
+    return ctrl
+
+
 class TestUdidMapping:
     async def test_list_devices_populates_mapping(self):
-        """list_devices() should correlate devicectl and usbmux names."""
-        ctrl = DeviceController()
-        ctrl.simctl.list_devices = AsyncMock(return_value=[])
-        ctrl.devicectl.list_devices = AsyncMock(
-            return_value=[
-                DeviceInfo(
-                    udid="B34C4EE9-CORE-DEVICE-UUID",
-                    name="iPhone 11",
-                    state=DeviceState.BOOTED,
-                    device_type=DeviceType.DEVICE,
-                    os_version="iOS 18.4",
-                ),
-            ]
-        )
-        ctrl.usbmux.list_devices = AsyncMock(return_value=[])
-        ctrl.usbmux.get_usb_udid_map = AsyncMock(
-            return_value={
-                "iPhone 11": "00008030-AABBCCDDEEFF",
-            }
+        """list_devices() maps a CoreDevice UUID to its USB UDID.
+
+        Through `_usb_controller`, so the fake devicectl records the hardware
+        UDID as an alias the way the real one does. Written without that, this
+        passed by matching *names* -- which is the fallback #323 removed, so
+        the test was exercising the path that no longer exists rather than the
+        exact match it is named for."""
+        ctrl = _usb_controller(
+            {"B34C4EE9-CORE-DEVICE-UUID": ("iPhone 11", "00008030-AABBCCDDEEFF", "usb")},
+            usb=[("00008030-AABBCCDDEEFF", "iPhone 11")],
         )
 
         await ctrl.list_devices()
 
         assert ctrl._usbmux_udid_map["B34C4EE9-CORE-DEVICE-UUID"] == "00008030-AABBCCDDEEFF"
+
+    async def test_a_phone_with_no_hardware_udid_is_not_matched_by_name(self):
+        """The fallback #323 removed, pinned so it cannot come back quietly.
+
+        Every condition it needed is set up here: devicectl lists the phone
+        with no hardware UDID, and its name is unique on both sides and matches
+        exactly one usbmux entry. Before the removal this mapped; now it must
+        not, because a name is not an identity -- two phones called "iPhone",
+        which is the default, could be handed each other's UDID, and a crash
+        pull then filed one phone's reports under the other on disk.
+
+        Measured on devicectl 642.16 (Xcode 27): every paired physical device
+        reports `hardwareProperties.udid`, so nothing reaches this state."""
+        ctrl = _usb_controller(
+            {"CORE-NO-HARDWARE-UDID": ("iPhone", None, "usb")},
+            usb=[("00008030-SOMEUSBUDID", "iPhone")],
+        )
+
+        await ctrl.list_devices()
+
+        assert "CORE-NO-HARDWARE-UDID" not in ctrl._usbmux_udid_map, (
+            "a phone with no hardware UDID was matched to a usbmux device by name"
+        )
 
     async def test_get_libimobiledevice_udid_cached(self):
         """get_libimobiledevice_udid returns cached value without refreshing."""
@@ -1093,7 +1319,7 @@ class TestUdidMapping:
         ctrl.simctl.list_devices = AsyncMock(return_value=[])
         ctrl.devicectl.list_devices = AsyncMock(return_value=[])
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
-        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={})
+        ctrl.usbmux.get_usb_devices = AsyncMock(return_value=[])
 
         result = await ctrl.get_libimobiledevice_udid("CORE-UUID")
         assert result == "00008030-CACHED"
@@ -1101,25 +1327,11 @@ class TestUdidMapping:
         ctrl.simctl.list_devices.assert_not_called()
 
     async def test_get_libimobiledevice_udid_refreshes_on_miss(self):
-        """get_libimobiledevice_udid refreshes device list on cache miss."""
-        ctrl = DeviceController()
-        ctrl.simctl.list_devices = AsyncMock(return_value=[])
-        ctrl.devicectl.list_devices = AsyncMock(
-            return_value=[
-                DeviceInfo(
-                    udid="NEW-CORE-UUID",
-                    name="iPhone 15 Pro",
-                    state=DeviceState.BOOTED,
-                    device_type=DeviceType.DEVICE,
-                    os_version="iOS 18.4",
-                ),
-            ]
-        )
-        ctrl.usbmux.list_devices = AsyncMock(return_value=[])
-        ctrl.usbmux.get_usb_udid_map = AsyncMock(
-            return_value={
-                "iPhone 15 Pro": "00008030-NEWDEVICE",
-            }
+        """A cache miss re-lists, and the alias recorded by that listing is
+        what resolves the lookup."""
+        ctrl = _usb_controller(
+            {"NEW-CORE-UUID": ("iPhone 15 Pro", "00008030-NEWDEVICE", "usb")},
+            usb=[("00008030-NEWDEVICE", "iPhone 15 Pro")],
         )
 
         result = await ctrl.get_libimobiledevice_udid("NEW-CORE-UUID")
@@ -1141,10 +1353,150 @@ class TestUdidMapping:
             ]
         )
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
-        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={})
+        ctrl.usbmux.get_usb_devices = AsyncMock(return_value=[])
 
         result = await ctrl.get_libimobiledevice_udid("WIFI-ONLY-UUID")
         assert result is None
+
+    async def test_get_libimobiledevice_udid_accepts_the_hardware_udid(self):
+        """The hardware UDID is what idevice_id, Xcode and Finder show. Passed
+        to a crash pull, it was answered "not connected over USB" for an
+        iPhone 12 that was plugged in. The alias is recorded by the refresh
+        itself, as on a server that has not listed devices yet."""
+        from server.device import devicectl
+
+        ctrl = DeviceController()
+        ctrl.simctl.list_devices = AsyncMock(return_value=[])
+
+        async def list_physical():
+            devicectl._remember_identity("48CF8DD9-CORE-UUID", "00008101-HWUDID")
+            return [DeviceInfo(
+                udid="48CF8DD9-CORE-UUID", name="iPhone 12", state=DeviceState.BOOTED,
+                device_type=DeviceType.DEVICE, os_version="iOS 26.5",
+            )]
+
+        ctrl.devicectl.list_devices = list_physical
+        ctrl.usbmux.list_devices = AsyncMock(return_value=[])
+        ctrl.usbmux.get_usb_devices = AsyncMock(return_value=[("00008101-HWUDID", "iPhone 12")])
+
+        assert await ctrl.get_libimobiledevice_udid("00008101-HWUDID") == "00008101-HWUDID"
+        # And once known, without another refresh.
+        ctrl.simctl.list_devices.reset_mock()
+        assert await ctrl.get_libimobiledevice_udid("00008101-HWUDID") == "00008101-HWUDID"
+        ctrl.simctl.list_devices.assert_not_called()
+
+    async def test_two_phones_with_one_name_each_get_their_own_usb_udid(self):
+        """"iPhone" is the default name, and this Mac has two. Matched by name,
+        one phone could be given the other's UDID, and its crash reports filed
+        under the other -- on disk, once pulls kept a directory per phone. And
+        usbmux keyed by name dropped one of the two before matching began."""
+        from server.device import devicectl
+
+        ctrl = _usb_controller(
+            {"CORE-A": ("iPhone", "00008101-AAAA"), "CORE-B": ("iPhone", "00008101-BBBB")},
+            usb=[("00008101-AAAA", "iPhone"), ("00008101-BBBB", "iPhone")],
+        )
+        await ctrl.list_devices()
+
+        assert ctrl._usbmux_udid_map == {"CORE-A": "00008101-AAAA", "CORE-B": "00008101-BBBB"}
+        assert devicectl.canonical_device_id("00008101-BBBB") == "CORE-B"
+
+    async def test_a_shared_name_is_never_matched_by_name(self):
+        """No hardware UDID for one of two same-named phones: it stays
+        unmatched rather than take the other's."""
+        ctrl = _usb_controller(
+            {"CORE-A": ("iPhone", None), "CORE-B": ("iPhone", "00008101-BBBB")},
+            usb=[("00008101-BBBB", "iPhone")],
+        )
+        await ctrl.list_devices()
+
+        assert ctrl._usbmux_udid_map == {"CORE-B": "00008101-BBBB"}
+
+    async def test_two_phones_sharing_a_name_and_no_udid_are_left_unmatched(self):
+        """Neither can be told apart by name, so neither gets the one USB
+        device of that name -- not whichever happens to be listed first."""
+        ctrl = _usb_controller(
+            {"CORE-A": ("iPhone", None), "CORE-B": ("iPhone", None)},
+            usb=[("00008101-XXXX", "iPhone")],
+        )
+        await ctrl.list_devices()
+
+        assert ctrl._usbmux_udid_map == {}
+
+    async def test_a_name_usbmux_lists_twice_is_never_matched_by_name(self):
+        ctrl = _usb_controller(
+            {"CORE-A": ("iPhone", None)},
+            usb=[("00008101-XXXX", "iPhone"), ("00008101-YYYY", "iPhone")],
+        )
+        await ctrl.list_devices()
+
+        assert ctrl._usbmux_udid_map == {}
+
+    async def test_a_wired_phone_matches_when_usbmux_cannot_be_asked(self):
+        """devicectl says the transport is wired, and its hardware UDID is the
+        USB UDID. With pymobiledevice3 missing, usbmux answers nothing, and
+        every phone used to read "not connected over USB"."""
+        ctrl = _usb_controller({"CORE-A": ("iPhone 12", "00008101-AAAA", "usb")}, usb=None)
+        await ctrl.list_devices()
+
+        assert ctrl._usbmux_udid_map == {"CORE-A": "00008101-AAAA"}
+
+    async def test_usbmux_answering_without_the_phone_wins_over_wired(self):
+        """usbmux answered, and the phone is not on its list: a pull against
+        that UDID would fail, so devicectl's "wired" does not overrule it
+        (CodeRabbit on #324)."""
+        ctrl = _usb_controller({"CORE-A": ("iPhone 12", "00008101-AAAA", "usb")}, usb=[])
+        await ctrl.list_devices()
+
+        assert ctrl._usbmux_udid_map == {}
+
+    async def test_an_unplugged_phone_loses_its_usb_mapping(self):
+        """It kept it, and a phone now on Wi-Fi was pulled over a USB
+        connection that no longer existed."""
+        phones = {"CORE-A": ("iPhone 12", "00008101-AAAA", "usb")}
+        usb = [("00008101-AAAA", "iPhone 12")]
+        ctrl = _usb_controller(phones, usb)
+        await ctrl.list_devices()
+        assert ctrl._usbmux_udid_map == {"CORE-A": "00008101-AAAA"}
+
+        phones["CORE-A"] = ("iPhone 12", "00008101-AAAA", "localNetwork")
+        usb.clear()
+        await ctrl.list_devices()
+
+        assert ctrl._usbmux_udid_map == {}
+
+    async def test_a_phone_missing_from_a_listing_keeps_its_mapping(self):
+        """A failed or partial devicectl listing is not evidence it moved."""
+        phones = {"CORE-A": ("iPhone 12", "00008101-AAAA", "usb")}
+        ctrl = _usb_controller(phones, usb=[("00008101-AAAA", "iPhone 12")])
+        await ctrl.list_devices()
+        phones.clear()
+
+        await ctrl.list_devices()
+
+        assert ctrl._usbmux_udid_map == {"CORE-A": "00008101-AAAA"}
+
+    async def test_the_name_fallback_never_takes_a_udid_another_phone_matched(self):
+        """usbmux and devicectl can name one phone differently; the fallback
+        must not hand a phone the UDID another already matched exactly."""
+        ctrl = _usb_controller(
+            {"CORE-A": ("Phone A", "00008101-AAAA"), "CORE-B": ("iPhone", None)},
+            usb=[("00008101-AAAA", "iPhone")],
+        )
+        await ctrl.list_devices()
+
+        assert ctrl._usbmux_udid_map == {"CORE-A": "00008101-AAAA"}
+
+    async def test_a_phone_with_a_udid_not_on_usb_is_not_matched_by_name(self):
+        """Its hardware UDID is not on usbmux's list, so it is not on USB --
+        whatever else on USB happens to share its name."""
+        ctrl = _usb_controller(
+            {"CORE-WIFI": ("iPad", "00008027-WIFI")},
+            usb=[("00008027-OTHER", "iPad")],
+        )
+        await ctrl.list_devices()
+
+        assert ctrl._usbmux_udid_map == {}
 
     async def test_get_libimobiledevice_udid_pre_ios17_passthrough(self):
         """Pre-iOS 17 devices already use libimobiledevice UDIDs — return as-is."""
@@ -1155,7 +1507,7 @@ class TestUdidMapping:
         ctrl.simctl.list_devices = AsyncMock(return_value=[])
         ctrl.devicectl.list_devices = AsyncMock(return_value=[])
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
-        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={})
+        ctrl.usbmux.get_usb_devices = AsyncMock(return_value=[])
 
         result = await ctrl.get_libimobiledevice_udid(usbmux_udid)
         assert result == usbmux_udid
@@ -1290,7 +1642,7 @@ class TestAndroidListDevicesMerge:
         )
         ctrl.devicectl.list_devices = AsyncMock(return_value=[])
         ctrl.usbmux.list_devices = AsyncMock(return_value=[])
-        ctrl.usbmux.get_usb_udid_map = AsyncMock(return_value={})
+        ctrl.usbmux.get_usb_devices = AsyncMock(return_value=[])
         ctrl.adb.list_devices = AsyncMock(
             return_value=[
                 _android_device(udid="emulator-5554"),
@@ -1348,6 +1700,27 @@ class TestAndroidUIBackendSelection:
         assert isinstance(ctrl._ui_backend("ZY224H6L"), U2Backend)
 
 
+#: The sweep opens by asking the device for its viewport -- a targeted query
+#: for the Application element -- so a harness that feeds reads as a fixed
+#: sequence has to answer that separately or the first read is consumed by it.
+#: It used to come from a per-model dimensions table, which was wrong for every
+#: model it listed (#210) and has been removed.
+def _feed_reads(ctrl, *responses, udid="AAAA-1111", width=402.0, height=852.0):
+    screen = UIElement(
+        type="Application", label="App", identifier="",
+        frame={"x": 0.0, "y": 0.0, "width": width, "height": height},
+    )
+    remaining = list(responses)
+
+    async def _read(*_a, **kw):
+        if kw.get("filter_type") == "Application":
+            return ([screen], udid)
+        return remaining.pop(0)
+
+    ctrl.get_ui_elements = _read
+    return ctrl
+
+
 class TestScrollToElement:
     async def test_requires_label_or_identifier(self):
         ctrl = DeviceController()
@@ -1359,9 +1732,6 @@ class TestScrollToElement:
         ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
         ctrl.resolve_udid = AsyncMock(return_value="AAAA-1111")
         ctrl._invalidate_ui_cache = MagicMock()
-        ctrl._get_screen_dimensions = AsyncMock(
-            return_value={"width": 402, "height": 852}
-        )
         ctrl._ui_backend = MagicMock(return_value=backend)
         return ctrl
 
@@ -1377,9 +1747,7 @@ class TestScrollToElement:
         backend.swipe = AsyncMock()
         ctrl = self._ios_ctrl(backend)
         # On-screen from the first fetch (center 420, within [0, 818]).
-        ctrl.get_ui_elements = AsyncMock(
-            return_value=([self._el(400)], "AAAA-1111")
-        )
+        _feed_reads(ctrl, *[([self._el(400)], "AAAA-1111")] * 4)
 
         result = await ctrl.scroll_to_element(identifier="button_log")
         assert result["status"] == "ok"
@@ -1391,13 +1759,17 @@ class TestScrollToElement:
         backend = MagicMock()
         backend.swipe = AsyncMock()
         ctrl = self._ios_ctrl(backend)
-        # First below the viewport (center 1020), then in view after a swipe
-        # (the third fetch is the settle re-confirm).
-        ctrl.get_ui_elements = AsyncMock(side_effect=[
+        # Reads, in order: the cold (probing) lookup finds it below the
+        # viewport; a plain read finds it too, so it is an ordinary element
+        # rather than a probe-only one and the sweep may stop probing; after the
+        # swipe it is in view; then the settle re-confirm.
+        _feed_reads(
+            ctrl,
+            ([self._el(1000)], "AAAA-1111"),
             ([self._el(1000)], "AAAA-1111"),
             ([self._el(400)], "AAAA-1111"),
             ([self._el(400)], "AAAA-1111"),
-        ])
+        )
 
         result = await ctrl.scroll_to_element(identifier="button_log")
         assert result["status"] == "ok"
@@ -1412,13 +1784,17 @@ class TestScrollToElement:
         backend = MagicMock()
         backend.swipe = AsyncMock()
         ctrl = self._ios_ctrl(backend)
-        # First tucked under the top nav bar (top edge 4 < 50 inset), then in
-        # view after scrolling up (the third fetch is the settle re-confirm).
-        ctrl.get_ui_elements = AsyncMock(side_effect=[
+        # Reads, in order: the cold lookup finds it tucked under the top nav bar
+        # (top edge 4 < 50 inset); a plain read finds it too, so it is not
+        # probe-only; after scrolling up it is in view; then the settle
+        # re-confirm.
+        _feed_reads(
+            ctrl,
+            ([self._el(4)], "AAAA-1111"),
             ([self._el(4)], "AAAA-1111"),
             ([self._el(120)], "AAAA-1111"),
             ([self._el(120)], "AAAA-1111"),
-        ])
+        )
 
         result = await ctrl.scroll_to_element(identifier="button_log")
         assert result["status"] == "ok"
@@ -1460,13 +1836,22 @@ class TestScrollToElement:
 
         element = {"label": "Log", "identifier": "button_log",
                    "type": "Button", "x": 100, "y": 200}
-        backend = MagicMock()
-        backend.scroll_into_view = AsyncMock(return_value=element)
-        ctrl._ui_backend = MagicMock(return_value=backend)
+        # `_ui_backend` is deliberately left alone so the real Android
+        # routing runs -- mocking it away made this test unable to notice
+        # Android selecting the wrong backend, which is the thing it is
+        # named for. Only the backend's own call is stubbed.
+        ctrl.u2.scroll_into_view = AsyncMock(return_value=element)
 
         result = await ctrl.scroll_to_element(identifier="button_log", max_swipes=5)
-        assert result == {"status": "ok", "element": element}
-        backend.scroll_into_view.assert_called_once_with(
+        assert result["status"] == "ok"
+        assert result["element"] == element
+        assert result["udid"] == "emulator-5554"
+        # The value, not just the key. Asserting presence let the
+        # precedence test next door stand in for Android routing, and that
+        # one mocks `_ui_backend` -- so both could pass with Android
+        # wrongly selecting sim-bridge.
+        assert result["backend"] == "u2"
+        ctrl.u2.scroll_into_view.assert_called_once_with(
             "emulator-5554", identifier="button_log", label=None, max_swipes=5,
         )
 
@@ -1492,9 +1877,6 @@ class TestTapElementIosScroll:
         ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
         ctrl.resolve_udid = AsyncMock(return_value="AAAA-1111")
         ctrl._invalidate_ui_cache = MagicMock()
-        ctrl._get_screen_dimensions = AsyncMock(
-            return_value={"width": 402, "height": 852}
-        )
         ctrl._ui_backend = MagicMock(return_value=backend)
         return ctrl
 
@@ -1513,8 +1895,12 @@ class TestTapElementIosScroll:
         ctrl.get_ui_elements = AsyncMock(return_value=([], "AAAA-1111"))
         ctrl._ios_scroll_to_element = AsyncMock(return_value=self._target())
 
+        # `scroll_to_find=True` explicitly: the default is now to ask the
+        # knowledge base and sweep only on a screen recorded as scrolling
+        # (#274). This test is about the sweep, so it opts in.
         result = await ctrl.tap_element(
             identifier="_SignOut button", skip_stability_check=True,
+            scroll_to_find=True,
         )
         assert result["status"] == "ok"
         assert result["tapped"]["identifier"] == "_SignOut button"
@@ -1523,6 +1909,10 @@ class TestTapElementIosScroll:
             # tap_element has already established the element is absent, so the
             # scroll loop skips its own opening lookup — a full tree read.
             target_known_absent=True,
+            # An out-parameter: the sweep fills it in with how many swipes it
+            # ran and whether anything moved, so not_found can tell the caller
+            # the screen was touched (#274).
+            report=ANY,
         )
         backend.tap.assert_awaited_once()
 
@@ -1554,7 +1944,10 @@ class TestTapElementIosScroll:
             "server.device.controller_ui._capture_screenshot",
             AsyncMock(return_value=None),
         ):
-            result = await ctrl.tap_element(label="Nope")
+            # Explicit, because the default is now to ask the knowledge base
+            # and sweep only on a screen recorded as scrolling (#274).
+            # This test is about the sweep itself, so it opts in.
+            result = await ctrl.tap_element(label="Nope", scroll_to_find=True)
         assert result["status"] == "not_found"
         ctrl._ios_scroll_to_element.assert_awaited_once()
         backend.tap.assert_not_called()
@@ -1703,3 +2096,374 @@ class TestActiveDeviceRefreshAtStartup:
             ctrl.refresh_active_device()
             ctrl.refresh_active_device()
         assert writes == 0, "refresh rewrote a sidecar that already agreed"
+
+
+class TestALaunchThatNeverCameUp:
+    """#235: `launch_app` answered `launched` for an app iOS refused.
+
+    On iOS 27 an app without a scene manifest is killed at startup. The
+    process survives 2.3s (measured), so a liveness check that runs before
+    that reports success and one that waits for it costs every launch 2.5s.
+    The signal used instead is the app becoming frontmost.
+    """
+
+    def _ctrl(self, *, frontmost: bool, alive: bool, name="Probe"):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value="AAAA-1111")
+        ctrl._invalidate_ui_cache = MagicMock()
+        ctrl.simctl.launch_app = AsyncMock(return_value=4242)
+        ctrl.simctl.app_display_name = AsyncMock(return_value=name)
+        ctrl.simctl.process_is_alive = MagicMock(return_value=alive)
+        ctrl.simctl.why_launch_failed = AsyncMock(return_value=". because reasons")
+        on_screen = name if frontmost else "SpringBoard"
+        ctrl.get_ui_elements = AsyncMock(return_value=(
+            [UIElement(type="Application", label=on_screen, identifier="",
+                       frame={"x": 0, "y": 0, "width": 393, "height": 852})],
+            "AAAA-1111",
+        ))
+        ctrl._LAUNCH_FRONTMOST_TIMEOUT_S = 0.05
+        ctrl._LAUNCH_FRONTMOST_INTERVAL_S = 0.01
+        return ctrl
+
+    async def test_an_app_that_comes_up_is_a_success(self):
+        ctrl = self._ctrl(frontmost=True, alive=True)
+        assert await ctrl.launch_app("com.example.App") == "AAAA-1111"
+
+    async def test_an_app_that_never_appears_and_is_gone_is_a_failure(self):
+        ctrl = self._ctrl(frontmost=False, alive=False)
+        with pytest.raises(DeviceError, match="was launched and is not running"):
+            await ctrl.launch_app("com.example.App")
+
+    async def test_the_reason_is_carried_into_the_error(self):
+        ctrl = self._ctrl(frontmost=False, alive=False)
+        with pytest.raises(DeviceError, match="because reasons"):
+            await ctrl.launch_app("com.example.App")
+
+    async def test_a_slow_app_that_is_still_running_is_not_failed(self):
+        """Refusing here would fail every cold start on a loaded machine; the
+        caller has `wait_for_element` for readiness."""
+        ctrl = self._ctrl(frontmost=False, alive=True)
+        assert await ctrl.launch_app("com.example.App") == "AAAA-1111"
+
+    async def test_an_app_whose_name_cannot_be_read_falls_back_to_the_process(self):
+        """No name means the screen cannot answer, so the pid must.
+
+        An earlier version returned "frontmost" here, which skipped the
+        liveness check entirely and reported a dead process as a successful
+        launch (CodeRabbit on #247). Not being able to tell from the screen
+        is not the same as nothing being wrong.
+        """
+        ctrl = self._ctrl(frontmost=False, alive=True, name=None)
+        assert await ctrl.launch_app("com.example.App") == "AAAA-1111"
+
+    async def test_an_unreadable_name_with_a_dead_process_is_still_a_failure(self):
+        ctrl = self._ctrl(frontmost=False, alive=False, name=None)
+        with pytest.raises(DeviceError, match="was launched and is not running"):
+            await ctrl.launch_app("com.example.App")
+
+
+class TestScreenshotNamesItsDevice:
+    """`resolve_udid` is what tells the action log which device a call went
+    to, and `screenshot` used to short-circuit past it when the caller named
+    one -- so the *explicitly scoped* call was the one that recorded no device.
+
+    Found by running it, not by reading it: `GET
+    /api/v1/device/screenshot?udid=<sim>` against a live server logged
+    `udid: ""`, so `GET /api/v1/trace?udid=<sim>` returned zero actions for a
+    screenshot just taken of that exact simulator. Every unit test here passed.
+
+    The first fix repeated the assignment inside the bypass, which left the
+    bypass in place -- and it then cost physical devices their canonical
+    identifier too (#270). `screenshot` now goes through `resolve_udid` with
+    `set_active=False`, so these tests no longer mock `_resolve_udid`: mocking
+    the thing that does the work would leave nothing under test.
+    """
+
+    async def _screenshot(self, **kwargs):
+        from server.api.actions import ActionScope
+        from server.logging_ext import reset_current_action, set_current_action
+
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl.simctl.screenshot = AsyncMock(return_value=b"\x89PNGfake")
+        # Deep enough to keep the real resolution running, shallow enough not
+        # to enumerate the developer's actual hardware (#272).
+        ctrl._ensure_device_type_cached = AsyncMock()
+        ctrl.list_devices = AsyncMock(return_value=[])
+
+        scope = ActionScope("take_screenshot", "device.read")
+        token = set_current_action(scope)
+        try:
+            with patch("server.device.controller.process_screenshot") as proc:
+                proc.return_value = (b"processed", "image/png")
+                await ctrl.screenshot(**kwargs)
+        finally:
+            reset_current_action(token)
+        return ctrl, scope
+
+    async def test_an_explicit_udid_reaches_the_action_log(self):
+        _, scope = await self._screenshot(udid="BBBB-2222")
+
+        assert scope.udid == "BBBB-2222"
+
+    async def test_the_fallback_path_still_names_it(self):
+        """The branch that did work must keep working."""
+        _, scope = await self._screenshot()
+
+        assert scope.udid == "AAAA-1111"
+
+    async def test_it_leaves_the_active_device_alone(self):
+        """Why the bypass existed. Routing through `resolve_udid` must not
+        make a read of one device silently retarget every later call."""
+        ctrl, _ = await self._screenshot(udid="BBBB-2222")
+
+        assert ctrl._active_udid == "AAAA-1111"
+
+class TestAMissingToolIsNotAnError:
+    """`list_devices` names "simctl unavailable" in its own handler, and until
+    now did not catch it.
+
+    The backends raise `DeviceError` for a tool that ran and refused. A tool
+    that is not installed never runs: `create_subprocess_exec` raises
+    `FileNotFoundError`, which is an `OSError` and not a `DeviceError`, so it
+    went straight through. Every developer machine has Xcode, so nothing
+    noticed until the suite ran on a host without it -- where 42 tests failed
+    on an `xcrun` none of them were testing.
+
+    `usbmux` is the shape the others should have had: `_find_binary()` returns
+    None and the call degrades to `{}` rather than raising at all.
+    """
+
+    @staticmethod
+    def _ctrl(absent: str) -> DeviceController:
+        ctrl = DeviceController()
+        for name in ("simctl", "devicectl", "usbmux", "adb"):
+            mock = (
+                AsyncMock(side_effect=FileNotFoundError(2, "No such file or directory", name))
+                if name == absent
+                else AsyncMock(return_value=[])
+            )
+            getattr(ctrl, name).list_devices = mock
+        ctrl.usbmux.get_usb_devices = AsyncMock(return_value=[])
+        return ctrl
+
+    @pytest.mark.parametrize("absent", ["simctl", "devicectl", "usbmux", "adb"])
+    async def test_an_absent_backend_is_skipped_not_raised(self, absent):
+        assert await self._ctrl(absent).list_devices() == []
+
+    async def test_the_present_backends_still_report(self):
+        """Degrading is not the same as giving up: a missing simctl must not
+        cost us the Android devices adb can still see."""
+        ctrl = self._ctrl("simctl")
+        android = _device(udid="emulator-5554", name="Pixel 8")
+        ctrl.adb.list_devices = AsyncMock(return_value=[android])
+
+        assert await ctrl.list_devices() == [android]
+
+    async def test_resolve_udid_survives_a_missing_simctl(self):
+        """The path that actually carried the exception out. An unknown UDID
+        warms the type cache, and warming it lists devices -- so every call
+        taking a UDID raised, whatever it was really doing."""
+        ctrl = self._ctrl("simctl")
+        assert await ctrl.resolve_udid("AAAA-1111") == "AAAA-1111"
+
+
+class TestARequestedSkeletonIsNotCalledDegraded:
+    """`strategy="skeleton"` never touches `/source`, so a note left by an
+    earlier timeout is still sitting there -- and the summary told a caller
+    who deliberately chose a skeleton that their read had timed out and to
+    retry with a larger source_timeout.
+
+    The agent guide recommends that strategy for exactly the dense screens
+    that produce the timeouts, so it is the ordinary sequence.
+    """
+
+    async def test_a_deliberate_skeleton_carries_no_degraded_note(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "AAAA-1111"
+        ctrl._is_physical = lambda _u: True
+        ctrl.wda_client.build_screen_skeleton = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
+        # A stale note from an earlier read that did time out.
+        ctrl.wda_client.source_timed_out = lambda _u: 20.0
+
+        summary, _elements, _udid = await ctrl.get_screen_summary(strategy="skeleton")
+
+        assert "degraded" not in summary, summary
+        assert "source_timed_out" not in summary, summary
+
+
+class TestASimulatorIsDrivenByTheBackendThatWasChosen:
+    """#236: nothing held the simulator routing in place.
+
+    `_ui_backend` picks sim-bridge for a simulator when `_sim_bridge_ok`,
+    and idb otherwise. dev-d6 proved with a mutant that replacing the whole
+    branch with `return self.idb` -- so sim-bridge is never used at all --
+    left `tests/test_device_controller.py` green, because `_sim_bridge_ok`
+    starts False and nothing in that file ever set it.
+
+    Measured before writing these: on a machine with a booted simulator the
+    production routing is *correct* -- `_ui_backend` returns IdbBackend
+    before the probe and SimBridgeBackend after, and the probe runs at
+    start-up and again every 300s (#179). So this is insurance against a
+    regression, not a live defect. What makes the regression worth insuring
+    against is that it would be invisible: the two backends differ in ways
+    the tool descriptions state -- sim-bridge holds a swipe to the end,
+    idb flings and steps about a quarter of the screen against
+    seven-tenths -- so a silent fall-back shows up as scrolling that
+    overshoots, not as anything red.
+    """
+
+    @staticmethod
+    def _sim(ctrl, udid="SIM-1"):
+        ctrl._device_type_cache[udid] = DeviceType.SIMULATOR
+        return udid
+
+    def test_a_simulator_uses_sim_bridge_when_it_is_available(self):
+        ctrl = DeviceController()
+        udid = self._sim(ctrl)
+        ctrl._sim_bridge_ok = True
+        assert ctrl._ui_backend(udid) is ctrl.sim_bridge
+
+    def test_a_simulator_falls_back_to_idb_when_it_is_not(self):
+        ctrl = DeviceController()
+        udid = self._sim(ctrl)
+        ctrl._sim_bridge_ok = False
+        assert ctrl._ui_backend(udid) is ctrl.idb
+
+    def test_the_name_follows_the_choice(self):
+        """`_backend_name` reads `_ui_backend`'s answer rather than
+        re-deciding, which is what #186 fixed. Pinned so it stays that way."""
+        ctrl = DeviceController()
+        udid = self._sim(ctrl)
+        ctrl._sim_bridge_ok = True
+        assert ctrl._backend_name(udid) == "sim-bridge"
+        ctrl._sim_bridge_ok = False
+        assert ctrl._backend_name(udid) == "idb"
+
+    def test_a_physical_device_is_unaffected_by_the_probe(self):
+        ctrl = DeviceController()
+        udid = "00008030-PHONE"
+        ctrl._device_type_cache[udid] = DeviceType.DEVICE
+        for ok in (True, False):
+            ctrl._sim_bridge_ok = ok
+            assert ctrl._ui_backend(udid) is ctrl.wda_client
+
+
+class TestAResponseSaysWhichBackendServedIt:
+    """The half of #236 with a user.
+
+    An agent seeing a sweep behave oddly could not tell "sim-bridge, and my
+    expectation was wrong" from "silently fell back to idb". `_backend_name`
+    existed but was only ever attached to *errors* (#186), so the answer was
+    available exactly when the call had already failed.
+    """
+
+    async def test_the_summary_names_the_backend(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "SIM-1"
+        ctrl._device_type_cache["SIM-1"] = DeviceType.SIMULATOR
+        ctrl._sim_bridge_ok = True
+        ctrl.sim_bridge.describe_all = AsyncMock(return_value=_FAKE_IDB_OUTPUT)
+
+        summary, _elements, _udid = await ctrl.get_screen_summary()
+        assert summary["backend"] == "sim-bridge", summary
+
+    def test_it_reports_the_backend_that_read_not_the_one_selected_now(self):
+        """A periodic re-probe can flip the choice between the read and the
+        response. Only the read knows which one did the work -- the same
+        argument `_last_read_backend` was added for."""
+        ctrl = DeviceController()
+        ctrl._device_type_cache["SIM-1"] = DeviceType.SIMULATOR
+        ctrl._last_read_backend["SIM-1"] = "sim-bridge"
+        ctrl._sim_bridge_ok = False          # the probe has since flipped
+
+        assert ctrl.backend_that_served("SIM-1") == "sim-bridge"
+
+    def test_with_no_read_yet_it_reports_what_would_be_selected(self):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["SIM-1"] = DeviceType.SIMULATOR
+        ctrl._sim_bridge_ok = False
+        assert ctrl.backend_that_served("SIM-1") == "idb"
+
+
+class TestScrollReportsTheBackendThatSwept:
+    """Review of #236 found this reporting the wrong half.
+
+    The route computed it from `result.get("udid") or body.udid`. No return
+    path of `scroll_to_element` set `udid`, and MCP callers routinely omit
+    it — so the argument was `None`, `backend_that_served` short-circuited
+    past `_last_read_backend`, and it answered with whatever would be
+    selected *now* for the active device. A 300s re-probe flip between the
+    sweep and the response is exactly when an agent is investigating, and
+    exactly when that reported the wrong backend, while `get_ui_tree`
+    reported the right one for the same device.
+    """
+
+    async def test_it_reports_what_swept_not_what_is_selected_now(self):
+        ctrl = DeviceController()
+        # Driven through the Android delegate rather than the iOS sweep:
+        # both build the result the same way, and the precedence being
+        # pinned here -- what read, over what would be selected -- does not
+        # depend on the platform. Mocking the whole sweep would test the
+        # mocks.
+        ctrl._device_type_cache["SIM-1"] = DeviceType.ANDROID_EMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value="SIM-1")
+        ctrl._invalidate_ui_cache = MagicMock()
+        ctrl._last_read_backend["SIM-1"] = "sim-bridge"
+        ctrl._sim_bridge_ok = False        # the probe has since flipped
+
+        backend = MagicMock()
+        backend.scroll_into_view = AsyncMock(return_value={"label": "Log"})
+        ctrl._ui_backend = MagicMock(return_value=backend)
+
+        result = await ctrl.scroll_to_element(identifier="log", max_swipes=3)
+
+        assert result["backend"] == "sim-bridge", result
+        assert result["udid"] == "SIM-1", (
+            "the resolved udid must travel with the result; the route used to "
+            "have no way to ask which device was swept"
+        )
+
+
+class TestANestedReadRecordsItsOwnBackend:
+    """`get_ui_elements_children_of` was the one read path that selected a
+    backend without recording it.
+
+    So `get_ui_tree?children_of=...` reported whichever backend an *earlier*
+    read had used — the stale answer this change exists to remove, surviving
+    on the route nobody looked at. Raised by review after an agent review
+    had already flagged it and I deferred it as out of scope; two reviewers
+    finding the same thing is the argument for closing it.
+    """
+
+    async def test_it_records_the_backend_that_did_this_read(self):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["SIM-1"] = DeviceType.SIMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value="SIM-1")
+        ctrl._sim_bridge_ok = True
+        ctrl.sim_bridge.describe_all_nested = AsyncMock(return_value={})
+        # A stale record from an earlier read on the other backend.
+        ctrl._last_read_backend["SIM-1"] = "idb"
+
+        await ctrl.get_ui_elements_children_of(children_of="Root")
+
+        assert ctrl._last_read_backend["SIM-1"] == "sim-bridge", (
+            "a nested read left an earlier read's backend in place"
+        )
+        assert ctrl.backend_that_served("SIM-1") == "sim-bridge"
+
+    async def test_it_reads_through_the_backend_it_recorded(self):
+        """Recorded and used must be the same object, or the record is a
+        guess. They were two separate `_ui_backend` calls before."""
+        ctrl = DeviceController()
+        ctrl._device_type_cache["SIM-1"] = DeviceType.SIMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value="SIM-1")
+        ctrl._sim_bridge_ok = True
+        ctrl.sim_bridge.describe_all_nested = AsyncMock(return_value={})
+        ctrl.idb.describe_all_nested = AsyncMock(return_value={})
+
+        await ctrl.get_ui_elements_children_of(children_of="Root")
+
+        ctrl.sim_bridge.describe_all_nested.assert_awaited_once()
+        ctrl.idb.describe_all_nested.assert_not_awaited()

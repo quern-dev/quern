@@ -11,7 +11,7 @@ from server.config import quern_cmd
 from server.device.tool_probe import probe_command
 from server.models import DeviceError
 
-logger = logging.getLogger("quern-debug-server.pmd3")
+logger = logging.getLogger(__name__)
 
 # A wedge is permanent; a failed probe may not be. Re-read before acting.
 WEDGE_CONFIRM_DELAY_SECONDS = 2.0

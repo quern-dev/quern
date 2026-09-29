@@ -33,7 +33,7 @@ import httpx
 
 from server.config import quern_cmd
 
-logger = logging.getLogger("quern-debug-server.tunneld")
+logger = logging.getLogger(__name__)
 
 TUNNELD_LABEL = "com.quern.tunneld"
 TUNNELD_URL = "http://127.0.0.1:49151"

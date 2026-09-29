@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-logger = logging.getLogger("quern-debug-server.cert-preflight")
+logger = logging.getLogger(__name__)
 
 
 async def simulators_without_cert(controller) -> list[dict[str, str]]:

@@ -37,6 +37,46 @@ REPO=$(python3 scripts/pr-review-status.py --repo-slug) || {
   exit 1
 }
 
+# Conflicts first, before anything that costs a review.
+#
+# A branch that conflicts with main cannot be merged by any of the paths
+# below, but the review gate does not know that: it would ask CodeRabbit for a
+# review, spend the hour, and only then reach a merge that GitHub refuses. On
+# 2026-09-20 #250 went CONFLICTING the moment #247 merged, with a review
+# request already armed -- caught by hand with 25 minutes to spare.
+#
+# This runs even under --force, because --force means "skip the gates I chose
+# to put here", not "merge something GitHub will reject anyway".
+#
+# Mergeability is computed asynchronously, so a PR pushed seconds ago reads
+# UNKNOWN. Poll briefly rather than guessing: treating UNKNOWN as fine is how
+# this would fail in exactly the case it exists for, right after a push.
+# Overridable so the tests do not sit through the real wait; nothing else
+# should set these.
+: "${MERGE_PR_POLL_TRIES:=6}"
+: "${MERGE_PR_POLL_SLEEP:=5}"
+MERGEABLE=""
+for _ in $(seq 1 "$MERGE_PR_POLL_TRIES"); do
+  MERGEABLE=$(gh pr view "$PR" --repo "$REPO" --json mergeable -q .mergeable 2>/dev/null || echo "")
+  [ "$MERGEABLE" != "UNKNOWN" ] && [ -n "$MERGEABLE" ] && break
+  sleep "$MERGE_PR_POLL_SLEEP"
+done
+
+case "$MERGEABLE" in
+  CONFLICTING)
+    echo "Not merging #$PR: it conflicts with the base branch."
+    echo "  Resolve first -- asking for a review now would spend the hour on a"
+    echo "  branch that cannot be merged either way:"
+    echo "    git fetch origin && git merge origin/main"
+    exit 1 ;;
+  MERGEABLE) ;;
+  *)
+    echo "Not merging #$PR: GitHub has not reported whether it merges cleanly"
+    echo "  (mergeable=${MERGEABLE:-unavailable}). Re-run in a moment; a PR"
+    echo "  pushed seconds ago reads UNKNOWN until GitHub catches up."
+    exit 1 ;;
+esac
+
 if [ -n "$FORCE" ]; then
   echo "Skipping the review gate deliberately (--force)."
 else

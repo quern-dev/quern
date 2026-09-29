@@ -43,6 +43,67 @@ TEST_CASE_RE = re.compile(
 # Matches: ** BUILD SUCCEEDED ** or ** BUILD FAILED **
 BUILD_STATUS_RE = re.compile(r"\*\*\s+BUILD\s+(SUCCEEDED|FAILED)\s+\*\*")
 
+# An error with no line: signing, provisioning, package resolution. Written
+# bare (`error: Signing for "App" requires a development team.`) or against a
+# project file (`/src/App.xcodeproj: error: No signing certificate "iOS
+# Development" found`). DIAGNOSTIC_RE wants file:line:col, so both parsed as
+# nothing and a failed build read "0 errors" -- the second measured on
+# a production app's device build. And the compiler's own placeless form,
+# `<unknown>:0: error: file '...' has been modified since the module file`,
+# which a stale DerivedData produces -- one production app's simulator build printed
+# nothing else. The path excludes ":", so a file:line:col line cannot match
+# here too.
+LOCATIONLESS_ERROR_RE = re.compile(
+    r"^(?:(?:xcodebuild|<unknown>|(/[^:\n]+))(?::\d+)?: )?error: (.+?)\s*$", re.MULTILINE,
+)
+#: A failed step names every file of a compile batch; past this it is noise.
+MAX_STEP_CHARS = 200
+UNREADABLE_FAILURE = (
+    "xcodebuild reported the build failed but printed no error quern could read; "
+    "build it in Xcode, or run xcodebuild and read its output, to see why"
+)
+
+# The step list xcodebuild prints after ** BUILD FAILED **. For a failure
+# outside compilation it is the only statement of what failed: plug-in
+# validation prints no error line at all, just the step (measured, Xcode 26.5).
+FAILED_COMMANDS_RE = re.compile(
+    r"^The following build commands failed:\n((?:[ \t]+\S.*\n?)+)", re.MULTILINE,
+)
+_BASE64_RE = re.compile(r"[A-Za-z0-9+/]{16,}={0,2}")
+_WHOLE_BUILD_RE = re.compile(r"^Building (?:workspace|project) .+ with scheme ")
+_VALIDATION_RE = re.compile(r"^Validate (?:plug-in|macro)\b")
+PLUGIN_VALIDATION_HINT = (
+    "xcodebuild will not run a package plug-in or macro until it has been approved. "
+    "Build the project once in Xcode and approve it when asked, or pass "
+    "skip_plugin_validation=true to build_and_install, which adds "
+    "-skipPackagePluginValidation and -skipMacroValidation to that build only"
+)
+
+
+def _located(diag: BuildDiagnostic) -> str:
+    """`file:line:col: message`, or the message alone when it has no place."""
+    if not diag.file:
+        return diag.message
+    # From the parts there are: an error against a project file has no line,
+    # and printing "App.xcodeproj:None:None:" read as a parser fault.
+    where = diag.file + "".join(f":{n}" for n in (diag.line, diag.column) if n is not None)
+    return f"{where}: {diag.message}"
+
+
+def _failed_commands(content: str) -> list[str]:
+    """xcodebuild's own list of what failed, less the noise in it: a base64
+    token it prints under a plug-in step, and the whole-build step every
+    failure lists."""
+    block = FAILED_COMMANDS_RE.search(content)
+    if not block:
+        return []
+    out = []
+    for line in block.group(1).splitlines():
+        step = line.strip()
+        if step and not _BASE64_RE.fullmatch(step) and not _WHOLE_BUILD_RE.match(step):
+            out.append(step)
+    return out
+
 # Matches: Test Suite 'All tests' passed at ... Executed N tests, with M failures ...
 TEST_SUITE_SUMMARY_RE = re.compile(
     r"Executed (\d+) tests?, with (\d+) failures?"
@@ -144,7 +205,7 @@ class BuildAdapter(BaseSourceAdapter):
 
     def __init__(
         self,
-        device_id: str = "default",
+        device_id: str = "",
         on_entry: EntryCallback | None = None,
     ) -> None:
         super().__init__(
@@ -196,6 +257,12 @@ class BuildAdapter(BaseSourceAdapter):
                 errors.append(diag)
             else:
                 raw_warnings.append(diag)
+
+        seen_errors = {e.message for e in errors}
+        for m in LOCATIONLESS_ERROR_RE.finditer(content):
+            if m.group(2) not in seen_errors:       # xcodebuild repeats them
+                seen_errors.add(m.group(2))
+                errors.append(BuildDiagnostic(file=m.group(1) or "", message=m.group(2)))
 
         # Dedup warnings on (file, line, column, message)
         seen_warnings: set[tuple[str, int | None, int | None, str]] = set()
@@ -261,6 +328,21 @@ class BuildAdapter(BaseSourceAdapter):
         status_match = BUILD_STATUS_RE.search(content)
         succeeded = status_match.group(1) == "SUCCEEDED" if status_match else len(errors) == 0
 
+        # A failed build with nothing to show for it read "Build failed. 0
+        # error(s)", which names no cause. Say what xcodebuild says failed.
+        if not succeeded and not errors:
+            for step in _failed_commands(content):
+                if len(step) > MAX_STEP_CHARS:
+                    step = step[:MAX_STEP_CHARS].rstrip() + "…"
+                message = f"{step} failed"
+                if _VALIDATION_RE.match(step):
+                    message += f": {PLUGIN_VALIDATION_HINT}"
+                errors.append(BuildDiagnostic(message=message))
+        if not succeeded and not errors:
+            # Never "0 errors" for a failed build: that reads as a parser that
+            # found nothing wrong, not one that could not see what was.
+            errors.append(BuildDiagnostic(message=UNREADABLE_FAILURE))
+
         result = BuildResult(
             succeeded=succeeded,
             errors=errors,
@@ -281,7 +363,7 @@ class BuildAdapter(BaseSourceAdapter):
                 device_id=self.device_id,
                 process="xcodebuild",
                 level=LogLevel.ERROR,
-                message=f"{diag.file}:{diag.line}:{diag.column}: {diag.message}",
+                message=_located(diag),
                 source=LogSource.BUILD,
             )
             await self.emit(entry)
@@ -293,7 +375,7 @@ class BuildAdapter(BaseSourceAdapter):
                 device_id=self.device_id,
                 process="xcodebuild",
                 level=LogLevel.WARNING,
-                message=f"{diag.file}:{diag.line}:{diag.column}: {diag.message}",
+                message=_located(diag),
                 source=LogSource.BUILD,
             )
             await self.emit(entry)

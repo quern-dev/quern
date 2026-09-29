@@ -1,0 +1,272 @@
+Drop box contents: 148 entries
+Max entries: 1000
+Low priority rate limit period: 2000 ms
+Low priority tags: {data_app_wtf, keymaster, system_server_wtf, system_app_strictmode, system_app_wtf, system_server_strictmode, data_app_strictmode, netstats}
+Searching for: system_app_anr
+
+========================================
+2026-09-27 13:54:50 system_app_anr (compressed text, 22462 bytes)
+Process: com.android.settings
+PID: 13620
+UID: 1000
+Flags: 0x28c9be45
+Package: com.android.settings v32 (12)
+Foreground: Yes
+Process-Runtime: 26121
+Activity: com.android.settings/.Settings$StorageUseActivity
+ErrorId: 2815c4fa-e7a0-4952-9fda-dbe57288ab7f
+Build: google/sdk_gphone64_arm64/emulator64_arm64:12/SE1B.240122.005/11418786:userdebug/dev-keys
+Loading-Progress: 1.0
+
+Subject: Input dispatching timed out (c1290c3 com.android.settings/com.android.settings.Settings$StorageUseActivity (server) is not responding. Waited 5003ms for KeyEvent(deviceId=-1, eventTime=362493616000000, source=0x00000000, displayId=-1, action=DOWN, flags=0x00000000, keyCode=20, scanCode=0, metaState=0x00000000, repeatCount=0), policyFlags=0x6b000000)
+
+----- pid 549 at 2026-09-27 13:54:49.759452753-0700 -----
+Cmd line: system_server
+Build fingerprint: 'google/sdk_gphone64_arm64/emulator64_arm64:12/SE1B.240122.005/11418786:userdebug/dev-keys'
+ABI: 'arm64'
+Build type: optimized
+Zygote loaded classes=24905 post zygote classes=4210
+Dumping registered class loaders
+#0 dalvik.system.PathClassLoader: [], parent #1
+#1 java.lang.BootClassLoader: [], no parent
+#2 dalvik.system.PathClassLoader: [/system/framework/services.jar:/system/framework/services.jar!classes2.dex:/apex/com.android.permission/javalib/service-permission.jar:/apex/com.android.appsearch/javalib/service-appsearch.jar:/apex/com.android.media/javalib/service-media-s.jar], parent #1
+#3 dalvik.system.PathClassLoader: [/system/priv-app/SettingsProvider/SettingsProvider.apk], parent #1
+#4 dalvik.system.PathClassLoader: [/apex/com.android.wifi/javalib/service-wifi.jar], parent #2
+#5 dalvik.system.PathClassLoader: [/apex/com.android.tethering/javalib/service-connectivity.jar], parent #2
+#6 dalvik.system.PathClassLoader: [/apex/com.android.os.statsd/javalib/service-statsd.jar], parent #2
+#7 dalvik.system.PathClassLoader: [/apex/com.android.scheduling/javalib/service-scheduling.jar], parent #2
+#8 dalvik.system.PathClassLoader: [/system/priv-app/Telecom/Telecom.apk], parent #1
+#9 dalvik.system.PathClassLoader: [/system/priv-app/FusedLocation/FusedLocation.apk], parent #1
+Done dumping class loaders
+Classes initialized: 0 in 0
+Intern table: 45489 strong; 3912 weak
+JNI: CheckJNI is off; globals=2852 (plus 234 weak)
+Libraries: /system/lib64/libalarm_jni.so /system/lib64/libandroid_servers.so libandroid.so libaudioeffect_jni.so libcompiler_rt.so libframework-connectivity-jni.so libicing.so libicu_jni.so libjavacore.so libjavacrypto.so libjnigraphics.so libmedia_jni.so libopenjdk.so librs_jni.so librtp_jni.so libservice-connectivity.so libsoundpool.so libstats_jni.so libwebviewchromium_loader.so (19)
+Heap: 40% free, 26MB/44MB; 620291 objects
+Dumping cumulative Gc timings
+Start Dumping Averages for 903 iterations for concurrent copying
+MarkingPhase:	Sum: 22.685s Avg: 25.122ms
+ScanImmuneSpaces:	Sum: 15.123s Avg: 16.747ms
+ScanCardsForSpace:	Sum: 7.616s Avg: 8.434ms
+ClearFromSpace:	Sum: 2.713s Avg: 3.004ms
+VisitConcurrentRoots:	Sum: 2.435s Avg: 2.697ms
+ProcessMarkStack:	Sum: 2.161s Avg: 2.393ms
+SweepSystemWeaks:	Sum: 2.018s Avg: 2.235ms
+CaptureThreadRootsForMarking:	Sum: 1.477s Avg: 1.636ms
+FlipOtherThreads:	Sum: 346.055ms Avg: 383.228us
+GrayAllDirtyImmuneObjects:	Sum: 323.628ms Avg: 358.392us
+ProcessReferences:	Sum: 230.711ms Avg: 255.493us
+InitializePhase:	Sum: 216.113ms Avg: 239.327us
+VisitNonThreadRoots:	Sum: 182.166ms Avg: 201.734us
+EnqueueFinalizerReferences:	Sum: 97.860ms Avg: 108.372us
+CopyingPhase:	Sum: 64.170ms Avg: 71.063us
+ForwardSoftReferences:	Sum: 60.417ms Avg: 66.906us
+MarkZygoteLargeObjects:	Sum: 38.243ms Avg: 42.351us
+SweepLargeObjects:	Sum: 35.883ms Avg: 39.737us
+ThreadListFlip:	Sum: 29.430ms Avg: 32.591us
+RecordFree:	Sum: 28.896ms Avg: 32us
+SweepAllocSpace:	Sum: 22.122ms Avg: 24.498us
+ResumeRunnableThreads:	Sum: 14.421ms Avg: 15.970us
+SwapBitmaps:	Sum: 10.800ms Avg: 11.960us
+MarkStackAsLive:	Sum: 9.046ms Avg: 10.017us
+(Paused)GrayAllNewlyDirtyImmuneObjects:	Sum: 7.631ms Avg: 8.450us
+ReclaimPhase:	Sum: 6.417ms Avg: 7.106us
+EmptyRBMarkBitStack:	Sum: 3.945ms Avg: 4.368us
+FlipThreadRoots:	Sum: 2.752ms Avg: 3.047us
+ResumeOtherThreads:	Sum: 2.084ms Avg: 2.307us
+(Paused)SetFromSpace:	Sum: 1.517ms Avg: 1.679us
+(Paused)FlipCallback:	Sum: 1.349ms Avg: 1.493us
+(Paused)ClearCards:	Sum: 665us Avg: 736ns
+UnBindBitmaps:	Sum: 431us Avg: 477ns
+Sweep:	Sum: 367us Avg: 406ns
+Done Dumping Averages
+concurrent copying paused:	Sum: 79.002ms 99% C.I. 8us-498.881us Avg: 43.744us Max: 12544us
+concurrent copying freed-bytes: Avg: 10MB Max: 27MB Min: 3164KB
+Freed-bytes histogram: 2560:1,5120:1,7680:660,10240:107,12800:4,15360:7,17920:46,20480:65,23040:11,25600:1
+concurrent copying total time: 57.968s mean time: 64.195ms
+concurrent copying freed: 271784483 objects with total size 9831MB
+concurrent copying throughput: 4.68853e+06/s / 169MB/s  per cpu-time: 195163178/s / 186MB/s
+concurrent copying tracing throughput: 154MB/s  per cpu-time: 169MB/s
+Average major GC reclaim bytes ratio 0.329234 over 903 GC cycles
+Average major GC copied live bytes ratio 0.0829026 over 908 major GCs
+Cumulative bytes moved 943402040
+Cumulative objects moved 18635620
+Peak regions allocated 229 (57MB) / 2048 (512MB)
+Total madvise time 1.146s
+Start Dumping Averages for 303 iterations for young concurrent copying
+ScanCardsForSpace:	Sum: 2.628s Avg: 8.673ms
+ScanImmuneSpaces:	Sum: 2.024s Avg: 6.679ms
+ClearFromSpace:	Sum: 1.817s Avg: 5.997ms
+ProcessMarkStack:	Sum: 1.633s Avg: 5.391ms
+SweepSystemWeaks:	Sum: 1.285s Avg: 4.243ms
+FlipOtherThreads:	Sum: 587.248ms Avg: 1.938ms
+GrayAllDirtyImmuneObjects:	Sum: 448.916ms Avg: 1.481ms
+VisitConcurrentRoots:	Sum: 363.538ms Avg: 1.199ms
+InitializePhase:	Sum: 150.600ms Avg: 497.029us
+ProcessReferences:	Sum: 113.711ms Avg: 375.283us
+EnqueueFinalizerReferences:	Sum: 49.302ms Avg: 162.712us
+CopyingPhase:	Sum: 38.161ms Avg: 125.943us
+SweepArray:	Sum: 34.138ms Avg: 112.666us
+ThreadListFlip:	Sum: 29.561ms Avg: 97.561us
+VisitNonThreadRoots:	Sum: 24.383ms Avg: 80.471us
+FreeList:	Sum: 19.697ms Avg: 65.006us
+ResumeRunnableThreads:	Sum: 15.595ms Avg: 51.468us
+RecordFree:	Sum: 12.346ms Avg: 40.745us
+FlipThreadRoots:	Sum: 10.848ms Avg: 35.801us
+ReclaimPhase:	Sum: 8.405ms Avg: 27.739us
+EmptyRBMarkBitStack:	Sum: 8.017ms Avg: 26.458us
+ResumeOtherThreads:	Sum: 6.350ms Avg: 20.957us
+(Paused)GrayAllNewlyDirtyImmuneObjects:	Sum: 3.688ms Avg: 12.171us
+ForwardSoftReferences:	Sum: 3.427ms Avg: 11.310us
+MarkZygoteLargeObjects:	Sum: 2.412ms Avg: 7.960us
+SwapBitmaps:	Sum: 1.995ms Avg: 6.584us
+ResetStack:	Sum: 1.411ms Avg: 4.656us
+(Paused)SetFromSpace:	Sum: 1.283ms Avg: 4.234us
+(Paused)ClearCards:	Sum: 800us Avg: 2.640us
+UnBindBitmaps:	Sum: 618us Avg: 2.039us
+(Paused)FlipCallback:	Sum: 378us Avg: 1.247us
+Done Dumping Averages
+young concurrent copying paused:	Sum: 53.702ms 99% C.I. 9us-957.083us Avg: 88.617us Max: 1577us
+young concurrent copying freed-bytes: Avg: 18MB Max: 22MB Min: 7273KB
+Freed-bytes histogram: 5120:1,10240:1,12800:7,15360:46,17920:188,20480:59,23040:1
+young concurrent copying total time: 11.325s mean time: 37.378ms
+young concurrent copying freed: 137263532 objects with total size 5701MB
+young concurrent copying throughput: 1.21204e+07/s / 503MB/s  per cpu-time: 576532457/s / 549MB/s
+young concurrent copying tracing throughput: 124MB/s  per cpu-time: 135MB/s
+Average minor GC reclaim bytes ratio 0.436564 over 303 GC cycles
+Average minor GC copied live bytes ratio 0.0355607 over 304 minor GCs
+Cumulative bytes moved 202739928
+Cumulative objects moved 4308376
+Peak regions allocated 229 (57MB) / 2048 (512MB)
+Total time spent in GC: 69.294s
+Mean GC size throughput: 224MB/s per cpu-time: 245MB/s
+Mean GC object throughput: 5.90305e+06 objects/s
+Total number of allocations 409668306
+Total bytes allocated 15GB
+Total bytes freed 15GB
+Free memory 18MB
+Free memory until GC 18MB
+Free memory until OOME 485MB
+Total memory 44MB
+Max memory 512MB
+Zygote space size 7176KB
+Total mutator paused time: 132.704ms
+Total time waiting for GC to complete: 11.643ms
+Total GC count: 1206
+Total GC time: 69.294s
+Total blocking GC count: 2
+Total blocking GC time: 88.948ms
+Histogram of GC count per 10000 ms: 0:34715,1:1077,2:33,3:13,4:1,6:2,7:1
+Histogram of blocking GC count per 10000 ms: 0:35840,1:2
+Native bytes total: 10013431 registered: 10013431
+Total native bytes at last GC: 10009335
+/data/dalvik-cache/arm64/apex@com.android.media@javalib@service-media-s.jar@classes.dex: verify
+/system/priv-app/SettingsProvider/oat/arm64/SettingsProvider.odex: speed
+/data/dalvik-cache/arm64/apex@com.android.appsearch@javalib@service-appsearch.jar@classes.dex: verify
+/system/framework/oat/arm64/ethernet-service.odex: speed
+/system/framework/oat/arm64/android.hidl.base-V1.0-java.odex: verify
+/data/dalvik-cache/arm64/apex@com.android.permission@javalib@service-permission.jar@classes.dex: verify
+/system/framework/oat/arm64/android.hidl.manager-V1.0-java.odex: verify
+/system/framework/oat/arm64/android.test.base.odex: verify
+/system/framework/oat/arm64/services.odex: speed
+/system/framework/oat/arm64/com.android.location.provider.odex: speed
+/system/priv-app/FusedLocation/oat/arm64/FusedLocation.odex: speed
+/system/framework/oat/arm64/com.android.location.provider.odex: speed
+/data/dalvik-cache/arm64/apex@com.android.scheduling@javalib@service-scheduling.jar@classes.dex: verify
+/system/priv-app/Telecom/oat/arm64/Telecom.odex: speed
+/data/dalvik-cache/arm64/apex@com.android.os.statsd@javalib@service-statsd.jar@classes.dex: verify
+/data/dalvik-cache/arm64/apex@com.android.wifi@javalib@service-wifi.jar@classes.dex: verify
+/data/dalvik-cache/arm64/apex@com.android.tethering@javalib@service-connectivity.jar@classes.dex: verify
+Current JIT code cache size (used / resident): 2457KB / 2484KB
+Current JIT data cache size (used / resident): 1257KB / 1308KB
+Zygote JIT code cache size (at point of fork): 13KB / 32KB
+Zygote JIT data cache size (at point of fork): 17KB / 32KB
+Current JIT mini-debug-info size: 296KB
+Current JIT capacity: 5120KB
+Current number of JIT JNI stub entries: 2
+Current number of JIT code cache entries: 2431
+Total number of JIT baseline compilations: 2289
+Total number of JIT optimized compilations: 579
+Total number of JIT compilations for on stack replacement: 9
+Total number of JIT code cache collections: 14
+Memory used for stack maps: Avg: 161B Max: 19KB Min: 16B
+Memory used for compiled code: Avg: 1002B Max: 120KB Min: 20B
+Memory used for profiling info: Avg: 251B Max: 38KB Min: 24B
+Start Dumping Averages for 2909 iterations for JIT timings
+Compiling baseline:	Sum: 1.769s Avg: 608.419us
+Compiling optimized:	Sum: 665.097ms Avg: 228.634us
+Code cache collection:	Sum: 153.242ms Avg: 52.678us
+TrimMaps:	Sum: 79.852ms Avg: 27.449us
+Compiling OSR:	Sum: 26.548ms Avg: 9.126us
+Done Dumping Averages
+Memory used for compilation: Avg: 70KB Max: 5019KB Min: 0B
+Number of JIT inline cache deoptimizations: 1
+
+*** ART internal metrics ***
+  Metadata:
+    timestamp_since_start_ms: 362506271
+  Metrics:
+    ClassLoadingTotalTime: count = 566989
+    ClassVerificationTotalTime: count = 16025
+    ClassVerificationCount: count = 96
+    WorldStopTimeDuringGCAvg: count = 110
+    YoungGcCount: count = 303
+    FullGcCount: count = 903
+    TotalBytesAllocated: count = 16313075248
+    TotalGcCollectionTime: count = 69360
+    YoungGcThroughputAvg: count = 653
+    FullGcThroughputAvg: count = 173
+    YoungGcTracingThroughputAvg: count = 163
+    FullGcTracingThroughputAvg: count = 166
+    JitMethodCompileTotalTime: count = 3675854
+    JitMethodCompileCount: count = 2877
+    YoungGcCollectionTime: range = 0...60000, buckets: 303,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    FullGcCollectionTime: range = 0...60000, buckets: 903,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    YoungGcThroughput: range = 0...10000, buckets: 192,84,26,1,0,0,0,0,0,0,0,0,0,0,0
+    FullGcThroughput: range = 0...10000, buckets: 903,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    YoungGcTracingThroughput: range = 0...10000, buckets: 303,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    FullGcTracingThroughput: range = 0...10000, buckets: 903,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+*** Done dumping ART internal metrics ***
+
+suspend all histogram:	Sum: 64.470ms 99% C.I. 1.300us-616.594us Avg: 26.552us Max: 12494us
+DALVIK THREADS (165):
+"Signal Catcher" daemon prio=10 tid=2 Runnable
+  | group="system" sCount=0 ucsCount=0 flags=0 obj=0x14240148 self=0xb400007d2cb52f50
+  | sysTid=555 nice=-20 cgrp=foreground sched=0/0 handle=0x7ba5f04cb0
+  | state=R schedstat=( 12854836 442125 18 ) utm=0 stm=0 core=2 HZ=100
+  | stack=0x7ba5e0d000-0x7ba5e0f000 stackSize=991KB
+  | held mutexes= "mutator lock"(shared held)
+  native: #00 pc 0000000000460620  /apex/com.android.art/lib64/libart.so (art::DumpNativeStack(std::__1::basic_ostream<char, std::__1::char_traits<char> >&, int, BacktraceMap*, char const*, art::ArtMethod*, void*, bool)+120)
+  native: #01 pc 00000000006ffed0  /apex/com.android.art/lib64/libart.so (art::Thread::DumpStack(std::__1::basic_ostream<char, std::__1::char_traits<char> >&, bool, BacktraceMap*, bool) const+252)
+  native: #02 pc 00000000007079a8  /apex/com.android.art/lib64/libart.so (art::DumpCheckpoint::Run(art::Thread*)+304)
+  native: #03 pc 000000000031b7dc  /apex/com.android.art/lib64/libart.so (art::ThreadList::RunCheckpoint(art::Closure*, art::Closure*)+628)
+  native: #04 pc 00000000006e6eb4  /apex/com.android.art/lib64/libart.so (art::ThreadList::Dump(std::__1::basic_ostream<char, std::__1::char_traits<char> >&, bool)+476)
+  native: #05 pc 00000000006e53e8  /apex/com.android.art/lib64/libart.so (art::ThreadList::DumpForSigQuit(std::__1::basic_ostream<char, std::__1::char_traits<char> >&)+360)
+  native: #06 pc 00000000006e4c84  /apex/com.android.art/lib64/libart.so (art::Runtime::DumpForSigQuit(std::__1::basic_ostream<char, std::__1::char_traits<char> >&)+188)
+  native: #07 pc 0000000000422204  /apex/com.android.art/lib64/libart.so (art::SignalCatcher::HandleSigQuit()+456)
+  native: #08 pc 0000000000421580  /apex/com.android.art/lib64/libart.so (art::SignalCatcher::Run(void*)+256)
+  native: #09 pc 00000000000b1810  /apex/com.android.runtime/lib64/bionic/libc.so (__pthread_start(void*)+264)
+  native: #10 pc 00000000000512f0  /apex/com.android.runtime/lib64/bionic/libc.so (__start_thread+64)
+  (no managed stack frames)
+
+"main" prio=5 tid=1 Native
+  | group="main" sCount=1 ucsCount=0 flags=1 obj=0x718dd828 self=0xb400007d2cb4c010
+  | sysTid=549 nice=-2 cgrp=foreground sched=0/0 handle=0x7e71c9c4f8
+  | state=S schedstat=( 5045628268244 1537065366708 19678109 ) utm=337305 stm=167257 core=3 HZ=100
+  | stack=0x7fc9f46000-0x7fc9f48000 stackSize=8188KB
+  | held mutexes=
+  native: #00 pc 000000000009e498  /apex/com.android.runtime/lib64/bionic/libc.so (__epoll_pwait+8)
+  native: #01 pc 0000000000016628  /system/lib64/libutils.so (android::Looper::pollInner(int)+180)
+  native: #02 pc 000000000001650c  /system/lib64/libutils.so (android::Looper::pollOnce(int, int*, int*, void**)+112)
+  native: #03 pc 0000000000157cec  /system/lib64/libandroid_runtime.so (android::android_os_MessageQueue_nativePollOnce(_JNIEnv*, _jobject*, long, int)+44)
+  at android.os.MessageQueue.nativePollOnce(Native method)
+  at android.os.MessageQueue.next(MessageQueue.java:335)
+  at android.os.Looper.loopOnce(Looper.java:161)
+  at android.os.Looper.loop(Looper.java:288)
+  at com.android.server.SystemServer.run(SystemServer.java:904)
+  at com.android.server.SystemServer.main(SystemServer.java:611)
+  at java.lang.reflect.Method.invoke(Native method)
+  at com.android.internal.os.RuntimeInit$MethodAndArgsCaller.run(RuntimeInit.java:548)
+  at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:981)
+
+----- end 549 -----

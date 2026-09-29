@@ -49,15 +49,24 @@ export async function apiRequest(
 }
 
 export async function probeServer(): Promise<void> {
-  const serverUrl = discoverServer().url;
+  const server = discoverServer();
   try {
-    await fetch(new URL("/health", serverUrl).toString(), {
+    await fetch(new URL("/health", server.url).toString(), {
       signal: AbortSignal.timeout(3000),
     });
-    console.error(`Connected to Quern at ${serverUrl}`);
+    console.error(`Connected to Quern at ${server.url}`);
   } catch {
-    console.error(
-      `WARNING: Cannot reach Quern at ${serverUrl} — use ensure_server tool to start it`
-    );
+    if (server.source === "default") {
+      // Naming the guessed URL here read as "your server at 9100 is down",
+      // which sent people to look at a port the server may never have used.
+      console.error(
+        "WARNING: No running Quern found (~/.quern/state.json is missing) — " +
+          "use the ensure_server tool to start it"
+      );
+    } else {
+      console.error(
+        `WARNING: Cannot reach Quern at ${server.url} — use ensure_server tool to start it`
+      );
+    }
   }
 }

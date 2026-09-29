@@ -244,7 +244,7 @@ NOTE: If you want to capture network traffic from this app:
       include_screen_context: z
         .boolean()
         .default(false)
-        .describe("Include a screen summary in the response after the app launches. Waits 0.5s for the screen to settle."),
+        .describe("Include a screen summary in the response after the app launches. Waits 0.5s for the screen to settle. With landmarks loaded it also tries to identify the screen you landed on, so you do not need a follow-up get_screen_summary?identify=true: confidence is 'exact', 'ambiguous' (candidates lists them) or 'none', and identified_as is null when nothing matched. Nothing is added when no landmarks are loaded. The summary carries \"backend\", naming which of quern's UI backends read the screen ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone, 'u2' on Android) -- worth checking if the screen you landed on is not the one you expected."),
       capture_screenshots: z
         .boolean()
         .default(false)
@@ -696,7 +696,7 @@ Android deep links: pass bundle_id (the app package) to deliver the URL straight
       include_screen_context: z
         .boolean()
         .default(false)
-        .describe("Include a screen summary in the response after the URL is handled. Waits 0.5s for the screen to settle."),
+        .describe("Include a screen summary in the response after the URL is handled. Waits 0.5s for the screen to settle. With landmarks loaded it also tries to identify the screen you landed on, so you do not need a follow-up get_screen_summary?identify=true: confidence is 'exact', 'ambiguous' (candidates lists them) or 'none', and identified_as is null when nothing matched. Nothing is added when no landmarks are loaded. The summary carries \"backend\", naming which of quern's UI backends read the screen ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone, 'u2' on Android) -- worth checking if the screen you landed on is not the one you expected."),
       capture_screenshots: z
         .boolean()
         .default(false)
@@ -810,7 +810,7 @@ Android deep links: pass bundle_id (the app package) to deliver the URL straight
   });
 
   server.registerTool("set_hardware_keyboard", {
-    description: `Attach or detach the simulated hardware keyboard on an iOS simulator — the same switch as Simulator.app's "Connect Hardware Keyboard" (shift-cmd-K) toggle. enabled=true hides the software keyboard (smaller UI trees, unobstructed screenshots during form filling); enabled=false restores the software keyboard for focused text fields. NOTE: type_text flips the simulator into hardware-keyboard mode as a side effect of sending key events — call this with enabled=false afterward if a later step expects the software keyboard to be visible.`,
+    description: `Attach or detach the simulated hardware keyboard on an iOS simulator — the same switch as the simulator window's "Connect Hardware Keyboard" (shift-cmd-K) toggle — in Device Hub on Xcode 27, which replaced Simulator.app, and in Simulator.app before it. enabled=true hides the software keyboard (smaller UI trees, unobstructed screenshots during form filling); enabled=false restores the software keyboard for focused text fields. NOTE: type_text flips the simulator into hardware-keyboard mode as a side effect of sending key events — call this with enabled=false afterward if a later step expects the software keyboard to be visible.`,
     inputSchema: strictParams({
       enabled: z.boolean().describe("true = attach hardware keyboard (software keyboard hidden), false = detach (software keyboard shows for focused fields)"),
       udid: z.string().optional().describe("Target device UDID (defaults to active device)"),
@@ -874,13 +874,13 @@ Android deep links: pass bundle_id (the app package) to deliver the URL straight
   });
 
   server.registerTool("preview_device", {
-    description: `Open a live preview window showing a device's screen in real time. iOS physical devices use CoreMediaIO (USB only, not simulators). Android devices (emulators and physical) use scrcpy (requires 'brew install scrcpy'). Multiple devices can be previewed independently. If no UDID is provided, opens preview windows for all connected USB iOS devices.`,
+    description: `Open a live preview window showing a device's screen in real time. iOS physical devices use CoreMediaIO over USB. Booted iOS simulators are supported too, by a different route: quern-media reads the simulator framebuffer and serves it as MJPEG. Android devices (emulators and physical) use scrcpy (requires 'brew install scrcpy'). Multiple devices can be previewed independently. If no UDID is provided, opens preview windows for all connected USB iOS devices -- simulators are not included in that sweep and must be named. An iOS response that concerns one device carries a "kind" field, either 'device' or 'simulator', because a phone and a simulator of the same model report the same name. stop_preview returns it when given a UDID; without one it stops everything and returns an aggregate status with no kind.`,
     inputSchema: strictParams({
       udid: z
         .string()
         .optional()
         .describe(
-          "UDID of a physical device to preview. If omitted, previews all USB-connected devices."
+          "UDID of a physical device (iOS or Android), a booted iOS simulator, or an Android emulator. If omitted, previews every USB-connected physical iOS device and nothing else -- no simulators, no Android."
         ),
     }),
   }, async ({ udid }) => {
@@ -914,7 +914,7 @@ Android deep links: pass bundle_id (the app package) to deliver the URL straight
   });
 
   server.registerTool("stop_preview", {
-    description: `Stop a live device preview. If a UDID is provided, stops only that device's preview (others stay running). If no UDID is provided, stops all previews and terminates the preview process.`,
+    description: `Stop a live device preview. Accepts the UDID of a physical device or of a booted simulator. If a UDID is provided, stops only that device's preview (others stay running). If no UDID is provided, stops all previews and terminates the preview process.`,
     inputSchema: strictParams({
       udid: z
         .string()

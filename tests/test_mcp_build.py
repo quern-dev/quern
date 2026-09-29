@@ -19,7 +19,9 @@ and to survive not having it (return False rather than raise). See #193.
 
 from __future__ import annotations
 
+import os
 import subprocess
+import time
 from unittest.mock import patch
 
 import pytest
@@ -221,7 +223,18 @@ class TestAMissingNpmIsReportedNotRaised:
         if stage == "build":
             nm = project / "mcp" / "node_modules"
             nm.mkdir(parents=True)
-            (nm / ".install-stamp").touch()
+            stamp = nm / ".install-stamp"
+            stamp.touch()
+            # Explicitly ahead of the manifests, not merely written after them.
+            # needs_install compares `manifest.st_mtime >= stamp.st_mtime`, and
+            # the fixture writes package.json moments earlier -- close enough
+            # that a checkout landing both in one timestamp tick makes them
+            # equal, which that `>=` counts as stale. The install branch then
+            # runs, `npm run build` is never reached, and this test fails
+            # somewhere other than where it is looking. It held on macOS and
+            # broke on a Linux runner, which is timing, not platform.
+            future = time.time() + 60
+            os.utime(stamp, (future, future))
 
         seen = []
 

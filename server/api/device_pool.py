@@ -4,6 +4,7 @@ import time
 
 from fastapi import APIRouter, HTTPException, Request
 
+from server.api.actions import logged_action
 from server.models import DeviceError, DeviceType, EnsureDevicesRequest, ResolveDeviceRequest
 
 router = APIRouter(prefix="/api/v1/devices", tags=["device-pool"])
@@ -39,6 +40,7 @@ def _parse_device_type(value: str | None) -> DeviceType | None:
 
 # Routes
 @router.post("/refresh")
+@logged_action("refresh_pool", category="device.lifecycle")
 async def refresh_pool(request: Request):
     """Refresh pool state from simctl (discover new devices)."""
     pool = _get_pool(request)
@@ -54,6 +56,7 @@ async def refresh_pool(request: Request):
 
 
 @router.post("/resolve")
+@logged_action("resolve_device", category="device.lifecycle")
 async def resolve_device(request: Request, body: ResolveDeviceRequest):
     """Smart device resolution with criteria matching and auto-boot.
 
@@ -88,6 +91,7 @@ async def resolve_device(request: Request, body: ResolveDeviceRequest):
 
 
 @router.post("/ensure")
+@logged_action("ensure_devices", category="device.lifecycle")
 async def ensure_devices(request: Request, body: EnsureDevicesRequest):
     """Ensure N devices matching criteria are booted and available.
 

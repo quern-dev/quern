@@ -12,6 +12,8 @@ Connection strategy:
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import enum
 import logging
 import time
 from dataclasses import dataclass
@@ -30,7 +32,7 @@ from server.models import (
     WdaStaleElementError,
 )
 
-logger = logging.getLogger("quern-debug-server.wda-client")
+logger = logging.getLogger(__name__)
 
 WDA_PORT = 8100
 WDA_TIMEOUT = 10.0  # seconds for HTTP requests
@@ -74,12 +76,97 @@ SOURCE_TIMEOUT = 10.0
 # derive the budget from the first successful /source per device and delete
 # these constants, which is the open half of #170.
 SOURCE_TIMEOUT_SLOW = 20.0
+
+#: How many times to ask `/status` after a `/source` timeout. Not what
+#: decides hung-versus-busy -- `WdaLiveness` does that -- but enough that a
+#: runner recovering from a restart, which can refuse one ping and answer
+#: the next, is not judged on a single sample.
+SOURCE_TIMEOUT_PING_ATTEMPTS = 4
+
+#: Seconds between those pings. A constant so a test can drive the retry
+#: without paying for it.
+SOURCE_TIMEOUT_PING_GAP = 1.0
+
+class WdaLiveness(enum.Enum):
+    """What a liveness probe established about a runner.
+
+    Three states rather than a boolean, because the restart decision needs
+    to tell "did not answer" from "is not there". WDA serialises, so a
+    `/source` big enough to outlast the probe window queues every `/status`
+    behind it -- a runner that answers nothing can be perfectly healthy.
+
+    Returned rather than stored. An earlier version kept the evidence in a
+    `dict[udid, bool]` on the client and review found three faults in it at
+    once: an early return skipped the per-call reset so a later probe
+    inherited an older one's verdict, nothing ever cleared it -- not
+    `close()`, not `_drop_connection`, not `_restart_wda` -- and the name
+    said "last ping" while the value meant "any of four". None of those are
+    possible for a value that is computed and handed back.
+    """
+
+    #: Answered 200. Healthy.
+    ALIVE = "alive"
+    #: Accepted the connection but did not finish in time. Busy, not dead --
+    #: and busy is what a long tree read looks like from outside.
+    BUSY = "busy"
+    #: Nothing usable is listening: refused, reset, never completed a
+    #: handshake, or answering something other than 200 every time.
+    GONE = "gone"
+
+
+#: `(udid, seconds)` for the tree read on this task, or None if it succeeded.
+#:
+#: Per-task rather than per-device: two callers can read one device at once,
+#: and a device-keyed record belongs to whichever finished last. See
+#: `WdaBackend._note_source_timeout`.
+_LAST_SOURCE_READ: contextvars.ContextVar[tuple[str, float] | None] = (
+    contextvars.ContextVar("quern_last_source_read", default=None)
+)
 # WDA default is 50 — 25 resolves most screens;
 # skeleton fallback handles dense maps
 SNAPSHOT_MAX_DEPTH = 25
 FORWARD_START_PORT = 18100  # base port for usbmux forwards
+FORWARD_KILL_GRACE = 3  # seconds to wait for SIGTERM before SIGKILL
 IDLE_TIMEOUT = 15 * 60  # 15 minutes
 IDLE_CHECK_INTERVAL = 60  # check every 60 seconds
+
+
+async def _kill_forward(proc: asyncio.subprocess.Process | None) -> None:
+    """Stop a usbmux forward subprocess, escalating to SIGKILL.
+
+    SIGTERM alone is not enough and cannot be relied on: measured on eleven
+    leaked forwards, every one survived `kill` and needed `kill -9` (#296).
+    So a bare `terminate()` is a cleanup that reports success and leaves the
+    process running -- this repo's recurring shape, in a teardown path.
+
+    One definition, used by both the failure path in `_start_usbmux_forward`
+    and by `close()`, because the two drifted once already: the second had
+    the escalation and the first did not.
+    """
+    if proc is None or proc.returncode is not None:
+        return
+    proc.terminate()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=FORWARD_KILL_GRACE)
+        return
+    except TimeoutError:
+        pass
+    except BaseException:
+        # Cancelled while waiting out the grace period. SIGTERM has been
+        # sent and these children ignore it, so leaving now strands exactly
+        # the orphan this function exists to prevent. Escalate first, then
+        # let the cancellation through. Reachable on a second Ctrl-C, or
+        # from a TaskGroup cancelled while a sibling's cleanup runs.
+        proc.kill()
+        raise
+    proc.kill()
+    # Reap it, so the child does not sit as a zombie for the server's life.
+    # Bounded: a process that ignores SIGKILL is not ours to fix, and
+    # blocking teardown on it would be worse than the leak.
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=FORWARD_KILL_GRACE)
+    except TimeoutError:
+        logger.warning("usbmux forward %s survived SIGKILL", proc.pid)
 
 # Class chain queries for the skeleton fallback (when /source times out).
 # These use XCTest's native lazy query API and bypass WDA's snapshot mechanism,
@@ -202,6 +289,15 @@ def _parse_wda_error(resp: httpx.Response, udid: str) -> WdaError | None:
 class WdaBackend:
     """Speaks WDA's HTTP API for UI automation on physical iOS devices."""
 
+    #: What this backend calls itself in an error. The dispatcher reads it
+    #: off whichever backend it selected, so an error can no longer name a
+    #: tool that was never involved (#186).
+    TOOL_NAME = "wda"
+
+    #: A WDA swipe returns once the app is idle, so a read straight after it
+    #: is at rest. Measured on an iPhone 11, including at the end of a list.
+    swipe_returns_at_rest = True
+
     def __init__(self) -> None:
         self._connections: dict[str, _WdaConnection] = {}
         self._next_port = FORWARD_START_PORT
@@ -216,6 +312,10 @@ class WdaBackend:
         self._current_depth: dict[str, int] = {}
         # Per-device lock for session creation (prevents parallel _ensure_session races)
         self._session_locks: dict[str, asyncio.Lock] = {}
+        #: Seconds the last `/source` ran before timing out, per device, or
+        #: absent once a read succeeds. Read by the summary so a fallback is
+        #: reported rather than passed off as the screen -- see
+        #: `_note_source_timeout`.
 
     def _source_timeout(self, udid: str) -> float:
         """Return the /source timeout for a device, extended for slower chips.
@@ -227,6 +327,59 @@ class WdaBackend:
         if name and _is_slow_device(name):
             return SOURCE_TIMEOUT_SLOW
         return SOURCE_TIMEOUT
+
+    async def _drop_connection(
+        self, udid: str, expected: _WdaConnection | None = None,
+    ) -> _WdaConnection | None:
+        """Forget a device's connection, killing its forward if it had one.
+
+        `expected` guards against dropping a *newer* connection than the one
+        the caller was using. Two requests can be in flight on one device:
+        if A fails and reconnects, and B then fails on the old URL, B's drop
+        would otherwise remove A's fresh connection and kill the forward A
+        is about to use -- turning what used to be a leak into a failed
+        request. Pass the connection you actually used, and the drop becomes
+        a no-op once it has been replaced.
+
+        **Returns the connection that superseded yours, or None.** That is
+        not a convenience: a caller that no-ops and then carries on to build
+        its own connection *overwrites* the replacement, orphaning its
+        forward -- the same leak this method exists to prevent, one level up.
+        Returning the winner makes "someone else already reconnected" a value
+        the caller has to handle rather than a case it has to remember.
+
+        **Every** site that drops a `_WdaConnection` goes through here. A
+        connection is the only record of its forward -- `close()` reaps what
+        is in `self._connections` and nothing else -- so a bare
+        `self._connections.pop()` orphans the subprocess immediately and
+        permanently.
+
+        That was not a hypothetical: four sites popped without killing, and
+        the one that fires on an ordinary transport error (`_request`'s
+        reconnect) then calls `_get_base_url`, which takes the next port.
+        Measured in the wild: eleven forwards on the unbroken run
+        18100-18110, none with a live connection. See #296.
+
+        Kept as one method rather than a rule to remember, because the rule
+        was already not being remembered.
+        """
+        current = self._connections.get(udid)
+        if expected is not None and current is not expected:
+            # Already replaced by a newer connection; not ours to drop. Hand
+            # the caller the winner so it uses that rather than replacing it.
+            return current
+        conn = self._connections.pop(udid, None)
+        self._last_interaction.pop(udid, None)
+        if conn is None:
+            return None
+        try:
+            await _kill_forward(conn.forward_proc)
+        except Exception:
+            logger.warning(
+                "Could not stop the usbmux forward for %s", udid[:8],
+                exc_info=True,
+            )
+        return None
 
     async def close(self) -> None:
         """Shutdown: cancel idle task, delete sessions, kill port-forwards."""
@@ -247,14 +400,16 @@ class WdaBackend:
                 except Exception:
                     pass
 
-        # Kill port-forward subprocesses
-        for conn in self._connections.values():
-            if conn.forward_proc and conn.forward_proc.returncode is None:
-                conn.forward_proc.terminate()
-                try:
-                    await asyncio.wait_for(conn.forward_proc.wait(), timeout=3)
-                except TimeoutError:
-                    conn.forward_proc.kill()
+        # Kill port-forward subprocesses. Guarded per connection: one that
+        # refuses to die must not strand the rest, nor skip the clear() below.
+        for udid, conn in list(self._connections.items()):
+            try:
+                await _kill_forward(conn.forward_proc)
+            except Exception:
+                logger.warning(
+                    "Could not stop the usbmux forward for %s", udid[:8],
+                    exc_info=True,
+                )
         self._connections.clear()
         self._last_interaction.clear()
         self._current_depth.clear()
@@ -279,7 +434,13 @@ class WdaBackend:
                 if conn.forward_proc.returncode is None:
                     return conn.base_url
                 # Forward proc died — remove and reconnect
-                del self._connections[udid]
+                winner = await self._drop_connection(udid, expected=conn)
+                if winner is not None:
+                    # Someone reconnected while we were checking. Use theirs;
+                    # building our own would overwrite it and orphan its
+                    # forward. Both branches, so this does not depend on
+                    # which of them happens to await today.
+                    return winner.base_url
             else:
                 # tunneld connection — verify WDA is still reachable
                 try:
@@ -294,7 +455,13 @@ class WdaBackend:
                 logger.info(
                     "Cached WDA tunnel stale for %s, reconnecting...", udid[:8],
                 )
-                del self._connections[udid]
+                winner = await self._drop_connection(udid, expected=conn)
+                if winner is not None:
+                    # Someone reconnected while we were checking. Use theirs;
+                    # building our own would overwrite it and orphan its
+                    # forward. Both branches, so this does not depend on
+                    # which of them happens to await today.
+                    return winner.base_url
 
         # Try tunneld first (iOS 17+)
         base_url = await self._try_tunneld_connection(udid)
@@ -402,35 +569,60 @@ class WdaBackend:
             stderr=asyncio.subprocess.PIPE,
         )
 
-        # Give the forward a moment to establish
-        await asyncio.sleep(0.5)
-
-        if proc.returncode is not None:
-            stderr = (await proc.stderr.read()).decode() if proc.stderr else ""
-            raise DeviceError(
-                f"usbmux forward failed for {udid[:8]}: {stderr.strip()}",
-                tool="wda",
-            )
-
-        base_url = f"http://localhost:{local_port}"
-
-        # Verify WDA is reachable
+        # From here to the `return`, every exit that is not a success has to
+        # kill `proc`. Nothing else will: `close()` reaps the forwards in
+        # `self._connections`, and this one is not in there until the caller
+        # records it, which only happens if we return.
+        #
+        # The try starts on the line after the spawn deliberately. It used to
+        # start below the sleep, which left a 0.5s window on *every* forward
+        # start where a cancellation orphaned the child -- and uvicorn cancels
+        # the request task when a client disconnects, so it was reachable
+        # rather than theoretical.
+        #
+        # It also used to catch httpx errors alone, while the non-200 raise
+        # sat inside the same try. DeviceError is not an httpx error, so it
+        # travelled straight past the cleanup: a device whose WDA answered
+        # 500 leaked a forward on every attempt, and the caller swallows the
+        # error and retries on the next port, so it also incremented.
+        # Measured: eleven orphans on 18100-18110, oldest 6d23h, none with a
+        # live connection. See #296.
         try:
+            # Give the forward a moment to establish
+            await asyncio.sleep(0.5)
+
+            if proc.returncode is not None:
+                stderr = (await proc.stderr.read()).decode() if proc.stderr else ""
+                raise DeviceError(
+                    f"usbmux forward failed for {udid[:8]}: {stderr.strip()}",
+                    tool="wda",
+                )
+
+            base_url = f"http://localhost:{local_port}"
             async with httpx.AsyncClient() as client:
                 resp = await client.get(f"{base_url}/status", timeout=3.0)
-                if resp.status_code != 200:
-                    raise DeviceError(
-                        f"WDA not responding on {udid[:8]} (status {resp.status_code}). "
-                        "Ensure WDA is running on the device.",
-                        tool="wda",
-                    )
-        except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as exc:
-            proc.terminate()
+            if resp.status_code != 200:
+                raise DeviceError(
+                    f"WDA not responding on {udid[:8]} (status {resp.status_code}). "
+                    "Ensure WDA is running on the device.",
+                    tool="wda",
+                )
+        except httpx.HTTPError as exc:
+            # The base class, not the three subclasses that had been seen:
+            # a ProxyError or a ProtocolError is just as fatal here, and
+            # naming them one at a time is how this list got short.
+            await _kill_forward(proc)
             raise DeviceError(
                 f"Cannot connect to WDA on {udid[:8]} ({type(exc).__name__}). "
                 "Ensure WDA is running: launch WebDriverAgentRunner on the device.",
                 tool="wda",
-            )
+            ) from exc
+        except BaseException:
+            # The non-200 DeviceError above, and anything else including
+            # cancellation. Re-raised unchanged; this clause exists only so
+            # that no path leaves the subprocess behind.
+            await _kill_forward(proc)
+            raise
 
         logger.info(
             "WDA reachable via usbmux forward at %s (device %s)",
@@ -467,7 +659,7 @@ class WdaBackend:
                         json={"capabilities": {}},
                         timeout=WDA_TIMEOUT,
                     )
-            except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as exc:
+            except httpx.HTTPError as exc:  # base class: a ProxyError is as fatal (#296)
                 raise DeviceError(
                     f"WDA session creation failed on {udid[:8]} ({type(exc).__name__})",
                     tool="wda",
@@ -581,8 +773,7 @@ class WdaBackend:
                         await self.delete_session(udid)
                     except Exception:
                         pass
-                    self._connections.pop(udid, None)
-                    self._last_interaction.pop(udid, None)
+                    await self._drop_connection(udid)
         except asyncio.CancelledError:
             return
 
@@ -612,21 +803,35 @@ class WdaBackend:
         else:
             base_url = await self._get_base_url(udid)
             url = f"{base_url}{path}"
+        # Captured before the request so a failure drops *this* connection
+        # and not a newer one another request has since established.
+        conn_used = self._connections.get(udid)
         try:
             async with httpx.AsyncClient() as client:
                 resp = await getattr(client, method)(
                     url, timeout=timeout or WDA_TIMEOUT, **kwargs,
                 )
-        except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException) as exc:
+        except httpx.HTTPError as exc:  # base class: a ProxyError is as fatal (#296)
             if raise_on_timeout and isinstance(exc, httpx.TimeoutException):
                 # Caller wants to handle timeouts — don't invalidate connection
                 # (WDA may still be alive, just slow on this request)
                 raise
-            # Connection lost — invalidate cached connection
-            self._connections.pop(udid, None)
+            # Connection lost — invalidate cached connection, and kill
+            # its forward: this fires on ordinary transport errors and
+            # the reconnect below takes the next port (#296).
+            await self._drop_connection(udid, expected=conn_used)
 
-            # Retry once: _get_base_url() will reconnect (tunneld/usbmux/auto-start)
-            if not _is_connection_retry:
+            # Cleanup widened to every HTTPError; the *retry* deliberately
+            # did not. RemoteProtocolError ("server disconnected without
+            # sending a response") and DecodingError arrive *after* WDA has
+            # the request, so re-sending is re-executing: type_text types
+            # twice, a tap taps twice. tap/swipe/type/press all reach here
+            # with raise_on_timeout=False. The pre-existing set is already
+            # ambiguous for writes (#74); this must not add to it.
+            retryable = isinstance(
+                exc, (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException),
+            )
+            if retryable and not _is_connection_retry:
                 self._current_depth.pop(udid, None)
                 logger.info(
                     "WDA transport error on %s (%s), reconnecting",
@@ -640,11 +845,21 @@ class WdaBackend:
                     **kwargs,
                 )
 
+            if not retryable:
+                # Not retried on purpose: this error arrived after WDA had
+                # the request, so re-sending could re-execute it (#74).
+                raise DeviceError(
+                    f"WDA connection failed on {udid[:8]} "
+                    f"({type(exc).__name__}). The request may already have "
+                    "run on the device, so it was not retried. Ensure WDA is "
+                    "running and re-issue it yourself if it is safe to repeat.",
+                    tool="wda",
+                ) from exc
             raise DeviceError(
                 f"WDA connection failed on {udid[:8]} ({type(exc).__name__}) "
                 "after reconnect attempt. Ensure WDA is running on the device.",
                 tool="wda",
-            )
+            ) from exc
 
         # Track interaction for idle timeout
         self._last_interaction[udid] = time.monotonic()
@@ -674,31 +889,142 @@ class WdaBackend:
 
         return resp
 
-    async def _is_wda_responsive(self, udid: str) -> bool:
-        """Quick /status ping to check if WDA is still alive (2s timeout)."""
+    def _note_source_timeout(self, udid: str, seconds: float) -> None:
+        """Record that *this* tree read timed out and fell back.
+
+        The fallback returns a container skeleton, which is frequently empty
+        -- and an empty result is exactly what a genuinely blank screen
+        returns. `element_count: 0` with no error is the reason #170 took a
+        long time to diagnose: every symptom said the device was fine and
+        the screen was empty, when the read had simply not finished.
+
+        Scoped to the read rather than the device. It began as a
+        `dict[udid, seconds]`, which is wrong under concurrency and was
+        caught in review: two callers can read one device at once, and the
+        device-wide entry belongs to whichever finished last. A timed-out
+        read whose neighbour then succeeded returned a fallback with no
+        `degraded` at all, and a successful read could be labelled degraded
+        by its neighbour's failure. Both are worse than the bug this field
+        exists to report, because they are wrong rather than merely silent.
+
+        A `ContextVar` is the right scope: asyncio copies the context per
+        task, so each request carries its own answer and no lock is needed.
+        The udid travels with it so a value set for one device cannot be
+        read back for another.
+        """
+        _LAST_SOURCE_READ.set((udid, seconds))
+
+    def _clear_source_timeout(self, udid: str) -> None:
+        """Record that this read succeeded, so nothing reports it degraded."""
+        _LAST_SOURCE_READ.set(None)
+
+    def source_timed_out(self, udid: str) -> float | None:
+        """Seconds *this caller's* tree read burned before falling back."""
+        seen = _LAST_SOURCE_READ.get()
+        if seen is None:
+            return None
+        seen_udid, seconds = seen
+        return seconds if seen_udid == udid else None
+
+    async def probe_wda(
+        self, udid: str, *, attempts: int = 1, timeout: float = 2.0,
+        gap: float | None = None,
+    ) -> WdaLiveness:
+        """What `/status` says about this runner.
+
+        One 2s ping by default, which is the right question for "is this
+        thing alive at all".
+
+        `attempts` exists for the caller that has just had a *different*
+        endpoint time out. A runner part-way through building a large
+        accessibility tree can miss a 2s ping while being perfectly healthy
+        -- `/source` on an iPhone 11 measures 10.19-10.35s under Xcode 27 --
+        and the old single ping declared that runner hung. The cost of being
+        wrong is not a retry: `_restart_wda` reinstalls the runner through
+        `xcodebuild`, so a slow read destroyed the device's automation
+        rather than degrading it (#170).
+
+        Asking more than once is not what distinguishes busy from dead --
+        review established that no window can, because WDA serialises and a
+        long enough tree queues every ping behind it. The verdict does that.
+        The extra attempts buy something narrower: a runner recovering from
+        a restart can refuse one ping and answer the next, and one ping
+        would have called that gone.
+
+        Cost: nothing when the runner answers, since the first attempt does
+        not sleep. About nine seconds otherwise -- and that is now paid on
+        every timed-out read that will *not* restart, which is the common
+        case, so it is a real cost rather than a prelude to a reinstall.
+        """
         conn = self._connections.get(udid)
         if not conn:
-            # No cached connection — try to resolve base URL without full reconnect
             try:
                 base_url = await self._get_base_url(udid)
             except DeviceError:
-                return False
+                # Not even addressable. The strongest evidence available that
+                # there is nothing to talk to -- and the old code returned a
+                # bare False here, which the caller could not tell from "did
+                # not answer in time".
+                return WdaLiveness.GONE
         else:
             base_url = conn.base_url
 
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(f"{base_url}/status", timeout=2.0)
-                return resp.status_code == 200
-        except Exception:
-            return False
+        pause = SOURCE_TIMEOUT_PING_GAP if gap is None else gap
+        saw_busy = False
+        for attempt in range(max(1, attempts)):
+            if attempt:
+                await asyncio.sleep(pause)
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(f"{base_url}/status", timeout=timeout)
+                    if resp.status_code == 200:
+                        return WdaLiveness.ALIVE
+                    # Answering, but not with anything usable. Persistent
+                    # non-200 is a state this file has met before: a runner
+                    # returning 500 leaked eleven port-forwards (#296), and
+                    # the two other reachability probes here both require a
+                    # 200. A single bad status is not enough, which is why
+                    # this does not set `saw_busy` and does not return.
+            except httpx.ConnectTimeout:
+                # A handshake that never completed. Nothing accepted the
+                # connection, which is this criterion's own definition of
+                # gone, even though httpx files it under TimeoutException.
+                pass
+            except httpx.TimeoutException:
+                # Read/write/pool: something accepted the connection and is
+                # taking its time. That is exactly what a runner serialising
+                # a large /source behind this ping looks like.
+                saw_busy = True
+            except httpx.TransportError:
+                # Refused, reset, protocol error: nothing usable is there.
+                pass
+            except Exception:  # noqa: BLE001
+                # An unknown failure is not evidence of death, and the cost
+                # of being wrong here is a reinstall.
+                saw_busy = True
+
+        # Any evidence that something accepted a connection outweighs the
+        # rest. A runner that refuses one ping mid-restart and then answers
+        # slowly is recovering, not gone -- restarting it there is the bug
+        # this whole change exists to remove.
+        return WdaLiveness.BUSY if saw_busy else WdaLiveness.GONE
+
+    async def _is_wda_responsive(
+        self, udid: str, *, attempts: int = 1, timeout: float = 2.0,
+        gap: float | None = None,
+    ) -> bool:
+        """Whether WDA answered `/status`. See `probe_wda` for the detail."""
+        probe = await self.probe_wda(
+            udid, attempts=attempts, timeout=timeout, gap=gap,
+        )
+        return probe is WdaLiveness.ALIVE
 
     async def _restart_wda(self, udid: str) -> None:
         """Stop and restart the WDA driver for a device, clearing cached connection."""
         from server.device.wda import start_driver, stop_driver
 
         # Clear cached connection
-        self._connections.pop(udid, None)
+        await self._drop_connection(udid)
 
         os_version = self._device_os_versions.get(udid)
         if not os_version:
@@ -854,6 +1180,10 @@ class WdaBackend:
         self, udid: str, *,
         snapshot_depth: int | None = None,
         source_timeout: float | None = None,
+        # Accepted for interface parity with SimBridgeBackend and IdbBackend,
+        # and ignored: XCUITest's /source enumerates container children, so there is
+        # nothing to probe and nothing for the caller to switch off.
+        probe: bool = True,
     ) -> list[dict]:
         """Get all UI elements as flat dicts in idb format.
 
@@ -889,13 +1219,34 @@ class WdaBackend:
                 elapsed, udid[:8],
             )
 
-            # Check if WDA is hung (common with MapKit/large trees)
-            if not await self._is_wda_responsive(udid):
+            # A slow /source is not evidence of a hung runner, and the
+            # recovery is expensive enough that guessing wrong is worse than
+            # the fault: `_restart_wda` reinstalls through xcodebuild. So the
+            # runner gets several chances to answer, spread over a window
+            # wider than the read that just timed out -- it may still be
+            # finishing that very tree.
+            self._note_source_timeout(udid, elapsed / 1000)
+            # GONE, not merely un-ALIVE. WDA serialises, so a tree that
+            # outlasts the probe window queues every ping behind it -- and a
+            # rule that restarts once a clock runs out reinstalls a healthy
+            # runner no matter how long the clock is.
+            liveness = await self.probe_wda(
+                udid, attempts=SOURCE_TIMEOUT_PING_ATTEMPTS,
+            )
+            if liveness is WdaLiveness.GONE:
                 logger.warning("WDA hung on %s, restarting driver...", udid[:8])
                 await self._restart_wda(udid)
+            else:
+                logger.warning(
+                    "wda /source timed out on %s but the runner is %s, not "
+                    "gone; leaving it alone and falling back to element "
+                    "queries",
+                    udid[:8], liveness.value,
+                )
 
             return await self.build_screen_skeleton(udid)
 
+        self._clear_source_timeout(udid)
         data = resp.json()
         # WDA returns {"value": {...tree...}, "sessionId": ...}
         tree = data.get("value", data)
@@ -943,13 +1294,30 @@ class WdaBackend:
                 elapsed, udid[:8],
             )
 
-            if not await self._is_wda_responsive(udid):
+            # Identical reasoning to `describe_all` above, and this route had
+            # none of it until a review asked which call site the fix forgot.
+            # `get_ui_tree(children_of=...)` reaches only here, so a nested
+            # read on a slow-but-healthy runner reinstalled it exactly as the
+            # flat read used to.
+            self._note_source_timeout(udid, elapsed / 1000)
+            # Same criterion as the flat read above.
+            nested_liveness = await self.probe_wda(
+                udid, attempts=SOURCE_TIMEOUT_PING_ATTEMPTS,
+            )
+            if nested_liveness is WdaLiveness.GONE:
                 logger.warning("WDA hung on %s, restarting driver...", udid[:8])
                 await self._restart_wda(udid)
+            else:
+                logger.warning(
+                    "wda /source timed out on %s (nested) but the runner is "
+                    "%s, not gone; leaving it alone",
+                    udid[:8], nested_liveness.value,
+                )
 
             # Fallback returns flat list — no hierarchy, but better than an error
             return await self.build_screen_skeleton(udid)
 
+        self._clear_source_timeout(udid)
         data = resp.json()
         tree = data.get("value", data)
 
@@ -983,8 +1351,15 @@ class WdaBackend:
         end_x: float,
         end_y: float,
         duration: float = 0.5,
+        hold: float = 0.0,
     ) -> None:
-        """Swipe gesture via WDA."""
+        """Swipe gesture via WDA.
+
+        `hold` is accepted for parity with sim-bridge and ignored. WDA's drag is
+        XCUITest's press-then-drag, not a flick: measured on an iPhone 11, a
+        358pt drag moved the list 349pt, and nothing was moving once the call
+        returned, including at the end of a list.
+        """
         await self._request("post", udid, "/wda/dragfromtoforduration",
                             use_session=True, timeout=ACTION_TIMEOUT,
                             json={
@@ -1210,12 +1585,21 @@ def _map_wda_element_from_query(el: dict, class_name: str) -> dict | None:
 
 
 def find_element_at_point(elements: list[dict], x: float, y: float) -> dict | None:
-    """Find the deepest (last in flat list) element whose frame contains (x, y).
+    """Find the smallest element whose frame contains (x, y).
 
-    Since flatten_wda_tree outputs parents before children, the last match
-    is the most specific (deepest) element.
+    Smallest, not last. flatten_wda_tree emits parents before children, so the
+    last match used to stand in for the deepest -- but a sibling that comes
+    *after* the content is also last, however large it is. iOS 26 Settings has
+    several full-screen `Other` views after its rows, so every point on the
+    screen resolved to one of them. Their frame never moves, which made the
+    scroll sweep's progress check conclude that nothing scrolled and give up
+    after one swipe on a list it could have scrolled.
+
+    Ties go to the later element, which keeps the deeper of a parent and a
+    child that share a frame.
     """
     best = None
+    best_area = float("inf")
     for el in elements:
         frame = el.get("frame")
         if not frame:
@@ -1225,5 +1609,7 @@ def find_element_at_point(elements: list[dict], x: float, y: float) -> dict | No
         fw = frame["width"]
         fh = frame["height"]
         if fx <= x <= fx + fw and fy <= y <= fy + fh:
-            best = el
+            area = fw * fh
+            if area <= best_area:
+                best, best_area = el, area
     return best

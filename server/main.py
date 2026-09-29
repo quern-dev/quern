@@ -29,7 +29,7 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import RedirectResponse
 
 from server import get_version
 from server.api.app_state import router as app_state_router
@@ -45,9 +45,16 @@ from server.api.proxy import router as proxy_router
 from server.api.proxy_certs import router as proxy_certs_router
 from server.api.proxy_intercept import router as proxy_intercept_router
 from server.api.system import router as system_router
+from server.api.trace import router as trace_router
 from server.api.wda import router as wda_router
 from server.auth import APIKeyMiddleware
-from server.config import ServerConfig, get_local_capture_processes, set_local_capture_processes
+from server.config import (
+    ServerConfig,
+    get_crash_retention_days,
+    get_local_capture_processes,
+    set_local_capture_processes,
+    with_capture_minimum,
+)
 from server.device.controller import DeviceController
 from server.lifecycle.daemon import _print_status, daemonize
 from server.lifecycle.ports import (
@@ -65,7 +72,7 @@ from server.lifecycle.state import (
     write_state,
 )
 from server.lifecycle.watchdog import proxy_watchdog
-from server.models import LogEntry
+from server.models import LogEntry, LogSource
 from server.processing.deduplicator import Deduplicator
 from server.processing.ingestion_filter import IngestionFilter
 from server.proxy.capture_session import CaptureSessionManager
@@ -77,9 +84,10 @@ from server.sources.oslog import OslogAdapter
 from server.sources.proxy import ProxyAdapter
 from server.sources.server_log import ServerLogAdapter
 from server.sources.syslog import SyslogAdapter
+from server.storage.arrival import ArrivalClock
 from server.storage.ring_buffer import RingBuffer
 
-logger = logging.getLogger("quern-debug-server")
+logger = logging.getLogger(__name__)
 
 
 def _fix_developer_dir() -> str | None:
@@ -150,6 +158,20 @@ def _fix_developer_dir() -> str | None:
     return None
 
 
+def buffer_for(entry: LogEntry, *, logs: RingBuffer, crashes: RingBuffer) -> RingBuffer:
+    """Which buffer an admitted entry belongs in.
+
+    Crash reports get their own, for the reason server logs already had one:
+    a crash is the most valuable entry quern holds and one of the rarest, and
+    in the shared buffer it had the same 10,000-entry budget as a simulator
+    producing ~2,900 lines a second -- so the crash that explained a failure
+    was evicted about 3.5 seconds after it arrived. `get_latest_crash` never
+    lost it (it reads the adapter's own list); `query_logs`, `get_errors` and
+    the trace did (#255).
+    """
+    return crashes if entry.source == LogSource.CRASH else logs
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage server startup and shutdown."""
@@ -160,9 +182,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     ingestion_filter = IngestionFilter()
     app.state.ingestion_filter = ingestion_filter
 
+    crash_buffer: RingBuffer = app.state.crash_buffer
+
     async def filtered_append(entry: LogEntry) -> None:
         if ingestion_filter.should_admit(entry):
-            await buffer.append(entry)
+            await buffer_for(entry, logs=buffer, crashes=crash_buffer).append(entry)
 
     dedup = Deduplicator(on_entry=filtered_append)
     dedup.start()
@@ -205,6 +229,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             extra_watch_dirs=app.state.crash_extra_watch_dirs,
             process_filter=app.state.crash_process_filter,
             on_crash_hook=app.state.on_crash_hook,
+            retention_days=get_crash_retention_days(),
         )
         adapters["crash"] = crash
         app.state.crash_adapter = crash
@@ -293,6 +318,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Device controller (Phase 3)
     device_controller = DeviceController()
     app.state.device_controller = device_controller
+    # One bound method, not the registry: `tap_element` needs a single
+    # question answered before deciding to sweep (#274), and handing it the
+    # whole registry would put knowledge-base types in the device layer for no
+    # gain. A controller without it behaves as though nothing were recorded,
+    # which is right for one built outside the app as every unit test does.
+    #
+    # Here rather than beside the registry's construction: that runs in
+    # `create_app`, where `app.state.device_controller` is still None, and the
+    # real controller is not built until the lifespan starts. Attaching there
+    # raised AttributeError on boot -- found by running the server, since every
+    # test sets `_landmarks` on its own controller directly.
+    device_controller._scrollable_lookup = (
+        app.state.landmark_registry.scrollable_for
+    )
+    # The same injection for the same reason, and the miss paths need it:
+    # `tap_element` finding nothing and `wait_for_element` timing out build
+    # their screen context in the controller, so they cannot reach the
+    # registry the API layer holds (#288).
+    device_controller._identify_lookup = (
+        app.state.landmark_registry.identify_for_context
+    )
     tools = await device_controller.check_tools(adopt=True)
     logger.info("Device tools: %s", tools)
     if tools.get("sim_bridge"):
@@ -527,8 +573,14 @@ def create_app(
 
     # Store shared state
     app.state.config = config
-    app.state.ring_buffer = RingBuffer(max_size=config.ring_buffer_size)
-    app.state.server_buffer = RingBuffer(max_size=1_000)
+    # One arrival clock for the three log buffers, so a single summary cursor
+    # orders an entry against all of them (#317).
+    log_clock = ArrivalClock()
+    app.state.ring_buffer = RingBuffer(max_size=config.ring_buffer_size, clock=log_clock)
+    app.state.server_buffer = RingBuffer(max_size=1_000, clock=log_clock)
+    # Crashes arrive a handful per session, so 1,000 is effectively "all of
+    # them" -- the point is that nothing else can take their room.
+    app.state.crash_buffer = RingBuffer(max_size=1_000, clock=log_clock)
     app.state.process_filter = process_filter
     app.state.enable_syslog = enable_syslog
     app.state.enable_oslog = enable_oslog
@@ -580,6 +632,7 @@ def create_app(
 
     # Routes
     app.include_router(logs_router)
+    app.include_router(trace_router)
     app.include_router(crashes_router)
     app.include_router(builds_router)
     app.include_router(proxy_router)
@@ -598,66 +651,6 @@ def create_app(
     async def root() -> RedirectResponse:
         """Redirect root to API docs."""
         return RedirectResponse(url="/docs")
-
-    @app.get("/video-test")
-    async def video_test() -> HTMLResponse:
-        """Simple test page for MJPEG video streaming."""
-        html = """<!DOCTYPE html>
-<html><head><title>Quern Video Test</title></head>
-<body style="background:#111;color:#fff;font-family:sans-serif;padding:20px">
-<h2>Quern MJPEG Stream Test</h2>
-<div id="streams"></div>
-<script>
-async function startStream(udid, label) {
-  const container = document.getElementById('streams');
-  const div = document.createElement('div');
-  div.style.cssText = 'display:inline-block;margin:10px;text-align:center';
-  div.innerHTML = '<p>' + label + '</p>';
-  const img = document.createElement('img');
-  img.style.cssText = 'border:1px solid #333;max-height:500px';
-  div.appendChild(img);
-  container.appendChild(div);
-
-  const res = await fetch(
-    '/api/v1/device/video?udid=' + encodeURIComponent(udid) + '&fps=5&scale=0.5&quality=75',
-    { headers: { 'Authorization': 'Bearer """ + config.api_key + """' } }
-  );
-  const reader = res.body.getReader();
-  let buffer = new Uint8Array();
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    const tmp = new Uint8Array(buffer.length + value.length);
-    tmp.set(buffer); tmp.set(value, buffer.length); buffer = tmp;
-    let start = -1, end = -1;
-    for (let i = 0; i < buffer.length - 1; i++) {
-      if (buffer[i] === 0xFF && buffer[i+1] === 0xD8) start = i;
-      if (buffer[i] === 0xFF && buffer[i+1] === 0xD9 && start >= 0) { end = i + 2; break; }
-    }
-    if (start >= 0 && end > start) {
-      const blob = new Blob([buffer.slice(start, end)], { type: 'image/jpeg' });
-      const url = URL.createObjectURL(blob);
-      const prev = img.src;
-      img.src = url;
-      if (prev.startsWith('blob:')) URL.revokeObjectURL(prev);
-      buffer = buffer.slice(end);
-    }
-  }
-}
-// Auto-detect booted devices
-fetch('/api/v1/device/list', {
-  headers: { 'Authorization': 'Bearer """ + config.api_key + """' }
-}).then(r => r.json()).then(data => {
-  const eligible = data.devices.filter(
-    d => d.state === 'booted' && d.connection_type !== 'localNetwork');
-  if (eligible.length === 0) {
-    document.getElementById('streams').innerHTML = '<p>No booted USB/wired devices found</p>';
-    return;
-  }
-  eligible.forEach(d => startStream(d.udid, d.name));
-});
-</script></body></html>"""
-        return HTMLResponse(html)
 
     @app.get("/health")
     async def health() -> dict:
@@ -757,6 +750,38 @@ def _add_server_flags(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _keep_running_ports(args: argparse.Namespace) -> argparse.Namespace:
+    """For a restart, stay on the ports the server is actually using.
+
+    `restart` takes no ports of its own, so they arrived as None and
+    `_resolve_args` filled in the defaults -- meaning a server started on
+    another port came back on 9100. That is not hypothetical: `quern update`
+    restarts the server for you, so an update silently moved it, and the
+    state file recorded the new port while every script that had been told
+    the old one broke.
+
+    Only when the caller said nothing. `quern restart --port N` is a request
+    to move, and this must not override it.
+
+    Called before `_resolve_args`, which is the last moment "the user did not
+    say" is still distinguishable from "the user said 9100".
+    """
+    state = read_state()
+    if not state:
+        return args
+    from server.__main__ import _valid_port
+
+    if getattr(args, "port", None) is None:
+        port = _valid_port(state.get("server_port"))
+        if port is not None:
+            args.port = port
+    if getattr(args, "proxy_port", None) is None:
+        proxy_port = _valid_port(state.get("proxy_port"))
+        if proxy_port is not None:
+            args.proxy_port = proxy_port
+    return args
+
+
 def _resolve_args(args: argparse.Namespace) -> argparse.Namespace:
     """Fill in defaults for None-valued port args."""
     if args.port is None:
@@ -770,6 +795,20 @@ def _is_our_process(pid: int) -> bool:
     """Check if a PID belongs to a quern-debug-server process (PID reuse guard)."""
     from server.lifecycle.ports import _is_quern_process
     return _is_quern_process(pid)
+
+
+def _config_or_exit(**kwargs: str | int) -> ServerConfig:
+    """Build the config, or stop with the reason on one line.
+
+    An api-key file quern cannot use is a setup problem with a one-line fix,
+    and the sentence saying what to do is the whole value of the check. A
+    traceback buries it under frames from inside a dataclass.
+    """
+    try:
+        return ServerConfig(**kwargs)
+    except ValueError as exc:
+        print(f"\n  {exc}\n")
+        sys.exit(1)
 
 
 def _cmd_start(args: argparse.Namespace) -> None:
@@ -807,6 +846,16 @@ def _cmd_start(args: argparse.Namespace) -> None:
         _print_status(existing)
         sys.exit(0)
 
+    # Validated here, before anything is torn down. Everything below this
+    # point has side effects: stale state is removed, ports are reclaimed from
+    # stale quern processes, and the process daemonizes. An api-key file quern
+    # cannot use would otherwise stop the start *after* all of that -- having
+    # killed the previous instance's leftovers -- and, past daemonize(), in a
+    # child whose output goes to the log, so the shell sees `quern start`
+    # succeed and there is no server. The port is not known yet, and does not
+    # need to be: nothing being checked here depends on it.
+    _config_or_exit(host=args.host, ring_buffer_size=args.buffer_size)
+
     if existing:
         # Restore system proxy if stale state has it configured
         if existing.get("system_proxy_configured"):
@@ -839,12 +888,28 @@ def _cmd_start(args: argparse.Namespace) -> None:
 
     # Daemonize if not foreground mode
     if not args.foreground:
-        daemonize(server_port)
+        daemonize(server_port, proxy_port if enable_proxy else None)
         # daemonize() never returns — it spawns a child process and exits.
 
     # Configure logging
+    # QUERN_LOG_LEVEL turns debug logging on without restarting through a
+    # different command line -- which matters because the thing you most want
+    # it for (an action that hung) is not reproducible on demand. `--verbose`
+    # still wins if it is passed.
+    # A whitelist rather than getattr(logging, name): `logging` has plenty of
+    # uppercase attributes that are not levels, and one of them resolving to a
+    # truthy non-level would configure logging with nonsense.
+    _LEVELS = {
+        "DEBUG": logging.DEBUG, "INFO": logging.INFO, "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR, "CRITICAL": logging.CRITICAL,
+    }
+    _env_level = os.environ.get("QUERN_LOG_LEVEL", "").strip().upper()
+    _level = (
+        logging.DEBUG if args.verbose
+        else _LEVELS.get(_env_level, logging.INFO)
+    )
     logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
+        level=_level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
@@ -864,16 +929,39 @@ def _cmd_start(args: argparse.Namespace) -> None:
 
         threading.Thread(target=_bg_update_check, daemon=True).start()
 
-    config = ServerConfig(
-        host=args.host,
-        port=server_port,
-        ring_buffer_size=args.buffer_size,
+    # Built again, now that the port is resolved. The first call is the one
+    # that refuses; this one cannot fail for a reason that one would not have
+    # caught, and constructing it twice is cheaper than carrying a half-built
+    # config through the port resolution above.
+    config = _config_or_exit(
+        host=args.host, port=server_port, ring_buffer_size=args.buffer_size,
     )
 
     enable_syslog = args.syslog is True and not args.no_syslog
     enable_oslog = args.oslog is True and not args.no_oslog
     enable_crash = not args.no_crash
-    local_capture_processes = get_local_capture_processes() if enable_proxy else []
+    # Widened here too, and this is the entry point that matters most for
+    # anyone already using the feature: `quern enable-local-capture MyApp` on
+    # any released version wrote `["MyApp"]` to config.json, and the lifespan
+    # routes straight from that file. Fixing only the endpoint and the CLI left
+    # every existing install still capturing nothing after upgrading -- the
+    # exact bug this change is about, surviving on the path where users live.
+    #
+    # `only` is deliberately not honoured here: config.json stores a bare list,
+    # so a stored narrow list cannot be told apart from one narrowed by
+    # accident. Widening is the safe reading of an ambiguous record -- capturing
+    # more than asked is visible and recoverable, capturing nothing is the
+    # silent failure. Persisting the distinction is the follow-up (#275 notes).
+    # Both bound here, not just the one the branch needs. `_capture_added`
+    # assigned only inside the `if` meant `quern start --no-proxy` raised
+    # UnboundLocalError building the state dict, before the server started at
+    # all -- and no test started with the proxy off, so the suite was green.
+    local_capture_processes: list[str] = []
+    _capture_added: list[str] = []
+    if enable_proxy:
+        local_capture_processes, _capture_added = with_capture_minimum(
+            get_local_capture_processes(),
+        )
 
     # Auto-fix developer dir before any tool checks
     developer_dir_msg = _fix_developer_dir()
@@ -890,6 +978,13 @@ def _cmd_start(args: argparse.Namespace) -> None:
         "proxy_enabled": enable_proxy,
         "proxy_status": "starting" if enable_proxy else "disabled",
         "local_capture": local_capture_processes,
+        # What start-up added on this boot, not just the total. The foreground
+        # banner says it, but `quern start` daemonizes by default: the child
+        # runs with `args.foreground` false so the banner never prints, and the
+        # parent reports from this file. Putting it here is what makes the
+        # addition visible to the default path -- and to `quern status` later,
+        # which is where someone whose Safari broke will actually look.
+        "local_capture_added": _capture_added,
         "started_at": datetime.now(UTC).isoformat(),
         "api_key": config.api_key,
     }
@@ -918,6 +1013,20 @@ def _cmd_start(args: argparse.Namespace) -> None:
             print(f"  Proxy: enabled (port: {proxy_port})")
             if local_capture_processes:
                 print(f"  Local capture: {', '.join(local_capture_processes)}")
+                if _capture_added:
+                    # Say what start-up added, not just the total. These are
+                    # newly routed through the proxy on this boot, so if the CA
+                    # is not trusted on a booted simulator their HTTPS starts
+                    # failing where it previously worked -- and without this
+                    # line the user has no way to connect the two. Booting
+                    # cannot refuse over a certificate (see
+                    # `warn_if_capture_lacks_trust`), so saying so is the
+                    # remedy available here.
+                    print(f"    added for you: {', '.join(_capture_added)}")
+                    print("    (a webview's requests leave through WebKit and an")
+                    print("     OAuth hand-off through Safari; if the CA is not")
+                    print("     trusted on a booted simulator, their HTTPS will")
+                    print("     fail until it is -- run: quern doctor)")
             else:
                 print("  Local capture: disabled")
                 print("    Capture simulator traffic without a system proxy:")
@@ -1127,7 +1236,7 @@ def _update_check_logged_to_file() -> Iterator[bool]:
     that exists to replace it, and would make "the full error is in
     server.log" a false promise in the same breath.
     """
-    log = logging.getLogger("quern-debug-server.update-check")
+    log = logging.getLogger(__name__)
     from server.lifecycle.daemon import LOG_FILE
 
     handler = None
@@ -1636,7 +1745,21 @@ def _cmd_enable_local_capture(
     process_names: list[str], skip_cert_check: bool = False,
 ) -> None:
     """Enable local capture mode for specific processes."""
-    processes = process_names if process_names else ["MobileSafari", "com.apple.WebKit.Networking"]
+    # Same widening as the HTTP endpoint. This command writes config.json and
+    # the lifespan routes from it, so a narrow list here has exactly the same
+    # effect as a narrow list there -- and `quern enable-local-capture MyApp`
+    # is the most natural way to make the mistake.
+    if process_names:
+        processes, added = with_capture_minimum(process_names)
+        if added:
+            print(f"  Also capturing {', '.join(added)}.")
+            print("  A webview's requests leave through WebKit, and an OAuth")
+            print("  hand-off leaves through Safari; naming only the app")
+            print("  captures neither.")
+    else:
+        from server.config import CAPTURE_MINIMUM
+
+        processes = list(CAPTURE_MINIMUM)
 
     current = get_local_capture_processes()
     if current == processes:
@@ -1786,6 +1909,14 @@ def cli() -> None:
         "check-updates",
         help="Check for a new release now, ignoring the once-a-day rate limit",
     )
+    # Dispatched early in `server.__main__`, like setup. Declared here so
+    # `quern --help` lists them and the two entry points agree about what
+    # exists.
+    subparsers.add_parser(
+        "url", help="Print the running server's base URL")
+    subparsers.add_parser(
+        "env", help="Print shell exports for the running server")
+
     setup_parser = subparsers.add_parser(
         "setup", help="Check environment and install dependencies")
     # `server.__main__` dispatches setup before this parser is reached, and
@@ -1809,10 +1940,10 @@ def cli() -> None:
     enable_lc.add_argument(
         "processes", nargs="*", default=[],
         help=(
-            "Process names to capture (default: MobileSafari and "
-            "com.apple.WebKit.Networking). Safari's requests leave through the "
-            "WebKit networking extension, so naming the app alone captures "
-            "nothing."
+            "Process names to capture. MobileSafari and "
+            "com.apple.WebKit.Networking are always kept, because a webview's "
+            "requests leave through WebKit and an OAuth hand-off goes through "
+            "Safari."
         ),
     )
     enable_lc.add_argument(
@@ -1852,8 +1983,12 @@ def cli() -> None:
         # case above, where server flags live on `start_parser`.
         parser.error("unrecognised arguments: " + " ".join(remaining))
 
-    # Fill port defaults
+    # Fill port defaults. A restart first adopts whatever the running server
+    # is on, since by the time defaults are filled in, "not given" and "9100"
+    # are the same value.
     if hasattr(args, "port"):
+        if args.command == "restart":
+            _keep_running_ports(args)
         _resolve_args(args)
 
     # Dispatch
@@ -1879,6 +2014,12 @@ def cli() -> None:
         sys.exit(run(getattr(args, "output", None)))
     elif args.command == "check-updates":
         sys.exit(_cmd_check_updates())
+    elif args.command == "url":
+        from server.__main__ import _cmd_url
+        sys.exit(_cmd_url())
+    elif args.command == "env":
+        from server.__main__ import _cmd_env
+        sys.exit(_cmd_env())
     elif args.command == "setup":
         from server.lifecycle.setup import run_setup
         sys.exit(run_setup(assume_yes=getattr(args, "assume_yes", False)))

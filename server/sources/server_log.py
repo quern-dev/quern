@@ -11,21 +11,26 @@ import logging
 import uuid
 from datetime import UTC, datetime
 
+from server.logging_ext import (
+    action_of,
+    category_of,
+    duration_ms_of,
+    outcome_of,
+    started_monotonic_of,
+    udid_of,
+)
 from server.models import LogEntry, LogLevel, LogSource
 from server.sources import BaseSourceAdapter, EntryCallback
 
-# Map Python log levels → our LogLevel enum
-_LEVEL_MAP: dict[int, LogLevel] = {
-    logging.DEBUG: LogLevel.DEBUG,
-    logging.INFO: LogLevel.INFO,
-    logging.WARNING: LogLevel.WARNING,
-    logging.ERROR: LogLevel.ERROR,
-    logging.CRITICAL: LogLevel.FAULT,
-}
-
 
 def _map_level(levelno: int) -> LogLevel:
-    """Map a Python logging level number to a LogLevel enum value."""
+    """Map a Python logging level number to a LogLevel enum value.
+
+    Note there is no path to ``LogLevel.NOTICE``: Python's logging has no
+    NOTICE level, so nothing logged through a logger can produce one. Device
+    sources (OSLog) can, which is why the enum member exists. See
+    docs/proposals/logging-spec.md.
+    """
     if levelno <= logging.DEBUG:
         return LogLevel.DEBUG
     if levelno <= logging.INFO:
@@ -58,10 +63,20 @@ class _BufferHandler(logging.Handler):
             timestamp=datetime.fromtimestamp(record.created, tz=UTC),
             device_id="server",
             process=record.name,
+            # Set by server.logging_ext; "" for anything logged through a
+            # plain logger call, which is most of the tree for now.
+            category=category_of(record),
             level=_map_level(record.levelno),
             message=record.getMessage(),
             source=LogSource.SERVER,
             raw=self.format(record),
+            # Empty on everything that is not an action entry, which is most
+            # of what comes through here.
+            action=action_of(record),
+            udid=udid_of(record),
+            duration_ms=duration_ms_of(record),
+            outcome=outcome_of(record),
+            started_monotonic=started_monotonic_of(record),
         )
 
         # Schedule the async emit on the event loop (thread-safe)

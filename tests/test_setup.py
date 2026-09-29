@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import sys
@@ -589,10 +590,105 @@ class TestCheckNode:
         assert result.status == CheckStatus.OK
         assert "v22" in result.message
 
-    def test_not_installed(self):
-        result = check_node(_sites(here=("missing", None)))
+    def test_not_installed_anywhere_is_offered_a_fix(self):
+        """Genuinely absent: installing one is the right offer."""
+        result = check_node(_sites(
+            here=("missing", None), login=("missing", None),
+            script=("missing", None), gui=("missing", None), app=("missing", None),
+        ))
         assert result.status == CheckStatus.MISSING
         assert result.fixable
+        assert "Not installed" in result.message
+
+    def test_missing_here_but_present_in_a_shell_says_so_instead(self):
+        """#339. The user's machine had Node 22 in every shell and none for a
+        GUI launch, and setup reported "Not installed" — so the report named
+        the wrong problem, and offering to install a second one would not have
+        fixed the first being invisible."""
+        result = check_node(_sites(here=("missing", None)))
+
+        assert result.status == CheckStatus.MISSING
+        assert not result.fixable, "installing another node does not make this one reachable"
+        assert "not reachable" in result.message
+        assert "Not installed" not in result.message
+        assert "terminal" in result.detail.lower(), "says where it will work"
+        assert "/x/login/node" in result.detail, "names where it did find one"
+
+    def test_it_does_not_send_you_to_a_terminal_that_has_no_node_either(self):
+        """`probe` reports GUI apps and the Quern app as well as the shells. If
+        one of those is the only place with a node, a terminal has none — and
+        advice naming the wrong place is worse than none, because it sends
+        someone to a shell that fails the same way."""
+        from server.lifecycle import node_env
+
+        sites = _sites(here=("missing", None))
+        sites[1] = node_env.NodeSite("login shell", "someone", node_env.MISSING, None, None)
+        sites[2] = node_env.NodeSite("non-interactive shell", "someone",
+                                     node_env.MISSING, None, None)
+        # Only GUI apps can see one, e.g. via `launchctl config user path`.
+        sites[3] = node_env.NodeSite("GUI apps", "someone", node_env.OK,
+                                     "/opt/node/bin/node", "v22.1.0")
+
+        result = check_node(sites)
+
+        assert "not reachable" in result.message
+        assert "Run this from a terminal" not in result.detail, result.detail
+        assert "will not help" in result.detail, result.detail
+        assert "gui apps" in result.detail.lower(), "names where it is visible"
+
+    def test_a_login_shell_node_still_says_to_use_a_terminal(self):
+        """The ordinary #339 case keeps the advice that works."""
+        result = check_node(_sites(here=("missing", None)))
+
+        assert "Run this from a terminal" in result.detail, result.detail
+
+    def test_a_node_elsewhere_that_is_too_old_is_not_called_reachable(self):
+        """A Node 18 in the login shell is a different problem with different
+        advice, and setup *could* fix it by putting a reachable 22 on the
+        search path — so claiming "installed, just not reachable" suppresses
+        the one thing that would have worked."""
+        from server.lifecycle import node_env
+
+        sites = _sites(here=("missing", None))
+        sites[1] = node_env.NodeSite("login shell", "someone", node_env.TOO_OLD,
+                                     "/Users/u/.nvm/versions/node/v18.20.4/bin/node", "v18.20.4")
+        sites[2] = node_env.NodeSite("non-interactive shell", "someone", node_env.TOO_OLD,
+                                     "/Users/u/.nvm/versions/node/v18.20.4/bin/node", "v18.20.4")
+        sites[3] = node_env.NodeSite("GUI apps", "someone", node_env.MISSING, None, None)
+        sites[4] = node_env.NodeSite("the Quern app", "someone", node_env.MISSING, None, None)
+
+        result = check_node(sites)
+
+        assert "not reachable" not in result.message, result.message
+        assert result.fixable, "an install is genuinely the fix here"
+
+    def test_a_broken_node_elsewhere_is_not_called_reachable(self):
+        """An asdf shim with no version selected exits non-zero, so it is
+        UNUSABLE with a path. It is broken everywhere, not invisible here."""
+        from server.lifecycle import node_env
+
+        sites = _sites(here=("missing", None))
+        for i in (1, 2, 3, 4):
+            sites[i] = node_env.NodeSite(sites[i].place, "someone", node_env.UNUSABLE,
+                                         "/Users/u/.asdf/shims/node", None)
+
+        result = check_node(sites)
+
+        assert "not reachable" not in result.message, result.message
+
+    def test_it_names_the_manager_when_it_can(self):
+        """Which tool put it there is the difference between a user recognising
+        their own setup and reading a generic complaint."""
+        from server.lifecycle import node_env
+
+        sites = _sites(here=("missing", None))
+        sites[1] = node_env.NodeSite(
+            "login shell", "someone", node_env.OK,
+            "/Users/u/.local/state/fnm_multishells/800_1789/bin/node", "v22.1.0",
+        )
+        result = check_node(sites)
+
+        assert "fnm" in result.message, result.message
 
     def test_node_20_is_a_warning_not_a_pass(self):
         """The old test asserted v20 was OK; the MCP wrapper refuses it."""
@@ -2757,6 +2853,43 @@ class TestTheEntryPointsParseTheirArguments:
         assert exc.value.code == 0
         assert seen == {"args": ["on"]}, f"{command} did not receive its value"
 
+    @pytest.mark.parametrize("targets", [
+        ["codex"], ["cursor", "opencode"], ["all"], [],
+    ])
+    def test_mcp_install_still_takes_its_targets(self, monkeypatch, targets):
+        """The operand guard counted `mcp-install` as taking none, so from
+        0.19.0 every target was refused before the command ran. The tests that
+        existed called `_cmd_mcp_install` directly and never saw it; this one
+        goes through `main`, which is where the refusal happened."""
+        import server.__main__ as entry
+
+        seen = {}
+        monkeypatch.setattr(entry, "_cmd_mcp_install",
+                            lambda: seen.update(argv=entry.sys.argv[2:]) or 0)
+        monkeypatch.setattr(entry.sys, "argv", ["quern", "mcp-install", *targets])
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 0
+        assert seen == {"argv": targets}, "mcp-install never ran with its targets"
+
+    def test_mcp_install_refuses_a_target_mixed_in_with_valid_ones(
+        self, monkeypatch, capsys,
+    ):
+        """Accepting targets must not reopen the silent drop: one bad word
+        among good ones installs nothing."""
+        import server.__main__ as entry
+
+        called = {}
+        monkeypatch.setattr(entry, "_cmd_mcp_install",
+                            lambda: called.update(ran=True) or 0)
+        monkeypatch.setattr(entry.sys, "argv",
+                            ["quern", "mcp-install", "codex", "cdoex"])
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 2
+        assert called == {}
+        assert "cdoex" in capsys.readouterr().err
+
     def test_argparse_does_not_swallow_a_stray_flag(self, monkeypatch, capsys):
         """The other entry point. `parse_known_args` kept the leftovers only
         for the no-subcommand case, and discarded them everywhere else."""
@@ -2767,3 +2900,272 @@ class TestTheEntryPointsParseTheirArguments:
             main_mod.cli()
         assert exc.value.code == 2
         assert "--yse" in capsys.readouterr().err
+
+
+class TestUrlAndEnv:
+    """`quern url` and `quern env` exist so a script never writes 9100 down.
+
+    The shipped example did exactly that -- `os.getenv("QUERN_SERVER_URL",
+    "http://127.0.0.1:9100")` -- which is the habit CONTRIBUTING forbids in
+    the sentence "All consumers discover the server via ~/.quern/state.json.
+    Never hardcode ports."
+    """
+
+    def _run(self, monkeypatch, argv, state=None, key=None):
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", *argv])
+        monkeypatch.setattr(
+            "server.lifecycle.state.read_state", lambda: state,
+        )
+        monkeypatch.setattr(
+            "server.lifecycle.state.is_server_healthy", lambda port, **kw: True,
+        )
+        monkeypatch.setattr(
+            "server.lifecycle.ports._get_pid_on_port", lambda p: None,
+        )
+        if key is not None:
+            import tempfile
+            from pathlib import Path
+            tmp = Path(tempfile.mkdtemp()) / "api-key"
+            tmp.write_text(key)
+            monkeypatch.setattr("server.config.API_KEY_FILE", tmp)
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        return exc.value.code
+
+    def test_url_reports_the_port_the_server_actually_took(self, monkeypatch, capsys):
+        """Not the default. A server that found 9100 busy is on another port,
+        and that is precisely when a hardcoded URL fails."""
+        code = self._run(monkeypatch, ["url"], state={"server_port": 9137})
+        assert code == 0
+        assert capsys.readouterr().out.strip() == "http://127.0.0.1:9137"
+
+    def test_a_stale_state_file_is_not_a_running_server(self, monkeypatch, capsys):
+        """A crash or a SIGKILL leaves state.json behind. Without a health
+        check `quern url` exits 0 and hands a script a URL that refuses
+        connections — worse than the hardcoded 9100 it replaced, because it
+        looks authoritative."""
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", "url"])
+        monkeypatch.setattr(
+            "server.lifecycle.state.read_state", lambda: {"server_port": 9137},
+        )
+        monkeypatch.setattr(
+            "server.lifecycle.state.is_server_healthy", lambda port, **kw: False,
+        )
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 1
+        out, err = capsys.readouterr()
+        assert out == "", "a script would have used this URL"
+        assert "quern start" in err
+
+    @pytest.mark.parametrize("port", [True, False, 0, 70000, -1, "9100", None, 3.5])
+    def test_an_unusable_port_is_refused(self, monkeypatch, capsys, port):
+        """`isinstance(port, int)` was the test, and `True` passes it —
+        bool subclasses int — as do 0 and 70000."""
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", "url"])
+        monkeypatch.setattr(
+            "server.lifecycle.state.read_state", lambda: {"server_port": port},
+        )
+        # Would pass the health check if it were ever reached, so a failure
+        # here is the validation and nothing else.
+        monkeypatch.setattr(
+            "server.lifecycle.state.is_server_healthy", lambda p, **kw: True,
+        )
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 1, f"{port!r} was accepted as a port"
+        assert capsys.readouterr().out == ""
+
+    def test_a_different_process_on_the_port_gets_nothing(self, monkeypatch, capsys):
+        """Answering /health is not proof of being ours, and `quern env`
+        prints the API key. Quern takes whatever port was free, so if it dies
+        an untrusted local process can claim the freed one and answer 200."""
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", "env"])
+        monkeypatch.setattr(
+            "server.lifecycle.state.read_state",
+            lambda: {"server_port": 9137, "pid": 4242},
+        )
+        monkeypatch.setattr(
+            "server.lifecycle.state.is_server_healthy", lambda p, **kw: True,
+        )
+        monkeypatch.setattr(
+            "server.lifecycle.ports._get_pid_on_port", lambda p: 9999,
+        )
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 1
+        out, err = capsys.readouterr()
+        assert out == "", "the API key went to a process that is not quern"
+        assert "quern start" in err
+
+    def test_our_own_server_is_accepted(self, monkeypatch, capsys):
+        """The other half: the check must not refuse the real thing."""
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", "url"])
+        monkeypatch.setattr(
+            "server.lifecycle.state.read_state",
+            lambda: {"server_port": 9137, "pid": 4242},
+        )
+        monkeypatch.setattr(
+            "server.lifecycle.state.is_server_healthy", lambda p, **kw: True,
+        )
+        monkeypatch.setattr(
+            "server.lifecycle.ports._get_pid_on_port", lambda p: 4242,
+        )
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 0
+        assert capsys.readouterr().out.strip() == "http://127.0.0.1:9137"
+
+    def test_an_unanswerable_owner_check_does_not_invent_a_refusal(
+        self, monkeypatch, capsys
+    ):
+        """`lsof` can fail or be absent. "Could not ask" must not read as
+        "an impostor" -- that would break the command on machines where the
+        real server is running perfectly well."""
+        import server.__main__ as entry
+
+        monkeypatch.setattr(entry.sys, "argv", ["quern", "url"])
+        monkeypatch.setattr(
+            "server.lifecycle.state.read_state",
+            lambda: {"server_port": 9137, "pid": 4242},
+        )
+        monkeypatch.setattr(
+            "server.lifecycle.state.is_server_healthy", lambda p, **kw: True,
+        )
+        monkeypatch.setattr("server.lifecycle.ports._get_pid_on_port", lambda p: None)
+        with pytest.raises(SystemExit) as exc:
+            entry.main()
+        assert exc.value.code == 0
+        assert capsys.readouterr().out.strip() == "http://127.0.0.1:9137"
+
+    def test_url_says_so_when_nothing_is_running(self, monkeypatch, capsys):
+        code = self._run(monkeypatch, ["url"], state=None)
+        assert code == 1
+        out, err = capsys.readouterr()
+        assert out == "", "a script would have eval'd or curl'd this"
+        assert "quern start" in err
+
+    def test_env_is_evalable(self, monkeypatch, capsys):
+        code = self._run(
+            monkeypatch, ["env"], state={"server_port": 9137}, key="s3cret",
+        )
+        assert code == 0
+        lines = capsys.readouterr().out.strip().splitlines()
+        assert lines == [
+            "export QUERN_SERVER_URL=http://127.0.0.1:9137",
+            "export QUERN_API_KEY=s3cret",
+        ]
+
+    def test_env_quotes_what_it_exports(self, monkeypatch, capsys):
+        """An API key is opaque; a shell-special character in one must not
+        become shell syntax when the caller evals it."""
+        code = self._run(
+            monkeypatch, ["env"], state={"server_port": 9137}, key="a b;rm -rf /",
+        )
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "export QUERN_API_KEY='a b;rm -rf /'" in out
+
+    def test_env_prints_nothing_when_there_is_no_server(self, monkeypatch, capsys):
+        """A partial environment is worse than none: `eval` would set half of
+        it and the script would fail later, somewhere unrelated."""
+        code = self._run(monkeypatch, ["env"], state=None, key="s3cret")
+        assert code == 1
+        out, err = capsys.readouterr()
+        assert out == ""
+        assert "quern start" in err
+
+    def test_env_does_not_emit_the_prototype_name(self, monkeypatch, capsys):
+        """QUERN_DEBUG_SERVER_URL is the old name. The wrapper still honours
+        it with a deprecation warning; nothing should be teaching it."""
+        self._run(monkeypatch, ["env"], state={"server_port": 9137}, key="s3cret")
+        assert "QUERN_DEBUG_SERVER_URL" not in capsys.readouterr().out
+
+
+class TestRestartKeepsThePort:
+    """`quern restart` takes no ports, so they arrived as None and the
+    defaults were filled in — meaning a server on any other port came back on
+    9100.
+
+    Not hypothetical: `quern update` restarts the server for you, so an
+    update silently moved it. The rehearsal caught this by starting a server
+    on 9190 and watching it return on 9102.
+    """
+
+    def _resolved(self, monkeypatch, argv, state):
+        """The ports `cli()` would hand to start, without starting anything."""
+        from server import main as main_mod
+
+        monkeypatch.setattr(main_mod, "read_state", lambda: state)
+        monkeypatch.setattr(main_mod.sys, "argv", ["quern", *argv])
+        seen = {}
+        monkeypatch.setattr(main_mod, "_cmd_restart",
+                            lambda args: seen.update(port=args.port,
+                                                     proxy=args.proxy_port))
+        # `cli()` returns for restart rather than exiting; other commands
+        # exit, so both are tolerated.
+        with contextlib.suppress(SystemExit):
+            main_mod.cli()
+        return seen
+
+    def test_it_returns_to_the_port_it_was_on(self, monkeypatch):
+        seen = self._resolved(
+            monkeypatch, ["restart"],
+            state={"server_port": 9190, "proxy_port": 9191},
+        )
+        assert seen == {"port": 9190, "proxy": 9191}, (
+            "the restart moved the server to the default port"
+        )
+
+    def test_an_explicit_port_still_wins(self, monkeypatch):
+        """`quern restart --port N` is a request to move, and adopting the
+        running port must not override it."""
+        seen = self._resolved(
+            monkeypatch, ["restart", "--port", "9300"],
+            state={"server_port": 9190, "proxy_port": 9191},
+        )
+        assert seen["port"] == 9300
+        assert seen["proxy"] == 9191, "the proxy port was not asked about"
+
+    def test_with_no_server_it_falls_back_to_the_defaults(self, monkeypatch):
+        from server.lifecycle.ports import DEFAULT_PROXY_PORT, DEFAULT_SERVER_PORT
+
+        seen = self._resolved(monkeypatch, ["restart"], state=None)
+        assert seen == {"port": DEFAULT_SERVER_PORT, "proxy": DEFAULT_PROXY_PORT}
+
+    def test_a_junk_port_in_state_does_not_become_the_port(self, monkeypatch):
+        """State is a file on disk and can be anything. A non-integer must
+        fall through to the default rather than reaching `bind`."""
+        from server.lifecycle.ports import DEFAULT_SERVER_PORT
+
+        seen = self._resolved(
+            monkeypatch, ["restart"],
+            state={"server_port": "not-a-port", "proxy_port": None},
+        )
+        assert seen["port"] == DEFAULT_SERVER_PORT
+
+    def test_start_is_not_affected(self, monkeypatch):
+        """Only restart adopts. `quern start` with no port means the default,
+        which is how someone deliberately returns a moved server to 9100."""
+        from server import main as main_mod
+        from server.lifecycle.ports import DEFAULT_SERVER_PORT
+
+        monkeypatch.setattr(main_mod, "read_state",
+                            lambda: {"server_port": 9190, "proxy_port": 9191})
+        monkeypatch.setattr(main_mod.sys, "argv", ["quern", "start"])
+        seen = {}
+        monkeypatch.setattr(main_mod, "_cmd_start",
+                            lambda args: seen.update(port=args.port))
+        with contextlib.suppress(SystemExit):
+            main_mod.cli()
+        assert seen == {"port": DEFAULT_SERVER_PORT}

@@ -14,6 +14,27 @@
 # also turned out to be the finding that exposed a test asserting the bug as
 # correct behaviour.
 #
+# There is a third place, and it is not a review at all: the **pre-merge checks**
+# table in the walkthrough *issue comment*. A PR can have zero reviews and zero
+# review comments and still be carrying findings there -- #309 did, and this
+# script printed two empty sections for it. So the checks table is read below,
+# separately, and it is read from the issue comments rather than the reviews.
+#
+# Do not read a failing table as a wall, though; most of it is noise. Measured
+# over the 28 most recently merged PRs (2026-09-25): 23 merged with a failing
+# tally, and Docstring Coverage was failing in *all 23* -- an 80% threshold
+# nothing here meets. Only two carried anything else: #277 (Out of Scope
+# Changes) and #275 (Title check, Inconclusive). That ratio is exactly why a
+# real finding goes unseen: the table has been red by default for months.
+# Docstring Coverage is therefore reported under a separate heading, not hidden
+# -- hiding it would just be a fourth blind spot.
+#
+# That measurement is history, not a current claim: the check was turned off in
+# `.coderabbit.yaml` on 2026-09-28 (`795c9c0`), so the row should stop appearing
+# on new PRs. The filter stays -- it goes inert on its own, and keeps working if
+# anyone re-enables the check. The heading below says "as of" for the same
+# reason a dated measurement stays true while a present-tense one decays.
+#
 # Usage:  scripts/cr-findings.sh <pr-number> [owner/repo]
 set -euo pipefail
 N="${1:?usage: cr-findings.sh <pr-number>}"
@@ -49,4 +70,194 @@ for section in ("Outside diff range comments", "Additional comments",
         for loc in re.findall(r"`(\d+-\d+)`", chunk)[:5]:
             print(f"     at lines {loc}")
         print()
+'
+
+echo
+echo "── pre-merge checks (walkthrough comment, not a review) ──"
+# Deliberately re-fetched from the issue comments: with zero reviews there is no
+# review body to carry this, which is the case the section exists for.
+# One record per comment, marker-separated: the tally and the rows it describes
+# have to come from the *same* comment. Concatenating every body and taking the
+# last tally pairs a current tally with an older comment's rows, which reports a
+# failure that may already be resolved -- the misreporting this file exists to
+# stop, in the tool meant to stop it.
+gh api "repos/$OWNER/$NAME/issues/$N/comments?per_page=100" --paginate \
+  --jq '.[] | select(.user.login=="coderabbitai[bot]") | "\u0000CR-COMMENT\u0000" + .body' \
+| python3 -c '
+import re, sys
+
+TALLY = re.compile(r"Pre-merge checks \| ([^<\n]*)")
+
+comments = [c for c in sys.stdin.read().split("\x00CR-COMMENT\x00") if c.strip()]
+# Select on "yields a tally", not "mentions the phrase". A comment can name
+# "Pre-merge checks" in prose -- a reply about them, a quoted heading -- and
+# then the tally regex finds nothing, so indexing [-1] raises IndexError and
+# takes the whole script'"'"'s exit code with it.
+withtable = [(c, m[-1].strip()) for c in comments if (m := TALLY.findall(c))]
+if not withtable:
+    if any("Pre-merge checks" in c for c in comments):
+        print("  (the phrase appears but no table does -- read the comments by hand)")
+    else:
+        print("  (no checks table -- CodeRabbit may not have processed this PR)")
+    raise SystemExit(0)
+if len(withtable) > 1:
+    print(f"  note: {len(withtable)} comments carry a table; reading the newest")
+
+# The newest one, and everything below is parsed from it alone.
+text, tally = withtable[-1]
+print(f"  tally: {tally}")
+
+# Rows look like:  | Check name | <status> | explanation | resolution |
+#
+# Neither column may be matched narrowly, and both mistakes were made here
+# first. The status is not always "⚠️ Warning" -- "❓ Inconclusive" exists too,
+# and #275 is the tell: a tally of ❌ 2 with a single Warning row. The *name*
+# is worse, because check names are user-defined: CodeRabbit allows custom ones
+# up to 50 characters, so a `[A-Za-z ]` name pattern silently drops `CI-1`,
+# and the report then looks tidy because Docstring Coverage still parsed. A
+# tool built to stop findings hiding must not hide one over a character class.
+#
+# So: take the whole cell, and treat anything that is not a pass as worth
+# showing.
+#
+# But scope the search to the checks table. The walkthrough comment holds other
+# tables -- the "Layer / File(s) | Summary" one among them -- and a cell-shaped
+# pattern run over the whole comment reports their header rows as failing
+# checks. Widening the cell without narrowing the region traded a false negative
+# for a false positive; the count cross-check below is what caught it.
+# End the region on a *structural* marker, never on bare label text. Check
+# names are user-supplied, so a check actually named "Generate unit tests" would
+# otherwise cut the region at its own name and drop its own row. A table cell
+# cannot contain a `<summary>` tag or start a markdown heading, so anchoring on
+# those makes the boundary independent of anything a name can say. This is the
+# fourth time in this file that matching a bare substring against
+# user-controlled text was wrong; the pattern is the lesson, not the label.
+start = text.rfind("Pre-merge checks")
+region = text[start:]
+END = re.compile(
+    r"(?:<summary>|^\s*#{1,6}\s*)[^<\n]*"
+    r"(?:Finishing Touches|Generate docstrings|Generate unit tests)",
+    re.MULTILINE,
+)
+end = END.search(region)
+if end:
+    region = region[:end.start()]
+rows = re.findall(r"\|([^|\n]{1,60})\|([^|\n]{0,40})\|([^|\n]*)", region)
+NOISE = "docstring coverage"
+real, noise = [], []
+for name, status, why in rows:
+    name, status = name.strip(), status.strip()
+    if not name or not status:
+        continue
+    if "Passed" in status or status.startswith("\u2705"):
+        continue
+    if "Status" in status or set(status) <= set(": -"):   # header / separator rows
+        continue
+    entry = (f"{name} [{status}]", " ".join(why.split())[:160])
+    (noise if name.lower() == NOISE else real).append(entry)
+
+def dedupe(xs):
+    seen, out = set(), []
+    for n, w in xs:
+        if n not in seen:
+            seen.add(n); out.append((n, w))
+    return out
+
+real, noise = dedupe(real), dedupe(noise)
+
+if real:
+    print("  FAILED -- look at these:")
+    for n, w in real:
+        print(f"    - {n}")
+        if w: print(f"        {w}")
+if noise:
+    print("  known-noisy as of 2026-09-25; judge, do not reflex-fix:")
+    for n, _ in noise:
+        print(f"    - {n}")
+# The count is the real guard. Widening a regex fixes the case you thought of;
+# comparing what was parsed against what the tally claims catches the next one
+# too, which is the whole complaint this script exists to make.
+declared = re.search(r"\u274c\s*(\d+)", tally)
+declared = int(declared.group(1)) if declared else 0
+parsed = len(real) + len(noise)
+if declared and parsed != declared:
+    print(f"  WARNING: tally declares {declared} failing but {parsed} row(s) "
+          f"parsed -- something was dropped; read the comment by hand")
+elif declared and not real and not noise:
+    print("  tally shows failures but no rows parsed -- read the comment by hand")
+'
+
+# ── how much of this PR has actually been reviewed ───────────────────────────
+#
+# Everything above reports *findings*. None of it reports whether a review has
+# seen the current code, and thread state tracks the last review rather than
+# the head -- which misleads in both directions. On #327 all three threads read
+# `[resolved]` and every section above printed clean, while the two commits
+# carrying the substantive work were entirely unreviewed. Earlier the same week
+# the mirror case: an `[OPEN]` thread for a finding already fixed and pushed.
+#
+# So the one comparison that separates those cases gets printed here: the
+# commit CodeRabbit's coverage marker names against the PR's head commit. The
+# marker (`final_review_risk_coverage` in the summary comment) is the one trace
+# every completed review leaves, a clean one included, and it names a commit,
+# so no clock is involved.
+#
+# This used to compare the newest review *with a body* against the newest
+# commit's date, and that was wrong three ways (2026-09-28):
+#   - A clean re-review creates no review object at all, only the marker and a
+#     "Review finished" reply, so #331's reviewed head read STALE.
+#   - `committedDate` is when the commit was made, not when it was pushed. A
+#     commit made before a review of the previous head lands, and pushed after
+#     it, read "at or after the head commit" -- all clear on unread code.
+#   - Any author's review counted, so a person's comment after a push did too.
+# The last two failed in the direction this section exists to catch.
+#
+# Trusted one way only, as in `pr-review-status.py`: equal to the head means
+# reviewed. The marker lags a review in progress, so a different commit proves
+# nothing either way -- it is reported as unconfirmed, not as stale.
+#
+# Advisory, deliberately. `scripts/pr-review-status.py` is the gate and decides
+# merges; this only makes the coverage visible to someone reading findings,
+# which is where they already are when the question occurs to them.
+echo
+echo "── review coverage ──"
+HEAD_SHA="$(gh pr view "$N" --repo "$REPO" --json headRefOid --jq .headRefOid)"
+gh api "repos/$OWNER/$NAME/issues/$N/comments?per_page=100" --paginate \
+  --jq '.[] | select(.user.id==136622811 and .user.login=="coderabbitai[bot]")
+        | "\u0000CR-COMMENT\u0000" + .body' \
+| HEAD_SHA="$HEAD_SHA" PR="$N" python3 -c '
+import json, os, re, sys
+
+head = os.environ["HEAD_SHA"].strip()
+comments = [c for c in sys.stdin.read().split("\x00CR-COMMENT\x00") if c.strip()]
+summary = next((c for c in comments
+                if "auto-generated comment: summarize by coderabbit.ai" in c), None)
+covered = ""
+if summary is not None:
+    m = re.search(r"final_review_risk_coverage:(\{[^\n]*?\})\s*-->", summary)
+    try:
+        marker = json.loads(m.group(1)) if m else {}
+    except json.JSONDecodeError:
+        marker = {}
+    if isinstance(marker, dict) and marker.get("kind") == "reviewed":
+        covered = str(marker.get("coveredCommitId") or "")
+
+shown_head = head[:10] or "(could not be read)"
+shown_covered = covered[:10] or "nothing recorded"
+print(f"  head commit:     {shown_head}")
+print(f"  review covered:  {shown_covered}")
+if not head:
+    print("  => UNKNOWN: the head commit could not be read, so nothing is confirmed.")
+elif covered == head:
+    print("  => REVIEWED: the head commit has been reviewed.")
+elif summary is None:
+    print("  => NOT REVIEWED: CodeRabbit has posted no summary on this PR. An empty")
+    print("     findings list above means nothing yet.")
+else:
+    what = ("no completed review is recorded" if not covered
+            else "the last recorded review covered an earlier commit")
+    print(f"  => NOT CONFIRMED: {what}, so the findings above")
+    pr = os.environ["PR"]
+    print(f"     may not describe the head. `scripts/pr-review-status.py {pr} --ask`")
+    print("     requests the review.")
 '

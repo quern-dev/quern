@@ -1,0 +1,310 @@
+import AVFoundation
+import CoreMedia
+import Foundation
+import Testing
+@testable import QuernMedia
+
+private func tempURL() -> URL {
+    FileManager.default.temporaryDirectory
+        .appendingPathComponent("quern-rec-\(UUID().uuidString).mp4")
+}
+
+private func captured(_ surface: IOSurface, at t: Double) -> CapturedFrame {
+    CapturedFrame(
+        surface: surface,
+        time: CMTime(seconds: t, preferredTimescale: 600),
+        timeAccuracy: .reported
+    )
+}
+
+/// Reads a written file back the way a player would, rather than trusting the
+/// writer's own accounting.
+private func assetDuration(_ url: URL) async throws -> Double {
+    let asset = AVURLAsset(url: url)
+    return try await CMTimeGetSeconds(asset.load(.duration))
+}
+
+@Test("writes a real mp4 that reads back at wall-clock duration")
+func recordsWallClockDuration() async throws {
+    let surface = try #require(TestSurface.make(width: 320, height: 240))
+    let encoder = H264Encoder(maxDimension: 0, bitrate: 800_000, expectedFPS: 30)
+    defer { encoder.invalidate() }
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let recorder = try Recorder(url: url)
+
+    // Five seconds of wall time at 30 fps.
+    var t = 0.0
+    while t < 5.0 {
+        let out = try #require(encoder.encode(captured(surface, at: t)))
+        recorder.append(out.frame)
+        t += 1.0 / 30.0
+    }
+    let summary = try #require(
+        recorder.finish(), "finish reported: \(String(describing: recorder.failure))"
+    )
+    #expect(summary.framesWritten > 140, "expected ~150 frames, got \(summary.framesWritten)")
+    #expect(summary.framesDropped == 0)
+
+    let duration = try await assetDuration(url)
+    #expect(abs(duration - 5.0) < 0.2, "expected ~5s on disk, got \(duration)")
+}
+
+@Test("an idle gap survives into the file as elapsed time")
+func idleGapIsPreserved() async throws {
+    // The property a test timeline depends on. A frame-counter PTS would
+    // collapse the pause and the recording would no longer match the run.
+    let surface = try #require(TestSurface.make(width: 320, height: 240))
+    let encoder = H264Encoder(maxDimension: 0, bitrate: 800_000, expectedFPS: 30)
+    defer { encoder.invalidate() }
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let recorder = try Recorder(url: url)
+
+    for i in 0..<30 {  // one second of activity
+        let out = try #require(encoder.encode(captured(surface, at: Double(i) / 30)))
+        recorder.append(out.frame)
+    }
+    for i in 0..<30 {  // ...six seconds of nothing, then activity resumes
+        let out = try #require(encoder.encode(captured(surface, at: 7.0 + Double(i) / 30)))
+        recorder.append(out.frame)
+    }
+    _ = recorder.finish()
+
+    let duration = try await assetDuration(url)
+    #expect(duration > 6.5, "the gap was collapsed: duration \(duration)")
+    #expect(duration < 8.5, "duration ran long: \(duration)")
+}
+
+@Test("recording refuses to start on a non-keyframe")
+func mustOpenOnAKeyframe() throws {
+    let surface = try #require(TestSurface.make(width: 320, height: 240))
+    let encoder = H264Encoder(maxDimension: 0, bitrate: 800_000, expectedFPS: 30)
+    defer { encoder.invalidate() }
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let recorder = try Recorder(url: url)
+
+    // Produce a non-keyframe by encoding past the session's opening IDR, then
+    // offer only that to a fresh recorder.
+    _ = encoder.encode(captured(surface, at: 0))
+    var nonKey: EncodedFrame?
+    for i in 1...5 where nonKey == nil {
+        if let out = encoder.encode(captured(surface, at: Double(i) / 30)),
+           !out.frame.isKeyframe { nonKey = out.frame }
+    }
+    let interFrame = try #require(nonKey, "encoder produced no non-keyframe to test with")
+
+    #expect(recorder.append(interFrame) == false,
+            "a file opening on a non-keyframe is undecodable")
+    #expect(recorder.finish() == nil, "nothing was recorded, so there is no summary")
+}
+
+@Test("finish before anything was appended does not produce a file summary")
+func finishWithNoFramesIsSafe() throws {
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let recorder = try Recorder(url: url)
+    #expect(recorder.finish() == nil)
+    #expect(recorder.finish() == nil, "finish must be idempotent")
+}
+
+@Test("appending after finish is refused rather than crashing")
+func appendAfterFinishIsRefused() throws {
+    let surface = try #require(TestSurface.make(width: 320, height: 240))
+    let encoder = H264Encoder(maxDimension: 0, bitrate: 800_000, expectedFPS: 30)
+    defer { encoder.invalidate() }
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let recorder = try Recorder(url: url)
+
+    let first = try #require(encoder.encode(captured(surface, at: 0)))
+    recorder.append(first.frame)
+    _ = recorder.finish()
+
+    let later = try #require(encoder.encode(captured(surface, at: 1), forceKeyframe: true))
+    #expect(recorder.append(later.frame) == false)
+}
+
+
+@Test("a finish that times out reports no summary, and says why")
+func finishTimeoutIsNotSilentSuccess() throws {
+    // The file has no moov atom until finishWriting completes, so a Summary
+    // here would describe a recording that cannot be opened. Measured on CI,
+    // where the write lost a race it always won on a developer machine.
+    let surface = try #require(TestSurface.make(width: 320, height: 240))
+    let encoder = H264Encoder(maxDimension: 0, bitrate: 800_000, expectedFPS: 30)
+    defer { encoder.invalidate() }
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let recorder = try Recorder(url: url)
+
+    let out = try #require(encoder.encode(captured(surface, at: 0)))
+    #expect(recorder.append(out.frame))
+
+    // Completion is withheld rather than raced. A zero-second deadline
+    // against the real writer is decided by whichever wins, and on a fast
+    // machine that is the writer -- so the test passed without exercising
+    // the timeout at all.
+    recorder.finishWritingOverride = { _ in }
+
+    #expect(recorder.finish(timeout: 0.2) == nil)
+    guard case .finishTimedOut = try #require(recorder.failure) else {
+        Issue.record("expected finishTimedOut, got \(String(describing: recorder.failure))")
+        return
+    }
+}
+
+@Test("a recording that never started reports that, not a failure to finish")
+func finishWithoutAnyFramesReportsNeverStarted() throws {
+    // `quern-media --record out.mp4` interrupted before the first keyframe
+    // reaches the recorder. The caller gets nil either way, so without a
+    // distinct reason it cannot tell "nothing was captured" from "the file is
+    // broken" -- and main.swift reported the second, with exit 1, for the
+    // first.
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let recorder = try Recorder(url: url)
+
+    #expect(recorder.finish() == nil)
+    guard case .neverStarted = try #require(recorder.failure) else {
+        Issue.record("expected neverStarted, got \(String(describing: recorder.failure))")
+        return
+    }
+}
+
+@Test("a successful recording leaves no failure behind")
+func successLeavesNoFailure() throws {
+    let surface = try #require(TestSurface.make(width: 320, height: 240))
+    let encoder = H264Encoder(maxDimension: 0, bitrate: 800_000, expectedFPS: 30)
+    defer { encoder.invalidate() }
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let recorder = try Recorder(url: url)
+
+    let out = try #require(encoder.encode(captured(surface, at: 0)))
+    #expect(recorder.append(out.frame))
+    _ = try #require(recorder.finish())
+    #expect(recorder.failure == nil)
+
+    // A second finish says why it returned nil, rather than leaving a bare
+    // one. main.swift dispatches on the reason, and with none it reported
+    // "could not finish the recording: unknown" and exited 1 for a recording
+    // that had succeeded.
+    #expect(recorder.finish() == nil)
+    guard case .alreadyFinished = try #require(recorder.failure) else {
+        Issue.record("expected alreadyFinished, got \(String(describing: recorder.failure))")
+        return
+    }
+}
+
+@Test("the summary reports the first frame's host time, so offsets can be computed")
+func summaryPublishesStartHostTime() throws {
+    // The movie timeline is not zero-based -- startSession begins at the
+    // first frame's PTS -- so a consumer holding an absolute host time (a
+    // trace entry stamped on the same clock) cannot convert it to a
+    // movie-relative offset without this value. It was captured internally
+    // and not exposed, and the handoff doc claimed otherwise.
+    let surface = try #require(TestSurface.make(width: 320, height: 240))
+    let encoder = H264Encoder(maxDimension: 0, bitrate: 800_000, expectedFPS: 30)
+    defer { encoder.invalidate() }
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let recorder = try Recorder(url: url)
+
+    // A deliberately non-zero, non-small start: a real host clock reads
+    // hundreds of thousands of seconds since boot, and a summary reporting 0
+    // or the duration would pass a laxer assertion.
+    let start = 612_668.5
+    let first = try #require(encoder.encode(captured(surface, at: start)))
+    #expect(recorder.append(first.frame))
+    let second = try #require(encoder.encode(captured(surface, at: start + 1.0)))
+    recorder.append(second.frame)
+
+    let summary = try #require(
+        recorder.finish(), "finish reported: \(String(describing: recorder.failure))"
+    )
+    #expect(abs(summary.startHostTime - start) < 0.01,
+            "expected the first frame's PTS, got \(summary.startHostTime)")
+    #expect(summary.startHostTime != summary.duration)
+}
+
+
+@Test("a writer that opened but wrote nothing is a failure, not a short recording")
+func startedButWroteNothingIsAFailure() throws {
+    // `.neverStarted` covers "no keyframe arrived". This is the other empty
+    // case: the writer opened on a keyframe and then every frame was refused,
+    // leaving an .mp4 with no samples. A Summary for that told the caller it
+    // had footage.
+    let surface = try #require(TestSurface.make(width: 320, height: 240))
+    let encoder = H264Encoder(maxDimension: 0, bitrate: 800_000, expectedFPS: 30)
+    defer { encoder.invalidate() }
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let recorder = try Recorder(url: url)
+
+    let out = try #require(encoder.encode(captured(surface, at: 0)))
+    #expect(recorder.append(out.frame))
+    // Force the written count back to zero, the state a refused append leaves.
+    recorder.forceFramesWrittenToZeroForTesting()
+
+    #expect(recorder.finish() == nil)
+    guard case .wroteNothing = try #require(recorder.failure) else {
+        Issue.record("expected wroteNothing, got \(String(describing: recorder.failure))")
+        return
+    }
+}
+
+@Test("a recording sink forwards the recorder's reason for failing")
+func recordingSinkForwardsFailure() throws {
+    // The sink owns the recorder privately, so a nil finish() is only
+    // actionable if the reason comes out with it. main.swift dispatches on
+    // exactly this, and it was public API with no test.
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let sink = RecordingSink(recorder: try Recorder(url: url))
+
+    #expect(sink.failure == nil, "a fresh sink should have nothing to report")
+    #expect(sink.finish() == nil, "nothing was recorded")
+    guard case .neverStarted = try #require(sink.failure) else {
+        Issue.record("expected neverStarted, got \(String(describing: sink.failure))")
+        return
+    }
+}
+
+@Test("a writer that refused to start keeps its reason through finish()")
+func startFailureSurvivesFinish() throws {
+    // `append` records the real reason and sets `finished` on its way out, so
+    // `finish()` sees a repeat call. Labelling that `.alreadyFinished` threw
+    // away the only explanation of what went wrong — and main.swift
+    // dispatches on the reason.
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let recorder = try Recorder(url: url)
+
+    // A sample buffer with no format description is what the writer refuses:
+    // a passthrough input cannot be created without a sourceFormatHint.
+    var made: CMSampleBuffer?
+    let status = CMSampleBufferCreate(
+        allocator: kCFAllocatorDefault, dataBuffer: nil, dataReady: true,
+        makeDataReadyCallback: nil, refcon: nil, formatDescription: nil,
+        sampleCount: 0, sampleTimingEntryCount: 0, sampleTimingArray: nil,
+        sampleSizeEntryCount: 0, sampleSizeArray: nil, sampleBufferOut: &made
+    )
+    #expect(status == noErr)
+    let bogus = try #require(made)
+    #expect(
+        recorder.append(EncodedFrame(sample: bogus, time: .zero, isKeyframe: true)) == false
+    )
+
+    guard case .noFormatDescription = try #require(recorder.failure) else {
+        Issue.record("expected noFormatDescription, got \(String(describing: recorder.failure))")
+        return
+    }
+
+    #expect(recorder.finish() == nil)
+    guard case .noFormatDescription = try #require(recorder.failure) else {
+        Issue.record("finish() overwrote the start failure with \(String(describing: recorder.failure))")
+        return
+    }
+}

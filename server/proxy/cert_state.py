@@ -12,6 +12,7 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+import os
 from datetime import UTC, datetime
 from typing import Any
 
@@ -49,10 +50,82 @@ def read_cert_state() -> dict[str, dict]:
 
         if not content.strip():
             return {}
-        return json.loads(content)
+        return _canonicalised(json.loads(content))
     except (json.JSONDecodeError, OSError) as e:
         logger.warning("Failed to read cert state file: %s", e)
         return {}
+
+
+def _newer_configs(first: dict, second: dict) -> dict:
+    """Union two SSID maps, keeping the more recently recorded on a clash.
+
+    By `set_at`, not by which record the file happened to list second. Both
+    spellings of one device carry their own history, and file order says
+    nothing about which was written later -- so taking the later entry could
+    resurrect a proxy address the device had already moved away from, and the
+    trace would then attribute its flows by a stale `client_ip`.
+
+    An entry with no `set_at` loses to one that has it: knowing when beats not
+    knowing. Between two undated entries there is nothing to choose, so the
+    second stands.
+    """
+    merged = dict(first)
+    for ssid, config in second.items():
+        existing = merged.get(ssid)
+        if existing is None:
+            merged[ssid] = config
+            continue
+        if str(config.get("set_at") or "") >= str(existing.get("set_at") or ""):
+            merged[ssid] = config
+    return merged
+
+
+def _canonicalised(state: dict[str, dict]) -> dict[str, dict]:
+    """Keys as the rest of quern spells them.
+
+    A physical device has two identifiers, and this file can hold either: the
+    writer canonicalises what it is handed, but only once device discovery has
+    run, and every file written before canonicalisation existed holds the raw
+    hardware udid.
+
+    Doing it here rather than in each reader is the point. There are eight, and
+    the first attempt fixed one -- `ip_to_udid` -- which repaired trace lookups
+    while `_verify_physical_device` still read by the canonical key, found
+    nothing, and reported `proxy_not_configured` for a device whose proxy was
+    configured. Every reader goes through this function; none of them should
+    have to know.
+
+    Unknown spellings pass through untouched, so simulators and anything
+    recorded before its device was ever listed are unaffected.
+
+    **Collisions are merged, not overwritten.** An old file can hold both
+    spellings of one device -- one written before canonicalisation, one after
+    -- and taking the later record wholesale drops the other's
+    `wifi_proxy_configs`, which is exactly the data the trace needs to
+    attribute that device's flows. A test caught this doing precisely that: a
+    proxy config recorded while the alias map was cold vanished when a second
+    record for the same device arrived.
+
+    Scalar fields still take the later value, which is the newest thing known
+    about the certificate. Only `wifi_proxy_configs` unions, keyed by SSID, and
+    a repeated SSID takes the later one for the same reason.
+    """
+    from server.device.devicectl import canonical_device_id
+
+    merged: dict[str, dict] = {}
+    for udid, record in state.items():
+        key = canonical_device_id(udid)
+        if key not in merged:
+            merged[key] = dict(record)
+            continue
+        configs = _newer_configs(
+            merged[key].get("wifi_proxy_configs") or {},
+            record.get("wifi_proxy_configs") or {},
+        )
+        merged[key] = {**merged[key], **record}
+        if configs:
+            merged[key]["wifi_proxy_configs"] = configs
+    return merged
 
 
 def read_cert_state_for_device(udid: str) -> dict | None:
@@ -60,8 +133,14 @@ def read_cert_state_for_device(udid: str) -> dict | None:
 
     Returns None if no state exists for the device.
     """
+    from server.device.devicectl import canonical_device_id
+
+    # The *key* too, not only the state. `read_cert_state` canonicalises what
+    # it returns, so a caller asking by the hardware udid looked for a key that
+    # had just been rewritten to the other spelling and got None -- the same
+    # miss this whole change exists to end, one layer down.
     state = read_cert_state()
-    return state.get(udid)
+    return state.get(canonical_device_id(udid))
 
 
 def _write_cert_state(state: dict) -> None:
@@ -171,6 +250,68 @@ def record_device_proxy_config(
     }
     existing["wifi_proxy_configs"] = configs
     update_cert_state(udid, existing)
+
+
+def forget_device_proxy_configs(udid: str) -> list[str]:
+    """Drop every recorded Wi-Fi proxy config for a device, naming what went.
+
+    Android's `global http_proxy` is one setting for the whole device, not one
+    per network, so clearing it invalidates every SSID recorded here at once.
+    Leaving the records behind would be the failure this file keeps producing:
+    a stored config that reads as current while the device is no longer
+    routed anywhere.
+
+    Clears **every spelling** of the device, not just the canonical one, and
+    reports what a subsequent read can no longer see rather than what it set
+    out to remove. Both halves were wrong first time round, and they hid each
+    other. `read_cert_state_for_device` returns the canonicalised *merge* of
+    every spelling, while `update_cert_state` writes to the one raw key it is
+    handed; so zeroing the canonical entry left the other spelling's configs
+    on disk, and `_canonicalised` unioned them straight back on the next read.
+    Meanwhile the return value was computed from the read *before* the write,
+    so it asserted a removal that the very next read contradicted -- a claim
+    that could not fail, which is the shape that keeps getting through here.
+    """
+    from server.device.devicectl import canonical_device_id
+
+    canonical = canonical_device_id(udid)
+    before = set((read_cert_state_for_device(udid) or {}).get(
+        "wifi_proxy_configs"
+    ) or {})
+    if not before:
+        return []
+
+    # Raw keys, deliberately: this needs the spellings as they sit on disk,
+    # which is exactly what the canonicalised read hides.
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    fd = CERT_STATE_FILE.open("a+") if CERT_STATE_FILE.exists() else _create_and_open()
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        fd.seek(0)
+        content = fd.read()
+        try:
+            state = json.loads(content) if content.strip() else {}
+        except json.JSONDecodeError:
+            state = {}
+
+        for key, entry in state.items():
+            if canonical_device_id(key) == canonical and isinstance(entry, dict):
+                entry["wifi_proxy_configs"] = {}
+
+        fd.seek(0)
+        fd.truncate()
+        json.dump(state, fd, indent=2)
+        fd.flush()
+        os.fsync(fd.fileno())
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
+
+    # What actually went, read back through the same merge a caller would use.
+    after = set((read_cert_state_for_device(udid) or {}).get(
+        "wifi_proxy_configs"
+    ) or {})
+    return sorted(before - after)
 
 
 def _create_and_open():

@@ -7,6 +7,7 @@ import pathlib
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from server.api.actions import logged_action
 from server.models import BuildResult
 
 router = APIRouter(prefix="/api/v1/builds", tags=["builds"])
@@ -40,6 +41,7 @@ async def get_latest_build(request: Request) -> BuildResult | None:
 
 
 @router.post("/parse", response_model=BuildResult)
+@logged_action("parse_build", category="build")
 async def parse_build(request: Request, body: BuildParseRequest) -> BuildResult:
     """Accept raw xcodebuild output and return the parsed result."""
     build_adapter = request.app.state.build_adapter
@@ -47,6 +49,7 @@ async def parse_build(request: Request, body: BuildParseRequest) -> BuildResult:
 
 
 @router.post("/parse-file", response_model=BuildResult)
+@logged_action("parse_build_file", category="build")
 async def parse_build_file(request: Request, body: BuildParseFileRequest) -> BuildResult:
     """Read a build log file and return the parsed result."""
     path = pathlib.Path(body.file_path).expanduser()

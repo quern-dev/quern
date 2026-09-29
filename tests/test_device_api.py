@@ -556,11 +556,14 @@ class TestTapElement:
             label_prefix=None,
             identifier=None,
             element_type=None,
-            udid=None,
+            udid="AAAA-1111",
             skip_stability_check=False,
             source_timeout=None,
             value=None,
-            scroll_to_find=True,
+            # None, not True: unset now means "ask the knowledge base"
+            # rather than "always sweep" (#274). The handler passes the
+            # request's value straight through, so this pins the default.
+            scroll_to_find=None,
         )
 
     async def test_tap_element_by_identifier(self, app, auth_headers, mock_controller):
@@ -578,11 +581,14 @@ class TestTapElement:
             label_prefix=None,
             identifier="Settings",
             element_type=None,
-            udid=None,
+            udid="AAAA-1111",
             skip_stability_check=False,
             source_timeout=None,
             value=None,
-            scroll_to_find=True,
+            # None, not True: unset now means "ask the knowledge base"
+            # rather than "always sweep" (#274). The handler passes the
+            # request's value straight through, so this pins the default.
+            scroll_to_find=None,
         )
 
     async def test_tap_element_with_type_filter(self, app, auth_headers, mock_controller):
@@ -600,11 +606,14 @@ class TestTapElement:
             label_prefix=None,
             identifier=None,
             element_type="Button",
-            udid=None,
+            udid="AAAA-1111",
             skip_stability_check=False,
             source_timeout=None,
             value=None,
-            scroll_to_find=True,
+            # None, not True: unset now means "ask the knowledge base"
+            # rather than "always sweep" (#274). The handler passes the
+            # request's value straight through, so this pins the default.
+            scroll_to_find=None,
         )
 
     async def test_tap_element_ambiguous(self, app, auth_headers, mock_controller):
@@ -776,7 +785,7 @@ class TestTypeText:
         # Untargeted, so the response says so rather than implying it landed.
         assert resp.json()["verified"] is False
         mock_controller.type_text.assert_called_once_with(
-            text="hello world", udid=None, label=None, identifier=None,
+            text="hello world", udid="AAAA-1111", label=None, identifier=None,
         )
 
     async def test_type_text_no_auth(self, app):
@@ -1085,3 +1094,100 @@ class TestScrollToElement:
                 headers=auth_headers,
             )
         assert resp.status_code == 422
+
+
+class TestGetUiTreeDoesNotCallARequestedSkeletonDegraded:
+    """The sibling of the same guard on `get_screen_summary`.
+
+    `strategy="skeleton"` never reads `/source`, so a note left by an earlier
+    timeout is still recorded — and `get_ui_tree` reported it, telling a
+    caller who deliberately chose a skeleton that their read had timed out.
+    Found by review on #329; the summary path had the guard and this one did
+    not.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_requested_skeleton_carries_no_degraded_note(
+        self, app, auth_headers, mock_controller
+    ):
+        from httpx import ASGITransport, AsyncClient
+
+        mock_controller._is_physical = lambda _u: True
+        mock_controller.resolve_udid = AsyncMock(return_value="PHYS-1")
+        from unittest.mock import MagicMock
+
+        mock_controller.wda_client = MagicMock()
+        mock_controller.wda_client.build_screen_skeleton = AsyncMock(return_value=[])
+        # A stale record from an earlier read that really did time out.
+        mock_controller.wda_client.source_timed_out = lambda _u: 20.0
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get(
+                "/api/v1/device/ui",
+                params={"udid": "PHYS-1", "strategy": "skeleton"},
+                headers=auth_headers,
+            )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert "degraded" not in body, body
+        assert "source_timed_out" not in body, body
+
+
+class TestEveryUiResponseNamesItsBackend:
+    """Review of #236 proved two of the three advertised fields could be
+    deleted with the whole suite still green — the claim was in the MCP
+    descriptions and in nothing executable.
+
+    These pin the routes. `get_screen_summary` is covered at the controller
+    in test_device_controller.py; these are the ones that were only ever
+    asserted in prose.
+    """
+
+    @staticmethod
+    def _ctrl(mock_controller):
+        mock_controller._last_read_backend = {"SIM-1": "sim-bridge"}
+        mock_controller.resolve_udid = AsyncMock(return_value="SIM-1")
+        mock_controller.backend_that_served = lambda udid: "sim-bridge"
+        return mock_controller
+
+    @pytest.mark.asyncio
+    async def test_get_ui_tree_names_it(self, app, auth_headers, mock_controller):
+        from httpx import ASGITransport, AsyncClient
+
+        c = self._ctrl(mock_controller)
+        c.get_ui_elements = AsyncMock(return_value=([], "SIM-1"))
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get(
+                "/api/v1/device/ui", params={"udid": "SIM-1"}, headers=auth_headers,
+            )
+        assert resp.status_code == 200, resp.text
+        assert resp.json().get("backend") == "sim-bridge", resp.json()
+
+    @pytest.mark.asyncio
+    async def test_wait_for_element_names_it_on_a_timeout(
+        self, app, auth_headers, mock_controller
+    ):
+        """A timeout returns 200 with matched=false — a success response, and
+        the moment someone asks which backend was driving."""
+        from httpx import ASGITransport, AsyncClient
+
+        c = self._ctrl(mock_controller)
+        c.wait_for_element = AsyncMock(
+            return_value=({"matched": False, "polls": 3}, "SIM-1"),
+        )
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/ui/wait-for-element",
+                json={"identifier": "nope", "condition": "exists", "timeout": 1},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["matched"] is False
+        assert body.get("backend") == "sim-bridge", body

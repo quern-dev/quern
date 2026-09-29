@@ -8,7 +8,7 @@ export function registerProxyTools(server: McpServer): void {
   server.registerTool("query_flows", {
     description: `Query captured HTTP flows from the network proxy. Filter by host, method, status code, and more.
 
-For physical devices, filter by client_ip to isolate that device's traffic — the recorded IP is in proxy_status cert_setup[udid].wifi_proxy_configs[ssid].client_ip. If filtering by client_ip returns nothing, check proxy_status for that device: wifi_proxy_stale:true means the proxy address on the device needs updating; a mismatched client_ip means the device got a new DHCP lease and record_device_proxy_config should be called again with the updated IP.`,
+For an Android emulator, filter by device_serial (e.g. emulator-5554): its traffic is NATed by the host, so every emulator on the machine arrives carrying the host's own address and client_ip cannot tell two of them apart, or either from the host. For physical devices, filter by client_ip to isolate that device's traffic — the recorded IP is in proxy_status cert_setup[udid].wifi_proxy_configs[ssid].client_ip. If filtering by client_ip returns nothing, check proxy_status for that device: wifi_proxy_stale:true means the proxy address on the device needs updating; a mismatched client_ip means the device got a new DHCP lease and record_device_proxy_config should be called again with the updated IP. If the result has \`truncated: true\`, flows in the window were evicted from the store (it holds 5,000) before you asked, so an empty or short answer -- or a \`total\` -- does NOT mean the request never happened; \`complete_after\` says from when the answer is whole. Pass \`since\` (e.g. just before the action you triggered) to ask only about the window you care about: evictions from before it do not flag the answer.`,
     inputSchema: strictParams({
       host: z.string().optional().describe("Filter by hostname (single host; use hosts for multiple)"),
       hosts: z.array(z.string()).optional().describe("Filter to flows matching any of these hostnames"),
@@ -34,10 +34,22 @@ For physical devices, filter by client_ip to isolate that device's traffic — t
         .string()
         .optional()
         .describe("Filter by simulator UDID (only flows from this simulator)"),
+      device_serial: z
+        .string()
+        .optional()
+        .describe("Filter to flows from this Android emulator (e.g. emulator-5554). Use this rather than client_ip for an emulator: every emulator on a host shares the host's address, so client_ip cannot tell two apart, or either from the host."),
       client_ip: z
         .string()
         .optional()
-        .describe("Filter by client IP address (physical device identification)"),
+        .describe("Filter by client IP address (physical devices). Does not narrow to a single Android emulator — use device_serial."),
+      since: z
+        .string()
+        .optional()
+        .describe("Only flows whose request started at or after this time (ISO 8601). No offset means UTC. Also scopes the truncated check to this window."),
+      until: z
+        .string()
+        .optional()
+        .describe("Only flows whose request started at or before this time (ISO 8601). No offset means UTC."),
       detail: z
         .enum(["full", "summary"])
         .default("full")
@@ -60,7 +72,10 @@ For physical devices, filter by client_ip to isolate that device's traffic — t
     status_max,
     has_error,
     simulator_udid,
+    device_serial,
     client_ip,
+    since,
+    until,
     detail,
     limit,
     offset,
@@ -76,7 +91,10 @@ For physical devices, filter by client_ip to isolate that device's traffic — t
         status_max,
         has_error,
         simulator_udid,
+        device_serial,
         client_ip,
+        since,
+        until,
         detail,
         limit,
         offset,
@@ -114,19 +132,21 @@ Use exclude_hosts to filter out analytics/SDK noise (Firebase, AppsFlyer, Facebo
       hosts: z.array(z.string()).optional().describe("Only capture flows to these hosts"),
       exclude_hosts: z.array(z.string()).optional().describe("Exclude flows to these hosts (analytics, SDKs, etc.)"),
       simulator_udid: z.string().optional().describe("Filter to flows from this simulator"),
-      client_ip: z.string().optional().describe("Filter by client IP (physical devices)"),
+      device_serial: z.string().optional().describe("Filter to flows from this Android emulator (e.g. emulator-5554)"),
+      client_ip: z.string().optional().describe("Filter by client IP (physical devices). Does not narrow to one Android emulator."),
       detail: z
         .enum(["full", "summary"])
         .default("summary")
         .describe("Detail level for flows on stop: 'summary' (default, compact) or 'full' (includes headers/bodies)"),
     }),
-  }, async ({ id, hosts, exclude_hosts, simulator_udid, client_ip, detail }) => {
+  }, async ({ id, hosts, exclude_hosts, simulator_udid, device_serial, client_ip, detail }) => {
     try {
       const body: Record<string, unknown> = { detail };
       if (id !== undefined) body.id = id;
       if (hosts !== undefined) body.hosts = hosts;
       if (exclude_hosts !== undefined) body.exclude_hosts = exclude_hosts;
       if (simulator_udid !== undefined) body.simulator_udid = simulator_udid;
+      if (device_serial !== undefined) body.device_serial = device_serial;
       if (client_ip !== undefined) body.client_ip = client_ip;
       const data = await apiRequest("POST", "/api/v1/proxy/capture/start", undefined, body);
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
@@ -139,7 +159,7 @@ Use exclude_hosts to filter out analytics/SDK noise (Firebase, AppsFlyer, Facebo
   });
 
   server.registerTool("stop_capture_session", {
-    description: `Stop a capture session and get the flows captured during that window. Returns flows (summary or full based on session config), a by_host breakdown, total count, and duration.`,
+    description: `Stop a capture session and get the flows captured during that window. Returns flows (summary or full based on session config), a by_host breakdown, total count, and duration. \`truncated: true\` means flows from the session were evicted from the store, so the list is not everything the action caused.`,
     inputSchema: strictParams({
       session_id: z.string().describe("Session ID from start_capture_session"),
     }),
@@ -158,7 +178,7 @@ Use exclude_hosts to filter out analytics/SDK noise (Firebase, AppsFlyer, Facebo
   server.registerTool("wait_for_flow", {
     description: `Wait for an HTTP flow matching filters to appear. Blocks server-side until a match is found or timeout expires. Always returns with matched:true/false — timeouts are not errors.
 
-Use this after triggering a UI action to observe the resulting network request without polling. Auto-sets 'since' to 5 seconds before the call to catch flows that completed between the action and the wait call.`,
+Use this after triggering a UI action to observe the resulting network request without polling. Auto-sets 'since' to 5 seconds before the call to catch flows that completed between the action and the wait call. On a timeout, \`truncated: true\` means a matching flow may have arrived and been evicted before it was seen -- not that it never happened.`,
     inputSchema: strictParams({
       host: z.string().optional().describe("Filter by hostname"),
       path_contains: z
@@ -184,10 +204,14 @@ Use this after triggering a UI action to observe the resulting network request w
         .describe(
           "Filter by simulator UDID (only flows from this simulator)"
         ),
+      device_serial: z
+        .string()
+        .optional()
+        .describe("Wait only for flows from this Android emulator (e.g. emulator-5554). client_ip cannot narrow to one — every emulator on a host arrives as the host."),
       client_ip: z
         .string()
         .optional()
-        .describe("Filter by client IP address (physical device identification)"),
+        .describe("Filter by client IP address (physical devices). Does not narrow to one Android emulator."),
       timeout: z
         .coerce.number()
         .min(0.1)
@@ -209,6 +233,7 @@ Use this after triggering a UI action to observe the resulting network request w
     status_max,
     has_error,
     simulator_udid,
+    device_serial,
     client_ip,
     timeout,
     interval,
@@ -223,6 +248,7 @@ Use this after triggering a UI action to observe the resulting network request w
       if (has_error !== undefined) body.has_error = has_error;
       if (simulator_udid !== undefined)
         body.simulator_udid = simulator_udid;
+      if (device_serial !== undefined) body.device_serial = device_serial;
       if (client_ip !== undefined) body.client_ip = client_ip;
       body.timeout = timeout;
       body.interval = interval;
@@ -257,7 +283,7 @@ Use this after triggering a UI action to observe the resulting network request w
   });
 
   server.registerTool("get_flow_detail", {
-    description: `Get full request/response detail for a single captured HTTP flow, including headers and bodies.`,
+    description: `Get full request/response detail for a single captured HTTP flow, including headers and bodies. A 404 on an id from an earlier query may mean the flow was evicted; the error says so when the store has evicted anything.`,
     inputSchema: strictParams({
       flow_id: z.string().describe("The flow ID to retrieve"),
     }),
@@ -357,7 +383,7 @@ network_state surfaces the Mac's current Wi-Fi/network identity from a backgroun
 - last_changed_at, previous_ssid, previous_local_ip, last_change_reason: populated when the monitor detected a change since server start. Reason codes: ssid_changed, ip_changed_same_ssid, ssid_and_ip_changed.
 - recent_changes: short ring of recent change events (capped at 10).
 
-When traffic capture suddenly stops working on a physical device, check network_state alongside cert_setup[udid].wifi_proxy_stale: if last_changed_at is recent, the laptop just moved networks (or got a new DHCP lease) and the device's stored proxy_host is now wrong. Update Wi-Fi proxy on the device, then call record_device_proxy_config with the new ssid + client_ip.`,
+When traffic capture suddenly stops working on a physical device, check network_state alongside cert_setup[udid].wifi_proxy_stale: if last_changed_at is recent, the laptop just moved networks (or got a new DHCP lease) and the device's stored proxy_host is now wrong. Update Wi-Fi proxy on the device, then call record_device_proxy_config with the new ssid + client_ip. \`flow_store\` gives the flow store's capacity, intake (\`added\`), evictions and the span it still holds; \`flows_captured\` is only what survived.`,
     inputSchema: strictParams({
       include_offline: z
         .coerce.boolean()
@@ -451,7 +477,7 @@ iOS simulators: Always works (simctl keychain).
 
 Android emulators: Requires a rootable image (Google APIs, NOT Google Play). Google Play images have a locked system partition. If the user's emulator is a Google Play image, suggest creating a Google APIs AVD instead — it's identical for app development (apps are installed via adb, not Play Store). The tool will auto-detect and return a helpful error if the image isn't rootable.
 
-Also auto-configures the HTTP proxy on Android emulators (10.0.2.2:9101).
+Does NOT route the device through the proxy. On Android, call record_device_proxy_config with apply=true for that — it works without the cert (plain HTTP needs none) and is required before the device can reach mitm.it, which the proxy itself serves.
 
 When udid is omitted, resolution order is: (1) the active device set via resolve_device, if any — (2) otherwise, all booted simulators and rootable Android emulators in a single batch call. Do NOT loop over individual UDIDs — the batch path is just as fast and avoids N redundant round-trips.
 
@@ -628,7 +654,7 @@ refusal exists to prevent.`,
   server.registerTool("get_flow_summary", {
     description: `Get an LLM-optimized summary of recent HTTP traffic. Groups by host, shows errors, slow requests, and overall statistics. Supports cursor-based polling for efficient delta updates.
 
-For physical devices, pass client_ip to isolate that device's traffic — the recorded IP is in proxy_status cert_setup[udid].wifi_proxy_configs[ssid].client_ip. If no flows appear, check proxy_status: wifi_proxy_stale:true means the device proxy needs reconfiguring; a mismatched client_ip means the device's IP changed and record_device_proxy_config should be called again with the new IP.`,
+For an Android emulator, pass device_serial (e.g. emulator-5554) — its traffic arrives as the host's address, so client_ip cannot narrow to one emulator. For physical devices, pass client_ip to isolate that device's traffic — the recorded IP is in proxy_status cert_setup[udid].wifi_proxy_configs[ssid].client_ip. If no flows appear, check proxy_status: wifi_proxy_stale:true means the device proxy needs reconfiguring; a mismatched client_ip means the device's IP changed and record_device_proxy_config should be called again with the new IP. If \`truncated\` is true, flows in the window were evicted and the counts may be low. The cursor follows arrival order: a delta returns every flow that finished since the last summary, including requests that started before it. If \`cursor_reset\` is true, the cursor could not be honoured (the server restarted, or the cursor is ahead of anything the server has numbered) and the result covers the window instead; a string that is not a cursor is refused with an error.`,
     inputSchema: strictParams({
       window: z
         .enum(["30s", "1m", "5m", "15m", "1h"])
@@ -648,18 +674,23 @@ For physical devices, pass client_ip to isolate that device's traffic — the re
         .string()
         .optional()
         .describe("Filter to flows from a specific simulator UDID"),
+      device_serial: z
+        .string()
+        .optional()
+        .describe("Filter to flows from this Android emulator (e.g. emulator-5554). Use this rather than client_ip for an emulator: every emulator on a host shares the host's address, so client_ip cannot tell two apart, or either from the host."),
       client_ip: z
         .string()
         .optional()
-        .describe("Filter by client IP address (physical device identification)"),
+        .describe("Filter by client IP address (physical devices). Does not narrow to a single Android emulator — use device_serial."),
     }),
-  }, async ({ window, host, since_cursor, simulator_udid, client_ip }) => {
+  }, async ({ window, host, since_cursor, simulator_udid, device_serial, client_ip }) => {
     try {
       const data = await apiRequest("GET", "/api/v1/proxy/flows/summary", {
         window,
         host,
         since_cursor,
         simulator_udid,
+        device_serial,
         client_ip,
       });
 
@@ -796,30 +827,57 @@ the background and can be re-enabled with configure_system_proxy.`,
   });
 
   server.registerTool("record_device_proxy_config", {
-    description: `Record that the Wi-Fi proxy has been configured on a physical device. ` +
-    `Call this after successfully completing the Wi-Fi proxy setup in device Settings. ` +
-    `Quern stores the config per Wi-Fi network (SSID) so multiple networks are tracked independently. ` +
-    `The proxy host is auto-derived from the Mac interface on the same subnet as the device's client_ip — ` +
-    `this is always the correct host regardless of interface names or routing tables. ` +
-    `The port is derived from the running server. ` +
-    `Passing client_ip also enables per-device flow filtering via the client_ip parameter on query_flows/get_flow_summary.`,
+    description: `Point a device at the Quern proxy, or record that someone else did. ` +
+    `On Android, pass apply=true and Quern writes the setting itself over adb — no root, ` +
+    `no Settings screen, on any device or emulator — then bounces Wi-Fi so it takes effect, ` +
+    `since the setting is only read when the network attaches. ` +
+    `On iOS the proxy is still configured by hand in Settings > Wi-Fi; call this afterwards to record it, ` +
+    `and apply/clear are refused rather than silently ignored. ` +
+    `Pass clear=true to unset it — the setting survives reboots, and a device left pointing at a proxy ` +
+    `that is no longer listening has no working network. ` +
+    `On Android, ssid and client_ip are read off the device when omitted, so prefer omitting them to guessing. ` +
+    `The proxy host is the Mac interface on the device's own subnet; the port comes from the running proxy. ` +
+    `Check network_reattached and hint in the response: applied means the setting was written, ` +
+    `not that traffic is flowing yet. ` +
+    `client_ip also enables per-device flow filtering on query_flows/get_flow_summary.`,
     inputSchema: strictParams({
       udid: z.string().describe("Device UDID"),
-      ssid: z.string().describe(
-        "Wi-Fi network name the device is connected to " +
-        "(visible at the top of Settings > Wi-Fi)."
-      ),
+      ssid: z
+        .string()
+        .optional()
+        .describe(
+          "Wi-Fi network name. Optional on Android, where Quern reads it from the device; " +
+          "supply it on iOS (visible at the top of Settings > Wi-Fi)."
+        ),
       client_ip: z
         .string()
         .optional()
         .describe(
-          "Device's LAN IP address (Settings > Wi-Fi > (network) > IP Address). " +
-          "Used to find the correct Mac interface IP automatically and to filter captured flows."
+          "Device's LAN IP address. Optional on Android, where Quern reads it from the device; " +
+          "on iOS see Settings > Wi-Fi > (network) > IP Address. " +
+          "Used to find the correct Mac interface IP and to filter captured flows."
+        ),
+      apply: z
+        .boolean()
+        .optional()
+        .describe(
+          "Android only: write the proxy setting to the device over adb and reattach the network, " +
+          "rather than only recording it. Refused with 400 on iOS."
+        ),
+      clear: z
+        .boolean()
+        .optional()
+        .describe(
+          "Android only: unset the device's proxy and forget every config recorded for it. " +
+          "Use this to undo apply, and to rescue a device pointing at a proxy that is gone."
         ),
     }),
-  }, async ({ udid, ssid, client_ip }) => {
+  }, async ({ udid, ssid, client_ip, apply, clear }) => {
     try {
-      const body: Record<string, unknown> = { udid, ssid };
+      const body: Record<string, unknown> = { udid };
+      if (ssid !== undefined) body.ssid = ssid;
+      if (apply !== undefined) body.apply = apply;
+      if (clear !== undefined) body.clear = clear;
       if (client_ip !== undefined) body.client_ip = client_ip;
       const data = await apiRequest(
         "POST",
@@ -936,13 +994,19 @@ without configuring a system proxy.
 Restarts the proxy automatically to apply the new configuration — no server
 restart needed. Pass an empty list to disable local capture.
 
-SETS THE LIST, does not add to it. Whatever is not named is dropped, so read
-proxy_status first and pass the processes already there alongside the new one.
-Told "capture MyApp", sending ["MyApp"] silently stops capturing everything
-else -- most often the web-view defaults, which are applied only when nothing
-is specified. The response echoes only the new list, so it cannot tell you
-what went missing; the drop is recorded as a warning in the server log, which
-query_logs(source: "server") will show you.
+SETS THE LIST, but a minimum is always kept. Naming ["MyApp"] no longer drops
+MobileSafari or com.apple.WebKit.Networking: a webview's requests leave through
+WebKit and an OAuth hand-off goes through Safari, so removing them silently
+stopped capturing the traffic people were usually looking for. What was added
+for you comes back as capture_added on the response, and anything your list
+did drop as capture_removed -- read them rather than the server log.
+
+It is still a set rather than an add for everything else, so read proxy_status
+first and pass processes you want kept. The HTTP endpoint takes only: true to
+capture exactly your list for the running server; it is not exposed here yet.
+Note what only does NOT mean: the flag is not stored, but the list it writes
+IS, so it replaces whatever was configured before and start-up widens that
+stored list again. It is a one-shot narrowing, not a temporary view.
 
 CERTIFICATE CHECK. Enabling capture refuses with HTTP 428 when a booted
 simulator does not trust the mitmproxy CA and auto_install_cert is off. With
@@ -960,7 +1024,7 @@ extension in System Settings > Privacy & Security.`,
       processes: z
         .array(z.string())
         .describe(
-          'List of process names to capture. For web traffic include com.apple.WebKit.Networking -- Safari and in-app web views egress through it, so ["MobileSafari"] alone captures nothing. Default: ["MobileSafari", "com.apple.WebKit.Networking"]. Replaces the current list; empty list disables local capture.'
+          'List of process names to capture. For web traffic include com.apple.WebKit.Networking -- Safari and in-app web views egress through it, so ["MobileSafari"] alone captures nothing. Default: ["MobileSafari", "com.apple.WebKit.Networking"], and those two are kept even when you name others. Replaces the rest of the current list; empty list disables local capture.'
         ),
       skip_cert_check: z
         .boolean()

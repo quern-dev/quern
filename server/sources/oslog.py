@@ -71,7 +71,7 @@ class OslogAdapter(BaseSourceAdapter):
 
     def __init__(
         self,
-        device_id: str = "default",
+        device_id: str = "",
         on_entry: EntryCallback | None = None,
         subsystem_filter: str | None = None,
         process_filter: str | None = None,

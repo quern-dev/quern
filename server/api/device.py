@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 from starlette.responses import StreamingResponse
 
+from server.api.actions import action, logged_action
+from server.logging_ext import current_action
 from server.models import (
     BootDeviceRequest,
     DeviceError,
@@ -48,8 +51,12 @@ from server.models import (
 #: measure fresh.
 TOOLS_IN_LIST_MAX_AGE = 5.0
 
+
+if TYPE_CHECKING:
+    from server.device.controller import DeviceController
+
 router = APIRouter(prefix="/api/v1/device", tags=["device"])
-logger = logging.getLogger("quern-debug-server.api")
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -57,19 +64,69 @@ logger = logging.getLogger("quern-debug-server.api")
 # ---------------------------------------------------------------------------
 
 
-async def _capture_screen_context(controller, udid: str) -> dict:
-    """Best-effort screen context capture for action responses."""
+async def _capture_screen_context(controller, udid: str, registry=None) -> dict:
+    """Best-effort screen context capture for action responses.
+
+    When landmarks are loaded, this also says which screen the action landed
+    on. That answer used to require a second call -- act, then ask
+    `get_screen_summary?identify=true` where you ended up -- so an agent had to
+    remember to ask, and paid a second full screen read to find out.
+
+    It is free here. The elements are already in hand, and `max_elements` only
+    truncates the *summary*: the list identification runs against is the whole
+    tree. With no landmarks loaded nothing is added and nothing is read.
+    """
     try:
-        summary, _elements, _ = await controller.get_screen_summary(
+        summary, elements, _ = await controller.get_screen_summary(
             max_elements=10, udid=udid,
         )
-        return {
+        context = {
             "screen_title": summary.get("screen_title", ""),
             "summary": summary.get("summary", ""),
             "element_count": summary.get("element_count", 0),
             "interactive_elements": summary.get("interactive_elements", []),
         }
+        # Carried, not dropped. "Tapped, and the screen now has 0 elements" is
+        # the most common way a caller meets a timed-out read, and this
+        # whitelist computed the explanation one frame up and discarded it
+        # (#170). An element count the caller cannot interpret is the whole
+        # defect, so the field that interprets it travels with the count.
+        if summary.get("source_timed_out"):
+            context["source_timed_out"] = True
+            context["degraded"] = summary.get("degraded", "")
+        # Second field this whitelist has dropped: #170 had to reopen it for
+        # `source_timed_out`, and it silently omitted `backend` the same way.
+        # A four-key literal in front of a growing dict loses whatever is
+        # added next, so it copies what it is given.
+        if summary.get("backend"):
+            context["backend"] = summary["backend"]
+        context.update(await _identify_for_context(controller, udid, registry, elements))
+        return context
     except Exception:
+        return {}
+
+
+async def _identify_for_context(controller, udid: str, registry, elements) -> dict:
+    """Thin adapter onto `LandmarkRegistry.identify_for_context`.
+
+    The rule -- and the reason for it -- lives on the registry, because the
+    miss paths in `controller_ui` need the same answer and a rule spelled
+    twice is a pair that drifts. This supplies the page-listing fetch, which
+    is the one part that needs a device.
+    """
+    if registry is None:
+        return {}
+    try:
+        return await registry.identify_for_context(
+            elements, lambda: controller.web_page_urls(udid),
+        )
+    except Exception:
+        # The registry guards its own internals, but *this* call can still
+        # fail -- anything that is not a registry, or a future where the
+        # method changes shape. Nothing may escape: the caller treats any
+        # exception as "no screen context at all", so an escape here costs the
+        # title, summary and elements as well as the identification.
+        logger.debug("screen identification failed", exc_info=True)
         return {}
 
 
@@ -89,6 +146,21 @@ async def _capture_action_screenshot(controller, udid: str, label: str) -> str |
         return str(filepath)
     except Exception:
         return None
+
+
+def _logging_lock(request: Request, udid: str) -> asyncio.Lock:
+    """The lock that serialises starting and stopping capture on one device.
+
+    Stops need it as much as starts. `adapter.stop()` marks the adapter not
+    running before it has finished, so a start arriving in that gap passed
+    the "already running" check and registered a new capture -- which the
+    stop, resuming, then deleted from the registry, leaving it running with
+    no way to stop it (CodeRabbit on #319).
+    """
+    locks = getattr(request.app.state, "logging_start_locks", None)
+    if locks is None:
+        locks = request.app.state.logging_start_locks = {}
+    return locks.setdefault(udid, asyncio.Lock())
 
 
 def _get_controller(request: Request):
@@ -151,6 +223,7 @@ async def tool_sites(request: Request) -> ToolSitesResponse:
 
 
 @router.get("/list")
+@logged_action("list_devices", category="device.read")
 async def list_devices(
     request: Request,
     state: str | None = Query(default=None, pattern="^(booted|shutdown)$"),
@@ -281,6 +354,7 @@ async def list_devices(
 
 
 @router.post("/boot")
+@logged_action("boot_device", category="device.lifecycle")
 async def boot_device(request: Request, body: BootDeviceRequest):
     """Boot a simulator by udid or name."""
     from server.config import get_auto_install_cert
@@ -289,6 +363,11 @@ async def boot_device(request: Request, body: BootDeviceRequest):
     controller = _get_controller(request)
     try:
         udid = await controller.boot(udid=body.udid, name=body.name, headless=body.headless)
+        # Decorated rather than wrapped in a `with`: the cert install and
+        # proxy auto-start below are part of what the caller waited for, and
+        # a block around just the boot would report a duration that stops
+        # before most of the work.
+        current_action().udid = udid
     except DeviceError as e:
         raise _handle_device_error(e)
 
@@ -308,12 +387,14 @@ async def boot_device(request: Request, body: BootDeviceRequest):
     # **Android is deliberately exempt, for now.** That sentence is false for
     # it: `simulators_without_cert` skips every non-simulator, so the gate
     # neither installs nor refuses (D9 in docs/proposals/cert-trust-model.md).
-    # Worse, `install_cert`'s Android path is also the only code in the tree
-    # that calls `adb.set_http_proxy`, so gating it here would remove both the
-    # cert and the emulator's proxy configuration and leave nothing to say so
-    # -- silent HTTPS failure, the exact class this subsystem exists to
-    # prevent, relocated to Android. `docs/guides/android-proxy.md` also
-    # promises the re-install after an emulator reboot that this provides.
+    # It no longer takes the proxy with it, though. That was the other half of
+    # the argument here -- `install_cert`'s Android path used to be the only
+    # code in the tree calling `adb.set_http_proxy`, so gating it removed the
+    # device's routing as well as its cert. #265 moved routing to
+    # `POST /proxy/device-proxy-config`, which is callable on its own and does
+    # not depend on a cert install succeeding, so only the cert argument above
+    # still holds. `docs/guides/android-proxy.md` also promises the re-install
+    # after an emulator reboot that this provides.
     # Bringing Android under the gate belongs with D9, where it can be tested
     # against a real emulator.
     cert_auto_installed: bool | None = None
@@ -371,11 +452,17 @@ async def boot_device(request: Request, body: BootDeviceRequest):
 async def shutdown_device(request: Request, body: ShutdownDeviceRequest):
     """Shutdown a simulator."""
     controller = _get_controller(request)
-    try:
-        await controller.shutdown(udid=body.udid)
-        return {"status": "shutdown", "udid": body.udid}
-    except DeviceError as e:
-        raise _handle_device_error(e)
+    with action("shutdown_device", category="device.lifecycle") as act:
+        try:
+            # Resolved rather than echoed: `body.udid` is None when the caller
+            # leaves the choice to quern, and both the entry and this response
+            # then say None, which joins to nothing.
+            resolved = await controller.resolve_udid(body.udid)
+            act.udid = resolved
+            await controller.shutdown(udid=resolved)
+            return {"status": "shutdown", "udid": resolved}
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 def _invalidate_cert_record(udid: str) -> None:
@@ -416,19 +503,23 @@ async def erase_device(request: Request, body: ShutdownDeviceRequest):
     behind was creating the field report's state itself.
     """
     controller = _get_controller(request)
-    try:
-        await controller.erase(udid=body.udid)
-        # In a thread: the helper does blocking reads, an exclusive flock and a
-        # write, and a contended lock would stall every other request on the
-        # loop. It swallows its own exceptions, so the best-effort contract is
-        # unchanged.
-        await asyncio.to_thread(_invalidate_cert_record, body.udid)
-        return {"status": "erased", "udid": body.udid}
-    except DeviceError as e:
-        raise _handle_device_error(e)
+    with action("erase_device", category="device.lifecycle") as act:
+        try:
+            resolved = await controller.resolve_udid(body.udid)
+            act.udid = resolved
+            await controller.erase(udid=resolved)
+            # In a thread: the helper does blocking reads, an exclusive flock
+            # and a write, and a contended lock would stall every other
+            # request on the loop. It swallows its own exceptions, so the
+            # best-effort contract is unchanged.
+            await asyncio.to_thread(_invalidate_cert_record, resolved)
+            return {"status": "erased", "udid": resolved}
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 @router.post("/active")
+@logged_action("set_active_device", category="device.lifecycle")
 async def set_active_device(request: Request, body: ShutdownDeviceRequest):
     """Set the active device by UDID."""
     controller = _get_controller(request)
@@ -438,7 +529,12 @@ async def set_active_device(request: Request, body: ShutdownDeviceRequest):
     # the active-device sidecar is written with no human-readable name.
     await controller._ensure_device_type_cached(body.udid)
     controller._active_udid = body.udid
-    return {"active_udid": body.udid}
+    # What was stored, not what was asked for. The setter canonicalises, so
+    # echoing the request tells a caller who passed the hardware udid that it
+    # is the active device -- and every later comparison, including the trace
+    # filter, is against the canonical one. "Report the outcome, not the
+    # request", which this repo already learned from `simctl launch`.
+    return {"active_udid": controller._active_udid}
 
 
 # ---------------------------------------------------------------------------
@@ -450,14 +546,18 @@ async def set_active_device(request: Request, body: ShutdownDeviceRequest):
 async def install_app(request: Request, body: InstallAppRequest):
     """Install an app on a simulator."""
     controller = _get_controller(request)
-    try:
-        udid = await controller.install_app(app_path=body.app_path, udid=body.udid)
-        return {"status": "installed", "udid": udid, "app_path": body.app_path}
-    except DeviceError as e:
-        raise _handle_device_error(e)
+    with action("install_app", category="device.lifecycle") as act:
+        act.detail = body.app_path
+        try:
+            udid = await controller.install_app(app_path=body.app_path, udid=body.udid)
+            act.udid = udid
+            return {"status": "installed", "udid": udid, "app_path": body.app_path}
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 @router.post("/app/launch")
+@logged_action("launch_app", category="device.action")
 async def launch_app(request: Request, body: LaunchAppRequest):
     """Launch an app on a simulator."""
     controller = _get_controller(request)
@@ -476,7 +576,9 @@ async def launch_app(request: Request, body: LaunchAppRequest):
         if body.include_screen_context:
             if not body.capture_screenshots:
                 await asyncio.sleep(body.settle_delay)
-            result["screen_context"] = await _capture_screen_context(controller, udid)
+            result["screen_context"] = await _capture_screen_context(
+                controller, udid, request.app.state.landmark_registry,
+            )
         return result
     except DeviceError as e:
         raise _handle_device_error(e)
@@ -486,26 +588,33 @@ async def launch_app(request: Request, body: LaunchAppRequest):
 async def terminate_app(request: Request, body: TerminateAppRequest):
     """Terminate an app on a simulator."""
     controller = _get_controller(request)
-    try:
-        udid = await controller.terminate_app(bundle_id=body.bundle_id, udid=body.udid)
-        return {"status": "terminated", "udid": udid, "bundle_id": body.bundle_id}
-    except DeviceError as e:
-        raise _handle_device_error(e)
+    with action("terminate_app", category="device.lifecycle") as act:
+        act.detail = body.bundle_id
+        try:
+            udid = await controller.terminate_app(bundle_id=body.bundle_id, udid=body.udid)
+            act.udid = udid
+            return {"status": "terminated", "udid": udid, "bundle_id": body.bundle_id}
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 @router.post("/app/uninstall")
 async def uninstall_app(request: Request, body: UninstallAppRequest):
     """Uninstall an app from a simulator or physical device."""
     controller = _get_controller(request)
-    try:
-        udid = await controller.uninstall_app(bundle_id=body.bundle_id, udid=body.udid)
-        return {"status": "uninstalled", "udid": udid, "bundle_id": body.bundle_id}
-    except DeviceError as e:
-        raise _handle_device_error(e)
+    with action("uninstall_app", category="device.lifecycle") as act:
+        act.detail = body.bundle_id
+        try:
+            udid = await controller.uninstall_app(bundle_id=body.bundle_id, udid=body.udid)
+            act.udid = udid
+            return {"status": "uninstalled", "udid": udid, "bundle_id": body.bundle_id}
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 
 @router.get("/app/list")
+@logged_action("list_apps", category="device.read")
 async def list_apps(request: Request, udid: str | None = Query(default=None)):
     """List installed apps on a simulator."""
     controller = _get_controller(request)
@@ -525,6 +634,7 @@ async def list_apps(request: Request, udid: str | None = Query(default=None)):
 
 
 @router.get("/screenshot")
+@logged_action("take_screenshot", category="device.read")
 async def take_screenshot(
     request: Request,
     udid: str | None = Query(default=None),
@@ -597,6 +707,7 @@ async def video_stream(
 
 
 @router.post("/location")
+@logged_action("set_location", category="device.action")
 async def set_location(request: Request, body: SetLocationRequest):
     """Set the simulated GPS location."""
     controller = _get_controller(request)
@@ -615,6 +726,7 @@ async def set_location(request: Request, body: SetLocationRequest):
 
 
 @router.post("/open-url")
+@logged_action("open_url", category="device.action")
 async def open_url(request: Request, body: OpenUrlRequest):
     """Open a URL on a simulator or emulator."""
     controller = _get_controller(request)
@@ -631,13 +743,16 @@ async def open_url(request: Request, body: OpenUrlRequest):
         if body.include_screen_context:
             if not body.capture_screenshots:
                 await asyncio.sleep(body.settle_delay)
-            result["screen_context"] = await _capture_screen_context(controller, udid)
+            result["screen_context"] = await _capture_screen_context(
+                controller, udid, request.app.state.landmark_registry,
+            )
         return result
     except DeviceError as e:
         raise _handle_device_error(e)
 
 
 @router.post("/permission")
+@logged_action("grant_permission", category="device.action")
 async def grant_permission(request: Request, body: GrantPermissionRequest):
     """Grant an app permission."""
     controller = _get_controller(request)
@@ -656,6 +771,7 @@ async def grant_permission(request: Request, body: GrantPermissionRequest):
 
 
 @router.post("/locale")
+@logged_action("set_locale", category="device.action")
 async def set_locale(request: Request, body: SetLocaleRequest):
     """Set the system locale (Android only)."""
     controller = _get_controller(request)
@@ -670,6 +786,7 @@ async def set_locale(request: Request, body: SetLocaleRequest):
 
 
 @router.post("/keyboard")
+@logged_action("set_hardware_keyboard", category="device.action")
 async def set_hardware_keyboard(request: Request, body: SetHardwareKeyboardRequest):
     """Attach or detach the simulated hardware keyboard (iOS simulators only)."""
     controller = _get_controller(request)
@@ -683,6 +800,7 @@ async def set_hardware_keyboard(request: Request, body: SetHardwareKeyboardReque
 
 
 @router.post("/font-scale")
+@logged_action("set_font_scale", category="device.action")
 async def set_font_scale(request: Request, body: SetFontScaleRequest):
     """Set the font scale (Android only). 1.0 = default."""
     controller = _get_controller(request)
@@ -694,6 +812,7 @@ async def set_font_scale(request: Request, body: SetFontScaleRequest):
 
 
 @router.post("/display-density")
+@logged_action("set_display_density", category="device.action")
 async def set_display_density(request: Request, body: SetDisplayDensityRequest):
     """Set display density override (Android only). Omit dpi to reset."""
     controller = _get_controller(request)
@@ -720,10 +839,9 @@ async def set_display_density(request: Request, body: SetDisplayDensityRequest):
 
 
 @router.post("/logging/start")
+@logged_action("start_simulator_logging", category="logs")
 async def start_simulator_logging(request: Request, body: StartSimLogRequest):
     """Start capturing logs from a simulator app via unified logging."""
-    from server.sources.simulator_log import SimulatorLogAdapter
-
     controller = _get_controller(request)
 
     # Resolve UDID
@@ -731,6 +849,16 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
         udid = await controller.resolve_udid(body.udid)
     except DeviceError as e:
         raise _handle_device_error(e)
+
+    # Serialised per device, for the reason given on start_device_logging.
+    async with _logging_lock(request, udid):
+        return await _start_simulator_logging(request, body, udid)
+
+
+async def _start_simulator_logging(
+    request: Request, body: StartSimLogRequest, udid: str,
+) -> dict[str, Any]:
+    from server.sources.simulator_log import SimulatorLogAdapter
 
     # Check if already running for this UDID
     sim_adapters: dict = request.app.state.sim_log_adapters
@@ -745,6 +873,10 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
 
     adapter = SimulatorLogAdapter(
         udid=udid,
+        # Without this every entry carries the model default, so nothing
+        # downstream can tell which device it came from -- which is what made
+        # the trace's log attribution reject every line it was given.
+        device_id=udid,
         on_entry=dedup.process,
         process_filter=body.process,
         subsystem_filter=body.subsystem,
@@ -762,6 +894,7 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
 
     # Apply ingestion filter preset if requested
     preset_applied = None
+    purged = 0
     if body.preset:
         from server.processing.ingestion_filter import PRESETS, build_config
 
@@ -775,7 +908,11 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
         from server.models import LogSource
         ingestion_filter.update_filter(config, source=LogSource.SIMULATOR)
         buffer = request.app.state.ring_buffer
-        await buffer.purge(lambda e: ingestion_filter.should_admit(e))
+        # Reported, not discarded. A purge removes entries the new filter
+        # would not admit, from a window already captured; they are then
+        # gone without eviction, so no `truncated` flag will ever mention
+        # them. The call that did it is the only place that can say so.
+        purged = await buffer.purge(lambda e: ingestion_filter.should_admit(e))
         preset_applied = body.preset
 
     # Auto-start plist watchers from persistent config
@@ -824,6 +961,7 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
         "status": "started", "udid": udid,
         "adapter_id": adapter.adapter_id,
         "preset_applied": preset_applied,
+        "purged": purged,
     }
     if plist_watchers_started:
         result["plist_watchers_started"] = plist_watchers_started
@@ -833,6 +971,7 @@ async def start_simulator_logging(request: Request, body: StartSimLogRequest):
 
 
 @router.post("/logging/stop")
+@logged_action("stop_simulator_logging", category="logs")
 async def stop_simulator_logging(request: Request, body: StopSimLogRequest):
     """Stop capturing logs from a simulator."""
     controller = _get_controller(request)
@@ -843,6 +982,12 @@ async def stop_simulator_logging(request: Request, body: StopSimLogRequest):
     except DeviceError as e:
         raise _handle_device_error(e)
 
+    # Under the same lock as starting; see _logging_lock.
+    async with _logging_lock(request, udid):
+        return await _stop_simulator_logging(request, udid)
+
+
+async def _stop_simulator_logging(request: Request, udid: str) -> dict[str, Any]:
     sim_adapters: dict = request.app.state.sim_log_adapters
     adapter = sim_adapters.get(udid)
     if not adapter:
@@ -876,6 +1021,7 @@ async def stop_simulator_logging(request: Request, body: StopSimLogRequest):
 
 
 @router.post("/logging/device/start")
+@logged_action("start_device_logging", category="logs")
 async def start_device_logging(request: Request, body: StartDeviceLogRequest):
     """Start capturing logs from a physical device.
 
@@ -887,9 +1033,6 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
     Use process filter to limit noise. Use preset to apply an ingestion
     filter at start time.
     """
-    from server.sources.device_log import PhysicalDeviceLogAdapter
-    from server.sources.logcat import LogcatAdapter
-
     controller = _get_controller(request)
 
     # Resolve UDID
@@ -897,6 +1040,25 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
         udid = await controller.resolve_udid(body.udid)
     except DeviceError as e:
         raise _handle_device_error(e)
+
+    # One start per device at a time. The body checks for a running adapter,
+    # awaits the adapter's start, and only then registers it -- and starting
+    # logcat now takes at least half a second (the early-exit check) and up
+    # to ten more if the device is slow to answer getprop. A second call in
+    # that window passed the check too, spawned its own logcat, and replaced
+    # the first in the registry, orphaning a process the API could no longer
+    # stop and doubling every line (#255, second review; reproduced with a
+    # fake adb: two "started" responses and one logcat left running after
+    # every registered adapter was stopped).
+    async with _logging_lock(request, udid):
+        return await _start_device_logging(request, body, udid, controller)
+
+
+async def _start_device_logging(
+    request: Request, body: StartDeviceLogRequest, udid: str, controller: DeviceController,
+) -> dict[str, Any]:
+    from server.sources.device_log import PhysicalDeviceLogAdapter
+    from server.sources.logcat import LogcatAdapter
 
     # Verify it's a physical or Android device (not a simulator)
     is_android = controller._is_android(udid)
@@ -920,12 +1082,17 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
     if is_android:
         adapter = LogcatAdapter(
             serial=udid,
+            # Same omission as the two iOS adapters had: the serial is right
+            # here and was never forwarded, so every Android line arrived
+            # naming no device.
+            device_id=udid,
             on_entry=dedup.process,
             process_filter=body.process,
         )
     else:
         adapter = PhysicalDeviceLogAdapter(
             udid=udid,
+            device_id=udid,
             on_entry=dedup.process,
             process_filter=body.process,
             match_filter=body.match,
@@ -942,6 +1109,7 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
 
     # Apply ingestion filter preset if requested
     preset_applied = None
+    purged = 0
     if body.preset:
         from server.processing.ingestion_filter import PRESETS, build_config
 
@@ -955,17 +1123,23 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
         from server.models import LogSource
         ingestion_filter.update_filter(config, source=LogSource.DEVICE)
         buffer = request.app.state.ring_buffer
-        await buffer.purge(lambda e: ingestion_filter.should_admit(e))
+        # Reported, not discarded. A purge removes entries the new filter
+        # would not admit, from a window already captured; they are then
+        # gone without eviction, so no `truncated` flag will ever mention
+        # them. The call that did it is the only place that can say so.
+        purged = await buffer.purge(lambda e: ingestion_filter.should_admit(e))
         preset_applied = body.preset
 
     return {
         "status": "started", "udid": udid,
         "adapter_id": adapter.adapter_id,
         "preset_applied": preset_applied,
+        "purged": purged,
     }
 
 
 @router.post("/logging/device/stop")
+@logged_action("stop_device_logging", category="logs")
 async def stop_device_logging(request: Request, body: StopDeviceLogRequest):
     """Stop capturing logs from a physical device."""
     controller = _get_controller(request)
@@ -976,6 +1150,12 @@ async def stop_device_logging(request: Request, body: StopDeviceLogRequest):
     except DeviceError as e:
         raise _handle_device_error(e)
 
+    # Under the same lock as starting; see _logging_lock.
+    async with _logging_lock(request, udid):
+        return await _stop_device_logging(request, udid)
+
+
+async def _stop_device_logging(request: Request, udid: str) -> dict[str, Any]:
     dev_adapters: dict = request.app.state.device_log_adapters
     adapter = dev_adapters.get(udid)
     if not adapter:
@@ -1012,6 +1192,7 @@ def _get_scrcpy_preview(request: Request):
 
 
 @router.post("/preview/start")
+@logged_action("preview_start", category="media")
 async def preview_start(request: Request, body: PreviewStartRequest):
     """Start a live preview window for a device.
 
@@ -1058,15 +1239,40 @@ async def preview_start(request: Request, body: PreviewStartRequest):
             except RuntimeError as e:
                 raise HTTPException(status_code=500, detail=str(e))
 
-        # iOS physical → CoreMediaIO
-        if not controller._is_physical(udid):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Device {udid} is a simulator. Live preview only works with "
-                       f"physical devices connected via USB.",
-            )
-
         pm = _get_preview_manager(request)
+
+        # iOS simulator → quern-media serves its framebuffer as MJPEG on
+        # loopback and the preview app opens a window on that stream.
+        #
+        # The udid goes straight through. The name round-trip below exists
+        # because CoreMediaIO matches on a localizedName and has no idea
+        # simulators exist; a simulator preview is filed under its udid, so
+        # resolving it to a name would only throw the identity away.
+        #
+        # This route used to refuse simulators with a 400, which left the
+        # capability with no way in: `PreviewManager.add` grew simulator
+        # support and this is the only HTTP path that reaches it. `preview_stop`
+        # never had the matching gate, so stopping a simulator preview was
+        # reachable while starting one was not.
+        if not controller._is_physical(udid):
+            try:
+                preview = await pm.add_booted_simulator(udid)
+            except DeviceError as e:
+                # `add` enumerates booted simulators through simctl to match
+                # the udid, so an unavailable or mid-update Xcode raises here.
+                # Uncaught it is a bare 500 with no detail; routed through the
+                # shared handler it says which tool failed and why, the same
+                # as every other simctl-backed route.
+                raise _handle_device_error(e)
+            except RuntimeError as e:
+                raise HTTPException(status_code=500, detail=str(e))
+            return {
+                "status": "added",
+                "name": preview.label or preview.name,
+                "position": preview.position,
+                "platform": "ios",
+                "kind": preview.kind,
+            }
 
         # Get device name for the CoreMediaIO match
         device_name = None
@@ -1086,12 +1292,20 @@ async def preview_start(request: Request, body: PreviewStartRequest):
             )
 
         try:
-            preview = await pm.add(device_name)
+            # `add_capture_device`, not `add`: this branch has already
+            # established the device is physical, and `add` would work the
+            # kind out again from whatever resolves. A phone CoreMediaIO has
+            # not published yet falls through to a booted simulator of the
+            # same name there, and default simulator names are device model
+            # names -- so the caller asking for their phone silently gets a
+            # simulator, with nothing in the response to tell them apart.
+            preview = await pm.add_capture_device(device_name)
             return {
                 "status": "added",
-                "name": preview.name,
+                "name": preview.label or preview.name,
                 "position": preview.position,
                 "platform": "ios",
+                "kind": preview.kind,
             }
         except RuntimeError as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -1107,15 +1321,21 @@ async def preview_start(request: Request, body: PreviewStartRequest):
         added = []
         errors = []
         for dev in pm._available:
-            if dev.name in pm._active:
-                added.append({"name": dev.name, "status": "already_active"})
+            if dev.cmio_id in pm._active:
+                added.append({
+                    "name": dev.name,
+                    "status": "already_active",
+                    "kind": pm._active[dev.cmio_id].kind,
+                })
                 continue
             try:
-                preview = await pm.add(dev.name)
+                # Also kind-explicit: this loop is over the capture-device list.
+                preview = await pm.add_capture_device(dev.cmio_id)
                 added.append({
-                    "name": preview.name,
+                    "name": preview.label or preview.name,
                     "position": preview.position,
                     "status": "added",
+                    "kind": preview.kind,
                 })
             except RuntimeError as e:
                 errors.append({"name": dev.name, "error": str(e)})
@@ -1124,6 +1344,7 @@ async def preview_start(request: Request, body: PreviewStartRequest):
 
 
 @router.post("/preview/stop")
+@logged_action("preview_stop", category="media")
 async def preview_stop(request: Request, body: PreviewStopRequest):
     """Stop live preview.
 
@@ -1143,8 +1364,29 @@ async def preview_stop(request: Request, body: PreviewStopRequest):
             await sp.remove(udid)
             return {"status": "removed", "serial": udid}
 
-        # iOS → CoreMediaIO
         pm = _get_preview_manager(request)
+
+        # iOS simulator → the udid is the session key, so it goes straight
+        # through, exactly as in `preview_start`.
+        #
+        # Resolving it to a display name throws the identity away, and
+        # `PreviewManager.remove` resolves capture devices before labels: with
+        # a phone and a simulator of the same name both previewed, the name
+        # landed on the phone. That closed the wrong window and returned
+        # "removed", while the simulator's window and its `quern-media` stayed
+        # up holding the framebuffer subscription.
+        #
+        # This is also why the simulator path must not touch `list_devices`
+        # below — a udid that is already the key needs no lookup, and a
+        # `DeviceError` from an unavailable simctl used to 404 it.
+        if not controller._is_physical(udid):
+            try:
+                await pm.remove(udid)
+            except RuntimeError as e:
+                raise HTTPException(status_code=500, detail=str(e))
+            return {"status": "removed", "udid": udid, "kind": "simulator"}
+
+        # iOS physical → CoreMediaIO, which matches on a localizedName.
         device_name: str | None = None
         try:
             devices = await controller.list_devices()
@@ -1161,8 +1403,22 @@ async def preview_stop(request: Request, body: PreviewStopRequest):
                 detail=f"Could not resolve device name for UDID {udid}",
             )
 
-        await pm.remove(device_name)
-        return {"status": "removed", "name": device_name}
+        # Caught for the reason `preview_start` catches it: an ambiguous name
+        # is a RuntimeError carrying the only instructions the caller can act
+        # on, and uncaught it reaches FastAPI as a 500 with no detail at all.
+        # `remove_capture_device`, not `remove`: this branch has already
+        # established the device is physical, and `remove` falls back to
+        # matching an active preview's *label*. A simulator is filed under
+        # its udid with its name as that label, so asking to stop a phone's
+        # preview closed a same-named simulator's window, tore down its
+        # quern-media, and answered {"status": "removed"} -- destroying a
+        # session the caller never named and reporting it as the one they
+        # asked for.
+        try:
+            await pm.remove_capture_device(device_name)
+        except RuntimeError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        return {"status": "removed", "name": device_name, "kind": "device"}
 
     # No UDID — stop all
     pm = _get_preview_manager(request)
@@ -1200,6 +1456,7 @@ async def preview_devices(request: Request):
 
 
 @router.get("/screenshot/annotated")
+@logged_action("screenshot_annotated", category="device.read")
 async def screenshot_annotated(
     request: Request,
     udid: str | None = Query(default=None),
@@ -1227,6 +1484,7 @@ async def screenshot_annotated(
 
 
 @router.post("/screenshot/timeline/start")
+@logged_action("start_timeline", category="media")
 async def start_timeline(
     request: Request,
     body: dict | None = None,
@@ -1260,6 +1518,7 @@ async def start_timeline(
 
 
 @router.post("/screenshot/timeline/stop")
+@logged_action("stop_timeline", category="media")
 async def stop_timeline(request: Request):
     """Stop the active screenshot timeline and return its manifest."""
     timeline = getattr(request.app.state, "active_timeline", None)

@@ -12,6 +12,11 @@ from server.device import probing
 from server.device.idb import IdbBackend
 from server.models import DeviceError
 
+#: This file *is* the discovery code -- the autouse stubs in conftest replace
+#: these very methods, so it opts out rather than asserting against them.
+#: The subprocess layer beneath is mocked, so nothing here reaches the machine.
+pytestmark = pytest.mark.device_discovery
+
 FIXTURES = Path(__file__).parent / "fixtures"
 
 

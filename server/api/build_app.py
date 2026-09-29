@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from server.api.actions import logged_action
 from server.config import CONFIG_DIR
-from server.models import BuildResult, DeviceError, DeviceType
+from server.device import build_records
+from server.models import BuildRecord, BuildResult, DeviceError, DeviceType
 
 router = APIRouter(prefix="/api/v1/device", tags=["device"])
-logger = logging.getLogger("quern-debug-server.api")
+logger = logging.getLogger(__name__)
 
 BUILD_TIMEOUT = 600  # seconds
 
@@ -31,6 +34,11 @@ class BuildAndInstallRequest(BaseModel):
     # Both may be supplied; they are merged into one list internally.
     udid: str | None = None
     udids: list[str] | None = None
+    # Opt-in, because approving a package plug-in or macro is a trust decision:
+    # xcodebuild will not run one the user has not approved in Xcode, and a
+    # non-interactive build cannot ask. Adds -skipPackagePluginValidation and
+    # -skipMacroValidation to this build only.
+    skip_plugin_validation: bool = False
 
 
 class DeviceInstallResult(BaseModel):
@@ -47,6 +55,10 @@ class BuildAndInstallResponse(BaseModel):
     # Per-device results
     devices: list[DeviceInstallResult]
     all_installed: bool
+    # One per successful build: what was built and each binary's UUID, kept
+    # after the next build overwrites DerivedData; for a device build, dSYMs of
+    # the app's own code (#326).
+    build_records: list[BuildRecord] = []
     summary: str = ""
 
 
@@ -99,6 +111,7 @@ async def _build(
     destination: str,
     derived_data: Path,
     build_adapter,
+    skip_plugin_validation: bool = False,
 ) -> BuildResult:
     """Run xcodebuild for one destination and return the parsed BuildResult."""
     cmd = [
@@ -108,6 +121,8 @@ async def _build(
         "-configuration", configuration,
         "-destination", destination,
         "-derivedDataPath", str(derived_data),
+        *(["-skipPackagePluginValidation", "-skipMacroValidation"]
+          if skip_plugin_validation else []),
         "build",
     ]
     logger.info("Building %s (scheme=%s, destination=%s)", proj_path, scheme, destination)
@@ -187,6 +202,7 @@ def _check_minimum_os(app_path: Path, device_os_version: str) -> str | None:
 
 
 @router.post("/build-and-install", response_model=BuildAndInstallResponse)
+@logged_action("build_and_install", category="build")
 async def build_and_install(request: Request, body: BuildAndInstallRequest):
     """Build an Xcode scheme and install the app on one or more devices/simulators.
 
@@ -251,6 +267,27 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
         if controller._device_type(u) == DeviceType.SIMULATOR
     ]
 
+    # Anything in neither bucket must be named, not dropped. `_device_type`
+    # answers None for a udid quern has never listed (#299) -- it used to
+    # guess `SIMULATOR` -- and `resolve_udid` does not check that a udid
+    # exists, so a typo reaches here. Falling through built nothing, left
+    # `device_results` empty, and `all([])` is True: the response reported
+    # `all_installed` alongside a summary saying the build had failed.
+    unplaced = [
+        u for u in resolved_udids
+        if u not in physical_udids and u not in simulator_udids
+    ]
+    if unplaced:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot build for {', '.join(unplaced)}: quern does not know "
+                "what kind of device this is. List devices first, or check the "
+                "udid. Android devices are not build targets for an Xcode "
+                "scheme."
+            ),
+        )
+
     derived = CONFIG_DIR / "builds" / body.scheme
     derived.mkdir(parents=True, exist_ok=True)
 
@@ -262,7 +299,7 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
             _build(
                 proj_flag, proj_path, body.scheme, body.configuration,
                 "generic/platform=iOS",
-                derived, build_adapter,
+                derived, build_adapter, body.skip_plugin_validation,
             )
         )
     if simulator_udids:
@@ -270,7 +307,7 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
             _build(
                 proj_flag, proj_path, body.scheme, body.configuration,
                 "generic/platform=iOS Simulator",
-                derived, build_adapter,
+                derived, build_adapter, body.skip_plugin_validation,
             )
         )
 
@@ -285,7 +322,19 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
     result_iphoneos = build_results.get("iphoneos")
     result_iphonesimulator = build_results.get("iphonesimulator")
 
-    # 6. Install on each device (parallel), skipping if its build failed
+    # 6. Record each successful build while the installs run. A device build's
+    # dSYMs must be made now: the next build of this scheme replaces the object
+    # files its debug information lives in.
+    app_paths = {
+        arch: _find_app(derived, body.configuration, arch == "iphoneos")
+        for arch, result in build_results.items() if result.succeeded
+    }
+    record_tasks = {
+        arch: asyncio.create_task(_record(path, body, proj_path, arch))
+        for arch, path in app_paths.items() if path is not None
+    }
+
+    # 7. Install on each device (parallel), skipping if its build failed
     async def _install_one(udid: str, is_physical: bool) -> DeviceInstallResult:
         arch = "iphoneos" if is_physical else "iphonesimulator"
 
@@ -296,7 +345,7 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
         if build_result is None or not build_result.succeeded:
             return DeviceInstallResult(udid=udid, installed=False, error="Build did not succeed")
 
-        app_path = _find_app(derived, body.configuration, is_physical)
+        app_path = app_paths.get(arch)
         if app_path is None:
             return DeviceInstallResult(
                 udid=udid, installed=False,
@@ -335,16 +384,80 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
         [_install_one(u, True) for u in physical_udids]
         + [_install_one(u, False) for u in simulator_udids]
     )
-    device_results: list[DeviceInstallResult] = await asyncio.gather(*install_tasks)
+    try:
+        device_results: list[DeviceInstallResult] = await asyncio.gather(*install_tasks)
+    except BaseException:
+        # The records are their own tasks: left running, they would outlive
+        # the request that started them.
+        for task in record_tasks.values():
+            task.cancel()
+        raise
+
+    records = await _finish_records(record_tasks, physical_udids, device_results)
 
     response = BuildAndInstallResponse(
         build_iphoneos=result_iphoneos,
         build_iphonesimulator=result_iphonesimulator,
         devices=device_results,
         all_installed=all(r.installed for r in device_results),
+        build_records=records,
     )
     response.summary = _build_install_summary(response)
     return response
+
+
+async def _record(
+    app_path: Path, body: BuildAndInstallRequest, proj_path: str, platform: str,
+) -> BuildRecord:
+    try:
+        return await build_records.record_build(
+            app_path, project_path=proj_path, scheme=body.scheme or "",
+            configuration=body.configuration, platform=platform,
+        )
+    except Exception as e:  # noqa: BLE001 -- deliberately broad, see below
+        # record_build reports what a build can leave behind on the record
+        # itself; anything reaching here is a defect in it. It must still not
+        # turn an installed build into a failed request, and it must not
+        # vanish either: the record says what went wrong.
+        logger.exception("Recording the %s build failed", platform)
+        return BuildRecord(
+            build_id="", created_at=datetime.now(UTC), project_path=proj_path,
+            scheme=body.scheme or "", configuration=body.configuration,
+            platform=platform, app_path=str(app_path),
+            error=f"the build could not be recorded: {type(e).__name__}: {e}",
+        )
+
+
+async def _finish_records(
+    tasks: dict[str, asyncio.Task], physical_udids: list[str],
+    device_results: list[DeviceInstallResult],
+) -> list[BuildRecord]:
+    """Await the records, note where each build was installed, apply retention."""
+    records = []
+    for arch, task in tasks.items():
+        record = await task
+        record.installed_on = [
+            d.udid for d in device_results
+            if d.installed and (d.udid in physical_udids) == (arch == "iphoneos")
+        ]
+        if record.build_id and not record.error:
+            try:
+                await asyncio.to_thread(build_records.save, record)
+            except Exception as e:  # noqa: BLE001 -- the install succeeded
+                record.notes.append(f"where it was installed could not be saved: {e}")
+        records.append(record)
+    if records:
+        try:
+            removed = await asyncio.to_thread(build_records.prune)
+        except Exception as e:  # noqa: BLE001 -- the install succeeded
+            # Retention failing must not fail a build that installed; and it is
+            # said, since a retention that never runs grows without bound.
+            logger.exception("Build record retention failed")
+            records[-1].notes.append(f"retention of older build records failed: {e}")
+        else:
+            if removed:
+                logger.info("Build record retention removed: %s", "; ".join(removed))
+    return records
 
 
 def _build_install_summary(resp: BuildAndInstallResponse) -> str:
@@ -371,7 +484,7 @@ def _build_install_summary(resp: BuildAndInstallResponse) -> str:
                     loc = err.file
                     if err.line:
                         loc += f":{err.line}"
-                    failed_parts.append(f"  {loc}: {err.message}")
+                    failed_parts.append(f"  {loc}: {err.message}" if loc else f"  {err.message}")
                 if len(build.errors) > 5:
                     failed_parts.append(f"  ... and {len(build.errors) - 5} more")
         return "\n".join(failed_parts)
@@ -406,5 +519,8 @@ def _build_install_summary(resp: BuildAndInstallResponse) -> str:
     if failed:
         for d in failed:
             parts.append(f"Install failed ({d.udid[:12]}): {d.error}")
+    # The MCP tool returns only this summary on success, so the record is named
+    # here or not at all.
+    parts += [build_records.summary_line(r) for r in resp.build_records]
 
     return " ".join(parts)
