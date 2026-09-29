@@ -219,8 +219,12 @@ only because some DropBox tags could not be read still reports it.
 flows and evicts the oldest-completed at capacity. `query_flows`,
 `get_flow_summary`, `wait_for_flow` and `stop_capture_session` return
 `truncated` and `complete_after`, with the meaning they have on the log tools.
-They are narrowed by `simulator_udid` or `client_ip` when the query filters on
-one. `truncated` covers counts as well as entries: a page can hold the newest
+They are narrowed by `simulator_udid`, `client_ip` or `device_serial` when the
+query filters on one. Prefer `device_serial` for Android: an emulator's traffic
+arrives from the host's own address because QEMU NATs it, so every emulator on
+a machine shares one `client_ip` and filtering on it cannot tell them apart.
+The serial is resolved from the process that owns the host socket, so it
+distinguishes two emulators where nothing else can. `truncated` covers counts as well as entries: a page can hold the newest
 flows and still carry a `total` that is short by what was evicted. To ask only
 about recent traffic, pass `since` (for example, just before the action you
 triggered); evictions from before it do not flag the answer. `proxy_status`

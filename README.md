@@ -168,6 +168,9 @@ The server prints connection info on startup — URL, API key, and proxy port. A
 | `last-update-check` | When the automatic check last ran, so it runs at most once a day |
 | `last-update.json` | What `quern update` last did — updated, nothing to do, or failed |
 | `installed-by-setup.json` | Packages installed by `quern setup` — used by `quern uninstall` |
+| `tool-sites.json` | Where `quern setup` found each external tool, so a later run can tell a moved install from a missing one |
+| `build-records/` | One directory per build (`<build id>/record.json`), plus a device build's dSYMs, so a crash can be symbolised against the binary that produced it |
+| `crashes/` | Crash reports the watcher collects; a phone's own pulls go in `crashes/devices/<device id>/` so two devices' reports cannot be confused |
 | `api-key` | Persistent API key |
 | `server.log` | Daemon log output |
 

@@ -119,6 +119,22 @@ Two things in the response are worth reading:
 No different. The Settings > Wi-Fi > Modify network > Proxy route still works
 by hand if you prefer, but nothing requires it.
 
+## Telling two emulators apart
+
+Filter by `device_serial`, not `client_ip`. An emulator's traffic reaches the
+proxy from the *host's* own address, because QEMU network-address-translates
+it — so every emulator on one machine shares a single `client_ip`, and so does
+anything else on the host. Filtering on it cannot separate two emulators, and
+will also catch a `curl` you ran yourself.
+
+`device_serial` is resolved from the process that owns the host socket the
+connection came in on, so it names the emulator that actually made the
+request. It is accepted by `query_flows`, `get_flow_summary` and
+`wait_for_flow`.
+
+Physical devices keep their own addresses and are unaffected either way, so
+`client_ip` remains correct for them.
+
 ## Cleanup
 
 The proxy setting lives in Android's global settings and **survives reboots**,
