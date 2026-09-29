@@ -12,6 +12,7 @@ Connection strategy:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import time
 from dataclasses import dataclass
@@ -83,6 +84,15 @@ SOURCE_TIMEOUT_PING_ATTEMPTS = 4
 #: Seconds between those pings. A constant so a test can drive the retry
 #: without paying for it.
 SOURCE_TIMEOUT_PING_GAP = 1.0
+
+#: `(udid, seconds)` for the tree read on this task, or None if it succeeded.
+#:
+#: Per-task rather than per-device: two callers can read one device at once,
+#: and a device-keyed record belongs to whichever finished last. See
+#: `WdaBackend._note_source_timeout`.
+_LAST_SOURCE_READ: contextvars.ContextVar[tuple[str, float] | None] = (
+    contextvars.ContextVar("quern_last_source_read", default=None)
+)
 # WDA default is 50 — 25 resolves most screens;
 # skeleton fallback handles dense maps
 SNAPSHOT_MAX_DEPTH = 25
@@ -277,7 +287,9 @@ class WdaBackend:
         #: absent once a read succeeds. Read by the summary so a fallback is
         #: reported rather than passed off as the screen -- see
         #: `_note_source_timeout`.
-        self._source_timed_out: dict[str, float] = {}
+        #: Whether the last liveness ping per device failed to connect at all,
+        #: as opposed to timing out. See `ping_was_refused`.
+        self._last_ping_refused: dict[str, bool] = {}
 
     def _source_timeout(self, udid: str) -> float:
         """Return the /source timeout for a device, extended for slower chips.
@@ -375,7 +387,6 @@ class WdaBackend:
         self._connections.clear()
         self._last_interaction.clear()
         self._current_depth.clear()
-        self._source_timed_out.clear()
 
     # ------------------------------------------------------------------
     # Connection management
@@ -853,7 +864,7 @@ class WdaBackend:
         return resp
 
     def _note_source_timeout(self, udid: str, seconds: float) -> None:
-        """Record that this device's tree read timed out and fell back.
+        """Record that *this* tree read timed out and fell back.
 
         The fallback returns a container skeleton, which is frequently empty
         -- and an empty result is exactly what a genuinely blank screen
@@ -861,19 +872,33 @@ class WdaBackend:
         long time to diagnose: every symptom said the device was fine and
         the screen was empty, when the read had simply not finished.
 
-        Cleared on the next successful read rather than after being reported,
-        so it describes the device's current state instead of draining on
-        whoever asks first.
+        Scoped to the read rather than the device. It began as a
+        `dict[udid, seconds]`, which is wrong under concurrency and was
+        caught in review: two callers can read one device at once, and the
+        device-wide entry belongs to whichever finished last. A timed-out
+        read whose neighbour then succeeded returned a fallback with no
+        `degraded` at all, and a successful read could be labelled degraded
+        by its neighbour's failure. Both are worse than the bug this field
+        exists to report, because they are wrong rather than merely silent.
+
+        A `ContextVar` is the right scope: asyncio copies the context per
+        task, so each request carries its own answer and no lock is needed.
+        The udid travels with it so a value set for one device cannot be
+        read back for another.
         """
-        self._source_timed_out[udid] = seconds
+        _LAST_SOURCE_READ.set((udid, seconds))
 
     def _clear_source_timeout(self, udid: str) -> None:
-        """Forget a recorded timeout, once a read has actually succeeded."""
-        self._source_timed_out.pop(udid, None)
+        """Record that this read succeeded, so nothing reports it degraded."""
+        _LAST_SOURCE_READ.set(None)
 
     def source_timed_out(self, udid: str) -> float | None:
-        """Seconds the last tree read burned before falling back, if it did."""
-        return self._source_timed_out.get(udid)
+        """Seconds *this caller's* tree read burned before falling back."""
+        seen = _LAST_SOURCE_READ.get()
+        if seen is None:
+            return None
+        seen_udid, seconds = seen
+        return seconds if seen_udid == udid else None
 
     async def _is_wda_responsive(
         self, udid: str, *, attempts: int = 1, timeout: float = 2.0,
@@ -916,6 +941,7 @@ class WdaBackend:
             base_url = conn.base_url
 
         pause = SOURCE_TIMEOUT_PING_GAP if gap is None else gap
+        self._last_ping_refused[udid] = False
         for attempt in range(max(1, attempts)):
             if attempt:
                 await asyncio.sleep(pause)
@@ -924,9 +950,31 @@ class WdaBackend:
                     resp = await client.get(f"{base_url}/status", timeout=timeout)
                     if resp.status_code == 200:
                         return True
-            except Exception:  # noqa: BLE001 - any failure is "did not answer"
+            except httpx.TransportError as exc:
+                # A *timeout* means something accepted the connection and is
+                # taking its time -- which is what a runner serialising a
+                # large /source behind this ping looks like. A refused or
+                # reset connection means nothing is listening. Only the
+                # second is evidence of death; recorded so the caller can
+                # require it before reinstalling anything.
+                if not isinstance(exc, httpx.TimeoutException):
+                    self._last_ping_refused[udid] = True
+            except Exception:  # noqa: BLE001 - any other failure is "did not answer"
                 pass
         return False
+
+    def ping_was_refused(self, udid: str) -> bool:
+        """Whether the last `_is_wda_responsive` saw the connection refused.
+
+        The distinction the restart decision rests on. A `/status` that times
+        out says the port is open and something is busy on it; a refused or
+        reset connection says nothing is there. Extending a retry window can
+        only ever distinguish "slow" from "slower", because WDA serialises --
+        a tree that outlasts the window queues every ping behind it, and a
+        purely time-based rule reinstalls a healthy runner no matter how
+        generous the window is (#170 review).
+        """
+        return self._last_ping_refused.get(udid, False)
 
     async def _restart_wda(self, udid: str) -> None:
         """Stop and restart the WDA driver for a device, clearing cached connection."""
@@ -1138,14 +1186,20 @@ class WdaBackend:
             alive = await self._is_wda_responsive(
                 udid, attempts=SOURCE_TIMEOUT_PING_ATTEMPTS,
             )
-            if not alive:
+            # Refused, not merely unanswered. WDA serialises, so a tree that
+            # outlasts the ping window queues every ping behind it -- and a
+            # rule that restarts once a clock runs out reinstalls a healthy
+            # runner no matter how long the clock is. Only a connection that
+            # is refused or reset says nothing is listening.
+            if not alive and self.ping_was_refused(udid):
                 logger.warning("WDA hung on %s, restarting driver...", udid[:8])
                 await self._restart_wda(udid)
             else:
                 logger.warning(
-                    "wda /source timed out on %s but the runner is answering; "
-                    "leaving it alone and falling back to element queries",
-                    udid[:8],
+                    "wda /source timed out on %s but nothing says the runner "
+                    "is gone (answering=%s); leaving it alone and falling "
+                    "back to element queries",
+                    udid[:8], alive,
                 )
 
             return await self.build_screen_skeleton(udid)
@@ -1204,16 +1258,18 @@ class WdaBackend:
             # read on a slow-but-healthy runner reinstalled it exactly as the
             # flat read used to.
             self._note_source_timeout(udid, elapsed / 1000)
-            if not await self._is_wda_responsive(
+            nested_alive = await self._is_wda_responsive(
                 udid, attempts=SOURCE_TIMEOUT_PING_ATTEMPTS,
-            ):
+            )
+            # Same criterion as the flat read above.
+            if not nested_alive and self.ping_was_refused(udid):
                 logger.warning("WDA hung on %s, restarting driver...", udid[:8])
                 await self._restart_wda(udid)
             else:
                 logger.warning(
-                    "wda /source timed out on %s (nested) but the runner is "
-                    "answering; leaving it alone",
-                    udid[:8],
+                    "wda /source timed out on %s (nested) but nothing says "
+                    "the runner is gone (answering=%s); leaving it alone",
+                    udid[:8], nested_alive,
                 )
 
             # Fallback returns flat list — no hierarchy, but better than an error
