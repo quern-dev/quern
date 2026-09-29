@@ -614,6 +614,34 @@ class TestCheckNode:
         assert "terminal" in result.detail.lower(), "says where it will work"
         assert "/x/login/node" in result.detail, "names where it did find one"
 
+    def test_it_does_not_send_you_to_a_terminal_that_has_no_node_either(self):
+        """`probe` reports GUI apps and the Quern app as well as the shells. If
+        one of those is the only place with a node, a terminal has none — and
+        advice naming the wrong place is worse than none, because it sends
+        someone to a shell that fails the same way."""
+        from server.lifecycle import node_env
+
+        sites = _sites(here=("missing", None))
+        sites[1] = node_env.NodeSite("login shell", "someone", node_env.MISSING, None, None)
+        sites[2] = node_env.NodeSite("non-interactive shell", "someone",
+                                     node_env.MISSING, None, None)
+        # Only GUI apps can see one, e.g. via `launchctl config user path`.
+        sites[3] = node_env.NodeSite("GUI apps", "someone", node_env.OK,
+                                     "/opt/node/bin/node", "v22.1.0")
+
+        result = check_node(sites)
+
+        assert "not reachable" in result.message
+        assert "Run this from a terminal" not in result.detail, result.detail
+        assert "will not help" in result.detail, result.detail
+        assert "gui apps" in result.detail.lower(), "names where it is visible"
+
+    def test_a_login_shell_node_still_says_to_use_a_terminal(self):
+        """The ordinary #339 case keeps the advice that works."""
+        result = check_node(_sites(here=("missing", None)))
+
+        assert "Run this from a terminal" in result.detail, result.detail
+
     def test_a_node_elsewhere_that_is_too_old_is_not_called_reachable(self):
         """A Node 18 in the login shell is a different problem with different
         advice, and setup *could* fix it by putting a reachable 22 on the

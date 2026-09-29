@@ -1835,6 +1835,25 @@ def check_node(sites: list | None = None) -> CheckResult:
             found = elsewhere[0]
             manager = node_env.manager_of(found.path)
             named = f" by {manager}" if manager else ""
+            # Where to send them depends on where it was actually found.
+            # `elsewhere[0]` is usually the login shell, and then "run it from a
+            # terminal" is right -- but probe also reports GUI apps and the
+            # Quern app, and if one of those is the only place with a node then
+            # a terminal has none either. Advice that names the wrong place is
+            # worse than none: it sends someone to a shell that will fail the
+            # same way.
+            if "shell" in found.place.lower():
+                where = (
+                    "Run this from a terminal, where your own environment is -- a GUI "
+                    "launch gets launchd's PATH and reads no shell startup files, so it "
+                    "cannot see it."
+                )
+            else:
+                where = (
+                    f"A terminal will not help: the node is visible to {found.place.lower()} "
+                    f"and not to a shell. Point this process at it with an absolute path, "
+                    f"or put a node on PATH for everything."
+                )
             return CheckResult(
                 name="Node.js",
                 status=CheckStatus.MISSING,
@@ -1845,9 +1864,7 @@ def check_node(sites: list | None = None) -> CheckResult:
                 fixable=False,
                 detail=(
                     f"Found at {found.path} for {found.place.lower()}, and not on this "
-                    f"process's PATH. Run this from a terminal, where your own "
-                    f"environment is -- a GUI launch gets launchd's PATH and reads no "
-                    f"shell startup files, so it cannot see it.\n"
+                    f"process's PATH.\n{where}\n"
                     f"{quern_cmd()} doctor shows each place a node is picked."
                 ),
             )
