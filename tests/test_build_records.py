@@ -23,7 +23,7 @@ from httpx import ASGITransport, AsyncClient
 
 from server.device import build_records
 from server.models import BuildBinary, BuildRecord, BuildResult
-from tests.test_macho import thin
+from tests.test_macho import ARM64, X86_64, fat, thin
 
 U_APP = uuid.UUID("8078f7c1-dc60-38a9-ba72-a17ec2727331")
 U_MAIN = uuid.UUID("cc8131b8-ffdb-3d26-b4c3-29cf2541b833")
@@ -252,8 +252,8 @@ class TestRetention:
         stale, fresh = root / "a.partial", root / "b.partial"
         stale.mkdir(parents=True)
         fresh.mkdir()
-        two_hours_ago = NOW.timestamp() - 7200
-        os.utime(stale, (two_hours_ago, two_hours_ago))
+        long_ago = NOW.timestamp() - build_records.STALE_PARTIAL_SECONDS - 60
+        os.utime(stale, (long_ago, long_ago))
         os.utime(fresh, (NOW.timestamp(), NOW.timestamp()))
         build_records.prune(root, now=NOW)
         assert not stale.exists() and fresh.exists()
@@ -376,3 +376,246 @@ class TestTheRoute:
                                         scheme="MyApp", udids=["00008101-PHONE"])
         [record] = resp.json()["build_records"]
         assert record["installed_on"] == [] and record["error"] == ""
+
+
+# ── second review ────────────────────────────────────────────────────────────
+
+
+class TestWhatBuiltHereMeans:
+    def test_a_parenthesis_in_the_path_is_not_an_archive_member(self, tmp_path):
+        """A scheme named "App (Beta)" puts one in every object path."""
+        app = _app(tmp_path / "App (Beta)")
+        run = FakeDsymutil()
+        _record(app, tmp_path / "records", run)
+        assert run.inputs == ["MyApp.debug.dylib"]
+
+    def test_an_archive_member_counts_by_its_archive(self, tmp_path):
+        app = _app(tmp_path)
+        (tmp_path / "libX.a").write_bytes(b"!<arch>")
+        (app / "MyApp.debug.dylib").write_bytes(
+            thin(U_APP, objects=(str(tmp_path / "libX.a") + "(member.o)",)))
+        run = FakeDsymutil()
+        _record(app, tmp_path / "records", run)
+        assert run.inputs == ["MyApp.debug.dylib"]
+
+
+class TestProductDsyms:
+    def test_one_covering_only_some_architectures_is_not_used(self, tmp_path):
+        app = _app(tmp_path)
+        objs = (str(tmp_path / "DerivedData" / "Intermediates" / "AppDelegate.o"),)
+        other = uuid.uuid4()
+        (app / "MyApp.debug.dylib").write_bytes(
+            fat((ARM64, thin(U_APP, objects=objs)),
+                (X86_64, thin(other, cputype=X86_64, objects=objs))))
+        _dsym(app.parent, "MyApp.app.dSYM", U_APP)            # arm64 only
+        run = FakeDsymutil()
+        _record(app, tmp_path / "records", run)
+        assert run.inputs == ["MyApp.debug.dylib"]
+
+
+class TestSymbolsThatAreNotThere:
+    def test_an_empty_dsym_is_an_error_not_a_kept_one(self, tmp_path):
+        """dsymutil exits 0 and writes it when the objects are gone."""
+        run = FakeDsymutil(err="warning: no debug symbols in executable (-arch arm64)\n")
+        record = _record(_app(tmp_path), tmp_path / "records", run)
+        app_bin = next(b for b in record.binaries if b.path == "MyApp.debug.dylib")
+        assert app_bin.dsym == "" and "no debug information" in app_bin.dsym_error
+        assert "may be incomplete" not in build_records.summary_line(record)
+
+    def test_the_summary_says_when_the_apps_own_code_has_none(self, tmp_path):
+        """A vendor's dSYM made the count read healthy while the app's failed."""
+        app = _app(tmp_path)
+        with open(app / "Info.plist", "rb") as f:
+            info = plistlib.load(f)
+        info["CFBundleExecutable"] = "MyApp"
+        with open(app / "Info.plist", "wb") as f:
+            plistlib.dump(info, f)
+        _dsym(app.parent, "Vendor.framework.dSYM", U_VENDOR)
+        record = _record(app, tmp_path / "records", FakeDsymutil(code=1, err="error: x"))
+        line = build_records.summary_line(record)
+        assert "symbols kept for 1 binary" in line
+        assert "none for the app's own code (MyApp, MyApp.debug.dylib)" in line
+
+    def test_nothing_is_left_claiming_a_dsym_when_the_record_cannot_be_written(
+            self, tmp_path, monkeypatch):
+        """The dSYM is made, then record.json fails: no directory, no claim."""
+        real = Path.write_text
+
+        def failing(self, *args, **kwargs):
+            if self.name == "record.json":
+                raise OSError(28, "No space left on device")
+            return real(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", failing)
+        root = tmp_path / "records"
+        record = _record(_app(tmp_path), root, FakeDsymutil())
+        assert "No space left" in record.error
+        assert all(b.dsym == "" for b in record.binaries)
+        assert list(root.iterdir()) == []
+
+
+class TestInfoPlist:
+    @pytest.mark.parametrize("content", [
+        b"<?xml version='1.0'?><plist><dict><key>CFBundleIdentifier</key>",   # truncated
+        plistlib.dumps(["not", "a", "dict"]),
+    ])
+    def test_a_malformed_one_is_a_note_not_a_lost_record(self, tmp_path, content):
+        app = _app(tmp_path)
+        (app / "Info.plist").write_bytes(content)
+        record = _record(app, tmp_path / "records", FakeDsymutil())
+        assert record.error == "" and record.binaries
+        assert "Info.plist could not be read" in record.notes[0]
+        assert "Note: Info.plist could not be read" in build_records.summary_line(record)
+
+
+class TestCancellation:
+    def test_a_cancelled_recording_leaves_no_partial(self, tmp_path):
+        started = asyncio.Event()
+
+        async def hang(argv):
+            Path(argv[argv.index("-o") + 1]).mkdir(parents=True)
+            started.set()
+            await asyncio.sleep(3600)
+
+        async def go():
+            task = asyncio.create_task(build_records.record_build(
+                _app(tmp_path), project_path="/p", scheme="MyApp", configuration="Debug",
+                platform="iphoneos", root=tmp_path / "records", run=hang))
+            await started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(go())
+        assert list((tmp_path / "records").iterdir()) == []
+
+    def test_the_child_is_killed_not_left_running(self):
+        procs = []
+        real = asyncio.create_subprocess_exec
+
+        async def spy(*args, **kwargs):
+            procs.append(await real(*args, **kwargs))
+            return procs[-1]
+
+        async def go():
+            asyncio.create_subprocess_exec = spy
+            try:
+                task = asyncio.create_task(build_records._run(["sleep", "30"]))
+                while not procs:
+                    await asyncio.sleep(0.01)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            finally:
+                asyncio.create_subprocess_exec = real
+            return procs[0].returncode
+
+        assert asyncio.run(go()) is not None
+
+
+class TestRetentionHardening:
+    def test_a_record_without_a_timezone_does_not_break_retention(self, tmp_path):
+        """A naive created_at raised TypeError in the sort -- on every build after."""
+        root = tmp_path / "records"
+        good = _stored(root, 1)
+        (root / "naive").mkdir()
+        data = json.loads((root / good.build_id / "record.json").read_text())
+        data.update(build_id="naive", created_at="2026-09-28T19:00:00")
+        (root / "naive" / "record.json").write_text(json.dumps(data))
+        build_records.prune(root, now=NOW)
+        assert {r.build_id for r in build_records.load_all(root)} == {good.build_id, "naive"}
+
+    def test_the_ten_are_counted_per_project_as_well_as_scheme(self, tmp_path):
+        root = tmp_path / "records"
+        mine = [_stored(root, n) for n in range(10)]
+        for n in range(3):
+            r = _stored(root, 50 + n)
+            r.project_path = "/src/other"
+            (root / r.build_id / "record.json").write_text(r.model_dump_json())
+        build_records.prune(root, now=NOW)
+        assert all((root / r.build_id / "dSYMs").is_dir() for r in mine)
+
+    def test_a_partial_is_never_listed(self, tmp_path):
+        root = tmp_path / "records"
+        r = _stored(root, 1)
+        (root / r.build_id).rename(root / (r.build_id + ".partial"))
+        assert build_records.load_all(root) == []
+
+    def test_an_unreadable_record_ages_out_by_its_directory(self, tmp_path):
+        root = tmp_path / "records"
+        old, fresh = root / "old", root / "fresh"
+        for d in (old, fresh):
+            (d / "dSYMs").mkdir(parents=True)
+            (d / "record.json").write_text("{not json")
+        forty_days = NOW.timestamp() - 40 * 86400
+        os.utime(old, (forty_days, forty_days))
+        build_records.prune(root, now=NOW)
+        assert not old.exists() and fresh.exists()
+
+    def test_retention_deletes_the_directory_it_read_not_one_the_file_names(self, tmp_path):
+        root = tmp_path / "records"
+        victim = tmp_path / "victim"
+        victim.mkdir()
+        r = _stored(root, 1, age=timedelta(days=40))
+        data = json.loads((root / r.build_id / "record.json").read_text())
+        data["build_id"] = "../victim"
+        (root / r.build_id / "record.json").write_text(json.dumps(data))
+        build_records.prune(root, now=NOW)
+        assert victim.exists() and not (root / r.build_id).exists()
+
+
+class TestTheRouteAndRetention:
+    async def test_the_route_applies_retention(self, build_app):
+        stored = []
+        for n in range(10):
+            r = _stored(build_app.records, n, age=timedelta(days=1))
+            r.project_path, r.scheme = str(build_app.project), "MyApp"
+            (build_app.records / r.build_id / "record.json").write_text(r.model_dump_json())
+            stored.append(r)
+        build_app.app.state.device_controller = FakeController({"00008101-PHONE": "device"})
+        resp = await _build_and_install(build_app.app, project_path=str(build_app.project),
+                                        scheme="MyApp", udids=["00008101-PHONE"])
+        assert resp.status_code == 200
+        oldest = stored[-1]
+        assert not (build_app.records / oldest.build_id / "dSYMs").exists()
+
+    async def test_a_retention_failure_is_said_and_does_not_fail_the_install(
+            self, build_app, monkeypatch):
+        def broken(*args, **kwargs):
+            raise TypeError("can't compare offset-naive and offset-aware datetimes")
+
+        monkeypatch.setattr(build_records, "prune", broken)
+        build_app.app.state.device_controller = FakeController({"00008101-PHONE": "device"})
+        resp = await _build_and_install(build_app.app, project_path=str(build_app.project),
+                                        scheme="MyApp", udids=["00008101-PHONE"])
+        data = resp.json()
+        assert resp.status_code == 200 and data["all_installed"]
+        assert "retention of older build records failed" in data["summary"]
+
+
+class TestPluginValidationFlag:
+    @pytest.mark.parametrize("skip, flags", [
+        (False, []), (True, ["-skipPackagePluginValidation", "-skipMacroValidation"]),
+    ])
+    async def test_it_reaches_xcodebuild_only_when_asked(self, monkeypatch, tmp_path, skip, flags):
+        from server.api import build_app as route
+        seen = []
+
+        class Proc:
+            async def communicate(self):
+                return b"** BUILD SUCCEEDED **\n", b""
+
+        async def fake_exec(*argv, **kwargs):
+            seen.extend(argv)
+            return Proc()
+
+        class Adapter:
+            async def parse_build_output(self, text):
+                return BuildResult(succeeded=True)
+
+        monkeypatch.setattr(route.asyncio, "create_subprocess_exec", fake_exec)
+        await route._build("-workspace", "/p/W.xcworkspace", "S", "Debug", "generic/platform=iOS",
+                           tmp_path, Adapter(), skip)
+        found = [a for a in seen if a in ("-skipPackagePluginValidation", "-skipMacroValidation")]
+        assert found == flags
+        assert seen[-1] == "build"

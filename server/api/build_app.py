@@ -34,6 +34,11 @@ class BuildAndInstallRequest(BaseModel):
     # Both may be supplied; they are merged into one list internally.
     udid: str | None = None
     udids: list[str] | None = None
+    # Opt-in, because approving a package plug-in or macro is a trust decision:
+    # xcodebuild will not run one the user has not approved in Xcode, and a
+    # non-interactive build cannot ask. Adds -skipPackagePluginValidation and
+    # -skipMacroValidation to this build only.
+    skip_plugin_validation: bool = False
 
 
 class DeviceInstallResult(BaseModel):
@@ -106,6 +111,7 @@ async def _build(
     destination: str,
     derived_data: Path,
     build_adapter,
+    skip_plugin_validation: bool = False,
 ) -> BuildResult:
     """Run xcodebuild for one destination and return the parsed BuildResult."""
     cmd = [
@@ -115,6 +121,8 @@ async def _build(
         "-configuration", configuration,
         "-destination", destination,
         "-derivedDataPath", str(derived_data),
+        *(["-skipPackagePluginValidation", "-skipMacroValidation"]
+          if skip_plugin_validation else []),
         "build",
     ]
     logger.info("Building %s (scheme=%s, destination=%s)", proj_path, scheme, destination)
@@ -291,7 +299,7 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
             _build(
                 proj_flag, proj_path, body.scheme, body.configuration,
                 "generic/platform=iOS",
-                derived, build_adapter,
+                derived, build_adapter, body.skip_plugin_validation,
             )
         )
     if simulator_udids:
@@ -299,7 +307,7 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
             _build(
                 proj_flag, proj_path, body.scheme, body.configuration,
                 "generic/platform=iOS Simulator",
-                derived, build_adapter,
+                derived, build_adapter, body.skip_plugin_validation,
             )
         )
 
@@ -376,7 +384,14 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
         [_install_one(u, True) for u in physical_udids]
         + [_install_one(u, False) for u in simulator_udids]
     )
-    device_results: list[DeviceInstallResult] = await asyncio.gather(*install_tasks)
+    try:
+        device_results: list[DeviceInstallResult] = await asyncio.gather(*install_tasks)
+    except BaseException:
+        # The records are their own tasks: left running, they would outlive
+        # the request that started them.
+        for task in record_tasks.values():
+            task.cancel()
+        raise
 
     records = await _finish_records(record_tasks, physical_udids, device_results)
 
@@ -428,13 +443,20 @@ async def _finish_records(
         if record.build_id and not record.error:
             try:
                 await asyncio.to_thread(build_records.save, record)
-            except OSError as e:
+            except Exception as e:  # noqa: BLE001 -- the install succeeded
                 record.notes.append(f"where it was installed could not be saved: {e}")
         records.append(record)
     if records:
-        removed = await asyncio.to_thread(build_records.prune)
-        if removed:
-            logger.info("Build record retention removed: %s", "; ".join(removed))
+        try:
+            removed = await asyncio.to_thread(build_records.prune)
+        except Exception as e:  # noqa: BLE001 -- the install succeeded
+            # Retention failing must not fail a build that installed; and it is
+            # said, since a retention that never runs grows without bound.
+            logger.exception("Build record retention failed")
+            records[-1].notes.append(f"retention of older build records failed: {e}")
+        else:
+            if removed:
+                logger.info("Build record retention removed: %s", "; ".join(removed))
     return records
 
 
@@ -462,7 +484,7 @@ def _build_install_summary(resp: BuildAndInstallResponse) -> str:
                     loc = err.file
                     if err.line:
                         loc += f":{err.line}"
-                    failed_parts.append(f"  {loc}: {err.message}")
+                    failed_parts.append(f"  {loc}: {err.message}" if loc else f"  {err.message}")
                 if len(build.errors) > 5:
                     failed_parts.append(f"  ... and {len(build.errors) - 5} more")
         return "\n".join(failed_parts)

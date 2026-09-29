@@ -127,3 +127,39 @@ class TestMalformed:
         data = bytearray(thin(U1))
         struct.pack_into("<I", data, 32 + 4, 0)                     # LC_UUID cmdsize
         assert macho.read(_write(tmp_path, bytes(data))) is None
+
+
+def thin32(uid: uuid.UUID, *, cputype: int = 12, subtype: int = 12,
+           objects: tuple[str, ...] = ()) -> bytes:
+    """A 32-bit Mach-O (armv7k, as a watch builds): 28-byte header, 12-byte nlist."""
+    strings, nlist = b"\0", b""
+    for name, kind in [("_a", 0x0F)] + [(o, macho.N_OSO) for o in objects]:
+        nlist += struct.pack("<IBBhI", len(strings), kind, 0, 0, 0)
+        strings += name.encode() + b"\0"
+    header, cmds = 28, 48
+    symoff = header + cmds
+    out = struct.pack("<IiiIIII", macho.MH_MAGIC, cputype, subtype, 6, 2, cmds, 0)
+    out += struct.pack("<II", macho.LC_UUID, 24) + uid.bytes
+    out += struct.pack("<IIIIII", macho.LC_SYMTAB, 24, symoff, 1 + len(objects),
+                       symoff + len(nlist), len(strings))
+    return out + nlist + strings
+
+
+class TestOtherLayouts:
+    def test_a_32_bit_slice(self, tmp_path):
+        m = macho.read(_write(tmp_path, thin32(U1, objects=("/o/w.o",))))
+        assert m.uuids == {"armv7k": str(U1).upper()}
+        assert m.slices[0].debug_objects == ["/o/w.o"]
+
+    def test_a_64_bit_fat_header(self, tmp_path):
+        """`lipo -fat64`: 32-byte entries with 64-bit offsets."""
+        slices = [(ARM64, thin(U1, objects=("/o/a.o",))), (X86_64, thin(U2, cputype=X86_64))]
+        head = struct.pack(">II", macho.FAT_MAGIC_64, len(slices))
+        offset = 8 + 32 * len(slices)
+        table, body = b"", b""
+        for cputype, data in slices:
+            table += struct.pack(">iiQQII", cputype, 0, offset + len(body), len(data), 0, 0)
+            body += data
+        m = macho.read(_write(tmp_path, head + table + body))
+        assert m.uuids == {"arm64": str(U1).upper(), "x86_64": str(U2).upper()}
+        assert m.slices[0].debug_objects == ["/o/a.o"]

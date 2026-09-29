@@ -418,7 +418,7 @@ export function registerLogTools(server: McpServer): void {
   );
 
   server.registerTool("get_build_result", {
-    description: `Get the most recent parsed xcodebuild result, including errors, warnings, and test results.`,
+    description: `Get the most recent parsed xcodebuild result, including errors, warnings, and test results. A failed build always names a cause: a location-less error (signing, provisioning), or the steps xcodebuild says failed.`,
     inputSchema: strictParams({}),
   }, async () => {
       try {
@@ -465,7 +465,7 @@ export function registerLogTools(server: McpServer): void {
   );
 
   server.registerTool("parse_build_output", {
-    description: `Parse an xcodebuild log file into structured errors, warnings, and test results. Run xcodebuild however you want (via Bash), pipe output to a file, then hand the file to this tool for structured parsing.`,
+    description: `Parse an xcodebuild log file into structured errors, warnings, and test results. Run xcodebuild however you want (via Bash), pipe output to a file, then hand the file to this tool for structured parsing. Errors include ones with no source location (signing, provisioning), and a build that failed with nothing compiled wrong reports the steps xcodebuild says failed -- a package plug-in xcodebuild would not run unapproved among them, with how to get past it.`,
     inputSchema: strictParams({
       file_path: z
         .string()

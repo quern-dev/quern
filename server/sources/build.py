@@ -43,6 +43,49 @@ TEST_CASE_RE = re.compile(
 # Matches: ** BUILD SUCCEEDED ** or ** BUILD FAILED **
 BUILD_STATUS_RE = re.compile(r"\*\*\s+BUILD\s+(SUCCEEDED|FAILED)\s+\*\*")
 
+# An error with no source location: signing, provisioning, package resolution.
+# `error: Signing for "App" requires a development team.` DIAGNOSTIC_RE wants
+# file:line:col, so these parsed as nothing and a failed build read "0 errors".
+LOCATIONLESS_ERROR_RE = re.compile(r"^(?:xcodebuild: )?error: (.+?)\s*$", re.MULTILINE)
+
+# The step list xcodebuild prints after ** BUILD FAILED **. For a failure
+# outside compilation it is the only statement of what failed: plug-in
+# validation prints no error line at all, just the step (measured, Xcode 26.5).
+FAILED_COMMANDS_RE = re.compile(
+    r"^The following build commands failed:\n((?:[ \t]+\S.*\n?)+)", re.MULTILINE,
+)
+_BASE64_RE = re.compile(r"[A-Za-z0-9+/]{16,}={0,2}")
+_WHOLE_BUILD_RE = re.compile(r"^Building (?:workspace|project) .+ with scheme ")
+_VALIDATION_RE = re.compile(r"^Validate (?:plug-in|macro)\b")
+PLUGIN_VALIDATION_HINT = (
+    "xcodebuild will not run a package plug-in or macro until it has been approved. "
+    "Build the project once in Xcode and approve it when asked, or pass "
+    "skip_plugin_validation=true to build_and_install, which adds "
+    "-skipPackagePluginValidation and -skipMacroValidation to that build only"
+)
+
+
+def _located(diag: BuildDiagnostic) -> str:
+    """`file:line:col: message`, or the message alone when it has no place."""
+    if not diag.file:
+        return diag.message
+    return f"{diag.file}:{diag.line}:{diag.column}: {diag.message}"
+
+
+def _failed_commands(content: str) -> list[str]:
+    """xcodebuild's own list of what failed, less the noise in it: a base64
+    token it prints under a plug-in step, and the whole-build step every
+    failure lists."""
+    block = FAILED_COMMANDS_RE.search(content)
+    if not block:
+        return []
+    out = []
+    for line in block.group(1).splitlines():
+        step = line.strip()
+        if step and not _BASE64_RE.fullmatch(step) and not _WHOLE_BUILD_RE.match(step):
+            out.append(step)
+    return out
+
 # Matches: Test Suite 'All tests' passed at ... Executed N tests, with M failures ...
 TEST_SUITE_SUMMARY_RE = re.compile(
     r"Executed (\d+) tests?, with (\d+) failures?"
@@ -197,6 +240,12 @@ class BuildAdapter(BaseSourceAdapter):
             else:
                 raw_warnings.append(diag)
 
+        seen_errors = {e.message for e in errors}
+        for m in LOCATIONLESS_ERROR_RE.finditer(content):
+            if m.group(1) not in seen_errors:       # xcodebuild repeats them
+                seen_errors.add(m.group(1))
+                errors.append(BuildDiagnostic(message=m.group(1)))
+
         # Dedup warnings on (file, line, column, message)
         seen_warnings: set[tuple[str, int | None, int | None, str]] = set()
         warnings: list[BuildDiagnostic] = []
@@ -261,6 +310,15 @@ class BuildAdapter(BaseSourceAdapter):
         status_match = BUILD_STATUS_RE.search(content)
         succeeded = status_match.group(1) == "SUCCEEDED" if status_match else len(errors) == 0
 
+        # A failed build with nothing to show for it read "Build failed. 0
+        # error(s)", which names no cause. Say what xcodebuild says failed.
+        if not succeeded and not errors:
+            for step in _failed_commands(content):
+                message = f"{step} failed"
+                if _VALIDATION_RE.match(step):
+                    message += f": {PLUGIN_VALIDATION_HINT}"
+                errors.append(BuildDiagnostic(message=message))
+
         result = BuildResult(
             succeeded=succeeded,
             errors=errors,
@@ -281,7 +339,7 @@ class BuildAdapter(BaseSourceAdapter):
                 device_id=self.device_id,
                 process="xcodebuild",
                 level=LogLevel.ERROR,
-                message=f"{diag.file}:{diag.line}:{diag.column}: {diag.message}",
+                message=_located(diag),
                 source=LogSource.BUILD,
             )
             await self.emit(entry)
@@ -293,7 +351,7 @@ class BuildAdapter(BaseSourceAdapter):
                 device_id=self.device_id,
                 process="xcodebuild",
                 level=LogLevel.WARNING,
-                message=f"{diag.file}:{diag.line}:{diag.column}: {diag.message}",
+                message=_located(diag),
                 source=LogSource.BUILD,
             )
             await self.emit(entry)

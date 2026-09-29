@@ -25,9 +25,14 @@ skipped with a clear error rather than a cryptic installer failure.
 
 Returns per-device install results plus per-architecture build results. Each successful build
 is recorded, and the summary names the record: bundle id, version, configuration and every
-binary's UUID, which is how a crash report names what it ran. For a device build, dSYMs of the
-app's own code are kept too (the newest 10 device builds per scheme), so a crash from this
-build can be symbolicated after later builds overwrite DerivedData.`,
+binary's UUID, which is how a crash report names what it ran. For a device build, dSYMs are kept
+too -- made for the app's own code, copied where Xcode or a vendor made one -- for the newest 10
+device builds per scheme, so a crash from this build can be symbolicated after later builds
+overwrite DerivedData.
+
+A failed build names its cause, including failures outside compilation (signing, provisioning).
+A project whose Swift package plug-in or macro has not been approved in Xcode is refused by
+xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
     inputSchema: strictParams({
       project_path: z.string().describe(
         "Path to the .xcodeproj, .xcworkspace, or a directory containing one."
@@ -42,10 +47,19 @@ build can be symbolicated after later builds overwrite DerivedData.`,
       configuration: z.string().optional().default("Debug").describe(
         "Build configuration (default: Debug)"
       ),
+      skip_plugin_validation: z.union([
+        z.boolean(),
+        z.enum(["true", "false"]).transform((v) => v === "true"),
+      ]).optional().describe(
+        "Build even if a Swift package plug-in or macro has not been approved in Xcode " +
+        "(adds -skipPackagePluginValidation and -skipMacroValidation). Off by default: " +
+        "approving one is a trust decision. A build refused for this says so in its errors."
+      ),
     }),
-  }, async ({ project_path, scheme, udids, configuration }) => {
+  }, async ({ project_path, scheme, udids, configuration, skip_plugin_validation }) => {
     try {
       const body: Record<string, unknown> = { project_path, configuration };
+      if (skip_plugin_validation) body.skip_plugin_validation = true;
       if (scheme) body.scheme = scheme;
       if (udids && udids.length > 0) body.udids = udids;
 

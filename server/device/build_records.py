@@ -7,13 +7,16 @@ record keeps, per build: what was built (bundle id, version, configuration,
 platform), where, and each binary's UUID, which is how a crash report names the
 binaries it ran.
 
-For a device build it also keeps dSYMs of the app's own code, made straight
-after the build while DerivedData still matches it. A Debug build has no dSYM
-of its own (`DEBUG_INFORMATION_FORMAT=dwarf`): its DWARF stays in the object
-files, which the next build replaces. Measured on Geocaching: about 6 s and
-185 MB per build, and `atos` then resolves a phone's crash to
-`AppDelegate.swift:13`. A simulator build gets the record alone, because macOS
-already writes file and line into a simulator's crash report.
+For a device build it also keeps dSYMs, straight after the build while
+DerivedData still matches it. Where Xcode made one (`dwarf-with-dsym`, or a
+vendored framework's) and its UUIDs match, it is copied: Geocaching's Internal
+scheme does, and recording takes 0.4 s and about 200 MB. Where it did not
+(`DEBUG_INFORMATION_FORMAT=dwarf`, the Debug default), the DWARF is still in
+the object files the next build replaces, and `dsymutil` makes one: about 6 s
+and 185 MB for Geocaching's 117 MB .debug.dylib. Either way `atos` then
+resolves a phone's crash to `AppDelegate.swift:13`. A simulator build gets the
+record alone, because macOS already writes file and line into a simulator's
+crash report.
 
 Records live in `~/.quern/build-records/<build id>/`: `record.json` and
 `dSYMs/`. Each is assembled under `<build id>.partial/` and renamed into place
@@ -46,6 +49,11 @@ RECORD_RETENTION_DAYS = 30
 DSYMUTIL_TIMEOUT = 300  # s; Geocaching's 117 MB .debug.dylib takes 5.4
 _PARTIAL = ".partial"
 
+#: A `.partial` untouched this long is a recording that died. Generous: a
+#: recording can run several `dsymutil`s of up to DSYMUTIL_TIMEOUT each, and
+#: only the directory's own mtime is looked at.
+STALE_PARTIAL_SECONDS = 6 * 3600
+
 #: `(argv) -> (exit code, stderr)`. Injected by tests, which never run Xcode.
 Runner = Callable[[list[str]], Awaitable[tuple[int, str]]]
 
@@ -56,9 +64,12 @@ async def _run(argv: list[str]) -> tuple[int, str]:
     )
     try:
         _, err = await asyncio.wait_for(proc.communicate(), timeout=DSYMUTIL_TIMEOUT)
-    except TimeoutError:
-        proc.kill()
-        await proc.wait()
+    except BaseException:
+        # A timeout, or the request cancelled (a server restart mid-build):
+        # either way the child is not left running on its own.
+        if proc.returncode is None:
+            proc.kill()
+            await asyncio.shield(proc.wait())
         raise
     return proc.returncode or 0, err.decode(errors="replace")
 
@@ -98,6 +109,9 @@ async def record_build(
             await _keep_dsyms(app_path, record, partial / "dSYMs", final / "dSYMs", run)
         (partial / "record.json").write_text(record.model_dump_json(indent=2))
         partial.rename(final)
+    except asyncio.CancelledError:
+        shutil.rmtree(partial, ignore_errors=True)
+        raise
     except OSError as e:
         shutil.rmtree(partial, ignore_errors=True)
         for b in record.binaries:
@@ -109,8 +123,12 @@ async def record_build(
 
 def save(record: BuildRecord, root: Path | None = None) -> None:
     """Rewrite a record that is already on disk (after its installs, say)."""
-    path = (root or RECORDS_DIR) / record.build_id / "record.json"
-    if not path.parent.is_dir():
+    _write(record, (root or RECORDS_DIR) / record.build_id)
+
+
+def _write(record: BuildRecord, directory: Path) -> None:
+    path = directory / "record.json"
+    if not directory.is_dir():
         return
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(record.model_dump_json(indent=2))
@@ -121,9 +139,15 @@ def _read_info(app_path: Path, record: BuildRecord) -> None:
     try:
         with open(app_path / "Info.plist", "rb") as f:
             info = plistlib.load(f)
-    except (OSError, plistlib.InvalidFileException, ValueError) as e:
-        record.notes.append(f"Info.plist could not be read: {e}")
+    except Exception as e:  # noqa: BLE001 -- a truncated XML plist raises
+        # expat's ExpatError, which is none of OSError, ValueError or
+        # InvalidFileException; losing the whole record over it is the defect.
+        record.notes.append(f"Info.plist could not be read: {type(e).__name__}: {e}")
         return
+    if not isinstance(info, dict):
+        record.notes.append("Info.plist could not be read: it is not a dictionary")
+        return
+    record.executable = str(info.get("CFBundleExecutable") or "")
     record.bundle_id = str(info.get("CFBundleIdentifier") or "")
     record.version = str(info.get("CFBundleShortVersionString") or "")
     record.build_number = str(info.get("CFBundleVersion") or "")
@@ -150,8 +174,11 @@ def _objects_here(m: macho.MachO) -> bool:
     vendor's build machine."""
     for s in m.slices:
         for obj in s.debug_objects:
-            # An archive member is written `lib.a(member.o)`.
-            if Path(obj.split("(", 1)[0]).exists():
+            # An archive member is written `lib.a(member.o)`. Only a trailing
+            # member is stripped: a scheme named "App (Beta)" puts a "(" in
+            # every object path, and cutting there found none of them.
+            archive, sep, _ = obj.rpartition("(")
+            if Path(archive if sep and obj.endswith(")") else obj).exists():
                 return True
     return False
 
@@ -185,6 +212,11 @@ async def _keep_dsyms(
                 if code != 0:
                     raise RuntimeError(f"dsymutil exited {code}: {_first_line(err)}")
                 warnings = [w for w in err.splitlines() if "warning" in w.lower()]
+                if any("no debug symbols" in w for w in warnings):
+                    # Exit 0 and an empty dSYM: the object files were gone by
+                    # the time it ran. Not incomplete -- empty.
+                    raise RuntimeError(
+                        "dsymutil found no debug information: its object files are gone")
                 if warnings:
                     # Most likely an object file replaced mid-read by another
                     # build of the scheme: the dSYM is kept, and said to be
@@ -219,16 +251,24 @@ def _first_line(text: str) -> str:
 
 def load_all(root: Path | None = None) -> list[BuildRecord]:
     """Every complete record, newest first. An unreadable one is skipped."""
-    root = root or RECORDS_DIR
-    records = []
-    for path in root.glob("*/record.json"):
-        if path.parent.name.endswith(_PARTIAL):
+    return [record for record, _ in _load(root or RECORDS_DIR)[0]]
+
+
+def _load(root: Path) -> tuple[list[tuple[BuildRecord, Path]], list[Path]]:
+    """(readable records with the directory each was read from, newest first;
+    directories whose record could not be read)."""
+    records, unreadable = [], []
+    for directory in root.glob("*"):
+        if directory.name.endswith(_PARTIAL) or not directory.is_dir():
             continue
+        path = directory / "record.json"
         try:
-            records.append(BuildRecord.model_validate_json(path.read_text()))
+            records.append((BuildRecord.model_validate_json(path.read_text()), directory))
         except (OSError, ValueError) as e:
             logger.warning("Skipping unreadable build record %s: %s", path, e)
-    return sorted(records, key=lambda r: r.created_at, reverse=True)
+            unreadable.append(directory)
+    records.sort(key=lambda rd: rd[0].created_at, reverse=True)
+    return records, unreadable
 
 
 def prune(root: Path | None = None, *, now: datetime | None = None,
@@ -245,16 +285,27 @@ def prune(root: Path | None = None, *, now: datetime | None = None,
     removed: list[str] = []
     for partial in root.glob("*" + _PARTIAL):
         try:
-            if now.timestamp() - partial.stat().st_mtime > 3600:
+            if now.timestamp() - partial.stat().st_mtime > STALE_PARTIAL_SECONDS:
                 shutil.rmtree(partial)
                 removed.append(f"{partial.name} (unfinished)")
         except OSError as e:
             logger.warning("Could not remove %s: %s", partial, e)
 
     cutoff = now - timedelta(days=max_age_days)
+    records, unreadable = _load(root)
+    # A record that no longer parses -- an older schema, say -- would otherwise
+    # hold its dSYMs forever. Aged by its directory instead.
+    for directory in unreadable:
+        try:
+            if max_age_days > 0 and directory.stat().st_mtime < cutoff.timestamp():
+                shutil.rmtree(directory)
+                removed.append(f"{directory.name} (unreadable, older than {max_age_days} days)")
+        except OSError as e:
+            logger.warning("Could not remove %s: %s", directory, e)
     kept_per_scheme: dict[tuple[str, str], int] = {}
-    for record in load_all(root):
-        directory = root / record.build_id
+    # The directory it was read from, never one named by the file: a record
+    # whose build_id said "../x" had retention delete a sibling of the root.
+    for record, directory in records:
         if max_age_days > 0 and record.created_at < cutoff:
             try:
                 shutil.rmtree(directory)
@@ -279,7 +330,7 @@ def prune(root: Path | None = None, *, now: datetime | None = None,
             b.dsym = ""
         record.dsyms_expired = True
         try:
-            save(record, root)
+            _write(record, directory)
         except OSError as e:
             logger.warning("Could not update %s: %s", record.build_id, e)
         removed.append(f"{record.build_id} dSYMs (beyond the newest {keep} of {record.scheme})")
@@ -293,8 +344,10 @@ def summary_line(record: BuildRecord) -> str:
     head = f"Recorded build {record.build_id}: {what or 'unknown app'}, {record.configuration}"
     if record.error:
         return f"{head} -- {record.error}."
+    notes = "".join(f" Note: {n}." for n in record.notes)
     if record.platform != "iphoneos":
-        return f"{head}, {len(record.binaries)} binaries' UUIDs."
+        n = len(record.binaries)
+        return f"{head}, {n} binar{'y' if n == 1 else 'ies'}' UUIDs.{notes}"
     kept = [b for b in record.binaries if b.dsym]
     failed = [b for b in record.binaries if b.dsym_error]
     parts = [f"{head}; symbols kept for {len(kept)} binar{'y' if len(kept) == 1 else 'ies'}"]
@@ -302,6 +355,12 @@ def summary_line(record: BuildRecord) -> str:
         parts.append(f"not for {', '.join(b.path for b in failed)} ({failed[0].dsym_error})")
     if any(b.dsym_warnings for b in kept):
         parts.append("some may be incomplete (dsymutil warned)")
-    if not kept and not failed:
+    # Vendored frameworks' dSYMs can make the count look healthy when the one
+    # that matters is missing.
+    names = (record.executable, f"{record.executable}.debug.dylib")
+    own = [b for b in record.binaries if record.executable and b.path in names]
+    if own and not any(b.dsym for b in own):
+        parts.append(f"none for the app's own code ({', '.join(b.path for b in own)})")
+    elif not kept and not failed:
         parts.append("none of its binaries were built from source here")
-    return "; ".join(parts) + "."
+    return "; ".join(parts) + "." + notes
