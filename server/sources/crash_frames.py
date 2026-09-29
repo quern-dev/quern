@@ -242,18 +242,50 @@ def _bundle_dir(proc_path: str) -> str:
     return m.group(1) if m else ""
 
 
-_SIMULATOR = re.compile(r"/CoreSimulator/Devices/([0-9A-Fa-f-]{36})/")
+#: A UDID in its canonical shape: a malformed one would be recorded as the
+#: report's device and match no device, dropping it from every list.
+_UDID = r"([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})"
+_SIMULATOR = re.compile(r"/CoreSimulator/Devices/" + _UDID + "/")
+#: `coalitionName`, which a simulator's system processes carry too.
+_SIMULATOR_COALITION = re.compile(r"com\.apple\.CoreSimulator\.SimDevice\." + _UDID + "$")
+#: The header's `platform`: iOS, tvOS, watchOS and visionOS simulators.
+_SIMULATOR_PLATFORMS = {7, 8, 9, 12}
 
 
-def simulator_udid(proc_path: str) -> str:
-    """The simulator a report came from, read from its app's path; "" if none.
+def simulator_udid(proc_path: str, coalition: str = "") -> str:
+    """The simulator a report came from; "" if none.
 
-    A simulator's crash file names no device, so a report without one was
-    listed under every device's udid -- an iPhone's list included the
-    simulator's crashes.
+    Read from the app's path, else from its coalition. A simulator's crash file
+    names no device, so a report without one was listed under every device's
+    udid. An installed app's path names its simulator; a system app's or
+    extension's runs from the runtime volume and does not, but its coalition
+    does (#330).
     """
     m = _SIMULATOR.search(proc_path) if isinstance(proc_path, str) else None
+    if not m and isinstance(coalition, str):
+        m = _SIMULATOR_COALITION.match(coalition)
     return m.group(1).upper() if m else ""
+
+
+def is_mac_process(header: dict, data: dict) -> bool:
+    """A crash of this Mac's own processes, not a simulator's or a device's.
+
+    Written on macOS, with nothing to say it ran in a simulator: its platform,
+    path, coalition and parent all say so for a simulator's process. A report
+    that does not say what it ran on is not claimed -- listing a Mac crash
+    under a phone is noise, but hiding a phone's crash is the defect.
+    """
+    os_info = data.get("osVersion")
+    os_version = _str(header.get("os_version")) or (
+        _str(os_info.get("train")) if isinstance(os_info, dict) else "")
+    if not os_version.startswith("macOS"):
+        return False
+    return not (
+        header.get("platform") in _SIMULATOR_PLATFORMS
+        or "/CoreSimulator/" in _str(data.get("procPath"))
+        or _str(data.get("coalitionName")).startswith("com.apple.CoreSimulator.SimDevice.")
+        or _str(data.get("parentProc")) == "launchd_sim"
+    )
 
 
 # -- iOS .crash text (iOS 14 and older) ------------------------------------------

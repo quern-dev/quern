@@ -420,6 +420,13 @@ class CrashReport(BaseModel):
     bundle_id: str = ""
     app_version: str = ""
     build_version: str = ""
+    mac_process: bool = Field(
+        default=False,
+        description=(
+            "A crash of one of this Mac's own processes, not a simulator's or a "
+            "device's. Listed only when get_latest_crash is not given a udid."
+        ),
+    )
 
 
 class OpenCrashDialog(BaseModel):

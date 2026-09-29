@@ -1220,6 +1220,44 @@ class TestCrashListShape:
         assert (await _latest(app, udid="00008101-PHONE"))["total"] == 0
         assert (await _latest(app))["total"] == 1
 
+    async def test_the_macs_own_crash_is_in_no_devices_list(self, app, monkeypatch):
+        """#330: a `node` crash on the Mac sat in every phone's and emulator's
+        list. It is still listed without a udid."""
+        from server.sources.crash import PullResult
+
+        adapter = app.state.crash_adapter
+        for name in ("mac_process", "simulator_system_extension"):
+            fixture = Path(__file__).parent / "fixtures" / "crash_ips" / f"{name}.ips"
+            adapter.crash_reports.append(adapter._parse_crash_file(fixture, fixture.read_text()))
+        app.state.device_controller = _controller(lib_udid="LIB")
+
+        async def pull(lib_udid, *, device_id="", days=3):
+            return PullResult()
+
+        monkeypatch.setattr(adapter, "pull_from_device", pull)
+
+        assert (await _latest(app, udid="00008101-PHONE"))["total"] == 0
+        on_sim = await _latest(app, udid="00000000-0000-0000-0000-00000000000b")
+        assert [c["process"] for c in on_sim["crashes"]] == ["TypeToSiriWidgetExtension"]
+        assert (await _latest(app))["total"] == 2
+
+    async def test_a_report_that_cannot_be_placed_is_still_listed(self, app, monkeypatch):
+        """What might be the device's crash stays in its list."""
+        from server.models import CrashReport
+        from server.sources.crash import PullResult
+
+        adapter = app.state.crash_adapter
+        adapter.crash_reports.append(
+            CrashReport(crash_id="a", timestamp=datetime(2026, 9, 27, tzinfo=UTC)))
+        app.state.device_controller = _controller(lib_udid="LIB")
+
+        async def pull(lib_udid, *, device_id="", days=3):
+            return PullResult()
+
+        monkeypatch.setattr(adapter, "pull_from_device", pull)
+
+        assert (await _latest(app, udid="00008101-PHONE"))["total"] == 1
+
     async def test_a_simulator_asked_for_in_lower_case(self, app, monkeypatch):
         """Its UDID is read upper-case from the report's path."""
         fixture = Path(__file__).parent / "fixtures" / "crash_ips" / "simulator_fatal_error.ips"
