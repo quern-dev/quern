@@ -1308,3 +1308,146 @@ class TestBlockAlignment:
         assert [f.thrown.split(":")[0] for f in frames] == [
             "java.lang.RuntimeException", "Caused by"]
         assert app_frame.symbol == "com.example.app.Inner.boom"
+
+
+# ── review round 3 ───────────────────────────────────────────────────────────
+
+
+def _d8_apk(module: Path) -> None:
+    apk = next(module.rglob("*.apk"))
+    stamp = apk.stat().st_mtime
+    with zipfile.ZipFile(apk, "w") as z:
+        z.writestr("classes.dex", b'dex\n035\0~~D8{"backend":"dex","compilation-mode":"debug"}')
+    os.utime(apk, (stamp, stamp))
+
+
+class TestKotlinsUnknownSource:
+    """kotlinc leaves the source file out of whole classes -- the coroutine
+    facades among them -- and ART prints those `(Unknown Source:N)`, in a
+    debug build as in a release one."""
+
+    TRACE = ("java.lang.IllegalStateException: boom\n"
+             "\tat com.example.app.Compass.onCreate(Compass.kt:45)\n"
+             "\tat kotlinx.coroutines.BuildersKt.withContext(Unknown Source:1)\n"
+             "\tat android.app.Activity.performCreate(Activity.java:8000)\n")
+
+    def test_it_does_not_let_an_unproven_mapping_through(self, tmp_path, tools):
+        report = _parsed(self.TRACE)
+        fake = FakeAndroidTools(retrace={
+            "at com.example.app.Compass.onCreate(Compass.kt:45)":
+                "\tat com.example.app.CompassBinding.bind(CompassBinding.java:112)\n"
+                "\tat com.example.app.Compass.onCreate(Compass.kt:45)"})
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert [f.symbol for f in report.frames][0] == "com.example.app.Compass.onCreate"
+        assert "renames no class in this trace" in report.symbols[0].note
+
+    def test_it_does_not_ask_for_a_record(self, tmp_path, tools):
+        report = _parsed(self.TRACE)
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", FakeAndroidTools()))
+        assert report.symbols == []
+
+    def test_a_minified_class_name_still_counts(self):
+        f = CrashFrame(symbol="l82.onClick", line=539)
+        g = CrashFrame(symbol="kotlinx.coroutines.BuildersKt.withContext", line=1)
+        assert symbolicate_android._is_r8(f) and not symbolicate_android._is_r8(g)
+
+
+class TestAnUnminifiedRecord:
+    def test_record_says_whether_r8_built_it(self, tmp_path):
+        module = _gradle_module(tmp_path / "d8", mapping=False)
+        _d8_apk(module)
+        assert _record_android(module, tmp_path / "r").minified is False
+        module = _gradle_module(tmp_path / "r8")
+        _apk_with_map_id(module, "e1ad14241ecb07832d")
+        assert _record_android(module, tmp_path / "r").minified is True
+        unknown = _gradle_module(tmp_path / "unknown")
+        assert _record_android(unknown, tmp_path / "r").minified is None
+
+    def test_a_newer_unminified_build_of_the_version_stops_an_older_mapping(
+            self, tmp_path, tools):
+        """A D8 build keeps no mapping, so matching among records with one
+        let an older minified build of the same version answer for it."""
+        root = tmp_path / "records"
+        _record_android(_gradle_module(tmp_path / "old"), root, now=NOW.replace(minute=1))
+        debug = _gradle_module(tmp_path / "new", mapping=False)
+        _d8_apk(debug)
+        _record_android(debug, root, now=NOW.replace(minute=2))
+        report = _java_report(file="Feed.kt")
+        fake = FakeAndroidTools(retrace=RETRACED)
+        _run([report], symbolicate.SymbolFinder(root, fake))
+        assert fake.calls == [] and report.symbols == []
+
+    def test_but_not_a_trace_that_shows_r8(self, tmp_path, tools):
+        root = tmp_path / "records"
+        _record_android(_gradle_module(tmp_path / "old"), root, now=NOW.replace(minute=1))
+        debug = _gradle_module(tmp_path / "new", mapping=False)
+        _d8_apk(debug)
+        _record_android(debug, root, now=NOW.replace(minute=2))
+        report = _java_report()
+        _run([report], symbolicate.SymbolFinder(root, FakeAndroidTools(retrace=RETRACED)))
+        assert report.frames[0].symbol == "com.example.app.Feed.parse"
+
+    def test_a_marker_in_a_later_dex_is_found(self, tmp_path):
+        apk = tmp_path / "app.apk"
+        with zipfile.ZipFile(apk, "w") as z:
+            z.writestr("classes.dex", b"dex\n035\0no marker")
+            z.writestr("classes2.dex", b'dex\n035\0~~R8{"pg-map-id":"abc123"}')
+        assert build_records._apk_map_id(apk) == "abc123"
+
+
+class TestAPrebuiltLibrarysFile:
+    def test_retraced_file_with_colons_keeps_its_line(self, tmp_path, tools):
+        fake = FakeAndroidTools(retrace={"at a.b.c(SourceFile:3)":
+                                         "\tat com.google.mlkit.zzik.run("
+                                         "com.google.mlkit:translate@@17.0.3:505)"})
+        report = _java_report()
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        f = report.frames[0]
+        assert (f.file, f.line) == ("com.google.mlkit:translate@@17.0.3", 505)
+
+    def test_parsed_file_with_colons_keeps_its_line(self):
+        [f] = crash_frames.java_frames(
+            ["\tat com.google.android.gms.zza.b(com.google.android.gms:play-services-basement"
+             "@@18.9.0:3)"])
+        assert (f.file, f.line) == ("com.google.android.gms:play-services-basement@@18.9.0", 3)
+
+
+class TestRound3Edges:
+    def test_native_frames_past_the_cap_are_not_resolved(self, tmp_path, tools):
+        report = _native_report()
+        extra = CrashFrame(image="libapp.so", offset=0x2000, build_id=BUILD_ID, app=True)
+        report.trace = list(report.frames) + [CrashFrame(image="libc.so", offset=i, symbol="x")
+                                              for i in range(40)] + [extra]
+        fake = FakeAndroidTools(symbolizer=SYMBOLIZED)
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert fake.calls[0][2:] == ["0x16c8"] and extra.file == ""
+
+    def test_a_folded_block_leaves_no_header_behind(self, tmp_path, tools):
+        """A cause whose only frame is folded: its header must not land on the
+        next block's second frame, splitting that block."""
+        report = _parsed("java.lang.RuntimeException: a\n"
+                         "\tat a.w(SourceFile:1)\n"
+                         "Caused by: java.lang.IllegalStateException: b\n"
+                         "\tat s75.l(SourceFile:4)\n"
+                         "Caused by: java.lang.NullPointerException: c\n"
+                         "\tat a.x(SourceFile:2)\n"
+                         "\tat a.y(SourceFile:3)\n")
+        fake = FakeAndroidTools(retrace={
+            "at a.w(SourceFile:1)": "\tat com.example.app.W.w(W.kt:1)",
+            "at s75.l(SourceFile:4)": "",
+            "at a.x(SourceFile:2)": "\tat com.example.app.X.x(X.kt:2)",
+            "at a.y(SourceFile:3)": "\tat com.example.app.Y.y(Y.kt:3)"})
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert [f.thrown.split(":")[0] for f in report.frames] == [
+            "java.lang.RuntimeException", "Caused by", ""]
+        assert report.app_frame.symbol == "com.example.app.X.x"
+
+    def test_a_failure_while_applying_is_not_settled(self, tmp_path, tools, monkeypatch):
+        def boom(*a, **kw):
+            raise RuntimeError("mid-apply")
+
+        monkeypatch.setattr(symbolicate_android, "_apply", boom)
+        report = _java_report()
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path),
+                                                FakeAndroidTools(retrace=RETRACED)))
+        assert "mid-apply" in report.symbols[0].note and not report.symbolicated

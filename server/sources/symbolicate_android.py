@@ -44,6 +44,13 @@ _MAP_ID = re.compile(r"^r8-map-id-([0-9a-f]+)$")
 #: D8's own synthetic classes, which a debug build's frames name with
 #: `(Unknown Source:2)` too: not R8's mark.
 _SYNTHETIC = ("$$ExternalSynthetic", "$$Lambda", "-$$Nest$")
+#: A class name as R8 writes it: `l82`, `a`, `Ab`, `y3c`. kotlinc leaves the
+#: source file out of whole classes (1,608 in a real debug build, among them
+#: kotlinx.coroutines.BuildersKt), and ART prints those `(Unknown Source:N)`
+#: too -- so without a minified name that is no mark of R8. Measured: 83% of
+#: a real mapping's renamed classes match, and the kept ones that do are
+#: libraries shipped already obfuscated (gms `zza`).
+_MINIFIED_CLASS = re.compile(r"^[a-zA-Z]{1,3}\d{0,4}[a-z]{0,2}$")
 #: Appended to every frame sent; retrace copies it onto each line it writes
 #: for that frame, inlined expansions included (measured).
 _TAG = " ~[QUERN-{}]"
@@ -99,13 +106,21 @@ def _is_java(frame: CrashFrame) -> bool:
 
 def _is_r8(frame: CrashFrame) -> bool:
     """A frame showing R8's marks: `SourceFile`, an `r8-map-id-` stamp, or no
-    file but a line -- `(Unknown Source:539)`, where rules strip the source
-    file (measured: a real release build's crash) -- unless it is one of D8's
-    own synthetic classes, which a debug build prints the same way."""
-    if _R8_FILE.match(frame.file or ""):
+    file but a line on a minified class name -- `l82.onClick(Unknown
+    Source:539)`, where rules strip the source file (measured: a real release
+    build's crash). A hint rather than proof, used to say a record is missing
+    and to count; `_names_r8` is what an unproven mapping is held to."""
+    if _names_r8(frame):
         return True
+    simple = _class(frame.symbol).rpartition(".")[2].split("$")[0]
     return (not frame.file and frame.line is not None
-            and not any(s in frame.symbol for s in _SYNTHETIC))
+            and not any(s in frame.symbol for s in _SYNTHETIC)
+            and bool(_MINIFIED_CLASS.match(simple)))
+
+
+def _names_r8(frame: CrashFrame) -> bool:
+    """R8's own spelling of a source file: nothing else writes these."""
+    return bool(_R8_FILE.match(frame.file or ""))
 
 
 async def symbolicate(report: CrashReport, finder, read) -> bool:
@@ -121,7 +136,12 @@ async def symbolicate(report: CrashReport, finder, read) -> bool:
             beyond = report.app_frame             # past the cap on `frames`
             frames.append(beyond)
     native: dict[str, list[CrashFrame]] = {}
-    for f in frames:
+    # Native frames past the cap belong to no image the report lists, so
+    # only those shown and the app frame are resolved.
+    shown = list(report.frames)
+    if report.app_frame is not None and not any(report.app_frame is f for f in shown):
+        shown.append(report.app_frame)
+    for f in shown:
         if f.build_id and f.app and f.offset is not None and not f.file:
             native.setdefault(f.image, []).append(f)
     java = [f for f in frames if _is_java(f)] if _JAVA_IMAGE not in settled else []
@@ -320,21 +340,23 @@ async def _java(report: CrashReport, java: list[CrashFrame], beyond: CrashFrame 
         entry.note = _failed("retrace", code, out, err)
         return True
     tagged = _tagged(out, java)
-    entry.settled = True                           # retrace answered; what follows is final
     if tagged is None:
-        entry.note = "retrace's output could not be matched to the frames sent"
+        # Settled: retrace answered, and asking again would repeat it.
+        entry.note, entry.settled = "retrace's output could not be matched to the frames sent", True
         return True
     readings = {i: _readings(f, tagged.get(i, [])) for i, f in enumerate(java)}
     # The frame's own method is the outermost line of an expansion (the last);
     # the lines before it are what was inlined into it, from any class.
     renamed = [i for i, (lines, _) in readings.items()
                if lines and _class(lines[-1].symbol) != _class(java[i].symbol)]
-    if not exact and not renamed and not any(_is_r8(f) for f in java):
-        # Nothing in the trace names its build or shows R8's marks, and the
-        # mapping renames none of its classes: an unminified build of the same
-        # version, whose kept classes it would still "retrace" by line number.
+    if not exact and not renamed and not any(_names_r8(f) for f in java):
+        # Nothing in the trace names its build or is spelled as only R8 spells
+        # it, and the mapping renames none of its classes: an unminified build
+        # of the same version, whose kept classes it would still "retrace" by
+        # line number. `Unknown Source:N` is no proof -- kotlinc prints it too.
         entry.note = (f"{how}; but that mapping renames no class in this trace, so the crash "
                       f"is not from that minified build, and its frames were left as they were")
+        entry.settled = True
         return True
     counted = [i for i, f in enumerate(java) if i in renamed or _is_r8(f)]
     resolved = sum(1 for i in counted if readings[i][0] and readings[i][0][0].file
@@ -359,6 +381,7 @@ async def _java(report: CrashReport, java: list[CrashFrame], beyond: CrashFrame 
         notes.append(f"{inlined} frames were inlined; each inlined function is listed, "
                      f"innermost first")
     entry.note = "; ".join(notes)
+    entry.settled = True                   # only now: the trace is in its final state
     return True
 
 
@@ -374,8 +397,12 @@ def _readings(sent: CrashFrame, lines: list[re.Match]) -> tuple[list[CrashFrame]
         if m.group("or"):
             continue
         symbol = m.group("sym")
-        file, _, line = m.group("src").partition(":")
-        number = int(line) if line.isdigit() else None
+        # `com.google.mlkit:translate@@17.0.3:505`: a prebuilt library's file
+        # has colons of its own, and the line is after the last.
+        file, _, line = m.group("src").rpartition(":")
+        if not line.isdigit():
+            file, line = m.group("src"), ""
+        number = int(line) if line else None
         if sent.line is None:
             number = None       # retrace's line for a frame sent without one is a guess
         elif (_class(symbol) != _class(sent.symbol) and symbol.rpartition(".")[2]
@@ -404,9 +431,7 @@ def _apply(report: CrashReport, java: list[CrashFrame], beyond: CrashFrame | Non
         if f.thrown:
             carry = ""                            # a new block: the old header ended
         i = index.get(id(f))
-        if i is None:
-            if carry and not f.thrown:
-                f.thrown, carry = carry, ""
+        if i is None:                             # native: nothing to put in
             result.append(f)
             continue
         lines, _ = readings[i]
@@ -482,10 +507,19 @@ def _mapping_for(report: CrashReport, java: list[CrashFrame],
             return exact[0], "", True
         return None, (f"no build record has the R8 mapping {sorted(stamped)[0][:12]} this "
                       f"crash was built with: record the build with record_android_build"), False
-    same = [r for r in with_mapping
-            if r.bundle_id == report.bundle_id
-            and report.build_version in ({r.build_number} | set(r.version_codes))
-            and (not report.app_version or r.version == report.app_version)]
+    def of_version(r: BuildRecord) -> bool:
+        return (r.bundle_id == report.bundle_id
+                and report.build_version in ({r.build_number} | set(r.version_codes))
+                and (not report.app_version or r.version == report.app_version))
+
+    newest = next((r for r in records if of_version(r)), None)
+    if newest is not None and newest.minified is False and not any(_is_r8(f) for f in java):
+        # The build of this version recorded last was not minified, and the
+        # trace shows no sign of R8: an older minified record of the same
+        # version is not the build that crashed.
+        return None, (f"the newest recorded build of {report.bundle_id} {report.app_version} "
+                      f"({newest.build_id}) was not minified"), False
+    same = [r for r in with_mapping if of_version(r)]
     if not same:
         return None, (f"no build record has an R8 mapping for {report.bundle_id} "
                       f"{report.app_version} ({report.build_version}): if it is a minified "

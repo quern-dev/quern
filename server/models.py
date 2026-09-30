@@ -665,6 +665,10 @@ class BuildRecord(BaseModel):
         default_factory=list,
         description="Android: every APK's versionCode; ABI splits give each APK its own",
     )
+    minified: bool | None = Field(
+        default=None,
+        description="Android: whether R8 built the APK (its marker in the dex); null if unknown",
+    )
 
     @field_validator("created_at")
     @classmethod

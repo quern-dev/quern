@@ -359,7 +359,10 @@ _NATIVE_BUILD_ID = re.compile(r"\s*\(BuildId: ([0-9a-fA-F]+)\)\s*$")
 _NATIVE_APK_OFFSET = re.compile(r"\s*\(offset 0x[0-9a-fA-F]+\)")
 #: `at com.example.Foo.bar(Foo.java:42)`, `(Native Method)`, `(Unknown Source:3)`
 _JAVA = re.compile(r"^\s*at (\S+?)\((.*)\)\s*$")
-_JAVA_SOURCE = re.compile(r"^([^:]+?)(?::(\d+))?$")
+#: `Feed.kt:12`, or a prebuilt library's `com.google.android.gms:play-services-
+#: basement@@18.9.0:3`, whose "file" has colons of its own: the line is the
+#: digits after the last one.
+_JAVA_SOURCE = re.compile(r"^(.+?)(?::(\d+))?$")
 #: The platform's and common libraries' packages: not the app's own code. Used
 #: only when the record does not name the app's package.
 _JAVA_NOT_APP = (

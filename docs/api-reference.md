@@ -152,13 +152,15 @@ frames only with that context. An inlined frame becomes one frame per function,
 innermost first; frames retrace writes nothing for (outlines, usually) are left out;
 and the app frame is chosen again from the real names, as the innermost cause's
 first app frame. `frames_resolved` of `frames_total` counts the frames retrace
-renamed. The mapping is chosen by the `r8-map-id` stamp when a frame carries one, and
+renamed or that carry R8's marks. The mapping is chosen by the `r8-map-id` stamp when a frame carries one, and
 otherwise by package and version, which a note always says, since local builds share
-a version. A version-only match that renames none of the trace's classes, in a trace
-with no mark of R8, is from another build of that version and is not applied. When no
+a version. A version-only match that renames none of the trace's own classes, in a
+trace with no `SourceFile` or `r8-map-id-` (kotlinc prints `Unknown Source` too), is
+from another build of that version and is not applied; nor is one whose newest record
+of that version is unminified. When no
 record matches, `symbols` asks for one only if the trace shows R8's marks: a
-`SourceFile` or `r8-map-id-<id>` source file, or `Unknown Source` with a line where
-the rules strip source files. At record time the APK's own marker is read: a mapping
+`SourceFile` or `r8-map-id-<id>` source file, or `Unknown Source` with a line on a
+minified class name (`l82`), where the rules strip source files. At record time the APK's own marker is read: a mapping
 from another R8 build, or one left beside a D8 (unminified) build, is not kept.
 Native frames in the app's own libraries are matched by BuildId to the record's
 unstripped copies, each checked against its BuildId before use, and resolved with the

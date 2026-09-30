@@ -241,6 +241,7 @@ def _keep_android_symbols(
 ) -> None:
     mapping = module_dir / "build" / "outputs" / "mapping" / variant / "mapping.txt"
     built_with = _apk_map_id(Path(record.app_path))
+    record.minified = (built_with != NOT_MINIFIED) if built_with else None
     if mapping.is_file() and built_with == NOT_MINIFIED:
         # Minify since turned off leaves the last minified build's mapping in
         # place, and it would rewrite this build's real names into wrong ones.
@@ -290,6 +291,7 @@ def _keep_android_symbols(
 #: which builds an unminified variant, writes `~~D8{…}` with no map id.
 _DEX_MAP_ID = re.compile(rb'~~R8\{[^}]*"pg-map-id":"([0-9a-f]+)"')
 _DEX_D8 = re.compile(rb"~~D8\{")
+_DEX_NAME = re.compile(r"^classes(\d*)\.dex$")
 NOT_MINIFIED = "d8"
 
 
@@ -299,16 +301,23 @@ def _apk_map_id(apk: Path) -> str:
     taken on trust, as before."""
     try:
         with zipfile.ZipFile(apk) as z:
-            dex = z.read("classes.dex")
+            # Every dex normally carries it, but not all do (7 of 26 in a real
+            # debug APK), so the first that does answers.
+            names = sorted((n for n in z.namelist() if _DEX_NAME.match(n)),
+                           key=lambda n: int(_DEX_NAME.match(n).group(1) or 1))
+            for name in names:
+                dex = z.read(name)
+                m = _DEX_MAP_ID.search(dex)
+                if m:
+                    return m.group(1).decode()
+                if _DEX_D8.search(dex):
+                    return NOT_MINIFIED
     # A corrupt APK raises whatever its compressor does (zlib.error, EOFError,
     # a RuntimeError for an encrypted entry), and a record must not fail on it.
     except (OSError, KeyError, EOFError, RuntimeError, ValueError, zipfile.BadZipFile,
             zlib.error):
         return ""
-    m = _DEX_MAP_ID.search(dex)
-    if m:
-        return m.group(1).decode()
-    return NOT_MINIFIED if _DEX_D8.search(dex) else ""
+    return ""
 
 
 def _map_id(mapping: Path) -> str:
