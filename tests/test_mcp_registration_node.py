@@ -117,6 +117,18 @@ class TestReadingTheRegistrations:
         [reg] = self._read()
         assert reg.client == "claude-code" and reg.error and reg.node is None
 
+    def test_each_shape_carries_its_launcher(self, home, monkeypatch):
+        _install(monkeypatch, "claude-code", "opencode", "codex")
+        launchers = {r.client: r.launcher for r in self._read()}
+        assert all(v and v.endswith("launcher.cjs") for v in launchers.values()), launchers
+
+    def test_codex_on_its_script_carries_the_script_as_launcher(self, home):
+        (home / ".codex").mkdir()
+        (home / ".codex/config.toml").write_text(
+            '[mcp_servers.quern]\ncommand = "/old/mcp/dist/index.js"\nargs = []\n')
+        [reg] = self._read()
+        assert (reg.node, reg.launcher) == ("node", "/old/mcp/dist/index.js")
+
     def test_codex_registered_before_214_runs_node_off_path(self, home):
         (home / ".codex").mkdir()
         (home / ".codex/config.toml").write_text(
@@ -164,7 +176,16 @@ class TestDoctorReportsTheRegistrations:
         regs = [setup.McpRegistration("claude-desktop", Path("/c"), "node")]
         self._report(monkeypatch, regs)
         out = capsys.readouterr().out
-        assert "! claude-desktop — `node`, found on each client's own PATH" in out
+        assert "! claude-desktop — `node`, which each client resolves its own way" in out
+
+    def test_a_launcher_that_is_gone_is_said(self, monkeypatch, capsys, tmp_path):
+        node = tmp_path / "node"
+        node.write_text("")
+        regs = [setup.McpRegistration("cursor", Path("/c"), str(node),
+                                      launcher="/old/mcp/dist/launcher.cjs")]
+        self._report(monkeypatch, regs, {str(node): (node_env.OK, "v22.0.0")})
+        assert "starts Quern from /old/mcp/dist/launcher.cjs, which no longer exists" in \
+            capsys.readouterr().out
 
     def test_an_unreadable_config_fails_the_check(self, monkeypatch, capsys):
         """Doctor's exit says when a check could not be made."""
@@ -263,12 +284,28 @@ class TestDoctorOnOddRegistrations:
         self._report(monkeypatch, regs)
         assert "clients do not expand" in capsys.readouterr().out
 
-    def test_a_wrapper_that_reports_no_version(self, monkeypatch, capsys, tmp_path):
-        node = tmp_path / "wrap.sh"
+    def test_a_node_that_reports_no_version(self, monkeypatch, capsys, tmp_path):
+        node = tmp_path / "node"
         node.write_text("")
         regs = [setup.McpRegistration("cursor", Path("/c"), str(node))]
         self._report(monkeypatch, regs, {str(node): (node_env.UNUSABLE, None)})
         assert "did not report a Node version" in capsys.readouterr().out
+
+    def test_a_wrapper_is_not_judged(self, monkeypatch, capsys, tmp_path):
+        """`/bin/bash -c …` or `/usr/bin/env node` chooses its own node; running
+        it with --version answered a different question, and "fixing" it
+        replaced a deliberate wrapper."""
+        wrapper = tmp_path / "bash"
+        wrapper.write_text("")
+        regs = [setup.McpRegistration("cursor", Path("/c"), str(wrapper))]
+        checked = []
+        monkeypatch.setattr(setup, "mcp_registrations", lambda: regs)
+        monkeypatch.setattr(node_env, "check_outside_a_shell",
+                            lambda path, **_: checked.append(path) or (node_env.UNUSABLE, None))
+        server_main._report_mcp_registrations()
+        out = capsys.readouterr().out
+        assert "a wrapper that chooses its own node" in out and "\u2717" not in out
+        assert checked == [], "the wrapper was run"
 
     def test_a_node_that_does_not_answer_fails_the_check(self, monkeypatch, capsys, tmp_path):
         """Could not ask is not a finding about the node."""

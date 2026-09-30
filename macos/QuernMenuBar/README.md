@@ -33,6 +33,24 @@ manager with a **Restart to Update** action.
   with the daemon still up, and a way out drawn only when the daemon is down
   would be missing exactly then. It clears once the server comes back on a
   different version, so finishing the update by any route retires it.
+- **\<Client\> Can’t Start Quern…** — appears when an MCP client quern is
+  registered with will not be able to start its MCP server: its registration
+  names a node that has since been removed, is older than 22 or does not run,
+  or a Quern wrapper that is no longer there (Quern moved or was reinstalled).
+  The client itself reports only `CONNECTION_CLOSED`. The dialog says which
+  clients and why, and **Fix in Terminal** runs `quern mcp-install` for them,
+  with a reminder to reopen them. The server writes `~/.quern/mcp-clients.json`
+  at start, every ten minutes, after `quern mcp-install`, `quern doctor` and
+  an update, because the checks run each client's node, which this app does
+  not do. Only failures it can know are in it: a registration on plain `node`
+  is not one, because each client resolves that its own way -- Claude Desktop
+  reads your shell's PATH -- and `quern doctor` warns about it instead. A
+client whose config cannot be read at that moment keeps its last problems, for
+an hour at most, rather than having them erased by a pass that did not see
+them; those never open the dialog by themselves. The
+  dialog opens by itself only once, right after an update started from this
+  menu; at login, or after an update run in a terminal, it is the menu row
+  alone.
 - **Check for Updates…** — shown instead, when nothing is staged. That cache is
   refreshed at most once a day, so without this a release landing in the
   afternoon would not be offered until tomorrow and there was no way to ask.

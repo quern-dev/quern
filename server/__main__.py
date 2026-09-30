@@ -768,6 +768,12 @@ def _cmd_mcp_install() -> int:
         if not ok:
             all_ok = False
 
+    # So the menu bar's warning clears as soon as the fix is made, not at the
+    # next server start.
+    from server.lifecycle import mcp_clients
+
+    mcp_clients.refresh()
+
     if chosen is None:
         # Registered anyway -- a client with its own good PATH may still start
         # it -- but no node here that runs the wrapper outside a shell means

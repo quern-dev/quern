@@ -34,6 +34,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
     private var didAttemptLaunchStart = false
+    /// The MCP clients dialog opens by itself at most once per launch.
+    private var mcpAlertShown = false
+    /// When the update being waited on was started from this menu, if one
+    /// was: set by Restart to Update, or taken from `MenuUpdateMarker` at the
+    /// launch that update relaunched. Let go once that update has its answer.
+    private var menuUpdateStartedAt: Date?
     /// Holds "Checking…" on screen long enough to be seen. See MinimumDisplay.
     private let checkIndicator = MinimumDisplay()
 
@@ -86,6 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self          // rebuilt lazily on each open
         statusItem.menu = menu
 
+        menuUpdateStartedAt = MenuUpdateMarker.consume()
         reader.onChange = { [weak self] snap in
             guard let self else { return }
             self.snapshot = snap
@@ -102,6 +109,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if snap.update.updateAvailable { self.lastCheckResult = nil }
             self.refreshStatusButton()
             self.settings.update(snap)
+            // Only right after an update the user started, never at login; the
+            // menu row is there either way. Cheap checks first: the update
+            // record is a file read, and this runs on every poll.
+            if let started = self.menuUpdateStartedAt {
+                let lastUpdate = UpdateResult.read()
+                let now = Date()
+                if McpClientAlert.shouldInterrupt(snap.mcpClients, lastUpdate: lastUpdate,
+                                                  menuUpdateStartedAt: started, now: now,
+                                                  alreadyShown: self.mcpAlertShown) {
+                    self.mcpAlertShown = true
+                    self.presentMcpClients(snap.mcpClients)
+                }
+                if !McpClientAlert.markerStillNeeded(snap.mcpClients, lastUpdate: lastUpdate,
+                                                     menuUpdateStartedAt: started, now: now) {
+                    self.menuUpdateStartedAt = nil
+                }
+            }
         }
         reader.start()
 
@@ -281,6 +305,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .serverLog:
                 menu.addItem(action("Open Server Log", #selector(openServerLog)))
             }
+        }
+
+        // An MCP client that cannot start Quern says nothing useful itself --
+        // `CONNECTION_CLOSED` -- so this is where a GUI user finds out (#214).
+        if let title = McpClientAlert.menuTitle(snapshot.mcpClients) {
+            menu.addItem(action(title, #selector(showMcpClients)))
         }
 
         menu.addItem(.separator())
@@ -496,15 +526,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func restartToUpdate() {
         lifecycle.clearUpdateRecovery()
+        // Saved for the app this update relaunches, and kept here too: an
+        // update whose version does not change finishes without relaunching,
+        // and its dialog is this process's to show.
+        let started = Date()
+        MenuUpdateMarker.record(started)
+        menuUpdateStartedAt = started
         updater.restartToUpdate(
             status: { [weak self] progress in
                 self?.updateStatusText = progress.text
                 self?.activityText = progress.isWorking ? progress.text : nil
+                // Finished without relaunching: nothing will consume the
+                // marker, and left behind it would count for a later launch.
+                if !progress.isWorking { MenuUpdateMarker.clear() }
             },
             failure: { [weak self] message, detail in
                 // "Could not start the update" means nothing ran -- the
                 // installed version could not even be read -- so there is no
                 // half-done update to finish.
+                MenuUpdateMarker.clear()
+                self?.menuUpdateStartedAt = nil
                 let recovery = Recovery.forUpdateFailure(
                     started: message != "Could not start the update")
                 // Recorded as well as shown: dismissing the alert must not
@@ -543,6 +584,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func openInstallDocs() { NSWorkspace.shared.open(TerminalUpdate.docs) }
+
+    @objc private func showMcpClients() { presentMcpClients(snapshot.mcpClients) }
+
+    private func presentMcpClients(_ health: McpClientHealth) {
+        DispatchQueue.main.async { [weak self] in
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = McpClientAlert.title(health)
+            alert.informativeText = McpClientAlert.body(health)
+            let buttons = McpClientAlert.buttons(health)
+            for button in buttons { alert.addButton(withTitle: button.title) }
+            let index = alert.runModal().rawValue
+                - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+            guard buttons.indices.contains(index) else { return }
+            switch buttons[index] {
+            case .ok:
+                break
+            case .fixInTerminal:
+                TerminalScript.open(
+                    name: "quern-mcp-clients.command",
+                    contents: McpClientAlert.script(health, quern: QuernCLI.resolve()?.path)
+                ) { error in
+                    guard let error else { return }
+                    self?.reportFailure("Could not open Terminal", detail: "",
+                                        guidance: error)
+                }
+            case .copy:
+                NSPasteboard.general.clearContents()
+                // The resolved wrapper: `~/.local/bin` may not be on the PATH
+                // of the terminal this is pasted into.
+                let quern = QuernCLI.resolve().map { TerminalScript.shellQuote($0.path) } ?? "quern"
+                NSPasteboard.general.setString(McpClientAlert.command(health, quern: quern) ?? "",
+                                               forType: .string)
+            }
+        }
+    }
 
     @objc private func openServerLog() { NSWorkspace.shared.open(Self.serverLog) }
 

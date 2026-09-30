@@ -627,7 +627,7 @@ def _update_finishes_in_process(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _node_env_is_not_this_machine(monkeypatch):
+def _node_env_is_not_this_machine(monkeypatch, tmp_path):
     """`node_env.probe` runs the developer's login and non-interactive shells.
 
     Harmless, but it makes every setup test a report about whoever runs the
@@ -666,6 +666,11 @@ def _node_env_is_not_this_machine(monkeypatch):
     monkeypatch.setattr(setup, "_real_mcp_registrations", setup.mcp_registrations,
                         raising=False)
     monkeypatch.setattr(setup, "mcp_registrations", lambda: [])
+    # And where the MCP clients answer goes: it now feeds the next pass, so a
+    # shared file let one test's answer reach another's.
+    from server.lifecycle import mcp_clients
+
+    monkeypatch.setattr(mcp_clients, "STATE_FILE", tmp_path / "mcp-clients.json")
 
 
 @pytest.fixture(autouse=True)

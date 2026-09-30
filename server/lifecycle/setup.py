@@ -3718,6 +3718,7 @@ class McpRegistration:
     node: str | None = None     # the node it runs the wrapper with, as written
     error: str = ""             # why it could not be read
     project: str = ""           # Claude Code: the project a project-scoped entry is for
+    launcher: str | None = None  # the wrapper it starts, as written
 
     @property
     def label(self) -> str:
@@ -3728,6 +3729,18 @@ class McpRegistration:
 #: through its `#!/usr/bin/env node`, which is a PATH lookup like bare `node`.
 #: codex was registered this way, as `index.js` and later `launcher.cjs`.
 _SCRIPT_SUFFIXES = (".js", ".mjs", ".cjs")
+
+
+def _launcher_of(command: object, args: object) -> str | None:
+    """The script a registration starts: the first argument, or opencode's
+    second word, or a codex command that is the script itself."""
+    if isinstance(command, list):
+        rest = command[1:]
+    elif isinstance(command, str) and command.endswith(_SCRIPT_SUFFIXES):
+        return command
+    else:
+        rest = args if isinstance(args, list) else []
+    return rest[0] if rest and isinstance(rest[0], str) else None
 
 
 def _node_of(command: object) -> str | None:
@@ -3772,8 +3785,9 @@ def mcp_registrations() -> list[McpRegistration]:
         for project, section in scopes:
             entry = section.get(entry_key) if isinstance(section, dict) else None
             if isinstance(entry, dict):
-                found.append(McpRegistration(name, path, _node_of(entry.get("command")),
-                                             project=project))
+                command = entry.get("command")
+                found.append(McpRegistration(name, path, _node_of(command), project=project,
+                                             launcher=_launcher_of(command, entry.get("args"))))
     codex = Path.home() / ".codex" / "config.toml"
     try:
         data = tomllib.loads(codex.read_text()) if codex.exists() else None
@@ -3783,7 +3797,9 @@ def mcp_registrations() -> list[McpRegistration]:
     servers = data.get("mcp_servers") if isinstance(data, dict) else None
     entry = servers.get("quern") if isinstance(servers, dict) else None
     if isinstance(entry, dict):
-        found.append(McpRegistration("codex", codex, _node_of(entry.get("command"))))
+        command = entry.get("command")
+        found.append(McpRegistration("codex", codex, _node_of(command),
+                                     launcher=_launcher_of(command, entry.get("args"))))
     return found
 
 
