@@ -406,6 +406,17 @@ class TestJava:
         assert report.symbols[0].uuid == "e1ad14241ecb07832d"
         assert report.symbols[0].build_id != newer.build_id
 
+    def test_a_stamp_matches_only_the_crashed_apps_records(self, tmp_path, tools):
+        root = _recorded(tmp_path)
+        [path] = root.glob("*/record.json")
+        data = json.loads(path.read_text())
+        data["bundle_id"] = "com.example.other"
+        path.write_text(json.dumps(data))
+        report = _java_report(file="r8-map-id-e1ad14241ecb07832d")
+        fake = FakeAndroidTools(retrace=RETRACED)
+        _run([report], symbolicate.SymbolFinder(root, fake))
+        assert fake.calls == [] and "no build record has the R8 mapping" in report.symbols[0].note
+
     def test_a_stamp_with_no_record_is_said(self, tmp_path, tools):
         report = _java_report(file="r8-map-id-deadbeef")
         _run([report], symbolicate.SymbolFinder(tmp_path / "records", FakeAndroidTools()))

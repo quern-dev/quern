@@ -531,7 +531,8 @@ def _mapping_for(report: CrashReport, java: list[CrashFrame],
     stamped = {m.group(1) for f in java if (m := _MAP_ID.match(f.file or ""))}
     with_mapping = [r for r in records if r.mapping and not r.dsyms_expired]
     if stamped:
-        exact = [r for r in with_mapping if r.mapping_id in stamped]
+        exact = [r for r in with_mapping
+                 if r.mapping_id in stamped and r.bundle_id == report.bundle_id]
         if exact:
             return exact[0], "", True
         return None, (f"no build record has the R8 mapping {sorted(stamped)[0][:12]} this "
