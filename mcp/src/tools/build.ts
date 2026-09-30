@@ -98,4 +98,33 @@ xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
       };
     }
   });
+
+  server.registerTool("record_android_build", {
+    description: `Record an Android build so its crashes can be symbolicated. quern does not run Gradle: build the variant yourself (./gradlew assembleStagingRelease), then call this with the app module's directory and the variant, right after the build: it records whatever build/ holds, and says when that is more than an hour old.
+
+quern keeps copies of what symbolicating needs, because the next build overwrites them: the APK's package, versionName and versionCode; R8's mapping.txt and its pg_map_id for a minified variant (not kept when the APK's own R8 marker names another mapping); and the unstripped native libraries from merged_native_libs, by the BuildId a tombstone names them by. get_latest_crash then retraces a minified build's Java frames with retrace (Android SDK command-line tools) and resolves native frames with the NDK's llvm-symbolizer. Records follow the same retention as iOS builds: symbols for the newest 10 builds per variant, records for 30 days.
+
+Returns the record and a one-line summary. A variant with no APK output is a 404 that names the variants that were built.`,
+    inputSchema: strictParams({
+      module_path: z.string().describe(
+        "The app module's absolute directory: the one with build.gradle(.kts) and build/, e.g. /path/to/project/app"
+      ),
+      variant: z.string().describe(
+        "The variant built, e.g. stagingRelease, prodDebug"
+      ),
+    }),
+  }, async ({ module_path, variant }) => {
+    try {
+      const data = await apiRequest("POST", "/api/v1/builds/android/record", undefined,
+                                    { module_path, variant }) as Record<string, unknown>;
+      return {
+        content: [{ type: "text" as const, text: (data.summary as string) + "\n\n" + JSON.stringify(data.record, null, 2) }],
+      };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      };
+    }
+  });
 }

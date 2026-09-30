@@ -359,7 +359,11 @@ _NATIVE_BUILD_ID = re.compile(r"\s*\(BuildId: ([0-9a-fA-F]+)\)\s*$")
 _NATIVE_APK_OFFSET = re.compile(r"\s*\(offset 0x[0-9a-fA-F]+\)")
 #: `at com.example.Foo.bar(Foo.java:42)`, `(Native Method)`, `(Unknown Source:3)`
 _JAVA = re.compile(r"^\s*at (\S+?)\((.*)\)\s*$")
-_JAVA_SOURCE = re.compile(r"^([^:]+?)(?::(\d+))?$")
+#: `Feed.kt:12`, or a prebuilt library's `com.google.android.gms:play-services-
+#: basement@@18.9.0:3`, whose "file" has colons of its own: the line is the
+#: digits after the last one.
+#: `(:12)` is an empty source file: `-renamesourcefileattribute` with no name.
+_JAVA_SOURCE = re.compile(r"^(.*?)(?::(\d+))?$")
 #: The platform's and common libraries' packages: not the app's own code. Used
 #: only when the record does not name the app's package.
 _JAVA_NOT_APP = (
@@ -426,6 +430,11 @@ def _native_path_and_symbol(rest: str) -> tuple[str, str, int | None]:
     return path, inner.strip(), None
 
 
+def is_java_frame(line: str) -> bool:
+    """Whether `java_frames` reads this line as a frame."""
+    return bool(_JAVA.match(line))
+
+
 def java_frames(lines: list[str], package: str = "") -> list[CrashFrame]:
     """Frames from `at …` lines, with which ones are the app's decided together.
 
@@ -448,7 +457,9 @@ def java_frames(lines: list[str], package: str = "") -> list[CrashFrame]:
         frames.append(CrashFrame(
             symbol=symbol,
             file=file,
-            line=_int(source.group(2)) if source and source.group(2) and file else None,
+            # Kept for `Unknown Source:539` too: no file for a reader, but the
+            # line is what retrace maps an R8-minified frame by (#326).
+            line=_int(source.group(2)) if source and source.group(2) else None,
         ))
     for frame, app in zip(frames, _java_app_flags([f.symbol for f in frames], package),
                           strict=True):

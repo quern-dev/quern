@@ -322,6 +322,10 @@ class CrashFrame(BaseModel):
         description="Android native: the library's BuildId. With `image`, which of `images` "
                     "this is: two libraries can share a name.",
     )
+    #: Java: the exception line this frame's block began with (the thrown
+    #: exception, or its `Caused by:`), on the block's first frame. retrace
+    #: needs it in front of the frames it rewrites (#326).
+    thrown: str = Field(default="", exclude=True)
 
 
 class ImageSymbols(BaseModel):
@@ -456,6 +460,10 @@ class CrashReport(BaseModel):
     )
     #: Set once symbolication has run, so a report is not handed to atos again.
     symbolicated: bool = Field(default=False, exclude=True)
+    #: Android: every frame the record's trace gave, of which `frames` is the
+    #: first MAX_FRAMES (the same objects). Symbolication works over the whole
+    #: trace and re-chooses `app_frame` from it, as parsing did (#326).
+    trace: list[CrashFrame] = Field(default_factory=list, exclude=True)
 
 
 class OpenCrashDialog(BaseModel):
@@ -646,6 +654,21 @@ class BuildRecord(BaseModel):
     )
     error: str = Field(default="", description="The record could not be written")
     notes: list[str] = Field(default_factory=list)
+    mapping: str = Field(
+        default="",
+        description="Android: the R8 mapping.txt kept for it, which retraces its Java frames",
+    )
+    mapping_id: str = Field(
+        default="", description="Android: the mapping's pg_map_id, which R8 stamps into the app",
+    )
+    version_codes: list[str] = Field(
+        default_factory=list,
+        description="Android: every APK's versionCode; ABI splits give each APK its own",
+    )
+    minified: bool | None = Field(
+        default=None,
+        description="Android: whether R8 built the APK (its marker in the dex); null if unknown",
+    )
 
     @field_validator("created_at")
     @classmethod

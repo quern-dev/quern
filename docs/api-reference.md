@@ -37,6 +37,7 @@ The key lives at `~/.quern/api-key`; the server's URL and port are in `~/.quern/
 | `get_errors` | GET | `/api/v1/logs/errors` | Errors and crashes only |
 | `get_build_result` | GET | `/api/v1/builds/latest` | Most recent build result |
 | `parse_build_output` | POST | `/api/v1/builds/parse-file` | Parse a build log file from disk |
+| `record_android_build` | POST | `/api/v1/builds/android/record` | Record a Gradle build (`module_path`, absolute; `variant`) so its crashes can be symbolicated: the APK's package and version codes, R8's `mapping.txt` and `pg_map_id` (checked against the APK's own), and the unstripped native libraries by BuildId, copied. quern does not run Gradle (#347), so record right after building; outputs more than an hour old are said to be. A variant with no APK output is a 404 naming the variants built |
 | `get_latest_crash` | GET | `/api/v1/crashes/latest` | Recent parsed crash reports; with `udid`, fetched from an iPhone (USB, the last `days`, default 3) or an Android device first |
 | `clear_crashes` | DELETE | `/api/v1/crashes` | Delete the crash reports quern stored on the Mac, for one `udid` or all; the device keeps its own |
 | `clear_device_crashes` | POST | `/api/v1/crashes/device/clear` | Permanently delete every crash report on an iPhone (USB); Android and simulators are refused with the reason |
@@ -135,12 +136,42 @@ address itself a `fatalError`'s own frame resolves to compiler-generated code. `
 for that UUID, a build whose dSYMs have expired, Spotlight or `atos` unavailable.
 Only the crashed app's own frames that lack a line are sent, so a simulator's
 report, which macOS usually symbolicates, costs nothing unless one of them does,
-and Android reports and the Mac's own processes are left alone. An image is
+and the Mac's own processes are left alone (Android reports are covered below). An image is
 settled once `atos` has answered for it, and kept until the server restarts; an
 image whose symbols were not found, or could not be read, is looked up again on the
 next read (a records scan and one Spotlight query), so a build or an index that
 appears later is picked up. `symbolicate=false` does no new work; frames an earlier
 read resolved stay resolved.
+
+**Android reports are symbolicated against a recorded Gradle build**
+(`record_android_build`). When a record's `mapping.txt` matches the crash, the Java
+frames are retraced with `retrace` from the Android SDK command-line tools: the whole
+trace, past the 30 frames `frames` shows, in one run, each block after its exception
+line, because retrace rewrites a NullPointerException's frames and resolves outlined
+frames only with that context. An inlined frame becomes one frame per function,
+innermost first; frames retrace writes nothing for (outlines, usually) are left out;
+and the app frame is chosen again from the real names, as the innermost cause's first
+app frame. `frames_resolved` of `frames_total` counts the frames retrace renamed or
+that carry R8's marks. The mapping is chosen by the `r8-map-id` stamp when a frame
+carries one, and otherwise by package and version, which a note always says, since
+local builds share a version. A version-only match is applied only with proof the
+trace is that build's: a frame's own class renamed, a file retrace gives back for a
+frame printed without one (R8 stripped it; kotlinc's source-less classes come back
+without one), or a `SourceFile` / `r8-map-id-` frame. Nor is it applied when the
+newest record of that version is unminified and the trace shows no sign of R8. When no
+record matches, `symbols` asks for one only if the trace shows R8's marks: a
+`SourceFile` or `r8-map-id-<id>` source file, `Unknown Source` with a line on a
+minified class name (`l82`, `Activity$b`), or every one of the app's frames printed
+without a source file, where the rules strip them. At record time the APK's own marker
+is read: a mapping from another R8 build, or one left beside a D8 (unminified) build,
+is not kept. Native frames in the app's own libraries are matched by BuildId to the
+record's unstripped copies, each checked against its BuildId before use, and resolved
+with the NDK's `llvm-symbolizer` at the pc the tombstone gives; a frame that gains a
+line takes the symbolizer's function name with it. A missing tool, record or mapping,
+a tool that fails or cannot run, and records that cannot be read are said in `symbols`
+and looked up again on the next read, as is a trace with no record yet. A tool's
+answer is kept, including one that cannot be matched to what was sent, which asking
+again would only repeat.
 
 A frame counts as the app's when:
 - **iOS:** its binary is inside the app bundle.

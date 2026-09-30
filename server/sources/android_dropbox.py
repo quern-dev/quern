@@ -199,6 +199,7 @@ def _parse_record(
         signal=signal,
         top_frames=[f.strip() for f in frames[:TOP_FRAMES]],
         frames=structured[:crash_frames.MAX_FRAMES],
+        trace=structured,
         images=_native_images(native, app_frame),
         frames_from=_FRAMES_FROM[kind] if structured else "",
         app_frame=app_frame,
@@ -289,26 +290,48 @@ def _java_trace(body: str, package: str) -> tuple[list[CrashFrame], CrashFrame |
     cause's message is the reason.
     """
     blocks: list[list[str]] = [[]]
+    first = _JAVA_EXCEPTION.search(body)
+    headers = [first.group(0).strip() if first else ""]
     for line in body.splitlines():
         if line.startswith("Caused by: "):
             blocks.append([])
-        elif _JAVA_FRAME.match(line):
+            headers.append(line.strip())
+        elif _JAVA_FRAME.match(line) and crash_frames.is_java_frame(line):
+            # Only lines the parser reads, so the frames split back into
+            # blocks exactly; a line it skipped shifted every later block.
             blocks[-1].append(line)
     # Decided over the whole trace, so every block agrees on which package is
     # the app's; then split back into blocks to find the innermost cause.
     lines = [line for block in blocks for line in block]
     frames = _safe(crash_frames.java_frames, lines, package)
     parsed, i = [], 0
-    for block in blocks:
+    for block, header in zip(blocks, headers, strict=True):
         parsed.append(frames[i:i + len(block)])
+        if parsed[-1] and len(frames) == len(lines):
+            parsed[-1][0].thrown = header
         i += len(block)
-    app_frame = next((a for a in (crash_frames.first_app_frame(b) for b in reversed(parsed))
-                      if a is not None), None)
+    app_frame = root_cause_app_frame(parsed)
     causes = _CAUSED_BY.findall(body)
     # The root cause; a trace with no cause is its own.
-    first = _JAVA_EXCEPTION.search(body)
     reason = causes[-1].strip() if causes else (first.group(0).strip() if first else "")
     return frames, app_frame, reason
+
+
+def root_cause_app_frame(blocks: list[list[CrashFrame]]) -> CrashFrame | None:
+    """The first app frame of the innermost cause that reaches the app's code."""
+    return next((a for a in (crash_frames.first_app_frame(b) for b in reversed(blocks))
+                 if a is not None), None)
+
+
+def java_blocks(frames: list[CrashFrame]) -> list[list[CrashFrame]]:
+    """Frames split back into the exception's blocks, by the `thrown` line on
+    each block's first frame."""
+    blocks: list[list[CrashFrame]] = [[]]
+    for frame in frames:
+        if frame.thrown and blocks[-1]:
+            blocks.append([])
+        blocks[-1].append(frame)
+    return blocks
 
 
 #: What `frames` is, per kind of record.
