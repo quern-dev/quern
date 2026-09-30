@@ -209,16 +209,28 @@ enum UpdateMenuItem: Equatable {
     /// A git install is checked first. When both apply the git reason is the
     /// one to show: it is the property of the install, true on every machine,
     /// where the Node one is a property of this launch.
-    static func forStaged(latestVersion: String?, install: InstallKind,
+    ///
+    /// No version in the title (#352). The one available is `latest_version`
+    /// from `update-info.json`, a cached answer refreshed at most once a day,
+    /// while the update itself installs the newest release on the channel -- so
+    /// the number could be older than what the click installs. The item
+    /// promises what it does: update to the latest.
+    static func forStaged(install: InstallKind,
                           node: NodeVisibility = .check()) -> UpdateMenuItem
     {
-        let suffix = latestVersion.map { " — v\($0)" } ?? ""
         if install.isGit {
-            return .updateInTerminal("Update in Terminal…" + suffix, .gitInstall)
+            return .updateInTerminal("Update in Terminal…", .gitInstall)
         }
         if case .managedElsewhere(let manager) = node {
-            return .updateInTerminal("Update in Terminal…" + suffix, .nodeManagedElsewhere(manager))
+            return .updateInTerminal("Update in Terminal…", .nodeManagedElsewhere(manager))
         }
-        return .restartToUpdate("Restart to Update" + suffix)
+        return .restartToUpdate("Restart to Update")
+    }
+
+    /// The status item's tooltip. Without a version, for the reason above.
+    static func tooltip(failed: Bool, updateAvailable: Bool, running: Bool) -> String {
+        if failed { return "Quern could not start — open the menu" }
+        if updateAvailable { return "Quern — update available" }
+        return running ? "Quern is running" : "Quern is stopped"
     }
 }

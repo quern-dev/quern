@@ -65,14 +65,13 @@ enum InstallKindTests {
             // real machine, and a test that did that would be a report about
             // whoever ran it.
             let git = InstallKind.git(URL(fileURLWithPath: "/c", isDirectory: true))
-            Harness.expect(UpdateMenuItem.forStaged(latestVersion: "0.18.5", install: git,
+            Harness.expect(UpdateMenuItem.forStaged(install: git,
                                                     node: .visible),
-                           .updateInTerminal("Update in Terminal… — v0.18.5", .gitInstall), "git")
-            Harness.expect(UpdateMenuItem.forStaged(latestVersion: "0.18.5",
-                                                    install: .release(release), node: .visible),
-                           .restartToUpdate("Restart to Update — v0.18.5"), "release")
+                           .updateInTerminal("Update in Terminal…", .gitInstall), "git")
+            Harness.expect(UpdateMenuItem.forStaged(install: .release(release), node: .visible),
+                           .restartToUpdate("Restart to Update"), "release")
             // Unknown keeps today's behaviour rather than guessing git.
-            Harness.expect(UpdateMenuItem.forStaged(latestVersion: nil, install: .unknown,
+            Harness.expect(UpdateMenuItem.forStaged(install: .unknown,
                                                     node: .visible),
                            .restartToUpdate("Restart to Update"), "unknown")
         }
@@ -80,20 +79,45 @@ enum InstallKindTests {
         Harness.test("a release install whose node is managed goes to Terminal, naming the manager") {
             // The #339 case: node exists and works in every shell, and this
             // launch cannot see it, so the update fails naming Node.
-            Harness.expect(UpdateMenuItem.forStaged(latestVersion: "0.22.1",
-                                                    install: .release(release),
+            Harness.expect(UpdateMenuItem.forStaged(install: .release(release),
                                                     node: .managedElsewhere("fnm")),
-                           .updateInTerminal("Update in Terminal… — v0.22.1",
+                           .updateInTerminal("Update in Terminal…",
                                              .nodeManagedElsewhere("fnm")), "fnm")
             Harness.expect(TerminalReason.nodeManagedElsewhere("fnm").menuTitle,
                            "Why Terminal? (Node is managed by fnm)", "says which one")
         }
 
+        Harness.test("no version is promised: the update installs the latest (#352)") {
+            // The cached latest_version is refreshed at most once a day, and
+            // the update installs whatever is newest -- so a number here could
+            // be older than what the click installs.
+            let git = InstallKind.git(URL(fileURLWithPath: "/c", isDirectory: true))
+            for item in [UpdateMenuItem.forStaged(install: .release(release), node: .visible),
+                         UpdateMenuItem.forStaged(install: git, node: .visible),
+                         UpdateMenuItem.forStaged(install: .release(release),
+                                                  node: .managedElsewhere("fnm"))] {
+                let title: String
+                switch item {
+                case .restartToUpdate(let t): title = t
+                case .updateInTerminal(let t, _): title = t
+                }
+                Harness.expect(!title.contains("v0.") && !title.contains("—"),
+                               "no version in \(title)")
+            }
+            Harness.expect(UpdateMenuItem.tooltip(failed: false, updateAvailable: true,
+                                                  running: true),
+                           "Quern — update available", "tooltip")
+            Harness.expect(UpdateMenuItem.tooltip(failed: true, updateAvailable: true,
+                                                  running: false),
+                           "Quern could not start — open the menu", "a failure comes first")
+            Harness.expect(UpdateMenuItem.tooltip(failed: false, updateAvailable: false,
+                                                  running: false), "Quern is stopped", "stopped")
+        }
+
         Harness.test("a genuinely absent node is not sent to Terminal") {
             // Terminal would not help: there is no node there either. Routing it
             // would move the same failure somewhere the user has to type.
-            Harness.expect(UpdateMenuItem.forStaged(latestVersion: nil,
-                                                    install: .release(release), node: .absent),
+            Harness.expect(UpdateMenuItem.forStaged(install: .release(release), node: .absent),
                            .restartToUpdate("Restart to Update"), "absent stays put")
             Harness.expect(NodeVisibility.absent.needsTerminal, false, "absent")
             Harness.expect(NodeVisibility.visible.needsTerminal, false, "visible")
@@ -104,7 +128,7 @@ enum InstallKindTests {
             // Both apply. Git is the property of the install and true on every
             // machine; the node one is a property of this launch.
             let git = InstallKind.git(URL(fileURLWithPath: "/c", isDirectory: true))
-            Harness.expect(UpdateMenuItem.forStaged(latestVersion: nil, install: git,
+            Harness.expect(UpdateMenuItem.forStaged(install: git,
                                                     node: .managedElsewhere("fnm")),
                            .updateInTerminal("Update in Terminal…", .gitInstall), "git wins")
         }
