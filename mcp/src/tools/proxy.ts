@@ -335,8 +335,8 @@ The system_proxy field shows whether the macOS system proxy is currently
 configured. If null/false, the user's browser works normally and traffic
 is NOT being captured.
 
-The local_capture field is a list of process names being captured via mitmproxy
-local mode. When non-empty, traffic from those processes is transparently captured
+The local_capture field is the list of entries being captured via mitmproxy
+local mode -- names, PIDs or ! exclusions (see set_local_capture). When non-empty, traffic from those processes is transparently captured
 without needing a system proxy. Empty list means disabled.
 Name the process that actually makes the requests: Safari's traffic leaves through
 com.apple.WebKit.Networking, not MobileSafari, so ["MobileSafari"] alone captures
@@ -987,9 +987,22 @@ The bypass_patterns field in proxy_status shows the current list.`,
   });
 
   server.registerTool("set_local_capture", {
-    description: `Set the list of process names for local capture mode. Uses mitmproxy's
+    description: `Set the list of processes for local capture mode. Uses mitmproxy's
 macOS System Extension to transparently capture traffic from specific processes
 without configuring a system proxy.
+
+ENTRY SYNTAX. Each entry goes to mitmproxy's local mode unchanged, so it takes
+mitmproxy's forms, not only names:
+- a name matches as a case-sensitive SUBSTRING of the process's full executable
+  path -- the same path flows report as source_process, so any fragment of it
+  works, not just the final component;
+- a bare number is a PID;
+- a leading ! excludes, either form: "!12345", "!Helper".
+Entries apply in order and the FIRST one sets the starting point. A list that
+begins with an exclusion captures EVERY process on the Mac except the ones
+excluded, and the minimum below is appended after your entries, so it does not
+narrow that. To drop one process from a capture, put the exclusion after an
+include -- ["MyApp", "!12345"], never ["!12345"].
 
 Restarts the proxy automatically to apply the new configuration — no server
 restart needed. Pass an empty list to disable local capture.
@@ -1024,7 +1037,7 @@ extension in System Settings > Privacy & Security.`,
       processes: z
         .array(z.string())
         .describe(
-          'List of process names to capture. For web traffic include com.apple.WebKit.Networking -- Safari and in-app web views egress through it, so ["MobileSafari"] alone captures nothing. Default: ["MobileSafari", "com.apple.WebKit.Networking"], and those two are kept even when you name others. Replaces the rest of the current list; empty list disables local capture.'
+          'Entries to capture: a name (case-sensitive substring of the executable path shown as source_process on flows), a PID, or either prefixed with ! to exclude. Order matters: a list that starts with an exclusion captures every other process on the Mac. For web traffic include com.apple.WebKit.Networking -- Safari and in-app web views egress through it, so ["MobileSafari"] alone captures nothing. Default: ["MobileSafari", "com.apple.WebKit.Networking"], and those two are kept even when you name others. Replaces the rest of the current list; empty list disables local capture.'
         ),
       skip_cert_check: z
         .boolean()
