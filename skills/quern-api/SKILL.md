@@ -188,6 +188,7 @@ from REST paths in non-obvious ways — this reference gives you the correct map
 |----------|--------|------|
 | `get_build_result` | GET | `/api/v1/builds/latest` |
 | `parse_build_output` | POST | `/api/v1/builds/parse` |
+| `record_android_build` | POST | `/api/v1/builds/android/record` |
 | `get_latest_crash` | GET | `/api/v1/crashes/latest` |
 | `clear_crashes` | DELETE | `/api/v1/crashes` |
 | `clear_device_crashes` | POST | `/api/v1/crashes/device/clear` |

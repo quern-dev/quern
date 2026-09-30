@@ -26,9 +26,11 @@ only when complete, so a record that exists is whole.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import plistlib
+import re
 import shutil
 import uuid as uuid_mod
 from collections.abc import Awaitable, Callable
@@ -36,7 +38,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from server.config import CONFIG_DIR
-from server.device import macho
+from server.device import elf, macho
 from server.models import BuildBinary, BuildRecord
 
 logger = logging.getLogger(__name__)
@@ -120,6 +122,123 @@ async def record_build(
         record.error = f"the record could not be written to {root}: {e}"
         logger.warning("Build record %s not written: %s", build_id, e)
     return record
+
+
+class AndroidBuildNotFound(ValueError):
+    """The variant has no APK output to record, said with what there is."""
+
+
+#: `# pg_map_id: e1ad14241ecb…` in mapping.txt's header.
+_MAP_ID = re.compile(r"^# pg_map_id: ([0-9a-f]+)\s*$")
+
+
+async def record_android_build(
+    module_dir: Path, variant: str, *, root: Path | None = None, now: datetime | None = None,
+) -> BuildRecord:
+    """Record a Gradle build of `variant` in `module_dir` (the app module).
+
+    quern does not run Gradle (#347), so the agent builds and then records:
+    the APK's package and version from AGP's `output-metadata.json`, R8's
+    `mapping.txt` with its `pg_map_id` when the variant is minified, and the
+    unstripped native libraries from `merged_native_libs`, each by the BuildId
+    a tombstone names it by. All copied, because the next build overwrites
+    them. Raises `AndroidBuildNotFound` when the variant has no APK output;
+    anything a build can leave behind short of that is said on the record.
+    """
+    root = root or RECORDS_DIR
+    created = now or datetime.now(UTC)
+    metadata = await asyncio.to_thread(_android_metadata, module_dir, variant)
+    element = (metadata.get("elements") or [{}])[0]
+    build_id = f"{created:%Y%m%d-%H%M%S}-android-{uuid_mod.uuid4().hex[:6]}"
+    record = BuildRecord(
+        build_id=build_id, created_at=created, project_path=str(module_dir), scheme=variant,
+        configuration=variant, platform="android",
+        app_path=str(metadata["_dir"] / str(element.get("outputFile") or "")),
+        bundle_id=str(metadata.get("applicationId") or ""),
+        version=str(element.get("versionName") or ""),
+        build_number=str(element.get("versionCode") or ""),
+    )
+    partial, final = root / (build_id + _PARTIAL), root / build_id
+    try:
+        partial.mkdir(parents=True)
+        await asyncio.to_thread(_keep_android_symbols, module_dir, variant, record,
+                                partial / "symbols", final / "symbols")
+        (partial / "record.json").write_text(record.model_dump_json(indent=2))
+        partial.rename(final)
+    except asyncio.CancelledError:
+        shutil.rmtree(partial, ignore_errors=True)
+        raise
+    except OSError as e:
+        shutil.rmtree(partial, ignore_errors=True)
+        for b in record.binaries:
+            b.dsym = b.dwarf = ""
+        record.mapping = ""
+        record.error = f"the record could not be written to {root}: {e}"
+        logger.warning("Build record %s not written: %s", build_id, e)
+    return record
+
+
+def _android_metadata(module_dir: Path, variant: str) -> dict:
+    outputs = module_dir / "build" / "outputs" / "apk"
+    seen = []
+    for path in sorted(outputs.rglob("output-metadata.json")):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        name = str(data.get("variantName") or "")
+        seen.append(name)
+        if name == variant:
+            data["_dir"] = path.parent
+            return data
+    if not outputs.is_dir():
+        raise AndroidBuildNotFound(
+            f"no APK outputs under {outputs}: build the variant first, and pass the app "
+            f"module's directory (the one with build.gradle), not the project root")
+    raise AndroidBuildNotFound(
+        f"no APK output for variant {variant!r} under {outputs}; built variants: "
+        f"{', '.join(sorted(set(seen))) or 'none'}")
+
+
+def _keep_android_symbols(
+    module_dir: Path, variant: str, record: BuildRecord, out: Path, recorded_as: Path,
+) -> None:
+    mapping = module_dir / "build" / "outputs" / "mapping" / variant / "mapping.txt"
+    if mapping.is_file():
+        out.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(mapping, out / "mapping.txt")
+        record.mapping = str(recorded_as / "mapping.txt")
+        record.mapping_id = _map_id(mapping)
+        if not record.mapping_id:
+            record.notes.append("mapping.txt carries no pg_map_id; matched by version only")
+    libs = module_dir / "build" / "intermediates" / "merged_native_libs" / variant
+    for so in sorted(libs.rglob("*.so")):
+        found = elf.read(so)
+        if found is None:
+            continue
+        rel = Path("lib") / so.parent.name / so.name
+        ids = {found.abi: found.build_id} if found.build_id else {}
+        binary = BuildBinary(path=str(rel), uuids=ids)
+        if found.build_id:
+            (out / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(so, out / rel)
+            binary.dsym = binary.dwarf = str(recorded_as / rel)
+        else:
+            binary.dsym_error = "no BuildId, so no crash can be matched to it"
+        record.binaries.append(binary)
+
+
+def _map_id(mapping: Path) -> str:
+    with open(mapping, errors="replace") as f:
+        for i, line in enumerate(f):
+            m = _MAP_ID.match(line)
+            if m:
+                return m.group(1)
+            if i > 50 or not line.startswith("#"):
+                return ""
+    return ""
 
 
 def save(record: BuildRecord, root: Path | None = None) -> None:
@@ -350,21 +469,23 @@ def prune(root: Path | None = None, *, now: datetime | None = None,
             except OSError as e:
                 logger.warning("Could not remove %s: %s", directory, e)
             continue
-        if record.platform != "iphoneos" or not any(b.dsym for b in record.binaries):
+        if record.platform not in ("iphoneos", "android") or not (
+                any(b.dsym for b in record.binaries) or record.mapping):
             continue
         key = (record.project_path, record.scheme)
         kept_per_scheme[key] = kept_per_scheme.get(key, 0) + 1
         if kept_per_scheme[key] <= keep:
             continue
         try:
-            shutil.rmtree(directory / "dSYMs")
-        except FileNotFoundError:
-            pass
+            for kept in ("dSYMs", "symbols"):     # iOS dSYMs; Android mapping and libraries
+                if (directory / kept).exists():
+                    shutil.rmtree(directory / kept)
         except OSError as e:
-            logger.warning("Could not remove dSYMs of %s: %s", record.build_id, e)
+            logger.warning("Could not remove the symbols of %s: %s", record.build_id, e)
             continue
         for b in record.binaries:
             b.dsym = b.dwarf = ""
+        record.mapping = ""
         record.dsyms_expired = True
         try:
             _write(record, directory)
@@ -386,6 +507,12 @@ def summary_line(record: BuildRecord) -> str:
     if record.error:
         return f"{head} -- {record.error}."
     notes = "".join(f" Note: {n}." for n in record.notes)
+    if record.platform == "android":
+        libs = sum(1 for b in record.binaries if b.dwarf)
+        mapping = (f"its R8 mapping ({record.mapping_id[:12]})" if record.mapping
+                   else "no R8 mapping (not a minified variant)")
+        return (f"{head}; kept {mapping} and {libs} native "
+                f"librar{'y' if libs == 1 else 'ies'} by BuildId.{notes}")
     if record.platform != "iphoneos":
         n = len(record.binaries)
         whose = "1 binary's" if n == 1 else f"{n} binaries'"

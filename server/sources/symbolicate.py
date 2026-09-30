@@ -34,7 +34,7 @@ from pathlib import Path
 
 from server.device import build_records
 from server.models import CrashFrame, CrashImage, CrashReport, ImageSymbols
-from server.sources import crash_frames
+from server.sources import crash_frames, symbolicate_android
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +59,11 @@ async def _run(argv: list[str]) -> tuple[int, str, str]:
     proc = await asyncio.create_subprocess_exec(
         *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
+    # retrace loads a whole R8 mapping, hundreds of megabytes for a real app.
+    timeout = (symbolicate_android.RETRACE_TIMEOUT if Path(argv[0]).name == "retrace"
+               else TOOL_TIMEOUT)
     try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=TOOL_TIMEOUT)
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except BaseException:
         if proc.returncode is None:
             proc.kill()
@@ -308,7 +311,9 @@ async def symbolicate_many(
         async with gate, finder.report_lock(report.crash_id):
             if report.symbolicated:           # done while this one waited
                 return
-            report.symbolicated = await _symbolicate(report, finder, read)
+            how = (symbolicate_android.symbolicate if symbolicate_android.is_android(report)
+                   else _symbolicate)
+            report.symbolicated = await how(report, finder, read)
 
     await asyncio.gather(*(one(r) for r in reports if not r.symbolicated and not r.mac_process))
 

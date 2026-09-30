@@ -37,6 +37,7 @@ The key lives at `~/.quern/api-key`; the server's URL and port are in `~/.quern/
 | `get_errors` | GET | `/api/v1/logs/errors` | Errors and crashes only |
 | `get_build_result` | GET | `/api/v1/builds/latest` | Most recent build result |
 | `parse_build_output` | POST | `/api/v1/builds/parse-file` | Parse a build log file from disk |
+| `record_android_build` | POST | `/api/v1/builds/android/record` | Record a Gradle build (`module_path`, `variant`) so its crashes can be symbolicated: the APK's package and version, R8's `mapping.txt` and `pg_map_id`, and the unstripped native libraries by BuildId, copied. quern does not run Gradle (#347). A variant with no APK output is a 404 naming the variants built |
 | `get_latest_crash` | GET | `/api/v1/crashes/latest` | Recent parsed crash reports; with `udid`, fetched from an iPhone (USB, the last `days`, default 3) or an Android device first |
 | `clear_crashes` | DELETE | `/api/v1/crashes` | Delete the crash reports quern stored on the Mac, for one `udid` or all; the device keeps its own |
 | `clear_device_crashes` | POST | `/api/v1/crashes/device/clear` | Permanently delete every crash report on an iPhone (USB); Android and simulators are refused with the reason |
@@ -141,6 +142,18 @@ image whose symbols were not found, or could not be read, is looked up again on 
 next read (a records scan and one Spotlight query), so a build or an index that
 appears later is picked up. `symbolicate=false` does no new work; frames an earlier
 read resolved stay resolved.
+
+**Android reports are symbolicated against a recorded Gradle build**
+(`record_android_build`). A minified build's Java frames, which show R8's marks
+(a `SourceFile` or `r8-map-id-<id>` source file), are retraced against the record's
+`mapping.txt` with `retrace` from the Android SDK command-line tools, in one run per
+report. The mapping is chosen by the `r8-map-id` stamp when a frame carries one, and
+otherwise by package and version code, with a note when several recorded builds
+share them. Native frames in the app's own libraries are matched by BuildId to the
+record's unstripped copies and resolved with the NDK's `llvm-symbolizer`, at the pc
+the tombstone gives. A missing tool, record or mapping is said in `symbols` and
+looked up again on the next read. A debug build's Java frames keep their real names
+and need nothing.
 
 A frame counts as the app's when:
 - **iOS:** its binary is inside the app bundle.

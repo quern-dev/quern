@@ -646,6 +646,13 @@ class BuildRecord(BaseModel):
     )
     error: str = Field(default="", description="The record could not be written")
     notes: list[str] = Field(default_factory=list)
+    mapping: str = Field(
+        default="",
+        description="Android: the R8 mapping.txt kept for it, which retraces its Java frames",
+    )
+    mapping_id: str = Field(
+        default="", description="Android: the mapping's pg_map_id, which R8 stamps into the app",
+    )
 
     @field_validator("created_at")
     @classmethod

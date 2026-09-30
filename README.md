@@ -467,7 +467,7 @@ quern tunneld <cmd>          # Manage the tunneld LaunchDaemon (install/uninstal
 
 ## MCP Tools
 
-113 tools available via MCP. All tools are lazy-loaded and won't hog your context just by connecting the MCP. They are lightweight API wrappers and are easy for the Agent to use.
+114 tools available via MCP. All tools are lazy-loaded and won't hog your context just by connecting the MCP. They are lightweight API wrappers and are easy for the Agent to use.
 
 | Category | Tools |
 |----------|-------|
@@ -477,7 +477,7 @@ quern tunneld <cmd>          # Manage the tunneld LaunchDaemon (install/uninstal
 | Network | `query_flows`, `wait_for_flow`, `get_flow_detail`, `get_flow_summary`, `start_capture_session`, `stop_capture_session`, `proxy_status`, `start_proxy`, `stop_proxy`, `proxy_setup_guide`, `verify_proxy_setup`, `install_proxy_cert`, `record_device_proxy_config`, `set_local_capture`, `set_bypass`, `clear_bypass` |
 | System Proxy | `configure_system_proxy`, `unconfigure_system_proxy` |
 | Intercept & Mock | `set_intercept`, `clear_intercept`, `list_held_flows`, `release_flow`, `replay_flow`, `set_mock`, `list_mocks`, `update_mock`, `clear_mocks` |
-| Device | `list_devices`, `boot_device`, `shutdown_device`, `erase_device`, `install_app`, `launch_app`, `terminate_app`, `uninstall_app`, `list_apps`, `build_and_install` |
+| Device | `list_devices`, `boot_device`, `shutdown_device`, `erase_device`, `install_app`, `launch_app`, `terminate_app`, `uninstall_app`, `list_apps`, `build_and_install`, `record_android_build` |
 | UI | `get_ui_tree`, `get_element_state`, `wait_for_element`, `get_screen_summary`, `tap`, `tap_element`, `swipe`, `scroll_to_element`, `type_text`, `clear_text`, `press_button`, `get_web_content`, `wait_for_settle`, `restore_simulator_input` |
 | Screenshots | `take_screenshot`, `take_annotated_screenshot`, `start_screenshot_timeline`, `stop_screenshot_timeline`, `get_screenshot_timeline` |
 | Device Config | `set_location`, `open_url`, `grant_permission`, `set_locale`, `set_hardware_keyboard`, `set_font_scale`, `set_display_density` |
