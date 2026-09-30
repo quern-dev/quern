@@ -362,7 +362,8 @@ _JAVA = re.compile(r"^\s*at (\S+?)\((.*)\)\s*$")
 #: `Feed.kt:12`, or a prebuilt library's `com.google.android.gms:play-services-
 #: basement@@18.9.0:3`, whose "file" has colons of its own: the line is the
 #: digits after the last one.
-_JAVA_SOURCE = re.compile(r"^(.+?)(?::(\d+))?$")
+#: `(:12)` is an empty source file: `-renamesourcefileattribute` with no name.
+_JAVA_SOURCE = re.compile(r"^(.*?)(?::(\d+))?$")
 #: The platform's and common libraries' packages: not the app's own code. Used
 #: only when the record does not name the app's package.
 _JAVA_NOT_APP = (

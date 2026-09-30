@@ -47,9 +47,10 @@ _SYNTHETIC = ("$$ExternalSynthetic", "$$Lambda", "-$$Nest$")
 #: A class name as R8 writes it: `l82`, `a`, `Ab`, `y3c`. kotlinc leaves the
 #: source file out of whole classes (1,608 in a real debug build, among them
 #: kotlinx.coroutines.BuildersKt), and ART prints those `(Unknown Source:N)`
-#: too -- so without a minified name that is no mark of R8. Measured: 83% of
-#: a real mapping's renamed classes match, and the kept ones that do are
-#: libraries shipped already obfuscated (gms `zza`).
+#: too -- so without a minified name that is no mark of R8. Tested on the
+#: outer name and each inner one (`Activity$b`): measured, 100% of a real
+#: mapping's renamed classes match, as do some kept ones (gms `zza`, a kept
+#: `$a`), so it is a hint and never proof.
 _MINIFIED_CLASS = re.compile(r"^[a-zA-Z]{1,3}\d{0,4}[a-z]{0,2}$")
 #: Appended to every frame sent; retrace copies it onto each line it writes
 #: for that frame, inlined expansions included (measured).
@@ -112,10 +113,23 @@ def _is_r8(frame: CrashFrame) -> bool:
     and to count; `_names_r8` is what an unproven mapping is held to."""
     if _names_r8(frame):
         return True
-    simple = _class(frame.symbol).rpartition(".")[2].split("$")[0]
+    parts = _class(frame.symbol).rpartition(".")[2].split("$")
+    minified = bool(_MINIFIED_CLASS.match(parts[0])) or any(
+        _MINIFIED_CLASS.match(p) for p in parts[1:] if not p.isdigit())
     return (not frame.file and frame.line is not None
-            and not any(s in frame.symbol for s in _SYNTHETIC)
-            and bool(_MINIFIED_CLASS.match(simple)))
+            and not any(s in frame.symbol for s in _SYNTHETIC) and minified)
+
+
+def _hints_r8(java: list[CrashFrame]) -> bool:
+    """Whether the trace looks minified: a frame with R8's marks, or every
+    frame of the app's and its libraries' printed without a source file --
+    an app whose rules strip them, where kept classes keep their names. A
+    debug build prints its own frames' files."""
+    if any(_is_r8(f) for f in java):
+        return True
+    own = [f for f in java if not f.symbol.startswith(_PLATFORM)
+           and not any(s in f.symbol for s in _SYNTHETIC)]
+    return bool(own) and all(not f.file and f.line is not None for f in own)
 
 
 def _names_r8(frame: CrashFrame) -> bool:
@@ -314,7 +328,7 @@ async def _java(report: CrashReport, java: list[CrashFrame], beyond: CrashFrame 
     records, why = await _records(finder, read)
     record, how, exact = _mapping_for(report, java, records)
     if record is None:
-        if not any(_is_r8(f) for f in java):
+        if not _hints_r8(java):
             return False
         entry.note = how + why
         return True
@@ -349,19 +363,29 @@ async def _java(report: CrashReport, java: list[CrashFrame], beyond: CrashFrame 
     # the lines before it are what was inlined into it, from any class.
     renamed = [i for i, (lines, _) in readings.items()
                if lines and _class(lines[-1].symbol) != _class(java[i].symbol)]
-    if not exact and not renamed and not any(_names_r8(f) for f in java):
+    # Sent with a line but no file, and given a file back: R8 stripped it. A
+    # D8 build prints the file, and a class kotlinc wrote without one comes
+    # back without one (measured: BuildersKt). So a kept class of a build
+    # whose rules strip source files proves the mapping too.
+    stripped = [i for i, (lines, _) in readings.items()
+                if lines and lines[-1].file and not java[i].file and java[i].line is not None]
+    if not exact and not renamed and not stripped and not any(_names_r8(f) for f in java):
         # Nothing in the trace names its build or is spelled as only R8 spells
         # it, and the mapping renames none of its classes: an unminified build
         # of the same version, whose kept classes it would still "retrace" by
         # line number. `Unknown Source:N` is no proof -- kotlinc prints it too.
-        entry.note = (f"{how}; but that mapping renames no class in this trace, so the crash "
-                      f"is not from that minified build, and its frames were left as they were")
+        entry.note = (f"{how}; but that mapping renames no class in this trace and finds no "
+                      f"file R8 stripped, so the crash is not from that minified build, and "
+                      f"its frames were left as they were")
         entry.settled = True
         return True
-    counted = [i for i, f in enumerate(java) if i in renamed or _is_r8(f)]
+    counted = [i for i, f in enumerate(java) if i in renamed or i in stripped or _is_r8(f)]
     resolved = sum(1 for i in counted if readings[i][0] and readings[i][0][0].file
                    and readings[i][0][0].line is not None)
     removed = _apply(report, java, beyond, readings)
+    # Settled from here: the trace holds retrace's names now, and sending
+    # them back would read as a mapping that renames nothing.
+    entry.settled = True
     _reassess_app(report, beyond, removed)
     entry.frames_total = len([i for i in counted if readings[i][0]])
     entry.frames_resolved = resolved
@@ -381,7 +405,6 @@ async def _java(report: CrashReport, java: list[CrashFrame], beyond: CrashFrame 
         notes.append(f"{inlined} frames were inlined; each inlined function is listed, "
                      f"innermost first")
     entry.note = "; ".join(notes)
-    entry.settled = True                   # only now: the trace is in its final state
     return True
 
 
@@ -513,7 +536,7 @@ def _mapping_for(report: CrashReport, java: list[CrashFrame],
                 and (not report.app_version or r.version == report.app_version))
 
     newest = next((r for r in records if of_version(r)), None)
-    if newest is not None and newest.minified is False and not any(_is_r8(f) for f in java):
+    if newest is not None and newest.minified is False and not _hints_r8(java):
         # The build of this version recorded last was not minified, and the
         # trace shows no sign of R8: an older minified record of the same
         # version is not the build that crashed.

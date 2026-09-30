@@ -1464,3 +1464,75 @@ class TestRound3Edges:
         _run([report], symbolicate.SymbolFinder(_recorded(tmp_path),
                                                 FakeAndroidTools(retrace=RETRACED)))
         assert "mid-apply" in report.symbols[0].note and not report.symbolicated
+
+
+# ── review round 4 ───────────────────────────────────────────────────────────
+
+
+KEPT = ("java.lang.IllegalStateException: boom\n"
+        "\tat com.example.app.Compass.onCreate(Unknown Source:15)\n"
+        "\tat android.app.Activity.performCreate(Activity.java:8000)\n")
+
+
+class TestAKeptClassOfAStrippedBuild:
+    """Rules that strip source files print a kept class as `(Unknown
+    Source:15)`; R8 still remaps its line, and retrace gives the file back."""
+
+    def test_the_file_retrace_gives_back_proves_the_mapping(self, tmp_path, tools):
+        report = _parsed(KEPT)
+        fake = FakeAndroidTools(retrace={
+            "at com.example.app.Compass.onCreate(Unknown Source:15)":
+                "\tat com.example.app.CompassBinding.inflate(CompassBinding.java:86)\n"
+                "\tat com.example.app.Compass.onCreate(Compass.kt:45)"})
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert [(f.symbol, f.line) for f in report.frames][:2] == [
+            ("com.example.app.CompassBinding.inflate", 86),
+            ("com.example.app.Compass.onCreate", 45)]
+        e = report.symbols[0]
+        assert (e.frames_resolved, e.frames_total) == (1, 1)
+
+    def test_no_file_back_is_no_proof(self, tmp_path, tools):
+        """kotlinc's source-less classes come back without a file too."""
+        report = _parsed(KEPT)
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), FakeAndroidTools()))
+        assert report.frames[0].line == 15
+        assert "finds no file R8 stripped" in report.symbols[0].note
+
+    def test_with_no_record_it_asks_for_one(self, tmp_path, tools):
+        report = _parsed(KEPT)
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", FakeAndroidTools()))
+        assert "record it with record_android_build" in report.symbols[0].note
+
+    def test_a_renamed_inner_class_of_a_kept_one_is_a_hint(self):
+        assert symbolicate_android._is_r8(
+            CrashFrame(symbol="com.example.app.Application$a.a", line=3))
+        assert not symbolicate_android._is_r8(
+            CrashFrame(symbol="com.example.app.Application$1.run", line=3))
+
+
+class TestRound4Edges:
+    def test_an_empty_source_file_keeps_its_line(self):
+        [f] = crash_frames.java_frames(["\tat a.b.c(:12)"])
+        assert (f.file, f.line) == ("", 12)
+
+    def test_only_the_newest_record_of_the_version_speaks_for_it(self, tmp_path, tools):
+        root = tmp_path / "records"
+        debug = _gradle_module(tmp_path / "old", mapping=False)
+        _d8_apk(debug)
+        _record_android(debug, root, now=NOW.replace(minute=1))
+        _record_android(_gradle_module(tmp_path / "new"), root, now=NOW.replace(minute=2))
+        report = _java_report(file="Feed.kt")
+        fake = FakeAndroidTools(retrace={"at a.b.c(Feed.kt:3)":
+                                         "\tat com.example.app.Feed.parse(Feed.kt:12)"})
+        _run([report], symbolicate.SymbolFinder(root, fake))
+        assert report.frames[0].symbol == "com.example.app.Feed.parse"
+
+    def test_a_refusal_is_not_asked_again(self, tmp_path, tools):
+        """Asking again loads the whole mapping for the same answer."""
+        report = _parsed(KEPT)
+        fake = FakeAndroidTools()
+        finder = symbolicate.SymbolFinder(_recorded(tmp_path), fake)
+        _run([report], finder)
+        report.symbolicated = False
+        _run([report], finder)
+        assert len(fake.calls) == 1 and report.symbolicated

@@ -150,26 +150,28 @@ trace, past the 30 frames `frames` shows, in one run, each block after its excep
 line, because retrace rewrites a NullPointerException's frames and resolves outlined
 frames only with that context. An inlined frame becomes one frame per function,
 innermost first; frames retrace writes nothing for (outlines, usually) are left out;
-and the app frame is chosen again from the real names, as the innermost cause's
-first app frame. `frames_resolved` of `frames_total` counts the frames retrace
-renamed or that carry R8's marks. The mapping is chosen by the `r8-map-id` stamp when a frame carries one, and
-otherwise by package and version, which a note always says, since local builds share
-a version. A version-only match that renames none of the trace's own classes, in a
-trace with no `SourceFile` or `r8-map-id-` (kotlinc prints `Unknown Source` too), is
-from another build of that version and is not applied; nor is one whose newest record
-of that version is unminified. When no
+and the app frame is chosen again from the real names, as the innermost cause's first
+app frame. `frames_resolved` of `frames_total` counts the frames retrace renamed or
+that carry R8's marks. The mapping is chosen by the `r8-map-id` stamp when a frame
+carries one, and otherwise by package and version, which a note always says, since
+local builds share a version. A version-only match is applied only with proof the
+trace is that build's: a frame's own class renamed, a file retrace gives back for a
+frame printed without one (R8 stripped it; kotlinc's source-less classes come back
+without one), or a `SourceFile` / `r8-map-id-` frame. Nor is it applied when the
+newest record of that version is unminified and the trace shows no sign of R8. When no
 record matches, `symbols` asks for one only if the trace shows R8's marks: a
-`SourceFile` or `r8-map-id-<id>` source file, or `Unknown Source` with a line on a
-minified class name (`l82`), where the rules strip source files. At record time the APK's own marker is read: a mapping
-from another R8 build, or one left beside a D8 (unminified) build, is not kept.
-Native frames in the app's own libraries are matched by BuildId to the record's
-unstripped copies, each checked against its BuildId before use, and resolved with the
-NDK's `llvm-symbolizer` at the pc the tombstone gives; a frame that gains a line takes
-the symbolizer's function name with it. A missing tool, record or mapping, a tool that
-fails or cannot run, and records that cannot be read are said in `symbols` and looked
-up again on the next read, as is a trace with no record yet. A tool's answer is kept,
-including one that cannot be matched to what was sent, which asking again would only
-repeat.
+`SourceFile` or `r8-map-id-<id>` source file, `Unknown Source` with a line on a
+minified class name (`l82`, `Activity$b`), or every one of the app's frames printed
+without a source file, where the rules strip them. At record time the APK's own marker
+is read: a mapping from another R8 build, or one left beside a D8 (unminified) build,
+is not kept. Native frames in the app's own libraries are matched by BuildId to the
+record's unstripped copies, each checked against its BuildId before use, and resolved
+with the NDK's `llvm-symbolizer` at the pc the tombstone gives; a frame that gains a
+line takes the symbolizer's function name with it. A missing tool, record or mapping,
+a tool that fails or cannot run, and records that cannot be read are said in `symbols`
+and looked up again on the next read, as is a trace with no record yet. A tool's
+answer is kept, including one that cannot be matched to what was sent, which asking
+again would only repeat.
 
 A frame counts as the app's when:
 - **iOS:** its binary is inside the app bundle.
