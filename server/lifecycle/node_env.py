@@ -28,6 +28,7 @@ developer's real shells would be both slow and a report about the developer.
 from __future__ import annotations
 
 import contextlib
+import functools
 import os
 import re
 import shutil
@@ -90,7 +91,8 @@ Runner = Callable[..., subprocess.CompletedProcess]
 
 
 def run_bounded(argv: list[str], *, env: dict[str, str] | None = None,
-                timeout: float = PROBE_TIMEOUT, **_kw) -> subprocess.CompletedProcess:
+                timeout: float = PROBE_TIMEOUT, cwd: str | None = None,
+                **_kw) -> subprocess.CompletedProcess:
     """The default runner: bounded, lenient about bytes, and tidy on timeout.
 
     `errors="replace"` because a startup file that writes one non-UTF-8 byte
@@ -105,7 +107,7 @@ def run_bounded(argv: list[str], *, env: dict[str, str] | None = None,
     files spawn daemons (gitstatusd, atuin, direnv) that would be left behind.
     """
     proc = subprocess.Popen(  # noqa: S603
-        argv, env=env, stdin=subprocess.DEVNULL,
+        argv, env=env, cwd=cwd, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         text=True, errors="replace", start_new_session=True,
     )
@@ -224,10 +226,20 @@ def probe(
     which: Callable[..., str | None] = shutil.which,
     env: dict[str, str] | None = None,
     home: str | None = None,
+    cwd: str | None = None,
 ) -> list[NodeSite]:
-    """Where each of the four places finds `node`, and whether it is usable."""
+    """Where each of the four places finds `node`, and whether it is usable.
+
+    `cwd` is the directory every probe runs in; by default the caller's. A
+    version manager that follows the directory (fnm's `--use-on-cd`, mise,
+    volta) answers for *that* directory, which is right for "what does my
+    terminal run here" and wrong for "what will a client run", which starts
+    elsewhere.
+    """
     env = dict(os.environ if env is None else env)
     home = home or env.get("HOME") or str(Path.home())
+    if cwd is not None:
+        run = functools.partial(run, cwd=cwd)
     checks: list[Callable[[], NodeSite]] = [lambda: _here(run, which, env)]
 
     shell = user_shell(env)
@@ -472,7 +484,12 @@ def node_for_clients(
     """
     env = dict(os.environ if env is None else env)
     home = home or env.get("HOME") or str(Path.home())
-    sites = probe() if sites is None else sites
+    # From the home directory, not the caller's: run inside a project pinned
+    # to Node 20, fnm's `--use-on-cd` and mise answer 20 for every place, and
+    # the user's default 22 was never seen (measured). A client does not start
+    # in that project either.
+    run = functools.partial(run, cwd=home)
+    sites = probe(cwd=home) if sites is None else sites
     rank = {place: i for i, place in enumerate(_CLIENT_PREFERENCE)}
     candidates = sorted((s for s in sites if s.ok and s.path),
                         key=lambda s: rank.get(s.place, len(rank)))
@@ -541,11 +558,27 @@ def _fnm_default_alias(real: str, *, resolve: Callable[[str], str],
     return None
 
 
-def version_outside_a_shell(path: str, *, run: Runner = run_bounded,
-                            home: str | None = None) -> str | None:
-    """The version `path` reports under launchd's PATH, if MIN_NODE_MAJOR+:
-    how a Dock-launched MCP client would run it."""
-    return _runs_without_a_shell(path, run=run, home=home or str(Path.home()))
+def check_outside_a_shell(path: str, *, run: Runner = run_bounded,
+                          home: str | None = None) -> tuple[str, str | None]:
+    """(status, version) for `path` run the way a Dock-launched MCP client runs
+    it: launchd's PATH, from the home directory. OK, TOO_OLD, UNUSABLE when it
+    ran but gave no version (a wrapper script, a broken shim), or UNKNOWN when
+    it could not be asked (a timeout) -- which is not a finding about it."""
+    home = home or str(Path.home())
+    try:
+        result = run([path, "--version"],
+                     env={"HOME": home, "PATH": os.pathsep.join(GUI_PATH)},
+                     capture_output=True, text=True, timeout=PROBE_TIMEOUT,
+                     stdin=subprocess.DEVNULL, cwd=home)
+    except subprocess.TimeoutExpired:
+        return UNKNOWN, None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return UNUSABLE, None
+    version = (result.stdout or "").strip() if result.returncode == 0 else ""
+    major = major_version(version)
+    if major is None:
+        return UNUSABLE, None
+    return (OK if major >= MIN_NODE_MAJOR else TOO_OLD), version
 
 
 def _runs_without_a_shell(path: str, *, run: Runner, home: str) -> str | None:

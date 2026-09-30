@@ -134,11 +134,20 @@ If you ran the installer, the MCP server is already registered. Just open Claude
 
 > "Boot an iPhone 16 simulator, install my app, and show me what API calls happen during login"
 
-If you installed manually, run `quern mcp-install` to register.
+If you installed manually, run `quern mcp-install` to register. It registers
+Claude Code, Claude Desktop, Cursor, OpenCode and Codex with the absolute path
+of a Node 22+ binary, and prints which one, so each client runs that node rather
+than whichever `node` its own PATH finds. Run it again after changing Node
+versions in a way that removes that binary; `quern doctor` lists each client's
+registration and says when that is needed.
 
 ### Other MCP Clients
 
-Point your client at: `node ~/.local/share/quern/mcp/dist/launcher.cjs`
+Point your client at an absolute Node 22+ binary running
+`~/.local/share/quern/mcp/dist/launcher.cjs` -- for example `command`
+`/opt/homebrew/bin/node` (or `~/.local/share/fnm/aliases/default/bin/node`,
+written out in full) with that launcher as its argument. A bare `node` is
+resolved on the client's own PATH, which is the problem described below.
 
 Use `launcher.cjs` rather than `index.js`. It checks the Node version first and tells you which binary it is running under if that version is too old — worth having, because MCP clients do not always pick the node you expect.
 

@@ -659,9 +659,10 @@ def _node_env_is_not_this_machine(monkeypatch):
     monkeypatch.setattr(node_env, "node_for_clients",
                         lambda *_a, **_kw: node_env.ClientNode("/test/node", "v22.0.0",
                                                                "login shell"))
-    monkeypatch.setattr(node_env, "_real_version_outside_a_shell",
-                        node_env.version_outside_a_shell, raising=False)
-    monkeypatch.setattr(node_env, "version_outside_a_shell", lambda *_a, **_kw: "v22.0.0")
+    monkeypatch.setattr(node_env, "_real_check_outside_a_shell",
+                        node_env.check_outside_a_shell, raising=False)
+    monkeypatch.setattr(node_env, "check_outside_a_shell",
+                        lambda *_a, **_kw: (node_env.OK, "v22.0.0"))
     monkeypatch.setattr(setup, "_real_mcp_registrations", setup.mcp_registrations,
                         raising=False)
     monkeypatch.setattr(setup, "mcp_registrations", lambda: [])

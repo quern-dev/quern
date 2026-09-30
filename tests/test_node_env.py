@@ -704,3 +704,41 @@ class TestTheNodeClientsAreRegisteredWith:
             raise OSError("exec format error")
         assert node_env._real_node_for_clients(
             [_site("login shell", SHELL_LINK)], run=run, env={}, home=HOME) is None
+
+    def test_every_run_is_from_home_not_the_callers_project(self):
+        """Inside a project pinned to Node 20, fnm's `--use-on-cd` and mise
+        answer 20 everywhere, and the default 22 was never seen (measured)."""
+        m = Machine(versions={SHELL_LINK: "v22.22.2", FNM_V22: "v22.22.2"},
+                    exec_paths={SHELL_LINK: FNM_V22})
+        m.choose([_site("login shell", SHELL_LINK)])
+        assert m.calls and all(kw.get("cwd") == HOME for _, kw in m.calls)
+
+    def test_the_probe_it_runs_itself_is_from_home(self, monkeypatch):
+        seen = {}
+
+        def probe(**kw):
+            seen.update(kw)
+            return []
+
+        monkeypatch.setattr(node_env, "probe", probe)
+        node_env._real_node_for_clients(env={"HOME": HOME}, home=HOME, run=Machine().run)
+        assert seen.get("cwd") == HOME
+
+    def test_a_relative_exec_path_is_not_taken(self):
+        m = Machine(versions={SHELL_LINK: "v22.22.2", "node": "v22.22.2"},
+                    exec_paths={SHELL_LINK: "node"})
+        assert m.choose([_site("login shell", SHELL_LINK)]) is None
+
+
+class TestCheckOutsideAShell:
+    def _check(self, run):
+        return node_env._real_check_outside_a_shell("/n/node", run=run, home=HOME)
+
+    def test_the_four_answers(self):
+        assert self._check(lambda *a, **k: _done("v22.1.0\n")) == (node_env.OK, "v22.1.0")
+        assert self._check(lambda *a, **k: _done("v20.20.2\n")) == (node_env.TOO_OLD, "v20.20.2")
+        assert self._check(lambda *a, **k: _done("usage: sh\n", 2)) == (node_env.UNUSABLE, None)
+
+        def timeout(*a, **k):
+            raise subprocess.TimeoutExpired("node", 10)
+        assert self._check(timeout) == (node_env.UNKNOWN, None)

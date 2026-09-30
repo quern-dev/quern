@@ -356,10 +356,11 @@ def _install_json_mcpservers(config_path: Path, mcp_entry: Path,
         config["mcpServers"] = {}
 
     existing = config["mcpServers"].get("quern-debug")
-    config["mcpServers"]["quern-debug"] = {
-        "command": node,
-        "args": [str(mcp_entry)],
-    }
+    # Merged, not replaced: an `env` or timeout someone added -- a PATH
+    # workaround for this very problem, say -- survives re-registering.
+    entry = dict(existing) if isinstance(existing, dict) else {}
+    entry.update({"command": node, "args": [str(mcp_entry)]})
+    config["mcpServers"]["quern-debug"] = entry
 
     config_path.write_text(json.dumps(config, indent=2) + "\n")
 
@@ -386,10 +387,9 @@ def _install_opencode(mcp_entry: Path, node: str = "node") -> tuple[bool, str]:
         config["mcp"] = {}
 
     existing = config["mcp"].get("quern")
-    config["mcp"]["quern"] = {
-        "type": "local",
-        "command": [node, str(mcp_entry)],
-    }
+    entry = dict(existing) if isinstance(existing, dict) else {}
+    entry.update({"type": "local", "command": [node, str(mcp_entry)]})
+    config["mcp"]["quern"] = entry
 
     config_path.write_text(json.dumps(config, indent=2) + "\n")
 
@@ -434,7 +434,27 @@ def _toml_upsert_section(text: str, section: str, fields: dict) -> str:
             end = i
             break
 
-    lines[start:end] = block + ["\n"]
+    # Keep the keys we are not writing (`env`, `startup_timeout_sec`), so
+    # re-registering does not strip what someone added. A key we do write is
+    # dropped with any continuation lines of a multi-line value.
+    kept: list[str] = []
+    dropping = False
+    for line in lines[start + 1:end]:
+        stripped = line.strip()
+        key = stripped.split("=", 1)[0].strip() if "=" in stripped else None
+        if key is not None and not stripped.startswith("#"):
+            dropping = key in fields
+            if dropping and stripped.count("[") <= stripped.count("]"):
+                dropping = False            # a one-line value: nothing follows
+                continue
+        if dropping:
+            if "]" in stripped:
+                dropping = False
+            continue
+        if stripped:
+            kept.append(line if line.endswith("\n") else line + "\n")
+
+    lines[start:end] = block + kept + ["\n"]
     return "".join(lines)
 
 
@@ -451,9 +471,12 @@ def _install_codex(mcp_entry: Path, node: str = "node") -> tuple[bool, str]:
     # The node, then the launcher -- not the launcher alone, run through its
     # `#!/usr/bin/env node`, which asked codex's PATH for a node like every
     # other bare `node` here.
+    # JSON strings are TOML basic strings, except that `ensure_ascii` writes
+    # an emoji as a surrogate pair, which TOML rejects -- and one bad escape
+    # makes the whole file unreadable to codex.
     fields = {
-        "command": json.dumps(node),
-        "args": json.dumps([str(mcp_entry)]),
+        "command": json.dumps(node, ensure_ascii=False),
+        "args": json.dumps([str(mcp_entry)], ensure_ascii=False),
         "enabled": "true",
     }
     new_text = _toml_upsert_section(existing_text, "mcp_servers.quern", fields)
