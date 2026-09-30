@@ -52,6 +52,13 @@ class TestAssess:
         assert a.status == mcp_clients.LAUNCHER_GONE and a.fails
         assert "start Quern from /old/quern/mcp/dist/launcher.cjs" in a.reason
 
+    def test_a_relative_launcher_is_not_judged(self):
+        """Relative to the client's directory, not ours: checking it from here
+        would call a working registration broken."""
+        [a], _ = _assess([_reg("cursor", NODE, launcher="mcp/dist/launcher.cjs")],
+                         exists=lambda p: p == NODE)
+        assert a.status == mcp_clients.OK and not a.fails
+
     def test_a_launcher_that_is_there_is_fine(self):
         [a], _ = _assess([_reg("cursor", NODE, launcher="/q/launcher.cjs")])
         assert a.status == mcp_clients.OK
