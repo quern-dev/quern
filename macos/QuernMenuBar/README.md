@@ -44,7 +44,10 @@ manager with a **Restart to Update** action.
   an update, because the checks run each client's node, which this app does
   not do. Only failures it can know are in it: a registration on plain `node`
   is not one, because each client resolves that its own way -- Claude Desktop
-  reads your shell's PATH -- and `quern doctor` warns about it instead. The
+  reads your shell's PATH -- and `quern doctor` warns about it instead. A
+client whose config cannot be read at that moment keeps its last problems, for
+an hour at most, rather than having them erased by a pass that did not see
+them; those never open the dialog by themselves. The
   dialog opens by itself only once, right after an update started from this
   menu; at login, or after an update run in a terminal, it is the menu row
   alone.

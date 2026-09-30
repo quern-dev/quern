@@ -17,7 +17,9 @@ PATH and adds every nvm version, measured from its own log -- so whether it
 finds a good node cannot be judged from here, and calling it broken was a false
 alarm on a machine where it worked. `quern doctor` warns about it instead. Nor
 is a check that could not be made: a menu warning that is sometimes wrong is one
-people learn to ignore.
+people learn to ignore. A client that could not be looked at keeps its last
+problems for a while -- marked as carried, and only for an hour -- rather than
+having them erased by a pass that did not see them.
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from server.config import CONFIG_DIR, quern_cmd
@@ -37,6 +39,11 @@ from server.lifecycle import node_env
 logger = logging.getLogger(__name__)
 
 STATE_FILE = CONFIG_DIR / "mcp-clients.json"
+
+#: How long a problem is carried through passes that could not look at its
+#: client. Long enough to ride out a config caught mid-rewrite; short enough
+#: that a menu row does not go on describing a check nobody has made.
+CARRY_LIMIT = timedelta(hours=1)
 
 #: Display names, for a person reading a menu rather than a config file.
 NAMES = {
@@ -129,7 +136,10 @@ def assess(registrations: list, *,
                                   reason=f"{name} is set to start Quern from {launcher}, "
                                          f"which no longer exists"))
         elif not os.path.isabs(node):
-            out.append(Assessment(reg, PLAIN, fix=fix_for(reg)))
+            # `node` itself is plain; `npx` or `bash` is a wrapper. Neither is
+            # judged: each client resolves them its own way.
+            status = PLAIN if _NODE_BINARY.match(os.path.basename(node)) else WRAPPER
+            out.append(Assessment(reg, status, fix=fix_for(reg) if status == PLAIN else ""))
         elif not exists(node):
             # Before the wrapper check: a command that is not there fails
             # whatever it is called.
@@ -157,14 +167,39 @@ def assess(registrations: list, *,
     return out
 
 
-def _problem(a: Assessment) -> dict:
+def _problem(a: Assessment, now: datetime) -> dict:
     reg = a.registration
     # `fixable`: whether `mcp-install` fixes it, which a project entry it does
-    # not -- so the menu bar knows which fixes to spell out. `id` and `project`
-    # say which registration it is, for carrying it past a pass that could not
-    # look at it.
+    # not -- so the menu bar knows which fixes to spell out. `id`, `project` and
+    # `node` say which registration it is, and `found_at` when it was actually
+    # seen, for carrying it past a pass that could not look at it.
     return {"client": _name(reg), "reason": a.reason, "fix": a.fix,
-            "fixable": not reg.project, "id": reg.client, "project": reg.project}
+            "fixable": not reg.project, "id": reg.client, "project": reg.project,
+            "node": reg.node, "found_at": now.isoformat(), "carried": False}
+
+
+def _carries(p: dict, a: Assessment, now: datetime) -> bool:
+    """Whether problem `p` from the last answer still stands for `a`, a
+    registration this pass could not look at."""
+    reg = a.registration
+    if p.get("id") != reg.client:
+        return False
+    # An unreadable file hides every entry in it; a node that did not answer
+    # speaks only for itself, and only while it is the same node -- a new one
+    # registered by Fix in Terminal is not the old one's problem.
+    if a.status == UNKNOWN and (p.get("project", "") != reg.project
+                                or p.get("node") != reg.node):
+        return False
+    found = _parse_time(p.get("found_at"))
+    return found is not None and now - found <= CARRY_LIMIT
+
+
+def _parse_time(value: object) -> datetime | None:
+    try:
+        found = datetime.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        return None
+    return found if found is None or found.tzinfo else found.replace(tzinfo=UTC)
 
 
 def state(assessments: list[Assessment], *, previous: dict | None = None,
@@ -177,23 +212,23 @@ def state(assessments: list[Assessment], *, previous: dict | None = None,
     that did not answer -- keeps the problems `previous` had for it. Dropping
     them would say "fixed" about something nobody fixed.
     """
-    problems = [_problem(a) for a in assessments if a.fails]
+    now = now or datetime.now(UTC)
+    problems = [_problem(a, now) for a in assessments if a.fails]
     old = previous.get("problems") if isinstance(previous, dict) else None
     for a in assessments:
         if a.status not in (UNREADABLE, UNKNOWN) or not isinstance(old, list):
             continue
-        reg = a.registration
         for p in old:
-            if (isinstance(p, dict) and p.get("id") == reg.client
-                    and (a.status == UNREADABLE or p.get("project", "") == reg.project)
-                    and p not in problems):
-                problems.append(p)
+            if isinstance(p, dict) and _carries(p, a, now):
+                # Marked, so the menu bar does not take a carried problem for
+                # an answer written since an update.
+                problems.append({**p, "carried": True})
     clients = []
     for p in problems:
         if p.get("fixable") and p.get("id") and p["id"] not in clients:
             clients.append(p["id"])
     return {
-        "checked_at": (now or datetime.now(UTC)).isoformat(),
+        "checked_at": now.isoformat(),
         "problems": problems,
         "fix_clients": clients,
     }

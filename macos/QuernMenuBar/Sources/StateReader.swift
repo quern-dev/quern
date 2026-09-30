@@ -61,6 +61,9 @@ struct McpClientProblem: Equatable {
     /// Whether `quern mcp-install` fixes it. A Claude Code project entry it
     /// does not, so that fix is spelled out instead.
     var fixable = true
+    /// Kept from an earlier pass that could look, through one that could not
+    /// (a config caught mid-rewrite). Still shown; never a reason to interrupt.
+    var carried = false
 }
 
 /// What the server last found about the MCP clients it is registered with.
@@ -333,7 +336,8 @@ final class StateReader {
             else { return nil }
             return McpClientProblem(client: client, reason: reason,
                                     fix: d["fix"] as? String ?? "",
-                                    fixable: d["fixable"] as? Bool ?? true)
+                                    fixable: d["fixable"] as? Bool ?? true,
+                                    carried: d["carried"] as? Bool ?? false)
         }
         return h
     }

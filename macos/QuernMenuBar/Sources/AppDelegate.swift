@@ -36,8 +36,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var didAttemptLaunchStart = false
     /// The MCP clients dialog opens by itself at most once per launch.
     private var mcpAlertShown = false
-    /// When the update this launch follows was started from the menu, if it
-    /// was. Taken from `MenuUpdateMarker` at launch, which removes it.
+    /// When the update being waited on was started from this menu, if one
+    /// was: set by Restart to Update, or taken from `MenuUpdateMarker` at the
+    /// launch that update relaunched. Let go once that update has its answer.
     private var menuUpdateStartedAt: Date?
     /// Holds "Checking…" on screen long enough to be seen. See MinimumDisplay.
     private let checkIndicator = MinimumDisplay()
@@ -111,12 +112,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // Only right after an update the user started, never at login; the
             // menu row is there either way. Cheap checks first: the update
             // record is a file read, and this runs on every poll.
-            if self.menuUpdateStartedAt != nil, !snap.mcpClients.problems.isEmpty,
-               McpClientAlert.shouldInterrupt(snap.mcpClients, lastUpdate: UpdateResult.read(),
-                                              menuUpdateStartedAt: self.menuUpdateStartedAt,
-                                              now: Date(), alreadyShown: self.mcpAlertShown) {
-                self.mcpAlertShown = true
-                self.presentMcpClients(snap.mcpClients)
+            if let started = self.menuUpdateStartedAt {
+                let lastUpdate = UpdateResult.read()
+                let now = Date()
+                if McpClientAlert.shouldInterrupt(snap.mcpClients, lastUpdate: lastUpdate,
+                                                  menuUpdateStartedAt: started, now: now,
+                                                  alreadyShown: self.mcpAlertShown) {
+                    self.mcpAlertShown = true
+                    self.presentMcpClients(snap.mcpClients)
+                }
+                if !McpClientAlert.markerStillNeeded(snap.mcpClients, lastUpdate: lastUpdate,
+                                                     menuUpdateStartedAt: started, now: now) {
+                    self.menuUpdateStartedAt = nil
+                }
             }
         }
         reader.start()

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import ast
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -81,6 +81,27 @@ class TestAssess:
             return node_env.UNUSABLE, None
         [a] = mcp_clients.assess([_reg("cursor", command)], exists=lambda p: True, check=check)
         assert (a.status, a.fails, ran) == (mcp_clients.WRAPPER, False, [])
+
+    @pytest.mark.parametrize("command", ["/x/bin/nodemon", "/x/bin/node-gyp"])
+    def test_tools_named_like_node_are_not_judged(self, command):
+        [a], _ = _assess([_reg("cursor", command)],
+                         checks={command: (node_env.UNUSABLE, None)})
+        assert a.status == mcp_clients.WRAPPER and not a.fails
+
+    @pytest.mark.parametrize("command", ["npx", "bash"])
+    def test_a_relative_wrapper_is_a_wrapper(self, command):
+        [a], _ = _assess([_reg("cursor", command)])
+        assert a.status == mcp_clients.WRAPPER and not a.fails
+
+    def test_a_missing_wrapper_is_gone_whatever_its_name(self):
+        [a], _ = _assess([_reg("cursor", "/bin/bash")], exists=lambda p: False)
+        assert a.status == mcp_clients.GONE and a.fails
+
+    @pytest.mark.parametrize("launcher", ["/usr/local/bin/start-quern", "~/bin/start-quern"])
+    def test_an_argument_that_is_not_a_script_is_not_a_launcher(self, launcher):
+        """A wrapper's own argument, which quern cannot judge."""
+        [a], _ = _assess([_reg("cursor", NODE, launcher=launcher)], exists=lambda p: p == NODE)
+        assert not a.fails
 
     @pytest.mark.parametrize("command", ["/x/bin/node", "/x/bin/nodejs", "/x/node22"])
     def test_a_node_binary_by_any_usual_name_is_judged(self, command):
@@ -176,6 +197,32 @@ class TestTheStateFile:
                             lambda: [_reg("cursor", None, error="mid-write")])
         mcp_clients.refresh(path)
         assert json.loads(path.read_text())["fix_clients"] == ["cursor"]
+
+    def test_a_carried_problem_says_so_and_keeps_when_it_was_found(self):
+        before, _ = _assess([_reg("cursor", "/gone")], exists=lambda p: False)
+        previous = mcp_clients.state(before, now=NOW)
+        now, _ = _assess([_reg("cursor", None, error="mid-write")])
+        later = NOW.replace(minute=30)
+        [p] = mcp_clients.state(now, previous=previous, now=later)["problems"]
+        assert p["carried"] is True and p["found_at"] == NOW.isoformat()
+        assert previous["problems"][0]["carried"] is False
+
+    def test_a_carried_problem_expires(self):
+        """A row must not go on describing a check nobody has made."""
+        before, _ = _assess([_reg("cursor", "/gone")], exists=lambda p: False)
+        previous = mcp_clients.state(before, now=NOW)
+        now, _ = _assess([_reg("cursor", None, error="still unreadable")])
+        data = mcp_clients.state(now, previous=previous, now=NOW + mcp_clients.CARRY_LIMIT
+                                 + timedelta(seconds=1))
+        assert data["problems"] == [] and data["fix_clients"] == []
+
+    def test_a_timeout_on_a_new_node_does_not_keep_the_old_nodes_problem(self):
+        """Fix in Terminal registers a new node; its first probe timing out must
+        not keep "the old node no longer exists" up."""
+        before, _ = _assess([_reg("cursor", "/old/node")], exists=lambda p: False)
+        previous = mcp_clients.state(before, now=NOW)
+        now = [mcp_clients.Assessment(_reg("cursor", "/new/node"), mcp_clients.UNKNOWN)]
+        assert mcp_clients.state(now, previous=previous, now=NOW)["problems"] == []
 
     def test_nothing_wrong_is_an_empty_list_not_no_file(self):
         """The file is rewritten, so a fixed client's warning goes away."""
@@ -291,9 +338,10 @@ class TestWhoRefreshes:
         from server import main as server_main
 
         written = []
+        found = datetime.now(UTC).isoformat()
         monkeypatch.setattr(mcp_clients, "read", lambda path=None: {"problems": [
             {"client": "Claude Code", "reason": "r", "fix": "f", "fixable": True,
-             "id": "claude-code", "project": ""}]})
+             "id": "claude-code", "project": "", "found_at": found}]})
         monkeypatch.setattr(setup, "mcp_registrations",
                             lambda: [_reg("claude-code", None, error="mid-write")])
         monkeypatch.setattr(mcp_clients, "write", lambda data, path=None: written.append(data))

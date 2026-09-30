@@ -152,6 +152,38 @@ enum McpClientsTests {
                            "nothing wrong")
         }
 
+        Harness.test("a carried problem alone does not interrupt, but still shows") {
+            var carried = desktop
+            carried.carried = true
+            let only = health([carried], fix: ["claude-desktop"],
+                              checkedAt: finished.addingTimeInterval(20))
+            Harness.expect(!interrupts(only, update(.updated, at: finished), started: started,
+                                       now: finished.addingTimeInterval(60)),
+                           "carried from before the update")
+            Harness.expect(McpClientAlert.menuTitle(only) != nil, "still on the menu")
+            let read = StateReader.readMcpClients(contents: ["problems": [
+                ["client": "c", "reason": "r", "carried": true]]])
+            Harness.expect(read.problems.first?.carried, true, "read")
+        }
+
+        Harness.test("the in-process marker is let go once its update has its answer") {
+            let fresh = health([], fix: [], checkedAt: finished.addingTimeInterval(20))
+            let old = health([], fix: [], checkedAt: finished.addingTimeInterval(-20))
+            let now = finished.addingTimeInterval(60)
+            func needed(_ h: McpClientHealth, _ u: UpdateResult?, at: Date = now) -> Bool {
+                McpClientAlert.markerStillNeeded(h, lastUpdate: u, menuUpdateStartedAt: started,
+                                                 now: at)
+            }
+            Harness.expect(needed(old, nil), "still running")
+            Harness.expect(needed(old, update(.updated, at: finished)), "no answer since yet")
+            Harness.expect(!needed(fresh, update(.updated, at: finished)), "answered, even clean")
+            Harness.expect(!needed(old, update(.noOp, at: finished)), "a no-op")
+            Harness.expect(!needed(old, update(.failed, at: finished)), "a failure")
+            Harness.expect(!needed(old, nil, at: started.addingTimeInterval(31 * 60)), "expired")
+            Harness.expect(needed(old, update(.updated, at: started.addingTimeInterval(-60))),
+                           "a record older than this run is not its answer")
+        }
+
         Harness.test("the marker is read once, then gone") {
             let defaults = UserDefaults(suiteName: "quern-tests-\(UUID().uuidString)")!
             Harness.expect(MenuUpdateMarker.consume(defaults: defaults), nil, "none yet")

@@ -97,31 +97,51 @@ enum McpClientAlert {
         return TerminalScript.wrap(title: "Quern MCP clients", body: body)
     }
 
+    /// A marker older than this is from some other attempt: an update does
+    /// not take half an hour.
+    static let markerLifetime: TimeInterval = 30 * 60
+
     /// Whether to open the dialog without being asked.
     ///
     /// Only right after an update started from this menu, and only once: at
     /// login a modal stealing focus is worse than a menu row, and the menu row
-    /// is always there. `menuUpdateStartedAt` is the marker the Update item
-    /// leaves for the relaunched app, which consumes it, so an update run in a
-    /// terminal, or a reopen of the app later, does not count. And only on an
-    /// answer written since that update: the one from before may describe a
-    /// registration the update replaced.
-    static let markerLifetime: TimeInterval = 30 * 60
-
+    /// is always there. `menuUpdateStartedAt` is when that update started --
+    /// kept in this process, and left in `MenuUpdateMarker` for the app it
+    /// relaunches -- so an update run in a terminal does not count. And only
+    /// on a problem found since that update: one from before, or one carried
+    /// through a pass that could not look, may describe what it replaced.
     static func shouldInterrupt(_ h: McpClientHealth, lastUpdate: UpdateResult?,
                                 menuUpdateStartedAt: Date?, now: Date,
                                 alreadyShown: Bool) -> Bool {
-        guard !alreadyShown, !h.problems.isEmpty,
+        guard !alreadyShown, h.problems.contains(where: { !$0.carried }),
               let started = menuUpdateStartedAt,
               let lastUpdate, lastUpdate.outcome == .updated,
               let finished = lastUpdate.finishedAt, finished >= started,
-              // An update does not take half an hour; a marker that old is
-              // left from some other attempt.
               finished.timeIntervalSince(started) <= markerLifetime,
               now.timeIntervalSince(finished) >= 0,
               now.timeIntervalSince(finished) <= FailureReporting.afterUpdateWindow,
               let checked = h.checkedAt, checked >= finished
         else { return false }
+        return true
+    }
+
+    /// Whether this process should go on holding `menuUpdateStartedAt`.
+    ///
+    /// Held, it lets a later update -- one run in a terminal -- count as the
+    /// menu's, which is what the rule above exists to prevent. So it is let go
+    /// once its update has had its answer: a no-op or a failure, an answer
+    /// written since a real update (whether or not it had problems), or the
+    /// marker's lifetime passing.
+    static func markerStillNeeded(_ h: McpClientHealth, lastUpdate: UpdateResult?,
+                                  menuUpdateStartedAt started: Date, now: Date) -> Bool {
+        if now.timeIntervalSince(started) > markerLifetime { return false }
+        guard let lastUpdate, lastUpdate.describes(runStartedAt: started) else {
+            return true                   // still running: no record of it yet
+        }
+        guard lastUpdate.outcome == .updated, let finished = lastUpdate.finishedAt else {
+            return false
+        }
+        if let checked = h.checkedAt, checked >= finished { return false }
         return true
     }
 }
