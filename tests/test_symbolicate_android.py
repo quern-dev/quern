@@ -54,6 +54,16 @@ def elf_bytes(build_id: str = BUILD_ID, *, machine: int = 183, wide: bool = True
     return head + ph + note
 
 
+def _with_notes(first: bytes) -> bytes:
+    """elf_bytes() with another note in front of the build-id note."""
+    data = elf_bytes()
+    head, note = data[:64 + 56], data[64 + 56:]
+    ph = bytearray(head)
+    size = len(first) + len(note)
+    struct.pack_into("<QQ", ph, 64 + 32, size, size)  # p_filesz, p_memsz
+    return bytes(ph) + first + note
+
+
 class TestElf:
     @pytest.mark.parametrize("kw, abi", [
         ({}, "arm64-v8a"), ({"machine": 62}, "x86_64"),
@@ -71,6 +81,23 @@ class TestElf:
         p = tmp_path / "lib.so"
         p.write_bytes(bytes(data))
         assert elf.read(p).build_id == ""
+
+    @pytest.mark.parametrize("name, kind", [(b"Android\0", 3), (b"GNU\0", 1)])
+    def test_only_the_gnu_build_id_note_is_the_build_id(self, tmp_path, name, kind):
+        """Android's own note (type 1, "Android") comes first in a real library;
+        its odd-length name is padded, which the reader must step over."""
+        other = struct.pack("<III", len(name.rstrip(b"\0")) + 1, 4, kind) + name
+        other += b"\0" * (-len(other) % 4) + b"\x1c\0\0\0"
+        p = tmp_path / "lib.so"
+        p.write_bytes(_with_notes(other))
+        assert elf.read(p).build_id == BUILD_ID
+
+    def test_a_note_past_its_segment_is_not_read(self, tmp_path):
+        data = bytearray(elf_bytes())
+        struct.pack_into("<I", data, 64 + 56, 1 << 20)   # descsz: far past the segment
+        p = tmp_path / "lib.so"
+        p.write_bytes(bytes(data))
+        assert elf.read(p) is None
 
     @pytest.mark.parametrize("data", [
         b"", b"not an elf", elf_bytes()[:70], b"\x7fELF" + b"\0" * 60,
@@ -167,6 +194,14 @@ class TestRecordAndroidBuild:
         [noid] = [b for b in record.binaries if b.path.endswith("libnoid.so")]
         assert "no BuildId" in noid.dsym_error and noid.dwarf == ""
 
+    def test_a_mapping_without_a_map_id_is_said(self, tmp_path):
+        module = _gradle_module(tmp_path)
+        next(module.rglob("mapping.txt")).write_text(
+            "# compiler: R8\ncom.example.app.Feed -> a.b:\n# pg_map_id: 0badc0de\n")
+        record = _record_android(module, tmp_path / "records")
+        # Only the header is read: a 192 MB mapping is not scanned for it.
+        assert record.mapping_id == "" and "no pg_map_id" in record.notes[0]
+
     def test_an_unminified_variant_has_no_mapping(self, tmp_path):
         record = _record_android(_gradle_module(tmp_path, mapping=False), tmp_path / "records")
         assert record.mapping == "" and "no R8 mapping" in build_records.summary_line(record)
@@ -221,12 +256,15 @@ def _java_report(file="SourceFile"):
 
 
 class FakeAndroidTools:
-    def __init__(self, symbolizer=None, retrace=None, code=0):
+    def __init__(self, symbolizer=None, retrace=None, code=0, raises=None):
         self.calls = []
         self.symbolizer, self.retrace, self.code = symbolizer, retrace, code
+        self.raises = raises
 
     async def __call__(self, argv):
         self.calls.append(argv)
+        if self.raises:
+            raise self.raises
         if Path(argv[0]).name == "llvm-symbolizer":
             return self.code, self.symbolizer or "", ""
         text = Path(argv[2]).read_text()
@@ -400,7 +438,7 @@ class TestJava:
 class TestTheTools:
     def test_the_newest_ndk_is_used(self, tmp_path, monkeypatch):
         """The version was read from the wrong path segment: NDK 23 over 27."""
-        for version in ("23.1.7779620", "27.1.12297006", "26.1.10909125"):
+        for version in ("23.1.7779620", "27.1.12297006", "26.1.10909125", "9.0.1"):
             tool = (tmp_path / "ndk" / version / "toolchains" / "llvm" / "prebuilt"
                     / "darwin-x86_64" / "bin" / "llvm-symbolizer")
             tool.parent.mkdir(parents=True)
@@ -453,3 +491,248 @@ class TestUnknownSource:
         fake = FakeAndroidTools()
         _run([report], symbolicate.SymbolFinder(tmp_path / "records", fake))
         assert fake.calls == []
+
+
+# ── the paths that must not settle, and the ones that must ────────────────────
+
+
+def _recorded(tmp_path):
+    root = tmp_path / "records"
+    _record_android(_gradle_module(tmp_path), root)
+    return root
+
+
+class TestNativeFailures:
+    @pytest.mark.parametrize("fake, said", [
+        (FakeAndroidTools(raises=OSError("exec format error")), "could not run: OSError"),
+        (FakeAndroidTools(raises=TimeoutError()), "could not run: TimeoutError"),
+        (FakeAndroidTools(code=-9), "exited -9"),
+    ])
+    def test_a_symbolizer_that_did_not_answer_is_retried(self, tmp_path, tools, fake, said):
+        report = _native_report()
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert said in report.symbols[0].note and not report.symbolicated
+
+    def test_a_symbolizer_refusal_is_an_answer(self, tmp_path, tools):
+        report = _native_report()
+        fake = FakeAndroidTools(code=1)
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert "exited 1" in report.symbols[0].note and report.symbolicated
+
+    def test_the_records_copy_gone_is_said_and_retried(self, tmp_path, tools):
+        root = _recorded(tmp_path)
+        next(root.rglob("libapp.so")).unlink()
+        report = _native_report()
+        fake = FakeAndroidTools(symbolizer=SYMBOLIZED)
+        _run([report], symbolicate.SymbolFinder(root, fake))
+        assert "gone or cannot be read" in report.symbols[0].note
+        assert not report.symbolicated and fake.calls == []
+
+    def test_an_expired_record_is_not_used(self, tmp_path, tools):
+        root = _recorded(tmp_path)
+        [path] = root.glob("*/record.json")
+        data = json.loads(path.read_text())
+        data["dsyms_expired"] = True
+        path.write_text(json.dumps(data))
+        report = _native_report()
+        _run([report], symbolicate.SymbolFinder(root, FakeAndroidTools(symbolizer=SYMBOLIZED)))
+        assert "no build record has libapp.so" in report.symbols[0].note
+
+    def test_an_upper_case_build_id_matches(self, tmp_path, tools):
+        report = _native_report()
+        report.frames[1].build_id = BUILD_ID.upper()
+        fake = FakeAndroidTools(symbolizer=SYMBOLIZED)
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert report.frames[1].line == 42
+
+
+class TestNativeNames:
+    def test_the_line_comes_with_its_function(self, tmp_path, tools):
+        """The tombstone names the symbol-table function; with inlining the line
+        is in another one, and a name and line from two functions is wrong."""
+        report = _native_report()
+        f = report.frames[1]
+        f.symbol, f.symbol_offset = "_ZN7Crasher3runEv", 44
+        out = "Crasher::boom()\n/src/a.cpp:3:1\nCrasher::run()\n/src/a.cpp:9:2\n\n"
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path),
+                                                FakeAndroidTools(symbolizer=out)))
+        assert (f.symbol, f.symbol_offset, f.line) == ("Crasher::boom()", None, 3)
+        assert "1 frames were inlined" in report.symbols[0].note
+
+    def test_a_name_alone_does_not_replace_the_tombstones(self, tmp_path, tools):
+        report = _native_report()
+        f = report.frames[1]
+        f.symbol, f.symbol_offset = "JNI_OnLoad", 44
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path),
+                                                FakeAndroidTools(symbolizer="other\n??:0:0\n\n")))
+        assert (f.symbol, f.symbol_offset) == ("JNI_OnLoad", 44)
+        assert "got a function name" not in report.symbols[0].note
+
+    def test_a_frame_with_a_file_is_not_sent(self, tmp_path, tools):
+        report = _native_report()
+        report.frames[1].file, report.frames[1].line = "crasher.cpp", 42
+        fake = FakeAndroidTools(symbolizer=SYMBOLIZED)
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert fake.calls == []
+
+    def test_the_app_frame_past_the_cap_is_resolved(self, tmp_path, tools):
+        report = _native_report()
+        beyond = report.frames.pop()                  # kept only as app_frame
+        fake = FakeAndroidTools(symbolizer=SYMBOLIZED)
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert beyond.line == 42 and report.app_frame is beyond
+
+
+class TestJavaFailures:
+    @pytest.mark.parametrize("fake, said", [
+        (FakeAndroidTools(raises=OSError("no java")), "could not run: OSError"),
+        (FakeAndroidTools(raises=TimeoutError()), "could not run: TimeoutError"),
+        (FakeAndroidTools(code=-15), "exited -15"),
+    ])
+    def test_a_retrace_that_did_not_answer_is_retried(self, tmp_path, tools, fake, said):
+        report = _java_report()
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert said in report.symbols[0].note and not report.symbolicated
+        assert report.top_frames == ["a.b.c(SourceFile:3)"]    # the trace's own text
+
+    def test_the_records_mapping_gone_is_said_and_retried(self, tmp_path, tools):
+        root = _recorded(tmp_path)
+        next(root.rglob("mapping.txt")).unlink()
+        report = _java_report()
+        fake = FakeAndroidTools(retrace=RETRACED)
+        _run([report], symbolicate.SymbolFinder(root, fake))
+        assert "mapping.txt is gone" in report.symbols[0].note
+        assert not report.symbolicated and fake.calls == []
+
+    @pytest.mark.parametrize("change", [
+        {"bundle_id": "com.example.other"}, {"build_version": "100000"},
+        {"app_version": "1.2.4"},
+    ])
+    def test_another_version_is_not_matched(self, tmp_path, tools, change):
+        report = _java_report().model_copy(update=change)
+        fake = FakeAndroidTools(retrace=RETRACED)
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert "no build record has an R8 mapping" in report.symbols[0].note
+        assert fake.calls == []
+
+    def test_a_stamp_with_no_record_does_not_fall_back_to_the_version(self, tmp_path, tools):
+        """The stamp names the build exactly; the version would name another."""
+        report = _java_report(file="r8-map-id-deadbeef")
+        fake = FakeAndroidTools(retrace=RETRACED)
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert fake.calls == [] and "deadbeef" in report.symbols[0].note
+
+    def test_of_builds_sharing_a_version_the_newest_is_used(self, tmp_path, tools):
+        root = tmp_path / "records"
+        module = _gradle_module(tmp_path)
+        _record_android(module, root, now=NOW.replace(minute=2))
+        older = _record_android(module, root, now=NOW.replace(minute=1))
+        newest = _record_android(module, root, now=NOW.replace(minute=3))
+        report = _java_report()
+        _run([report], symbolicate.SymbolFinder(root, FakeAndroidTools(retrace=RETRACED)))
+        assert report.symbols[0].build_id == newest.build_id != older.build_id
+
+
+class TestRetraceOutput:
+    """Shapes taken from the real retrace (R8 9.4.14) on a hand-made mapping."""
+
+    def _retrace(self, tmp_path, out_for_frame, file="SourceFile", line=3):
+        report = _java_report(file=file)
+        report.frames[0].line = line
+        key = f"at a.b.c({file or 'Unknown Source'}" + (f":{line})" if line else ")")
+        _run([report], symbolicate.SymbolFinder(
+            _recorded(tmp_path), FakeAndroidTools(retrace={key: out_for_frame})))
+        return report
+
+    def test_an_unmapped_frame_passes_through_unresolved(self, tmp_path, tools):
+        report = self._retrace(tmp_path, "\tat a.b.c(SourceFile:3)")
+        f = report.frames[0]
+        assert (f.file, f.line) == ("", 3)
+        assert report.symbols[0].frames_resolved == 0
+        assert "1 of 1 frames have no source line" in report.symbols[0].note
+
+    def test_a_name_without_a_line_is_not_resolved(self, tmp_path, tools):
+        report = self._retrace(tmp_path, "\tat com.example.app.Feed.load(Feed.java)\n"
+                                         "\t<OR> at com.example.app.Feed.parse(Feed.java)",
+                               line=None)
+        f = report.frames[0]
+        assert (f.symbol, f.file, f.line) == ("com.example.app.Feed.load", "Feed.java", None)
+        assert report.symbols[0].frames_resolved == 0
+
+    def test_ambiguous_alone_is_not_inlined(self, tmp_path, tools):
+        report = self._retrace(tmp_path, "\tat com.example.app.Feed.load(Feed.kt:7)\n"
+                                         "\t<OR> at com.example.app.Feed.parse(Feed.kt:9)")
+        note = report.symbols[0].note
+        assert "ambiguous" in note and "inlined" not in note
+
+    def test_the_app_frame_moves_to_the_real_app_frame(self, tmp_path, tools):
+        """An obfuscated name tells nothing of whose code it is: `l82` looked
+        like the app's, and after retracing it is the framework's."""
+        report = _java_report()
+        report.frames.insert(0, CrashFrame(image="", symbol="l82.a", file="SourceFile", line=1,
+                                           app=True))
+        report.app_frame = report.frames[0]
+        fake = FakeAndroidTools(retrace={
+            "at l82.a(SourceFile:1)": "\tat androidx.fragment.app.Fragment.f(Fragment.java:5)",
+            **RETRACED})
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert report.frames[0].app is False
+        assert report.app_frame.symbol == "com.example.app.Feed.parse"
+
+
+class TestSettled:
+    def test_a_second_read_keeps_what_settled_and_asks_nothing(self, tmp_path, tools):
+        root = _recorded(tmp_path)
+        fake = FakeAndroidTools(retrace=RETRACED, symbolizer=SYMBOLIZED)
+        report = _java_report()
+        report.frames += _native_report().frames[1:]
+        finder = symbolicate.SymbolFinder(root, fake)
+        _run([report], finder)
+        first = [(e.image, e.frames_resolved) for e in report.symbols]
+        report.symbolicated = False                     # as a fresh read of the same report
+        _run([report], finder)
+        assert len(fake.calls) == 2
+        assert [(e.image, e.frames_resolved) for e in report.symbols] == first
+        assert sorted(first) == [("java (R8 mapping)", 1), ("libapp.so", 1)]
+
+    def test_an_unsettled_image_is_asked_again(self, tmp_path, monkeypatch):
+        root = _recorded(tmp_path)
+        monkeypatch.setattr(symbolicate_android, "find_llvm_symbolizer",
+                            lambda: "/ndk/llvm-symbolizer")
+        monkeypatch.setattr(symbolicate_android, "find_retrace", lambda: None)
+        fake = FakeAndroidTools(retrace=RETRACED, symbolizer=SYMBOLIZED)
+        report = _java_report()
+        report.frames += _native_report().frames[1:]
+        finder = symbolicate.SymbolFinder(root, fake)
+        _run([report], finder)
+        monkeypatch.setattr(symbolicate_android, "find_retrace", lambda: "/sdk/retrace")
+        _run([report], finder)
+        assert [Path(c[0]).name for c in fake.calls] == ["llvm-symbolizer", "retrace"]
+        assert report.symbolicated and report.frames[0].file == "Feed.kt"
+
+
+class TestTheSubprocess:
+    @pytest.mark.parametrize("tool, timeout", [
+        ("/sdk/cmdline-tools/latest/bin/retrace", symbolicate_android.RETRACE_TIMEOUT),
+        ("/ndk/bin/llvm-symbolizer", symbolicate.TOOL_TIMEOUT),
+    ])
+    def test_retrace_gets_its_longer_timeout(self, monkeypatch, tool, timeout):
+        seen = {}
+
+        class Proc:
+            returncode = 0
+
+            async def communicate(self):
+                return b"", b""
+
+        async def spawn(*argv, **kw):
+            return Proc()
+
+        async def wait_for(aw, timeout):
+            seen["timeout"] = timeout
+            return await aw
+
+        monkeypatch.setattr(symbolicate.asyncio, "create_subprocess_exec", spawn)
+        monkeypatch.setattr(symbolicate.asyncio, "wait_for", wait_for)
+        asyncio.run(symbolicate._run([tool, "x"]))
+        assert seen["timeout"] == timeout

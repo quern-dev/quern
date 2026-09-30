@@ -173,23 +173,37 @@ async def _native(todo: list[CrashFrame], entry: ImageSymbols, finder, read) -> 
         entry.note = f"llvm-symbolizer gave {len(blocks)} answers for {len(wanted)} addresses"
         return True
     answers = dict(zip(wanted, blocks, strict=True))
-    lined = named = 0
+    lined, named, inlined = set(), set(), set()
     for f in todo:
-        function, file, line = answers.get(f.offset, ("", "", 0))
-        if function and not f.symbol:
-            f.symbol, named = function, named + 1
+        function, file, line, nested = answers.get(f.offset, ("", "", 0, False))
         if file and line:
-            f.file, f.line, lined = os.path.basename(file), int(line), lined + 1
-    entry.frames_resolved = lined
-    if lined < entry.frames_total:
-        entry.note = (f"{entry.frames_total - lined} of {entry.frames_total} frames have no "
-                      f"source line: the library has no debug information for them"
-                      + (f"; {named} got a function name" if named else ""))
+            # The line belongs to the function the symbolizer names -- with
+            # inlining, not the one the tombstone named from the symbol table --
+            # so the two are taken together, and the tombstone's offset into
+            # its own symbol goes with its name.
+            if function and function != f.symbol:
+                f.symbol, f.symbol_offset = function, None
+            f.file, f.line = os.path.basename(file), int(line)
+            lined.add(f.offset)
+            if nested:
+                inlined.add(f.offset)
+        elif function and not f.symbol:
+            f.symbol = function
+            named.add(f.offset)
+    entry.frames_resolved = len(lined)
+    notes = []
+    if len(lined) < entry.frames_total:
+        notes.append(f"{entry.frames_total - len(lined)} of {entry.frames_total} frames have no "
+                     f"source line: the library has no debug information for them"
+                     + (f"; {len(named)} got a function name" if named else ""))
+    if inlined:
+        notes.append(f"{len(inlined)} frames were inlined; the innermost function is shown")
+    entry.note = "; ".join(notes)
     return True
 
 
-def _plain_blocks(out: str) -> list[tuple[str, str, int]]:
-    """(function, file, line) per address from llvm-symbolizer's plain output:
+def _plain_blocks(out: str) -> list[tuple[str, str, int, bool]]:
+    """(function, file, line, inlined) per address from llvm-symbolizer's plain output:
     a function line and a `file:line:col` line per frame, the innermost inlined
     frame first, a blank line between addresses, `??` for what it does not
     know. Plain rather than `--output-style=JSON`, which NDK 23's ignores
@@ -203,7 +217,7 @@ def _plain_blocks(out: str) -> list[tuple[str, str, int]]:
             where = lines[1].rsplit(":", 2)
             if len(where) == 3 and where[0] != "??" and where[1].isdigit():
                 file, line = where[0], int(where[1])
-        blocks.append((function, file, line))
+        blocks.append((function, file, line, len(lines) > 2))
     return blocks
 
 
