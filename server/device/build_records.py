@@ -33,6 +33,7 @@ import plistlib
 import re
 import shutil
 import uuid as uuid_mod
+import zipfile
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -148,7 +149,8 @@ async def record_android_build(
     root = root or RECORDS_DIR
     created = now or datetime.now(UTC)
     metadata = await asyncio.to_thread(_android_metadata, module_dir, variant)
-    element = (metadata.get("elements") or [{}])[0]
+    elements = metadata["elements"]
+    element = elements[0]
     build_id = f"{created:%Y%m%d-%H%M%S}-android-{uuid_mod.uuid4().hex[:6]}"
     record = BuildRecord(
         build_id=build_id, created_at=created, project_path=str(module_dir), scheme=variant,
@@ -157,6 +159,7 @@ async def record_android_build(
         bundle_id=str(metadata.get("applicationId") or ""),
         version=str(element.get("versionName") or ""),
         build_number=str(element.get("versionCode") or ""),
+        version_codes=sorted({str(e["versionCode"]) for e in elements if e.get("versionCode")}),
     )
     stale = _stale_outputs(Path(record.app_path), created)
     if stale:
@@ -175,7 +178,7 @@ async def record_android_build(
         shutil.rmtree(partial, ignore_errors=True)
         for b in record.binaries:
             b.dsym = b.dwarf = ""
-        record.mapping = ""
+        record.mapping = record.mapping_id = ""
         record.error = f"the record could not be written to {root}: {e}"
         logger.warning("Build record %s not written: %s", build_id, e)
     return record
@@ -215,6 +218,12 @@ def _android_metadata(module_dir: Path, variant: str) -> dict:
         name = str(data.get("variantName") or "")
         seen.append(name)
         if name == variant:
+            elements = data.get("elements")
+            if (not isinstance(elements, list) or not elements
+                    or not all(isinstance(e, dict) for e in elements)):
+                raise AndroidBuildNotFound(
+                    f"{path} names variant {variant!r} but lists no APKs in the form AGP "
+                    f"writes: build the variant again")
             data["_dir"] = path.parent
             return data
     if not outputs.is_dir():
@@ -230,13 +239,26 @@ def _keep_android_symbols(
     module_dir: Path, variant: str, record: BuildRecord, out: Path, recorded_as: Path,
 ) -> None:
     mapping = module_dir / "build" / "outputs" / "mapping" / variant / "mapping.txt"
+    built_with = _apk_map_id(Path(record.app_path))
     if mapping.is_file():
-        out.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(mapping, out / "mapping.txt")
-        record.mapping = str(recorded_as / "mapping.txt")
-        record.mapping_id = _map_id(mapping)
-        if not record.mapping_id:
-            record.notes.append("mapping.txt carries no pg_map_id; matched by version only")
+        mapping_id = _map_id(mapping)
+        if built_with and mapping_id and built_with != mapping_id:
+            # A mapping.txt left from another build -- minify since turned off,
+            # or a build that failed after R8 -- retraces to plausible, wrong
+            # names. Kept, it would be used without a word.
+            record.notes.append(
+                f"mapping.txt ({mapping_id[:12]}) is not the one the APK was built with "
+                f"({built_with[:12]}), so it was not kept: build the variant again")
+        else:
+            out.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(mapping, out / "mapping.txt")
+            record.mapping = str(recorded_as / "mapping.txt")
+            record.mapping_id = mapping_id
+            if not mapping_id:
+                record.notes.append("mapping.txt carries no pg_map_id; matched by version only")
+    elif built_with:
+        record.notes.append(f"the APK was minified by R8 ({built_with[:12]}) but there is no "
+                            f"mapping.txt for {variant}, so its Java frames cannot be retraced")
     libs = module_dir / "build" / "intermediates" / "merged_native_libs" / variant
     for so in sorted(libs.rglob("*.so")):
         found = elf.read(so)
@@ -246,12 +268,31 @@ def _keep_android_symbols(
         ids = {found.abi: found.build_id} if found.build_id else {}
         binary = BuildBinary(path=str(rel), uuids=ids)
         if found.build_id:
-            (out / rel).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(so, out / rel)
-            binary.dsym = binary.dwarf = str(recorded_as / rel)
+            # Stored by BuildId: two outputs of one name (a stale directory
+            # from an older AGP beside the current one) would otherwise
+            # overwrite each other, the record naming one and holding the other.
+            kept = Path("lib") / so.parent.name / found.build_id / so.name
+            (out / kept).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(so, out / kept)
+            binary.dsym = binary.dwarf = str(recorded_as / kept)
         else:
             binary.dsym_error = "no BuildId, so no crash can be matched to it"
         record.binaries.append(binary)
+
+
+#: R8's marker in every dex it writes: `~~R8{…"pg-map-id":"e1ad1424…"…}`.
+_DEX_MAP_ID = re.compile(rb'~~R8\{[^}]*"pg-map-id":"([0-9a-f]+)"')
+
+
+def _apk_map_id(apk: Path) -> str:
+    """The pg_map_id R8 stamped into the APK's code, or "" if there is none or
+    the APK cannot be read -- then the mapping is taken on trust, as before."""
+    try:
+        with zipfile.ZipFile(apk) as z:
+            m = _DEX_MAP_ID.search(z.read("classes.dex"))
+    except (OSError, KeyError, zipfile.BadZipFile, EOFError):
+        return ""
+    return m.group(1).decode() if m else ""
 
 
 def _map_id(mapping: Path) -> str:

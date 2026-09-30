@@ -14,14 +14,18 @@ import asyncio
 import json
 import os
 import struct
+import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 
+from server.config import ServerConfig
 from server.device import build_records, elf
+from server.main import create_app
 from server.models import CrashFrame, CrashImage, CrashReport
-from server.sources import symbolicate, symbolicate_android
+from server.sources import android_dropbox, symbolicate, symbolicate_android
 
 BUILD_ID = "a7846ae06d6bf6cf0e9d7c1b2a3f4e5d6c7b8a90"
 NOW = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
@@ -270,8 +274,16 @@ class FakeAndroidTools:
         text = Path(argv[2]).read_text()
         self.sent = text
         out = []
+        # As the real retrace does (measured): a frame it knows becomes its
+        # lines, each carrying the frame's `~[…]` suffix; one it does not
+        # passes through, suffix and all; exception lines pass through.
         for line in text.splitlines():
-            out.append(self.retrace.get(line.strip(), line) if self.retrace else line)
+            frame, tag = (line.rsplit(" ~[", 1) + [""])[:2]
+            known = (self.retrace or {}).get(frame.strip())
+            if known is None or not tag:
+                out.append(line)
+            else:
+                out += [f"{x} ~[{tag}" for x in known.splitlines()]
         return self.code, "\n".join(out) + "\n", ""
 
 
@@ -356,14 +368,20 @@ class TestJava:
         assert "com.example.app.Feed.parse" in report.top_frames[0]
         assert "Feed.kt:12" in report.top_frames[0]
 
-    def test_only_frames_with_r8_marks_are_sent(self, tmp_path, tools):
+    def test_the_trace_is_sent_whole_with_its_exception(self, tmp_path, tools):
+        """retrace rewrites an NPE's frames only with the exception line in
+        front of them, and resolves an outline from the frame after it: sent
+        frame by frame, an NPE named the inlined callee (measured)."""
         root = tmp_path / "records"
         _record_android(_gradle_module(tmp_path), root)
         fake = FakeAndroidTools(retrace=RETRACED)
         report = _java_report()
+        report.frames[0].thrown = "java.lang.NullPointerException: boom"
         _run([report], symbolicate.SymbolFinder(root, fake))
-        assert "a.b.c(SourceFile:3)" in fake.sent
-        assert "Handler" not in fake.sent                # its real file name: not R8's
+        assert fake.sent == ("java.lang.NullPointerException: boom\n"
+                             "\tat a.b.c(SourceFile:3) ~[QUERN-0]\n"
+                             "\tat android.os.Handler.dispatchMessage(Handler.java:106)"
+                             " ~[QUERN-1]\n")
         assert report.frames[1].symbol == "android.os.Handler.dispatchMessage"
 
     def test_a_debug_builds_frames_need_nothing(self, tmp_path, tools):
@@ -399,7 +417,7 @@ class TestJava:
         _record_android(module, root, now=NOW.replace(minute=2))
         report = _java_report()
         _run([report], symbolicate.SymbolFinder(root, FakeAndroidTools(retrace=RETRACED)))
-        assert "2 recorded builds share them" in report.symbols[0].note
+        assert "2 recorded builds share it" in report.symbols[0].note
 
     def test_no_retrace_is_said_and_retried(self, tmp_path, monkeypatch):
         root = tmp_path / "records"
@@ -513,11 +531,15 @@ class TestNativeFailures:
         _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
         assert said in report.symbols[0].note and not report.symbolicated
 
-    def test_a_symbolizer_refusal_is_an_answer(self, tmp_path, tools):
+    def test_a_failed_run_is_retried_and_says_why(self, tmp_path, tools):
         report = _native_report()
-        fake = FakeAndroidTools(code=1)
-        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
-        assert "exited 1" in report.symbols[0].note and report.symbolicated
+
+        async def fails(argv):
+            return 1, "error: cannot open file\n", ""
+
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fails))
+        assert report.symbols[0].note == "llvm-symbolizer exited 1: error: cannot open file"
+        assert not report.symbolicated
 
     def test_the_records_copy_gone_is_said_and_retried(self, tmp_path, tools):
         root = _recorded(tmp_path)
@@ -525,8 +547,27 @@ class TestNativeFailures:
         report = _native_report()
         fake = FakeAndroidTools(symbolizer=SYMBOLIZED)
         _run([report], symbolicate.SymbolFinder(root, fake))
-        assert "gone or cannot be read" in report.symbols[0].note
+        assert "is gone, unreadable, or not the library" in report.symbols[0].note
         assert not report.symbolicated and fake.calls == []
+
+    def test_a_copy_that_is_another_library_is_not_used(self, tmp_path, tools):
+        """A record is not proof of what is on disk."""
+        root = _recorded(tmp_path)
+        next(root.rglob("libapp.so")).write_bytes(elf_bytes("00" * 20))
+        report = _native_report()
+        fake = FakeAndroidTools(symbolizer=SYMBOLIZED)
+        _run([report], symbolicate.SymbolFinder(root, fake))
+        assert "not the library with BuildId" in report.symbols[0].note and fake.calls == []
+
+    def test_an_older_record_is_used_when_the_newest_copy_is_gone(self, tmp_path, tools):
+        root = tmp_path / "records"
+        module = _gradle_module(tmp_path)
+        older = _record_android(module, root, now=NOW.replace(minute=1))
+        newer = _record_android(module, root, now=NOW.replace(minute=2))
+        next((root / newer.build_id).rglob("libapp.so")).unlink()
+        report = _native_report()
+        _run([report], symbolicate.SymbolFinder(root, FakeAndroidTools(symbolizer=SYMBOLIZED)))
+        assert report.symbols[0].build_id == older.build_id and report.frames[1].line == 42
 
     def test_an_expired_record_is_not_used(self, tmp_path, tools):
         root = _recorded(tmp_path)
@@ -536,7 +577,8 @@ class TestNativeFailures:
         path.write_text(json.dumps(data))
         report = _native_report()
         _run([report], symbolicate.SymbolFinder(root, FakeAndroidTools(symbolizer=SYMBOLIZED)))
-        assert "no build record has libapp.so" in report.symbols[0].note
+        assert "expired with its build record" in report.symbols[0].note
+        assert not report.symbolicated
 
     def test_an_upper_case_build_id_matches(self, tmp_path, tools):
         report = _native_report()
@@ -647,9 +689,9 @@ class TestRetraceOutput:
     def test_an_unmapped_frame_passes_through_unresolved(self, tmp_path, tools):
         report = self._retrace(tmp_path, "\tat a.b.c(SourceFile:3)")
         f = report.frames[0]
-        assert (f.file, f.line) == ("", 3)
-        assert report.symbols[0].frames_resolved == 0
-        assert "1 of 1 frames have no source line" in report.symbols[0].note
+        assert (f.symbol, f.file, f.line) == ("a.b.c", "", 3)
+        assert report.symbols[0].frames_resolved == 1           # Handler's, as it was
+        assert "1 of 2 frames have no source line" in report.symbols[0].note
 
     def test_a_name_without_a_line_is_not_resolved(self, tmp_path, tools):
         report = self._retrace(tmp_path, "\tat com.example.app.Feed.load(Feed.java)\n"
@@ -657,7 +699,7 @@ class TestRetraceOutput:
                                line=None)
         f = report.frames[0]
         assert (f.symbol, f.file, f.line) == ("com.example.app.Feed.load", "Feed.java", None)
-        assert report.symbols[0].frames_resolved == 0
+        assert report.symbols[0].frames_resolved == 1           # Handler's alone
 
     def test_ambiguous_alone_is_not_inlined(self, tmp_path, tools):
         report = self._retrace(tmp_path, "\tat com.example.app.Feed.load(Feed.kt:7)\n"
@@ -693,7 +735,7 @@ class TestSettled:
         _run([report], finder)
         assert len(fake.calls) == 2
         assert [(e.image, e.frames_resolved) for e in report.symbols] == first
-        assert sorted(first) == [("java (R8 mapping)", 1), ("libapp.so", 1)]
+        assert sorted(first) == [("java (R8 mapping)", 2), ("libapp.so", 1)]
 
     def test_an_unsettled_image_is_asked_again(self, tmp_path, monkeypatch):
         root = _recorded(tmp_path)
@@ -736,3 +778,251 @@ class TestTheSubprocess:
         monkeypatch.setattr(symbolicate.asyncio, "wait_for", wait_for)
         asyncio.run(symbolicate._run([tool, "x"]))
         assert seen["timeout"] == timeout
+
+
+# ── review round 1 ───────────────────────────────────────────────────────────
+
+
+def _apk_with_map_id(module: Path, map_id: str | None) -> None:
+    apk = next(module.rglob("*.apk"))
+    stamp = apk.stat().st_mtime
+    with zipfile.ZipFile(apk, "w") as z:
+        marker = (f'~~R8{{"backend":"dex","compilation-mode":"release","pg-map-id":"{map_id}"}}'
+                  if map_id else "no marker")
+        z.writestr("classes.dex", b"dex\n035\0" + marker.encode())
+    os.utime(apk, (stamp, stamp))
+
+
+class TestTheApksOwnMapId:
+    def test_a_mapping_from_another_build_is_not_kept(self, tmp_path):
+        module = _gradle_module(tmp_path)
+        _apk_with_map_id(module, "0123456789ab")
+        record = _record_android(module, tmp_path / "records")
+        assert record.mapping == "" and record.mapping_id == ""
+        assert "is not the one the APK was built with (0123456789ab)" in record.notes[0]
+
+    def test_the_mapping_the_apk_was_built_with_is_kept(self, tmp_path):
+        module = _gradle_module(tmp_path)
+        _apk_with_map_id(module, "e1ad14241ecb07832d")
+        record = _record_android(module, tmp_path / "records")
+        assert record.mapping_id == "e1ad14241ecb07832d" and record.notes == []
+
+    def test_a_minified_apk_with_no_mapping_is_said(self, tmp_path):
+        module = _gradle_module(tmp_path, mapping=False)
+        _apk_with_map_id(module, "0123456789ab")
+        record = _record_android(module, tmp_path / "records")
+        assert "minified by R8 (0123456789ab) but there is no mapping.txt" in record.notes[0]
+
+    def test_an_apk_with_no_marker_takes_the_mapping_on_trust(self, tmp_path):
+        module = _gradle_module(tmp_path)
+        _apk_with_map_id(module, None)
+        assert _record_android(module, tmp_path / "records").mapping_id == "e1ad14241ecb07832d"
+
+
+class TestRecordEdges:
+    @pytest.mark.parametrize("elements", [{"versionCode": 1}, ["not an element"], []])
+    def test_metadata_not_in_agps_form_is_refused(self, tmp_path, elements):
+        module = _gradle_module(tmp_path)
+        meta = next(module.rglob("output-metadata.json"))
+        meta.write_text(json.dumps({"applicationId": PKG, "variantName": "stagingRelease",
+                                    "elements": elements}))
+        with pytest.raises(build_records.AndroidBuildNotFound, match="form AGP writes"):
+            _record_android(module, tmp_path / "records")
+
+    def test_abi_splits_keep_every_version_code(self, tmp_path):
+        module = _gradle_module(tmp_path)
+        meta = next(module.rglob("output-metadata.json"))
+        data = json.loads(meta.read_text())
+        data["elements"] = [dict(data["elements"][0], versionCode=1001),
+                            dict(data["elements"][0], versionCode=2001)]
+        meta.write_text(json.dumps(data))
+        record = _record_android(module, tmp_path / "records")
+        assert record.version_codes == ["1001", "2001"]
+        report = _java_report().model_copy(update={"build_version": "2001"})
+        record, _ = symbolicate_android._mapping_for(report, report.frames, [record])
+        assert record is not None
+
+    def test_two_libraries_of_one_name_are_both_kept(self, tmp_path):
+        """A stale output directory beside the current one: the copies
+        overwrote each other and the record named one while holding the other."""
+        module = _gradle_module(tmp_path)
+        stale = (module / "build/intermediates/merged_native_libs/stagingRelease/out/lib"
+                 / "arm64-v8a")
+        stale.mkdir(parents=True)
+        (stale / "libapp.so").write_bytes(elf_bytes("11" * 20))
+        record = _record_android(module, tmp_path / "records")
+        kept = {b.uuids["arm64-v8a"]: b.dwarf for b in record.binaries if b.dwarf}
+        assert set(kept) == {BUILD_ID, "11" * 20}
+        for build_id, path in kept.items():
+            assert elf.read(Path(path)).build_id == build_id
+
+    def test_a_failed_write_leaves_no_mapping_behind(self, tmp_path, monkeypatch):
+        real = build_records.shutil.copy2
+
+        def copy2(src, dst, *a, **kw):
+            if str(src).endswith(".so"):
+                raise OSError(28, "No space left on device")
+            return real(src, dst, *a, **kw)
+
+        monkeypatch.setattr(build_records.shutil, "copy2", copy2)
+        record = _record_android(_gradle_module(tmp_path), tmp_path / "records")
+        assert "No space left" in record.error
+        assert (record.mapping, record.mapping_id) == ("", "")
+        assert not any(b.dwarf for b in record.binaries)
+        assert not list((tmp_path / "records").iterdir())
+
+
+class TestAppFrameAfterRetracing:
+    def test_the_root_cause_rule_holds(self, tmp_path, tools):
+        """The first app frame of the innermost cause, as the trace was read:
+        not the wrapper that rethrew it."""
+        body = ("java.lang.RuntimeException: wrapped\n"
+                "\tat a.w(SourceFile:1)\n"
+                "Caused by: java.lang.IllegalStateException: boom\n"
+                "\tat a.x(SourceFile:2)\n")
+        frames, app_frame, _ = android_dropbox._java_trace(body, PKG)
+        assert [f.thrown for f in frames] == ["java.lang.RuntimeException: wrapped",
+                                              "Caused by: java.lang.IllegalStateException: boom"]
+        report = _java_report().model_copy(update={"frames": frames, "app_frame": app_frame})
+        fake = FakeAndroidTools(retrace={
+            "at a.w(SourceFile:1)": "\tat com.example.app.Wrapper.run(Wrapper.kt:5)",
+            "at a.x(SourceFile:2)": "\tat com.example.app.Cause.boom(Cause.kt:9)"})
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert report.app_frame.symbol == "com.example.app.Cause.boom"
+        assert "Caused by: java.lang.IllegalStateException: boom\n\tat a.x" in fake.sent
+
+    def test_a_native_frame_is_never_the_java_app_frame(self, tmp_path, tools):
+        """An ANR's native frame without a BuildId read as Java, and libc's
+        epoll became the app frame."""
+        report = _java_report().model_copy(update={"kind": "anr"})
+        report.frames.insert(0, CrashFrame(image="libc.so", offset=0x9e498,
+                                           symbol="__epoll_pwait"))
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path),
+                                                FakeAndroidTools(retrace=RETRACED)))
+        assert report.frames[0].app is False
+        assert report.app_frame.symbol == "com.example.app.Feed.parse"
+
+    def test_a_frame_r8_made_up_is_folded_away(self, tmp_path, tools):
+        """retrace writes nothing for an outline; its caller takes the line."""
+        report = _java_report()
+        report.frames.insert(0, CrashFrame(symbol="s75.l", line=3))
+        fake = FakeAndroidTools(retrace={"at s75.l(Unknown Source:3)": "", **RETRACED})
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert [f.symbol for f in report.frames][:1] == ["com.example.app.Feed.parse"]
+        assert "1 frames R8 generated" in report.symbols[0].note
+        assert "no source line" not in report.symbols[0].note
+
+
+class TestWhatIsSent:
+    def test_a_kept_source_file_is_retraced_when_a_mapping_matches(self, tmp_path, tools):
+        """`-keepattributes SourceFile` without renaming: R8's names, real
+        file names, no mark at all."""
+        report = _java_report(file="Feed.kt")
+        fake = FakeAndroidTools(retrace={"at a.b.c(Feed.kt:3)":
+                                         "\tat com.example.app.Feed.parse(Feed.kt:12)"})
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert report.frames[0].symbol == "com.example.app.Feed.parse"
+
+    def test_a_debug_builds_synthetic_frames_ask_for_nothing(self, tmp_path, tools):
+        """D8's lambdas print `(Unknown Source:2)` in a debug build too."""
+        report = _java_report(file="Feed.kt")
+        report.frames[0].symbol = "com.example.app.Feed$$ExternalSyntheticLambda0.run"
+        report.frames[0].file, report.frames[0].line = "", 2
+        fake = FakeAndroidTools()
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", fake))
+        assert fake.calls == [] and report.symbols == [] and report.symbolicated
+
+    def test_a_line_of_zero_is_sent(self, tmp_path, tools):
+        report = _java_report()
+        report.frames[0].line = 0
+        fake = FakeAndroidTools(retrace=RETRACED)
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert "at a.b.c(SourceFile:0) ~[QUERN-0]" in fake.sent
+
+    def test_a_version_only_match_always_says_so(self, tmp_path, tools):
+        report = _java_report()
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path),
+                                                FakeAndroidTools(retrace=RETRACED)))
+        assert "matched by package and version only" in report.symbols[0].note
+
+    def test_an_exact_stamp_says_nothing_of_versions(self, tmp_path, tools):
+        report = _java_report(file="r8-map-id-e1ad14241ecb07832d")
+        fake = FakeAndroidTools(retrace={"at a.b.c(r8-map-id-e1ad14241ecb07832d:3)":
+                                         "\tat com.example.app.Feed.parse(Feed.kt:12)"})
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert report.symbols[0].note == ""
+
+    def test_retrace_failing_says_why_from_stdout(self, tmp_path, tools):
+        """The SDK script prints why on stdout and exits 1; that settled for
+        good with an empty reason."""
+        async def no_java(argv):
+            return 1, "ERROR: JAVA_HOME is not set and no 'java' command could be found\n", ""
+
+        report = _java_report()
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), no_java))
+        assert "retrace exited 1: ERROR: JAVA_HOME is not set" in report.symbols[0].note
+        assert not report.symbolicated
+
+
+class TestCouldNotAsk:
+    def test_an_unreadable_record_is_not_no_record(self, tmp_path, tools):
+        root = tmp_path / "records"
+        (root / "20260101-000000-android-bad").mkdir(parents=True)
+        (root / "20260101-000000-android-bad" / "record.json").write_text("{not json")
+        report = _native_report()
+        _run([report], symbolicate.SymbolFinder(root, FakeAndroidTools()))
+        assert "1 build record could not be read" in report.symbols[0].note
+
+    def test_an_unlistable_records_directory_is_said(self, tmp_path, tools, monkeypatch):
+        monkeypatch.setattr(build_records, "load_with_unreadable", lambda root: ([], 0, False))
+        report = _java_report(file="r8-map-id-deadbeef")
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", FakeAndroidTools()))
+        assert "directory could not be read" in report.symbols[0].note
+
+
+class TestFindRetrace:
+    def test_the_sdks_retrace_before_one_on_path(self, tmp_path, monkeypatch):
+        """Homebrew's ProGuard installs a `retrace` that is another program."""
+        sdk = tmp_path / "sdk" / "cmdline-tools" / "latest" / "bin" / "retrace"
+        sdk.parent.mkdir(parents=True)
+        sdk.write_text("")
+        monkeypatch.setenv("ANDROID_HOME", str(tmp_path / "sdk"))
+        monkeypatch.setattr(symbolicate_android.shutil, "which", lambda name: "/opt/brew/retrace")
+        assert symbolicate_android.find_retrace() == str(sdk)
+
+
+class TestTheRoute:
+    @pytest.fixture
+    def app(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(build_records, "RECORDS_DIR", tmp_path / "records")
+        return create_app(config=ServerConfig(api_key="k"), enable_oslog=False,
+                          enable_crash=False, enable_proxy=False)
+
+    def _post(self, app, body):
+        async def go():
+            async with AsyncClient(transport=ASGITransport(app=app),
+                                   base_url="http://test") as c:
+                return await c.post("/api/v1/builds/android/record", json=body,
+                                    headers={"Authorization": "Bearer k"})
+        return asyncio.run(go())
+
+    def test_records(self, app, tmp_path):
+        module = _gradle_module(tmp_path, built=datetime.now(UTC))
+        r = self._post(app, {"module_path": str(module), "variant": "stagingRelease"})
+        assert r.status_code == 200, r.text
+        assert r.json()["summary"].startswith("Recorded build")
+        assert list((tmp_path / "records").glob("*/record.json"))
+
+    @pytest.mark.parametrize("body, said", [
+        ({"module_path": "project/app", "variant": "stagingRelease"}, "must be absolute"),
+        ({"module_path": "/nonexistent/app", "variant": "stagingRelease"}, "not a directory"),
+        ({"module_path": "/tmp", "variant": "  "}, "variant is empty"),
+    ])
+    def test_refusals(self, app, body, said):
+        r = self._post(app, body)
+        assert r.status_code == 400 and said in r.json()["detail"]
+
+    def test_a_variant_not_built_is_404(self, app, tmp_path):
+        module = _gradle_module(tmp_path)
+        r = self._post(app, {"module_path": str(module), "variant": "prodRelease"})
+        assert r.status_code == 404 and "built variants" in r.json()["detail"]

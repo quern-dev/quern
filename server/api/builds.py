@@ -96,6 +96,10 @@ async def record_android_build(
     if not body.variant.strip():
         raise HTTPException(
             status_code=400, detail="variant is empty: name one, e.g. stagingRelease")
+    if not module.is_absolute():
+        # Relative to the daemon's directory, which is nobody's project -- and
+        # stored as given, the key retention counts builds by.
+        raise HTTPException(status_code=400, detail=f"module_path must be absolute: {module}")
     if not module.is_dir():
         raise HTTPException(status_code=400, detail=f"{module} is not a directory")
     try:

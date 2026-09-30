@@ -107,7 +107,7 @@ quern keeps copies of what symbolicating needs, because the next build overwrite
 Returns the record and a one-line summary. A variant with no APK output is a 404 that names the variants that were built.`,
     inputSchema: strictParams({
       module_path: z.string().describe(
-        "The app module's directory: the one with build.gradle(.kts) and build/, e.g. /path/to/project/app"
+        "The app module's absolute directory: the one with build.gradle(.kts) and build/, e.g. /path/to/project/app"
       ),
       variant: z.string().describe(
         "The variant built, e.g. stagingRelease, prodDebug"
