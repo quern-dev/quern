@@ -32,10 +32,15 @@ enum McpClientsTests {
                 "fix_clients": ["claude-desktop"],
                 "problems": [["client": "Claude Desktop", "reason": "r", "fix": "f",
                               "fixable": true],
+                             ["client": "Claude Code (/p)", "reason": "r2", "fix": "f2",
+                              "fixable": false],
                              ["client": "no reason"]],
             ])
-            Harness.expect(h.problems, [McpClientProblem(client: "Claude Desktop", reason: "r",
-                                                         fix: "f")], "the well-formed one")
+            Harness.expect(h.problems, [
+                McpClientProblem(client: "Claude Desktop", reason: "r", fix: "f"),
+                McpClientProblem(client: "Claude Code (/p)", reason: "r2", fix: "f2",
+                                 fixable: false),
+            ], "the well-formed ones, fixable read")
             Harness.expect(h.fixClients, ["claude-desktop"], "fix clients")
             Harness.expect(h.checkedAt != nil, "fractional seconds parse")
         }

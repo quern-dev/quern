@@ -58,6 +58,11 @@ class TestAssess:
         _, asked = _assess([_reg("claude-code", "node"), _reg("cursor", NODE)])
         assert asked == []
 
+    def test_the_gui_is_asked_once_for_every_gui_client(self):
+        (desktop, cursor), asked = _assess([_reg("claude-desktop", "node"),
+                                            _reg("cursor", "node")], gui=False)
+        assert desktop.fails and cursor.fails and asked == [1]
+
     def test_the_gui_lookup_failing_is_not_a_finding(self):
         def boom():
             raise OSError("no")
@@ -108,6 +113,12 @@ class TestTheStateFile:
         assert data["fix_clients"] == ["cursor", "claude-code"]
         assert all(p["reason"] and p["fix"] for p in data["problems"])
         assert [p["fixable"] for p in data["problems"]] == [True, False, True]
+
+    def test_a_project_entry_alone_has_nothing_for_mcp_install(self):
+        assessments, _ = _assess([_reg("claude-code", "/gone", project="/src/app")],
+                                 exists=lambda p: False)
+        data = mcp_clients.state(assessments, now=NOW)
+        assert len(data["problems"]) == 1 and data["fix_clients"] == []
 
     def test_nothing_wrong_is_an_empty_list_not_no_file(self):
         """The file is rewritten, so a fixed client's warning goes away."""
