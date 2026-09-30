@@ -158,6 +158,9 @@ async def record_android_build(
         version=str(element.get("versionName") or ""),
         build_number=str(element.get("versionCode") or ""),
     )
+    stale = _stale_outputs(Path(record.app_path), created)
+    if stale:
+        record.notes.append(stale)
     partial, final = root / (build_id + _PARTIAL), root / build_id
     try:
         partial.mkdir(parents=True)
@@ -176,6 +179,27 @@ async def record_android_build(
         record.error = f"the record could not be written to {root}: {e}"
         logger.warning("Build record %s not written: %s", build_id, e)
     return record
+
+
+#: Outputs older than this, when recorded, are said to be. Recording is meant to
+#: follow the build it records; an agent recording whatever `build/` held gets
+#: the build from weeks ago, and its mapping retraces to lines that have moved.
+STALE_OUTPUTS = timedelta(hours=1)
+
+
+def _stale_outputs(apk: Path, now: datetime) -> str:
+    try:
+        built = datetime.fromtimestamp(apk.stat().st_mtime, UTC)
+    except OSError:
+        return f"the APK its output-metadata.json names, {apk.name}, is not there"
+    age = now - built
+    if age <= STALE_OUTPUTS:
+        return ""
+    hours = round(age.total_seconds() / 3600)
+    ago = f"{age.days} days" if age.days >= 2 else f"{hours} hour{'' if hours == 1 else 's'}"
+    return (f"these outputs were built {built:%Y-%m-%d %H:%M} UTC, {ago} before they were "
+            f"recorded: if the source has changed since, build again and record that, "
+            f"or its lines will not match the source")
 
 
 def _android_metadata(module_dir: Path, variant: str) -> dict:

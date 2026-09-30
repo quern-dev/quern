@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import struct
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -84,11 +85,14 @@ class TestElf:
 # ── record_android_build ─────────────────────────────────────────────────────
 
 
-def _gradle_module(tmp_path: Path, variant="stagingRelease", *, mapping=True, code=99999) -> Path:
+def _gradle_module(tmp_path: Path, variant="stagingRelease", *, mapping=True, code=99999,
+                   built=NOW - timedelta(minutes=5)) -> Path:
     module = tmp_path / "project" / "app"
     apk_dir = module / "build" / "outputs" / "apk" / "staging" / "release"
     apk_dir.mkdir(parents=True)
-    (apk_dir / "app-staging-release.apk").write_bytes(b"PK")
+    apk = apk_dir / "app-staging-release.apk"
+    apk.write_bytes(b"PK")
+    os.utime(apk, (built.timestamp(), built.timestamp()))
     (apk_dir / "output-metadata.json").write_text(json.dumps({
         "applicationId": PKG, "variantName": variant,
         "elements": [{"versionCode": code, "versionName": "1.2.3",
@@ -121,6 +125,33 @@ class TestRecordAndroidBuild:
         assert lib.path == "lib/arm64-v8a/libapp.so" and lib.uuids == {"arm64-v8a": BUILD_ID}
         assert Path(lib.dwarf).read_bytes() == elf_bytes()
         assert "kept its R8 mapping (e1ad14241ecb)" in build_records.summary_line(record)
+
+    def test_a_fresh_build_carries_no_age_note(self, tmp_path):
+        record = _record_android(_gradle_module(tmp_path), tmp_path / "records")
+        assert record.notes == []
+
+    def test_outputs_older_than_an_hour_say_so(self, tmp_path):
+        # Recording what build/ held from weeks ago retraced a real crash to a
+        # line seven lines from where today's source throws.
+        module = _gradle_module(tmp_path, built=NOW - timedelta(days=82))
+        record = _record_android(module, tmp_path / "records")
+        [note] = record.notes
+        assert "built 2026-07-09 12:00 UTC, 82 days before" in note
+        assert "build again" in build_records.summary_line(record)
+
+    def test_the_hour_is_the_line(self, tmp_path):
+        old = _record_android(_gradle_module(tmp_path / "a", built=NOW - timedelta(minutes=61)),
+                              tmp_path / "records")
+        fresh = _record_android(_gradle_module(tmp_path / "b", built=NOW - timedelta(minutes=59)),
+                                tmp_path / "records")
+        assert "1 hour before" in old.notes[0] and fresh.notes == []
+
+    def test_a_missing_apk_is_said(self, tmp_path):
+        module = _gradle_module(tmp_path)
+        next(module.rglob("*.apk")).unlink()
+        record = _record_android(module, tmp_path / "records")
+        assert record.notes == ["the APK its output-metadata.json names, "
+                                "app-staging-release.apk, is not there"]
 
     def test_a_truncated_library_is_skipped(self, tmp_path):
         record = _record_android(_gradle_module(tmp_path), tmp_path / "records")
