@@ -146,22 +146,28 @@ read resolved stay resolved.
 **Android reports are symbolicated against a recorded Gradle build**
 (`record_android_build`). When a record's `mapping.txt` matches the crash, the Java
 frames are retraced with `retrace` from the Android SDK command-line tools: the whole
-trace in one run, each block after its exception line, because retrace rewrites a
-NullPointerException's frames and resolves outlined frames only with that context.
-Frames R8 generated (outlines) are folded into their callers, and the app frame is
-chosen again from the real names, as the innermost cause's first app frame. The
-mapping is chosen by the `r8-map-id` stamp when a frame carries one, and otherwise by
-package and version, which a note always says, since local builds share a version.
-When no record matches, `symbols` asks for one only if the trace shows R8's marks: a
+trace, past the 30 frames `frames` shows, in one run, each block after its exception
+line, because retrace rewrites a NullPointerException's frames and resolves outlined
+frames only with that context. An inlined frame becomes one frame per function,
+innermost first; frames retrace writes nothing for (outlines, usually) are left out;
+and the app frame is chosen again from the real names, as the innermost cause's
+first app frame. `frames_resolved` of `frames_total` counts the frames retrace
+renamed. The mapping is chosen by the `r8-map-id` stamp when a frame carries one, and
+otherwise by package and version, which a note always says, since local builds share
+a version. A version-only match that renames none of the trace's classes, in a trace
+with no mark of R8, is from another build of that version and is not applied. When no
+record matches, `symbols` asks for one only if the trace shows R8's marks: a
 `SourceFile` or `r8-map-id-<id>` source file, or `Unknown Source` with a line where
-the rules strip source files. At record time the APK's own R8 marker is compared with
-`mapping.txt`, and a mapping from another build is not kept. Native frames in the
-app's own libraries are matched by BuildId to the record's unstripped copies, each
-checked against its BuildId before use, and resolved with the NDK's
-`llvm-symbolizer` at the pc the tombstone gives; a frame that gains a line takes the
-symbolizer's function name with it. A missing tool, record or mapping, a tool that
-fails, and records that cannot be read are said in `symbols` and looked up again on
-the next read.
+the rules strip source files. At record time the APK's own marker is read: a mapping
+from another R8 build, or one left beside a D8 (unminified) build, is not kept.
+Native frames in the app's own libraries are matched by BuildId to the record's
+unstripped copies, each checked against its BuildId before use, and resolved with the
+NDK's `llvm-symbolizer` at the pc the tombstone gives; a frame that gains a line takes
+the symbolizer's function name with it. A missing tool, record or mapping, a tool that
+fails or cannot run, and records that cannot be read are said in `symbols` and looked
+up again on the next read, as is a trace with no record yet. A tool's answer is kept,
+including one that cannot be matched to what was sent, which asking again would only
+repeat.
 
 A frame counts as the app's when:
 - **iOS:** its binary is inside the app bundle.
