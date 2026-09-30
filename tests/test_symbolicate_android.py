@@ -86,10 +86,11 @@ class TestElf:
         p.write_bytes(bytes(data))
         assert elf.read(p).build_id == ""
 
-    @pytest.mark.parametrize("name, kind", [(b"Android\0", 3), (b"GNU\0", 1)])
+    @pytest.mark.parametrize("name, kind", [(b"Andro\0", 3), (b"GNU\0", 1)])
     def test_only_the_gnu_build_id_note_is_the_build_id(self, tmp_path, name, kind):
-        """Android's own note (type 1, "Android") comes first in a real library;
-        its odd-length name is padded, which the reader must step over."""
+        """Another note can come first -- Android's own, a type-1 GNU ABI tag --
+        and a name whose length is not a multiple of four is padded, which
+        the reader must step over."""
         other = struct.pack("<III", len(name.rstrip(b"\0")) + 1, 4, kind) + name
         other += b"\0" * (-len(other) % 4) + b"\x1c\0\0\0"
         p = tmp_path / "lib.so"
@@ -1026,3 +1027,90 @@ class TestTheRoute:
         module = _gradle_module(tmp_path)
         r = self._post(app, {"module_path": str(module), "variant": "prodRelease"})
         assert r.status_code == 404 and "built variants" in r.json()["detail"]
+
+
+# ── mutation round 2 ─────────────────────────────────────────────────────────
+
+
+class TestNoRecord:
+    def test_an_unknown_source_frame_asks_for_a_record(self, tmp_path, tools):
+        """The only mark a real release app's crash carries."""
+        report = _java_report()
+        top = report.frames[0]
+        top.symbol, top.file, top.line = "l82.onClick", "", 539
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", FakeAndroidTools()))
+        assert "record it with record_android_build" in report.symbols[0].note
+        assert not report.symbolicated
+
+    def test_a_file_merely_containing_sourcefile_is_no_mark(self, tmp_path, tools):
+        report = _java_report(file="MySourceFile.kt")
+        fake = FakeAndroidTools()
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", fake))
+        assert report.symbols == [] and report.symbolicated
+
+
+class TestSettledAgain:
+    def test_a_settled_image_without_lines_is_not_asked_again(self, tmp_path, tools):
+        """Once resolved a frame has a file and is not sent anyway; one that
+        got only a name is not, and must still not be asked twice."""
+        fake = FakeAndroidTools(symbolizer="JNI_OnLoad\n??:0:0\n\n")
+        finder = symbolicate.SymbolFinder(_recorded(tmp_path), fake)
+        report = _native_report()
+        _run([report], finder)
+        report.symbolicated = False
+        _run([report], finder)
+        assert len(fake.calls) == 1 and len(report.symbols) == 1
+
+
+class TestRetraceMismatch:
+    def test_an_index_that_was_not_sent_is_not_guessed(self, tmp_path, tools):
+        async def odd(argv):
+            return 0, "\tat com.example.app.Feed.parse(Feed.kt:12) ~[QUERN-9]\n", ""
+
+        report = _java_report()
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), odd))
+        assert report.frames[0].symbol == "a.b.c"
+        assert "could not be matched" in report.symbols[0].note
+        assert report.symbolicated                   # asking again gets the same answer
+
+    def test_a_passed_through_stamp_is_not_a_file(self, tmp_path, tools):
+        report = _java_report(file="r8-map-id-e1ad14241ecb07832d")
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), FakeAndroidTools()))
+        assert report.frames[0].file == "" and report.frames[0].line == 3
+
+
+class TestAppFrameEdges:
+    def test_a_native_frame_is_not_flagged_by_the_java_fallback(self, tmp_path, tools):
+        """With no frame in the app's package, Java falls back to "not the
+        platform's" -- which a native frame's name also is."""
+        report = _java_report().model_copy(update={"kind": "anr"})
+        report.frames.insert(0, CrashFrame(image="libc.so", offset=0x9e498,
+                                           symbol="__epoll_pwait"))
+        fake = FakeAndroidTools(retrace={"at a.b.c(SourceFile:3)":
+                                         "\tat org.vendor.Feed.parse(Feed.kt:12)"})
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert report.frames[0].app is False
+        assert report.app_frame.symbol == "org.vendor.Feed.parse"
+
+    def test_an_app_frame_past_the_cap_stays_the_app_frame(self, tmp_path, tools):
+        """It was chosen over the whole trace, most of which is not here."""
+        report = _java_report()
+        beyond = CrashFrame(symbol="a.d.e", file="SourceFile", line=7, app=True)
+        report.app_frame = beyond
+        fake = FakeAndroidTools(retrace={
+            **RETRACED, "at a.d.e(SourceFile:7)": "\tat com.example.app.Root.cause(Root.kt:3)"})
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert report.app_frame is beyond and beyond.symbol == "com.example.app.Root.cause"
+        assert report.frames[0].app                # also the app's, and not chosen
+
+
+class TestRetentionOfAMappingAlone:
+    def test_a_record_with_only_a_mapping_is_counted_and_expired(self, tmp_path):
+        root = tmp_path / "records"
+        module = _gradle_module(tmp_path)
+        for so in module.rglob("*.so"):
+            so.unlink()
+        records = [_record_android(module, root, now=NOW.replace(minute=m)) for m in range(11)]
+        build_records.prune(root, now=NOW.replace(hour=13))
+        oldest = next(r for r in build_records.load_all(root) if r.build_id == records[0].build_id)
+        assert oldest.dsyms_expired and oldest.mapping == ""
