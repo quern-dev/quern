@@ -1180,8 +1180,12 @@ class TestAnUnminifiedTrace:
         unminified trace came back with wrong frames, counted resolved."""
         report = _parsed("java.lang.IllegalStateException: boom\n"
                          "\tat com.example.app.Main.onCreate(Main.kt:40)\n")
+        # The real shape: a kept class is still expanded by line number, into
+        # what the minified build inlined there -- other classes' methods first.
         fake = FakeAndroidTools(retrace={"at com.example.app.Main.onCreate(Main.kt:40)":
-                                         "\tat com.example.app.Main.inject(Main.kt:79)"})
+                                         "\tat com.example.app.Main_MembersInjector.inject("
+                                         "Main_MembersInjector.java:79)\n"
+                                         "\tat com.example.app.Main.onCreate(Main.kt:126)"})
         _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
         f = report.frames[0]
         assert (f.symbol, f.line) == ("com.example.app.Main.onCreate", 40)

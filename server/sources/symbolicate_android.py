@@ -325,8 +325,10 @@ async def _java(report: CrashReport, java: list[CrashFrame], beyond: CrashFrame 
         entry.note = "retrace's output could not be matched to the frames sent"
         return True
     readings = {i: _readings(f, tagged.get(i, [])) for i, f in enumerate(java)}
+    # The frame's own method is the outermost line of an expansion (the last);
+    # the lines before it are what was inlined into it, from any class.
     renamed = [i for i, (lines, _) in readings.items()
-               if any(_class(r.symbol) != _class(java[i].symbol) for r in lines)]
+               if lines and _class(lines[-1].symbol) != _class(java[i].symbol)]
     if not exact and not renamed and not any(_is_r8(f) for f in java):
         # Nothing in the trace names its build or shows R8's marks, and the
         # mapping renames none of its classes: an unminified build of the same
