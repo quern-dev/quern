@@ -34,6 +34,7 @@ import re
 import shutil
 import uuid as uuid_mod
 import zipfile
+import zlib
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -240,7 +241,12 @@ def _keep_android_symbols(
 ) -> None:
     mapping = module_dir / "build" / "outputs" / "mapping" / variant / "mapping.txt"
     built_with = _apk_map_id(Path(record.app_path))
-    if mapping.is_file():
+    if mapping.is_file() and built_with == NOT_MINIFIED:
+        # Minify since turned off leaves the last minified build's mapping in
+        # place, and it would rewrite this build's real names into wrong ones.
+        record.notes.append("the APK was not minified (D8 built it), so the mapping.txt left "
+                            "from an earlier minified build was not kept")
+    elif mapping.is_file():
         mapping_id = _map_id(mapping)
         if built_with and mapping_id and built_with != mapping_id:
             # A mapping.txt left from another build -- minify since turned off,
@@ -256,7 +262,7 @@ def _keep_android_symbols(
             record.mapping_id = mapping_id
             if not mapping_id:
                 record.notes.append("mapping.txt carries no pg_map_id; matched by version only")
-    elif built_with:
+    elif built_with and built_with != NOT_MINIFIED:
         record.notes.append(f"the APK was minified by R8 ({built_with[:12]}) but there is no "
                             f"mapping.txt for {variant}, so its Java frames cannot be retraced")
     libs = module_dir / "build" / "intermediates" / "merged_native_libs" / variant
@@ -280,19 +286,29 @@ def _keep_android_symbols(
         record.binaries.append(binary)
 
 
-#: R8's marker in every dex it writes: `~~R8{…"pg-map-id":"e1ad1424…"…}`.
+#: R8's marker in every dex it writes: `~~R8{…"pg-map-id":"e1ad1424…"…}`. D8,
+#: which builds an unminified variant, writes `~~D8{…}` with no map id.
 _DEX_MAP_ID = re.compile(rb'~~R8\{[^}]*"pg-map-id":"([0-9a-f]+)"')
+_DEX_D8 = re.compile(rb"~~D8\{")
+NOT_MINIFIED = "d8"
 
 
 def _apk_map_id(apk: Path) -> str:
-    """The pg_map_id R8 stamped into the APK's code, or "" if there is none or
-    the APK cannot be read -- then the mapping is taken on trust, as before."""
+    """The pg_map_id R8 stamped into the APK's code; NOT_MINIFIED when D8 built
+    it; "" if it carries no marker or cannot be read -- then the mapping is
+    taken on trust, as before."""
     try:
         with zipfile.ZipFile(apk) as z:
-            m = _DEX_MAP_ID.search(z.read("classes.dex"))
-    except (OSError, KeyError, zipfile.BadZipFile, EOFError):
+            dex = z.read("classes.dex")
+    # A corrupt APK raises whatever its compressor does (zlib.error, EOFError,
+    # a RuntimeError for an encrypted entry), and a record must not fail on it.
+    except (OSError, KeyError, EOFError, RuntimeError, ValueError, zipfile.BadZipFile,
+            zlib.error):
         return ""
-    return m.group(1).decode() if m else ""
+    m = _DEX_MAP_ID.search(dex)
+    if m:
+        return m.group(1).decode()
+    return NOT_MINIFIED if _DEX_D8.search(dex) else ""
 
 
 def _map_id(mapping: Path) -> str:

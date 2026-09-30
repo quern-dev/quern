@@ -460,6 +460,10 @@ class CrashReport(BaseModel):
     )
     #: Set once symbolication has run, so a report is not handed to atos again.
     symbolicated: bool = Field(default=False, exclude=True)
+    #: Android: every frame the record's trace gave, of which `frames` is the
+    #: first MAX_FRAMES (the same objects). Symbolication works over the whole
+    #: trace and re-chooses `app_frame` from it, as parsing did (#326).
+    trace: list[CrashFrame] = Field(default_factory=list, exclude=True)
 
 
 class OpenCrashDialog(BaseModel):

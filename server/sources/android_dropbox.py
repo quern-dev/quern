@@ -199,6 +199,7 @@ def _parse_record(
         signal=signal,
         top_frames=[f.strip() for f in frames[:TOP_FRAMES]],
         frames=structured[:crash_frames.MAX_FRAMES],
+        trace=structured,
         images=_native_images(native, app_frame),
         frames_from=_FRAMES_FROM[kind] if structured else "",
         app_frame=app_frame,
@@ -295,7 +296,9 @@ def _java_trace(body: str, package: str) -> tuple[list[CrashFrame], CrashFrame |
         if line.startswith("Caused by: "):
             blocks.append([])
             headers.append(line.strip())
-        elif _JAVA_FRAME.match(line):
+        elif _JAVA_FRAME.match(line) and crash_frames.is_java_frame(line):
+            # Only lines the parser reads, so the frames split back into
+            # blocks exactly; a line it skipped shifted every later block.
             blocks[-1].append(line)
     # Decided over the whole trace, so every block agrees on which package is
     # the app's; then split back into blocks to find the innermost cause.

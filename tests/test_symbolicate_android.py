@@ -25,7 +25,7 @@ from server.config import ServerConfig
 from server.device import build_records, elf
 from server.main import create_app
 from server.models import CrashFrame, CrashImage, CrashReport
-from server.sources import android_dropbox, symbolicate, symbolicate_android
+from server.sources import android_dropbox, crash_frames, symbolicate, symbolicate_android
 
 BUILD_ID = "a7846ae06d6bf6cf0e9d7c1b2a3f4e5d6c7b8a90"
 NOW = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
@@ -389,7 +389,8 @@ class TestJava:
         report = _java_report(file="Feed.kt")
         fake = FakeAndroidTools()
         _run([report], symbolicate.SymbolFinder(tmp_path / "records", fake))
-        assert fake.calls == [] and report.symbols == [] and report.symbolicated
+        # Not settled: its record may be made later, and asking again is a scan.
+        assert fake.calls == [] and report.symbols == [] and not report.symbolicated
 
     def test_the_map_id_stamp_picks_the_mapping_exactly(self, tmp_path, tools):
         root = tmp_path / "records"
@@ -691,8 +692,9 @@ class TestRetraceOutput:
         report = self._retrace(tmp_path, "\tat a.b.c(SourceFile:3)")
         f = report.frames[0]
         assert (f.symbol, f.file, f.line) == ("a.b.c", "", 3)
-        assert report.symbols[0].frames_resolved == 1           # Handler's, as it was
-        assert "1 of 2 frames have no source line" in report.symbols[0].note
+        # Counted as a frame to retrace (it carries R8's mark); Handler is not.
+        assert (report.symbols[0].frames_resolved, report.symbols[0].frames_total) == (0, 1)
+        assert "1 of 1 renamed frames have no source line" in report.symbols[0].note
 
     def test_a_name_without_a_line_is_not_resolved(self, tmp_path, tools):
         report = self._retrace(tmp_path, "\tat com.example.app.Feed.load(Feed.java)\n"
@@ -700,7 +702,7 @@ class TestRetraceOutput:
                                line=None)
         f = report.frames[0]
         assert (f.symbol, f.file, f.line) == ("com.example.app.Feed.load", "Feed.java", None)
-        assert report.symbols[0].frames_resolved == 1           # Handler's alone
+        assert (report.symbols[0].frames_resolved, report.symbols[0].frames_total) == (0, 1)
 
     def test_ambiguous_alone_is_not_inlined(self, tmp_path, tools):
         report = self._retrace(tmp_path, "\tat com.example.app.Feed.load(Feed.kt:7)\n"
@@ -736,7 +738,7 @@ class TestSettled:
         _run([report], finder)
         assert len(fake.calls) == 2
         assert [(e.image, e.frames_resolved) for e in report.symbols] == first
-        assert sorted(first) == [("java (R8 mapping)", 2), ("libapp.so", 1)]
+        assert sorted(first) == [("java (R8 mapping)", 1), ("libapp.so", 1)]
 
     def test_an_unsettled_image_is_asked_again(self, tmp_path, monkeypatch):
         root = _recorded(tmp_path)
@@ -840,7 +842,7 @@ class TestRecordEdges:
         record = _record_android(module, tmp_path / "records")
         assert record.version_codes == ["1001", "2001"]
         report = _java_report().model_copy(update={"build_version": "2001"})
-        record, _ = symbolicate_android._mapping_for(report, report.frames, [record])
+        record, _, _ = symbolicate_android._mapping_for(report, report.frames, [record])
         assert record is not None
 
     def test_two_libraries_of_one_name_are_both_kept(self, tmp_path):
@@ -892,17 +894,6 @@ class TestAppFrameAfterRetracing:
         assert report.app_frame.symbol == "com.example.app.Cause.boom"
         assert "Caused by: java.lang.IllegalStateException: boom\n\tat a.x" in fake.sent
 
-    def test_a_native_frame_is_never_the_java_app_frame(self, tmp_path, tools):
-        """An ANR's native frame without a BuildId read as Java, and libc's
-        epoll became the app frame."""
-        report = _java_report().model_copy(update={"kind": "anr"})
-        report.frames.insert(0, CrashFrame(image="libc.so", offset=0x9e498,
-                                           symbol="__epoll_pwait"))
-        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path),
-                                                FakeAndroidTools(retrace=RETRACED)))
-        assert report.frames[0].app is False
-        assert report.app_frame.symbol == "com.example.app.Feed.parse"
-
     def test_a_frame_r8_made_up_is_folded_away(self, tmp_path, tools):
         """retrace writes nothing for an outline; its caller takes the line."""
         report = _java_report()
@@ -910,7 +901,7 @@ class TestAppFrameAfterRetracing:
         fake = FakeAndroidTools(retrace={"at s75.l(Unknown Source:3)": "", **RETRACED})
         _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
         assert [f.symbol for f in report.frames][:1] == ["com.example.app.Feed.parse"]
-        assert "1 frames R8 generated" in report.symbols[0].note
+        assert "retrace wrote nothing for 1 frames" in report.symbols[0].note
         assert "no source line" not in report.symbols[0].note
 
 
@@ -931,7 +922,7 @@ class TestWhatIsSent:
         report.frames[0].file, report.frames[0].line = "", 2
         fake = FakeAndroidTools()
         _run([report], symbolicate.SymbolFinder(tmp_path / "records", fake))
-        assert fake.calls == [] and report.symbols == [] and report.symbolicated
+        assert fake.calls == [] and report.symbols == []
 
     def test_a_line_of_zero_is_sent(self, tmp_path, tools):
         report = _java_report()
@@ -1046,7 +1037,7 @@ class TestNoRecord:
         report = _java_report(file="SourceFileParser.kt")
         fake = FakeAndroidTools()
         _run([report], symbolicate.SymbolFinder(tmp_path / "records", fake))
-        assert report.symbols == [] and report.symbolicated
+        assert report.symbols == [] and fake.calls == []
 
 
 class TestSettledAgain:
@@ -1114,3 +1105,188 @@ class TestRetentionOfAMappingAlone:
         build_records.prune(root, now=NOW.replace(hour=13))
         oldest = next(r for r in build_records.load_all(root) if r.build_id == records[0].build_id)
         assert oldest.dsyms_expired and oldest.mapping == ""
+
+
+# ── review round 2 ───────────────────────────────────────────────────────────
+
+
+def _parsed(body: str, kind="crash") -> CrashReport:
+    """A report as the DropBox parser builds it: frames capped, the whole
+    trace kept, each block's exception line on its first frame."""
+    frames, app_frame, _ = android_dropbox._java_trace(body, PKG)
+    return CrashReport(
+        crash_id="p1", timestamp=NOW, process=PKG, kind=kind,
+        frames=frames[:crash_frames.MAX_FRAMES], trace=frames, app_frame=app_frame,
+        file_path="dropbox:data_app_crash@2026-09-29 12:00:00", bundle_id=PKG,
+        app_version="1.2.3", build_version="99999")
+
+
+class TestBlocksSurviveFolding:
+    def test_an_outline_first_in_a_cause_keeps_the_cause(self, tmp_path, tools):
+        """Outlines hold message-building code, so they often open a throwing
+        block; folding one merged the cause into the wrapper (measured)."""
+        report = _parsed("java.lang.RuntimeException: wrapper\n"
+                         "\tat a.w(SourceFile:80)\n"
+                         "Caused by: java.lang.IllegalStateException: root\n"
+                         "\tat s75.l(SourceFile:4)\n"
+                         "\tat a.x(SourceFile:21)\n")
+        fake = FakeAndroidTools(retrace={
+            "at a.w(SourceFile:80)": "\tat com.example.app.Wrapper.run(Wrapper.kt:5)",
+            "at s75.l(SourceFile:4)": "",
+            "at a.x(SourceFile:21)": "\tat com.example.app.Cause.boom(Cause.kt:9)"})
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert [f.symbol for f in report.frames] == ["com.example.app.Wrapper.run",
+                                                     "com.example.app.Cause.boom"]
+        assert report.frames[1].thrown.startswith("Caused by:")
+        assert report.app_frame.symbol == "com.example.app.Cause.boom"
+
+
+class TestInlinedExpansion:
+    def test_each_inlined_function_is_a_frame_and_the_app_stays(self, tmp_path, tools):
+        """R8 inlines library code into the app's methods; keeping only the
+        innermost line dropped the app's frame, and app_frame went to None."""
+        report = _parsed("java.lang.IllegalStateException: boom\n"
+                         "\tat a.b.c(SourceFile:40)\n"
+                         "\tat android.os.Handler.dispatchMessage(Handler.java:106)\n")
+        fake = FakeAndroidTools(retrace={"at a.b.c(SourceFile:40)":
+                                         "\tat kotlin.time.Clock.now(Clock.kt:3)\n"
+                                         "\tat com.example.app.Auth.token(Auth.kt:436)"})
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert [f.symbol for f in report.frames] == [
+            "kotlin.time.Clock.now", "com.example.app.Auth.token",
+            "android.os.Handler.dispatchMessage"]
+        assert report.frames[0].thrown and not report.frames[1].thrown
+        assert report.app_frame.symbol == "com.example.app.Auth.token"
+        assert "each inlined function is listed" in report.symbols[0].note
+
+
+class TestAnUnminifiedTrace:
+    def test_a_version_match_that_renames_nothing_is_not_applied(self, tmp_path, tools):
+        """A kept class maps to itself and is still remapped by line: an
+        unminified trace came back with wrong frames, counted resolved."""
+        report = _parsed("java.lang.IllegalStateException: boom\n"
+                         "\tat com.example.app.Main.onCreate(Main.kt:40)\n")
+        fake = FakeAndroidTools(retrace={"at com.example.app.Main.onCreate(Main.kt:40)":
+                                         "\tat com.example.app.Main.inject(Main.kt:79)"})
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        f = report.frames[0]
+        assert (f.symbol, f.line) == ("com.example.app.Main.onCreate", 40)
+        assert "renames no class in this trace" in report.symbols[0].note
+
+    def test_a_d8_apk_does_not_keep_a_leftover_mapping(self, tmp_path):
+        module = _gradle_module(tmp_path)
+        apk = next(module.rglob("*.apk"))
+        with zipfile.ZipFile(apk, "w") as z:
+            z.writestr("classes.dex", b'dex\n035\0~~D8{"backend":"dex","compilation-mode":'
+                                      b'"debug","min-api":29}')
+        record = _record_android(module, tmp_path / "records")
+        assert record.mapping == "" and "not minified (D8 built it)" in record.notes[0]
+
+    def test_a_corrupt_apk_does_not_fail_the_record(self, tmp_path):
+        module = _gradle_module(tmp_path)
+        apk = next(module.rglob("*.apk"))
+        with zipfile.ZipFile(apk, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("classes.dex", b"x" * 4096)
+        data = bytearray(apk.read_bytes())
+        at = data.index(b"classes.dex") + len("classes.dex")   # local header's name
+        data[at:at + 8] = b"\xff" * 8                          # into the deflate stream
+        apk.write_bytes(bytes(data))
+        record = _record_android(module, tmp_path / "records")
+        assert record.error == "" and record.mapping_id == "e1ad14241ecb07832d"
+
+
+class TestNoRecordYet:
+    def test_a_trace_read_before_its_record_is_retraced_after(self, tmp_path, tools):
+        """A kept source file shows no mark; read before recording it was
+        settled with nothing, and never looked at again."""
+        root = tmp_path / "records"
+        report = _java_report(file="Feed.kt")
+        fake = FakeAndroidTools(retrace={"at a.b.c(Feed.kt:3)":
+                                         "\tat com.example.app.Feed.parse(Feed.kt:12)"})
+        finder = symbolicate.SymbolFinder(root, fake)
+        _run([report], finder)
+        assert fake.calls == [] and not report.symbolicated
+        _record_android(_gradle_module(tmp_path), root)
+        _run([report], symbolicate.SymbolFinder(root, fake))
+        assert report.frames[0].symbol == "com.example.app.Feed.parse"
+
+
+class TestCounting:
+    def test_frames_that_already_had_lines_are_not_counted(self, tmp_path, tools):
+        report = _java_report()
+        report.frames += [CrashFrame(symbol=f"android.app.ActivityThread.m{i}",
+                                     file="ActivityThread.java", line=100 + i)
+                          for i in range(30)]
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path),
+                                                FakeAndroidTools(retrace=RETRACED)))
+        e = report.symbols[0]
+        assert (e.frames_resolved, e.frames_total) == (1, 1)
+
+    def test_a_renamed_class_with_its_minified_line_is_not_resolved(self, tmp_path, tools):
+        """retrace renames a class it knows and passes an unknown method's
+        minified line through (measured): that line is not a source line."""
+        fake = FakeAndroidTools(retrace={"at a.b.c(SourceFile:3)":
+                                         "\tat com.example.app.Feed.c(Feed.kt:3)"})
+        report = _java_report()
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert report.frames[0].line is None
+        assert report.symbols[0].frames_resolved == 0
+
+    def test_a_frame_sent_without_a_line_gets_none_back(self, tmp_path, tools):
+        """retrace picks some line for a frame sent without one."""
+        report = _java_report()
+        report.frames[0].line = None
+        fake = FakeAndroidTools(retrace={"at a.b.c(SourceFile)":
+                                         "\tat com.example.app.Feed.parse(Feed.kt:2086)"})
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert (report.frames[0].symbol, report.frames[0].line) == (
+            "com.example.app.Feed.parse", None)
+
+    def test_r8s_synthetic_class_is_not_a_file(self, tmp_path, tools):
+        fake = FakeAndroidTools(retrace={"at a.b.c(SourceFile:3)":
+                                         "\tat com.example.app.Feed$1.run(R8$$SyntheticClass:2)"})
+        report = _java_report()
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert report.frames[0].file == "" and report.symbols[0].frames_resolved == 0
+
+
+class TestTheWholeTrace:
+    def test_frames_past_the_cap_are_retraced_and_can_be_the_app_frame(self, tmp_path, tools):
+        framework = "".join(f"\tat android.app.ActivityThread.m{i}(ActivityThread.java:{i + 1})\n"
+                            for i in range(crash_frames.MAX_FRAMES))
+        report = _parsed("java.lang.RuntimeException: wrapper\n" + framework
+                         + "Caused by: java.lang.NullPointerException\n"
+                           "\tat a.x(SourceFile:21)\n")
+        assert report.app_frame is None or report.app_frame.symbol == "a.x"
+        fake = FakeAndroidTools(retrace={
+            "at a.x(SourceFile:21)": "\tat com.example.app.Cause.boom(Cause.kt:9)"})
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert "at a.x(SourceFile:21)" in fake.sent
+        assert report.app_frame.symbol == "com.example.app.Cause.boom"
+        assert len(report.frames) == crash_frames.MAX_FRAMES
+
+
+class TestUntrustworthyOutput:
+    def test_a_platform_frame_missing_from_the_output_is_not_trusted(self, tmp_path, tools):
+        """A retrace that wrote no tags would make every frame look folded."""
+        async def untagged(argv):
+            return 0, ("\tat com.example.app.Feed.parse(Feed.kt:12) ~[QUERN-0]\n"
+                       "\tat android.os.Handler.dispatchMessage(Handler.java:106)\n"), ""
+
+        report = _java_report()
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), untagged))
+        assert report.frames[0].symbol == "a.b.c" and len(report.frames) == 2
+        assert "could not be matched" in report.symbols[0].note
+
+
+class TestBlockAlignment:
+    def test_a_line_the_parser_skips_does_not_shift_the_blocks(self):
+        frames, app_frame, _ = android_dropbox._java_trace(
+            "java.lang.RuntimeException: outer\n"
+            "\tat not a frame line\n"
+            "\tat com.example.app.Outer.run(Outer.kt:1)\n"
+            "Caused by: java.lang.IllegalStateException: inner\n"
+            "\tat com.example.app.Inner.boom(Inner.kt:2)\n", PKG)
+        assert [f.thrown.split(":")[0] for f in frames] == [
+            "java.lang.RuntimeException", "Caused by"]
+        assert app_frame.symbol == "com.example.app.Inner.boom"

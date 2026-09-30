@@ -426,6 +426,11 @@ def _native_path_and_symbol(rest: str) -> tuple[str, str, int | None]:
     return path, inner.strip(), None
 
 
+def is_java_frame(line: str) -> bool:
+    """Whether `java_frames` reads this line as a frame."""
+    return bool(_JAVA.match(line))
+
+
 def java_frames(lines: list[str], package: str = "") -> list[CrashFrame]:
     """Frames from `at …` lines, with which ones are the app's decided together.
 

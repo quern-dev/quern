@@ -52,7 +52,8 @@ _TAG = " ~[QUERN-{}]"
 _RETRACED = re.compile(r"^\s*(?P<or><OR>\s*)?at (?P<sym>[^\s(]+)\((?P<src>[^)]*)\)"
                        r"\s*~\[QUERN-(?P<i>\d+)\]\s*$")
 #: What retrace writes where a frame has no file.
-_NO_FILE = ("Unknown Source", "SourceFile", "unavailable", "Native Method")
+_NO_FILE = ("Unknown Source", "SourceFile", "unavailable", "Native Method",
+            "R8$$SyntheticClass")
 _JAVA_IMAGE = "java (R8 mapping)"
 
 
@@ -110,11 +111,15 @@ def _is_r8(frame: CrashFrame) -> bool:
 async def symbolicate(report: CrashReport, finder, read) -> bool:
     """Symbolicate one Android report in place; return whether it is settled."""
     settled = {e.image: e for e in report.symbols if e.settled}
-    frames = list(report.frames)
+    whole = bool(report.trace)
     beyond = None
-    if report.app_frame is not None and not any(report.app_frame is f for f in frames):
-        beyond = report.app_frame                 # past the cap on `frames`
-        frames.append(beyond)
+    if whole:
+        frames = list(report.trace)               # the whole trace, not the first 30
+    else:
+        frames = list(report.frames)
+        if report.app_frame is not None and not any(report.app_frame is f for f in frames):
+            beyond = report.app_frame             # past the cap on `frames`
+            frames.append(beyond)
     native: dict[str, list[CrashFrame]] = {}
     for f in frames:
         if f.build_id and f.app and f.offset is not None and not f.file:
@@ -138,16 +143,18 @@ async def symbolicate(report: CrashReport, finder, read) -> bool:
                 entry.note = f"symbolication failed: {type(e).__name__}: {e}"
             done &= entry.settled
         if java:
-            entry = ImageSymbols(image=_JAVA_IMAGE, frames_total=len(java))
+            entry = ImageSymbols(image=_JAVA_IMAGE)
             try:
                 wanted = await _java(report, java, beyond, entry, finder, read)
             except Exception as e:  # noqa: BLE001
                 entry.note, wanted = f"symbolication failed: {type(e).__name__}: {e}", True
             if wanted:
                 entries.append(entry)
-                done &= entry.settled
+            done &= entry.settled
     finally:
         report.symbols = entries
+        if whole:
+            report.frames = report.trace[:crash_frames.MAX_FRAMES]
         after = [(f.symbol, f.file, f.line) for f in report.frames]
         if after != before:
             # Rebuilt only once something resolved: until then top_frames is
@@ -275,16 +282,19 @@ def _plain_blocks(out: str) -> list[tuple[str, str, int, bool]]:
 
 # ── Java ─────────────────────────────────────────────────────────────────────
 
+#: Classes no app's R8 run renames: retrace must hand them back as they went.
+_PLATFORM = ("android.", "java.", "javax.", "dalvik.", "com.android.")
+
+
 async def _java(report: CrashReport, java: list[CrashFrame], beyond: CrashFrame | None,
                 entry: ImageSymbols, finder, read) -> bool:
     """Retrace the Java frames into `entry`; return whether it is worth an
-    entry at all -- a debug build's trace, with no mapping and no mark of R8,
-    is not."""
+    entry at all. With no record and no mark of R8 it is not -- a debug
+    build's trace -- but neither is it settled: the record may come later."""
     records, why = await _records(finder, read)
-    record, how = _mapping_for(report, java, records)
+    record, how, exact = _mapping_for(report, java, records)
     if record is None:
         if not any(_is_r8(f) for f in java):
-            entry.settled = True
             return False
         entry.note = how + why
         return True
@@ -309,49 +319,123 @@ async def _java(report: CrashReport, java: list[CrashFrame], beyond: CrashFrame 
     if code != 0:
         entry.note = _failed("retrace", code, out, err)
         return True
-    tagged = _tagged(out, len(java))
+    tagged = _tagged(out, java)
+    entry.settled = True                           # retrace answered; what follows is final
     if tagged is None:
-        entry.note, entry.settled = "retrace's output could not be matched to the frames sent", True
+        entry.note = "retrace's output could not be matched to the frames sent"
         return True
-    resolved = ambiguous = inlined = 0
-    removed = []
-    for i, f in enumerate(java):
-        lines = tagged.get(i, [])
-        primary = [m for m in lines if not m.group("or")]
-        if not primary:
-            # retrace writes nothing for a frame R8 made up -- an outline, a
-            # synthetic bridge -- having folded it into its caller.
-            removed.append(f)
-            continue
-        m = primary[0]
-        f.symbol = m.group("sym")
-        file, _, line = m.group("src").partition(":")
-        f.file = "" if file in _NO_FILE or _MAP_ID.match(file) else file
-        f.line = int(line) if line.isdigit() else None
-        resolved += bool(f.file and f.line)
-        ambiguous += len(primary) < len(lines)
-        inlined += len(primary) > 1
-    for f in removed:
-        if any(f is g for g in report.frames):
-            report.frames = [g for g in report.frames if g is not f]
+    readings = {i: _readings(f, tagged.get(i, [])) for i, f in enumerate(java)}
+    renamed = [i for i, (lines, _) in readings.items()
+               if any(_class(r.symbol) != _class(java[i].symbol) for r in lines)]
+    if not exact and not renamed and not any(_is_r8(f) for f in java):
+        # Nothing in the trace names its build or shows R8's marks, and the
+        # mapping renames none of its classes: an unminified build of the same
+        # version, whose kept classes it would still "retrace" by line number.
+        entry.note = (f"{how}; but that mapping renames no class in this trace, so the crash "
+                      f"is not from that minified build, and its frames were left as they were")
+        return True
+    counted = [i for i, f in enumerate(java) if i in renamed or _is_r8(f)]
+    resolved = sum(1 for i in counted if readings[i][0] and readings[i][0][0].file
+                   and readings[i][0][0].line is not None)
+    removed = _apply(report, java, beyond, readings)
     _reassess_app(report, beyond, removed)
+    entry.frames_total = len([i for i in counted if readings[i][0]])
     entry.frames_resolved = resolved
     notes = [how] if how else []
-    unresolved = entry.frames_total - resolved - len(removed)
-    if unresolved:
-        notes.append(f"{unresolved} of {entry.frames_total} frames have no source line after "
-                     f"retracing")
+    if entry.frames_total > resolved:
+        notes.append(f"{entry.frames_total - resolved} of {entry.frames_total} renamed frames "
+                     f"have no source line")
     if removed:
-        notes.append(f"{len(removed)} frames R8 generated (outlines, bridges) were folded into "
-                     f"their callers")
+        notes.append(f"retrace wrote nothing for {len(removed)} frames (usually outlines and "
+                     f"bridges R8 generated), so they were left out")
+    ambiguous = sum(1 for _, amb in readings.values() if amb)
     if ambiguous:
         notes.append(f"{ambiguous} frames were ambiguous in the mapping; the first reading "
                      f"is shown")
+    inlined = sum(1 for lines, _ in readings.values() if len(lines) > 1)
     if inlined:
-        notes.append(f"{inlined} frames were inlined; the innermost function is shown")
+        notes.append(f"{inlined} frames were inlined; each inlined function is listed, "
+                     f"innermost first")
     entry.note = "; ".join(notes)
-    entry.settled = True
     return True
+
+
+def _class(symbol: str) -> str:
+    return symbol.rpartition(".")[0]
+
+
+def _readings(sent: CrashFrame, lines: list[re.Match]) -> tuple[list[CrashFrame], bool]:
+    """The frames retrace gave for one frame sent, innermost first, and whether
+    it was ambiguous (the first reading is kept)."""
+    out = []
+    for m in lines:
+        if m.group("or"):
+            continue
+        symbol = m.group("sym")
+        file, _, line = m.group("src").partition(":")
+        number = int(line) if line.isdigit() else None
+        if sent.line is None:
+            number = None       # retrace's line for a frame sent without one is a guess
+        elif (_class(symbol) != _class(sent.symbol) and symbol.rpartition(".")[2]
+              == sent.symbol.rpartition(".")[2] and number == sent.line):
+            # The class is mapped but not the method: retrace renames the class
+            # and passes the minified line through, which is not a source line.
+            number = None
+        out.append(CrashFrame(symbol=symbol, line=number,
+                              file="" if file in _NO_FILE or _MAP_ID.match(file) else file))
+    return out, len(out) < len(lines)
+
+
+def _apply(report: CrashReport, java: list[CrashFrame], beyond: CrashFrame | None,
+           readings: dict[int, tuple[list[CrashFrame], bool]]) -> list[CrashFrame]:
+    """Put the readings into the trace: each frame becomes its first (innermost)
+    reading, with the rest of an inlined expansion after it, and a frame
+    retrace wrote nothing for leaves -- passing on the exception line that
+    began its block. Returns the frames that left."""
+    index = {id(f): i for i, f in enumerate(java)}
+    whole = bool(report.trace)
+    listed = report.trace if whole else report.frames
+    result: list[CrashFrame] = []
+    removed: list[CrashFrame] = []
+    carry = ""
+    for f in listed:
+        if f.thrown:
+            carry = ""                            # a new block: the old header ended
+        i = index.get(id(f))
+        if i is None:
+            if carry and not f.thrown:
+                f.thrown, carry = carry, ""
+            result.append(f)
+            continue
+        lines, _ = readings[i]
+        if not lines:
+            carry = f.thrown or carry
+            removed.append(f)
+            continue
+        _take(f, lines[0])
+        if carry and not f.thrown:
+            f.thrown, carry = carry, ""
+        result.append(f)
+        result += lines[1:]
+    if whole:
+        report.trace = result
+    else:
+        report.frames = result
+    if beyond is not None:
+        lines, _ = readings[index[id(beyond)]]
+        if lines:
+            # Not in the list, so no room for its expansion: the app's own
+            # line of it, since it stands for where in the app it crashed.
+            flags = crash_frames._java_app_flags([r.symbol for r in lines], report.bundle_id)
+            _take(beyond, next((r for r, app in zip(lines, flags, strict=True) if app),
+                               lines[0]))
+        else:
+            removed.append(beyond)
+    return removed
+
+
+def _take(frame: CrashFrame, reading: CrashFrame) -> None:
+    frame.symbol, frame.file, frame.line = reading.symbol, reading.file, reading.line
 
 
 def _trace(java: list[CrashFrame]) -> str:
@@ -366,30 +450,36 @@ def _trace(java: list[CrashFrame]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _tagged(out: str, count: int) -> dict[int, list[re.Match]] | None:
-    """retrace's `at` lines, by the index each carries; None when none came
-    back or one names a frame that was not sent."""
+def _tagged(out: str, java: list[CrashFrame]) -> dict[int, list[re.Match]] | None:
+    """retrace's `at` lines, by the index each carries; None when they cannot
+    be trusted: none came back, one names a frame that was not sent, or a
+    platform frame -- which no mapping renames -- did not come back, as it
+    would not if this retrace wrote no tags."""
     found: dict[int, list[re.Match]] = {}
     for line in out.splitlines():
         m = _RETRACED.match(line)
         if m:
             found.setdefault(int(m.group("i")), []).append(m)
-    if not found or any(i >= count for i in found):
+    if not found or any(i >= len(java) for i in found):
+        return None
+    if any(i not in found for i, f in enumerate(java)
+           if f.file and not _is_r8(f) and f.symbol.startswith(_PLATFORM)):
         return None
     return found
 
 
 def _mapping_for(report: CrashReport, java: list[CrashFrame],
-                 records: list[BuildRecord]) -> tuple[BuildRecord | None, str]:
-    """(the record whose mapping retraces these frames, a note on how sure)."""
+                 records: list[BuildRecord]) -> tuple[BuildRecord | None, str, bool]:
+    """(the record whose mapping retraces these frames, a note on how sure,
+    whether the trace named it exactly)."""
     stamped = {m.group(1) for f in java if (m := _MAP_ID.match(f.file or ""))}
     with_mapping = [r for r in records if r.mapping and not r.dsyms_expired]
     if stamped:
         exact = [r for r in with_mapping if r.mapping_id in stamped]
         if exact:
-            return exact[0], ""
+            return exact[0], "", True
         return None, (f"no build record has the R8 mapping {sorted(stamped)[0][:12]} this "
-                      f"crash was built with: record the build with record_android_build")
+                      f"crash was built with: record the build with record_android_build"), False
     same = [r for r in with_mapping
             if r.bundle_id == report.bundle_id
             and report.build_version in ({r.build_number} | set(r.version_codes))
@@ -397,36 +487,38 @@ def _mapping_for(report: CrashReport, java: list[CrashFrame],
     if not same:
         return None, (f"no build record has an R8 mapping for {report.bundle_id} "
                       f"{report.app_version} ({report.build_version}): if it is a minified "
-                      f"build, record it with record_android_build")
+                      f"build, record it with record_android_build"), False
     # Nothing in the trace names its build, and local builds share a version:
     # a build made after this one was recorded would retrace to wrong names.
     note = (f"matched by package and version only ({same[0].build_id}); a build of the same "
             f"version made since would retrace wrongly")
     if len(same) > 1:
         note += f"; {len(same)} recorded builds share it, and the newest was used"
-    return same[0], note
+    return same[0], note, False
 
 
 def _reassess_app(report: CrashReport, beyond: CrashFrame | None,
                   removed: list[CrashFrame]) -> None:
     """With the real names back, decide again which frames are the app's --
     an obfuscated name told nothing -- and where in the app it crashed, by
-    the rule the trace was first read with."""
-    java = [f for f in report.frames if _is_java(f)]
-    if beyond is not None and not any(beyond is f for f in removed):
+    the rule the trace was first read with, over the whole trace."""
+    listed = report.trace or report.frames
+    java = [f for f in listed if _is_java(f)]
+    kept_beyond = beyond is not None and not any(beyond is f for f in removed)
+    if kept_beyond:
         java.append(beyond)
     if not java:
         return
     flags = crash_frames._java_app_flags([f.symbol for f in java], report.bundle_id)
     for f, app in zip(java, flags, strict=True):
         f.app = app
-    if beyond is not None and beyond.app and not any(beyond is f for f in removed):
+    if kept_beyond and beyond.app:
         return            # chosen over the whole trace, of which only it is still here
     if report.kind == "crash":
         report.app_frame = android_dropbox.root_cause_app_frame(
-            android_dropbox.java_blocks(report.frames))
+            android_dropbox.java_blocks(listed))
     else:
-        report.app_frame = crash_frames.first_app_frame(report.frames)
+        report.app_frame = crash_frames.first_app_frame(listed)
 
 
 def _readable(path: Path) -> bool:
