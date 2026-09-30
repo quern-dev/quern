@@ -101,8 +101,8 @@ enum InstallKindTests {
                 case .restartToUpdate(let t): title = t
                 case .updateInTerminal(let t, _): title = t
                 }
-                Harness.expect(!title.contains("v0.") && !title.contains("—"),
-                               "no version in \(title)")
+                Harness.expect(title.range(of: #"v\d"#, options: .regularExpression) == nil
+                               && !title.contains("—"), "no version in \(title)")
             }
             Harness.expect(UpdateMenuItem.tooltip(failed: false, updateAvailable: true,
                                                   running: true),
@@ -112,6 +112,15 @@ enum InstallKindTests {
                            "Quern could not start — open the menu", "a failure comes first")
             Harness.expect(UpdateMenuItem.tooltip(failed: false, updateAvailable: false,
                                                   running: false), "Quern is stopped", "stopped")
+            Harness.expect(UpdateMenuItem.tooltip(failed: false, updateAvailable: false,
+                                                  running: true), "Quern is running", "running")
+            Harness.expect(UpdateMenuItem.tooltip(failed: false, updateAvailable: true,
+                                                  running: false),
+                           "Quern — update available", "an update wins over stopped")
+            Harness.expect(UpdateMenuItem.settingsLine(updateAvailable: true), "Update available",
+                           "settings: no version, and no Up to date while one waits")
+            Harness.expect(UpdateMenuItem.settingsLine(updateAvailable: false), "Up to date",
+                           "settings: nothing waiting")
         }
 
         Harness.test("a genuinely absent node is not sent to Terminal") {

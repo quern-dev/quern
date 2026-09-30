@@ -227,6 +227,15 @@ enum UpdateMenuItem: Equatable {
         return .restartToUpdate("Restart to Update")
     }
 
+    /// The Settings window's update line. Without a version, for the reason
+    /// above -- and decided by `updateAvailable` alone: it used to need a
+    /// `latest_version` too, so an update the server reported without one
+    /// (older quern.dev deployments did not send it) read "Up to date" while
+    /// the menu offered Restart to Update.
+    static func settingsLine(updateAvailable: Bool) -> String {
+        updateAvailable ? "Update available" : "Up to date"
+    }
+
     /// The status item's tooltip. Without a version, for the reason above.
     static func tooltip(failed: Bool, updateAvailable: Bool, running: Bool) -> String {
         if failed { return "Quern could not start — open the menu" }

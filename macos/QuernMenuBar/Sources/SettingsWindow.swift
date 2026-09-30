@@ -485,12 +485,8 @@ struct SettingsView: View {
                         .accessibilityValue(model.channel)
                         Spacer()
                     }
-                    if u.updateAvailable, let latest = u.latestVersion {
-                        Text("Update available: v\(latest)")
-                            .foregroundColor(.secondary).font(.callout)
-                    } else {
-                        Text("Up to date").foregroundColor(.secondary).font(.callout)
-                    }
+                    Text(UpdateMenuItem.settingsLine(updateAvailable: u.updateAvailable))
+                        .foregroundColor(.secondary).font(.callout)
                 }
                 .padding(Self.contentInset)
                 .frame(maxWidth: .infinity, alignment: .leading)
