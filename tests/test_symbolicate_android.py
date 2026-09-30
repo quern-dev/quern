@@ -1400,6 +1400,25 @@ class TestAnUnminifiedRecord:
         _run([report], symbolicate.SymbolFinder(root, FakeAndroidTools(retrace=RETRACED)))
         assert report.frames[0].symbol == "com.example.app.Feed.parse"
 
+    def test_the_summary_never_calls_a_minified_build_unminified(self, tmp_path):
+        """With its mapping refused or missing, R8 still built it, and the
+        note asks for a rebuild the summary must not talk the reader out of."""
+        refused = _gradle_module(tmp_path / "refused")
+        _apk_with_map_id(refused, "0123456789ab")
+        missing = _gradle_module(tmp_path / "missing", mapping=False)
+        _apk_with_map_id(missing, "0123456789ab")
+        debug = _gradle_module(tmp_path / "debug", mapping=False)
+        _d8_apk(debug)
+        unknown = _gradle_module(tmp_path / "unknown", mapping=False)
+        lines = {name: build_records.summary_line(_record_android(m, tmp_path / "r"))
+                 for name, m in [("refused", refused), ("missing", missing),
+                                 ("debug", debug), ("unknown", unknown)]}
+        for name in ("refused", "missing"):
+            assert "though R8 built the APK" in lines[name]
+            assert "not a minified variant" not in lines[name]
+        assert "not a minified variant" in lines["debug"]
+        assert "no mapping.txt for stagingRelease" in lines["unknown"]
+
     def test_a_marker_in_a_later_dex_is_found(self, tmp_path):
         apk = tmp_path / "app.apk"
         with zipfile.ZipFile(apk, "w") as z:

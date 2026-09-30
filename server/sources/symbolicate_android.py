@@ -30,11 +30,16 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from server.device import elf
 from server.device.adb import _SDK_SEARCH_PATHS, _find_sdk_tool
 from server.models import BuildRecord, CrashFrame, CrashReport, ImageSymbols
 from server.sources import android_dropbox, crash_frames
+
+if TYPE_CHECKING:
+    # symbolicate imports this module, so its types are for the checker only.
+    from server.sources.symbolicate import Read, SymbolFinder
 
 #: retrace loads the whole mapping (192 MB for a real app): 0.7 s measured,
 #: but a slow disk or a cold JVM is not atos.
@@ -137,7 +142,7 @@ def _names_r8(frame: CrashFrame) -> bool:
     return bool(_R8_FILE.match(frame.file or ""))
 
 
-async def symbolicate(report: CrashReport, finder, read) -> bool:
+async def symbolicate(report: CrashReport, finder: SymbolFinder, read: Read) -> bool:
     """Symbolicate one Android report in place; return whether it is settled."""
     settled = {e.image: e for e in report.symbols if e.settled}
     whole = bool(report.trace)
@@ -198,7 +203,7 @@ async def symbolicate(report: CrashReport, finder, read) -> bool:
     return done
 
 
-async def _records(finder, read) -> tuple[list[BuildRecord], str]:
+async def _records(finder: SymbolFinder, read: Read) -> tuple[list[BuildRecord], str]:
     """Android records, and what to add to a miss: that some could not be
     read is not the same answer as that none exists."""
     records, unreadable, listable = await finder._records(read)
@@ -218,7 +223,8 @@ def _failed(tool: str, code: int, out: str, err: str) -> str:
 
 # ── native ───────────────────────────────────────────────────────────────────
 
-async def _native(todo: list[CrashFrame], entry: ImageSymbols, finder, read) -> bool:
+async def _native(todo: list[CrashFrame], entry: ImageSymbols, finder: SymbolFinder,
+                  read: Read) -> bool:
     build_id = todo[0].build_id.lower()
     records, why = await _records(finder, read)
     candidates = [(r, b) for r in records for b in r.binaries
@@ -321,7 +327,7 @@ _PLATFORM = ("android.", "java.", "javax.", "dalvik.", "com.android.")
 
 
 async def _java(report: CrashReport, java: list[CrashFrame], beyond: CrashFrame | None,
-                entry: ImageSymbols, finder, read) -> bool:
+                entry: ImageSymbols, finder: SymbolFinder, read: Read) -> bool:
     """Retrace the Java frames into `entry`; return whether it is worth an
     entry at all. With no record and no mark of R8 it is not -- a debug
     build's trace -- but neither is it settled: the record may come later."""

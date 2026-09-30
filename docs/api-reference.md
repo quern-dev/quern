@@ -136,7 +136,7 @@ address itself a `fatalError`'s own frame resolves to compiler-generated code. `
 for that UUID, a build whose dSYMs have expired, Spotlight or `atos` unavailable.
 Only the crashed app's own frames that lack a line are sent, so a simulator's
 report, which macOS usually symbolicates, costs nothing unless one of them does,
-and Android reports and the Mac's own processes are left alone. An image is
+and the Mac's own processes are left alone (Android reports are covered below). An image is
 settled once `atos` has answered for it, and kept until the server restarts; an
 image whose symbols were not found, or could not be read, is looked up again on the
 next read (a records scan and one Spotlight query), so a build or an index that

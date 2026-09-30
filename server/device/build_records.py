@@ -599,8 +599,16 @@ def summary_line(record: BuildRecord) -> str:
     notes = "".join(f" Note: {n}." for n in record.notes)
     if record.platform == "android":
         libs = sum(1 for b in record.binaries if b.dwarf)
-        mapping = (f"its R8 mapping ({record.mapping_id[:12]})" if record.mapping
-                   else "no R8 mapping (not a minified variant)")
+        if record.mapping:
+            mapping = f"its R8 mapping ({record.mapping_id[:12]})"
+        elif record.minified:
+            # Refused, or missing: the note says which, and this must not
+            # read as a build that needs none.
+            mapping = "no R8 mapping, though R8 built the APK (see the note)"
+        elif record.minified is False:
+            mapping = "no R8 mapping (not a minified variant)"
+        else:
+            mapping = f"no R8 mapping (no mapping.txt for {record.configuration})"
         return (f"{head}; kept {mapping} and {libs} native "
                 f"librar{'y' if libs == 1 else 'ies'} by BuildId.{notes}")
     if record.platform != "iphoneos":
