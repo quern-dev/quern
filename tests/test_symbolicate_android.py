@@ -498,12 +498,12 @@ class TestUnknownSource:
         top = report.frames[0]
         top.symbol, top.file, top.line = "l82.onClick", "", 539
         fake = FakeAndroidTools(retrace={"at l82.onClick(Unknown Source:539)":
-                                         "\tat com.example.app.debug.DebugMenuFragment.onCreateView"
-                                         "$lambda$0$13(DebugMenuFragment.kt:304)"})
+                                         "\tat com.example.app.debug.ToolsFragment.onCreateView"
+                                         "$lambda$0$13(ToolsFragment.kt:304)"})
         _run([report], symbolicate.SymbolFinder(root, fake))
         assert "at l82.onClick(Unknown Source:539)" in fake.sent
         f = report.frames[0]
-        assert (f.file, f.line) == ("DebugMenuFragment.kt", 304)
+        assert (f.file, f.line) == ("ToolsFragment.kt", 304)
 
     def test_no_file_and_no_line_is_not_sent(self, tmp_path, tools):
         report = _java_report()
