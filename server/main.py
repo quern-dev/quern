@@ -1531,8 +1531,9 @@ def _report_mcp_registrations() -> bool:
     # on the menu while doctor said it was fine.
     try:
         mcp_clients.write(mcp_clients.state(assessments, previous=mcp_clients.read()))
-    except OSError:
-        pass
+    except Exception as exc:  # noqa: BLE001 -- doctor reports, it does not crash
+        # Said rather than swallowed: the app is now showing an older answer.
+        print(f"  ? could not record this for the Quern app ({exc})")
     for a in assessments:
         reg = a.registration
         if a.status == mcp_clients.UNREADABLE:

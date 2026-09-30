@@ -348,6 +348,17 @@ class TestWhoRefreshes:
         server_main._report_mcp_registrations()
         assert written[0]["fix_clients"] == ["claude-code"]
 
+    def test_doctor_says_when_it_could_not_record_its_answer(self, monkeypatch, capsys):
+        """Doctor reports, it does not crash -- and the app now shows an older answer."""
+        from server import main as server_main
+
+        def boom(data, path=None):
+            raise TypeError("Object of type set is not JSON serializable")
+        monkeypatch.setattr(setup, "mcp_registrations", lambda: [_reg("cursor", NODE)])
+        monkeypatch.setattr(mcp_clients, "write", boom)
+        assert server_main._report_mcp_registrations() is True
+        assert "could not record this for the Quern app" in capsys.readouterr().out
+
     def test_mcp_install_refreshes_it(self, tmp_path, monkeypatch):
         import server.__main__ as entry
 
