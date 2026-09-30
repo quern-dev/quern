@@ -28,6 +28,7 @@ developer's real shells would be both slow and a report about the developer.
 from __future__ import annotations
 
 import contextlib
+import functools
 import os
 import re
 import shutil
@@ -90,7 +91,8 @@ Runner = Callable[..., subprocess.CompletedProcess]
 
 
 def run_bounded(argv: list[str], *, env: dict[str, str] | None = None,
-                timeout: float = PROBE_TIMEOUT, **_kw) -> subprocess.CompletedProcess:
+                timeout: float = PROBE_TIMEOUT, cwd: str | None = None,
+                **_kw) -> subprocess.CompletedProcess:
     """The default runner: bounded, lenient about bytes, and tidy on timeout.
 
     `errors="replace"` because a startup file that writes one non-UTF-8 byte
@@ -105,7 +107,7 @@ def run_bounded(argv: list[str], *, env: dict[str, str] | None = None,
     files spawn daemons (gitstatusd, atuin, direnv) that would be left behind.
     """
     proc = subprocess.Popen(  # noqa: S603
-        argv, env=env, stdin=subprocess.DEVNULL,
+        argv, env=env, cwd=cwd, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         text=True, errors="replace", start_new_session=True,
     )
@@ -224,10 +226,20 @@ def probe(
     which: Callable[..., str | None] = shutil.which,
     env: dict[str, str] | None = None,
     home: str | None = None,
+    cwd: str | None = None,
 ) -> list[NodeSite]:
-    """Where each of the four places finds `node`, and whether it is usable."""
+    """Where each of the four places finds `node`, and whether it is usable.
+
+    `cwd` is the directory every probe runs in; by default the caller's. A
+    version manager that follows the directory (fnm's `--use-on-cd`, mise,
+    volta) answers for *that* directory, which is right for "what does my
+    terminal run here" and wrong for "what will a client run", which starts
+    elsewhere.
+    """
     env = dict(os.environ if env is None else env)
     home = home or env.get("HOME") or str(Path.home())
+    if cwd is not None:
+        run = functools.partial(run, cwd=cwd)
     checks: list[Callable[[], NodeSite]] = [lambda: _here(run, which, env)]
 
     shell = user_shell(env)
@@ -425,3 +437,160 @@ def fix_for(site: NodeSite, sites: list[NodeSite]) -> str:
         return f"Node is installed ({manager}) but your login shell does not load it. " \
                f"Load it from {file}."
     return f"No node found. Run: {upgrade}"
+
+
+# ── the node an MCP client is registered with ────────────────────────────────
+
+#: Which places to take a client's node from, best first. The login shell is
+#: the user's own choice; the others are what is left when it has none.
+_CLIENT_PREFERENCE = ("login shell", "this command", "non-interactive shell",
+                      "the Quern app", "GUI apps")
+
+
+@dataclass(frozen=True)
+class ClientNode:
+    """An absolute node an MCP client can be registered with."""
+
+    path: str
+    version: str
+    found_in: str     # the place it came from, e.g. "login shell"
+
+
+def node_for_clients(
+    sites: list[NodeSite] | None = None,
+    *,
+    run: Runner = run_bounded,
+    env: dict[str, str] | None = None,
+    home: str | None = None,
+    resolve: Callable[[str], str] = os.path.realpath,
+    exists: Callable[[str], bool] = os.path.exists,
+) -> ClientNode | None:
+    """A Node MIN_NODE_MAJOR+ binary every MCP client can run, by absolute path.
+
+    Registering `"command": "node"` hands the choice to each client's own PATH,
+    which for a GUI client is launchd's -- no fnm, no nvm, no Homebrew -- and
+    for an old CLI session may be whichever node was first when it started.
+    Measured: sessions started before an nvm-to-fnm migration kept finding
+    Node 20 and the wrapper refused to start, as `CONNECTION_CLOSED` with the
+    reason hidden (#214).
+
+    The path must outlive the shell it was found in, so fnm's per-shell
+    `fnm_multishells/<pid>/bin/node` is replaced by the binary behind it,
+    preferring fnm's `default` alias when that is the same version so a later
+    `fnm default` carries the client with it. And every candidate is run with
+    launchd's bare PATH before it is chosen, since that is all a Dock-launched
+    client gives it: a shim that needs its manager on PATH fails there, and is
+    passed over rather than registered. None when nothing qualifies.
+    """
+    env = dict(os.environ if env is None else env)
+    home = home or env.get("HOME") or str(Path.home())
+    # From the home directory, not the caller's: run inside a project pinned
+    # to Node 20, fnm's `--use-on-cd` and mise answer 20 for every place, and
+    # the user's default 22 was never seen (measured). A client does not start
+    # in that project either.
+    run = functools.partial(run, cwd=home)
+    sites = probe(cwd=home) if sites is None else sites
+    rank = {place: i for i, place in enumerate(_CLIENT_PREFERENCE)}
+    candidates = sorted((s for s in sites if s.ok and s.path),
+                        key=lambda s: rank.get(s.place, len(rank)))
+    tried: set[str] = set()
+    for site in candidates:
+        for path in _stable_paths(site.path, run=run, env=env, resolve=resolve, exists=exists):
+            if path in tried:
+                continue
+            tried.add(path)
+            version = _runs_without_a_shell(path, run=run, home=home)
+            if version:
+                return ClientNode(path, version, site.place)
+    return None
+
+
+def _stable_paths(path: str, *, run: Runner, env: dict[str, str],
+                  resolve: Callable[[str], str],
+                  exists: Callable[[str], bool]) -> list[str]:
+    """Absolute paths for this node that will still exist later, best first.
+
+    The path as found comes first when it is not per-shell: Homebrew's
+    `/opt/homebrew/bin/node` survives `brew upgrade` where the Cellar path it
+    points to does not. Then the binary node itself reports running as, which
+    sees through shims and fnm's per-shell links.
+    """
+    out = []
+    if os.path.isabs(path) and "fnm_multishells" not in path:
+        out.append(path)
+    real = _exec_path(path, run=run, env=env)
+    if real:
+        alias = _fnm_default_alias(real, resolve=resolve, exists=exists)
+        out += [p for p in (alias, real) if p]
+    return out
+
+
+def _exec_path(path: str, *, run: Runner, env: dict[str, str]) -> str | None:
+    """The binary behind a node path, as node itself reports it."""
+    try:
+        result = run([path, "-p", "process.execPath"], env=env, capture_output=True,
+                     text=True, timeout=PROBE_TIMEOUT, stdin=subprocess.DEVNULL)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    out = (result.stdout or "").strip().splitlines()
+    if result.returncode != 0 or not out or not os.path.isabs(out[-1]):
+        return None
+    return out[-1]
+
+
+def _fnm_default_alias(real: str, *, resolve: Callable[[str], str],
+                       exists: Callable[[str], bool]) -> str | None:
+    """fnm's `aliases/default/bin/node`, if it is this same binary.
+
+    `<fnm dir>/node-versions/<v>/installation/bin/node` is where fnm keeps a
+    version, wherever the fnm dir is (it has moved between releases).
+    """
+    marker = f"{os.sep}node-versions{os.sep}"
+    if marker not in real:
+        return None
+    fnm_dir = real.split(marker, 1)[0]
+    alias = os.path.join(fnm_dir, "aliases", "default", "bin", "node")
+    try:
+        if exists(alias) and resolve(alias) == resolve(real):
+            return alias
+    except OSError:
+        return None
+    return None
+
+
+def check_outside_a_shell(path: str, *, run: Runner = run_bounded,
+                          home: str | None = None) -> tuple[str, str | None]:
+    """(status, version) for `path` run the way a Dock-launched MCP client runs
+    it: launchd's PATH, from the home directory. OK, TOO_OLD, UNUSABLE when it
+    ran but gave no version (a wrapper script, a broken shim), or UNKNOWN when
+    it could not be asked (a timeout) -- which is not a finding about it."""
+    home = home or str(Path.home())
+    try:
+        result = run([path, "--version"],
+                     env={"HOME": home, "PATH": os.pathsep.join(GUI_PATH)},
+                     capture_output=True, text=True, timeout=PROBE_TIMEOUT,
+                     stdin=subprocess.DEVNULL, cwd=home)
+    except subprocess.TimeoutExpired:
+        return UNKNOWN, None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return UNUSABLE, None
+    version = (result.stdout or "").strip() if result.returncode == 0 else ""
+    major = major_version(version)
+    if major is None:
+        return UNUSABLE, None
+    return (OK if major >= MIN_NODE_MAJOR else TOO_OLD), version
+
+
+def _runs_without_a_shell(path: str, *, run: Runner, home: str) -> str | None:
+    """The version this node reports under launchd's PATH, if MIN_NODE_MAJOR+."""
+    try:
+        result = run([path, "--version"],
+                     env={"HOME": home, "PATH": os.pathsep.join(GUI_PATH)},
+                     capture_output=True, text=True, timeout=PROBE_TIMEOUT,
+                     stdin=subprocess.DEVNULL)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    version = (result.stdout or "").strip()
+    if result.returncode != 0 or (major_version(version) or 0) < MIN_NODE_MAJOR:
+        return None
+    return version

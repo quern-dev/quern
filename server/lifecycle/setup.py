@@ -3691,11 +3691,11 @@ def run_uninstall() -> int:
     return 0
 
 
-def _remove_mcp_registrations() -> None:
-    """Remove quern-debug from all known MCP config files."""
-    import json
-
-    configs = [
+def _mcp_json_configs() -> list[tuple[str, Path, str, str]]:
+    """(client, config file, section, entry) for each JSON-configured client
+    quern registers with. Evaluated per call: `Path.home()` is redirected in
+    tests."""
+    return [
         ("claude-code", Path.home() / ".claude.json", "mcpServers", "quern-debug"),
         (
             "claude-desktop",
@@ -3708,7 +3708,90 @@ def _remove_mcp_registrations() -> None:
         ("opencode", Path.home() / ".config" / "opencode" / "opencode.json", "mcp", "quern"),
     ]
 
-    for name, path, section_key, entry_key in configs:
+
+@dataclass(frozen=True)
+class McpRegistration:
+    """One client's quern registration, as its config file holds it."""
+
+    client: str
+    config: Path
+    node: str | None = None     # the node it runs the wrapper with, as written
+    error: str = ""             # why it could not be read
+    project: str = ""           # Claude Code: the project a project-scoped entry is for
+
+    @property
+    def label(self) -> str:
+        return f"{self.client} ({self.project})" if self.project else self.client
+
+
+#: A registered command that is the wrapper itself rather than a node: run
+#: through its `#!/usr/bin/env node`, which is a PATH lookup like bare `node`.
+#: codex was registered this way, as `index.js` and later `launcher.cjs`.
+_SCRIPT_SUFFIXES = (".js", ".mjs", ".cjs")
+
+
+def _node_of(command: object) -> str | None:
+    # opencode keeps the whole argv in "command"; the others split it.
+    node = command[0] if isinstance(command, list) and command else command
+    if not isinstance(node, str):
+        return None
+    return "node" if node.endswith(_SCRIPT_SUFFIXES) else node
+
+
+def mcp_registrations() -> list[McpRegistration]:
+    """The clients quern is registered with, and the node each will run.
+
+    Read-only. A config that exists but cannot be read is reported with its
+    error rather than skipped: "not registered" and "could not tell" are
+    different answers (#214). Each client is read on its own, so one odd file
+    does not hide the rest.
+    """
+    import json
+    import tomllib
+
+    found: list[McpRegistration] = []
+    for name, path, section_key, entry_key in _mcp_json_configs():
+        try:
+            if not path.exists():
+                continue
+            data = json.loads(path.read_text())
+        except (OSError, ValueError) as e:
+            found.append(McpRegistration(name, path, error=str(e)))
+            continue
+        if not isinstance(data, dict):
+            found.append(McpRegistration(name, path, error="not a JSON object"))
+            continue
+        scopes: list[tuple[str, object]] = [("", data.get(section_key))]
+        if name == "claude-code":
+            # A project's own entry overrides the user-wide one inside that
+            # project, so it is what runs there.
+            projects = data.get("projects")
+            for project, settings in (projects.items() if isinstance(projects, dict) else ()):
+                if isinstance(settings, dict):
+                    scopes.append((str(project), settings.get(section_key)))
+        for project, section in scopes:
+            entry = section.get(entry_key) if isinstance(section, dict) else None
+            if isinstance(entry, dict):
+                found.append(McpRegistration(name, path, _node_of(entry.get("command")),
+                                             project=project))
+    codex = Path.home() / ".codex" / "config.toml"
+    try:
+        data = tomllib.loads(codex.read_text()) if codex.exists() else None
+    except (OSError, ValueError) as e:
+        found.append(McpRegistration("codex", codex, error=str(e)))
+        data = None
+    servers = data.get("mcp_servers") if isinstance(data, dict) else None
+    entry = servers.get("quern") if isinstance(servers, dict) else None
+    if isinstance(entry, dict):
+        found.append(McpRegistration("codex", codex, _node_of(entry.get("command"))))
+    return found
+
+
+def _remove_mcp_registrations() -> None:
+    """Remove quern-debug from all known MCP config files."""
+    import json
+
+    for name, path, section_key, entry_key in _mcp_json_configs():
         if not path.exists():
             continue
         try:

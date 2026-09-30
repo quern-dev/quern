@@ -26,6 +26,7 @@ def _no_slow_sections(monkeypatch):
     `doctor` gains sections over time.
     """
     monkeypatch.setattr("server.main._report_node", lambda: True)
+    monkeypatch.setattr("server.main._report_mcp_registrations", lambda: True)
     monkeypatch.setattr("server.main._report_menubar", lambda fix=False: (True, None))
 
 
@@ -183,6 +184,10 @@ class TestDoctorExitContract:
         monkeypatch.setattr("server.main._report_node", lambda: True)
         monkeypatch.setattr("server.main._report_menubar", lambda fix=False: (False, None))
         assert _run() != 0, "an app that could not be checked must not read as clean"
+
+        monkeypatch.setattr("server.main._report_menubar", lambda fix=False: (True, None))
+        monkeypatch.setattr("server.main._report_mcp_registrations", lambda: False)
+        assert _run() != 0, "an MCP config that could not be read must not read as clean"
 
     def test_a_diagnostic_that_could_not_look_does_not_veto_a_repair(
         self, monkeypatch, capsys,
