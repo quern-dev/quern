@@ -1059,6 +1059,7 @@ class TestRetraceMismatch:
             return 0, "\tat com.example.app.Feed.parse(Feed.kt:12) ~[QUERN-9]\n", ""
 
         report = _java_report()
+        del report.frames[1]              # no platform frame: the index alone must refuse it
         _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), odd))
         assert report.frames[0].symbol == "a.b.c"
         assert "could not be matched" in report.symbols[0].note
@@ -1093,6 +1094,19 @@ class TestAppFrameEdges:
         _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
         assert report.app_frame is beyond and beyond.symbol == "com.example.app.Root.cause"
         assert report.frames[0].app                # also the app's, and not chosen
+
+    def test_an_app_frame_past_the_cap_takes_the_apps_line_of_its_expansion(
+            self, tmp_path, tools):
+        """No room in the list for its inlined expansion, and it stands for
+        where in the app it crashed: the app's line, not the library's."""
+        report = _java_report()
+        beyond = CrashFrame(symbol="a.d.e", file="SourceFile", line=7, app=True)
+        report.app_frame = beyond
+        fake = FakeAndroidTools(retrace={
+            **RETRACED, "at a.d.e(SourceFile:7)": "\tat kotlin.collections.First.get(First.kt:1)\n"
+                                                  "\tat com.example.app.Root.cause(Root.kt:3)"})
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert (beyond.symbol, beyond.line) == ("com.example.app.Root.cause", 3)
 
 
 class TestRetentionOfAMappingAlone:
