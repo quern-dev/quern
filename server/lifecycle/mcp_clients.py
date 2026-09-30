@@ -11,9 +11,13 @@ failures to `~/.quern/mcp-clients.json` for the menu-bar app, which cannot run
 the checks itself and is the only thing a GUI user looks at. `quern doctor`
 reports the same assessment in full.
 
-Only failures go in the file. A CLI client on plain `node` is fine in the
-terminal it is started from, and a check that could not be made is not a
-finding: a menu warning that is sometimes wrong is one people learn to ignore.
+Only failures go in the file, and only ones this can know. Plain `node` is not
+one: each client resolves it its own way -- Claude Desktop reads your shell's
+PATH and adds every nvm version, measured from its own log -- so whether it
+finds a good node cannot be judged from here, and calling it broken was a false
+alarm on a machine where it worked. `quern doctor` warns about it instead. Nor
+is a check that could not be made: a menu warning that is sometimes wrong is one
+people learn to ignore.
 """
 
 from __future__ import annotations
@@ -21,7 +25,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -34,9 +37,6 @@ logger = logging.getLogger(__name__)
 
 STATE_FILE = CONFIG_DIR / "mcp-clients.json"
 
-#: Clients launched as apps, from the Dock or at login, with launchd's PATH.
-GUI_CLIENTS = frozenset({"claude-desktop", "cursor"})
-
 #: Display names, for a person reading a menu rather than a config file.
 NAMES = {
     "claude-code": "Claude Code",
@@ -47,7 +47,8 @@ NAMES = {
 }
 
 OK = "ok"
-PLAIN = "plain_node"        # `node`, resolved on the client's own PATH
+PLAIN = "plain_node"        # `node`, resolved by each client its own way
+LAUNCHER_GONE = "launcher_gone"  # the wrapper it starts is not there
 TILDE = "tilde"             # a `~` path, which clients exec unexpanded
 GONE = "gone"
 TOO_OLD = "too_old"
@@ -83,33 +84,16 @@ def fix_for(reg) -> str:
             f"{node_env.MIN_NODE_MAJOR}+")
 
 
-def _gui_has_node() -> bool:
-    """Whether an app opened from the Dock finds a usable `node` at all."""
-    site = node_env._on_path("GUI apps", "MCP clients opened from the Dock",
-                             list(node_env.GUI_PATH), node_env.run_bounded, shutil.which)
-    return site.ok
-
-
 def assess(registrations: list, *,
            check: Callable[..., tuple[str, str | None]] | None = None,
-           gui_has_node: Callable[[], bool] | None = None,
            exists: Callable[[str], bool] = os.path.exists) -> list[Assessment]:
-    """One assessment per registration. `gui_has_node` is asked at most once,
-    and only if a GUI client is on plain `node`."""
+    """One assessment per registration."""
     check = check or node_env.check_outside_a_shell
-    gui_answer: list[bool] = []
-
-    def gui_ok() -> bool:
-        if not gui_answer:
-            try:
-                gui_answer.append((gui_has_node or _gui_has_node)())
-            except Exception:  # noqa: BLE001 -- could not ask is not a finding
-                gui_answer.append(True)
-        return gui_answer[0]
 
     out = []
     for reg in registrations:
         name, node = _name(reg), reg.node
+        launcher = getattr(reg, "launcher", None)
         if reg.error:
             out.append(Assessment(reg, UNREADABLE))
         elif not node:
@@ -119,13 +103,14 @@ def assess(registrations: list, *,
             out.append(Assessment(reg, TILDE, fails=True, fix=fix_for(reg),
                                   reason=f"{name} is set to run {node}, and apps do not "
                                          f"expand `~`"))
+        elif launcher and os.path.isabs(launcher) and not exists(launcher):
+            # Quern moved, was reinstalled, or the clone it was registered from
+            # is gone: the node is fine and the wrapper it is told to run is not.
+            out.append(Assessment(reg, LAUNCHER_GONE, fails=True, fix=fix_for(reg),
+                                  reason=f"{name} is set to start Quern from {launcher}, "
+                                         f"which no longer exists"))
         elif not os.path.isabs(node):
-            fails = reg.client in GUI_CLIENTS and not gui_ok()
-            out.append(Assessment(
-                reg, PLAIN, fails=fails, fix=fix_for(reg),
-                reason=(f"{name} runs plain `node`, and apps opened from the Dock find "
-                        f"none: they do not read your shell's startup files, where fnm, "
-                        f"nvm, Volta, asdf and mise are set up") if fails else ""))
+            out.append(Assessment(reg, PLAIN, fix=fix_for(reg)))
         elif not exists(node):
             out.append(Assessment(reg, GONE, fails=True, fix=fix_for(reg),
                                   reason=f"{name} is set to run {node}, which no longer "
@@ -172,15 +157,23 @@ def write(data: dict, path: Path | None = None) -> None:
     """Atomically, so the menu bar never reads half a file."""
     path = path or STATE_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n")
-    tmp.replace(path)
+    # Per process: the server's own refresh and an `mcp-install` from Fix in
+    # Terminal can run at once, and a shared name let one truncate the file
+    # the other was about to rename -- a partial file reads as no problems.
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def refresh(path: Path | None = None) -> list[Assessment] | None:
     """Assess every registration and write the result. None if it could not
-    be done; the old file is left alone then rather than cleared, since
-    "could not check" must not read as "all fine"."""
+    be done. The old file is left alone then: it may say "all fine" from
+    before, which is what an empty file would say too -- but clearing a
+    problem nobody fixed would say "fixed", which is worse."""
     from server.lifecycle import setup
 
     try:

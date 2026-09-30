@@ -127,6 +127,15 @@ down would be missing in that case. It stays until the server comes back on a
 different version, so finishing the update by any route retires it, including
 running `quern update` in your own terminal.
 
+**\<Client\> Can’t Start Quern.** Appears when an MCP client quern is
+registered with -- Claude Desktop, Cursor, Claude Code, OpenCode or Codex --
+names a node or a Quern wrapper that no longer works: a node removed or older
+than 22, or an install that has moved. The client itself says only
+`CONNECTION_CLOSED`. The dialog names the clients and why, and its **Fix in
+Terminal** runs `quern mcp-install` for them; quit and reopen those apps
+afterwards, since a client reads its configuration when it starts. It opens by
+itself only right after an update started from the menu.
+
 Every start or update failure that has a way out offers the same step as a
 **Fix in Terminal** button on its alert.
 

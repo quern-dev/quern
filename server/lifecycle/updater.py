@@ -1053,4 +1053,13 @@ def finish_update(apply_tools: bool = False) -> int:
         return 1
 
     _write_result(UPDATED, "update applied", version=_installed_version())
+    # After the result, not before: the menu bar opens its MCP clients dialog
+    # only on an answer at least as new as the update, and the restarted
+    # server's own check ran before this record was written (#214).
+    try:
+        from server.lifecycle import mcp_clients
+
+        mcp_clients.refresh()
+    except Exception:  # noqa: BLE001 -- an update that worked must not fail here
+        pass
     return 0

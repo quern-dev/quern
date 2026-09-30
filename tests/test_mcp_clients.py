@@ -25,17 +25,11 @@ def _reg(client, node, **kw):
     return setup.McpRegistration(client, Path(f"/cfg/{client}"), node, **kw)
 
 
-def _assess(regs, *, checks=None, gui=True, exists=None):
-    asked = []
-
-    def gui_has_node():
-        asked.append(1)
-        return gui
-
+def _assess(regs, *, checks=None, exists=None):
     out = mcp_clients.assess(
         regs, check=lambda path, **_: (checks or {}).get(path, (node_env.OK, "v22.23.2")),
-        gui_has_node=gui_has_node, exists=exists or (lambda p: True))
-    return out, asked
+        exists=exists or (lambda p: True))
+    return out, None
 
 
 class TestAssess:
@@ -43,31 +37,24 @@ class TestAssess:
         [a], _ = _assess([_reg("cursor", NODE)])
         assert (a.status, a.fails, a.version) == (mcp_clients.OK, False, "v22.23.2")
 
-    def test_plain_node_fails_only_a_gui_client_with_no_gui_node(self):
-        (desktop, code), asked = _assess([_reg("claude-desktop", "node"),
-                                          _reg("claude-code", "node")], gui=False)
-        assert desktop.fails and "apps opened from the Dock find none" in desktop.reason
-        assert not code.fails, "a CLI client starts in a terminal, where node is found"
-        assert asked == [1]
+    @pytest.mark.parametrize("client", ["claude-desktop", "cursor", "claude-code"])
+    def test_plain_node_is_never_a_failure(self, client):
+        """Each client resolves it its own way: Claude Desktop reads the shell's
+        PATH and adds every nvm version (measured from its log), so flagging a
+        Dock app on plain `node` was a false alarm on a machine where it worked."""
+        [a], _ = _assess([_reg(client, "node")])
+        assert a.status == mcp_clients.PLAIN and not a.fails and "mcp-install" in a.fix
 
-    def test_plain_node_on_a_gui_client_is_fine_when_the_dock_finds_one(self):
-        [a], _ = _assess([_reg("cursor", "node")], gui=True)
-        assert a.status == mcp_clients.PLAIN and not a.fails
+    def test_a_launcher_that_is_gone_fails(self):
+        """Quern moved, reinstalled, or the clone it was registered from is gone."""
+        [a], _ = _assess([_reg("cursor", NODE, launcher="/old/quern/mcp/dist/launcher.cjs")],
+                         exists=lambda p: p == NODE)
+        assert a.status == mcp_clients.LAUNCHER_GONE and a.fails
+        assert "start Quern from /old/quern/mcp/dist/launcher.cjs" in a.reason
 
-    def test_the_gui_is_asked_only_when_it_matters(self):
-        _, asked = _assess([_reg("claude-code", "node"), _reg("cursor", NODE)])
-        assert asked == []
-
-    def test_the_gui_is_asked_once_for_every_gui_client(self):
-        (desktop, cursor), asked = _assess([_reg("claude-desktop", "node"),
-                                            _reg("cursor", "node")], gui=False)
-        assert desktop.fails and cursor.fails and asked == [1]
-
-    def test_the_gui_lookup_failing_is_not_a_finding(self):
-        def boom():
-            raise OSError("no")
-        [a] = mcp_clients.assess([_reg("cursor", "node")], gui_has_node=boom)
-        assert not a.fails
+    def test_a_launcher_that_is_there_is_fine(self):
+        [a], _ = _assess([_reg("cursor", NODE, launcher="/q/launcher.cjs")])
+        assert a.status == mcp_clients.OK
 
     @pytest.mark.parametrize("node, exists, check, status, words", [
         ("/gone/node", False, None, mcp_clients.GONE, "no longer exists"),
@@ -131,6 +118,18 @@ class TestTheStateFile:
         assert json.loads(path.read_text()) == {"problems": []}
         assert not list(tmp_path.glob("*.tmp"))
 
+    def test_a_failed_write_leaves_no_temp_file(self, tmp_path, monkeypatch):
+        """Per-process names, and cleaned up: a shared one let the server and an
+        mcp-install from Fix in Terminal truncate each other's file."""
+        path = tmp_path / "mcp-clients.json"
+
+        def fail(self, target):
+            raise OSError(28, "No space left on device")
+        monkeypatch.setattr(Path, "replace", fail)
+        with pytest.raises(OSError):
+            mcp_clients.write({"problems": []}, path)
+        assert not list(tmp_path.iterdir())
+
     def test_refresh_writes_what_it_found(self, tmp_path, monkeypatch):
         monkeypatch.setattr(setup, "mcp_registrations", lambda: [_reg("cursor", "/gone/node")])
         path = tmp_path / "mcp-clients.json"
@@ -157,11 +156,58 @@ class TestWhoRefreshes:
         tree = ast.parse((ROOT / "server" / "main.py").read_text())
         lifespan = next(n for n in ast.walk(tree)
                         if isinstance(n, ast.AsyncFunctionDef) and n.name == "lifespan")
-        calls = [n for n in ast.walk(lifespan) if isinstance(n, ast.Call)
-                 and getattr(n.func, "attr", None) == "to_thread"]
-        assert any(isinstance(c.args[0], ast.Attribute) and c.args[0].attr == "refresh"
-                   and getattr(c.args[0].value, "id", None) == "mcp_clients"
-                   for c in calls), "the lifespan does not refresh mcp-clients.json"
+        started = [n for n in ast.walk(lifespan) if isinstance(n, ast.Call)
+                   and getattr(n.func, "id", None) == "_refresh_mcp_clients_periodically"]
+        assert started, "the lifespan does not start the mcp-clients.json refresh"
+        loop = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)
+                    and n.name == "_refresh_mcp_clients_periodically")
+        assert any(isinstance(c, ast.Call) and getattr(c.func, "attr", None) == "to_thread"
+                   and getattr(c.args[0], "attr", None) == "refresh"
+                   for c in ast.walk(loop)), "the loop does not refresh in a thread"
+
+    def test_the_server_checks_again_periodically(self, monkeypatch):
+        """A server runs for days; a node removed or a config fixed meanwhile
+        should not wait for the next start."""
+        import asyncio
+
+        import server.main as server_main
+
+        calls = []
+        monkeypatch.setattr(mcp_clients, "refresh", lambda *a, **k: calls.append(1))
+
+        async def sleep(seconds):
+            assert seconds == server_main.MCP_CLIENTS_INTERVAL
+            if len(calls) >= 2:
+                raise asyncio.CancelledError
+        monkeypatch.setattr(server_main.asyncio, "sleep", sleep)
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(server_main._refresh_mcp_clients_periodically())
+        assert len(calls) == 2
+
+    def test_an_update_refreshes_it_after_recording_its_result(self, monkeypatch):
+        """The dialog opens only on an answer at least as new as the update, and
+        the restarted server's own check runs before the result is written."""
+        from server.lifecycle import updater
+
+        src = (ROOT / "server" / "lifecycle" / "updater.py").read_text()
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef) and n.name == "finish_update")
+        body = ast.get_source_segment(src, fn)
+        written = body.index('_write_result(UPDATED, "update applied"')
+        assert "mcp_clients.refresh()" in body[written:], \
+            "finish_update does not refresh mcp-clients.json after writing its result"
+        _ = updater
+
+    def test_doctor_writes_what_it_found(self, tmp_path, monkeypatch):
+        """Otherwise a registration fixed by hand stayed on the menu while doctor
+        said it was fine."""
+        from server import main as server_main
+
+        written = []
+        monkeypatch.setattr(setup, "mcp_registrations", lambda: [_reg("cursor", "/gone")])
+        monkeypatch.setattr(mcp_clients, "write", lambda data, path=None: written.append(data))
+        server_main._report_mcp_registrations()
+        assert written and written[0]["fix_clients"] == ["cursor"]
 
     def test_mcp_install_refreshes_it(self, tmp_path, monkeypatch):
         import server.__main__ as entry

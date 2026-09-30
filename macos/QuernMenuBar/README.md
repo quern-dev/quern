@@ -34,17 +34,20 @@ manager with a **Restart to Update** action.
   would be missing exactly then. It clears once the server comes back on a
   different version, so finishing the update by any route retires it.
 - **\<Client\> Can’t Start Quern…** — appears when an MCP client quern is
-  registered with will not be able to start its MCP server: a registration on
-  plain `node` in an app opened from the Dock, which finds no node on launchd's
-  PATH, or one naming a node that has since been removed or is older than 22.
+  registered with will not be able to start its MCP server: its registration
+  names a node that has since been removed, is older than 22 or does not run,
+  or a Quern wrapper that is no longer there (Quern moved or was reinstalled).
   The client itself reports only `CONNECTION_CLOSED`. The dialog says which
   clients and why, and **Fix in Terminal** runs `quern mcp-install` for them,
   with a reminder to reopen them. The server writes `~/.quern/mcp-clients.json`
-  at start and after `quern mcp-install`, because the checks run each client's
-  node, which this app does not do, and only failures are in it: a CLI client
-  on plain `node` is fine in the terminal it is started from. The dialog opens
-  by itself only right after an update you started from here, once; at login
-  it is the menu row alone.
+  at start, every ten minutes, after `quern mcp-install`, `quern doctor` and
+  an update, because the checks run each client's node, which this app does
+  not do. Only failures it can know are in it: a registration on plain `node`
+  is not one, because each client resolves that its own way -- Claude Desktop
+  reads your shell's PATH -- and `quern doctor` warns about it instead. The
+  dialog opens by itself only once, right after an update started from this
+  menu; at login, or after an update run in a terminal, it is the menu row
+  alone.
 - **Check for Updates…** — shown instead, when nothing is staged. That cache is
   refreshed at most once a day, so without this a release landing in the
   afternoon would not be offered until tomorrow and there was no way to ask.

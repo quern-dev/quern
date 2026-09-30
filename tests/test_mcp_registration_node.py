@@ -117,6 +117,11 @@ class TestReadingTheRegistrations:
         [reg] = self._read()
         assert reg.client == "claude-code" and reg.error and reg.node is None
 
+    def test_each_shape_carries_its_launcher(self, home, monkeypatch):
+        _install(monkeypatch, "claude-code", "opencode", "codex")
+        launchers = {r.client: r.launcher for r in self._read()}
+        assert all(v and v.endswith("launcher.cjs") for v in launchers.values()), launchers
+
     def test_codex_registered_before_214_runs_node_off_path(self, home):
         (home / ".codex").mkdir()
         (home / ".codex/config.toml").write_text(
@@ -164,16 +169,16 @@ class TestDoctorReportsTheRegistrations:
         regs = [setup.McpRegistration("claude-desktop", Path("/c"), "node")]
         self._report(monkeypatch, regs)
         out = capsys.readouterr().out
-        assert "! claude-desktop — `node`, found on each client's own PATH" in out
+        assert "! claude-desktop — `node`, which each client resolves its own way" in out
 
-    def test_plain_node_on_a_gui_client_with_no_gui_node_fails(self, monkeypatch, capsys):
-        from server.lifecycle import mcp_clients
-
-        monkeypatch.setattr(mcp_clients, "_gui_has_node", lambda: False)
-        regs = [setup.McpRegistration("claude-desktop", Path("/c"), "node")]
-        self._report(monkeypatch, regs)
-        out = capsys.readouterr().out
-        assert "\u2717 claude-desktop — `node`, and apps opened from the Dock find no node" in out
+    def test_a_launcher_that_is_gone_is_said(self, monkeypatch, capsys, tmp_path):
+        node = tmp_path / "node"
+        node.write_text("")
+        regs = [setup.McpRegistration("cursor", Path("/c"), str(node),
+                                      launcher="/old/mcp/dist/launcher.cjs")]
+        self._report(monkeypatch, regs, {str(node): (node_env.OK, "v22.0.0")})
+        assert "starts Quern from /old/mcp/dist/launcher.cjs, which no longer exists" in \
+            capsys.readouterr().out
 
     def test_an_unreadable_config_fails_the_check(self, monkeypatch, capsys):
         """Doctor's exit says when a check could not be made."""

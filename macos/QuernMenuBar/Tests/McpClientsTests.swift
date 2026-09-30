@@ -73,8 +73,11 @@ enum McpClientsTests {
             Harness.expect(body.contains(desktop.reason), "the reason")
             Harness.expect(body.contains("`quern mcp-install claude-desktop`"), "the command")
             Harness.expect(body.contains("quit and reopen that app"), "restart the client")
-            Harness.expect(body.contains("Claude Code (/src/app): edit the command"),
+            Harness.expect(body.contains("Claude Code (/src/app): `quern mcp-install` does not "
+                                         + "write project entries"),
                            "the fix mcp-install cannot make")
+            Harness.expect(body.contains("says so if it does not"),
+                           "no promise it cannot keep when there is no Node 22")
             Harness.expect(!body.contains("Claude Desktop: `quern mcp-install"),
                            "a fixable one's fix is not repeated")
             Harness.expect(body.contains("quern doctor"), "where to look")
@@ -96,39 +99,62 @@ enum McpClientsTests {
             Harness.expect(text.contains("Quit and reopen"), "what to do next")
         }
 
-        Harness.test("it interrupts right after an update, once, on a fresh answer") {
-            let h = health([desktop], fix: ["claude-desktop"],
-                           checkedAt: finished.addingTimeInterval(20))
-            let now = finished.addingTimeInterval(60)
-            Harness.expect(McpClientAlert.shouldInterrupt(
-                h, lastUpdate: update(.updated, at: finished), now: now, alreadyShown: false),
-                "right after an update")
-            Harness.expect(!McpClientAlert.shouldInterrupt(
-                h, lastUpdate: update(.updated, at: finished), now: now, alreadyShown: true),
-                "only once")
+        Harness.test("a long list is cut short, and project fixes are said once") {
+            let many = (0..<7).map { McpClientProblem(client: "Claude Code (/p\($0))",
+                                                      reason: "reason \($0)", fix: "f",
+                                                      fixable: false) }
+            let body = McpClientAlert.body(health(many, fix: []))
+            Harness.expect(body.contains("reason 3") && !body.contains("reason 4"), "four listed")
+            Harness.expect(body.contains("And 3 more."), "the rest summed")
+            Harness.expect(body.components(separatedBy: "does not write project entries").count,
+                           2, "one project line, however many")
         }
 
-        Harness.test("it does not interrupt at login, after a no-op, or on a stale answer") {
-            let h = health([desktop], fix: ["claude-desktop"],
-                           checkedAt: finished.addingTimeInterval(20))
-            Harness.expect(!McpClientAlert.shouldInterrupt(
-                h, lastUpdate: nil, now: finished, alreadyShown: false), "no update: login")
-            Harness.expect(!McpClientAlert.shouldInterrupt(
-                h, lastUpdate: update(.updated, at: finished),
-                now: finished.addingTimeInterval(3600), alreadyShown: false), "an hour later")
-            Harness.expect(!McpClientAlert.shouldInterrupt(
-                h, lastUpdate: update(.noOp, at: finished),
-                now: finished.addingTimeInterval(60), alreadyShown: false), "nothing updated")
+        let h = health([desktop], fix: ["claude-desktop"], checkedAt: finished.addingTimeInterval(20))
+        let started = finished.addingTimeInterval(-90)
+        func interrupts(_ h: McpClientHealth, _ update: UpdateResult?, started: Date?,
+                        now: Date, shown: Bool = false) -> Bool {
+            McpClientAlert.shouldInterrupt(h, lastUpdate: update, menuUpdateStartedAt: started,
+                                           now: now, alreadyShown: shown)
+        }
+
+        Harness.test("it interrupts right after a menu update, once, on a fresh answer") {
+            let now = finished.addingTimeInterval(60)
+            Harness.expect(interrupts(h, update(.updated, at: finished), started: started, now: now),
+                           "right after an update from the menu")
+            Harness.expect(!interrupts(h, update(.updated, at: finished), started: started,
+                                       now: now, shown: true), "only once")
+        }
+
+        Harness.test("it does not interrupt without the menu's marker, or late, or on a stale answer") {
+            let now = finished.addingTimeInterval(60)
+            Harness.expect(!interrupts(h, update(.updated, at: finished), started: nil, now: now),
+                           "an update run in a terminal: no marker")
+            Harness.expect(!interrupts(h, update(.updated, at: finished),
+                                       started: finished.addingTimeInterval(30), now: now),
+                           "a marker from after that update: some other attempt")
+            Harness.expect(!interrupts(h, update(.updated, at: finished), started: started,
+                                       now: finished.addingTimeInterval(3600)), "an hour later")
+            Harness.expect(!interrupts(h, update(.noOp, at: finished), started: started, now: now),
+                           "nothing updated")
+            Harness.expect(!interrupts(h, update(.failed, at: finished), started: started, now: now),
+                           "a failed update has its own alert")
             let stale = health([desktop], fix: ["claude-desktop"],
                                checkedAt: finished.addingTimeInterval(-60))
-            Harness.expect(!McpClientAlert.shouldInterrupt(
-                stale, lastUpdate: update(.updated, at: finished),
-                now: finished.addingTimeInterval(60), alreadyShown: false),
-                "checked before the update: may describe what it replaced")
-            Harness.expect(!McpClientAlert.shouldInterrupt(
-                health([], fix: [], checkedAt: finished.addingTimeInterval(20)),
-                lastUpdate: update(.updated, at: finished),
-                now: finished.addingTimeInterval(60), alreadyShown: false), "nothing wrong")
+            Harness.expect(!interrupts(stale, update(.updated, at: finished), started: started,
+                                       now: now), "checked before the update finished")
+            Harness.expect(!interrupts(health([], fix: [], checkedAt: finished.addingTimeInterval(20)),
+                                       update(.updated, at: finished), started: started, now: now),
+                           "nothing wrong")
+        }
+
+        Harness.test("the marker is read once, then gone") {
+            let defaults = UserDefaults(suiteName: "quern-tests-\(UUID().uuidString)")!
+            Harness.expect(MenuUpdateMarker.consume(defaults: defaults), nil, "none yet")
+            MenuUpdateMarker.record(finished, defaults: defaults)
+            Harness.expect(MenuUpdateMarker.consume(defaults: defaults), finished, "the time")
+            Harness.expect(MenuUpdateMarker.consume(defaults: defaults), nil,
+                           "consumed: a reopen or a login finds nothing")
         }
     }
 }

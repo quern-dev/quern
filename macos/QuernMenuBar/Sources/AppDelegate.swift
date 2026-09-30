@@ -36,6 +36,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var didAttemptLaunchStart = false
     /// The MCP clients dialog opens by itself at most once per launch.
     private var mcpAlertShown = false
+    /// When the update this launch follows was started from the menu, if it
+    /// was. Taken from `MenuUpdateMarker` at launch, which removes it.
+    private var menuUpdateStartedAt: Date?
     /// Holds "Checking…" on screen long enough to be seen. See MinimumDisplay.
     private let checkIndicator = MinimumDisplay()
 
@@ -88,6 +91,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self          // rebuilt lazily on each open
         statusItem.menu = menu
 
+        menuUpdateStartedAt = MenuUpdateMarker.consume()
         reader.onChange = { [weak self] snap in
             guard let self else { return }
             self.snapshot = snap
@@ -107,9 +111,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // Only right after an update the user started, never at login; the
             // menu row is there either way. Cheap checks first: the update
             // record is a file read, and this runs on every poll.
-            if !self.mcpAlertShown, !snap.mcpClients.problems.isEmpty,
+            if self.menuUpdateStartedAt != nil, !snap.mcpClients.problems.isEmpty,
                McpClientAlert.shouldInterrupt(snap.mcpClients, lastUpdate: UpdateResult.read(),
-                                              now: Date(), alreadyShown: false) {
+                                              menuUpdateStartedAt: self.menuUpdateStartedAt,
+                                              now: Date(), alreadyShown: self.mcpAlertShown) {
                 self.mcpAlertShown = true
                 self.presentMcpClients(snap.mcpClients)
             }
@@ -513,6 +518,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func restartToUpdate() {
         lifecycle.clearUpdateRecovery()
+        MenuUpdateMarker.record()
         updater.restartToUpdate(
             status: { [weak self] progress in
                 self?.updateStatusText = progress.text
@@ -588,7 +594,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             case .copy:
                 NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(McpClientAlert.command(health) ?? "",
+                // The resolved wrapper: `~/.local/bin` may not be on the PATH
+                // of the terminal this is pasted into.
+                let quern = QuernCLI.resolve().map { TerminalScript.shellQuote($0.path) } ?? "quern"
+                NSPasteboard.general.setString(McpClientAlert.command(health, quern: quern) ?? "",
                                                forType: .string)
             }
         }

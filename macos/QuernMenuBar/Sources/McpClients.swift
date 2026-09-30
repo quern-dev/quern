@@ -49,20 +49,32 @@ enum McpClientAlert {
         h.fixClients.isEmpty ? nil : ([quern, "mcp-install"] + h.fixClients).joined(separator: " ")
     }
 
+    /// How many reasons the dialog lists before summing up the rest. An
+    /// alert's text neither scrolls nor caps its height, and a long one put
+    /// the buttons off-screen once (#339).
+    static let listed = 4
+
     static func body(_ h: McpClientHealth) -> String {
-        var parts = h.problems.map { $0.reason + "." }
+        var parts = h.problems.prefix(listed).map { $0.reason + "." }
+        if h.problems.count > listed {
+            parts.append("And \(h.problems.count - listed) more.")
+        }
         if let command = command(h) {
             let one = h.fixClients.count == 1
             let them: String = one ? "it" : "them"
             let apps: String = one ? "that app" : "those apps"
             parts.append("Fix in Terminal runs `\(command)`, which registers \(them) with "
-                         + "a Node 22 or later that apps opened from the Dock can run. Then "
-                         + "quit and reopen \(apps): a client reads its configuration when it "
-                         + "starts.")
+                         + "a Node 22 or later if it finds one, and says so if it does not. "
+                         + "Then quit and reopen \(apps): a client reads its configuration "
+                         + "when it starts.")
         }
-        // What `mcp-install` cannot fix still needs saying: a project entry.
-        for p in h.problems where !p.fixable && !p.fix.isEmpty {
-            parts.append("\(p.client): \(p.fix).")
+        // What `mcp-install` cannot fix still needs saying -- once, however
+        // many project entries there are.
+        let projects = h.problems.filter { !$0.fixable }.map(\.client)
+        if !projects.isEmpty {
+            parts.append("\(projects.joined(separator: ", ")): `quern mcp-install` does not "
+                         + "write project entries. Edit the command of quern-debug under that "
+                         + "project in ~/.claude.json, or remove it so the user-wide one applies.")
         }
         parts.append("`quern doctor` shows which node each client runs.")
         return parts.joined(separator: "\n\n")
@@ -88,17 +100,43 @@ enum McpClientAlert {
 
     /// Whether to open the dialog without being asked.
     ///
-    /// Only right after an update the user started, and only once: at login a
-    /// modal stealing focus is worse than a menu row, and the menu row is
-    /// always there. Only on an answer written since that update, since the
-    /// one from before it may describe a registration the update replaced.
+    /// Only right after an update started from this menu, and only once: at
+    /// login a modal stealing focus is worse than a menu row, and the menu row
+    /// is always there. `menuUpdateStartedAt` is the marker the Update item
+    /// leaves for the relaunched app, which consumes it, so an update run in a
+    /// terminal, or a reopen of the app later, does not count. And only on an
+    /// answer written since that update: the one from before may describe a
+    /// registration the update replaced.
     static func shouldInterrupt(_ h: McpClientHealth, lastUpdate: UpdateResult?,
-                                now: Date, alreadyShown: Bool) -> Bool {
+                                menuUpdateStartedAt: Date?, now: Date,
+                                alreadyShown: Bool) -> Bool {
         guard !alreadyShown, !h.problems.isEmpty,
-              FailureReporting.forLaunchStart(lastUpdate: lastUpdate, now: now) == .alert,
-              let finished = lastUpdate?.finishedAt, let checked = h.checkedAt,
-              checked >= finished
+              let started = menuUpdateStartedAt,
+              let lastUpdate, lastUpdate.outcome == .updated,
+              let finished = lastUpdate.finishedAt, finished >= started,
+              now.timeIntervalSince(finished) >= 0,
+              now.timeIntervalSince(finished) <= FailureReporting.afterUpdateWindow,
+              let checked = h.checkedAt, checked >= finished
         else { return false }
         return true
+    }
+}
+
+/// The marker an update started from the menu leaves for the app it relaunches.
+///
+/// UserDefaults, because the relaunch is a new process. Consumed at launch:
+/// read once and removed, so quitting and reopening the app, or a login after
+/// a reboot, finds nothing.
+enum MenuUpdateMarker {
+    static let key = "QuernMenuUpdateStartedAt"
+
+    static func record(_ now: Date = Date(), defaults: UserDefaults = .standard) {
+        defaults.set(now.timeIntervalSince1970, forKey: key)
+    }
+
+    static func consume(defaults: UserDefaults = .standard) -> Date? {
+        guard let seconds = defaults.object(forKey: key) as? Double else { return nil }
+        defaults.removeObject(forKey: key)
+        return Date(timeIntervalSince1970: seconds)
     }
 }

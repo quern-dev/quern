@@ -172,6 +172,21 @@ def buffer_for(entry: LogEntry, *, logs: RingBuffer, crashes: RingBuffer) -> Rin
     return crashes if entry.source == LogSource.CRASH else logs
 
 
+#: How often the MCP client registrations are checked again (#214). Cheap --
+#: one `node --version` per pinned client, measured 0.3s for five.
+MCP_CLIENTS_INTERVAL = 600.0  # s
+
+
+async def _refresh_mcp_clients_periodically() -> None:
+    from server.lifecycle import mcp_clients
+
+    while True:
+        # In a thread, since it runs each client's node. `refresh` catches its
+        # own failures, so one bad pass does not end the loop.
+        await asyncio.to_thread(mcp_clients.refresh)
+        await asyncio.sleep(MCP_CLIENTS_INTERVAL)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage server startup and shutdown."""
@@ -464,12 +479,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         pass
 
     # Which registered MCP clients cannot start the wrapper, for the menu bar,
-    # which cannot run the checks itself (#214). Once per start: a node removed
-    # since registering is noticed at the next start, which the menu bar does
-    # on launch. In a thread, since it runs each client's node.
-    from server.lifecycle import mcp_clients
+    # which cannot run the checks itself (#214). At start and then every few
+    # minutes: a server runs for days, and a node removed or a config edited
+    # meanwhile should not wait for the next start to show or clear.
 
-    mcp_clients_task = asyncio.create_task(asyncio.to_thread(mcp_clients.refresh))
+    mcp_clients_task = asyncio.create_task(_refresh_mcp_clients_periodically())
 
     # Network-change monitor — polls every ~15s so the server notices
     # SSID/IP changes proactively. Lets proxy_status surface "the network
@@ -1508,7 +1522,16 @@ def _report_mcp_registrations() -> bool:
         print(f"  \u2013 none (`{quern_cmd()} mcp-install` registers one)")
         return True
     complete = True
-    for a in mcp_clients.assess(registrations):
+    assessments = mcp_clients.assess(registrations)
+    # The menu bar shows the same answer, and would otherwise keep showing
+    # what the server found at its last start: a registration fixed by hand
+    # since then -- the fix this very section gives a project entry -- stayed
+    # on the menu while doctor said it was fine.
+    try:
+        mcp_clients.write(mcp_clients.state(assessments))
+    except OSError:
+        pass
+    for a in assessments:
         reg = a.registration
         if a.status == mcp_clients.UNREADABLE:
             complete = False
@@ -1523,11 +1546,14 @@ def _report_mcp_registrations() -> bool:
         if a.status == mcp_clients.OK:
             print(f"  \u2713 {reg.label} — {a.version}  {reg.node}")
             continue
-        if a.status == mcp_clients.PLAIN and not a.fails:
-            print(f"  ! {reg.label} — `{reg.node}`, found on each client's own PATH")
-        elif a.status == mcp_clients.PLAIN:
-            print(f"  \u2717 {reg.label} — `{reg.node}`, and apps opened from the Dock "
-                  f"find no node")
+        if a.status == mcp_clients.PLAIN:
+            # Not a failure: each client resolves it its own way, and may find
+            # a good one. The risk is that it finds an old one.
+            print(f"  ! {reg.label} — `{reg.node}`, which each client resolves its own "
+                  f"way and may find an older node")
+        elif a.status == mcp_clients.LAUNCHER_GONE:
+            print(f"  \u2717 {reg.label} — starts Quern from {reg.launcher}, which no "
+                  f"longer exists")
         elif a.status == mcp_clients.NO_COMMAND:
             print(f"  \u2717 {reg.label} — no command in {reg.config}")
         elif a.status == mcp_clients.TILDE:

@@ -25,4 +25,4 @@ RecoveryTests.all()
 McpClientsTests.all()
 // The count is deliberate. See Harness.report(expected:) -- without it, a suite
 // that runs nothing exits 0.
-exit(Harness.report(expected: 161))
+exit(Harness.report(expected: 163))
