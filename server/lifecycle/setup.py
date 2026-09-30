@@ -3691,11 +3691,11 @@ def run_uninstall() -> int:
     return 0
 
 
-def _remove_mcp_registrations() -> None:
-    """Remove quern-debug from all known MCP config files."""
-    import json
-
-    configs = [
+def _mcp_json_configs() -> list[tuple[str, Path, str, str]]:
+    """(client, config file, section, entry) for each JSON-configured client
+    quern registers with. Evaluated per call: `Path.home()` is redirected in
+    tests."""
+    return [
         ("claude-code", Path.home() / ".claude.json", "mcpServers", "quern-debug"),
         (
             "claude-desktop",
@@ -3708,7 +3708,68 @@ def _remove_mcp_registrations() -> None:
         ("opencode", Path.home() / ".config" / "opencode" / "opencode.json", "mcp", "quern"),
     ]
 
-    for name, path, section_key, entry_key in configs:
+
+@dataclass(frozen=True)
+class McpRegistration:
+    """One client's quern registration, as its config file holds it."""
+
+    client: str
+    config: Path
+    node: str | None = None     # the node it runs the wrapper with, as written
+    error: str = ""             # why it could not be read
+
+
+def mcp_registrations() -> list[McpRegistration]:
+    """The clients quern is registered with, and the node each will run.
+
+    Read-only. A config that exists but cannot be read is reported with its
+    error rather than skipped: "not registered" and "could not tell" are
+    different answers (#214).
+    """
+    import json
+    import tomllib
+
+    found: list[McpRegistration] = []
+    for name, path, section_key, entry_key in _mcp_json_configs():
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError) as e:
+            found.append(McpRegistration(name, path, error=str(e)))
+            continue
+        section = data.get(section_key) if isinstance(data, dict) else None
+        entry = section.get(entry_key) if isinstance(section, dict) else None
+        if not isinstance(entry, dict):
+            continue
+        command = entry.get("command")
+        # opencode keeps the whole argv in "command"; the others split it.
+        node = command[0] if isinstance(command, list) and command else command
+        found.append(McpRegistration(name, path, node if isinstance(node, str) else None))
+    codex = Path.home() / ".codex" / "config.toml"
+    if codex.exists():
+        try:
+            data = tomllib.loads(codex.read_text())
+        except (OSError, ValueError) as e:
+            found.append(McpRegistration("codex", codex, error=str(e)))
+        else:
+            entry = data.get("mcp_servers", {}).get("quern")
+            if isinstance(entry, dict):
+                command = entry.get("command")
+                # Registered before #214 as the launcher itself, run through
+                # its `#!/usr/bin/env node`: a PATH lookup like bare `node`.
+                if isinstance(command, str) and command.endswith(".cjs"):
+                    command = "node"
+                found.append(McpRegistration(
+                    "codex", codex, command if isinstance(command, str) else None))
+    return found
+
+
+def _remove_mcp_registrations() -> None:
+    """Remove quern-debug from all known MCP config files."""
+    import json
+
+    for name, path, section_key, entry_key in _mcp_json_configs():
         if not path.exists():
             continue
         try:

@@ -1394,6 +1394,7 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
     repaired = _report_python_deps(fix)
     _report_external_tools(fix)
     node_complete = _report_node()
+    registrations_complete = _report_mcp_registrations()
     menubar_checked, menubar_repaired = _report_menubar(fix)
     services_complete = _report_service_health(fix)
 
@@ -1405,7 +1406,7 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         # start` after the venv repair succeeded.
         sys.exit(0 if repaired is not False and menubar_repaired is not False else 1)
     sys.exit(0 if tools is not None and services_complete and node_complete
-             and menubar_checked else 1)
+             and registrations_complete and menubar_checked else 1)
 
 
 def _report_menubar(fix: bool = False) -> tuple[bool, bool | None]:
@@ -1475,6 +1476,57 @@ def _report_node() -> bool:
     # a permanent fact about the machine, and failing on it would fail every
     # doctor run there.
     return not any(site.status == node_env.UNKNOWN for site in sites)
+
+
+def _report_mcp_registrations() -> bool:
+    """Which node each registered MCP client will run the wrapper with.
+
+    Returns whether every config could be read. A registration naming an
+    absolute node is checked the way a Dock-launched client would run it;
+    one naming plain `node` leaves the choice to each client's PATH, which is
+    how the wrapper came to refuse to start under an old session's Node 20 as
+    `CONNECTION_CLOSED` (#214). Read-only.
+    """
+    import os
+
+    from server.config import quern_cmd
+    from server.lifecycle import node_env, setup
+
+    print()
+    print("MCP client registrations:")
+    try:
+        registrations = setup.mcp_registrations()
+    except Exception as exc:  # noqa: BLE001 -- doctor reports, it does not crash
+        print(f"  ? could not be read ({exc})")
+        return False
+    if not registrations:
+        print(f"  \u2013 none (`{quern_cmd()} mcp-install` registers one)")
+        return True
+    complete = True
+    for reg in registrations:
+        fix = f"`{quern_cmd()} mcp-install {reg.client}` registers an absolute Node " \
+              f"{node_env.MIN_NODE_MAJOR}+"
+        if reg.error:
+            complete = False
+            print(f"  ? {reg.client} — {reg.config} could not be read ({reg.error})")
+        elif not reg.node:
+            print(f"  \u2717 {reg.client} — no command in {reg.config}")
+            print(f"      fix: {fix}")
+        elif not os.path.isabs(reg.node):
+            print(f"  ! {reg.client} — `{reg.node}`, found on each client's own PATH")
+            print(f"      fix: {fix}, so a GUI or older session cannot find a different one")
+        elif not os.path.exists(reg.node):
+            print(f"  \u2717 {reg.client} — {reg.node} no longer exists")
+            print(f"      fix: {fix}")
+        else:
+            version = node_env.version_outside_a_shell(reg.node)
+            if version:
+                print(f"  \u2713 {reg.client} — {version}  {reg.node}")
+            else:
+                print(f"  \u2717 {reg.client} — {reg.node} is below Node "
+                      f"{node_env.MIN_NODE_MAJOR} or does not run without your shell's setup")
+                print(f"      fix: {fix}")
+    return complete
 
 
 _HEALTH_MARKERS = {"healthy": "\u2713", "unsupported": "\u2013"}

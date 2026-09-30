@@ -332,7 +332,8 @@ def _ensure_mcp_built(quiet: bool = False) -> bool:
     return True
 
 
-def _install_json_mcpservers(config_path: Path, mcp_entry: Path) -> tuple[bool, str]:
+def _install_json_mcpservers(config_path: Path, mcp_entry: Path,
+                             node: str = "node") -> tuple[bool, str]:
     """Install quern-debug into a config file that uses the mcpServers JSON format.
 
     Used by claude-code, claude-desktop, and cursor.
@@ -356,7 +357,7 @@ def _install_json_mcpservers(config_path: Path, mcp_entry: Path) -> tuple[bool, 
 
     existing = config["mcpServers"].get("quern-debug")
     config["mcpServers"]["quern-debug"] = {
-        "command": "node",
+        "command": node,
         "args": [str(mcp_entry)],
     }
 
@@ -366,7 +367,7 @@ def _install_json_mcpservers(config_path: Path, mcp_entry: Path) -> tuple[bool, 
     return True, f"{verb} quern-debug in {config_path}"
 
 
-def _install_opencode(mcp_entry: Path) -> tuple[bool, str]:
+def _install_opencode(mcp_entry: Path, node: str = "node") -> tuple[bool, str]:
     """Install quern into ~/.config/opencode/opencode.json."""
     import json
 
@@ -387,7 +388,7 @@ def _install_opencode(mcp_entry: Path) -> tuple[bool, str]:
     existing = config["mcp"].get("quern")
     config["mcp"]["quern"] = {
         "type": "local",
-        "command": ["node", str(mcp_entry)],
+        "command": [node, str(mcp_entry)],
     }
 
     config_path.write_text(json.dumps(config, indent=2) + "\n")
@@ -437,17 +438,22 @@ def _toml_upsert_section(text: str, section: str, fields: dict) -> str:
     return "".join(lines)
 
 
-def _install_codex(mcp_entry: Path) -> tuple[bool, str]:
+def _install_codex(mcp_entry: Path, node: str = "node") -> tuple[bool, str]:
     """Install quern into ~/.codex/config.toml."""
+    import json
+
     config_path = Path.home() / ".codex" / "config.toml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
     existing_text = config_path.read_text() if config_path.exists() else ""
     existing = "[mcp_servers.quern]" in existing_text
 
+    # The node, then the launcher -- not the launcher alone, run through its
+    # `#!/usr/bin/env node`, which asked codex's PATH for a node like every
+    # other bare `node` here.
     fields = {
-        "command": f'"{str(mcp_entry)}"',
-        "args": "[]",
+        "command": json.dumps(node),
+        "args": json.dumps([str(mcp_entry)]),
         "enabled": "true",
     }
     new_text = _toml_upsert_section(existing_text, "mcp_servers.quern", fields)
@@ -705,14 +711,30 @@ def _cmd_mcp_install() -> int:
         Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
     )
 
+    # An absolute node, not `node`: each client would otherwise resolve it on
+    # its own PATH, where a GUI client finds none and an old session finds an
+    # old one -- and the wrapper refusing to start shows up as
+    # `CONNECTION_CLOSED`, with the reason out of sight (#214).
+    from server.lifecycle import node_env
+
+    try:
+        chosen = node_env.node_for_clients()
+    except Exception as exc:  # noqa: BLE001 -- registering beats not registering
+        print(f"  ? could not choose a node for MCP clients ({exc})")
+        chosen = None
+    node = chosen.path if chosen else "node"
+    if chosen:
+        print(f"  node: {chosen.path} ({chosen.version}, from your {chosen.found_in})")
+
     dispatch = {
-        "claude-code":    lambda: _install_json_mcpservers(Path.home() / ".claude.json", mcp_entry),
-        "claude-desktop": lambda: _install_json_mcpservers(CLAUDE_DESKTOP_CONFIG, mcp_entry),
+        "claude-code":    lambda: _install_json_mcpservers(
+            Path.home() / ".claude.json", mcp_entry, node),
+        "claude-desktop": lambda: _install_json_mcpservers(CLAUDE_DESKTOP_CONFIG, mcp_entry, node),
         "cursor":         lambda: _install_json_mcpservers(
-            Path.home() / ".cursor" / "mcp.json", mcp_entry,
+            Path.home() / ".cursor" / "mcp.json", mcp_entry, node,
         ),
-        "opencode":       lambda: _install_opencode(mcp_entry),
-        "codex":          lambda: _install_codex(mcp_entry),
+        "opencode":       lambda: _install_opencode(mcp_entry, node),
+        "codex":          lambda: _install_codex(mcp_entry, node),
     }
 
     all_ok = True
@@ -723,6 +745,17 @@ def _cmd_mcp_install() -> int:
         if not ok:
             all_ok = False
 
+    if chosen is None:
+        # Registered anyway -- a client with its own good PATH may still start
+        # it -- but no node here that runs the wrapper outside a shell means
+        # the likeliest outcome is a client that cannot, so the exit says so.
+        from server.config import quern_cmd
+
+        print(f"  ✗ no Node {node_env.MIN_NODE_MAJOR}+ was found that runs without your "
+              f"shell's setup, so clients were registered with plain `node`, which each "
+              f"resolves on its own PATH. Install Node {node_env.MIN_NODE_MAJOR}+ and run "
+              f"this again; `{quern_cmd()} doctor` shows where each place finds node.")
+        return 1
     return 0 if all_ok else 1
 
 

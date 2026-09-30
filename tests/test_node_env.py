@@ -590,3 +590,117 @@ class TestUpdateWarnsAndContinues:
 
         updater.run_update()
         assert "Warning" not in capsys.readouterr().out
+
+
+# ── the node MCP clients are registered with ─────────────────────────────────
+
+
+FNM = f"{HOME}/.local/share/fnm"
+FNM_V22 = f"{FNM}/node-versions/v22.22.2/installation/bin/node"
+FNM_ALIAS = f"{FNM}/aliases/default/bin/node"
+SHELL_LINK = f"{HOME}/.local/state/fnm_multishells/123_456/bin/node"
+
+
+class Machine:
+    """What each node binary answers, and how it behaves with launchd's PATH."""
+
+    def __init__(self, *, versions=None, exec_paths=None, needs_shell=(), links=None):
+        self.versions = versions or {}         # path -> "vNN" (any env)
+        self.exec_paths = exec_paths or {}     # path -> process.execPath
+        self.needs_shell = set(needs_shell)    # paths that fail under launchd's PATH
+        self.links = links or {}               # symlink -> target
+        self.calls: list[tuple[list[str], dict]] = []
+
+    def run(self, argv, **kw):
+        self.calls.append((argv, kw))
+        path = argv[0]
+        bare = kw.get("env", {}).get("PATH") == ":".join(node_env.GUI_PATH)
+        if path in self.needs_shell and bare:
+            return _done("", 127)
+        if argv[1:] == ["-p", "process.execPath"]:
+            real = self.exec_paths.get(path)
+            return _done(real + "\n") if real else _done("", 1)
+        v = self.versions.get(path)
+        return _done(v + "\n") if v else _done("", 1)
+
+    def resolve(self, path):
+        return self.links.get(path, path)
+
+    def exists(self, path):
+        return path in self.versions or path in self.links
+
+    def choose(self, sites):
+        return node_env._real_node_for_clients(sites, run=self.run, env={"HOME": HOME},
+                                               home=HOME, resolve=self.resolve,
+                                               exists=self.exists)
+
+
+def _site(place, path, version="v22.22.2"):
+    return node_env.NodeSite(place, "test", node_env.OK, path, version)
+
+
+class TestTheNodeClientsAreRegisteredWith:
+    def test_homebrews_stable_link_is_kept_over_the_cellar(self):
+        """`brew upgrade` removes the Cellar path the link points at."""
+        cellar = "/opt/homebrew/Cellar/node/22.22.2/bin/node"
+        m = Machine(versions={"/opt/homebrew/bin/node": "v22.22.2", cellar: "v22.22.2"},
+                    exec_paths={"/opt/homebrew/bin/node": cellar})
+        chosen = m.choose([_site("login shell", "/opt/homebrew/bin/node")])
+        assert chosen == node_env.ClientNode("/opt/homebrew/bin/node", "v22.22.2",
+                                             "login shell")
+
+    def test_fnms_per_shell_link_becomes_its_default_alias(self):
+        """The per-shell link disappears with the shell; the alias follows
+        `fnm default` from then on."""
+        m = Machine(versions={SHELL_LINK: "v22.22.2", FNM_V22: "v22.22.2",
+                              FNM_ALIAS: "v22.22.2"},
+                    exec_paths={SHELL_LINK: FNM_V22}, links={FNM_ALIAS: FNM_V22})
+        chosen = m.choose([_site("login shell", SHELL_LINK)])
+        assert chosen.path == FNM_ALIAS
+        assert all(argv[0] != SHELL_LINK or argv[1] != "--version" for argv, _ in m.calls), \
+            "the per-shell link was considered for registration"
+
+    def test_an_alias_to_another_version_is_not_used(self):
+        other = f"{FNM}/node-versions/v24.1.0/installation/bin/node"
+        m = Machine(versions={SHELL_LINK: "v22.22.2", FNM_V22: "v22.22.2",
+                              FNM_ALIAS: "v24.1.0", other: "v24.1.0"},
+                    exec_paths={SHELL_LINK: FNM_V22}, links={FNM_ALIAS: other})
+        assert m.choose([_site("login shell", SHELL_LINK)]).path == FNM_V22
+
+    def test_a_shim_that_needs_its_shell_gives_way_to_its_binary(self):
+        """A GUI client runs it with launchd's PATH and nothing else."""
+        shim = f"{HOME}/.asdf/shims/node"
+        real = f"{HOME}/.asdf/installs/nodejs/22.22.2/bin/node"
+        m = Machine(versions={shim: "v22.22.2", real: "v22.22.2"},
+                    exec_paths={shim: real}, needs_shell={shim})
+        assert m.choose([_site("login shell", shim)]).path == real
+
+    def test_every_candidate_is_run_with_launchds_path(self):
+        m = Machine(versions={"/usr/local/bin/node": "v22.22.2"})
+        m.choose([_site("login shell", "/usr/local/bin/node")])
+        [(argv, kw)] = [c for c in m.calls if c[0][-1] == "--version"]
+        assert kw["env"] == {"HOME": HOME, "PATH": ":".join(node_env.GUI_PATH)}
+
+    def test_the_login_shells_node_is_preferred(self):
+        m = Machine(versions={"/caller/node": "v22.1.0", "/login/node": "v24.0.0"})
+        chosen = m.choose([_site("this command", "/caller/node"),
+                           _site("login shell", "/login/node")])
+        assert (chosen.path, chosen.found_in) == ("/login/node", "login shell")
+
+    def test_a_node_too_old_outside_a_shell_is_passed_over(self):
+        """The site said 22 in its own shell; launchd's PATH is what counts."""
+        m = Machine(versions={"/login/node": "v20.20.2", "/opt/homebrew/bin/node": "v22.22.2"})
+        chosen = m.choose([_site("login shell", "/login/node"),
+                           _site("the Quern app", "/opt/homebrew/bin/node")])
+        assert chosen.path == "/opt/homebrew/bin/node"
+
+    def test_nothing_usable_is_none(self):
+        m = Machine(versions={"/login/node": "v20.20.2"})
+        assert m.choose([_site("login shell", "/login/node"),
+                         node_env.NodeSite("GUI apps", "test", node_env.MISSING)]) is None
+
+    def test_a_node_that_will_not_say_where_it_is_is_not_fatal(self):
+        def run(argv, **kw):
+            raise OSError("exec format error")
+        assert node_env._real_node_for_clients(
+            [_site("login shell", SHELL_LINK)], run=run, env={}, home=HOME) is None

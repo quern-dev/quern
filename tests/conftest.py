@@ -648,6 +648,23 @@ def _node_env_is_not_this_machine(monkeypatch):
     # `here` too: every git-update test reaches it, and the real one runs the
     # developer's `node --version`.
     monkeypatch.setattr(node_env, "here", lambda **_kw: all_fine()[0])
+    # And the node MCP clients are registered with, and what doctor checks a
+    # registration by: the real ones run the developer's node binaries, and
+    # the registrations reader opens their MCP client configs. Tests of those
+    # reach the originals as `_real_*`.
+    from server.lifecycle import setup
+
+    monkeypatch.setattr(node_env, "_real_node_for_clients", node_env.node_for_clients,
+                        raising=False)
+    monkeypatch.setattr(node_env, "node_for_clients",
+                        lambda *_a, **_kw: node_env.ClientNode("/test/node", "v22.0.0",
+                                                               "login shell"))
+    monkeypatch.setattr(node_env, "_real_version_outside_a_shell",
+                        node_env.version_outside_a_shell, raising=False)
+    monkeypatch.setattr(node_env, "version_outside_a_shell", lambda *_a, **_kw: "v22.0.0")
+    monkeypatch.setattr(setup, "_real_mcp_registrations", setup.mcp_registrations,
+                        raising=False)
+    monkeypatch.setattr(setup, "mcp_registrations", lambda: [])
 
 
 @pytest.fixture(autouse=True)
