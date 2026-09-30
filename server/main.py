@@ -463,6 +463,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         pass
 
+    # Which registered MCP clients cannot start the wrapper, for the menu bar,
+    # which cannot run the checks itself (#214). Once per start: a node removed
+    # since registering is noticed at the next start, which the menu bar does
+    # on launch. In a thread, since it runs each client's node.
+    from server.lifecycle import mcp_clients
+
+    mcp_clients_task = asyncio.create_task(asyncio.to_thread(mcp_clients.refresh))
+
     # Network-change monitor — polls every ~15s so the server notices
     # SSID/IP changes proactively. Lets proxy_status surface "the network
     # just changed" without anyone having to ask.
@@ -496,7 +504,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Shutdown: cancel background tasks, stop adapters, flush deduplicator
     for task in (
         watchdog_task, update_check_task, network_monitor_task,
-        sim_bridge_resync_task,
+        sim_bridge_resync_task, mcp_clients_task,
     ):
         if task and not task.done():
             task.cancel()
@@ -1481,16 +1489,11 @@ def _report_node() -> bool:
 def _report_mcp_registrations() -> bool:
     """Which node each registered MCP client will run the wrapper with.
 
-    Returns whether every config could be read. A registration naming an
-    absolute node is checked the way a Dock-launched client would run it;
-    one naming plain `node` leaves the choice to each client's PATH, which is
-    how the wrapper came to refuse to start under an old session's Node 20 as
-    `CONNECTION_CLOSED` (#214). Read-only.
+    Returns whether every config could be read and every node asked. The
+    assessment is `mcp_clients.assess`, the same one the menu bar is shown, so
+    the two cannot disagree. Read-only.
     """
-    import os
-
-    from server.config import quern_cmd
-    from server.lifecycle import node_env, setup
+    from server.lifecycle import mcp_clients, node_env, setup
 
     print()
     print("MCP client registrations:")
@@ -1500,52 +1503,44 @@ def _report_mcp_registrations() -> bool:
         print(f"  ? could not be read ({exc})")
         return False
     if not registrations:
+        from server.config import quern_cmd
+
         print(f"  \u2013 none (`{quern_cmd()} mcp-install` registers one)")
         return True
     complete = True
-    for reg in registrations:
-        if reg.project:
-            # `mcp-install` writes the user-wide entry, which this one
-            # overrides inside its project -- so re-registering cannot fix it.
-            fix = (f"edit the command of `quern-debug` under projects[\"{reg.project}\"]"
-                   f".mcpServers in {reg.config}, or remove that entry so the user-wide "
-                   f"one applies; `{quern_cmd()} mcp-install` does not write project entries")
-        else:
-            fix = f"`{quern_cmd()} mcp-install {reg.client}` registers an absolute Node " \
-                  f"{node_env.MIN_NODE_MAJOR}+"
-        if reg.error:
+    for a in mcp_clients.assess(registrations):
+        reg = a.registration
+        if a.status == mcp_clients.UNREADABLE:
             complete = False
             print(f"  ? {reg.label} — {reg.config} could not be read ({reg.error})")
-        elif not reg.node:
-            print(f"  \u2717 {reg.label} — no command in {reg.config}")
-            print(f"      fix: {fix}")
-        elif reg.node.startswith("~"):
-            # Not expanded: a client execs the string as given.
-            print(f"  \u2717 {reg.label} — {reg.node} (a `~` path, which clients do not expand)")
-            print(f"      fix: {fix}")
-        elif not os.path.isabs(reg.node):
+            continue
+        if a.status == mcp_clients.UNKNOWN:
+            # Could not ask is not a finding; doctor's exit says so.
+            complete = False
+            print(f"  ? {reg.label} — {reg.node} did not answer within "
+                  f"{node_env.PROBE_TIMEOUT:.0f}s")
+            continue
+        if a.status == mcp_clients.OK:
+            print(f"  \u2713 {reg.label} — {a.version}  {reg.node}")
+            continue
+        if a.status == mcp_clients.PLAIN and not a.fails:
             print(f"  ! {reg.label} — `{reg.node}`, found on each client's own PATH")
-            print(f"      fix: {fix}, so a GUI or older session cannot find a different one")
-        elif not os.path.exists(reg.node):
+        elif a.status == mcp_clients.PLAIN:
+            print(f"  \u2717 {reg.label} — `{reg.node}`, and apps opened from the Dock "
+                  f"find no node")
+        elif a.status == mcp_clients.NO_COMMAND:
+            print(f"  \u2717 {reg.label} — no command in {reg.config}")
+        elif a.status == mcp_clients.TILDE:
+            print(f"  \u2717 {reg.label} — {reg.node} (a `~` path, which clients do not expand)")
+        elif a.status == mcp_clients.GONE:
             print(f"  \u2717 {reg.label} — {reg.node} no longer exists")
-            print(f"      fix: {fix}")
+        elif a.status == mcp_clients.TOO_OLD:
+            print(f"  \u2717 {reg.label} — {reg.node} is {a.version}, below Node "
+                  f"{node_env.MIN_NODE_MAJOR}")
         else:
-            status, version = node_env.check_outside_a_shell(reg.node)
-            if status == node_env.OK:
-                print(f"  \u2713 {reg.label} — {version}  {reg.node}")
-            elif status == node_env.UNKNOWN:
-                # Could not ask is not a finding; doctor's exit says so.
-                complete = False
-                print(f"  ? {reg.label} — {reg.node} did not answer within "
-                      f"{node_env.PROBE_TIMEOUT:.0f}s")
-            elif status == node_env.TOO_OLD:
-                print(f"  \u2717 {reg.label} — {reg.node} is {version}, below Node "
-                      f"{node_env.MIN_NODE_MAJOR}")
-                print(f"      fix: {fix}")
-            else:
-                print(f"  \u2717 {reg.label} — {reg.node} did not report a Node version "
-                      f"when run the way a GUI client runs it")
-                print(f"      fix: {fix}")
+            print(f"  \u2717 {reg.label} — {reg.node} did not report a Node version "
+                  f"when run the way a GUI client runs it")
+        print(f"      fix: {a.fix}")
     return complete
 
 

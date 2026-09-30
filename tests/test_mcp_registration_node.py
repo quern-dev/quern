@@ -166,6 +166,15 @@ class TestDoctorReportsTheRegistrations:
         out = capsys.readouterr().out
         assert "! claude-desktop — `node`, found on each client's own PATH" in out
 
+    def test_plain_node_on_a_gui_client_with_no_gui_node_fails(self, monkeypatch, capsys):
+        from server.lifecycle import mcp_clients
+
+        monkeypatch.setattr(mcp_clients, "_gui_has_node", lambda: False)
+        regs = [setup.McpRegistration("claude-desktop", Path("/c"), "node")]
+        self._report(monkeypatch, regs)
+        out = capsys.readouterr().out
+        assert "\u2717 claude-desktop — `node`, and apps opened from the Dock find no node" in out
+
     def test_an_unreadable_config_fails_the_check(self, monkeypatch, capsys):
         """Doctor's exit says when a check could not be made."""
         regs = [setup.McpRegistration("claude-code", Path("/c"), error="bad JSON")]

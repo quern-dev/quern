@@ -6,6 +6,7 @@
 //   • update-info.json   — the cached "update available" hint (24h refresh)
 //   • active-device.json — the active device UDID and name
 //   • config.json        — user preferences; the update channel lives here
+//   • mcp-clients.json   — MCP clients whose registration will not start Quern
 //
 // Field names mirror what the server writes. That is checked, not asserted:
 // tests/test_menubar_state_sync.py pins every key read here against the module
@@ -52,11 +53,36 @@ struct ActiveDevice {
     var kind: String?
 }
 
+/// One MCP client that cannot start Quern's MCP server, and why (#214).
+struct McpClientProblem: Equatable {
+    var client: String      // a display name: "Claude Desktop", "Claude Code (/src/app)"
+    var reason: String
+    var fix: String
+    /// Whether `quern mcp-install` fixes it. A Claude Code project entry it
+    /// does not, so that fix is spelled out instead.
+    var fixable = true
+}
+
+/// What the server last found about the MCP clients it is registered with.
+///
+/// The app cannot run the checks itself -- they run each client's node -- so
+/// the server writes the answer at start and after `quern mcp-install`, and
+/// only failures are in it: a CLI client on plain `node` is fine in the
+/// terminal it starts from, and a check that could not be made is not one.
+struct McpClientHealth: Equatable {
+    var problems: [McpClientProblem] = []
+    /// Clients `quern mcp-install` can fix. A Claude Code project entry is not
+    /// among them: that command writes only the user-wide entry.
+    var fixClients: [String] = []
+    var checkedAt: Date?
+}
+
 struct QuernSnapshot {
     var server = ServerState()
     var update = UpdateInfo()
     var device = ActiveDevice()
     var proxy = ProxyPolicy()
+    var mcpClients = McpClientHealth()
 }
 
 final class StateReader {
@@ -117,6 +143,7 @@ final class StateReader {
         snap.update = Self.readUpdateInfo()
         snap.device = Self.readActiveDevice()
         snap.proxy = ProxyPolicy(autoInstallCert: Self.readAutoInstallCert())
+        snap.mcpClients = Self.readMcpClients()
         snapshot = snap
         onChange?(snap)
     }
@@ -289,6 +316,25 @@ final class StateReader {
               validChannels.contains(raw)
         else { return defaultChannel }
         return raw
+    }
+
+    /// `contents` is for tests; the app reads the file. Anything it cannot
+    /// make sense of reads as no problems -- an unreadable warning file must
+    /// not put a warning on the menu that nothing can clear.
+    static func readMcpClients(contents: [String: Any]?? = nil) -> McpClientHealth {
+        var h = McpClientHealth()
+        guard let d = contents ?? json("mcp-clients.json") else { return h }
+        h.checkedAt = (d["checked_at"] as? String).flatMap(Self.parseISO8601)
+        h.fixClients = (d["fix_clients"] as? [String]) ?? []
+        let problems = d["problems"] as? [[String: Any]] ?? []
+        h.problems = problems.compactMap { d in
+            guard let client = d["client"] as? String, let reason = d["reason"] as? String
+            else { return nil }
+            return McpClientProblem(client: client, reason: reason,
+                                    fix: d["fix"] as? String ?? "",
+                                    fixable: d["fixable"] as? Bool ?? true)
+        }
+        return h
     }
 
     private static func readActiveDevice() -> ActiveDevice {

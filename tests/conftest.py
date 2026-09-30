@@ -666,6 +666,13 @@ def _node_env_is_not_this_machine(monkeypatch):
     monkeypatch.setattr(setup, "_real_mcp_registrations", setup.mcp_registrations,
                         raising=False)
     monkeypatch.setattr(setup, "mcp_registrations", lambda: [])
+    # Whether an app opened from the Dock finds a node: the real one looks on
+    # this machine's launchd PATH.
+    from server.lifecycle import mcp_clients
+
+    monkeypatch.setattr(mcp_clients, "_real_gui_has_node", mcp_clients._gui_has_node,
+                        raising=False)
+    monkeypatch.setattr(mcp_clients, "_gui_has_node", lambda: True)
 
 
 @pytest.fixture(autouse=True)

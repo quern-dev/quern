@@ -34,6 +34,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
     private var didAttemptLaunchStart = false
+    /// The MCP clients dialog opens by itself at most once per launch.
+    private var mcpAlertShown = false
     /// Holds "Checking…" on screen long enough to be seen. See MinimumDisplay.
     private let checkIndicator = MinimumDisplay()
 
@@ -102,6 +104,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if snap.update.updateAvailable { self.lastCheckResult = nil }
             self.refreshStatusButton()
             self.settings.update(snap)
+            // Only right after an update the user started, never at login; the
+            // menu row is there either way. Cheap checks first: the update
+            // record is a file read, and this runs on every poll.
+            if !self.mcpAlertShown, !snap.mcpClients.problems.isEmpty,
+               McpClientAlert.shouldInterrupt(snap.mcpClients, lastUpdate: UpdateResult.read(),
+                                              now: Date(), alreadyShown: false) {
+                self.mcpAlertShown = true
+                self.presentMcpClients(snap.mcpClients)
+            }
         }
         reader.start()
 
@@ -281,6 +292,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .serverLog:
                 menu.addItem(action("Open Server Log", #selector(openServerLog)))
             }
+        }
+
+        // An MCP client that cannot start Quern says nothing useful itself --
+        // `CONNECTION_CLOSED` -- so this is where a GUI user finds out (#214).
+        if let title = McpClientAlert.menuTitle(snapshot.mcpClients) {
+            menu.addItem(action(title, #selector(showMcpClients)))
         }
 
         menu.addItem(.separator())
@@ -543,6 +560,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func openInstallDocs() { NSWorkspace.shared.open(TerminalUpdate.docs) }
+
+    @objc private func showMcpClients() { presentMcpClients(snapshot.mcpClients) }
+
+    private func presentMcpClients(_ health: McpClientHealth) {
+        DispatchQueue.main.async { [weak self] in
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = McpClientAlert.title(health)
+            alert.informativeText = McpClientAlert.body(health)
+            let buttons = McpClientAlert.buttons(health)
+            for button in buttons { alert.addButton(withTitle: button.title) }
+            let index = alert.runModal().rawValue
+                - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+            guard buttons.indices.contains(index) else { return }
+            switch buttons[index] {
+            case .ok:
+                break
+            case .fixInTerminal:
+                TerminalScript.open(
+                    name: "quern-mcp-clients.command",
+                    contents: McpClientAlert.script(health, quern: QuernCLI.resolve()?.path)
+                ) { error in
+                    guard let error else { return }
+                    self?.reportFailure("Could not open Terminal", detail: "",
+                                        guidance: error)
+                }
+            case .copy:
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(McpClientAlert.command(health) ?? "",
+                                               forType: .string)
+            }
+        }
+    }
 
     @objc private func openServerLog() { NSWorkspace.shared.open(Self.serverLog) }
 

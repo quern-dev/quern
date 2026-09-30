@@ -33,6 +33,18 @@ manager with a **Restart to Update** action.
   with the daemon still up, and a way out drawn only when the daemon is down
   would be missing exactly then. It clears once the server comes back on a
   different version, so finishing the update by any route retires it.
+- **\<Client\> Can’t Start Quern…** — appears when an MCP client quern is
+  registered with will not be able to start its MCP server: a registration on
+  plain `node` in an app opened from the Dock, which finds no node on launchd's
+  PATH, or one naming a node that has since been removed or is older than 22.
+  The client itself reports only `CONNECTION_CLOSED`. The dialog says which
+  clients and why, and **Fix in Terminal** runs `quern mcp-install` for them,
+  with a reminder to reopen them. The server writes `~/.quern/mcp-clients.json`
+  at start and after `quern mcp-install`, because the checks run each client's
+  node, which this app does not do, and only failures are in it: a CLI client
+  on plain `node` is fine in the terminal it is started from. The dialog opens
+  by itself only right after an update you started from here, once; at login
+  it is the menu row alone.
 - **Check for Updates…** — shown instead, when nothing is staged. That cache is
   refreshed at most once a day, so without this a release landing in the
   afternoon would not be offered until tomorrow and there was no way to ask.
