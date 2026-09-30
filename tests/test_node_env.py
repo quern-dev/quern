@@ -276,6 +276,12 @@ class TestTheRealRunner:
         assert "a" in result.stdout and "b" in result.stdout
 
 
+    def test_it_runs_in_the_directory_it_is_given(self, tmp_path):
+        """What a directory-following version manager answers depends on it."""
+        result = node_env.run_bounded(["/bin/sh", "-c", "pwd -P"], timeout=5, cwd=str(tmp_path))
+        assert result.stdout.strip() == str(tmp_path.resolve())
+
+
 class TestShellOutput:
     def test_startup_noise_is_ignored(self):
         node = f"{HOME}/.nvm/versions/node/v22.3.0/bin/node"
