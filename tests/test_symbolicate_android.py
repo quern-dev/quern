@@ -1042,8 +1042,8 @@ class TestNoRecord:
         assert "record it with record_android_build" in report.symbols[0].note
         assert not report.symbolicated
 
-    def test_a_file_merely_containing_sourcefile_is_no_mark(self, tmp_path, tools):
-        report = _java_report(file="MySourceFile.kt")
+    def test_a_file_merely_named_like_sourcefile_is_no_mark(self, tmp_path, tools):
+        report = _java_report(file="SourceFileParser.kt")
         fake = FakeAndroidTools()
         _run([report], symbolicate.SymbolFinder(tmp_path / "records", fake))
         assert report.symbols == [] and report.symbolicated
