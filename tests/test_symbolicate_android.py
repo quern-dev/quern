@@ -1341,6 +1341,19 @@ class TestKotlinsUnknownSource:
         assert [f.symbol for f in report.frames][0] == "com.example.app.Compass.onCreate"
         assert "renames no class in this trace" in report.symbols[0].note
 
+    def test_a_prebuilt_obfuscated_class_is_no_proof_either(self, tmp_path, tools):
+        """Libraries ship already obfuscated (gms `zza`): a minified-looking
+        name hints at R8, but is not the proof an unstamped mapping needs."""
+        report = _parsed("java.lang.IllegalStateException: boom\n"
+                         "\tat com.example.app.Compass.onCreate(Compass.kt:45)\n"
+                         "\tat com.google.android.gms.auth.zza.b(Unknown Source:3)\n")
+        fake = FakeAndroidTools(retrace={
+            "at com.example.app.Compass.onCreate(Compass.kt:45)":
+                "\tat com.example.app.CompassBinding.bind(CompassBinding.java:112)\n"
+                "\tat com.example.app.Compass.onCreate(Compass.kt:45)"})
+        _run([report], symbolicate.SymbolFinder(_recorded(tmp_path), fake))
+        assert report.frames[0].symbol == "com.example.app.Compass.onCreate"
+
     def test_it_does_not_ask_for_a_record(self, tmp_path, tools):
         report = _parsed(self.TRACE)
         _run([report], symbolicate.SymbolFinder(tmp_path / "records", FakeAndroidTools()))
