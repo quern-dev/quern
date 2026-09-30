@@ -286,6 +286,20 @@ class TestWhoRefreshes:
         server_main._report_mcp_registrations()
         assert written and written[0]["fix_clients"] == ["cursor"]
 
+    def test_doctor_carries_a_problem_through_an_unreadable_config(self, monkeypatch):
+        """Doctor writes too, and a run of it mid-rewrite erased the problem."""
+        from server import main as server_main
+
+        written = []
+        monkeypatch.setattr(mcp_clients, "read", lambda path=None: {"problems": [
+            {"client": "Claude Code", "reason": "r", "fix": "f", "fixable": True,
+             "id": "claude-code", "project": ""}]})
+        monkeypatch.setattr(setup, "mcp_registrations",
+                            lambda: [_reg("claude-code", None, error="mid-write")])
+        monkeypatch.setattr(mcp_clients, "write", lambda data, path=None: written.append(data))
+        server_main._report_mcp_registrations()
+        assert written[0]["fix_clients"] == ["claude-code"]
+
     def test_mcp_install_refreshes_it(self, tmp_path, monkeypatch):
         import server.__main__ as entry
 
