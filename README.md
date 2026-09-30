@@ -390,6 +390,8 @@ quern enable-local-capture MyApp com.apple.WebKit.Networking    # your app and w
 
 The process name is usually the target name in Xcode. Name the process that actually makes the requests: Safari's traffic and every in-app web view's leave through `com.apple.WebKit.Networking`, so `MobileSafari` on its own captures nothing. The command prints what a change drops, since removing a process otherwise looks exactly like adding one.
 
+Entries are mitmproxy's local-mode syntax, not only names: a name matches any part of the process's executable path, a bare number is a PID, and `!` excludes. Put exclusions *after* an include (`MyApp '!12345'`, quoted so the shell leaves the `!` alone). A list that *starts* with an exclusion captures every process on the Mac except those excluded, so it is refused unless you pass `--whole-mac`.
+
 You can also update the list at runtime via the `set_local_capture` MCP tool without restarting the server.
 
 **Proxy setup for physical devices:** Configure the device's Wi-Fi proxy in Settings, then call `record_device_proxy_config` with the SSID and device IP. Quern automatically finds the correct Mac interface IP by subnet-matching, so it works correctly even when multiple interfaces are active. Configs are stored per SSID — switching between home and work networks just works. `proxy_status` shows `wifi_proxy_stale` per device if the stored config no longer matches the current network, and `network_state` (refreshed by a ~15s background poll) reports the current SSID/IP plus a `last_changed_at` timestamp so the response surfaces *when* the network shifted, not just that it's currently mismatched. When the laptop and physical devices travel together between locations, this lets agents notice the change and prompt for proxy reconfiguration without anyone having to remember to ask.
@@ -454,7 +456,7 @@ quern menubar open           # Start the Quern app in the menu bar (a running on
 quern menubar install [--force]
                              # Install the signed app matching this quern and start it;
                              #   how a git install gets a newer app
-quern enable-local-capture [--skip-cert-check] [process ...]
+quern enable-local-capture [--skip-cert-check] [--whole-mac] [process ...]
                              # Enable transparent simulator traffic capture. Refuses
                              #   when a booted simulator does not trust the capture
                              #   certificate; --skip-cert-check proceeds anyway

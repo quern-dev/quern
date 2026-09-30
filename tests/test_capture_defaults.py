@@ -433,3 +433,134 @@ class TestStateFollowsRuntimeChanges:
             "both move together, or status reports boot-time additions "
             "under a list that has since changed"
         )
+
+
+class TestAnExclusionFirstListIsRefused:
+    """mitmproxy takes local mode's starting point from the *first* entry, so a
+    list that opens with ``!X`` captures every process on the Mac except X.
+    The minimum is appended after the caller's entries and cannot narrow it.
+    ``["!12345"]`` reads like a narrowing and is the whole machine minus one
+    PID, so every entry point refuses it unless whole-Mac capture was asked for
+    by name. Driven through the handler and the CLI, not only the helper: a
+    guard that is correct and not called passes a helper-only test.
+    """
+
+    def test_the_helper_finds_only_a_leading_exclusion(self):
+        from server.config import leading_exclusion
+
+        assert leading_exclusion(["!12345"]) == "!12345"
+        assert leading_exclusion(["", "  !Helper"]) == "!Helper", (
+            "blank entries are dropped before mitmproxy sees the list, so the "
+            "first entry that counts is the first non-blank one"
+        )
+        assert leading_exclusion(["MyApp", "!12345"]) is None
+        assert leading_exclusion([]) is None
+
+    async def test_the_endpoint_refuses_it_before_touching_anything(self, monkeypatch):
+        from fastapi import HTTPException
+
+        from server.api import proxy as proxy_api
+        from server.api.proxy import set_local_capture
+        from server.models import LocalCaptureRequest
+
+        request, adapter, written = TestTheHandlerActuallyWidens._request(monkeypatch)
+
+        try:
+            await set_local_capture(
+                request=request, body=LocalCaptureRequest(processes=["!12345"]),
+            )
+        except HTTPException as exc:
+            assert exc.status_code == 400
+            assert "EVERY process on the Mac" in exc.detail
+            assert "whole_mac" in exc.detail, "the refusal must name the way through"
+        else:
+            raise AssertionError("an exclusion-first list was accepted")
+
+        adapter.reconfigure.assert_not_called()
+        assert written == [], "a refused list must not reach config.json"
+        proxy_api._ensure_ca_is_trusted.assert_not_called(), (
+            "refuse before the CA gate, which may install a root CA"
+        )
+
+    async def test_asking_for_the_whole_mac_is_allowed(self, monkeypatch):
+        from server.api.proxy import set_local_capture
+        from server.models import LocalCaptureRequest
+
+        request, adapter, _ = TestTheHandlerActuallyWidens._request(monkeypatch)
+
+        await set_local_capture(
+            request=request,
+            body=LocalCaptureRequest(processes=["!12345"], whole_mac=True),
+        )
+
+        applied = adapter.reconfigure.call_args.kwargs["local_capture_processes"]
+        assert applied[0] == "!12345"
+
+    async def test_an_exclusion_after_an_include_needs_no_flag(self, monkeypatch):
+        """The narrowing people actually want must not be caught by the guard."""
+        from server.api.proxy import set_local_capture
+        from server.models import LocalCaptureRequest
+
+        request, adapter, _ = TestTheHandlerActuallyWidens._request(monkeypatch)
+
+        await set_local_capture(
+            request=request,
+            body=LocalCaptureRequest(processes=["MyApp", "!12345"]),
+        )
+
+        applied = adapter.reconfigure.call_args.kwargs["local_capture_processes"]
+        assert applied[:2] == ["MyApp", "!12345"]
+
+    def test_the_cli_refuses_it_and_writes_nothing(self, monkeypatch, tmp_path, capsys):
+        import pytest
+
+        from server import config as cfg
+        from server import main as m
+
+        monkeypatch.setattr(cfg, "USER_CONFIG_FILE", tmp_path / "config.json")
+        monkeypatch.setattr(m, "_local_capture_cert_gate", lambda *a, **k: None)
+
+        with pytest.raises(SystemExit) as exc:
+            m._cmd_enable_local_capture(["!12345"], skip_cert_check=True)
+
+        assert exc.value.code == 1
+        assert "--whole-mac" in capsys.readouterr().err
+        assert not (tmp_path / "config.json").exists(), (
+            "a refused list must not be written"
+        )
+
+    def test_the_cli_allows_it_when_asked(self, monkeypatch, tmp_path):
+        from server import config as cfg
+        from server import main as m
+
+        monkeypatch.setattr(cfg, "USER_CONFIG_FILE", tmp_path / "config.json")
+        monkeypatch.setattr(m, "_local_capture_cert_gate", lambda *a, **k: None)
+        monkeypatch.setattr(m, "read_state", lambda: None)
+
+        m._cmd_enable_local_capture(["!12345"], skip_cert_check=True, whole_mac=True)
+
+        assert cfg.get_local_capture_processes()[0] == "!12345"
+
+    def test_the_cli_flag_is_wired_through(self):
+        """The argument existing and being passed are separate facts."""
+        import inspect
+
+        from server import main as m
+
+        src = inspect.getsource(m)
+        assert '"--whole-mac"' in src
+        assert "args.whole_mac" in src
+
+    def test_startup_warns_rather_than_refusing(self):
+        """A stored list was chosen in an earlier process -- perhaps on purpose,
+        since whole_mac is not stored -- so booting must not fail over it. It
+        must still say so."""
+        import inspect
+
+        from server import main as m
+
+        src = inspect.getsource(m._cmd_start)
+        assert "leading_exclusion(local_capture_processes)" in src
+        assert src.index("with_capture_minimum(") < src.index(
+            "leading_exclusion(local_capture_processes)"
+        ), "check the list that will actually be routed, after widening"

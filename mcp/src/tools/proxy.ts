@@ -1011,8 +1011,9 @@ mitmproxy's forms, not only names:
 Entries apply in order and the FIRST one sets the starting point. A list that
 begins with an exclusion captures EVERY process on the Mac except the ones
 excluded, and the minimum below is appended after your entries, so it does not
-narrow that. To drop one process from a capture, put the exclusion after an
-include -- ["MyApp", "!12345"], never ["!12345"].
+narrow that. Such a list is REFUSED with 400 unless you pass whole_mac: true.
+To drop one process from a capture, put the exclusion after an include:
+["MyApp", "!12345"], not ["!12345"].
 
 Restarts the proxy automatically to apply the new configuration — no server
 restart needed. Pass an empty list to disable local capture.
@@ -1059,11 +1060,21 @@ extension in System Settings > Privacy & Security.`,
           "nothing pointing at the proxy. Correct when deliberately " +
           "exercising TLS-failure paths."
         ),
+      whole_mac: z
+        .boolean()
+        .optional()
+        .describe(
+          "Allow a list that starts with an exclusion, which captures EVERY " +
+          "process on the Mac except those excluded. Refused without this. " +
+          "Only pass it when the user has asked to capture the whole machine; " +
+          "to narrow a capture, put exclusions after an include instead."
+        ),
     }),
-  }, async ({ processes, skip_cert_check: skipCertCheck }) => {
+  }, async ({ processes, skip_cert_check: skipCertCheck, whole_mac: wholeMac }) => {
     try {
       const body: Record<string, unknown> = { processes };
       if (skipCertCheck) body.skip_cert_check = true;
+      if (wholeMac) body.whole_mac = true;
       const data = await apiRequest(
         "POST",
         "/api/v1/proxy/local-capture",
