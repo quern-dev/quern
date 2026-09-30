@@ -398,3 +398,27 @@ class TestTheTools:
         _run([report], symbolicate.SymbolFinder(root, FakeAndroidTools(symbolizer=out)))
         assert report.frames[1].symbol == ""
         assert "2 answers for 1 addresses" in report.symbols[0].note
+
+
+class TestUnknownSource:
+    def test_a_frame_with_no_file_but_a_line_is_retraced(self, tmp_path, tools):
+        """A real release build's crash: its rules strip the source file."""
+        root = tmp_path / "records"
+        _record_android(_gradle_module(tmp_path), root)
+        report = _java_report()
+        top = report.frames[0]
+        top.symbol, top.file, top.line = "l82.onClick", "", 539
+        fake = FakeAndroidTools(retrace={"at l82.onClick(Unknown Source:539)":
+                                         "\tat com.example.app.debug.DebugMenuFragment.onCreateView"
+                                         "$lambda$0$13(DebugMenuFragment.kt:304)"})
+        _run([report], symbolicate.SymbolFinder(root, fake))
+        assert "at l82.onClick(Unknown Source:539)" in fake.sent
+        f = report.frames[0]
+        assert (f.file, f.line) == ("DebugMenuFragment.kt", 304)
+
+    def test_no_file_and_no_line_is_not_sent(self, tmp_path, tools):
+        report = _java_report()
+        report.frames[0].file, report.frames[0].line = "", None
+        fake = FakeAndroidTools()
+        _run([report], symbolicate.SymbolFinder(tmp_path / "records", fake))
+        assert fake.calls == []

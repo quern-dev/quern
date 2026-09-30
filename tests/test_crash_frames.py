@@ -574,10 +574,16 @@ class TestAndroidJava:
         assert (frame.symbol, frame.file, frame.line, frame.app) == (
             "com.example.app.Foo.bar", "Foo.java", 42, True)
 
-    @pytest.mark.parametrize("where", ["Native Method", "Unknown Source", "Unknown Source:3"])
+    @pytest.mark.parametrize("where", ["Native Method", "Unknown Source"])
     def test_no_source(self, where):
         [frame] = java_frames([f"at com.example.app.Foo.bar({where})"])
         assert frame.file == "" and frame.line is None
+
+    def test_unknown_source_keeps_its_line(self):
+        """No file to show, but R8's line: what retrace maps the frame by. A
+        minified release crash reads `at l82.onClick(Unknown Source:539)`."""
+        [frame] = java_frames(["at l82.onClick(Unknown Source:539)"])
+        assert frame.file == "" and frame.line == 539
 
     @pytest.mark.parametrize("symbol", [
         "android.app.ActivityThread.main", "java.lang.reflect.Method.invoke",

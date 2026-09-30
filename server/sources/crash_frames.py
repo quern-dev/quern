@@ -448,7 +448,9 @@ def java_frames(lines: list[str], package: str = "") -> list[CrashFrame]:
         frames.append(CrashFrame(
             symbol=symbol,
             file=file,
-            line=_int(source.group(2)) if source and source.group(2) and file else None,
+            # Kept for `Unknown Source:539` too: no file for a reader, but the
+            # line is what retrace maps an R8-minified frame by (#326).
+            line=_int(source.group(2)) if source and source.group(2) else None,
         ))
     for frame, app in zip(frames, _java_app_flags([f.symbol for f in frames], package),
                           strict=True):

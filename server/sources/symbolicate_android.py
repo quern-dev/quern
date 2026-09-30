@@ -13,6 +13,9 @@ Two halves, both matched to a build record made by `record_android_build`:
   every source file to `SourceFile` or `r8-map-id-<id>`, and a debug build's
   frames keep their real file names and need nothing.
 
+Many apps' rules strip the source file, and their frames read
+`(Unknown Source:539)`: no file, but the line R8 maps by, which counts too.
+
 A frame's `r8-map-id-<id>` names its mapping exactly. Without it the match is
 by package and version code, which a local build does not change (Gradle
 builds here are all version code 99999), so the note says when several builds
@@ -67,7 +70,13 @@ def _version(name: str) -> tuple[int, ...]:
 
 
 def _is_r8(frame: CrashFrame) -> bool:
-    return not frame.build_id and bool(_R8_FILE.match(frame.file or ""))
+    """A frame showing R8's marks: `SourceFile`, an `r8-map-id-` stamp, or no
+    file but a line -- `(Unknown Source:539)`, where rules strip the source
+    file (measured: a real release build's crash). A debug build's frames keep
+    their real file names."""
+    if frame.build_id:
+        return False
+    return bool(_R8_FILE.match(frame.file or "")) or (not frame.file and frame.line is not None)
 
 
 async def symbolicate(report: CrashReport, finder, read) -> bool:
@@ -218,7 +227,7 @@ async def _java(report: CrashReport, java: list[CrashFrame], entry: ImageSymbols
         return False
     lines = []
     for i, f in enumerate(java):
-        where = f.file + (f":{f.line}" if f.line else "")
+        where = (f.file or "Unknown Source") + (f":{f.line}" if f.line else "")
         lines += [f"{_MARK}{i}", f"\tat {f.symbol}({where})"]
     with tempfile.TemporaryDirectory(prefix="quern-retrace-") as tmp:
         trace = Path(tmp) / "trace.txt"
