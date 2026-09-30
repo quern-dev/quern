@@ -250,7 +250,7 @@ class TestReadingOddRegistrations:
             "mcpServers": {"quern-debug": {"command": NODE}},
             "projects": {"/src/app": {"mcpServers": {"quern-debug": {"command": "node"}}},
                          "/src/other": {"mcpServers": {}}}}))
-        found = {r.client: r.node for r in self._read()}
+        found = {r.label: r.node for r in self._read()}
         assert found == {"claude-code": NODE, "claude-code (/src/app)": "node"}
 
 
@@ -277,3 +277,15 @@ class TestDoctorOnOddRegistrations:
         regs = [setup.McpRegistration("cursor", Path("/c"), str(node))]
         assert self._report(monkeypatch, regs, {str(node): (node_env.UNKNOWN, None)}) is False
         assert "did not answer" in capsys.readouterr().out
+
+
+    def test_a_project_entry_is_not_told_to_run_mcp_install(self, monkeypatch, capsys):
+        """`mcp-install` writes only the user-wide entry, which a project entry
+        overrides in its project, and would not parse `claude-code (/src/app)`."""
+        regs = [setup.McpRegistration("claude-code", Path("/h/.claude.json"), "node",
+                                      project="/src/app")]
+        self._report(monkeypatch, regs)
+        out = capsys.readouterr().out
+        assert "! claude-code (/src/app) — `node`" in out
+        assert 'projects["/src/app"].mcpServers in /h/.claude.json' in out
+        assert "mcp-install claude-code" not in out

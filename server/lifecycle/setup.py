@@ -3717,6 +3717,11 @@ class McpRegistration:
     config: Path
     node: str | None = None     # the node it runs the wrapper with, as written
     error: str = ""             # why it could not be read
+    project: str = ""           # Claude Code: the project a project-scoped entry is for
+
+    @property
+    def label(self) -> str:
+        return f"{self.client} ({self.project})" if self.project else self.client
 
 
 #: A registered command that is the wrapper itself rather than a node: run
@@ -3756,18 +3761,19 @@ def mcp_registrations() -> list[McpRegistration]:
         if not isinstance(data, dict):
             found.append(McpRegistration(name, path, error="not a JSON object"))
             continue
-        scopes: list[tuple[str, object]] = [(name, data.get(section_key))]
+        scopes: list[tuple[str, object]] = [("", data.get(section_key))]
         if name == "claude-code":
             # A project's own entry overrides the user-wide one inside that
             # project, so it is what runs there.
             projects = data.get("projects")
             for project, settings in (projects.items() if isinstance(projects, dict) else ()):
                 if isinstance(settings, dict):
-                    scopes.append((f"claude-code ({project})", settings.get(section_key)))
-        for client, section in scopes:
+                    scopes.append((str(project), settings.get(section_key)))
+        for project, section in scopes:
             entry = section.get(entry_key) if isinstance(section, dict) else None
             if isinstance(entry, dict):
-                found.append(McpRegistration(client, path, _node_of(entry.get("command"))))
+                found.append(McpRegistration(name, path, _node_of(entry.get("command")),
+                                             project=project))
     codex = Path.home() / ".codex" / "config.toml"
     try:
         data = tomllib.loads(codex.read_text()) if codex.exists() else None

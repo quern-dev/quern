@@ -1504,39 +1504,46 @@ def _report_mcp_registrations() -> bool:
         return True
     complete = True
     for reg in registrations:
-        fix = f"`{quern_cmd()} mcp-install {reg.client}` registers an absolute Node " \
-              f"{node_env.MIN_NODE_MAJOR}+"
+        if reg.project:
+            # `mcp-install` writes the user-wide entry, which this one
+            # overrides inside its project -- so re-registering cannot fix it.
+            fix = (f"edit the command of `quern-debug` under projects[\"{reg.project}\"]"
+                   f".mcpServers in {reg.config}, or remove that entry so the user-wide "
+                   f"one applies; `{quern_cmd()} mcp-install` does not write project entries")
+        else:
+            fix = f"`{quern_cmd()} mcp-install {reg.client}` registers an absolute Node " \
+                  f"{node_env.MIN_NODE_MAJOR}+"
         if reg.error:
             complete = False
-            print(f"  ? {reg.client} — {reg.config} could not be read ({reg.error})")
+            print(f"  ? {reg.label} — {reg.config} could not be read ({reg.error})")
         elif not reg.node:
-            print(f"  \u2717 {reg.client} — no command in {reg.config}")
+            print(f"  \u2717 {reg.label} — no command in {reg.config}")
             print(f"      fix: {fix}")
         elif reg.node.startswith("~"):
             # Not expanded: a client execs the string as given.
-            print(f"  \u2717 {reg.client} — {reg.node} (a `~` path, which clients do not expand)")
+            print(f"  \u2717 {reg.label} — {reg.node} (a `~` path, which clients do not expand)")
             print(f"      fix: {fix}")
         elif not os.path.isabs(reg.node):
-            print(f"  ! {reg.client} — `{reg.node}`, found on each client's own PATH")
+            print(f"  ! {reg.label} — `{reg.node}`, found on each client's own PATH")
             print(f"      fix: {fix}, so a GUI or older session cannot find a different one")
         elif not os.path.exists(reg.node):
-            print(f"  \u2717 {reg.client} — {reg.node} no longer exists")
+            print(f"  \u2717 {reg.label} — {reg.node} no longer exists")
             print(f"      fix: {fix}")
         else:
             status, version = node_env.check_outside_a_shell(reg.node)
             if status == node_env.OK:
-                print(f"  \u2713 {reg.client} — {version}  {reg.node}")
+                print(f"  \u2713 {reg.label} — {version}  {reg.node}")
             elif status == node_env.UNKNOWN:
                 # Could not ask is not a finding; doctor's exit says so.
                 complete = False
-                print(f"  ? {reg.client} — {reg.node} did not answer within "
+                print(f"  ? {reg.label} — {reg.node} did not answer within "
                       f"{node_env.PROBE_TIMEOUT:.0f}s")
             elif status == node_env.TOO_OLD:
-                print(f"  \u2717 {reg.client} — {reg.node} is {version}, below Node "
+                print(f"  \u2717 {reg.label} — {reg.node} is {version}, below Node "
                       f"{node_env.MIN_NODE_MAJOR}")
                 print(f"      fix: {fix}")
             else:
-                print(f"  \u2717 {reg.client} — {reg.node} did not report a Node version "
+                print(f"  \u2717 {reg.label} — {reg.node} did not report a Node version "
                       f"when run the way a GUI client runs it")
                 print(f"      fix: {fix}")
     return complete
