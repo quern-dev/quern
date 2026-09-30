@@ -392,7 +392,8 @@ prompt is a workaround for shared state, not a safeguard.
 A worktree has no `.venv`, and does not need one: run with cwd inside it and the
 main checkout's venv imports `server` from the worktree, because cwd precedes
 site-packages on `sys.path`. Measured — 103 tests in 1.9s, and the TS-parsing
-tests work because they read `mcp/src/*.ts` rather than `node_modules`.
+tests work because they read `mcp/src/*.ts` rather than `node_modules`. The
+exception is a test that starts a *separate* pytest, below.
 
 It isolates **source only**. `~/.quern`, `~/.local/bin/quern`, MCP registrations
 and the Swift build cache under `CONFIG_DIR/bin` are shared from every checkout,
@@ -490,9 +491,22 @@ And keep the sweep narrow. Globbing `quern-*` under `/tmp` returns log files,
 findings and is an artefact of the question. The one that answers it is "a
 directory with `server/` and `tests/` and no registration".
 
-`PYTHONPATH=$PWD` is redundant when running from inside a worktree: cwd already
-precedes site-packages. Harmless, but it implies the import needs help it does
-not, which is worth not teaching.
+**A test that starts its own pytest imports the primary checkout's `server`.**
+Run from inside a worktree, cwd precedes site-packages, so the suite itself
+imports the worktree's code without help. But `tests/test_hardware_guard.py`
+starts sub-sessions with pytester's `runpytest_subprocess`, whose cwd is a
+temporary directory: there `server` resolves through the editable install, to
+the primary checkout -- while the `conftest.py` it loads is the worktree's.
+Measured on `fix/214-node-check`: 20 failures, `module 'server.lifecycle.node_env'
+has no attribute 'node_for_clients'`, because the branch's conftest stubbed a
+function `main` did not have yet; all 20 passed with `PYTHONPATH=$PWD`. It
+reads as a broken branch and is a broken import, and CI, which runs one
+checkout, never sees it.
+
+So `PYTHONPATH=$PWD` is not redundant: it is what makes those sub-sessions test
+the tree in front of you. Use it for full-suite runs from a worktree, and pass it
+to review agents. On a branch that changes nothing the conftest names, the two
+trees agree and it makes no difference -- which is why it looked unnecessary.
 
 ### Naming a worktree
 
