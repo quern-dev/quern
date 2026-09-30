@@ -336,7 +336,9 @@ configured. If null/false, the user's browser works normally and traffic
 is NOT being captured.
 
 The local_capture field is the list of entries being captured via mitmproxy
-local mode -- names, PIDs or ! exclusions (see set_local_capture). When non-empty, traffic from those processes is transparently captured
+local mode -- names, PIDs or ! exclusions (see set_local_capture). It is shared
+by every simulator: to see one simulator's traffic, filter flows by simulator_udid
+rather than changing this list. When non-empty, traffic from those processes is transparently captured
 without needing a system proxy. Empty list means disabled.
 Name the process that actually makes the requests: Safari's traffic leaves through
 com.apple.WebKit.Networking, not MobileSafari, so ["MobileSafari"] alone captures
@@ -990,6 +992,14 @@ The bypass_patterns field in proxy_status shows the current list.`,
     description: `Set the list of processes for local capture mode. Uses mitmproxy's
 macOS System Extension to transparently capture traffic from specific processes
 without configuring a system proxy.
+
+ONE SIMULATOR? Don't configure anything here. Capture is by process and spans
+every simulator on the Mac; it cannot be scoped to one device. Per-simulator is
+a FILTER: every captured flow is attributed to its simulator through process
+ancestry, so pass simulator_udid to query_flows, get_flow_summary, wait_for_flow
+or start_capture_session. That attribution includes the simulator's WebKit
+traffic. An entry here matching a UDID catches only processes whose executable
+path contains it, which is not the same set.
 
 ENTRY SYNTAX. Each entry goes to mitmproxy's local mode unchanged, so it takes
 mitmproxy's forms, not only names:
