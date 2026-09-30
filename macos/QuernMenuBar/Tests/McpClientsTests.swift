@@ -12,7 +12,8 @@ enum McpClientsTests {
 
     static let desktop = McpClientProblem(
         client: "Claude Desktop",
-        reason: "Claude Desktop runs plain `node`, and apps opened from the Dock find none",
+        reason: "Claude Desktop is set to run /Users/u/.nvm/versions/node/v22.1.0/bin/node, "
+            + "which no longer exists",
         fix: "`quern mcp-install claude-desktop` registers an absolute Node 22+")
     static let project = McpClientProblem(
         client: "Claude Code (/src/app)",
@@ -133,6 +134,9 @@ enum McpClientsTests {
             Harness.expect(!interrupts(h, update(.updated, at: finished),
                                        started: finished.addingTimeInterval(30), now: now),
                            "a marker from after that update: some other attempt")
+            Harness.expect(!interrupts(h, update(.updated, at: finished),
+                                       started: finished.addingTimeInterval(-3600), now: now),
+                           "a marker an hour older than the update: left from another attempt")
             Harness.expect(!interrupts(h, update(.updated, at: finished), started: started,
                                        now: finished.addingTimeInterval(3600)), "an hour later")
             Harness.expect(!interrupts(h, update(.noOp, at: finished), started: started, now: now),
@@ -155,6 +159,10 @@ enum McpClientsTests {
             Harness.expect(MenuUpdateMarker.consume(defaults: defaults), finished, "the time")
             Harness.expect(MenuUpdateMarker.consume(defaults: defaults), nil,
                            "consumed: a reopen or a login finds nothing")
+            MenuUpdateMarker.record(finished, defaults: defaults)
+            MenuUpdateMarker.clear(defaults: defaults)
+            Harness.expect(MenuUpdateMarker.consume(defaults: defaults), nil,
+                           "cleared when the update ended without a relaunch")
         }
     }
 }

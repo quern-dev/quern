@@ -1379,7 +1379,8 @@ def _cmd_check_updates() -> int:
 
 
 def _cmd_doctor(args: argparse.Namespace) -> None:
-    """Read-only diagnostics: device tools, venv, tool versions, service health.
+    """Diagnostics: device tools, venv, tool versions, service health. Read-only,
+    except that it records the MCP client finding the Quern app shows.
 
     Only the device-tool section needs a running server. Everything else reads
     the filesystem or probes a separate daemon, so it used to be withheld for no
@@ -1504,8 +1505,9 @@ def _report_mcp_registrations() -> bool:
     """Which node each registered MCP client will run the wrapper with.
 
     Returns whether every config could be read and every node asked. The
-    assessment is `mcp_clients.assess`, the same one the menu bar is shown, so
-    the two cannot disagree. Read-only.
+    assessment is `mcp_clients.assess`, the same one the menu bar is shown, and
+    it is written to `~/.quern/mcp-clients.json` so the two cannot disagree --
+    the one thing doctor writes, and only its own finding.
     """
     from server.lifecycle import mcp_clients, node_env, setup
 
@@ -1528,7 +1530,7 @@ def _report_mcp_registrations() -> bool:
     # since then -- the fix this very section gives a project entry -- stayed
     # on the menu while doctor said it was fine.
     try:
-        mcp_clients.write(mcp_clients.state(assessments))
+        mcp_clients.write(mcp_clients.state(assessments, previous=mcp_clients.read()))
     except OSError:
         pass
     for a in assessments:
@@ -1545,6 +1547,10 @@ def _report_mcp_registrations() -> bool:
             continue
         if a.status == mcp_clients.OK:
             print(f"  \u2713 {reg.label} — {a.version}  {reg.node}")
+            continue
+        if a.status == mcp_clients.WRAPPER:
+            print(f"  ! {reg.label} — `{reg.node}`, a wrapper that chooses its own node, "
+                  f"which quern does not check")
             continue
         if a.status == mcp_clients.PLAIN:
             # Not a failure: each client resolves it its own way, and may find

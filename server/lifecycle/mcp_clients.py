@@ -1,10 +1,10 @@
 """Whether each MCP client quern is registered with can start its wrapper (#214).
 
-`mcp-install` registers an absolute Node 22+, but a registration outlives the
-node it names -- `nvm uninstall`, a Homebrew cleanup -- and older ones say plain
-`node`, which an app opened from the Dock resolves on launchd's PATH and finds
-nothing. The client then reports only `CONNECTION_CLOSED`, and nothing in
-quern's own output ever mentioned it.
+`mcp-install` registers an absolute Node 22+ and the wrapper beside it, but a
+registration outlives both: `nvm uninstall` or a Homebrew cleanup removes the
+node, and moving or reinstalling Quern removes the wrapper. The client then
+reports only `CONNECTION_CLOSED`, and nothing in quern's own output ever
+mentioned it.
 
 This module decides, per registration, whether it will fail, and writes the
 failures to `~/.quern/mcp-clients.json` for the menu-bar app, which cannot run
@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -48,6 +49,7 @@ NAMES = {
 
 OK = "ok"
 PLAIN = "plain_node"        # `node`, resolved by each client its own way
+WRAPPER = "wrapper"         # a command that is not node (`bash -c`, `env node`)
 LAUNCHER_GONE = "launcher_gone"  # the wrapper it starts is not there
 TILDE = "tilde"             # a `~` path, which clients exec unexpanded
 GONE = "gone"
@@ -71,6 +73,18 @@ class Assessment:
 def _name(reg) -> str:
     name = NAMES.get(reg.client, reg.client)
     return f"{name} ({reg.project})" if reg.project else name
+
+
+#: What a launcher is when it is quern's wrapper rather than an argument to a
+#: shell (`-c`) or to `env` (`node`).
+_SCRIPTS = (".js", ".mjs", ".cjs")
+
+#: A command that is a node binary, and so can be judged by running it:
+#: `node`, `nodejs`, `node22`. Anything else -- `/bin/bash -c …`,
+#: `/usr/bin/env node`, `npx` -- was put there on purpose and chooses its node
+#: its own way; running it with `--version` answers a different question, and
+#: calling it broken, then "fixing" it, replaced a deliberate wrapper.
+_NODE_BINARY = re.compile(r"^node(js)?[\d.]*$")
 
 
 def fix_for(reg) -> str:
@@ -103,7 +117,12 @@ def assess(registrations: list, *,
             out.append(Assessment(reg, TILDE, fails=True, fix=fix_for(reg),
                                   reason=f"{name} is set to run {node}, and apps do not "
                                          f"expand `~`"))
-        elif launcher and os.path.isabs(launcher) and not exists(launcher):
+        elif launcher and launcher.startswith("~") and launcher.endswith(_SCRIPTS):
+            out.append(Assessment(reg, TILDE, fails=True, fix=fix_for(reg),
+                                  reason=f"{name} is set to start Quern from {launcher}, and "
+                                         f"apps do not expand `~`"))
+        elif (launcher and launcher.endswith(_SCRIPTS) and os.path.isabs(launcher)
+              and not exists(launcher)):
             # Quern moved, was reinstalled, or the clone it was registered from
             # is gone: the node is fine and the wrapper it is told to run is not.
             out.append(Assessment(reg, LAUNCHER_GONE, fails=True, fix=fix_for(reg),
@@ -112,9 +131,13 @@ def assess(registrations: list, *,
         elif not os.path.isabs(node):
             out.append(Assessment(reg, PLAIN, fix=fix_for(reg)))
         elif not exists(node):
+            # Before the wrapper check: a command that is not there fails
+            # whatever it is called.
             out.append(Assessment(reg, GONE, fails=True, fix=fix_for(reg),
                                   reason=f"{name} is set to run {node}, which no longer "
                                          f"exists"))
+        elif not _NODE_BINARY.match(os.path.basename(node)):
+            out.append(Assessment(reg, WRAPPER))
         else:
             status, version = check(node)
             if status == node_env.OK:
@@ -134,23 +157,55 @@ def assess(registrations: list, *,
     return out
 
 
-def state(assessments: list[Assessment], *, now: datetime | None = None) -> dict:
+def _problem(a: Assessment) -> dict:
+    reg = a.registration
+    # `fixable`: whether `mcp-install` fixes it, which a project entry it does
+    # not -- so the menu bar knows which fixes to spell out. `id` and `project`
+    # say which registration it is, for carrying it past a pass that could not
+    # look at it.
+    return {"client": _name(reg), "reason": a.reason, "fix": a.fix,
+            "fixable": not reg.project, "id": reg.client, "project": reg.project}
+
+
+def state(assessments: list[Assessment], *, previous: dict | None = None,
+          now: datetime | None = None) -> dict:
     """What the menu bar reads: the failures, and which clients `mcp-install`
-    can fix (a project entry it cannot, so it is not listed)."""
-    failing = [a for a in assessments if a.fails]
+    can fix (a project entry it cannot, so it is not listed).
+
+    A client that could not be looked at this time -- its config mid-rewrite
+    (Claude Code rewrites its 158 KB `~/.claude.json` constantly), or a node
+    that did not answer -- keeps the problems `previous` had for it. Dropping
+    them would say "fixed" about something nobody fixed.
+    """
+    problems = [_problem(a) for a in assessments if a.fails]
+    old = previous.get("problems") if isinstance(previous, dict) else None
+    for a in assessments:
+        if a.status not in (UNREADABLE, UNKNOWN) or not isinstance(old, list):
+            continue
+        reg = a.registration
+        for p in old:
+            if (isinstance(p, dict) and p.get("id") == reg.client
+                    and (a.status == UNREADABLE or p.get("project", "") == reg.project)
+                    and p not in problems):
+                problems.append(p)
     clients = []
-    for a in failing:
-        if not a.registration.project and a.registration.client not in clients:
-            clients.append(a.registration.client)
+    for p in problems:
+        if p.get("fixable") and p.get("id") and p["id"] not in clients:
+            clients.append(p["id"])
     return {
         "checked_at": (now or datetime.now(UTC)).isoformat(),
-        # `fixable`: whether `mcp-install` fixes it, which a project entry it
-        # does not -- so the menu bar knows which fixes to spell out.
-        "problems": [{"client": _name(a.registration), "reason": a.reason, "fix": a.fix,
-                      "fixable": not a.registration.project}
-                     for a in failing],
+        "problems": problems,
         "fix_clients": clients,
     }
+
+
+def read(path: Path | None = None) -> dict | None:
+    """The last answer written, or None."""
+    try:
+        data = json.loads((path or STATE_FILE).read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def write(data: dict, path: Path | None = None) -> None:
@@ -178,7 +233,7 @@ def refresh(path: Path | None = None) -> list[Assessment] | None:
 
     try:
         assessments = assess(setup.mcp_registrations())
-        write(state(assessments), path)
+        write(state(assessments, previous=read(path)), path)
     except Exception as exc:  # noqa: BLE001 -- a startup side job must not fail startup
         logger.warning("Could not check the MCP client registrations: %s", exc)
         return None

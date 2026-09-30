@@ -518,16 +518,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func restartToUpdate() {
         lifecycle.clearUpdateRecovery()
-        MenuUpdateMarker.record()
+        // Saved for the app this update relaunches, and kept here too: an
+        // update whose version does not change finishes without relaunching,
+        // and its dialog is this process's to show.
+        let started = Date()
+        MenuUpdateMarker.record(started)
+        menuUpdateStartedAt = started
         updater.restartToUpdate(
             status: { [weak self] progress in
                 self?.updateStatusText = progress.text
                 self?.activityText = progress.isWorking ? progress.text : nil
+                // Finished without relaunching: nothing will consume the
+                // marker, and left behind it would count for a later launch.
+                if !progress.isWorking { MenuUpdateMarker.clear() }
             },
             failure: { [weak self] message, detail in
                 // "Could not start the update" means nothing ran -- the
                 // installed version could not even be read -- so there is no
                 // half-done update to finish.
+                MenuUpdateMarker.clear()
+                self?.menuUpdateStartedAt = nil
                 let recovery = Recovery.forUpdateFailure(
                     started: message != "Could not start the update")
                 // Recorded as well as shown: dismissing the alert must not

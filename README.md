@@ -429,7 +429,7 @@ quern restart                # Stop + start
 quern status                 # Show PID, URL, uptime, tool availability
 quern url                    # Print the server's base URL, for scripts
 quern env                    # Print shell exports: eval "$(quern env)"
-quern doctor                 # Read-only diagnostics: device tools, venv, tool versions, service health
+quern doctor                 # Diagnostics: device tools, venv, tool versions, service health, MCP clients
 quern doctor --fix           # ...and reconcile the venv with pyproject.toml (venv only)
 quern capture-env            # Write an environment report to attach to a bug report
 quern help                   # Show the command list

@@ -66,9 +66,10 @@ struct McpClientProblem: Equatable {
 /// What the server last found about the MCP clients it is registered with.
 ///
 /// The app cannot run the checks itself -- they run each client's node -- so
-/// the server writes the answer at start and after `quern mcp-install`, and
-/// only failures are in it: a CLI client on plain `node` is fine in the
-/// terminal it starts from, and a check that could not be made is not one.
+/// the server writes the answer (at start, every ten minutes, and after
+/// `mcp-install`, `doctor` and an update), and only failures it can know are
+/// in it: plain `node` and a wrapper choose their own node, and a check that
+/// could not be made is not a finding.
 struct McpClientHealth: Equatable {
     var problems: [McpClientProblem] = []
     /// Clients `quern mcp-install` can fix. A Claude Code project entry is not

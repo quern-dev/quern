@@ -1,8 +1,7 @@
 """Which MCP clients cannot start the wrapper, for the menu bar (#214).
 
 No node runs and no real config is read: registrations are built here, the
-check and the GUI lookup are injected, and the state file goes to a temporary
-directory.
+check is injected, and the state file goes to a temporary directory.
 """
 
 from __future__ import annotations
@@ -59,6 +58,35 @@ class TestAssess:
                          exists=lambda p: p == NODE)
         assert a.status == mcp_clients.OK and not a.fails
 
+    def test_plain_node_with_its_launcher_gone_fails(self):
+        """The pre-#214 shape, and the one most likely to point at an old clone."""
+        [a], _ = _assess([_reg("cursor", "node", launcher="/old/mcp/dist/launcher.cjs")],
+                         exists=lambda p: False)
+        assert a.status == mcp_clients.LAUNCHER_GONE and a.fails
+
+    def test_a_tilde_launcher_fails(self):
+        [a], _ = _assess([_reg("cursor", NODE, launcher="~/quern/mcp/dist/launcher.cjs")])
+        assert a.status == mcp_clients.TILDE and a.fails and "do not expand" in a.reason
+
+    def test_a_shells_arguments_are_not_a_launcher(self):
+        """`bash -c '…'` has `-c` where the launcher would be."""
+        [a], _ = _assess([_reg("cursor", "/bin/bash", launcher="-c")], exists=lambda p: True)
+        assert not a.fails
+
+    @pytest.mark.parametrize("command", ["/bin/bash", "/usr/bin/env", "/opt/wrappers/start-quern"])
+    def test_a_wrapper_is_neither_failed_nor_run(self, command):
+        ran = []
+        def check(path, **_):
+            ran.append(path)
+            return node_env.UNUSABLE, None
+        [a] = mcp_clients.assess([_reg("cursor", command)], exists=lambda p: True, check=check)
+        assert (a.status, a.fails, ran) == (mcp_clients.WRAPPER, False, [])
+
+    @pytest.mark.parametrize("command", ["/x/bin/node", "/x/bin/nodejs", "/x/node22"])
+    def test_a_node_binary_by_any_usual_name_is_judged(self, command):
+        [a], _ = _assess([_reg("cursor", command)], checks={command: (node_env.TOO_OLD, "v20.0.0")})
+        assert a.status == mcp_clients.TOO_OLD
+
     def test_a_launcher_that_is_there_is_fine(self):
         [a], _ = _assess([_reg("cursor", NODE, launcher="/q/launcher.cjs")])
         assert a.status == mcp_clients.OK
@@ -68,7 +96,7 @@ class TestAssess:
         ("~/.nvm/node", True, None, mcp_clients.TILDE, "do not expand"),
         ("/old/node", True, (node_env.TOO_OLD, "v20.20.2"), mcp_clients.TOO_OLD,
          "Node v20.20.2; Quern needs 22"),
-        ("/wrap.sh", True, (node_env.UNUSABLE, None), mcp_clients.UNUSABLE,
+        ("/broken/bin/node", True, (node_env.UNUSABLE, None), mcp_clients.UNUSABLE,
          "did not report a Node version"),
         (None, True, None, mcp_clients.NO_COMMAND, "has no command"),
     ])
@@ -113,6 +141,41 @@ class TestTheStateFile:
                                  exists=lambda p: False)
         data = mcp_clients.state(assessments, now=NOW)
         assert len(data["problems"]) == 1 and data["fix_clients"] == []
+
+    def test_an_unreadable_config_keeps_its_last_problems(self):
+        """Claude Code rewrites its 158 KB config constantly; a read mid-write
+        erased a real problem, and the row vanished for ten minutes."""
+        before, _ = _assess([_reg("claude-code", "/gone"),
+                             _reg("claude-code", "/gone", project="/src/app"),
+                             _reg("cursor", "/gone")], exists=lambda p: False)
+        previous = mcp_clients.state(before, now=NOW)
+        now, _ = _assess([_reg("claude-code", None, error="Expecting value"),
+                          _reg("cursor", NODE)])
+        data = mcp_clients.state(now, previous=previous, now=NOW)
+        assert [p["client"] for p in data["problems"]] == ["Claude Code",
+                                                           "Claude Code (/src/app)"]
+        assert data["fix_clients"] == ["claude-code"]
+
+    def test_a_node_that_did_not_answer_keeps_only_its_own_problem(self):
+        before, _ = _assess([_reg("claude-code", NODE, project="/a"),
+                             _reg("claude-code", NODE, project="/b")],
+                            checks={NODE: (node_env.TOO_OLD, "v20.0.0")})
+        previous = mcp_clients.state(before, now=NOW)
+        now = [mcp_clients.Assessment(_reg("claude-code", NODE, project="/a"),
+                                      mcp_clients.UNKNOWN),
+               mcp_clients.Assessment(_reg("claude-code", NODE, project="/b"), mcp_clients.OK)]
+        data = mcp_clients.state(now, previous=previous, now=NOW)
+        assert [p["client"] for p in data["problems"]] == ["Claude Code (/a)"]
+
+    def test_refresh_reads_the_last_answer_to_carry(self, tmp_path, monkeypatch):
+        path = tmp_path / "mcp-clients.json"
+        monkeypatch.setattr(setup, "mcp_registrations", lambda: [_reg("cursor", "/gone")])
+        monkeypatch.setattr(mcp_clients.os.path, "exists", lambda p: False)
+        mcp_clients.refresh(path)
+        monkeypatch.setattr(setup, "mcp_registrations",
+                            lambda: [_reg("cursor", None, error="mid-write")])
+        mcp_clients.refresh(path)
+        assert json.loads(path.read_text())["fix_clients"] == ["cursor"]
 
     def test_nothing_wrong_is_an_empty_list_not_no_file(self):
         """The file is rewritten, so a fixed client's warning goes away."""
@@ -166,6 +229,10 @@ class TestWhoRefreshes:
         started = [n for n in ast.walk(lifespan) if isinstance(n, ast.Call)
                    and getattr(n.func, "id", None) == "_refresh_mcp_clients_periodically"]
         assert started, "the lifespan does not start the mcp-clients.json refresh"
+        cancelled = {n.id for t in ast.walk(lifespan) if isinstance(t, ast.For)
+                     and isinstance(t.iter, ast.Tuple) for n in t.iter.elts
+                     if isinstance(n, ast.Name)}
+        assert "mcp_clients_task" in cancelled, "the loop is not cancelled at shutdown"
         loop = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)
                     and n.name == "_refresh_mcp_clients_periodically")
         assert any(isinstance(c, ast.Call) and getattr(c.func, "attr", None) == "to_thread"
@@ -191,19 +258,22 @@ class TestWhoRefreshes:
             asyncio.run(server_main._refresh_mcp_clients_periodically())
         assert len(calls) == 2
 
-    def test_an_update_refreshes_it_after_recording_its_result(self, monkeypatch):
+    def test_an_update_refreshes_it_after_recording_its_result(self, monkeypatch, tmp_path):
         """The dialog opens only on an answer at least as new as the update, and
         the restarted server's own check runs before the result is written."""
         from server.lifecycle import updater
 
-        src = (ROOT / "server" / "lifecycle" / "updater.py").read_text()
-        fn = next(n for n in ast.walk(ast.parse(src))
-                  if isinstance(n, ast.FunctionDef) and n.name == "finish_update")
-        body = ast.get_source_segment(src, fn)
-        written = body.index('_write_result(UPDATED, "update applied"')
-        assert "mcp_clients.refresh()" in body[written:], \
-            "finish_update does not refresh mcp-clients.json after writing its result"
-        _ = updater
+        order = []
+        monkeypatch.setattr(updater, "_find_project_root", lambda: tmp_path)
+        monkeypatch.setattr(updater, "_refresh_update_check", lambda: None)
+        monkeypatch.setattr(updater, "_rebuild_and_restart", lambda root: [])
+        monkeypatch.setattr(updater, "_report_tool_updates", lambda apply: True)
+        monkeypatch.setattr(updater, "_installed_version", lambda: "0.23.0")
+        monkeypatch.setattr(updater, "_write_result",
+                            lambda outcome, *a, **k: order.append(("result", outcome)))
+        monkeypatch.setattr(mcp_clients, "refresh", lambda *a, **k: order.append("refresh"))
+        assert updater.finish_update() == 0
+        assert order == [("result", updater.UPDATED), "refresh"]
 
     def test_doctor_writes_what_it_found(self, tmp_path, monkeypatch):
         """Otherwise a registration fixed by hand stayed on the menu while doctor

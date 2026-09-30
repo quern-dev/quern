@@ -1,11 +1,10 @@
 // MCP clients that cannot start Quern's MCP server (#214).
 //
-// A client registered with plain `node` resolves it on its own PATH, and an
-// app opened from the Dock gets launchd's -- no fnm, nvm, Volta, asdf or mise,
-// since those are set up in shell startup files it never reads. A registration
-// can also outlive the node it names. Either way the client reports only
-// `CONNECTION_CLOSED`, and nothing Quern said ever mentioned it, so the one
-// place a GUI user would find out is here.
+// A registration outlives the node and the wrapper it names: `nvm uninstall`
+// removes one, moving or reinstalling Quern the other. The client then reports
+// only `CONNECTION_CLOSED`, and nothing Quern said ever mentioned it, so the one
+// place a GUI user would find out is here. Plain `node` is not reported: each
+// client resolves it its own way, and Claude Desktop reads the shell's PATH.
 //
 // The server decides what fails (server/lifecycle/mcp_clients.py) and this
 // only shows it: a menu row while there is something to fix, and the dialog
@@ -107,6 +106,8 @@ enum McpClientAlert {
     /// terminal, or a reopen of the app later, does not count. And only on an
     /// answer written since that update: the one from before may describe a
     /// registration the update replaced.
+    static let markerLifetime: TimeInterval = 30 * 60
+
     static func shouldInterrupt(_ h: McpClientHealth, lastUpdate: UpdateResult?,
                                 menuUpdateStartedAt: Date?, now: Date,
                                 alreadyShown: Bool) -> Bool {
@@ -114,6 +115,9 @@ enum McpClientAlert {
               let started = menuUpdateStartedAt,
               let lastUpdate, lastUpdate.outcome == .updated,
               let finished = lastUpdate.finishedAt, finished >= started,
+              // An update does not take half an hour; a marker that old is
+              // left from some other attempt.
+              finished.timeIntervalSince(started) <= markerLifetime,
               now.timeIntervalSince(finished) >= 0,
               now.timeIntervalSince(finished) <= FailureReporting.afterUpdateWindow,
               let checked = h.checkedAt, checked >= finished
@@ -132,6 +136,13 @@ enum MenuUpdateMarker {
 
     static func record(_ now: Date = Date(), defaults: UserDefaults = .standard) {
         defaults.set(now.timeIntervalSince1970, forKey: key)
+    }
+
+    /// Removed when an update ends without relaunching the app -- a no-op, a
+    /// failure, a version that did not change -- so it cannot reach a later
+    /// launch and interrupt after an update run somewhere else.
+    static func clear(defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: key)
     }
 
     static func consume(defaults: UserDefaults = .standard) -> Date? {
