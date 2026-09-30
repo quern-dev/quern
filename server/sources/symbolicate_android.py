@@ -22,7 +22,6 @@ share one.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import re
 import tempfile
@@ -51,8 +50,9 @@ def find_llvm_symbolizer() -> str | None:
     roots = [Path(os.environ[v]) for v in ("ANDROID_HOME", "ANDROID_SDK_ROOT")
              if os.environ.get(v)] + list(_SDK_SEARCH_PATHS)
     for root in roots:
+        # <sdk>/ndk/<version>/toolchains/llvm/prebuilt/<host>/bin/llvm-symbolizer
         found = sorted((root / "ndk").glob("*/toolchains/llvm/prebuilt/*/bin/llvm-symbolizer"),
-                       key=lambda p: _version(p.parts[-6]))
+                       key=lambda p: _version(p.parts[-7]))
         if found:
             return str(found[-1])
     return _find_sdk_tool("llvm-symbolizer", "")
@@ -150,24 +150,23 @@ async def _native(todo: list[CrashFrame], entry: ImageSymbols, finder, read) -> 
     wanted = sorted({f.offset for f in todo if f.offset >= 0})
     try:
         code, out, err = await finder.run(
-            [tool, f"--obj={binary.dwarf}", "--output-style=JSON", *(hex(a) for a in wanted)])
+            [tool, f"--obj={binary.dwarf}", *(hex(a) for a in wanted)])
     except (OSError, TimeoutError) as e:
         entry.note = f"llvm-symbolizer could not run: {type(e).__name__}: {e}"
         return False
     if code != 0:
         entry.note = f"llvm-symbolizer exited {code}: {err.strip()[:160]}"
         return code > 0
-    try:
-        answers = {int(a["Address"], 16): a.get("Symbol") or [] for a in json.loads(out)}
-    except (ValueError, KeyError, TypeError) as e:
-        entry.note = f"llvm-symbolizer's output could not be read ({type(e).__name__})"
+    blocks = _plain_blocks(out)
+    if len(blocks) != len(wanted):
+        # One block per address, in order: anything else cannot be matched up
+        # safely, and a wrong line is worse than none.
+        entry.note = f"llvm-symbolizer gave {len(blocks)} answers for {len(wanted)} addresses"
         return True
+    answers = dict(zip(wanted, blocks, strict=True))
     lined = named = 0
     for f in todo:
-        symbols = answers.get(f.offset) or []
-        top = symbols[0] if symbols else {}
-        function, file, line = top.get("FunctionName") or "", top.get("FileName") or "", \
-            top.get("Line") or 0
+        function, file, line = answers.get(f.offset, ("", "", 0))
         if function and not f.symbol:
             f.symbol, named = function, named + 1
         if file and line:
@@ -178,6 +177,25 @@ async def _native(todo: list[CrashFrame], entry: ImageSymbols, finder, read) -> 
                       f"source line: the library has no debug information for them"
                       + (f"; {named} got a function name" if named else ""))
     return True
+
+
+def _plain_blocks(out: str) -> list[tuple[str, str, int]]:
+    """(function, file, line) per address from llvm-symbolizer's plain output:
+    a function line and a `file:line:col` line per frame, the innermost inlined
+    frame first, a blank line between addresses, `??` for what it does not
+    know. Plain rather than `--output-style=JSON`, which NDK 23's ignores
+    (measured) -- the form ndk-stack reads works on every NDK."""
+    blocks = []
+    for chunk in out.strip("\n").split("\n\n") if out.strip() else []:
+        lines = [line.strip() for line in chunk.splitlines() if line.strip()]
+        function = lines[0] if lines and lines[0] != "??" else ""
+        file, line = "", 0
+        if len(lines) > 1:
+            where = lines[1].rsplit(":", 2)
+            if len(where) == 3 and where[0] != "??" and where[1].isdigit():
+                file, line = where[0], int(where[1])
+        blocks.append((function, file, line))
+    return blocks
 
 
 # ── Java ─────────────────────────────────────────────────────────────────────

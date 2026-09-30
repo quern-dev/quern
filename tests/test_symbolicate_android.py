@@ -197,7 +197,7 @@ class FakeAndroidTools:
     async def __call__(self, argv):
         self.calls.append(argv)
         if Path(argv[0]).name == "llvm-symbolizer":
-            return self.code, json.dumps(self.symbolizer or []), ""
+            return self.code, self.symbolizer or "", ""
         text = Path(argv[2]).read_text()
         self.sent = text
         out = []
@@ -216,8 +216,8 @@ def _run(reports, finder):
     asyncio.run(symbolicate.symbolicate_many(reports, finder))
 
 
-SYMBOLIZED = [{"Address": "0x16c8", "Symbol": [
-    {"FunctionName": "Crasher::boom()", "FileName": "/src/app/cpp/crasher.cpp", "Line": 42}]}]
+#: llvm-symbolizer's plain output for one address.
+SYMBOLIZED = "Crasher::boom()\n/src/app/cpp/crasher.cpp:42:7\n\n"
 
 
 class TestNative:
@@ -231,9 +231,8 @@ class TestNative:
         assert (f.symbol, f.file, f.line) == ("Crasher::boom()", "crasher.cpp", 42)
         [entry] = report.symbols
         assert entry.source == "build_record" and entry.frames_resolved == 1
-        assert fake.calls[0][:3] == ["/ndk/llvm-symbolizer", f"--obj={entry.dwarf}",
-                                     "--output-style=JSON"]
-        assert fake.calls[0][3] == "0x16c8"             # the pc as the tombstone gave it
+        assert fake.calls[0][:2] == ["/ndk/llvm-symbolizer", f"--obj={entry.dwarf}"]
+        assert fake.calls[0][2] == "0x16c8"             # the pc as the tombstone gave it
         assert report.symbolicated
 
     def test_system_libraries_are_left_alone(self, tmp_path, tools):
@@ -261,8 +260,7 @@ class TestNative:
     def test_a_name_without_debug_info(self, tmp_path, tools):
         root = tmp_path / "records"
         _record_android(_gradle_module(tmp_path), root)
-        nameonly = [{"Address": "0x16c8", "Symbol": [
-            {"FunctionName": "JNI_OnLoad", "FileName": "", "Line": 0}]}]
+        nameonly = "JNI_OnLoad\n??:0:0\n\n"             # real, from a library with no DWARF
         report = _native_report()
         _run([report], symbolicate.SymbolFinder(root, FakeAndroidTools(symbolizer=nameonly)))
         assert report.frames[1].symbol == "JNI_OnLoad" and report.frames[1].file == ""
@@ -366,3 +364,37 @@ class TestJava:
         _run([report], symbolicate.SymbolFinder(root, garbled))
         assert report.frames[0].symbol == "a.b.c"
         assert "could not be matched" in report.symbols[0].note
+
+
+class TestTheTools:
+    def test_the_newest_ndk_is_used(self, tmp_path, monkeypatch):
+        """The version was read from the wrong path segment: NDK 23 over 27."""
+        for version in ("23.1.7779620", "27.1.12297006", "26.1.10909125"):
+            tool = (tmp_path / "ndk" / version / "toolchains" / "llvm" / "prebuilt"
+                    / "darwin-x86_64" / "bin" / "llvm-symbolizer")
+            tool.parent.mkdir(parents=True)
+            tool.write_text("")
+        monkeypatch.setenv("ANDROID_HOME", str(tmp_path))
+        assert "/27.1.12297006/" in symbolicate_android.find_llvm_symbolizer()
+
+    def test_an_unknown_address_and_inlining(self, tmp_path, tools):
+        """`??` for what it does not know; inlined frames innermost first."""
+        root = tmp_path / "records"
+        _record_android(_gradle_module(tmp_path), root)
+        report = _native_report()
+        report.frames.append(CrashFrame(image="libapp.so", offset=0x2000, build_id=BUILD_ID,
+                                        app=True))
+        out = ("inner()\n/src/a.cpp:3:1\nouter()\n/src/a.cpp:9:2\n\n"
+               "??\n??:0:0\n\n")
+        _run([report], symbolicate.SymbolFinder(root, FakeAndroidTools(symbolizer=out)))
+        assert (report.frames[1].symbol, report.frames[1].line) == ("inner()", 3)
+        assert report.frames[2].symbol == "" and report.frames[2].file == ""
+
+    def test_answers_that_do_not_match_the_addresses_are_not_guessed(self, tmp_path, tools):
+        root = tmp_path / "records"
+        _record_android(_gradle_module(tmp_path), root)
+        report = _native_report()
+        out = SYMBOLIZED + SYMBOLIZED                  # two answers for one address
+        _run([report], symbolicate.SymbolFinder(root, FakeAndroidTools(symbolizer=out)))
+        assert report.frames[1].symbol == ""
+        assert "2 answers for 1 addresses" in report.symbols[0].note
