@@ -761,7 +761,10 @@ class TestInstalling:
                                            uninstall_on_signature_mismatch=True))
         [d] = r["devices"]
         assert d.error.startswith("uninstalled com.example.app first, which erased its data")
-        assert not d.error.endswith(": "), "an empty exception message reads as no reason"
+        # str(TimeoutError()) is "": the reason must still name something.
+        assert "()" not in d.error and not d.error.endswith(": ")
+        if isinstance(raised, TimeoutError) and not str(raised):
+            assert "TimeoutError" in d.error
 
     def test_still_refused_after_the_uninstall_does_not_repeat_the_advice(self, built):
         adb = FakeAdb([(1, "", "Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: sigs]"),
