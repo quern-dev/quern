@@ -863,6 +863,32 @@ class TestEveryFlowResultCarriesTheNote:
         assert r.json()["matched"] is False
         assert r.json()["simulator_tls_note"] == "passed through"
 
+    def test_start_capture_session_warns_before_anything_is_captured(self, store):
+        """At start the note is worth most: the agent can install the CA before
+        driving the app, instead of finding the capture empty at stop.
+        (CodeRabbit's linked-issue check on #357; #354 listed this endpoint.)"""
+        r = store.client.post(
+            "/api/v1/proxy/capture/start", json={"simulator_udid": B},
+            headers=store.headers,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["simulator_tls_note"] == "passed through"
+
+    def test_start_capture_session_is_silent_for_a_decrypted_simulator(self, store):
+        r = store.client.post(
+            "/api/v1/proxy/capture/start", json={"simulator_udid": A},
+            headers=store.headers,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["simulator_tls_note"] is None
+
+    def test_start_capture_session_is_silent_without_a_simulator(self, store):
+        r = store.client.post(
+            "/api/v1/proxy/capture/start", json={}, headers=store.headers,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["simulator_tls_note"] is None
+
     def test_stop_capture_session(self, store):
         r = store.client.post(
             "/api/v1/proxy/capture/start", json={"simulator_udid": B},

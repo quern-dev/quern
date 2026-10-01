@@ -131,7 +131,7 @@ Use exclude_hosts to filter out analytics/SDK noise (Firebase, AppsFlyer, Facebo
       id: z.string().optional().describe("Custom session ID (auto-generated if omitted)"),
       hosts: z.array(z.string()).optional().describe("Only capture flows to these hosts"),
       exclude_hosts: z.array(z.string()).optional().describe("Exclude flows to these hosts (analytics, SDKs, etc.)"),
-      simulator_udid: z.string().optional().describe("Filter to flows from this simulator. If its TLS is passed through (it does not trust the CA), stop_capture_session's result carries simulator_tls_note -- read it before concluding the app made no HTTPS requests."),
+      simulator_udid: z.string().optional().describe("Filter to flows from this simulator. If its TLS is passed through (it does not trust the CA), the response carries simulator_tls_note now -- before you drive the app, so you can install the CA first if you need its HTTPS -- and stop_capture_session's result carries it again."),
       device_serial: z.string().optional().describe("Filter to flows from this Android emulator (e.g. emulator-5554)"),
       client_ip: z.string().optional().describe("Filter by client IP (physical devices). Does not narrow to one Android emulator."),
       detail: z

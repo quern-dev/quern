@@ -252,7 +252,7 @@ only because some DropBox tags could not be read still reports it.
 | `get_flow_detail` | GET | `/api/v1/proxy/flows/{id}` | Full flow detail |
 | `wait_for_flow` | POST | `/api/v1/proxy/flows/wait` | Block until a matching flow appears, or time out |
 | `get_flow_summary` | GET | `/api/v1/proxy/flows/summary` | Traffic digest |
-| `start_capture_session` | POST | `/api/v1/proxy/capture/start` | Start a capture session to bracket a UI action |
+| `start_capture_session` | POST | `/api/v1/proxy/capture/start` | Start a capture session to bracket a UI action. With `simulator_udid` naming a simulator whose TLS is passed through, the response carries `simulator_tls_note` before anything is captured |
 | `stop_capture_session` | POST | `/api/v1/proxy/capture/stop` | Stop the session and return only the flows from that window |
 | `proxy_status` | GET | `/api/v1/proxy/status` | Proxy status and config |
 | `start_proxy` | POST | `/api/v1/proxy/start` | Start the proxy. With `system_proxy: true` it also configures the macOS system proxy and takes the same certificate check as `configure_system_proxy` — **428** when a booted simulator does not trust the CA; pass `skip_cert_check` to proceed. Starting the listener alone is never refused |

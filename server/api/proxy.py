@@ -1008,7 +1008,9 @@ async def start_capture(request: Request, body: CaptureStartRequest) -> CaptureS
         session = manager.start(body)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
-    return CaptureStartResponse(session_id=session.id, start_time=session.start_time)
+    return _with_tls_note(request, body.simulator_udid, CaptureStartResponse(
+        session_id=session.id, start_time=session.start_time,
+    ))
 
 
 @router.post("/capture/stop", response_model=CaptureStopResponse)
