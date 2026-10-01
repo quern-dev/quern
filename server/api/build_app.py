@@ -453,7 +453,10 @@ def _android_summary(resp: BuildAndInstallResponse) -> str:
     """The Android build's summary, which is all the MCP tool returns on success."""
     parts: list[str] = []
     if resp.environment:
-        parts.append("Not built: the environment is not ready.")
+        # Whether Gradle ran decides the sentence: "not built" about a build
+        # that ran and failed sends the reader to look for why it never started.
+        parts.append("Build failed: the machine, not the code, stopped it."
+                     if resp.build_android else "Not built: the environment is not ready.")
         for p in resp.environment:
             parts.append(f"[{p.kind}] {p.summary}.")
             parts += [f"  - {o}" for o in p.options]

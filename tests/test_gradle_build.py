@@ -804,3 +804,11 @@ class TestMoreOutput:
             java="Java 21")
         text = build_app._android_summary(resp)
         assert "Install failed (a): no room. Install failed (b): offline." in text
+
+    @pytest.mark.parametrize("ran, says", [(True, "Build failed: the machine"),
+                                           (False, "Not built: the environment")])
+    def test_the_summary_says_whether_gradle_ran(self, ran, says):
+        resp = build_app.BuildAndInstallResponse(
+            build_android=BuildResult(succeeded=False) if ran else None, all_installed=False,
+            devices=[], environment=[gradle.sdk_problem(SimpleNamespace(root=Path("/p")))])
+        assert build_app._android_summary(resp).startswith(says)

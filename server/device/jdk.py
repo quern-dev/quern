@@ -219,7 +219,7 @@ def choose(project_root: Path, *, java_home: str | None = None,
     for forced, label in forced_sources:
         if not forced:
             continue
-        jdk = read_jdk(os.path.expanduser(forced), f"org.gradle.java.home ({label})")
+        jdk = read_jdk(os.path.expanduser(forced), f"org.gradle.java.home, from {label}")
         if jdk and jdk.major >= minimum:
             return Choice(jdk=jdk, candidates=jdks, forced_by=label,
                           warning=_beyond(jdk, maximum))
