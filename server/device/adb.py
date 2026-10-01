@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import shutil
@@ -145,10 +146,15 @@ class AdbBackend:
         """Where adb is, or None if it was not found."""
         return self._adb_path
 
-    async def _run_adb(self, *args: str) -> tuple[str, str]:
+    async def _run_adb(
+        self, *args: str, timeout: float | None = None,
+    ) -> tuple[str, str]:
         """Run an adb command and return (stdout, stderr).
 
-        Raises DeviceError on non-zero exit code.
+        Raises DeviceError on non-zero exit code. `timeout`, when given, bounds
+        the wait: the adb process is killed and reaped and a DeviceError is
+        raised, so the caller is not held indefinitely by a device that has
+        stopped answering. Unbounded by default, as every caller was before.
         """
         if not self._adb_path:
             raise DeviceError("adb not found", tool="adb")
@@ -157,7 +163,19 @@ class AdbBackend:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        if timeout is None:
+            stdout, stderr = await proc.communicate()
+        else:
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
+            except TimeoutError:
+                proc.kill()
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(proc.wait(), 1.0)
+                raise DeviceError(
+                    f"adb {' '.join(args[:4])} did not answer within {timeout:g}s",
+                    tool="adb",
+                ) from None
         if proc.returncode != 0:
             raise DeviceError(
                 f"adb {args[0]} failed: {stderr.decode().strip()}",
@@ -165,9 +183,11 @@ class AdbBackend:
             )
         return stdout.decode(), stderr.decode()
 
-    async def _run_adb_for_device(self, serial: str, *args: str) -> tuple[str, str]:
+    async def _run_adb_for_device(
+        self, serial: str, *args: str, timeout: float | None = None,
+    ) -> tuple[str, str]:
         """Run an adb command targeting a specific device."""
-        return await self._run_adb("-s", serial, *args)
+        return await self._run_adb("-s", serial, *args, timeout=timeout)
 
     # API level → Android version (major releases)
     _API_TO_VERSION: dict[int, str] = {
@@ -695,6 +715,9 @@ class AdbBackend:
             tool="emulator",
         )
 
+    #: Per read of `sys.boot_completed`; the overall wait has its own deadline.
+    _GETPROP_TIMEOUT = 5.0
+
     async def wait_for_boot_completed(self, serial: str, timeout: float) -> None:
         """Wait until Android itself has finished starting, not just adb.
 
@@ -711,8 +734,14 @@ class AdbBackend:
             # already spent still learns a boot that *has* finished, instead
             # of being told it failed without anyone looking (review of #360).
             try:
+                # Bounded per read. A half-started device can leave adb
+                # hanging, and an unbounded read never returned to the
+                # deadline check below, holding the AVD's reservation with it
+                # (review of #361). A timeout is a DeviceError, so it reads as
+                # "not yet" and the deadline still decides.
                 out, _ = await self._run_adb_for_device(
                     serial, "shell", "getprop", "sys.boot_completed",
+                    timeout=self._GETPROP_TIMEOUT,
                 )
                 if out.strip() == "1":
                     return

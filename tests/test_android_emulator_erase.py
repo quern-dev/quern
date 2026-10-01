@@ -434,7 +434,7 @@ class TestWaitingForBootCompleted:
         backend = adb_module.AdbBackend()
         answers = [DeviceError("device offline"), ("\n", ""), ("1\n", "")]
 
-        async def getprop(serial, *args):
+        async def getprop(serial, *args, **_kw):
             a = answers.pop(0)
             if isinstance(a, Exception):
                 raise a
@@ -681,7 +681,7 @@ class TestASpentBudgetStillLooksOnce:
         backend = adb_module.AdbBackend()
         reads = []
 
-        async def getprop(serial, *args):
+        async def getprop(serial, *args, **_kw):
             reads.append(1)
             return "1\n", ""
 
@@ -697,7 +697,7 @@ class TestASpentBudgetStillLooksOnce:
         backend = adb_module.AdbBackend()
         reads = []
 
-        async def getprop(serial, *args):
+        async def getprop(serial, *args, **_kw):
             reads.append(1)
             return "\n", ""
 
@@ -774,3 +774,71 @@ class TestAnEmulatorThatCameBackButIsSlowIsNotReportedGone:
         with pytest.raises(BootIncompleteError) as e:
             await asyncio.wait_for(backend.boot_emulator(AVD, timeout=2), timeout=10)
         assert e.value.serial == NEW
+
+
+
+class TestABootPropertyReadCannotHang:
+    """A half-started device can leave `adb shell getprop` hanging. Unbounded,
+    the boot wait never got back to its deadline check, and held the AVD's
+    reservation with it (review of #361)."""
+
+    @staticmethod
+    def _hanging_adb(monkeypatch, backend):
+        procs = []
+
+        class Hangs:
+            returncode = None
+
+            def __init__(self):
+                self.killed = self.waited = False
+
+            async def communicate(self):
+                await asyncio.Event().wait()     # never answers
+
+            def kill(self):
+                self.killed = True
+
+            async def wait(self):
+                self.waited = True
+                return -9
+
+        async def spawn(*_a, **_k):
+            procs.append(Hangs())
+            return procs[-1]
+
+        backend._adb_path = "/sdk/platform-tools/adb"
+        monkeypatch.setattr(adb_module.asyncio, "create_subprocess_exec", spawn)
+        return procs
+
+    async def test_a_bounded_adb_call_is_killed_reaped_and_reported(self, monkeypatch):
+        backend = adb_module.AdbBackend()
+        procs = self._hanging_adb(monkeypatch, backend)
+
+        with pytest.raises(DeviceError, match="did not answer"):
+            await asyncio.wait_for(
+                backend._run_adb("-s", OLD, "shell", "getprop", timeout=0.05), timeout=5)
+
+        assert procs[0].killed and procs[0].waited
+
+    async def test_the_boot_wait_ends_on_its_deadline_even_when_adb_hangs(self, monkeypatch):
+        backend = adb_module.AdbBackend()
+        self._hanging_adb(monkeypatch, backend)
+        monkeypatch.setattr(adb_module.AdbBackend, "_GETPROP_TIMEOUT", 0.05)
+
+        with pytest.raises(DeviceError, match="had not finished starting"):
+            await asyncio.wait_for(
+                backend.wait_for_boot_completed(OLD, timeout=0.0), timeout=5)
+
+    async def test_an_unbounded_call_is_still_unbounded_elsewhere(self, monkeypatch):
+        """Scope: only the boot wait passes a timeout. Every other adb call
+        behaves exactly as it did."""
+        backend = adb_module.AdbBackend()
+        seen = {}
+
+        async def run(*args, timeout=None):
+            seen["timeout"] = timeout
+            return "", ""
+
+        monkeypatch.setattr(backend, "_run_adb", run)
+        await backend._run_adb_for_device(OLD, "shell", "true")
+        assert seen["timeout"] is None
