@@ -521,8 +521,9 @@ class TestRouteDispatch:
 
 
 class TestTheJdkRange:
-    """A JDK too new for the project's Gradle fails as surely as one too old:
-    Java 21 broke a Gradle 7.6.4 build (measured)."""
+    """Below the minimum Gradle does not start; above the maximum it depends on
+    the build. Measured on Gradle 7.6.4 with Java 21: a Groovy build script
+    failed and the same project in Kotlin DSL built."""
 
     def _choose(self, root, found, **kw):
         return jdk_mod.choose(root, env={"HOME": str(root.parent)}, home=str(root.parent),
@@ -533,31 +534,43 @@ class TestTheJdkRange:
         ok = jdk_mod.Jdk("/j17", "17.0.2", 17, "sdkman")
         assert self._choose(_project(tmp_path), [new, ok], minimum=11, maximum=19).jdk == ok
 
-    def test_only_too_new_ones_is_a_problem_naming_the_range(self, tmp_path):
-        new = jdk_mod.Jdk("/jbr", "21.0.10", 21, "Android Studio")
-        c = self._choose(_project(tmp_path), [new], minimum=11, maximum=19)
-        assert c.jdk is None and "Java 11 to 19" in c.problem
+    def test_only_newer_ones_uses_the_closest_and_says_so(self, tmp_path):
+        j25 = jdk_mod.Jdk("/j25", "25.0.1", 25, "sdkman")
+        j21 = jdk_mod.Jdk("/jbr", "21.0.10", 21, "Android Studio")
+        c = self._choose(_project(tmp_path), [j25, j21], minimum=11, maximum=19)
+        assert c.jdk == j21 and "newer than this project's Gradle supports (up to 19)" in c.warning
 
-    def test_a_too_new_java_home_is_refused(self, tmp_path):
+    def test_a_newer_java_home_is_used_and_said(self, tmp_path):
         new = jdk_mod.Jdk("/jbr", "21.0.10", 21, "the java_home you passed")
         c = self._choose(_project(tmp_path), [new], java_home="/jbr", minimum=11, maximum=19)
-        assert c.jdk is None and "Java 21.0.10" in c.problem
+        assert c.jdk == new and "up to 19" in c.warning
 
-    def test_the_route_refuses_java_21_for_gradle_7(self, built, monkeypatch, tmp_path):
+    def test_one_in_range_carries_no_warning(self, tmp_path):
+        ok = jdk_mod.Jdk("/j17", "17.0.2", 17, "sdkman")
+        assert self._choose(_project(tmp_path), [ok], minimum=11, maximum=19).warning == ""
+
+    def test_the_route_builds_gradle_7_on_java_21_and_says_so(self, built, tmp_path):
         root = _project(tmp_path / "old", gradle_v="7.6.4")
-        r = _go(FakeController(FakeAdb([])), _body(project_path=str(root)))
-        [p] = r["environment"]
-        assert p.kind == "jdk" and "Java 11 to 19" in p.summary and built.ran == []
-        assert "Gradle 7.6.4" in p.summary
+        _go(FakeController(FakeAdb([])), _body(project_path=str(root)))
+        assert built.ran and built.ran[0][1] == "/jbr"
+
+    def test_the_warning_reaches_the_response(self, built, tmp_path):
+        root = _project(tmp_path / "old", gradle_v="7.6.4")
+        out = root / "app" / "build" / "outputs" / "apk" / "debug"
+        out.mkdir(parents=True)
+        (out / "app-debug.apk").write_bytes(b"PK")
+        (out / "output-metadata.json").write_text(json.dumps({
+            "applicationId": "com.example.app", "variantName": "debug",
+            "elements": [{"outputFile": "app-debug.apk"}]}))
+        r = _go(FakeController(FakeAdb([(0, "Success\n", "")])), _body(project_path=str(root)))
+        assert "Warning: Java 21 is newer than this project's Gradle supports" in r["java"]
 
     def test_gradle_saying_the_jdk_is_too_new_names_one_that_fits(self, tmp_path):
         p = gradle.find_project(str(_project(tmp_path, gradle_v="7.6.4")))
         j17 = jdk_mod.Jdk("/j17", "17.0.2", 17, "sdkman")
         j21 = jdk_mod.Jdk("/jbr", "21.0.10", 21, "Android Studio")
-        out = ("FAILURE: Build failed with an exception.\n\n* What went wrong:\n"
-               "Could not open settings generic class cache for settings file.\n"
-               "> BUG! exception in phase 'semantic analysis' in source unit "
-               "'_BuildScript_' Unsupported class file major version 65\n")
+        # Real: Gradle 7.6.4 on Java 21 with a Groovy settings.gradle.
+        out = (FIXTURES / "jdk_too_new.out").read_text()
         _, [env] = gradle.parse(1, out, p, [j21, j17])
         assert env.kind == "jdk" and "Java 21" in env.summary
         assert any('java_home="/j17"' in o for o in env.options)

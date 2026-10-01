@@ -74,6 +74,7 @@ async def build_and_install(controller, body) -> dict:
         "java": (f"Java {choice.jdk.version} at {choice.jdk.home} ({choice.jdk.source})"
                  + (f", starting Gradle, which builds on the Java {criteria} the project's "
                     f"Daemon JVM criteria ask for" if criteria else "")
+                 + (f". Warning: {choice.warning}" if choice.warning else "")
                  if choice.jdk else None),
         "android_sdk": f"{sdk} ({sdk_source})" if sdk else None,
     }

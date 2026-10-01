@@ -52,6 +52,9 @@ class Choice:
     #: Gradle uses whatever JAVA_HOME says, names an unusable JDK.
     forced_by: str = ""
     problem: str = ""
+    #: Set when the JDK is newer than the project's Gradle supports: it may
+    #: still build, so it is used, and said.
+    warning: str = ""
 
 
 def major_of(version: str) -> int | None:
@@ -162,6 +165,14 @@ def _fits(jdk: Jdk, minimum: int, maximum: int | None) -> bool:
     return jdk.major >= minimum and (maximum is None or jdk.major <= maximum)
 
 
+def _beyond(jdk: Jdk, maximum: int | None) -> str:
+    """Why a JDK above the ceiling is used anyway, or "" if it is not above."""
+    if maximum is None or jdk.major <= maximum:
+        return ""
+    return (f"Java {jdk.major} is newer than this project's Gradle supports (up to {maximum}); "
+            f"a Kotlin DSL build may still work, a Groovy build script will not")
+
+
 def java_home_override(gradle_args: list[str] | None) -> str | None:
     """`-Dorg.gradle.java.home=<path>` among the arguments, which Gradle
     honours over both gradle.properties files."""
@@ -183,8 +194,15 @@ def choose(project_root: Path, *, java_home: str | None = None,
     it from `-Dorg.gradle.java.home` first, then your ~/.gradle/gradle.properties,
     then the project's; a refusal still lists every JDK found, so the options
     can name one that works. Otherwise the first candidate in range wins, an
-    explicit `java_home` first. A JDK too new for the project's Gradle fails
-    as surely as one too old: Java 21 broke a Gradle 7.6 build (measured).
+    explicit `java_home` first.
+
+    `minimum` is a wall and `maximum` a preference. Below the minimum Gradle
+    does not start. Above the maximum it depends on the build, measured on
+    Gradle 7.6.4 with Java 21: a Groovy build script failed ("Unsupported class
+    file major version 65") and the same project in Kotlin DSL built. So a JDK
+    in range is preferred, and one above it is used, with `warning` saying so,
+    when it is all there is or what the caller chose; Gradle's own failure, if
+    it comes, is the answer `parse` reports.
     """
     env = dict(os.environ if env is None else env)
     home = home or env.get("HOME") or str(Path.home())
@@ -202,8 +220,9 @@ def choose(project_root: Path, *, java_home: str | None = None,
         if not forced:
             continue
         jdk = read_jdk(os.path.expanduser(forced), f"org.gradle.java.home ({label})")
-        if jdk and _fits(jdk, minimum, maximum):
-            return Choice(jdk=jdk, candidates=jdks, forced_by=label)
+        if jdk and jdk.major >= minimum:
+            return Choice(jdk=jdk, candidates=jdks, forced_by=label,
+                          warning=_beyond(jdk, maximum))
         what = f"Java {jdk.version}" if jdk else "not a JDK quern can read"
         return Choice(jdk=None, candidates=jdks, forced_by=label,
                       problem=f"org.gradle.java.home ({label}) is {forced} ({what}); Gradle "
@@ -213,14 +232,18 @@ def choose(project_root: Path, *, java_home: str | None = None,
         if given is None:
             return Choice(jdk=None, candidates=jdks,
                           problem=f"the java_home you passed, {java_home}, is not a JDK")
-        if not _fits(given, minimum, maximum):
+        if given.major < minimum:
             return Choice(jdk=None, candidates=jdks,
                           problem=f"the java_home you passed is Java {given.version}; this "
                                   f"build needs {want}")
-        return Choice(jdk=given, candidates=jdks)
+        return Choice(jdk=given, candidates=jdks, warning=_beyond(given, maximum))
     usable = [j for j in jdks if _fits(j, minimum, maximum)]
     if usable:
         return Choice(jdk=usable[0], candidates=jdks)
+    newer = sorted((j for j in jdks if j.major >= minimum), key=lambda j: j.major)
+    if newer:
+        # The closest above the ceiling: the likeliest to work.
+        return Choice(jdk=newer[0], candidates=jdks, warning=_beyond(newer[0], maximum))
     have = ", ".join(f"Java {j.version}" for j in jdks) or "none"
     return Choice(jdk=None, candidates=jdks,
                   problem=f"no JDK in the range this build needs ({want}) was found "
