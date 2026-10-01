@@ -153,7 +153,7 @@ export function registerDeviceTools(server: McpServer): void {
   });
 
   server.registerTool("erase_device", {
-    description: `Erase a simulator, resetting it to factory state. All apps, data, and settings are removed. The simulator is shut down automatically before erasing. Simulator only — not supported for physical devices or Android.`,
+    description: `Erase a simulator or Android emulator, resetting it to factory state. All apps, data, and settings are removed. A simulator is shut down first and left shut down. An Android emulator is killed and booted again with -wipe-data, so it comes back running, cold-booted, and possibly on a different serial — use the udid in the response, which also carries restarted: true (and previous_udid if the serial changed). Not supported for physical devices, iOS or Android, or for an emulator attached over TCP.`,
     inputSchema: strictParams({
       udid: z.string().describe("Simulator UDID to erase"),
     }),

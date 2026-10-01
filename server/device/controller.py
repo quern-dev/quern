@@ -20,7 +20,15 @@ from server.device.usbmux import UsbmuxBackend
 from server.device.wda_client import WdaBackend
 from server.lifecycle.state import read_active_udid, write_active_udid
 from server.logging_ext import current_action
-from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType, UIElement
+from server.models import (
+    AppInfo,
+    DeviceError,
+    DeviceInfo,
+    DeviceOperationUnsupportedError,
+    DeviceState,
+    DeviceType,
+    UIElement,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -463,15 +471,15 @@ class DeviceController(DeviceControllerUI):
         "start_plist_watch": ("watching an app's own files for changes", "inotifyd", 314),
         "save_app_state": ("archiving an app's own data directory", "run-as", 314),
         "restore_app_state": ("restoring an app's own data directory", "run-as", 314),
-        # Both restart-shaped -- a launch flag and a boot-time AVD property --
-        # so whether to build them at all is the open question, and #356 holds
-        # it. They pointed at #263 until it closed as fixed, which sent a
-        # caller to "both defects are fixed" for work that was never part of
-        # it. A pointer here is a claim that the work is pending somewhere.
+        # `hw.keyboard` is read at boot, so honouring this means restarting the
+        # emulator, where the iOS call is instant -- and the runtime route,
+        # switching to quern's own input method, is exactly what left a phone
+        # stranded on it in March. #356 holds the question. This pointed at
+        # #263 until it closed as fixed, which sent callers to "both defects
+        # are fixed" for work that was never part of it.
         "Set hardware keyboard": (
             "the hardware-keyboard setting", "the hw.keyboard AVD property", 356,
         ),
-        "Erase": ("wiping an emulator", "the -wipe-data launch flag", 356),
     }
 
     #: Entries whose mechanism is `run-as`, which the platform refuses for a
@@ -1005,21 +1013,38 @@ class DeviceController(DeviceControllerUI):
                     self._active_udid = None
                 return
             if self._device_type(udid) == DeviceType.ANDROID_EMULATOR:
-                raise DeviceError(
+                raise DeviceOperationUnsupportedError(
                     f"{udid} is an emulator, but it is attached over TCP and "
                     "`adb emu kill` needs the local console serial. Shut it "
                     "down through its `emulator-NNNN` serial, or stop the "
                     "process hosting it.",
                     tool="adb",
                 )
-            raise DeviceError("Shutdown not supported for physical Android devices", tool="adb")
+            raise DeviceOperationUnsupportedError(
+                "Shutdown not supported for physical Android devices", tool="adb",
+            )
         self._require_simulator(udid, "Shutdown")
         await self.simctl.shutdown(udid)
         if self._active_udid == udid:
             self._active_udid = None
 
-    async def erase(self, udid: str) -> None:
-        """Erase a simulator, resetting it to factory state. Shuts down first if booted."""
+    #: An erased emulator boots cold -- the wipe discards the snapshot and
+    #: the first boot of fresh userdata is the slow one.
+    _ERASE_BOOT_TIMEOUT = 180.0
+    _ERASE_KILL_TIMEOUT = 30.0
+
+    async def erase(self, udid: str) -> str:
+        """Reset a simulator or Android emulator to factory state.
+
+        Returns the udid the erased device is now at. For a simulator that is
+        the one passed in, shut down. An Android emulator comes back *running*,
+        because `-wipe-data` is a launch flag: erasing one means killing it and
+        booting the same AVD again with the flag, and the boot may land on a
+        different console port. Nobody calls erase by accident, so the session
+        ending is the point rather than a side effect (#356).
+        """
+        if self._is_android(udid):
+            return await self._erase_android_emulator(udid)
         self._require_simulator(udid, "Erase")
         # simctl erase requires the simulator to be shutdown
         try:
@@ -1029,6 +1054,63 @@ class DeviceController(DeviceControllerUI):
         await self.simctl.erase(udid)
         if self._active_udid == udid:
             self._active_udid = None
+        return udid
+
+    async def _erase_android_emulator(self, udid: str) -> str:
+        """Kill an emulator and boot its AVD again with `-wipe-data`."""
+        # The console, not the device kind -- the same reasoning, and the same
+        # refusals, as `shutdown`: `adb emu` travels only over the local
+        # `emulator-NNNN` serial.
+        if not self.adb.is_console_serial(udid):
+            if self._device_type(udid) == DeviceType.ANDROID_EMULATOR:
+                raise DeviceOperationUnsupportedError(
+                    f"{udid} is an emulator, but it is attached over TCP, and "
+                    "erasing one needs its local console to learn the AVD name "
+                    "and kill it. Erase it through its `emulator-NNNN` serial.",
+                    tool="adb",
+                )
+            raise DeviceOperationUnsupportedError(
+                f"Erase is not possible on a physical Android device ({udid}): a "
+                "factory reset needs the device's own settings or recovery mode, "
+                "and neither is reachable over adb without root.",
+                tool="adb",
+            )
+
+        avd = await self.adb.avd_name(udid)
+        headless = await self.adb.emulator_was_headless(avd)
+        was_active = self._active_udid == udid
+
+        await self.adb._run_adb_for_device(udid, "emu", "kill")
+        await self._wait_until_gone(udid, self._ERASE_KILL_TIMEOUT)
+
+        serial = await self.adb.boot_emulator(
+            avd, timeout=self._ERASE_BOOT_TIMEOUT, headless=headless, wipe_data=True,
+        )
+        # Report the outcome, not the request: listed by adb is not started.
+        await self.adb.wait_for_boot_completed(serial, self._ERASE_BOOT_TIMEOUT)
+        if serial != udid:
+            self._device_type_cache.pop(udid, None)
+        self._device_type_cache[serial] = DeviceType.ANDROID_EMULATOR
+        if was_active:
+            # Unlike a simulator, which an erase leaves shut down, this device
+            # is up and is the one the caller was using -- possibly on a new
+            # serial, which they would otherwise have to go and find.
+            self._active_udid = serial
+        return serial
+
+    async def _wait_until_gone(self, serial: str, timeout: float) -> None:
+        """Wait for adb to stop listing `serial`, so the boot cannot find it."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while loop.time() < deadline:
+            if serial not in {d.udid for d in await self.adb.list_devices()}:
+                return
+            await asyncio.sleep(1)
+        raise DeviceError(
+            f"{serial} was told to shut down for the erase but was still listed "
+            f"after {timeout:.0f}s; it has not been wiped.",
+            tool="adb",
+        )
 
     def _is_pre_ios17_udid(self, udid: str) -> bool:
         """Return True if this UDID is a pre-iOS 17 libimobiledevice UDID.

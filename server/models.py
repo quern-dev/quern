@@ -1596,6 +1596,18 @@ class DeviceError(Exception):
         super().__init__(message)
 
 
+class DeviceOperationUnsupportedError(DeviceError):
+    """This device cannot do what was asked, and no retry will change that.
+
+    A refusal, not a failure: the request was understood and the device is
+    healthy. Typed so `_handle_device_error` can answer 400 without matching
+    message text -- the refusals it already recognised by string were the ones
+    whose wording happened to contain "only supported on simulators", and an
+    accurately worded refusal ("not possible on a physical Android device")
+    fell through to a 500 that reads as quern having broken (#356).
+    """
+
+
 class SimBridgeSaturatedError(DeviceError):
     """Raised when sim-bridge has more queued work than it can usefully serve.
 

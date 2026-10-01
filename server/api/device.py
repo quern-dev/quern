@@ -16,6 +16,7 @@ from server.logging_ext import current_action
 from server.models import (
     BootDeviceRequest,
     DeviceError,
+    DeviceOperationUnsupportedError,
     DeviceType,
     GrantPermissionRequest,
     InstallAppRequest,
@@ -185,6 +186,8 @@ def _handle_device_error(e: DeviceError) -> HTTPException:
     if isinstance(e, WdaInvalidSessionError):
         return HTTPException(status_code=503, detail=msg)
     if isinstance(e, (WdaKeyboardNotPresentError, WdaElementNotInteractableError)):
+        return HTTPException(status_code=400, detail=msg)
+    if isinstance(e, DeviceOperationUnsupportedError):
         return HTTPException(status_code=400, detail=msg)
     if "No booted device" in msg or "Multiple devices booted" in msg:
         return HTTPException(status_code=400, detail=msg)
@@ -499,7 +502,11 @@ def _invalidate_cert_record(udid: str) -> None:
 
 @router.post("/erase")
 async def erase_device(request: Request, body: ShutdownDeviceRequest):
-    """Erase a simulator, resetting it to factory state. Simulator only.
+    """Erase a simulator or Android emulator, resetting it to factory state.
+
+    An emulator comes back running and possibly on a new serial -- `-wipe-data`
+    is a launch flag, so the erase is a kill and a fresh boot. `udid` in the
+    response is where the device is *now*; `restarted` says it was relaunched.
 
     Clears the device's recorded certificate state, because the erase is what
     invalidated it. An erase recreates the TrustStore empty while leaving
@@ -513,19 +520,31 @@ async def erase_device(request: Request, body: ShutdownDeviceRequest):
         try:
             resolved = await controller.resolve_udid(body.udid)
             act.udid = resolved
-            await controller.erase(udid=resolved)
+            # `or resolved`: a controller that returns nothing erased in place.
+            now_at = await controller.erase(udid=resolved) or resolved
             # In a thread: the helper does blocking reads, an exclusive flock
             # and a write, and a contended lock would stall every other
             # request on the loop. It swallows its own exceptions, so the
-            # best-effort contract is unchanged.
-            await asyncio.to_thread(_invalidate_cert_record, resolved)
+            # best-effort contract is unchanged. Both serials, because a wiped
+            # emulator can come back on a different port and the record for
+            # either would otherwise still claim the CA is trusted.
+            for serial in {resolved, now_at}:
+                await asyncio.to_thread(_invalidate_cert_record, serial)
             # An erased simulator no longer trusts the CA, so it must leave the
             # trusted set now: decrypting it would fail every HTTPS request it
             # makes. The periodic check would catch it, but not before it
             # could boot again (#354).
             from server.proxy import sim_tls
             await sim_tls.refresh_after(request.app, "erasing a simulator")
-            return {"status": "erased", "udid": resolved}
+            result = {"status": "erased", "udid": now_at}
+            # Asked of the type rather than inferred from the serial changing:
+            # an emulator usually comes back on the *same* port, and it was
+            # still relaunched.
+            if controller._device_type(now_at) == DeviceType.ANDROID_EMULATOR:
+                result["restarted"] = True
+                if now_at != resolved:
+                    result["previous_udid"] = resolved
+            return result
         except DeviceError as e:
             raise _handle_device_error(e)
 

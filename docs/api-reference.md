@@ -304,7 +304,7 @@ holds in `flow_store`. `flows_captured` is only what survived.
 | `list_devices` | GET | `/api/v1/device/list` | List simulators, emulators, and physical devices |
 | `boot_device` | POST | `/api/v1/device/boot` | Boot simulator |
 | `shutdown_device` | POST | `/api/v1/device/shutdown` | Shutdown simulator |
-| `erase_device` | POST | `/api/v1/device/erase` | Erase a simulator, resetting it to factory state |
+| `erase_device` | POST | `/api/v1/device/erase` | Erase a simulator or Android emulator, resetting it to factory state (an emulator is relaunched, possibly on a new serial) |
 | `install_app` | POST | `/api/v1/device/app/install` | Install app |
 | `launch_app` | POST | `/api/v1/device/app/launch` | Launch app |
 | `terminate_app` | POST | `/api/v1/device/app/terminate` | Terminate app |

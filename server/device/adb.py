@@ -572,6 +572,7 @@ class AdbBackend:
 
     async def boot_emulator(
         self, avd_name: str, timeout: float = 60, headless: bool = False,
+        wipe_data: bool = False,
     ) -> str:
         """Boot an Android emulator by AVD name. Returns the adb serial.
 
@@ -585,12 +586,15 @@ class AdbBackend:
 
         self._booting_avds.add(avd_name)
         try:
-            return await self._boot_emulator_inner(avd_name, timeout, headless)
+            return await self._boot_emulator_inner(
+                avd_name, timeout, headless, wipe_data,
+            )
         finally:
             self._booting_avds.discard(avd_name)
 
     async def _boot_emulator_inner(
         self, avd_name: str, timeout: float, headless: bool,
+        wipe_data: bool = False,
     ) -> str:
         avds = await self.list_avds()
         if avd_name not in avds:
@@ -609,6 +613,11 @@ class AdbBackend:
         args = [self._emulator_path, "-avd", avd_name, "-no-snapshot-load"]
         if headless:
             args.append("-no-window")
+        if wipe_data:
+            # A launch flag, not a command: the userdata partition is reset as
+            # the emulator starts, which is why erasing a running emulator has
+            # to be a kill followed by this boot (#356).
+            args.append("-wipe-data")
         await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.DEVNULL,
@@ -633,6 +642,71 @@ class AdbBackend:
             f"Timed out waiting for emulator '{avd_name}' to boot after {timeout}s",
             tool="emulator",
         )
+
+    async def wait_for_boot_completed(self, serial: str, timeout: float) -> None:
+        """Wait until Android itself has finished starting, not just adb.
+
+        `boot_emulator` returns when adb lists the serial as `device`, which is
+        well before the system is usable: measured on an erased emulator,
+        `sys.boot_completed` was still unset when the erase answered, and set
+        about nine seconds later. Anything the caller does next -- install,
+        launch -- would meet a half-started device.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while loop.time() < deadline:
+            try:
+                out, _ = await self._run_adb_for_device(
+                    serial, "shell", "getprop", "sys.boot_completed",
+                )
+                if out.strip() == "1":
+                    return
+            except DeviceError:
+                pass  # adb can refuse a shell while the device is still coming up
+            await asyncio.sleep(1)
+        raise DeviceError(
+            f"{serial} came back but Android had not finished starting after "
+            f"{timeout:.0f}s",
+            tool="adb",
+        )
+
+    async def avd_name(self, serial: str) -> str:
+        """The AVD a running emulator was started from, asked over its console.
+
+        `emulator-5554` is a port, not a name, and booting again needs the
+        name. Console serials only -- the same constraint `adb emu kill` has.
+        """
+        stdout, _ = await self._run_adb_for_device(serial, "emu", "avd", "name")
+        # The console answers the name, then `OK` on its own line.
+        lines = [ln.strip() for ln in stdout.splitlines() if ln.strip()]
+        name = lines[0] if lines else ""
+        if not name or name == "OK":
+            raise DeviceError(
+                f"{serial} did not report its AVD name over the emulator console",
+                tool="adb",
+            )
+        return name
+
+    async def emulator_was_headless(self, avd_name: str) -> bool:
+        """Whether the running emulator for `avd_name` was launched with no window.
+
+        Read off the process's own command line, so an erase brings it back the
+        way it was started rather than popping a window onto a desktop that had
+        none, or hiding one somebody was looking at. False when it cannot tell,
+        which is also `boot_emulator`'s default.
+        """
+        proc = await asyncio.create_subprocess_exec(
+            "ps", "-A", "-o", "command=",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+        for line in out.decode(errors="replace").splitlines():
+            argv = line.split()
+            if "-avd" in argv:
+                i = argv.index("-avd")
+                if i + 1 < len(argv) and argv[i + 1] == avd_name:
+                    return "-no-window" in argv
+        return False
 
     async def install_app(self, serial: str, apk_path: str) -> None:
         """Install an APK on a device."""
