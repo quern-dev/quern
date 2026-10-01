@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-10-01
+
 ### Added
 - **WebDriverAgent can serve a simulator (#336).** `start_driver` on a simulator builds an unsigned simulator WDA (once, about a minute), starts it on its own port in 8200–8299 and routes every UI read and action for that simulator through it until `stop_driver`. Simulators are otherwise read through the accessibility tree, whose element types differ from XCUITest's — a tab item is a `RadioButton` there and a `Button` to XCUITest — so this is the way to see what an XCUITest will see. Elements read through WDA carry `xcui_type` (`XCUIElementTypeButton`), and `backend` on UI responses says `wda`. WDA mode survives a server restart. `get_web_content` refuses in WDA mode rather than mixing two trees.
 - **Landmarks and element filters match across backends (#336, follow-up).** A landmark or `element_type` written on one backend now finds the same element read through the other. How far a type is widened depends on what pins the element: with an identifier, its family (`Group` stands for `TabBar`, `NavigationBar`, `Table`…); with a label, its safe pair (`RadioButton`↔`Button`, `Heading`↔`StaticText`, `TextArea`↔`TextView`, …); with neither, nothing. An exact type wins when one is on screen, an identifier that only repeats the element's label counts as a label, and `Button`↔`StaticText` is never equated by label. A match made through an equivalence says so: `matched_via: "RadioButton≈Button"` on each landmark result and on `tap_element`, `get_element` and `wait_for_element`. The pairs are measured, not inferred; see `docs/screen-landmarks.md` and `docs/proposals/landmark-conventions.md`.
@@ -684,7 +686,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.22.1...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.23.0...main
+[0.23.0]: https://github.com/quern-dev/quern/releases/tag/v0.23.0
 [0.22.1]: https://github.com/quern-dev/quern/releases/tag/v0.22.1
 [0.22.0]: https://github.com/quern-dev/quern/releases/tag/v0.22.0
 [0.21.0]: https://github.com/quern-dev/quern/releases/tag/v0.21.0
