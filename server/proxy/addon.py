@@ -1438,9 +1438,25 @@ class IOSDebugAddon:
                     self._trusted_instances = bound
 
     def _bind_trusted(self) -> None:
-        """At load: bind the set handed over at spawn (it also warms the cache)."""
+        """At load: bind the set handed over at spawn, and warm the cache.
+
+        Binds the snapshot and never publishes it. This runs on its own thread
+        while the stdin thread may already be applying a newer set, and calling
+        `_set_trusted` with the snapshot re-published it over that newer one --
+        an older, wider answer landing last (CodeRabbit on #357). So the
+        bindings are installed only if the set is still the very object that
+        was read; anything newer brought its own.
+        """
         try:
-            self._set_trusted(self._trusted_simulators)
+            with self._trust_lock:
+                initial = self._trusted_simulators
+            if not initial:
+                _refresh_launchd_sim_cache()
+                return
+            bound = _bind_to_running_instances(initial)
+            with self._trust_lock:
+                if self._trusted_simulators is initial:
+                    self._trusted_instances = bound
         except Exception:
             pass
 

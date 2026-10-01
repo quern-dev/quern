@@ -275,6 +275,68 @@ class TestTheCommandFailsSafe:
         assert a._untrusted_simulator(_local_client()) == A
 
 
+class TestTheLoadTimeBindNeverRestoresAnOlderSet:
+    """CodeRabbit on #357. `load` binds the set handed over at spawn on its own
+    thread, while the stdin thread may already be applying a newer one. Calling
+    `_set_trusted` with the spawn-time snapshot re-published it over the newer
+    set -- an older, wider answer landing last, one layer below the lock that
+    stops the same thing on the server."""
+
+    def test_a_newer_set_survives_the_load_time_bind(self, monkeypatch):
+        a = IOSDebugAddon()
+        a._trusted_simulators = frozenset({A})  # handed over at spawn
+        landed = []
+
+        def bind(udids):
+            # The stdin thread applies a newer set mid-bind -- once.
+            if not landed:
+                landed.append(1)
+                a._handle_set_trusted_simulators({"udids": [B]})
+            return {u: 100 for u in udids}
+
+        monkeypatch.setattr(addon_mod, "_bind_to_running_instances", bind)
+        monkeypatch.setattr(addon_mod, "_refresh_launchd_sim_cache", lambda: None)
+        a._bind_trusted()
+
+        assert a._trusted_simulators == {B}, "the spawn-time set was put back"
+        assert A not in a._trusted_instances
+
+    def test_it_never_publishes_a_set(self, monkeypatch):
+        """The race itself sits between reading the snapshot and publishing it,
+        which no test can interleave deterministically. So assert the operation
+        that makes the race possible never happens: binding at load reads the
+        set and binds it, and does not write it."""
+        a = IOSDebugAddon()
+        snapshot = frozenset({A})
+        a._trusted_simulators = snapshot
+        published = []
+        monkeypatch.setattr(a, "_set_trusted", lambda t: published.append(t))
+        monkeypatch.setattr(
+            addon_mod, "_bind_to_running_instances", lambda udids: {u: 100 for u in udids},
+        )
+        a._bind_trusted()
+        assert published == [], "the load-time bind re-published the spawn-time set"
+        assert a._trusted_simulators is snapshot
+
+    def test_it_still_binds_when_nothing_raced(self, monkeypatch):
+        a = IOSDebugAddon()
+        a._trusted_simulators = frozenset({A})
+        monkeypatch.setattr(
+            addon_mod, "_bind_to_running_instances", lambda udids: {u: 100 for u in udids},
+        )
+        a._bind_trusted()
+        assert a._trusted_instances == {A: 100}
+
+    def test_an_empty_set_still_warms_the_cache(self, monkeypatch):
+        """The load thread was also what first filled the launchd_sim cache."""
+        warmed = []
+        monkeypatch.setattr(addon_mod, "_refresh_launchd_sim_cache", lambda: warmed.append(1))
+        a = IOSDebugAddon()
+        a._trusted_simulators = frozenset()
+        a._bind_trusted()
+        assert warmed
+
+
 class TestFindingTheSimulatorWithoutASubprocess:
     """The lookup runs inside every TLS handshake, on mitmproxy's event loop,
     so it walks parents with libproc and never forks `ps`."""
