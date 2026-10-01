@@ -28,11 +28,12 @@ import asyncio
 import json
 import logging
 import shutil
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
 from server.config import CONFIG_DIR
-from server.models import DeviceError
+from server.models import AppStateNotFoundError, DeviceError, InvalidAppStatePathError
 
 logger = logging.getLogger(__name__)
 
@@ -285,7 +286,7 @@ async def resolve_container(udid: str, bundle_id: str, container: str) -> Path:
     if container in groups:
         return groups[container]
 
-    raise DeviceError(
+    raise AppStateNotFoundError(
         f"Container {container!r} not found for {bundle_id}. "
         f"Available groups: {list(groups.keys())}",
         tool="simctl",
@@ -297,8 +298,47 @@ async def resolve_container(udid: str, bundle_id: str, container: str) -> Path:
 # ---------------------------------------------------------------------------
 
 
+def checked_name(kind: str, value: str) -> str:
+    """`value` if it is one plain path segment, else `InvalidAppStatePathError`.
+
+    Bundle ids, labels and group ids become directory names under
+    `APP_STATES_DIR`, and delete is an `rmtree` of the result. Unchecked,
+    `bundle_id="../.."` with an existing label named a directory beside
+    `~/.quern`, and `label=".."` named the whole store for that bundle. A
+    leading dot is refused too: dot-names are how an in-progress save is
+    hidden from `list_states`, so a checkpoint called `.x` was saved and then
+    never listed.
+    """
+    if (
+        not value
+        or value.startswith(".")
+        or any(c in value for c in ("/", "\\", "\0"))
+    ):
+        raise InvalidAppStatePathError(
+            f"{kind} {value!r} is not usable as a name: it must be a single path "
+            "segment, not empty, not starting with '.', with no '/', '\\' or NUL",
+            tool="quern",
+        )
+    return value
+
+
+def contained_path(base: Path, relative: str, kind: str = "plist_path") -> Path:
+    """`base / relative`, refused if it resolves outside `base`.
+
+    `relative` comes from the caller, so `../../..` or an absolute path would
+    otherwise read or rewrite any plist on the Mac, not just the app's.
+    """
+    root = base.resolve()
+    full = (base / relative).resolve()
+    if not full.is_relative_to(root):
+        raise InvalidAppStatePathError(
+            f"{kind} {relative!r} leaves its container", tool="quern",
+        )
+    return full
+
+
 def _checkpoint_dir(bundle_id: str, label: str) -> Path:
-    return APP_STATES_DIR / bundle_id / label
+    return APP_STATES_DIR / checked_name("bundle_id", bundle_id) / checked_name("label", label)
 
 
 async def _terminate_app(udid: str, bundle_id: str) -> None:
@@ -323,6 +363,58 @@ async def _copy_container(src: Path, dest: Path) -> None:
     await asyncio.to_thread(shutil.copytree, str(src), str(dest), dirs_exist_ok=True)
 
 
+async def _save_into(
+    checkpoint: Path,
+    udid: str,
+    bundle_id: str,
+    label: str,
+    description: str,
+    include_keychain: bool,
+) -> dict:
+    from server.device.live_plist import capture_preferences
+
+    await _terminate_app(udid, bundle_id)
+
+    # Copy data container, then replace its preference files with what
+    # cfprefsd holds: the files on disk trail the app by seconds.
+    data_path = await get_data_container(udid, bundle_id)
+    data_dest = checkpoint / "data-container"
+    await _copy_container(data_path, data_dest)
+    await capture_preferences(udid, data_path, data_dest, f"{bundle_id}.plist")
+
+    # Copy app group containers
+    groups = await get_app_groups(udid, bundle_id)
+    groups_dest = checkpoint / "app-group"
+    if groups:
+        groups_dest.mkdir(exist_ok=True)
+        for group_id, group_path in groups.items():
+            dest = groups_dest / group_id
+            await _copy_container(group_path, dest)
+            await capture_preferences(udid, group_path, dest, f"{group_id}.plist")
+
+    # Copy the keychain (outside every container — this is what carries the login)
+    keychain_meta: dict = {"captured": False}
+    if include_keychain:
+        keychain_meta = await _save_keychain(udid, checkpoint)
+
+    # Write metadata
+    captured_at = datetime.now(UTC).isoformat()
+    meta = {
+        "label": label,
+        "description": description,
+        "bundle_id": bundle_id,
+        "captured_at": captured_at,
+        "udid": udid,
+        "keychain": keychain_meta,
+        "containers": {
+            "data": str(data_path),
+            "groups": {gid: str(p) for gid, p in groups.items()},
+        },
+    }
+    (checkpoint / ".quern-meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+    return meta
+
+
 async def save_state(
     udid: str,
     bundle_id: str,
@@ -345,48 +437,32 @@ async def save_state(
     if include_keychain:
         await _require_shutdown(udid, "Saving a checkpoint with include_keychain=True")
 
-    checkpoint = _checkpoint_dir(bundle_id, label)
-    if checkpoint.exists():
-        shutil.rmtree(checkpoint)
-    checkpoint.mkdir(parents=True, exist_ok=True)
-
-    # Terminate app before copying
-    await _terminate_app(udid, bundle_id)
-
-    # Copy data container
-    data_path = await get_data_container(udid, bundle_id)
-    data_dest = checkpoint / "data-container"
-    await _copy_container(data_path, data_dest)
-
-    # Copy app group containers
-    groups = await get_app_groups(udid, bundle_id)
-    groups_dest = checkpoint / "app-group"
-    if groups:
-        groups_dest.mkdir(exist_ok=True)
-        for group_id, group_path in groups.items():
-            dest = groups_dest / group_id
-            await _copy_container(group_path, dest)
-
-    # Copy the keychain (outside every container — this is what carries the login)
-    keychain_meta: dict = {"captured": False}
-    if include_keychain:
-        keychain_meta = await _save_keychain(udid, checkpoint)
-
-    # Write metadata
-    captured_at = datetime.now(UTC).isoformat()
-    meta = {
-        "label": label,
-        "description": description,
-        "bundle_id": bundle_id,
-        "captured_at": captured_at,
-        "udid": udid,
-        "keychain": keychain_meta,
-        "containers": {
-            "data": str(data_path),
-            "groups": {gid: str(p) for gid, p in groups.items()},
-        },
-    }
-    (checkpoint / ".quern-meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+    final = _checkpoint_dir(bundle_id, label)
+    # Built beside the final directory and swapped in only once complete. The
+    # old order deleted an existing checkpoint first, so a save that failed
+    # part-way -- an app that is not installed is enough -- destroyed the
+    # checkpoint it was replacing and left an empty directory in its place.
+    # Fixed-length names, so a label near the filesystem's limit does not fail
+    # here having worked before staging existed.
+    token = uuid.uuid4().hex[:8]
+    checkpoint = final.with_name(f".saving-{token}")
+    displaced = final.with_name(f".replaced-{token}")
+    try:
+        checkpoint.mkdir(parents=True)
+        meta = await _save_into(checkpoint, udid, bundle_id, label, description, include_keychain)
+        # Move the old one aside rather than deleting it first, so there is no
+        # moment at which neither copy exists.
+        if final.exists():
+            final.rename(displaced)
+        checkpoint.rename(final)
+    except OSError as e:
+        if displaced.exists() and not final.exists():
+            displaced.rename(final)
+        raise DeviceError(f"Saving checkpoint {label!r} failed: {e}", tool="quern") from e
+    finally:
+        for leftover in (checkpoint, displaced):
+            if leftover.exists():
+                shutil.rmtree(leftover, ignore_errors=True)
 
     logger.info("Saved app state %r for %s (udid=%s)", label, bundle_id, udid[:8])
     return meta
@@ -414,7 +490,7 @@ async def restore_state(
     """
     checkpoint = _checkpoint_dir(bundle_id, label)
     if not checkpoint.exists():
-        raise DeviceError(
+        raise AppStateNotFoundError(
             f"Checkpoint {label!r} not found for {bundle_id}",
             tool="simctl",
         )
@@ -441,13 +517,16 @@ async def restore_state(
     if should_restore_keychain:
         await _require_shutdown(udid, "Restoring a checkpoint that contains a keychain")
 
-    # Terminate app before restoring
+    from server.device.live_plist import preference_plists, push_preferences
+
     await _terminate_app(udid, bundle_id)
+    problems: list[str] = []
 
     # Restore data container — re-resolve live path (UUID may have rotated)
     data_src = checkpoint / "data-container"
     if data_src.exists():
         live_data = await get_data_container(udid, bundle_id)
+        prefs_before = [p.name for p in preference_plists(live_data)]
         # Wipe live container contents
         for child in live_data.iterdir():
             if child.is_dir():
@@ -456,6 +535,9 @@ async def restore_state(
                 child.unlink()
         # Copy checkpoint back
         await asyncio.to_thread(shutil.copytree, str(data_src), str(live_data), dirs_exist_ok=True)
+        problems += await push_preferences(
+            udid, live_data, prefs_before, f"{bundle_id}.plist",
+        )
 
     # Restore app group containers — re-resolve live paths
     groups_src = checkpoint / "app-group"
@@ -469,6 +551,7 @@ async def restore_state(
                 logger.warning("Group %r not found in live simulator, skipping restore", group_id)
                 continue
             live_group_path = live_groups[group_id]
+            group_prefs_before = [p.name for p in preference_plists(live_group_path)]
             # Wipe live group contents
             for child in live_group_path.iterdir():
                 if child.is_dir():
@@ -478,6 +561,9 @@ async def restore_state(
             # Copy checkpoint back
             await asyncio.to_thread(
                 shutil.copytree, str(group_dir), str(live_group_path), dirs_exist_ok=True,
+            )
+            problems += await push_preferences(
+                udid, live_group_path, group_prefs_before, f"{group_id}.plist",
             )
 
     # Restore the keychain last: the container wipe above must not run after it.
@@ -496,6 +582,17 @@ async def restore_state(
                 label,
             )
 
+    meta["preferences"] = {"synced": not problems}
+    if problems:
+        logger.warning("Restored %r, but cfprefsd disagrees: %s", label, problems)
+        meta["preferences"].update({
+            "detail": problems,
+            "warning": (
+                "the files were restored, but cfprefsd still serves other values for "
+                "some preferences, so the app may not see the restored state"
+            ),
+        })
+
     logger.info("Restored app state %r for %s (udid=%s)", label, bundle_id, udid[:8])
     return meta
 
@@ -505,13 +602,14 @@ def list_states(bundle_id: str) -> list[dict]:
 
     Returns a list of metadata dicts sorted by captured_at (newest first).
     """
-    bundle_dir = APP_STATES_DIR / bundle_id
+    bundle_dir = APP_STATES_DIR / checked_name("bundle_id", bundle_id)
     if not bundle_dir.exists():
         return []
 
     results = []
     for label_dir in bundle_dir.iterdir():
-        if not label_dir.is_dir():
+        # A dot-name is a save still being written (see `save_state`).
+        if not label_dir.is_dir() or label_dir.name.startswith("."):
             continue
         meta_path = label_dir / ".quern-meta.json"
         if not meta_path.exists():
@@ -539,7 +637,7 @@ def get_checkpoint_plist_path(
     """
     checkpoint = _checkpoint_dir(bundle_id, label)
     if not checkpoint.exists():
-        raise DeviceError(
+        raise AppStateNotFoundError(
             f"Checkpoint {label!r} not found for {bundle_id}",
             tool="simctl",
         )
@@ -547,17 +645,17 @@ def get_checkpoint_plist_path(
     if container == "data":
         base = checkpoint / "data-container"
     else:
-        base = checkpoint / "app-group" / container
+        base = checkpoint / "app-group" / checked_name("container", container)
 
     if not base.exists():
-        raise DeviceError(
+        raise AppStateNotFoundError(
             f"Container {container!r} not found in checkpoint {label!r}",
             tool="simctl",
         )
 
-    full = base / plist_path
+    full = contained_path(base, plist_path)
     if not full.exists():
-        raise DeviceError(
+        raise AppStateNotFoundError(
             f"Plist {plist_path!r} not found in checkpoint {label!r} container {container!r}",
             tool="simctl",
         )
@@ -569,7 +667,7 @@ def delete_state(bundle_id: str, label: str) -> None:
     """Delete a named checkpoint."""
     checkpoint = _checkpoint_dir(bundle_id, label)
     if not checkpoint.exists():
-        raise DeviceError(
+        raise AppStateNotFoundError(
             f"Checkpoint {label!r} not found for {bundle_id}",
             tool="simctl",
         )

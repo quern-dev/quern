@@ -26,6 +26,11 @@ up can be counted separately from what a person noticed.
 | F7 Xcode 27 moved SimulatorKit | fixed, [#176](https://github.com/quern-dev/quern/pull/176) |
 | F8 Android `clear_text` deletes one character | [#177](https://github.com/quern-dev/quern/issues/177) |
 | F9 `scroll_to_element` intermittently misses a distant row | [#84](https://github.com/quern-dev/quern/issues/84), pre-existing |
+| F19 checkpoint names and plist paths could leave their root | fixed, [#367](https://github.com/quern-dev/quern/issues/367) |
+| F20 a dotted plist key could not be set or removed | fixed, [#367](https://github.com/quern-dev/quern/issues/367) |
+| F21 app-state errors classified by message text | fixed, [#367](https://github.com/quern-dev/quern/issues/367) |
+| F22 restore silently undone by cfprefsd's cache | fixed, [#367](https://github.com/quern-dev/quern/issues/367) |
+| F23 MCP `set_app_plist_value` wrote booleans as 1/0 | fixed, [#367](https://github.com/quern-dev/quern/issues/367) |
 
 ---
 
@@ -678,3 +683,83 @@ older shape and nothing else covers it.
 The product bug is still open. `launch_app` reporting success for a launch that
 cannot survive is what made this cost a suite run to diagnose, and no fixture
 change fixes that for anyone else's app.
+
+## F19 — checkpoint names and plist paths could leave their root
+
+Checkpoints live at `<state>/app-states/<bundle_id>/<label>`, joined from the
+request unchecked, and delete is an `rmtree` of the result. So
+`DELETE /api/v1/device/app/state/Documents?bundle_id=../..` named `~/Documents`,
+and a save with the same names deleted it before copying into it. `label=..`
+named every checkpoint for the bundle. `plist_path` had the same shape against
+the app container, which put any plist on the Mac in reach of the plist read
+and write tools.
+
+Shown by computing the paths, never by sending one that exists: the conformance
+probe uses a label that cannot be there, so on an affected server it answers
+404 and touches nothing. Names are now single path segments and plist paths
+must resolve inside their container; both refuse with 400 before anything --
+the app included -- is touched.
+
+## F20 — a dotted plist key could not be set or removed
+
+`set_app_plist_value` shelled out to `plutil -replace <key>`, and plutil reads
+its argument as a *key path*: `probe.greeting` is `greeting` inside a
+dictionary called `probe`. So every reverse-DNS key -- the ordinary way to name
+a preference -- failed with `Key path not found`, or would have been written
+into a nested dictionary that happened to match. Reads worked, because they
+look keys up literally, which is what made the failure look like a write bug in
+the app. The existing unit tests asserted plutil's argv and could not see it.
+
+Edits now go through plistlib with literal keys, keep the file's format and
+mode, and replace it atomically; a batch is one write, all or nothing.
+
+## F21 — app-state errors were classified by message text
+
+`_handle_device_error` answered 404 for any message containing "not found" and
+"container". Every simulator container path contains `Containers`, so a plutil
+failure that quoted its path became "404" for a container that existed.
+Separately, a batch in which every key failed answered 200 with
+`status: "partial"` and `keys_set: 0`. Not-found is now a type, and a failed
+batch is an error.
+
+## F22 — a restore was silently undone by cfprefsd's cache
+
+Measured on an iOS 18.6 simulator with the probe's State tab: after a restore
+the preferences file said `counter: 1` and the relaunched app said `4`. The
+simulator's cfprefsd caches each app's defaults and serves the cache, not the
+file; it also writes the app's changes out 3s to more than 15s late, so a save
+could capture a stale file and a read could report one.
+
+The fix is to talk to cfprefsd rather than around it, with `defaults` run
+inside the simulator. quern never restarts it.
+
+- **Reads** use `defaults export`. Measured: with the file at 1 and the app at
+  3, it returned 3.
+- **Writes** use `defaults write` / `delete`, and every value is read back,
+  typed, before success is reported. A running app sees the value on its next
+  read; it survives a relaunch.
+- **Save** replaces each copied preference file with `defaults export`, so the
+  checkpoint holds the app's unflushed writes.
+- **Restore** imports each restored file into cfprefsd, deletes the keys the
+  checkpoint lacks, and verifies cfprefsd reads back exactly the checkpoint;
+  a mismatch is a `warning` on the response. Measured: a plain file restore
+  came back with the app's unflushed value in 1 of 3 trials; with the import,
+  3 of 3 were correct, including that case.
+
+A shut-down simulator has no cfprefsd, and there the files are the truth.
+
+The first version restarted cfprefsd instead (`launchctl stop`, which does
+flush before exiting). That made the files current, but restarting the
+daemon under a running app intermittently swallowed the app's own writes --
+about once per full conformance run, never in 39 hand-driven trials -- and a
+restore's restart put every other running app on the simulator at the same
+risk. The tests that caught it still report lag versus loss if it recurs.
+
+## F23 — MCP `set_app_plist_value` wrote booleans as 1 and 0
+
+Its value schema was `z.union([z.string(), z.coerce.number(),
+z.coerce.boolean()])`. `true` fails the string arm and then *succeeds* as a
+coerced number, so it reached the server as `1` and was stored as an integer --
+while the tool description promised a boolean. The batch tool's schema was not
+affected. Now one non-coercing `plistValue` schema serves both.
+

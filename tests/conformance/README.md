@@ -71,6 +71,7 @@ handing that back gets `Invalid device` from simctl.
 | `QUERN_API_KEY` | Override the key. Default: `~/.quern/api-key` |
 | `QUERN_CONFORMANCE_PHYSICAL` | Enable physical-device tests |
 | `QUERN_CONFORMANCE_DESTRUCTIVE` | Enable host-mutating tests |
+| `QUERN_CONFORMANCE_DEVICES` | Comma-separated UDIDs or unambiguous prefixes; the run uses only these. Set it on a machine other sessions share -- unpinned, the suite takes the first booted device of each kind, which may be someone else's |
 
 Resolution is read from the **real** home directory on purpose. The root
 `tests/conftest.py` repoints `QUERN_STATE_DIR` at a temp directory before any
@@ -125,12 +126,13 @@ suite that skips everything has not passed; it has not run.
 
 ## Categories
 
-Status as of the current branch.
+Status as of the current branch. Test counts are functions, before
+parametrisation; probe-driven tests run once per platform present.
 
 | # | Category | Module | State |
 |---|---|---|---|
 | 1 | Discovery & device mapping | `test_00_environment.py` | **done** — 9 tests |
-| 2 | Authentication & public surface | `test_auth.py` | **done** — 7 tests, sweeps all 122 protected operations |
+| 2 | Authentication & public surface | `test_auth.py` | **done** — 10 tests, sweeps every protected operation in `/openapi.json` |
 | 3 | Mocks & bypass list | `test_proxy_mocks.py` | **done** — 23 tests, found F3 |
 | 4 | Logs: query, summary, cursors | `test_logs.py` | **done** — 20 tests, found F4 |
 | 5 | System, update channel, doctor | `test_system.py` | todo |
@@ -139,9 +141,9 @@ Status as of the current branch.
 | 8 | Device pool: resolve, ensure, active | `test_device_pool.py` | todo |
 | 9 | Device lifecycle: boot, shutdown, erase | `test_device_lifecycle.py` | todo (erase is destructive) |
 | 10 | App install / launch / terminate / list | `test_apps.py` | todo — drives QuernProbe |
-| 11 | UI: tree, tap, type, swipe, scroll, wait | `test_ui.py` | todo — drives QuernProbe |
+| 11 | UI: tree, tap, type, swipe, scroll, wait | `test_ui.py` | **done** — 23 tests, run against both platforms' QuernProbe |
 | 12 | Screenshots, annotation, timeline | `test_screenshots.py` | todo |
-| 13 | App state checkpoints & plist | `test_app_state.py` | todo — drives QuernProbe |
+| 13 | App state checkpoints & plist | `test_app_state.py` | **in progress** — 17 tests (24 with parametrisation) on QuernProbe's new State tab; 7 fail on current `main` (F19–F22) |
 | 14 | Landmarks & screen identification | `test_landmarks.py` | todo — drives QuernProbe |
 | 15 | Device configuration (locale, font, density, GPS) | `test_device_config.py` | todo |
 | 16 | Certificates & trust | `test_certs.py` | todo — destructive |
@@ -158,7 +160,7 @@ this repo — a mirrored pair, which is exactly the shape this suite wants:
 
 | | iOS | Android |
 |---|---|---|
-| Source | `tools/probe-app/` (UIKit, 11 Swift files) | `tools/probe-app-android/` (Kotlin, 8 fragments) |
+| Source | `tools/probe-app/` (UIKit, 12 Swift files) | `tools/probe-app-android/` (Kotlin, 8 fragments) |
 | Bundle / package | `com.quern.probe` | `com.quern.probe` |
 | Build | `./build.sh [--install [udid]]`, bare `swiftc` into a hand-assembled bundle — no Xcode project | `./build.sh [--install [serial]]`, Gradle; finds its own JDK |
 | Self-test | `selftest.py`, drives the app over Quern's REST API | `selftest.py` |

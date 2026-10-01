@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import plistlib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,12 +11,49 @@ import pytest
 
 import server.device.app_state as app_state_module
 from server.device.app_state import (
+    checked_name,
+    contained_path,
+    delete_state,
     get_app_groups,
+    get_checkpoint_plist_path,
     list_states,
     restore_state,
     save_state,
 )
-from server.models import DeviceError
+from server.models import AppStateNotFoundError, DeviceError, InvalidAppStatePathError
+
+
+@pytest.fixture(autouse=True)
+def _shut_down(monkeypatch):
+    """By default the simulator reads as shut down, so save and restore have
+    no cfprefsd to talk to. `cfprefsd` boots it for the tests that need one."""
+    monkeypatch.setattr(
+        "server.device.live_plist.get_device_state", AsyncMock(return_value="Shutdown"),
+    )
+
+
+@pytest.fixture
+def cfprefsd(monkeypatch):
+    from tests.test_app_state_api import FakeCfprefsd
+
+    fake = FakeCfprefsd()
+    monkeypatch.setattr(
+        "server.device.live_plist.get_device_state", AsyncMock(return_value="Booted"),
+    )
+    monkeypatch.setattr("server.device.live_plist._defaults", fake)
+    return fake
+
+
+@pytest.fixture
+def store(tmp_path, monkeypatch):
+    """APP_STATES_DIR in a temp tree, with a directory beside it to protect."""
+    root = tmp_path / "state" / "app-states"
+    root.mkdir(parents=True)
+    monkeypatch.setattr(app_state_module, "APP_STATES_DIR", root)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "precious.txt").write_text("keep me")
+    return root
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -596,3 +634,337 @@ class TestDataContainerDiscovery:
             pytest.raises(DeviceError, match="Could not get data container"),
         ):
             await app_state_module.get_data_container("TEST-UDID", "com.missing.App")
+
+
+# ---------------------------------------------------------------------------
+# Names and paths cannot leave their root
+# ---------------------------------------------------------------------------
+
+
+class TestNamesStayInTheStore:
+    @pytest.mark.parametrize(
+        "bad", ["", ".", "..", "../..", "a/b", "a\\b", "a\0b", ".hidden", "..hidden"],
+    )
+    def test_a_name_that_is_not_one_segment_is_refused(self, bad):
+        with pytest.raises(InvalidAppStatePathError):
+            checked_name("label", bad)
+
+    @pytest.mark.parametrize("ok", ["baseline", "com.example.App", "a..b", "v1.2", "x" * 245])
+    def test_ordinary_names_pass(self, ok):
+        assert checked_name("label", ok) == ok
+
+    def test_delete_with_a_climbing_bundle_id_touches_nothing(self, store, tmp_path):
+        """`../..` from `state/app-states` is `tmp_path`, where `victim` lives.
+
+        The bug this pins: delete was an unchecked `rmtree` of
+        `APP_STATES_DIR / bundle_id / label`.
+        """
+        with pytest.raises(InvalidAppStatePathError):
+            delete_state("../..", "victim")
+        assert (tmp_path / "victim" / "precious.txt").read_text() == "keep me"
+
+    def test_delete_with_a_dot_dot_label_keeps_every_checkpoint(self, store):
+        (store / "com.example.App" / "keep").mkdir(parents=True)
+        with pytest.raises(InvalidAppStatePathError):
+            delete_state("com.example.App", "..")
+        assert (store / "com.example.App" / "keep").is_dir()
+
+    async def test_save_with_a_climbing_bundle_id_touches_nothing(self, store, tmp_path):
+        """Save `rmtree`d an existing directory at the target before copying."""
+        with (
+            patch("server.device.app_state._terminate_app", AsyncMock()) as terminate,
+            patch("server.device.app_state.get_data_container", AsyncMock()),
+        ):
+            with pytest.raises(InvalidAppStatePathError):
+                await save_state("TEST-UDID", "../..", "victim")
+        assert (tmp_path / "victim" / "precious.txt").read_text() == "keep me"
+        terminate.assert_not_called()
+
+    async def test_restore_with_a_climbing_label_is_refused_before_the_app_is_touched(
+        self, store,
+    ):
+        with patch("server.device.app_state._terminate_app", AsyncMock()) as terminate:
+            with pytest.raises(InvalidAppStatePathError):
+                await restore_state("TEST-UDID", "com.example.App", "..")
+        terminate.assert_not_called()
+
+    def test_list_refuses_a_climbing_bundle_id(self, store):
+        with pytest.raises(InvalidAppStatePathError):
+            list_states("..")
+
+    @pytest.mark.parametrize("bad", ["../../../etc/x.plist", "/etc/x.plist", "a/../../x.plist"])
+    def test_a_plist_path_cannot_leave_its_container(self, tmp_path, bad):
+        base = tmp_path / "container"
+        base.mkdir()
+        with pytest.raises(InvalidAppStatePathError):
+            contained_path(base, bad)
+
+    def test_a_container_reached_through_a_symlink_still_works(self, tmp_path):
+        """People relocate CoreSimulator/Devices behind a symlink. Containment
+        compares resolved paths on both sides, or every path is refused."""
+        real = tmp_path / "real"
+        (real / "Library").mkdir(parents=True)
+        link = tmp_path / "link"
+        link.symlink_to(real)
+        assert contained_path(link, "Library/p.plist") == real / "Library" / "p.plist"
+
+    def test_a_nested_plist_path_is_fine(self, tmp_path):
+        base = tmp_path / "container"
+        base.mkdir()
+        got = contained_path(base, "Library/Preferences/../Preferences/a.plist")
+        assert got == (base / "Library" / "Preferences" / "a.plist").resolve()
+
+    def test_a_checkpoint_plist_path_cannot_leave_the_checkpoint(self, store):
+        (store / "com.example.App" / "base" / "data-container").mkdir(parents=True)
+        with pytest.raises(InvalidAppStatePathError):
+            get_checkpoint_plist_path("com.example.App", "base", "data", "../../../../victim")
+        with pytest.raises(InvalidAppStatePathError):
+            get_checkpoint_plist_path("com.example.App", "base", "../..", "x.plist")
+
+
+class TestNotFoundIsTyped:
+    async def test_restoring_a_missing_checkpoint(self, store):
+        with pytest.raises(AppStateNotFoundError):
+            await restore_state("TEST-UDID", "com.example.App", "nope")
+
+    def test_deleting_a_missing_checkpoint(self, store):
+        with pytest.raises(AppStateNotFoundError):
+            delete_state("com.example.App", "nope")
+
+
+# ---------------------------------------------------------------------------
+# A failed save does not cost the checkpoint it was replacing
+# ---------------------------------------------------------------------------
+
+
+class TestSaveIsAllOrNothing:
+    async def test_a_failed_save_keeps_the_previous_checkpoint(self, store, tmp_path):
+        old = store / "com.example.App" / "baseline"
+        old.mkdir(parents=True)
+        (old / ".quern-meta.json").write_text('{"label": "baseline", "v": 1}')
+        with (
+            patch("server.device.app_state._terminate_app", AsyncMock()),
+            patch(
+                "server.device.app_state.get_data_container",
+                AsyncMock(side_effect=DeviceError("app not installed", tool="simctl")),
+            ),
+        ):
+            with pytest.raises(DeviceError, match="not installed"):
+                await save_state("TEST-UDID", "com.example.App", "baseline")
+        assert json.loads((old / ".quern-meta.json").read_text())["v"] == 1
+        assert sorted(p.name for p in old.parent.iterdir()) == ["baseline"], (
+            "a staging directory was left behind"
+        )
+
+    async def test_a_copy_that_fails_midway_is_a_device_error_and_keeps_the_old_one(
+        self, store, tmp_path,
+    ):
+        old = store / "com.example.App" / "baseline"
+        old.mkdir(parents=True)
+        (old / ".quern-meta.json").write_text('{"v": 1}')
+        data = tmp_path / "sim-data"
+        data.mkdir()
+        with (
+            patch("server.device.app_state._terminate_app", AsyncMock()),
+            patch("server.device.app_state.get_data_container", AsyncMock(return_value=data)),
+            patch(
+                "server.device.app_state._copy_container",
+                AsyncMock(side_effect=OSError(63, "File name too long")),
+            ),
+        ):
+            with pytest.raises(DeviceError, match="File name too long"):
+                await save_state("TEST-UDID", "com.example.App", "baseline")
+        assert json.loads((old / ".quern-meta.json").read_text()) == {"v": 1}
+        assert sorted(p.name for p in old.parent.iterdir()) == ["baseline"]
+
+    async def test_a_label_near_the_name_limit_saves(self, store, tmp_path):
+        """Staging once added the label's length to its own name."""
+        data = tmp_path / "sim-data"
+        data.mkdir()
+        label = "x" * 245
+        with (
+            patch("server.device.app_state._terminate_app", AsyncMock()),
+            patch("server.device.app_state.get_data_container", AsyncMock(return_value=data)),
+            patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
+        ):
+            await save_state("TEST-UDID", "com.example.App", label)
+        assert (store / "com.example.App" / label / ".quern-meta.json").exists()
+
+    async def test_a_successful_save_replaces_the_previous_one(self, store, tmp_path):
+        old = store / "com.example.App" / "baseline"
+        old.mkdir(parents=True)
+        (old / "stale.txt").write_text("old")
+        data = tmp_path / "sim-data"
+        data.mkdir()
+        (data / "new.txt").write_text("new")
+        with (
+            patch("server.device.app_state._terminate_app", AsyncMock()),
+            patch("server.device.app_state.get_data_container", AsyncMock(return_value=data)),
+            patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
+        ):
+            await save_state("TEST-UDID", "com.example.App", "baseline")
+        assert not (old / "stale.txt").exists()
+        assert (old / "data-container" / "new.txt").read_text() == "new"
+        assert sorted(p.name for p in old.parent.iterdir()) == ["baseline"]
+
+    def test_a_save_in_progress_is_not_listed(self, store):
+        staging = store / "com.example.App" / ".baseline.saving-1234"
+        staging.mkdir(parents=True)
+        (staging / ".quern-meta.json").write_text('{"label": "baseline"}')
+        assert list_states("com.example.App") == []
+
+
+# ---------------------------------------------------------------------------
+# cfprefsd: a save captures what it holds; a restore hands it the files back
+# ---------------------------------------------------------------------------
+
+
+def _prefs(container: Path, name: str = "com.example.App.plist") -> Path:
+    path = container / "Library" / "Preferences" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+class TestSaveCapturesWhatCfprefsdHolds:
+    async def test_the_checkpoint_has_the_apps_unflushed_writes(
+        self, store, tmp_path, cfprefsd,
+    ):
+        """The file on disk says 1; the app had written 3."""
+        live = tmp_path / "live"
+        prefs = _prefs(live)
+        prefs.write_bytes(plistlib.dumps({"probe.counter": 1}))
+        cfprefsd.domains[str(prefs.with_suffix(""))] = {"probe.counter": 3}
+        with (
+            patch("server.device.app_state._terminate_app", AsyncMock()),
+            patch("server.device.app_state.get_data_container", AsyncMock(return_value=live)),
+            patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
+        ):
+            await save_state("TEST-UDID", "com.example.App", "b")
+        saved = store / "com.example.App" / "b" / "data-container" / prefs.relative_to(live)
+        assert plistlib.loads(saved.read_bytes()) == {"probe.counter": 3}
+
+    async def test_a_domain_only_cfprefsd_holds_is_captured(
+        self, store, tmp_path, cfprefsd,
+    ):
+        """No file on disk yet -- the app's first writes, or a value quern just
+        set through cfprefsd -- and enumerating files alone skipped it."""
+        live = tmp_path / "live"
+        (live / "Library" / "Preferences").mkdir(parents=True)
+        domain = str(live / "Library" / "Preferences" / "com.example.App")
+        cfprefsd.domains[domain] = {"first.launch": True}
+        with (
+            patch("server.device.app_state._terminate_app", AsyncMock()),
+            patch("server.device.app_state.get_data_container", AsyncMock(return_value=live)),
+            patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
+        ):
+            await save_state("TEST-UDID", "com.example.App", "b")
+        saved = (store / "com.example.App" / "b" / "data-container" / "Library"
+                 / "Preferences" / "com.example.App.plist")
+        assert plistlib.loads(saved.read_bytes()) == {"first.launch": True}
+
+    async def test_an_empty_standard_domain_does_not_invent_a_file(
+        self, store, tmp_path, cfprefsd,
+    ):
+        live = tmp_path / "live"
+        live.mkdir()
+        with (
+            patch("server.device.app_state._terminate_app", AsyncMock()),
+            patch("server.device.app_state.get_data_container", AsyncMock(return_value=live)),
+            patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
+        ):
+            await save_state("TEST-UDID", "com.example.App", "b")
+        prefs = store / "com.example.App" / "b" / "data-container" / "Library" / "Preferences"
+        assert not prefs.exists() or not any(prefs.iterdir())
+
+    async def test_a_capture_that_fails_fails_the_save_and_keeps_the_old_one(
+        self, store, tmp_path, cfprefsd, monkeypatch,
+    ):
+        old = store / "com.example.App" / "b"
+        old.mkdir(parents=True)
+        (old / ".quern-meta.json").write_text('{"v": 1}')
+        live = tmp_path / "live"
+        _prefs(live).write_bytes(plistlib.dumps({}))
+
+        async def broken(udid, *args):
+            raise DeviceError("defaults export failed: boom", tool="defaults")
+
+        monkeypatch.setattr("server.device.live_plist._defaults", broken)
+        with (
+            patch("server.device.app_state._terminate_app", AsyncMock()),
+            patch("server.device.app_state.get_data_container", AsyncMock(return_value=live)),
+            patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
+        ):
+            with pytest.raises(DeviceError, match="boom"):
+                await save_state("TEST-UDID", "com.example.App", "b")
+        assert json.loads((old / ".quern-meta.json").read_text()) == {"v": 1}
+
+
+class TestRestorePushesTheFilesIntoCfprefsd:
+    @pytest.fixture
+    def setup(self, store, tmp_path):
+        checkpoint = store / "com.example.App" / "b"
+        saved = _prefs(checkpoint / "data-container")
+        saved.write_bytes(plistlib.dumps({"probe.counter": 1, "probe.greeting": "saved"}))
+        (checkpoint / ".quern-meta.json").write_text('{"label": "b"}')
+        live = tmp_path / "live"
+        live_prefs = _prefs(live)
+        live_prefs.write_bytes(plistlib.dumps({"probe.counter": 3}))
+        return live, live_prefs
+
+    async def _restore(self, live):
+        with (
+            patch("server.device.app_state._terminate_app", AsyncMock()),
+            patch("server.device.app_state.get_data_container", AsyncMock(return_value=live)),
+            patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
+        ):
+            return await restore_state("TEST-UDID", "com.example.App", "b")
+
+    async def test_cfprefsd_ends_up_holding_exactly_the_checkpoint(self, setup, cfprefsd):
+        """It held 3 and a key the checkpoint never had. Measured live: left
+        alone, cfprefsd served the 3 and later wrote it over the file."""
+        live, live_prefs = setup
+        domain = str(live_prefs.with_suffix(""))
+        cfprefsd.domains[domain] = {"probe.counter": 3, "probe.flag": True}
+        meta = await self._restore(live)
+        assert cfprefsd.domains[domain] == {"probe.counter": 1, "probe.greeting": "saved"}
+        assert meta["preferences"] == {"synced": True}
+
+    async def test_a_domain_the_checkpoint_lacks_is_emptied(self, setup, cfprefsd):
+        live, _ = setup
+        extra = _prefs(live, "com.example.Other.plist")
+        extra.write_bytes(plistlib.dumps({"x": 1}))
+        cfprefsd.domains[str(extra.with_suffix(""))] = {"x": 1}
+        await self._restore(live)
+        assert cfprefsd.domains[str(extra.with_suffix(""))] == {}
+
+    async def test_a_cached_only_standard_domain_is_emptied_when_the_checkpoint_lacks_it(
+        self, store, tmp_path, cfprefsd,
+    ):
+        checkpoint = store / "com.example.App" / "b"
+        (checkpoint / "data-container").mkdir(parents=True)
+        (checkpoint / ".quern-meta.json").write_text('{"label": "b"}')
+        live = tmp_path / "live"
+        live.mkdir()
+        domain = str(live / "Library" / "Preferences" / "com.example.App")
+        cfprefsd.domains[domain] = {"set.after.save": 1}
+        await self._restore(live)
+        assert cfprefsd.domains[domain] == {}
+
+    async def test_a_value_cfprefsd_will_not_take_is_a_warning(self, setup, cfprefsd):
+        live, live_prefs = setup
+        cfprefsd.domains[str(live_prefs.with_suffix(""))] = {"probe.counter": 3}
+        cfprefsd.drop_imports = True
+        meta = await self._restore(live)
+        assert meta["preferences"]["synced"] is False
+        assert "may not see the restored state" in meta["preferences"]["warning"]
+
+    async def test_cfprefsd_is_never_restarted(self, setup, cfprefsd):
+        live, _ = setup
+        await self._restore(live)
+        assert {c[0] for c in cfprefsd.calls} <= {"export", "import", "delete"}
+
+    async def test_a_shut_down_simulator_needs_nothing_but_the_files(self, setup):
+        live, live_prefs = setup
+        meta = await self._restore(live)
+        assert plistlib.loads(live_prefs.read_bytes())["probe.counter"] == 1
+        assert meta["preferences"] == {"synced": True}

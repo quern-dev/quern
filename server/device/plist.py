@@ -1,14 +1,21 @@
-"""Thin subprocess wrapper around plutil for plist read/write, plus plistlib for reading."""
+"""Plist reading, editing and diffing, all through plistlib.
+
+No `plutil`: it addresses keys by key path, which makes every dotted key
+unreachable, and it does not exist on Linux.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import datetime
+import os
 import plistlib
+import shutil
+import uuid
 from pathlib import Path
 from typing import Any
 
-from server.models import DeviceError
+from server.models import AppStateNotFoundError, DeviceError
 
 
 def _make_json_safe(obj: Any) -> Any:
@@ -44,42 +51,98 @@ async def read_plist(path: Path) -> dict:
     except Exception as e:
         raise DeviceError(
             f"plistlib read failed for {path}: {e}",
-            tool="plutil",
+            tool="plistlib",
         )
     return _make_json_safe(raw)
 
 
-async def set_plist_value(path: Path, key: str, value: Any) -> None:
-    """Set a key in a plist file using plutil.
+def _plist_type_for(value: Any) -> Any:
+    """The value as plistlib should store it: numbers and booleans as
+    themselves (plistlib writes `True` as `<true/>`, not as the int it also
+    is), anything else as its string form."""
+    if isinstance(value, (bool, int, float)):
+        return value
+    return str(value)
 
-    Type inference: bool → -bool, int → -integer, float → -float, everything else → -string.
 
-    Uses: plutil -replace <key> -<type> <value> <path>
-    """
-    if isinstance(value, bool):
-        type_flag = "-bool"
-        str_value = "true" if value else "false"
-    elif isinstance(value, int):
-        type_flag = "-integer"
-        str_value = str(value)
-    elif isinstance(value, float):
-        type_flag = "-float"
-        str_value = str(value)
-    else:
-        type_flag = "-string"
-        str_value = str(value)
-
-    proc = await asyncio.create_subprocess_exec(
-        "plutil", "-replace", key, type_flag, str_value, str(path),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
+def _load_for_edit(path: Path) -> tuple[dict, plistlib.PlistFormat]:
+    raw = path.read_bytes()
+    fmt = plistlib.FMT_BINARY if raw.startswith(b"bplist00") else plistlib.FMT_XML
+    data = plistlib.loads(raw)
+    if not isinstance(data, dict):
         raise DeviceError(
-            f"plutil set failed for {path} key {key!r}: {stderr.decode().strip()}",
-            tool="plutil",
+            f"{path} holds a {type(data).__name__}, not a dictionary; "
+            "only top-level keys can be edited",
+            tool="plistlib",
         )
+    return data, fmt
+
+
+def _write_atomically(path: Path, data: dict, fmt: plistlib.PlistFormat) -> None:
+    """Replace `path` in one step, keeping its format and permissions.
+
+    A reader -- cfprefsd, or the app -- must never see a half-written file, so
+    the new contents go to a sibling and are renamed over the original.
+    """
+    tmp = path.with_name(f".{path.name}.quern-{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        tmp.write_bytes(plistlib.dumps(data, fmt=fmt))
+        shutil.copymode(path, tmp)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _edit(path: Path, change) -> None:
+    try:
+        data, fmt = _load_for_edit(path)
+        change(data)
+        _write_atomically(path, data, fmt)
+    except DeviceError:
+        raise
+    except Exception as e:
+        # Broad on purpose. plistlib raises far more than its documented
+        # InvalidFileException -- `ExpatError` for broken XML, `AttributeError`
+        # for a bad <date>, OverflowError for a big int -- and each one that
+        # escaped here became an undetailed 500.
+        raise DeviceError(f"editing {path} failed: {type(e).__name__}: {e}", tool="plistlib") from e
+
+
+async def set_plist_values(path: Path, values: dict[str, Any]) -> None:
+    """Set top-level keys in a plist file, all in one write.
+
+    Keys are taken literally. This used to shell out to `plutil -replace`,
+    which reads its argument as a *key path* -- so `probe.greeting` meant key
+    `greeting` inside a dictionary called `probe`, and every reverse-DNS key
+    (the ordinary way to name a preference) failed with "Key path not found",
+    or was written into a nested dictionary that happened to match.
+
+    All or nothing: either every key is written or the file is untouched.
+
+    Type inference: bool -> <true/>/<false/>, int -> <integer>, float -> <real>,
+    everything else -> <string>.
+    """
+    converted = {key: _plist_type_for(value) for key, value in values.items()}
+    await asyncio.to_thread(_edit, path, lambda data: data.update(converted))
+
+
+async def set_plist_value(path: Path, key: str, value: Any) -> None:
+    """Set one top-level key. See `set_plist_values`."""
+    await set_plist_values(path, {key: value})
+
+
+async def remove_plist_key(path: Path, key: str) -> None:
+    """Remove a top-level key, taken literally.
+
+    Raises `AppStateNotFoundError` when the key is not there, rather than
+    reporting a removal that did nothing.
+    """
+    def _remove(data: dict) -> None:
+        if key not in data:
+            raise AppStateNotFoundError(f"Key {key!r} not found in {path.name}", tool="plistlib")
+        del data[key]
+
+    await asyncio.to_thread(_edit, path, _remove)
 
 
 def diff_plists(old: dict, new: dict) -> dict:
@@ -99,21 +162,3 @@ def diff_plists(old: dict, new: dict) -> dict:
             changed[k] = {"old": old[k], "new": new[k]}
 
     return {"added": added, "removed": removed, "changed": changed}
-
-
-async def remove_plist_key(path: Path, key: str) -> None:
-    """Remove a key from a plist file using plutil.
-
-    Uses: plutil -remove <key> <path>
-    """
-    proc = await asyncio.create_subprocess_exec(
-        "plutil", "-remove", key, str(path),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise DeviceError(
-            f"plutil remove failed for {path} key {key!r}: {stderr.decode().strip()}",
-            tool="plutil",
-        )

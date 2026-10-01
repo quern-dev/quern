@@ -6,7 +6,17 @@ import enum
 from datetime import UTC, date, datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 
 def _as_utc(value: datetime | None) -> datetime | None:
@@ -1614,6 +1624,27 @@ class DeviceOperationUnsupportedError(DeviceError):
     """
 
 
+class AppStateNotFoundError(DeviceError):
+    """A checkpoint, container, plist or key that the request named is not there.
+
+    Typed so the app-state routes answer 404 by what happened rather than by
+    what the message says. They used to match "not found" plus "container" in
+    the text, and every simulator container path contains `Containers` -- so a
+    plutil failure whose stderr said "Key path not found" was reported as a
+    404 for a container that existed.
+    """
+
+
+class InvalidAppStatePathError(DeviceError):
+    """A bundle id, label, container or plist path that would leave its root.
+
+    Checkpoints are directories named after the bundle id and label, and
+    delete is an `rmtree` of that directory -- so `bundle_id="../.."` once
+    reached a directory beside `~/.quern`. Refused with a 400 before any path
+    is touched.
+    """
+
+
 class BootIncompleteError(DeviceError):
     """An emulator came up -- adb lists it -- but Android did not finish starting.
 
@@ -2467,6 +2498,11 @@ class ReadAppPlistRequest(BaseModel):
     udid: str | None = None
 
 
+#: A value the plist tools can store. Strict, so `true` stays a boolean and
+#: `"1"` stays a string rather than being coerced to the other's type.
+PlistScalar = StrictBool | StrictInt | StrictFloat | StrictStr
+
+
 class SetAppPlistValueRequest(BaseModel):
     """Request body for POST /api/v1/device/app/state/plist."""
 
@@ -2474,7 +2510,10 @@ class SetAppPlistValueRequest(BaseModel):
     container: str
     plist_path: str
     key: str
-    value: object
+    #: Scalars only, each kept as its own type. `object` let a list or null
+    #: through to be stored as its Python repr -- "[1, 2]", "None" -- with a
+    #: 200, which is a failure that reads as success.
+    value: PlistScalar
     udid: str | None = None
 
 
@@ -2484,7 +2523,7 @@ class SetAppPlistValuesRequest(BaseModel):
     bundle_id: str
     container: str
     plist_path: str
-    values: dict[str, object]  # key → value mapping
+    values: dict[str, PlistScalar]
     udid: str | None = None
 
 

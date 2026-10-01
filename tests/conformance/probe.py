@@ -108,6 +108,15 @@ class Ids:
     # Diag tab
     CRASH_UNCAUGHT = "crash_uncaught"
 
+    # State tab -- the app's one persistent surface, for the app-state tools
+    STATE_GREETING = "state_greeting"
+    STATE_COUNTER = "state_counter"
+    STATE_FLAG = "state_flag"
+    STATE_INCREMENT = "state_increment"
+    STATE_TOGGLE_FLAG = "state_toggle_flag"
+    STATE_RELOAD = "state_reload"
+    STATE_RESET = "state_reset"
+
 
 #: Rows the scroll tab guarantees. `row_0` is on screen at rest; the last one is
 #: reachable only by actually scrolling, which is what makes it a scroll test
@@ -197,6 +206,13 @@ IOS = ProbeContract(
         Ids.WEB_VIEW: "web_view",
         Ids.WEB_HEADING_NATIVE: "web_heading_native",
         Ids.CRASH_UNCAUGHT: "diag_crash_uncaught",
+        Ids.STATE_GREETING: "state_greeting",
+        Ids.STATE_COUNTER: "state_counter",
+        Ids.STATE_FLAG: "state_flag",
+        Ids.STATE_INCREMENT: "state_increment",
+        Ids.STATE_TOGGLE_FLAG: "state_toggle_flag",
+        Ids.STATE_RELOAD: "state_reload",
+        Ids.STATE_RESET: "state_reset",
     },
     tab_identifier="tab_{name}",
     row_identifier_template="row_{index}",
@@ -236,6 +252,15 @@ ANDROID = ProbeContract(
         Ids.WEB_VIEW: "web_view",
         Ids.WEB_HEADING_NATIVE: "web_heading_native",
         Ids.CRASH_UNCAUGHT: "diag_crash_uncaught",
+        # No State tab: the app-state tools are simulator-only and refuse on
+        # Android (#314), so there is nothing for one to exercise yet.
+        Ids.STATE_GREETING: None,
+        Ids.STATE_COUNTER: None,
+        Ids.STATE_FLAG: None,
+        Ids.STATE_INCREMENT: None,
+        Ids.STATE_TOGGLE_FLAG: None,
+        Ids.STATE_RELOAD: None,
+        Ids.STATE_RESET: None,
     },
     tab_identifier=None,
     row_identifier_template=None,
@@ -255,7 +280,7 @@ CONTRACTS = {"ios": IOS, "android": ANDROID}
 #: tabs. Measured against the live screen, which reports exactly
 #: `Text, Controls, Scroll, Links, More`.
 IOS_BAR_TABS = ("text", "controls", "scroll", "links")
-IOS_MORE_TABS = ("logs", "location", "web", "diag")
+IOS_MORE_TABS = ("logs", "location", "web", "diag", "state")
 
 
 class ProbeUnavailable(RuntimeError):

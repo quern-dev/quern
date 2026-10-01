@@ -15,6 +15,7 @@ unavailable, and the environment report prints it.
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -23,6 +24,14 @@ from typing import Any
 import httpx
 
 from tests.conformance.client import QuernClient
+
+#: Comma-separated UDIDs (or unambiguous prefixes) the run may use. Unset means
+#: any device the server lists. Exists because "any booted, first by udid" is
+#: not a safe default on a machine several sessions share: a run once picked up
+#: another session's throwaway simulator with WebDriverAgent on it, and WDA
+#: poisons the accessibility tree sim-bridge reads -- so the failures looked
+#: like flaky UI tests on our side rather than a stolen device.
+PIN_ENV = "QUERN_CONFORMANCE_DEVICES"
 
 #: `/tools` probes every device CLI, and a wedged one blocks the response.
 #: Short on purpose: if tool discovery cannot answer in this long, the run needs
@@ -149,7 +158,11 @@ class Environment:
     authenticated: bool
     tools: dict[str, bool] = field(default_factory=dict)
     tools_error: str = ""
+    #: The devices this run may use -- everything listed, unless pinned.
     devices: list[Device] = field(default_factory=list)
+    #: Everything `/device/list` returned, pinned or not. Tests about the
+    #: server's listing compare against this, not against the run's subset.
+    listed_devices: list[Device] = field(default_factory=list)
     devices_error: str = ""
     roles: dict[Role, RoleAvailability] = field(default_factory=dict)
     #: Seconds each discovery probe took; slow discovery is itself a signal.
@@ -192,6 +205,8 @@ class Environment:
                 lines.append(f"  missing   {', '.join(missing)}")
         if self.devices_error:
             lines.append(f"  devices   UNAVAILABLE — {self.devices_error}")
+        elif os.environ.get(PIN_ENV, "").strip():
+            lines.append(f"  pinned    {PIN_ENV}={os.environ[PIN_ENV].strip()}")
 
         for role in Role:
             avail = self.roles.get(role)
@@ -233,6 +248,9 @@ def discover(client: QuernClient, *, authenticated: bool) -> Environment:
 
     env.tools, env.tools_error = _probe_tools(env, client)
     env.devices, env.devices_error = _probe_devices(env, client, authenticated=authenticated)
+    env.listed_devices = list(env.devices)
+    if not env.devices_error:
+        env.devices, env.devices_error = _apply_pin(env.devices, os.environ.get(PIN_ENV, ""))
     env.roles = _map_roles(env)
     return env
 
@@ -331,6 +349,30 @@ def _probe_devices(
         env.tools = {str(k): bool(v) for k, v in body["tools"].items()}
         env.tools_error += " (recovered from /device/list)"
     return devices, ""
+
+
+def _apply_pin(devices: list[Device], spec: str) -> tuple[list[Device], str]:
+    """Restrict discovery to the devices `QUERN_CONFORMANCE_DEVICES` names.
+
+    A name that matches nothing, or more than one device, is a discovery error
+    rather than a quiet narrowing: a typo that silently skipped every tier would
+    read as a machine with no hardware, which is the absent-vs-broken confusion
+    this module exists to avoid.
+    """
+    wanted = [w.strip() for w in spec.split(",") if w.strip()]
+    if not wanted:
+        return devices, ""
+    kept: list[Device] = []
+    for name in wanted:
+        hits = [d for d in devices if d.udid.lower().startswith(name.lower())]
+        if len(hits) != 1:
+            problem = "matches no listed device" if not hits else (
+                f"is ambiguous ({', '.join(d.udid[:12] for d in hits)})"
+            )
+            return [], f"{PIN_ENV} entry {name!r} {problem}"
+        if hits[0] not in kept:
+            kept.append(hits[0])
+    return kept, ""
 
 
 def _map_roles(env: Environment) -> dict[Role, RoleAvailability]:
