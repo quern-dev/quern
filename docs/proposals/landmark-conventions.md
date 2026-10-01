@@ -318,15 +318,28 @@ Every pair and family in §2.2 is backed by an observed element in §1, and new
 entries are added the same way. The probe screens in §5 exist to make that
 possible for types it did not have.
 
+### ADR 5 — Equivalence applies to undeclared files too
+
+**Date:** 2026-10-01 · **Status:** accepted (was open question 1)
+
+Files that declare no `landmark_conventions` (every knowledge base written
+before this spec) get the §2 matching rule as well. The widening is safe under
+§2.1, existing knowledge bases are the ones that gain from it, and versioned
+interpretation (§3.4) is reserved for changes that alter what a field *means*,
+which this does not. Declaring v2 changes what is *checked* (§3.3), not how a
+file is matched.
+
+### ADR 6 — `tap_element` is in the same change
+
+**Date:** 2026-10-01 · **Status:** accepted (was open question 2)
+
+`element_type` on `tap_element` and the other element filters uses the §2 rule
+and tables in the same change as landmarks (§2.4). The conformance suite
+already depends on it: it opens the More list as a `RadioButton`, which fails
+on a simulator in WDA mode.
+
 ## 7. Open questions
 
-1. **Does equivalence apply to undeclared (v1) files?** *Recommendation: yes.*
-   The widening is safe under the §2.1 rule, existing knowledge bases are the
-   ones that gain from it, and versioned interpretation (§3.4) is for changes
-   that alter a field's meaning, which this does not. If it should not, v1
-   files keep exact matching and only declared v2 files get equivalence.
-2. **Is `tap_element` in the same change?** *Recommendation: yes* — the same
-   rule and tables, and the conformance suite already depends on it.
-3. **Coverage beyond the probe.** The tables cover what the probe exercises on
+1. **Coverage beyond the probe.** The tables cover what the probe exercises on
    iOS 18.6. Other iOS versions, SwiftUI-specific controls, and web content
    inside a `WebView` were not measured. Entries are added as they are.
