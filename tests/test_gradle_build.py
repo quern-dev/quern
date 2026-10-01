@@ -1722,6 +1722,9 @@ class TestEnvironmentVariables:
         root = _project(tmp_path)
         self._scripts(root, {
             "app/src/main/kotlin/A.kt": 'val x = System.getenv("APP_RUNTIME")\n',
+            # A build script under src is a fixture (a plugin's test
+            # resources), not part of this build.
+            "app/src/test/resources/sample.gradle.kts": 'System.getenv("FIXTURE_ONLY")\n',
             "buildSrc/src/main/kotlin/Signing.kt": 'val p = System.getenv("KEYSTORE_PASSWORD")\n',
             "conventions/src/main/kotlin/Ci.kt": 'val c = System.getenv("CI")\n',
             "app/build/generated/X.kt": 'System.getenv("GENERATED")\n',
@@ -1766,6 +1769,14 @@ class TestEnvironmentVariables:
         r = _go(FakeController(FakeAdb([(0, "Success\n", "")])),
                 _body(project_path=str(built.root), env={"GRADLE_USER_HOME": str(guh)}))
         assert built.envs[0]["JAVA_HOME"] == j17 and str(guh) in r["java"]
+
+    def test_changed_variables_list_the_variants_again(self, built):
+        """A variable can switch a flavour on: the listing cached for one set
+        is not the answer for another."""
+        for job in ("one", "two", "two"):
+            _go(FakeController(FakeAdb([(0, "Success\n", "")])),
+                _body(project_path=str(built.root), env={"FLAVOURS": job}))
+        assert built.listed == ["app", "app"], "listed once per set of variables"
 
     def test_different_variables_are_a_different_listing(self, tmp_path):
         p = gradle.find_project(str(_project(tmp_path)))
