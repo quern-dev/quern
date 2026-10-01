@@ -1740,6 +1740,15 @@ class UIElement(BaseModel):
     """A single UI accessibility element from idb describe-all."""
 
     type: str  # "Button", "StaticText", "Slider", etc.
+    xcui_type: str | None = None
+    """XCUITest's own type for this element -- ``XCUIElementTypeButton`` --
+    present only when WebDriverAgent served the read, which is XCUITest's view
+    of the screen (#336). ``type`` stays in quern's vocabulary for every
+    backend, so nothing that reads it changes; this is the field to write an
+    XCUITest selector from. The two genuinely disagree: a tab-bar item the
+    accessibility tree calls ``RadioButton`` is ``XCUIElementTypeButton`` here,
+    and ``app.radioButtons[...]`` finds nothing. None from sim-bridge and idb,
+    which never see XCUITest's vocabulary -- not "no XCUITest type"."""
     label: str = ""  # from AXLabel
     identifier: str | None = None  # from AXUniqueId
     value: str | None = None  # from AXValue

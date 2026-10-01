@@ -116,7 +116,7 @@ async def get_ui_elements(
             asked_for_skeleton = False
             if strategy == "skeleton":
                 resolved_udid = await controller.resolve_udid(udid)
-                if controller._is_physical(resolved_udid):
+                if controller._served_by_wda(resolved_udid):
                     asked_for_skeleton = True
                     raw = await controller.wda_client.build_screen_skeleton(resolved_udid)
                     from server.device.ui_elements import parse_elements

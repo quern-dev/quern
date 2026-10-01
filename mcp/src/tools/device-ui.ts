@@ -96,7 +96,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
       element_type: z
         .string()
         .optional()
-        .describe("Element type to narrow results (e.g., 'Button', 'TextField')"),
+        .describe("Element type to narrow results (e.g., 'Button', 'TextField'). These are the types quern reports in `type`, which on a simulator come from the accessibility tree by default -- XCUITest names some controls differently (tab-bar items are RadioButton here, XCUIElementTypeButton to XCUITest). For an XCUITest selector use xcui_type, present while WDA serves the device (start_driver)."),
       udid: z
         .string()
         .optional()
@@ -153,7 +153,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
       element_type: z
         .string()
         .optional()
-        .describe("Element type to narrow results (e.g., 'Button', 'TextField')"),
+        .describe("Element type to narrow results (e.g., 'Button', 'TextField'). These are the types quern reports in `type`, which on a simulator come from the accessibility tree by default -- XCUITest names some controls differently (tab-bar items are RadioButton here, XCUIElementTypeButton to XCUITest). For an XCUITest selector use xcui_type, present while WDA serves the device (start_driver)."),
       condition: z
         .enum([
           "exists",
@@ -429,7 +429,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
       element_type: z
         .string()
         .optional()
-        .describe('Element type to filter by (e.g. "Button", "TextField")'),
+        .describe('Element type to filter by (e.g. "Button", "TextField"). Matched against `type`, which on a simulator comes from the accessibility tree by default -- XCUITest names some controls differently (tab-bar items are RadioButton here, XCUIElementTypeButton to XCUITest). For an XCUITest selector use xcui_type, present while WDA serves the device (start_driver).'),
       udid: z
         .string()
         .optional()

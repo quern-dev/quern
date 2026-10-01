@@ -831,16 +831,27 @@ class TestWdaApi:
         data = resp.json()
         assert data["status"] == "ok"
 
-    async def test_setup_wda_simulator_rejected(self, app, auth_headers, mock_controller):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.post(
-                "/api/v1/device/wda/setup",
-                json={"udid": "AAAA-1111"},
-                headers=auth_headers,
-            )
+    async def test_setup_wda_on_a_simulator_builds_the_simulator_artifact(
+        self, app, auth_headers, mock_controller,
+    ):
+        """Refused with 400 until #336. A simulator needs no team and no
+        install, so setup is just the simulator build -- and never the
+        device path, which would ask for a signing identity."""
+        build = AsyncMock(return_value=True)
+        device_setup = AsyncMock()
+        with patch("server.device.wda.build_wda_simulator", build), \
+                patch("server.device.wda.setup_wda", device_setup):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                resp = await client.post(
+                    "/api/v1/device/wda/setup",
+                    json={"udid": "AAAA-1111"},
+                    headers=auth_headers,
+                )
 
-        assert resp.status_code == 400
-        assert "simulator" in resp.json()["detail"].lower()
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["simulator"] is True
+        build.assert_awaited_once()
+        device_setup.assert_not_awaited()
 
     async def test_setup_wda_device_not_found(self, app, auth_headers, mock_controller):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -1135,16 +1146,46 @@ class TestWdaStartStopApi:
         assert resp.status_code == 200
         assert resp.json()["status"] == "started"
 
-    async def test_start_driver_simulator_rejected(self, app, auth_headers, mock_controller):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.post(
-                "/api/v1/device/wda/start",
-                json={"udid": "AAAA-1111"},
-                headers=auth_headers,
-            )
+    async def test_starting_on_a_simulator_puts_it_in_wda_mode(
+        self, app, auth_headers, mock_controller,
+    ):
+        """Refused with 400 until #336. Once WDA answers, the simulator's UI is
+        served by WDA -- asserted on the routing itself, not on a mock."""
+        started = {"status": "started", "udid": "AAAA-1111", "pid": 1,
+                   "port": 8200, "ready": True}
+        with patch("server.device.wda.start_driver_simulator",
+                   AsyncMock(return_value=started)):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                resp = await client.post(
+                    "/api/v1/device/wda/start",
+                    json={"udid": "AAAA-1111"},
+                    headers=auth_headers,
+                )
 
-        assert resp.status_code == 400
-        assert "simulator" in resp.json()["detail"].lower()
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["backend"] == "wda"
+        assert mock_controller.wda_client.serves_simulator("AAAA-1111")
+        assert mock_controller._ui_backend("AAAA-1111") is mock_controller.wda_client
+
+    async def test_a_simulator_whose_wda_never_answered_stays_on_the_default(
+        self, app, auth_headers, mock_controller,
+    ):
+        """Registering a runner that is not answering would send every read
+        to a WDA that cannot serve it."""
+        failed = {"status": "failed", "udid": "AAAA-1111", "pid": 1,
+                  "port": 8200, "ready": False, "error": "did not answer"}
+        with patch("server.device.wda.start_driver_simulator",
+                   AsyncMock(return_value=failed)):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                resp = await client.post(
+                    "/api/v1/device/wda/start",
+                    json={"udid": "AAAA-1111"},
+                    headers=auth_headers,
+                )
+
+        assert resp.status_code == 200, resp.text
+        assert not mock_controller.wda_client.serves_simulator("AAAA-1111")
+        assert mock_controller._ui_backend("AAAA-1111") is not mock_controller.wda_client
 
     async def test_start_driver_not_found(self, app, auth_headers, mock_controller):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -1173,15 +1214,39 @@ class TestWdaStartStopApi:
         assert resp.status_code == 200
         assert resp.json()["status"] == "stopped"
 
-    async def test_stop_driver_simulator_rejected(self, app, auth_headers, mock_controller):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.post(
-                "/api/v1/device/wda/stop",
-                json={"udid": "AAAA-1111"},
-                headers=auth_headers,
-            )
+    async def test_stopping_returns_a_simulator_to_the_default(
+        self, app, auth_headers, mock_controller,
+    ):
+        mock_controller.wda_client.register_simulator("AAAA-1111", 8200)
+        with patch("server.device.wda.stop_driver",
+                   AsyncMock(return_value={"status": "stopped", "udid": "AAAA-1111"})):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                resp = await client.post(
+                    "/api/v1/device/wda/stop",
+                    json={"udid": "AAAA-1111"},
+                    headers=auth_headers,
+                )
 
-        assert resp.status_code == 400
+        assert resp.status_code == 200, resp.text
+        assert not mock_controller.wda_client.serves_simulator("AAAA-1111")
+        assert resp.json()["backend"] != "wda", "it reports the backend it went back to"
+
+    async def test_a_failed_stop_still_takes_the_simulator_out_of_wda_mode(
+        self, app, auth_headers, mock_controller,
+    ):
+        """Routing a simulator to a WDA that may be gone is the worse failure."""
+        mock_controller.wda_client.register_simulator("AAAA-1111", 8200)
+        with patch("server.device.wda.stop_driver",
+                   AsyncMock(side_effect=RuntimeError("kill failed"))):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                resp = await client.post(
+                    "/api/v1/device/wda/stop",
+                    json={"udid": "AAAA-1111"},
+                    headers=auth_headers,
+                )
+
+        assert resp.status_code == 500
+        assert not mock_controller.wda_client.serves_simulator("AAAA-1111")
 
 
 @pytest.mark.usefixtures("produced")

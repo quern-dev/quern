@@ -300,6 +300,11 @@ class WdaBackend:
 
     def __init__(self) -> None:
         self._connections: dict[str, _WdaConnection] = {}
+        #: Simulators whose UI this backend serves, by the port their WDA
+        #: listens on (#336). A simulator shares the Mac's network, so it is
+        #: reached on 127.0.0.1 -- none of the tunnel, usbmux or auto-start
+        #: machinery below applies.
+        self._simulator_ports: dict[str, int] = {}
         self._next_port = FORWARD_START_PORT
         # os_version cache for auto-start — populated by controller
         self._device_os_versions: dict[str, str] = {}
@@ -418,6 +423,18 @@ class WdaBackend:
     # Connection management
     # ------------------------------------------------------------------
 
+    def register_simulator(self, udid: str, port: int) -> None:
+        """Serve this simulator through WDA on `port` until unregistered."""
+        self._simulator_ports[udid] = port
+        self._connections.pop(udid, None)
+
+    def unregister_simulator(self, udid: str) -> None:
+        self._simulator_ports.pop(udid, None)
+        self._connections.pop(udid, None)
+
+    def serves_simulator(self, udid: str) -> bool:
+        return udid in self._simulator_ports
+
     async def _get_base_url(self, udid: str) -> str:
         """Get (or create) the WDA base URL for a device.
 
@@ -425,7 +442,21 @@ class WdaBackend:
         iOS 16-: starts a usbmux port-forward subprocess.
 
         If WDA is not reachable and os_version is known, auto-starts the driver.
+        A simulator in WDA mode is reached on its own port and never
+        auto-started: its runner is started and stopped deliberately, and a
+        silent restart would hide that it had died.
         """
+        port = self._simulator_ports.get(udid)
+        if port is not None:
+            # A real connection entry, as for a phone: the session and snapshot
+            # depth live on it, and several methods read it directly. Returning
+            # the URL alone left those reading a key that was never written --
+            # found by the first live read, which raised KeyError.
+            base_url = f"http://127.0.0.1:{port}"
+            conn = self._connections.get(udid)
+            if conn is None or conn.base_url != base_url:
+                self._connections[udid] = _WdaConnection(base_url=base_url)
+            return base_url
         if udid in self._connections:
             conn = self._connections[udid]
 
@@ -1478,6 +1509,25 @@ class WdaBackend:
 # ------------------------------------------------------------------
 
 
+_XCUI_PREFIX = "XCUIElementType"
+
+
+def _xcui_type(name: str | None) -> str | None:
+    """XCUITest's full type name, whichever form WDA sent (#336).
+
+    WDA's JSON ``/source`` -- the main read path -- sends the *short* name
+    (``Button``, ``TabBar``); only element queries send the class name
+    (``XCUIElementTypeButton``). Measured against a running WDA: not one type
+    in a JSON source carried the prefix. So the old "strip it for idb compat"
+    was a no-op on the path that matters, and keeping the original would have
+    kept the short name. Normalised here to the class name an XCUITest
+    selector's documentation uses.
+    """
+    if not name:
+        return None
+    return name if name.startswith(_XCUI_PREFIX) else _XCUI_PREFIX + name
+
+
 def _map_wda_element(wda: dict) -> dict:
     """Convert a single WDA element dict to idb-compatible format.
 
@@ -1497,13 +1547,15 @@ def _map_wda_element(wda: dict) -> dict:
             "height": rect["height"],
         }
 
-    wda_type = wda.get("type", "")
-    # WDA prefixes types with "XCUIElementType" — strip it for idb compat
-    if wda_type.startswith("XCUIElementType"):
-        wda_type = wda_type[len("XCUIElementType"):]
+    raw_type = wda.get("type", "")
+    wda_type = raw_type
+    # Stripped for idb compat when present -- JSON /source does not send it.
+    if wda_type.startswith(_XCUI_PREFIX):
+        wda_type = wda_type[len(_XCUI_PREFIX):]
 
     return {
         "type": wda_type,
+        "xcui_type": _xcui_type(raw_type),
         "AXUniqueId": wda.get("rawIdentifier") or wda.get("name") or "",
         "AXLabel": wda.get("label") or "",
         "AXValue": wda.get("value"),
@@ -1549,7 +1601,8 @@ def _map_wda_element_from_query(el: dict, class_name: str) -> dict | None:
     The /elements endpoint returns less data than /source — typically just
     the element reference and a few attributes. We extract what we can.
     """
-    # Strip XCUIElementType prefix for the type field
+    # Strip XCUIElementType prefix for the type field; keep the original as
+    # xcui_type (#336).
     el_type = class_name
     if el_type.startswith("XCUIElementType"):
         el_type = el_type[len("XCUIElementType"):]
@@ -1574,6 +1627,7 @@ def _map_wda_element_from_query(el: dict, class_name: str) -> dict | None:
 
     return {
         "type": el_type,
+        "xcui_type": _xcui_type(class_name),
         "AXUniqueId": identifier,
         "AXLabel": el.get("label") or "",
         "AXValue": el.get("value"),

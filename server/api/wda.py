@@ -53,10 +53,24 @@ async def setup_wda(request: Request, body: SetupWdaRequest):
     if device is None:
         raise HTTPException(status_code=404, detail=f"Device {body.udid} not found")
 
+    if device.device_type == DeviceType.SIMULATOR:
+        # No team, no provisioning, no install: just the simulator build (#336).
+        from server.device.wda import build_wda_simulator
+
+        try:
+            built = await build_wda_simulator(force=body.force)
+        except RuntimeError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        return {
+            "status": "ok", "udid": body.udid, "simulator": True, "built": built,
+            "message": "WDA is built for the iOS Simulator. start_driver on this "
+                       "simulator to serve its UI through WDA -- XCUITest's view.",
+        }
+
     if device.device_type != DeviceType.DEVICE:
         raise HTTPException(
             status_code=400,
-            detail=f"Device {body.udid} is a simulator. WDA setup is only for physical devices.",
+            detail=f"Device {body.udid} is not an iOS device or simulator.",
         )
 
     if not device.os_version:
@@ -80,8 +94,9 @@ async def setup_wda(request: Request, body: SetupWdaRequest):
     return result
 
 
-async def _validate_physical_device(controller, udid: str):
-    """Validate that a UDID refers to a physical device. Returns the DeviceInfo."""
+async def _validate_ios_device(controller, udid: str):
+    """Validate that a UDID refers to an iOS device or simulator. Returns the
+    DeviceInfo. Simulators were refused here until #336."""
     try:
         devices = await controller.list_devices()
     except DeviceError as e:
@@ -96,10 +111,10 @@ async def _validate_physical_device(controller, udid: str):
     if device is None:
         raise HTTPException(status_code=404, detail=f"Device {udid} not found")
 
-    if device.device_type != DeviceType.DEVICE:
+    if device.device_type not in (DeviceType.DEVICE, DeviceType.SIMULATOR):
         raise HTTPException(
             status_code=400,
-            detail=f"Device {udid} is a simulator. This endpoint is only for physical devices.",
+            detail=f"Device {udid} is not an iOS device or simulator.",
         )
 
     return device
@@ -108,9 +123,32 @@ async def _validate_physical_device(controller, udid: str):
 @router.post("/start")
 @logged_action("start_wda_driver", category="device.lifecycle")
 async def start_wda_driver(request: Request, body: StartDriverRequest):
-    """Start WDA driver (xcodebuild test-without-building) on a physical device."""
+    """Start WDA (xcodebuild test-without-building) on a device or simulator.
+
+    On a simulator this is the opt-in to WDA (#336): once it answers, every UI
+    read and action on that simulator goes through WDA -- XCUITest's view --
+    until stop_driver. Registered only when it is ready, so a runner that never
+    comes up leaves the simulator on sim-bridge rather than half-switched.
+    """
     controller = _get_controller(request)
-    device = await _validate_physical_device(controller, body.udid)
+    device = await _validate_ios_device(controller, body.udid)
+
+    if device.device_type == DeviceType.SIMULATOR:
+        from server.device.wda import start_driver_simulator
+
+        try:
+            result = await start_driver_simulator(body.udid)
+        except RuntimeError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        if result.get("ready"):
+            controller.wda_client.register_simulator(body.udid, result["port"])
+            result["backend"] = "wda"
+            result["message"] = (
+                "This simulator's UI reads and actions now go through WDA, so "
+                "element types are XCUITest's (xcui_type on each element). "
+                "stop_driver returns it to sim-bridge."
+            )
+        return result
 
     if not device.os_version:
         raise HTTPException(
@@ -131,9 +169,9 @@ async def start_wda_driver(request: Request, body: StartDriverRequest):
 @router.post("/stop")
 @logged_action("stop_wda_driver", category="device.lifecycle")
 async def stop_wda_driver(request: Request, body: StopDriverRequest):
-    """Stop WDA driver on a physical device."""
+    """Stop WDA on a device or simulator. A simulator returns to sim-bridge."""
     controller = _get_controller(request)
-    await _validate_physical_device(controller, body.udid)
+    device = await _validate_ios_device(controller, body.udid)
 
     # Delete session first
     try:
@@ -147,5 +185,15 @@ async def stop_wda_driver(request: Request, body: StopDriverRequest):
         result = await stop_driver(udid=body.udid)
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Unregistered even if stopping raised: routing a simulator to a WDA
+        # that may be gone is the worse failure, and sim-bridge heals the
+        # bridge WDA poisoned on its next read (#337, #343).
+        if device.device_type == DeviceType.SIMULATOR:
+            controller.wda_client.unregister_simulator(body.udid)
 
+    if device.device_type == DeviceType.SIMULATOR:
+        # What the router now picks, not a literal: it is idb where sim-bridge
+        # is unavailable, and a hardcoded name is the drift #186 removed.
+        result["backend"] = controller._backend_name(body.udid)
     return result

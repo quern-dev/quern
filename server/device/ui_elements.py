@@ -105,6 +105,7 @@ def parse_elements(raw: list[dict], filter_label: str | None = None,
 
         elements.append(UIElement(
             type=type_val,
+            xcui_type=item.get("xcui_type"),
             label=item.get("AXLabel") or "",
             identifier=item.get("AXUniqueId"),
             value=str(v) if (v := item.get("AXValue")) is not None else None,

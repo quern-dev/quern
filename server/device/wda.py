@@ -45,6 +45,19 @@ WDA_LOG_DIR = CONFIG_DIR / "wda"
 WDA_MIN_DEPLOYMENT_TARGET = "15.0"
 
 DRIVER_START_TIMEOUT = 30
+
+# Simulators (#336). A separate build: `generic/platform=iOS` makes an
+# iphoneos/arm64 artifact a simulator cannot run, and the two must not share
+# derived data or one build would clobber the other.
+WDA_DERIVED_SIM = WDA_DIR / "build-sim"
+#: Simulators share the Mac's network, so WDA in a simulator binds the Mac's
+#: port -- two simulators on 8100 would collide, and the pre-iOS-17 physical
+#: path falls back to polling localhost:8100, where it would find a simulator's
+#: WDA and call the phone ready. So simulators get their own range.
+SIM_PORT_FIRST = 8200
+SIM_PORT_LAST = 8299
+#: First start on a simulator installs the runner as well as launching it.
+SIM_DRIVER_START_TIMEOUT = 90
 DRIVER_STOP_TIMEOUT = 5
 
 CLONE_TIMEOUT = 60
@@ -997,6 +1010,222 @@ async def stop_driver(udid: str) -> dict:
     save_wda_state(state)
 
     return {"status": "stopped", "udid": udid}
+
+
+# ---------------------------------------------------------------------------
+# Simulators (#336)
+# ---------------------------------------------------------------------------
+#
+# Not a special case of the device path but a simpler one: no signing team, no
+# provisioning, no 7-day expiry, and no install step -- `test-without-building`
+# against a simulator destination installs the runner itself.
+
+
+def _find_sim_xctestrun() -> Path | None:
+    products = WDA_DERIVED_SIM / "Build" / "Products"
+    if products.exists():
+        for f in sorted(products.glob("*.xctestrun")):
+            return f
+    return None
+
+
+async def _sim_build_is_current(state: dict[str, Any]) -> bool:
+    """Reusable if the artifact exists and was built by this Xcode.
+
+    Unlike the device build, an *absent* fingerprint means rebuild: there are
+    no existing simulator builds to spare, so the strict rule costs nothing.
+    """
+    if _find_sim_xctestrun() is None:
+        return False
+    recorded = state.get("sim_build_xcode")
+    if recorded is None:
+        return False
+    if state.get("sim_build_deployment_target") != WDA_MIN_DEPLOYMENT_TARGET:
+        return False
+    current = await _xcode_build_id()
+    return current is None or current == recorded
+
+
+async def build_wda_simulator(force: bool = False) -> bool:
+    """Build WDA for the iOS Simulator. Returns True if it built.
+
+    Unsigned: a simulator does not enforce code signing on a test runner, so
+    there is no team to choose and nothing to provision.
+    """
+    state = read_wda_state()
+    if not force and await _sim_build_is_current(state):
+        return False
+
+    if not WDA_REPO.exists():
+        await clone_wda()
+        customize_wda()
+
+    if WDA_DERIVED_SIM.exists():
+        import shutil
+        shutil.rmtree(WDA_DERIVED_SIM)
+
+    logger.info("Building WDA for the iOS Simulator")
+    proc = await asyncio.create_subprocess_exec(
+        "xcodebuild", "build-for-testing",
+        "-project", str(WDA_REPO / "WebDriverAgent.xcodeproj"),
+        "-scheme", "WebDriverAgentRunner",
+        "-destination", "generic/platform=iOS Simulator",
+        f"PRODUCT_BUNDLE_IDENTIFIER={WDA_BUNDLE_ID}",
+        "CODE_SIGNING_ALLOWED=NO",
+        # The same floor as the device build, for the same reason -- Xcode 27
+        # refuses upstream's 13.0. See build_wda.
+        f"IPHONEOS_DEPLOYMENT_TARGET={WDA_MIN_DEPLOYMENT_TARGET}",
+        "-derivedDataPath", str(WDA_DERIVED_SIM),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=BUILD_TIMEOUT)
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise RuntimeError(f"xcodebuild (simulator) timed out after {BUILD_TIMEOUT}s")
+
+    # Cleared on every failure path: a fingerprint must never describe an
+    # artifact that is not there.
+    state = read_wda_state()
+    state.pop("sim_build_xcode", None)
+    state.pop("sim_build_deployment_target", None)
+    save_wda_state(state)
+
+    if proc.returncode != 0:
+        tail = "\n".join((stderr.decode() + stdout.decode()).splitlines()[-25:])
+        raise RuntimeError(f"xcodebuild (simulator) failed (rc={proc.returncode}):\n{tail}")
+    if _find_sim_xctestrun() is None:
+        raise RuntimeError(
+            f"xcodebuild (simulator) reported success but produced no .xctestrun "
+            f"under {WDA_DERIVED_SIM}"
+        )
+
+    xcode = await _xcode_build_id()
+    state = read_wda_state()
+    if xcode:
+        state["sim_build_xcode"] = xcode
+    state["sim_build_deployment_target"] = WDA_MIN_DEPLOYMENT_TARGET
+    state["sim_built_at"] = datetime.now(UTC).isoformat()
+    save_wda_state(state)
+    return True
+
+
+def _port_is_free(port: int) -> bool:
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+        try:
+            s.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
+def _allocate_sim_port(runners: dict[str, Any]) -> int:
+    taken = {r.get("port") for r in runners.values() if r.get("simulator")}
+    for port in range(SIM_PORT_FIRST, SIM_PORT_LAST + 1):
+        if port not in taken and _port_is_free(port):
+            return port
+    raise RuntimeError(
+        f"No free port for WDA in {SIM_PORT_FIRST}-{SIM_PORT_LAST}; stop a "
+        "simulator's driver (stop_driver) or free a port in that range."
+    )
+
+
+def simulator_runner_port(udid: str) -> int | None:
+    """The port of a live WDA runner on this simulator, or None."""
+    runner = read_wda_state().get("runners", {}).get(udid)
+    if not runner or not runner.get("simulator"):
+        return None
+    pid = runner.get("pid")
+    if not pid or not _is_process_alive(pid):
+        return None
+    return runner.get("port")
+
+
+def live_simulator_runners() -> dict[str, int]:
+    """Every simulator with a live WDA runner, as {udid: port}. For restoring
+    WDA mode after a server restart -- runners outlive the server."""
+    out = {}
+    for udid, runner in read_wda_state().get("runners", {}).items():
+        if runner.get("simulator") and runner.get("port"):
+            pid = runner.get("pid")
+            if pid and _is_process_alive(pid):
+                out[udid] = runner["port"]
+    return out
+
+
+async def start_driver_simulator(udid: str) -> dict:
+    """Start WDA on a simulator, building it first if needed.
+
+    Returns {status, udid, pid, port, ready}. While it runs, quern serves that
+    simulator's UI reads and actions through WDA -- XCUITest's view.
+    """
+    port = simulator_runner_port(udid)
+    if port is not None:
+        pid = read_wda_state()["runners"][udid]["pid"]
+        return {"status": "already_running", "udid": udid, "pid": pid,
+                "port": port, "ready": True}
+
+    built = await build_wda_simulator()
+    xctestrun = _find_sim_xctestrun()
+    if xctestrun is None:
+        raise RuntimeError("WDA simulator build missing after build_wda_simulator()")
+
+    state = read_wda_state()
+    runners = state.get("runners", {})
+    runners.pop(udid, None)  # a dead entry for this simulator
+    port = _allocate_sim_port(runners)
+
+    WDA_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = WDA_LOG_DIR / f"runner-{udid[:8]}.log"
+    log_file = open(log_path, "w")
+    env = dict(os.environ)
+    # xcodebuild hands TEST_RUNNER_* variables to the runner with the prefix
+    # removed; WDA reads USE_PORT.
+    env["TEST_RUNNER_USE_PORT"] = str(port)
+    logger.info("Starting WDA on simulator %s, port %d", udid[:8], port)
+    proc = await asyncio.create_subprocess_exec(
+        "xcodebuild", "test-without-building",
+        "-xctestrun", str(xctestrun),
+        "-destination", f"id={udid}",
+        stdout=log_file, stderr=log_file, env=env,
+    )
+    log_file.close()
+
+    state = read_wda_state()
+    state.setdefault("runners", {})[udid] = {
+        "pid": proc.pid,
+        "port": port,
+        "simulator": True,
+        "log_path": str(log_path),
+        "started_at": datetime.now(UTC).isoformat(),
+    }
+    save_wda_state(state)
+
+    ready = await _poll_wda_status(
+        f"http://127.0.0.1:{port}", timeout=SIM_DRIVER_START_TIMEOUT,
+    )
+    result: dict[str, Any] = {
+        "status": "started", "udid": udid, "pid": proc.pid,
+        "port": port, "ready": ready, "built": built,
+    }
+    if not ready:
+        # Not left registered: routing would send this simulator's reads to a
+        # WDA that is not answering. Stopped and removed, so it stays on
+        # sim-bridge, and the failure is the answer -- not a half-on mode.
+        await stop_driver(udid)
+        result["status"] = "failed"
+        diagnosis = _diagnose_runner_failure(log_path)
+        result["error"] = diagnosis or (
+            f"WDA did not answer on port {port} within "
+            f"{SIM_DRIVER_START_TIMEOUT}s; the simulator stays on sim-bridge."
+        )
+        result["log_path"] = str(log_path)
+    return result
 
 
 # ---------------------------------------------------------------------------

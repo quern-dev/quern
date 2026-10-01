@@ -278,15 +278,26 @@ class DeviceControllerUI:
         """Return the appropriate UI automation backend for a device.
 
         Android devices use U2Backend; iOS physical devices use WdaBackend;
-        iOS simulators use SimBridgeBackend (preferred) or IdbBackend (fallback).
+        iOS simulators use SimBridgeBackend (preferred) or IdbBackend (fallback)
+        -- unless WDA has been started on that simulator, in which case WDA
+        serves it until it is stopped (#336). That is the opt-in for seeing what
+        XCUITest sees; the default is unchanged.
         """
         if self._is_android(udid):
             return self.u2
         if self._is_physical(udid):
             return self.wda_client
+        if self.wda_client.serves_simulator(udid):
+            return self.wda_client
         if self._sim_bridge_ok:
             return self.sim_bridge
         return self.idb
+
+    def _served_by_wda(self, udid: str) -> bool:
+        """Whether WDA serves this device's UI -- a phone, or a simulator in
+        WDA mode. Ask this, not `_is_physical`, before a WDA-only call: since
+        #336 the two are not the same question."""
+        return self._ui_backend(udid) is self.wda_client
 
     #: Backend name per device, written by `get_ui_elements` when it selects
     #: one. Read by the error paths that follow a read, so the label names the
@@ -1417,7 +1428,7 @@ class DeviceControllerUI:
                 return cached_elements, resolved
 
         # WDA direct query: physical device + filters + cache miss → query directly
-        if has_filters and self._is_physical(resolved):
+        if has_filters and self._served_by_wda(resolved):
             elements, query_elapsed = await self._wda_direct_query(
                 resolved, label=filter_label,
                 identifier=filter_identifier, element_type=filter_type,
@@ -1783,7 +1794,7 @@ class DeviceControllerUI:
             mode: 'flat' to use flat idb output (for custom companion). Default uses nested.
         """
         resolved = await self.resolve_udid(udid)
-        asked_for_skeleton = strategy == "skeleton" and self._is_physical(resolved)
+        asked_for_skeleton = strategy == "skeleton" and self._served_by_wda(resolved)
         if asked_for_skeleton:
             raw = await self.wda_client.build_screen_skeleton(resolved)
             elements = parse_elements(raw)

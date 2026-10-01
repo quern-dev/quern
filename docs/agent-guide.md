@@ -263,7 +263,7 @@ When the question is "what screen am I on right now?" — for verifying navigati
 
 | Field | Purpose |
 |---|---|
-| `element` | Element type, required (e.g. `Button`, `RadioButton`, `navigationBar`) |
+| `element` | Element type, required (e.g. `Button`, `RadioButton`, `navigationBar`). Matched against `type`, which follows the backend that read the screen — a simulator's tab is `RadioButton` from the accessibility tree and `Button` while it is in WDA mode — so record landmarks with the backend you will identify with |
 | `identifier` | Accessibility identifier, exact match (preferred — locale-independent) |
 | `label` | Label text, case-insensitive exact match |
 | `label_contains` | Substring match for elements with dynamic content in their label |
@@ -299,7 +299,7 @@ quern start --on-crash 'cat > /tmp/last_crash.json'
 
 ### Working with Physical Devices
 
-Physical iOS devices are supported for screenshots, UI automation, log capture, and crash reports. The key difference from simulators is that UI automation uses WebDriverAgent (WDA) instead of the simulator backend (sim-bridge / idb).
+Physical iOS devices are supported for screenshots, UI automation, log capture, and crash reports. UI automation on a device always uses WebDriverAgent (WDA). A simulator uses the accessibility tree (sim-bridge / idb) by default, and can be switched to WDA with `start_driver` — that is the way to see the element types XCUITest will see (`xcui_type`), and `stop_driver` switches it back.
 
 **First-time setup**: Call `setup_wda` with the device UDID. This builds and installs WDA on the device, which requires a valid Apple Developer signing identity. If multiple identities exist, the tool returns a list — call again with the chosen `team_id`. The app appears on the device as **Quern Driver**.
 
