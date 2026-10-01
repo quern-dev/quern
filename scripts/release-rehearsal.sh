@@ -3,6 +3,10 @@
 #
 #   scripts/release-rehearsal.sh [candidate-ref] [previous-tag]
 #
+# With no previous tag, the candidate is rehearsed from each of the last four
+# published releases in turn -- the full set of cases from each -- and the run
+# fails if any of them does. With one, from that release only.
+#
 # release-verify.sh checks a release after it is published. This checks the
 # thing that has actually broken: updating into it. Every release so far has
 # shipped a defect in the move rather than in the code -- a channel branch left
@@ -30,25 +34,96 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CANDIDATE="${1:-HEAD}"
 
-# The newest *published* release, not the newest tag. A release that was cut
-# and then pulled back to a draft leaves its tag behind -- 0.18.3 is exactly
-# this -- and no user is on it, so rehearsing from it rehearses a move nobody
-# will make. `releases/latest` excludes drafts and prereleases by definition.
-latest_published() {
-  local tag
-  tag="$(gh api repos/quern-dev/quern/releases/latest -q .tag_name 2>/dev/null || true)"
-  if [[ -n "$tag" ]]; then
-    printf '%s' "$tag"
+# The releases a user could plausibly be updating from. Four rather than one,
+# because every user runs the updater of the release they are on, not the
+# newest: an install left on 0.21.0 updates into the candidate with 0.21.0's
+# code, and nothing about the newest release's run says that works.
+#
+# *Published* releases, not tags. A release that was cut and then pulled back
+# to a draft leaves its tag behind -- 0.18.3 is exactly this -- and no user is
+# on it, so rehearsing from it rehearses a move nobody will make. And no silent
+# fall back to tags when GitHub cannot be asked, for the same reason.
+REHEARSE_FROM_COUNT=4
+recent_published() {
+  local tags
+  tags="$(gh api "repos/quern-dev/quern/releases?per_page=30" -q \
+    "[.[] | select(.draft | not) | select(.prerelease | not)]
+     | sort_by(.published_at) | reverse | .[0:$1] | .[].tag_name" 2>/dev/null || true)"
+  if [[ -n "$tags" ]]; then
+    printf '%s\n' "$tags"
     return 0
   fi
-  # Not a silent fall back to the newest tag: this function exists *because*
-  # the newest tag can be a release that was pulled back to a draft, and
-  # quietly using one would rehearse a move nobody will make.
-  echo "error: could not ask GitHub for the latest published release." >&2
+  echo "error: could not ask GitHub for the recent published releases." >&2
   echo "       Pass the previous tag explicitly: $0 <candidate> <tag>" >&2
   return 1
 }
-PREV="${2:-$(latest_published)}"
+
+# No previous tag: one full rehearsal per recent release, each in its own
+# process. Sequential, not parallel -- every run uses the same rehearsal ports
+# and stops the developer's server for the running-server case.
+#
+# Every case runs from every release, including the ones that look as though
+# they test only the candidate: they all run against the tree the update from
+# *that* release produced, and a file an older release leaves behind is
+# exactly the kind of move bug this script exists to catch.
+if [[ -z "${2:-}" ]]; then
+  froms="$(recent_published "$REHEARSE_FROM_COUNT")" || exit 2
+  results="$(mktemp -d)"
+  trap 'rm -rf "$results"' EXIT
+  overall=0
+  for from in $froms; do
+    printf '\n################ from %s ################\n' "$from"
+    set +e
+    QUERN_REHEARSAL_RESULT="$results/$from" "$BASH" "$0" "$CANDIDATE" "$from"
+    rc=$?
+    set -e
+    if [[ "$rc" -eq 2 ]]; then
+      # Not a failed case but a run that could not start -- most often a
+      # candidate claiming a version already published. The older runs would
+      # each compare it with a version below it and "pass", which is worse
+      # than stopping.
+      echo "error: the run from $from could not start (exit 2); stopping." >&2
+      exit 2
+    fi
+    if [[ "$rc" -ne 0 ]]; then overall=1; fi
+    printf '%s\n' "$rc" > "$results/$from.rc"
+  done
+
+  printf '\n################ summary ################\n'
+  total_skips=0
+  for from in $froms; do
+    rc="$(cat "$results/$from.rc")"
+    # The result file is written as the run's last act, so its absence means
+    # the run died before reporting -- never read that as a pass. Nor a line
+    # that is not two counts: reading it anyway raised a syntax error halfway
+    # through the summary.
+    f="" k=""
+    if [[ -s "$results/$from" ]]; then read -r f k < "$results/$from" || true; fi
+    if [[ "$f" =~ ^[0-9]+$ && "$k" =~ ^[0-9]+$ ]]; then
+      if [[ "$rc" -eq 0 ]]; then
+        printf '  \033[0;32m✓\033[0m from %-8s passed' "$from"
+      else
+        printf '  \033[0;31m✗\033[0m from %-8s %d failed' "$from" "$f"
+      fi
+      if [[ "$k" -gt 0 ]]; then printf ', %d skipped' "$k"; fi
+      total_skips=$((total_skips + k))
+      printf '\n'
+    else
+      printf '  \033[0;31m✗\033[0m from %-8s did not finish (exit %s)\n' "$from" "$rc"
+      overall=1
+    fi
+  done
+  if [[ "$overall" -ne 0 ]]; then
+    printf '\033[0;31mThe rehearsal failed from at least one release.\033[0m\n'
+  elif [[ "$total_skips" -gt 0 ]]; then
+    # Said on the last line too, as the single run does: it is the line read.
+    printf '\033[0;32mThe rehearsal passed from every release\033[0m — %d skipped, listed above.\n' "$total_skips"
+  else
+    printf '\033[0;32mThe rehearsal passed from every release.\033[0m\n'
+  fi
+  exit "$overall"
+fi
+PREV="$2"
 
 failures=0
 ok()   { printf '  \033[0;32m✓\033[0m %s\n' "$1"; }
@@ -1835,6 +1910,10 @@ fi
 
 printf '\n'
 skips="$(skip_count)"
+# For the multi-release run above, which reads it as this run's last act.
+if [[ -n "${QUERN_REHEARSAL_RESULT:-}" ]]; then
+  printf '%s %s\n' "$failures" "$skips" > "$QUERN_REHEARSAL_RESULT"
+fi
 if (( failures )); then
   printf '\033[0;31m%d check(s) failed.\033[0m\n' "$failures"
   (( skips )) && printf '%d also skipped, listed above.\n' "$skips"

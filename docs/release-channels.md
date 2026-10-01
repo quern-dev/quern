@@ -319,7 +319,7 @@ That leaves a signed, notarized `Quern.app` in `dist/`, and prints the exact
 committed, and before the tag in step 2:
 
 ```sh
-scripts/release-rehearsal.sh            # candidate HEAD, from the published release
+scripts/release-rehearsal.sh            # candidate HEAD, from each of the last four releases
 ```
 
 The bump has to come first because the rehearsal compares the candidate's
@@ -344,8 +344,9 @@ other way: 0.18.3 was fine to install and crashed every update into it.
 
 It runs in a sandbox with its own `HOME` and `QUERN_STATE_DIR` and stubs for
 `osascript`, `open`, `sudo`, `launchctl`, `pkill` and `killall`, so it writes
-nothing outside a temporary directory. It takes a few minutes, mostly building
-venvs and the MCP wrapper. It does start a server, which takes the first free
+nothing outside a temporary directory. One run takes three or four minutes,
+mostly building venvs and the MCP wrapper, and the default does four of them —
+about a quarter of an hour. It does start a server, which takes the first free
 port from 9100 as usual.
 
 The cases, each against the tree the update produced:
@@ -369,9 +370,24 @@ Unattended, `install.sh` cannot ask whether to create a venv, so it declines,
 exits non-zero and names the step. The rehearsal asserts that rather than
 treating it as a pass, then finishes the install the way the message says to.
 
-It defaults to the newest *published* release rather than the newest tag: a
-release pulled back to a draft leaves its tag behind -- 0.18.3 did -- and no
-user is on it. Pass a second argument to rehearse from somewhere else.
+**It rehearses from each of the last four published releases**, one full run
+each, and fails if any of them does. A user runs the updater of the release
+they are on, not the newest, so the newest release's run says nothing about an
+install left on the one before it. Every case runs from every release, including
+the ones that look as if they test only the candidate: they all run against the
+tree the update from *that* release produced, and a file an older release leaves
+behind is exactly the kind of move bug this exists to catch. The runs are
+sequential, since they share ports and each stops your server once.
+
+The summary lists each release with its failures and skips, and its last line
+carries the skip count too. A run that dies before reporting reads as **did not
+finish**, never as a pass, and a run that cannot start at all — most often a
+candidate that has not been bumped — stops the rest, because the older runs
+would each compare it against a lower version and pass.
+
+*Published* releases, not tags: a release pulled back to a draft leaves its tag
+behind -- 0.18.3 did -- and no user is on it. Prereleases are left out too. Pass
+a second argument to rehearse from one release only.
 
 Proof that it works: `scripts/release-rehearsal.sh v0.18.3 v0.18.2` still
 reproduces #212 — `ImportError: cannot import name 'quern_cmd'` — and exits
