@@ -516,6 +516,7 @@ class TestTheRoute:
         adb = FakeAdb([])
         r = _go(FakeController(adb), _body(project_path=str(built.root)))
         assert not r["build_android"].succeeded and adb.calls == [] and built.recorded == []
+        assert r["devices"][0].error == "not installed: the build failed"
 
     def test_a_signature_mismatch_is_said_and_not_uninstalled_by_default(self, built):
         adb = FakeAdb([(1, "", "Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: sigs]")])
@@ -1004,6 +1005,14 @@ class TestReadingTheJavaVersionRight:
                "   > Unsupported class file major version 59\n\n* Try:\n")
         result, env = self._parse(tmp_path, out, ran_on=17)
         assert env == [] and "major version 59" in result.errors[0].message
+
+    def test_a_dependency_beyond_the_ceiling_is_not_the_jdk_either(self, tmp_path):
+        """Gradle 7.6 (up to 19) on Java 17, Jetifier reading a Java 21 class:
+        the number is past the ceiling and still not the JVM's."""
+        out = ("* What went wrong:\nExecution failed for task ':app:jetifyDebug'.\n"
+               "   > Unsupported class file major version 65\n\n* Try:\n")
+        _, env = self._parse(tmp_path, out, ran_on=17, gradle_v="7.6.4")
+        assert env == []
 
     def test_the_jvms_own_version_beyond_the_ceiling_is(self, tmp_path):
         out = (FIXTURES / "jdk_too_new.out").read_text()
