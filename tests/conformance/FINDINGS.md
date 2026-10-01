@@ -737,6 +737,16 @@ that before a save copies, before and after a restore, before a read, and
 before and after a write. A failure to restart it is reported on the response
 as a `warning`, because a caller who does not see it will trust a stale answer.
 
+**Still open:** twice in about nine runs of
+`test_a_read_sees_the_apps_write_without_waiting`, a read taken straight after
+three taps on the *running* app returned an older value (2 where the app showed
+4) with the restart reporting success. Fifteen hand-driven trials of the same
+sequence, and five more pytest runs, never reproduced it. A running app hands
+its writes to cfprefsd asynchronously, so a flush can only write out what has
+arrived; whether the missing writes were late or lost is not yet known, and the
+test now reports which if it fails again. Terminating the app first is the
+reliable way to an exact read.
+
 ## F23 — MCP `set_app_plist_value` wrote booleans as 1 and 0
 
 Its value schema was `z.union([z.string(), z.coerce.number(),
