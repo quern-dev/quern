@@ -775,7 +775,7 @@ docs: #369 (64359a3) now says `scrollable` is read on iOS only. The Android
 half of `test_a_miss_on_a_screen_known_not_to_scroll_says_so` asserts that
 contract, so a change to it is noticed.
 
-## F25 — an Android tap's screen context describes the transition, not the destination
+## F25 — an Android tap's screen context describes the transition, not the destination → fixed with #14
 
 `tap_element(include_screen_context=true)` on Android, from the Text tab to
 Links: three of three responses said `identified_as: null, confidence: none`,
@@ -788,5 +788,7 @@ the State screen from More, named State correctly in three of three.
 `settle_delay` exists on the request but is applied only when screenshots are
 captured; the screen context is read immediately. The context's whole job is
 to say where the action landed, so reading it mid-transition reports the
-journey. Found by `test_landmarks.py`; no issue yet.
+journey. `launch_app` and `open_url` already waited `settle_delay` before
+their context; `tap_element` and `type_text` now do too, and the two route
+tests that pin it are the first that drive those endpoints' context at all.
 
