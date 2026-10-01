@@ -28,6 +28,7 @@ import { registerOslogTools } from "./tools/oslog.js";
 import { registerAppKnowledgeTools } from "./tools/app-knowledge.js";
 import { registerLandmarkTools } from "./tools/landmarks.js";
 import { registerSystemTools } from "./tools/system.js";
+import { registerRecordingTools } from "./tools/recordings.js";
 import { discoverServer } from "./config.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -96,6 +97,7 @@ const server = new McpServer(
 
 registerLogTools(server);
 registerProxyTools(server);
+registerRecordingTools(server);
 registerInterceptTools(server);
 registerDeviceTools(server);
 registerDeviceUITools(server);

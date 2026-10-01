@@ -901,6 +901,29 @@ class FlowQueryResponse(Completeness, SimulatorTlsNote):
     has_more: bool
 
 
+class RecordingStartRequest(BaseModel):
+    """Start recording one device's actions, flows and logs to disk (#364)."""
+
+    udid: str = Field(min_length=1, description=(
+        "The device: a simulator UDID, an Android serial, or a physical device's UDID "
+        "(either of its two spellings)."))
+    output_dir: str | None = Field(default=None, description=(
+        "Absolute directory to write manifest.json and events.jsonl into; created if "
+        "missing, refused if it already holds a recording. Default "
+        "~/.quern/recordings/<id>."))
+    hosts: list[str] | None = Field(default=None, description=(
+        "Only flows to these hosts (and their subdomains)."))
+    exclude_hosts: list[str] | None = Field(default=None, description=(
+        "Drop flows to these hosts (and their subdomains), e.g. analytics."))
+    kinds: list[Literal["actions", "flows", "logs"]] | None = Field(default=None, description=(
+        "What to collect: any of actions (quern's own), flows (full detail) and logs "
+        "(the app's log lines and crash reports). Default all three."))
+    include_unattributed: bool = Field(default=False, description=(
+        "Also record flows and log lines quern cannot tie to any device, as the live "
+        "trace does. Off by default: on a shared machine that is other processes' "
+        "traffic, and it would land in every device's recording."))
+
+
 class CaptureStartRequest(BaseModel):
     """Request body for POST /api/v1/proxy/capture/start."""
 
@@ -1200,13 +1223,18 @@ class TraceResponse(BaseModel):
     udid: str | None = None
     clock_anchor: ClockAnchor
     actions: list[TracedAction] = []
-    proxy_running: bool
+    #: Null for a trace read from a recording: whether capture was on then is
+    #: not something this server can say now.
+    proxy_running: bool | None
     log_window_truncated: bool
     logs_over_limit: bool
     actions_over_limit: bool
     action_window_truncated: bool
     flows_over_limit: bool
     flow_window_truncated: bool
+    #: Set for a trace read from a recording (#364): where it was read from,
+    #: whether it was stopped cleanly, and the spans it says it does not cover.
+    recording: dict | None = None
 
 
 class SimulatorTls(BaseModel):

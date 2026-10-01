@@ -773,7 +773,9 @@ Every flow and log line carries \`identified_by\`, saying how its device was est
 
 Read \`caveats\` and \`overlaps\` before trusting an attribution. Attribution is by device and time, because the proxy is a separate process and nothing quern controls travels with the app's requests. Two actions overlapping on one device cannot be told apart, and that is reported rather than guessed. Simulators under local capture (see set_local_capture) attribute most precisely, because flows carry a UDID resolved from the client process.
 
-With several agents on one server, pass \`udid\` to get only your own device's actions.`,
+With several agents on one server, pass \`udid\` to get only your own device's actions.
+
+Pass \`recording\` (an id from start_recording, or the directory it wrote) to build the same trace from a recording instead of the live buffers, over any window of it (\`since\`, \`until\`) -- for a run longer than the buffers hold. Its \`recording.holes\` lists spans the recording says it does not cover, and the *_truncated fields are set when one overlaps the window.`,
     inputSchema: strictParams({
       since: z
         .string()
@@ -790,13 +792,23 @@ With several agents on one server, pass \`udid\` to get only your own device's a
         .max(1000)
         .optional()
         .describe("Maximum actions to return (1-1000, default 100)"),
+      recording: z
+        .string()
+        .optional()
+        .describe("Read from this recording (its id, or the directory it wrote) instead of the live buffers"),
+      until: z
+        .string()
+        .optional()
+        .describe("End time (ISO 8601). With recording: defaults to its end"),
     }),
-  }, async ({ since, udid, limit }) => {
+  }, async ({ since, udid, limit, recording, until }) => {
       try {
         const params: Record<string, string | number | boolean | undefined> = {};
         if (since) params.since = since;
         if (udid) params.udid = udid;
         if (limit) params.limit = limit;
+        if (recording) params.recording = recording;
+        if (until) params.until = until;
 
         const data = await apiRequest("GET", "/api/v1/trace", params);
 

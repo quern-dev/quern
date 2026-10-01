@@ -15,9 +15,11 @@ import asyncio
 import logging
 import time
 from datetime import UTC, datetime, timedelta
+from typing import Annotated
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
+from server import recording as recording_mod
 from server.device.devicectl import canonical_device_id
 from server.models import LogQueryParams, LogSource, TraceResponse, UtcDatetime
 from server.trace import (
@@ -114,8 +116,23 @@ async def get_trace(
         ),
     ),
     limit: int = Query(default=100, ge=1, le=1000),
+    # Annotated, so a direct call -- as the tests make -- gets None rather
+    # than a truthy `Query` object that would send every call down the
+    # recording path.
+    recording: Annotated[str | None, Query(
+        description=(
+            "Build the trace from a recording instead of the live buffers: its id, or "
+            "the directory it was written to. The same attribution, over a window the "
+            "buffers no longer hold (#364)."
+        ),
+    )] = None,
+    until: Annotated[UtcDatetime | None, Query(
+        description="End of the window; with `recording`, default its end.",
+    )] = None,
 ) -> dict:
     """Actions in a window, each with the flows and log lines it caused."""
+    if recording:
+        return await _trace_from_recording(request, recording, since, until, udid, limit)
     # Canonicalised, because the caller may name a physical device by either
     # of its two identifiers while the action log stores only one. Comparing
     # the raw parameter returned an empty trace for a device that had just
@@ -344,6 +361,65 @@ async def get_trace(
         # check reported True with capture off -- which is exactly the
         # "empty and broken look alike" failure this field exists to prevent.
         "proxy_running": _proxy_is_running(request),
+    }
+
+
+async def _trace_from_recording(request: Request, ref: str, since: datetime | None,
+                                until: datetime | None, udid: str | None, limit: int) -> dict:
+    """The trace over a recording: `build_trace`, unchanged, on what it wrote.
+
+    The truncation fields mean what they mean live, answered from the file:
+    a `dropped` or gap span overlapping the window sets the flag for what it
+    lost, and `recording.holes` says where. Nothing in the file is inferred
+    to be complete.
+    """
+    from server.api.recordings import recording_dir
+
+    directory = recording_dir(request, ref)
+    try:
+        loaded = await asyncio.to_thread(recording_mod.load, directory)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"{directory} could not be read: {e}") from e
+    udid = canonical_device_id(udid) if udid else loaded.udid
+
+    def inside(at: datetime) -> bool:
+        return (since is None or at >= since) and (until is None or at <= until)
+
+    actions = sorted((a for a in loaded.actions
+                      if a.outcome != "started" and inside(a.timestamp)
+                      and (not udid or a.udid == udid)), key=lambda a: a.timestamp)
+    actions_over_limit = len(actions) > limit
+    if actions_over_limit:
+        actions = actions[-limit:]
+    flows = sorted((f for f in loaded.flows if inside(f.timestamp)), key=lambda f: f.timestamp)
+    logs = sorted((e for e in loaded.logs if inside(e.timestamp)), key=lambda e: e.timestamp)
+    ip_map = await asyncio.to_thread(_ip_map)
+    attributions = await asyncio.to_thread(build_trace, actions, flows, logs, ip_map=ip_map)
+
+    def holes(*kinds: str) -> list[str]:
+        return recording_mod.holes_in(loaded, set(kinds), since, until)
+
+    return {
+        "since": (since or (min((a.timestamp for a in actions), default=None))
+                  or datetime.now(UTC)).isoformat(),
+        "udid": udid,
+        "clock_anchor": {"wall": datetime.now(UTC).isoformat(), "monotonic": time.monotonic()},
+        "actions": [_serialise(a, ip_map) for a in attributions],
+        "log_window_truncated": bool(holes("log", "crash")),
+        "logs_over_limit": False,
+        "actions_over_limit": actions_over_limit,
+        "action_window_truncated": bool(holes("action")),
+        "flows_over_limit": False,
+        "flow_window_truncated": bool(holes("flow")),
+        # Not recorded: whether capture was on is a fact about the run, and
+        # this server's proxy today says nothing about it.
+        "proxy_running": None,
+        "recording": {
+            "directory": str(directory),
+            "stopped": loaded.stopped,
+            "holes": holes("action", "flow", "log", "crash"),
+            "unreadable_lines": loaded.unreadable_lines,
+        },
     }
 
 
