@@ -504,8 +504,50 @@ class TestBootAdoptsOnlyItsOwnAvd:
 
         monkeypatch.setattr(adb_module.asyncio, "create_subprocess_exec", spawned)
         monkeypatch.setattr(adb_module.asyncio, "sleep", AsyncMock())
+        monkeypatch.setattr(backend, "wait_for_boot_completed", AsyncMock())
 
         assert await backend.boot_emulator(AVD, timeout=30) == "emulator-5558"
+
+
+class TestBootReturnsOnlyOnceAndroidHasStarted:
+    """`boot_emulator` returned when adb listed the serial, about nine seconds
+    before `sys.boot_completed` -- measured. Every caller inherited that:
+    `boot`, the device pool, and erase. Waiting here fixes all three."""
+
+    @staticmethod
+    def _backend(monkeypatch):
+        backend = adb_module.AdbBackend()
+        backend._emulator_path = "/sdk/emulator/emulator"
+        monkeypatch.setattr(backend, "list_avds", AsyncMock(return_value=[AVD]))
+        listings = [[]]
+        monkeypatch.setattr(backend, "list_devices", AsyncMock(
+            side_effect=lambda: listings.pop(0) if listings else _listed(OLD)))
+        monkeypatch.setattr(backend, "avd_name", AsyncMock(return_value=AVD))
+
+        async def spawned(*_a, **_k):
+            return None
+
+        monkeypatch.setattr(adb_module.asyncio, "create_subprocess_exec", spawned)
+        monkeypatch.setattr(adb_module.asyncio, "sleep", AsyncMock())
+        return backend
+
+    async def test_it_waits_for_boot_completed_on_the_serial_it_adopted(self, monkeypatch):
+        backend = self._backend(monkeypatch)
+        waited = AsyncMock()
+        monkeypatch.setattr(backend, "wait_for_boot_completed", waited)
+
+        assert await backend.boot_emulator(AVD, timeout=30) == OLD
+
+        waited.assert_awaited_once()
+        assert waited.await_args.args[0] == OLD
+
+    async def test_a_boot_that_never_completes_is_not_reported_as_booted(self, monkeypatch):
+        backend = self._backend(monkeypatch)
+        monkeypatch.setattr(backend, "wait_for_boot_completed", AsyncMock(
+            side_effect=DeviceError("had not finished starting", tool="adb")))
+
+        with pytest.raises(DeviceError, match="had not finished starting"):
+            await backend.boot_emulator(AVD, timeout=30)
 
 
 

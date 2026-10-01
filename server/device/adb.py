@@ -571,7 +571,7 @@ class AdbBackend:
             return []
 
     async def boot_emulator(
-        self, avd_name: str, timeout: float = 60, headless: bool = False,
+        self, avd_name: str, timeout: float = 120, headless: bool = False,
         wipe_data: bool = False,
     ) -> str:
         """Boot an Android emulator by AVD name. Returns the adb serial.
@@ -661,6 +661,16 @@ class AdbBackend:
                             continue
                     except DeviceError:
                         continue  # console not answering yet; next pass
+                    # Listed by adb is not started. Measured: an emulator
+                    # was listed about nine seconds before
+                    # `sys.boot_completed`, and this used to return at the
+                    # first -- so `boot` told the caller the device was ready
+                    # while the framework was still coming up, and the next
+                    # install or launch met a half-started device. One
+                    # deadline covers both waits, which is why the default
+                    # timeout went from 60s to 120s.
+                    remaining = deadline - asyncio.get_event_loop().time()
+                    await self.wait_for_boot_completed(d.udid, max(remaining, 5.0))
                     logger.info("Android emulator booted: %s (AVD: %s)", d.udid, avd_name)
                     return d.udid
 
