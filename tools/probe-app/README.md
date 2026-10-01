@@ -78,9 +78,16 @@ The tab bar itself doubles as a fixture for hidden tab-bar-children probing.
 **Tab order is load bearing.** An iPhone tab bar shows five items and moves the
 rest into a More list, which keeps its own navigation stack and is markedly
 harder to drive. The five the self-test exercises on every run are on the bar;
-Location, Web, Diag and State are reached through More by `goto()`, which handles the
-list, the nav stack, and the fact that "More" names two different elements — the
-tab (a `RadioButton`) and the back button (a `Button`).
+Location, Web, Diag, State, Widgets and Lists are reached through More by
+`goto()`, which handles the list, the nav stack, and the fact that "More" names
+two different elements — the tab (a `RadioButton`) and the back button (a
+`Button`).
+
+That distinction holds on the accessibility tree only. Through WDA both are
+`Button "More"`: from a bar tab, asking for the `RadioButton` still finds the
+tab (it matches the `Button` by equivalence), but once a More sub-screen is
+pushed, both requests are ambiguous — measured on iOS 18.6, tab at y≈770 and
+back button at y≈53. On WDA, tell them apart by position instead.
 
 ## Logging
 
