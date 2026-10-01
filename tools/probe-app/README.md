@@ -70,6 +70,8 @@ does, and the mismatch surfaces at install as a signature error.
 | Web | *(in More)* | `WKWebView` with fixed local content and named DOM ids; `isInspectable` on 16.4+ |
 | Diag | *(in More)* | Crash (uncaught exception, `fatalError`) and main-thread hang |
 | State | *(in More)* | The only persistent surface: UserDefaults keys `probe.greeting` (string), `probe.counter` (int) and `probe.flag` (bool), mirrored in `state_greeting` / `state_counter` / `state_flag`; `state_increment`, `state_toggle_flag`, `state_reload`, `state_reset`. An absent key shows `—`, not its zero value |
+| Widgets | *(in More)* | One of each standard control the other tabs lack — search bar, progress and activity indicators, page control, image, menu button, colour well, compact date picker, text view, picker wheel, toolbar (`widget_*`) — all on screen at once, for comparing how the accessibility tree and XCUITest name each type ([landmark-conventions](../../docs/proposals/landmark-conventions.md)) |
+| Lists | *(in More)* | A table with a section header, footer and three accessory types (`lists_row_0`…`2`), and a collection view (`lists_tile_0`…`5`), for the same comparison |
 
 The tab bar itself doubles as a fixture for hidden tab-bar-children probing.
 

@@ -33,6 +33,11 @@ enum ProbeTabs {
             (WebViewController(), "Web", "globe"),
             (DiagViewController(), "Diag", "exclamationmark.triangle"),
             (StateViewController(), "State", "externaldrive"),
+            // One of each standard element type, for comparing how the
+            // accessibility tree and XCUITest name it (#336). Last, so the
+            // five bar tabs the self-test drives are unchanged.
+            (WidgetsViewController(), "Widgets", "slider.horizontal.3"),
+            (ListsViewController(), "Lists", "list.dash"),
         ]
 
         let tabBarController = UITabBarController()
