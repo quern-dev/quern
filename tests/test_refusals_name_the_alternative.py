@@ -11,11 +11,14 @@ lack is an implementation, not a mechanism.
 Three situations, and conflating them costs the caller the only thing the
 refusal was for:
 
-- no equivalent exists (`Set hardware keyboard`)
+- no equivalent exists (nothing mapped today; absent from the table means this)
 - one exists and quern has not built it (the plist family, save/restore: #314)
-- one exists with different semantics (`Erase` and `-wipe-data`)
+- one exists with different semantics (`Set hardware keyboard`: `hw.keyboard`
+  is read only at boot, so honouring it means a restart -- #356)
 
-See #263.
+`Erase` sat in that last group until #356 built it for emulators by booting
+the AVD again with `-wipe-data`; it is refused now only for a physical phone or
+a TCP-attached emulator, with its own reason. See #263, #356.
 """
 
 from __future__ import annotations
@@ -49,14 +52,18 @@ class TestTheRefusalNamesTheAlternative:
         assert "run-as" in msg or "inotifyd" in msg
         assert "#314" in msg
 
-    def test_erase_names_a_launch_flag_rather_than_a_live_operation(self):
-        """`-wipe-data` cannot be applied to a running emulator. An earlier
-        version said it "restarts it", which is not what a launch flag does,
-        and a test asserting that literal phrase held the wrong wording in
-        place."""
-        msg = _refusal(_android(), "Erase")
-        assert "-wipe-data" in msg
-        assert "launch flag" in msg
+    async def test_erase_on_a_physical_phone_says_why_not_simulators_only(self):
+        """Erase is no longer refused for an emulator (#356), so a phone gets a
+        reason of its own rather than the generic "only supported on
+        simulators" -- which would now be false, since emulators are supported.
+        The assertion is on what must *not* be said; the wording of the reason
+        is free to improve."""
+        ctrl = _android()
+        with pytest.raises(DeviceError) as e:
+            await ctrl.erase("PHONE")
+        msg = str(e.value)
+        assert "only supported on simulators" not in msg, msg
+        assert e.value.tool == "adb"
 
     def test_set_hardware_keyboard_is_not_called_simulator_only(self):
         """It was. `hw.keyboard` is an AVD property and
@@ -187,7 +194,7 @@ class TestTheMapDoesNotDriftFromTheCode:
         """
         branches_on_android_first = {
             "Boot", "Shutdown", "Set location", "Open URL",
-            "Grant permission", "Clear app data",
+            "Grant permission", "Clear app data", "Erase",
         }
         unaccounted = (
             self._guarded_operations()
@@ -278,3 +285,19 @@ class TestTheAdviceHasNoRoomToMakeAClaim:
         assert DeviceController._needs_debuggable("start_plist_watch") is False
         assert DeviceController._needs_debuggable("Erase") is False
         assert DeviceController._needs_debuggable("not an operation") is False
+
+
+
+def test_the_keyboard_refusal_points_at_the_issue_that_holds_it():
+    """It pointed at #263 after that closed as fixed, so a caller following
+    "quern does not expose it yet -- see #263" landed on "both defects are
+    fixed" for work that was never part of that issue. #356 holds it, open,
+    with the question it actually needs. Rendered rather than read off the
+    table, because the caller sees the sentence, not the tuple."""
+    ctrl = DeviceController()
+    ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR
+    with pytest.raises(DeviceError) as excinfo:
+        ctrl._require_simulator("emulator-5554", "Set hardware keyboard")
+    msg = str(excinfo.value)
+    assert "#356" in msg, msg
+    assert "#263" not in msg, msg
