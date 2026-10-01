@@ -892,9 +892,10 @@ class AdbBackend:
         """Force-stop an app."""
         await self._run_adb_for_device(serial, "shell", "am", "force-stop", package)
 
-    async def uninstall_app(self, serial: str, package: str) -> None:
+    async def uninstall_app(self, serial: str, package: str,
+                            timeout: float | None = None) -> None:
         """Uninstall an app."""
-        await self._run_adb_for_device(serial, "uninstall", package)
+        await self._run_adb_for_device(serial, "uninstall", package, timeout=timeout)
 
     async def install_apk_result(self, serial: str, apk_path: str, timeout: float = 300,
                                  allow_downgrade: bool = False) -> tuple[int, str, str]:
@@ -921,9 +922,15 @@ class AdbBackend:
         return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
 
     async def supported_abis(self, serial: str) -> list[str]:
-        """The device's ABIs, preferred first (`arm64-v8a`, `armeabi-v7a`)."""
-        value = await self._get_device_property(serial, "ro.product.cpu.abilist")
-        return [a.strip() for a in value.split(",") if a.strip()]
+        """The device's ABIs, preferred first (`arm64-v8a`, `armeabi-v7a`).
+
+        Raises DeviceError when the device cannot be asked, rather than
+        answering []: "could not ask" and "has none that fit" call for
+        different fixes, and only the caller can say which it was.
+        """
+        stdout, _ = await self._run_adb_for_device(serial, "shell", "getprop",
+                                                   "ro.product.cpu.abilist", timeout=20)
+        return [a.strip() for a in stdout.strip().split(",") if a.strip()]
 
     async def list_apps(self, serial: str) -> list[AppInfo]:
         """List third-party installed apps."""

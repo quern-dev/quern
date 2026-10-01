@@ -26,8 +26,7 @@ from pathlib import Path
 
 #: The oldest JDK a current Gradle build runs on when that JDK *is* the
 #: build's: Gradle 9, and the Android Gradle plugin since 8.0, both require 17.
-#: A project with Daemon JVM criteria needs far less -- see
-#: `gradle.launcher_minimum`.
+#: A project with Daemon JVM criteria needs far less -- see `gradle.java_range`.
 MIN_LAUNCHER_MAJOR = 17
 
 ANDROID_STUDIO_JBR = ("/Applications/Android Studio.app/Contents/jbr/Contents/Home",
@@ -155,47 +154,74 @@ def candidates(*, java_home: str | None, env: dict[str, str], home: str,
     return found
 
 
+def _range(minimum: int, maximum: int | None) -> str:
+    return f"Java {minimum} to {maximum}" if maximum else f"Java {minimum} or later"
+
+
+def _fits(jdk: Jdk, minimum: int, maximum: int | None) -> bool:
+    return jdk.major >= minimum and (maximum is None or jdk.major <= maximum)
+
+
+def java_home_override(gradle_args: list[str] | None) -> str | None:
+    """`-Dorg.gradle.java.home=<path>` among the arguments, which Gradle
+    honours over both gradle.properties files."""
+    for arg in gradle_args or []:
+        if arg.startswith("-Dorg.gradle.java.home="):
+            return arg.split("=", 1)[1]
+    return None
+
+
 def choose(project_root: Path, *, java_home: str | None = None,
            env: dict[str, str] | None = None, home: str | None = None,
-           minimum: int = MIN_LAUNCHER_MAJOR,
+           minimum: int = MIN_LAUNCHER_MAJOR, maximum: int | None = None,
+           gradle_args: list[str] | None = None,
            found: list[Jdk] | None = None) -> Choice:
-    """The JDK to run Gradle in `project_root` with.
+    """The JDK to run Gradle in `project_root` with: one in [minimum, maximum].
 
-    `org.gradle.java.home` (the project's gradle.properties, then the user's)
-    is authoritative: Gradle runs on it whatever JAVA_HOME says, so it is
-    validated rather than overridden. Otherwise the first candidate at least
-    `minimum` wins, an explicit `java_home` first.
+    `org.gradle.java.home` is authoritative -- Gradle runs on it whatever
+    JAVA_HOME says -- so it is validated rather than overridden. Gradle reads
+    it from `-Dorg.gradle.java.home` first, then your ~/.gradle/gradle.properties,
+    then the project's; a refusal still lists every JDK found, so the options
+    can name one that works. Otherwise the first candidate in range wins, an
+    explicit `java_home` first. A JDK too new for the project's Gradle fails
+    as surely as one too old: Java 21 broke a Gradle 7.6 build (measured).
     """
     env = dict(os.environ if env is None else env)
     home = home or env.get("HOME") or str(Path.home())
-    for props, label in ((project_root / "gradle.properties", "the project's gradle.properties"),
-                         (Path(env.get("GRADLE_USER_HOME") or Path(home) / ".gradle")
-                          / "gradle.properties", "your ~/.gradle/gradle.properties")):
-        forced = gradle_property(props, "org.gradle.java.home")
-        if forced:
-            jdk = read_jdk(forced, f"org.gradle.java.home in {label}")
-            if jdk and jdk.major >= minimum:
-                return Choice(jdk=jdk, candidates=[jdk], forced_by=label)
-            what = f"Java {jdk.version}" if jdk else "not a JDK quern can read"
-            return Choice(jdk=None, candidates=[jdk] if jdk else [], forced_by=label,
-                          problem=f"org.gradle.java.home in {label} is {forced} ({what}); "
-                                  f"Gradle uses it whatever JAVA_HOME says, and this build "
-                                  f"needs Java {minimum} or later")
+    java_home = os.path.expanduser(java_home) if java_home else None
     jdks = found if found is not None else candidates(java_home=java_home, env=env, home=home)
+    want = _range(minimum, maximum)
+    user_props = Path(env.get("GRADLE_USER_HOME") or Path(home) / ".gradle") / "gradle.properties"
+    forced_sources = [(java_home_override(gradle_args), "-Dorg.gradle.java.home in gradle_args"),
+                      (gradle_property(user_props, "org.gradle.java.home"),
+                       "your ~/.gradle/gradle.properties"),
+                      (gradle_property(project_root / "gradle.properties",
+                                       "org.gradle.java.home"),
+                       "the project's gradle.properties")]
+    for forced, label in forced_sources:
+        if not forced:
+            continue
+        jdk = read_jdk(os.path.expanduser(forced), f"org.gradle.java.home ({label})")
+        if jdk and _fits(jdk, minimum, maximum):
+            return Choice(jdk=jdk, candidates=jdks, forced_by=label)
+        what = f"Java {jdk.version}" if jdk else "not a JDK quern can read"
+        return Choice(jdk=None, candidates=jdks, forced_by=label,
+                      problem=f"org.gradle.java.home ({label}) is {forced} ({what}); Gradle "
+                              f"uses it whatever JAVA_HOME says, and this build needs {want}")
     if java_home:
         given = next((j for j in jdks if j.source.startswith("the java_home")), None)
         if given is None:
             return Choice(jdk=None, candidates=jdks,
                           problem=f"the java_home you passed, {java_home}, is not a JDK")
-        if given.major < minimum:
+        if not _fits(given, minimum, maximum):
             return Choice(jdk=None, candidates=jdks,
                           problem=f"the java_home you passed is Java {given.version}; this "
-                                  f"build needs Java {minimum} or later")
+                                  f"build needs {want}")
         return Choice(jdk=given, candidates=jdks)
-    usable = [j for j in jdks if j.major >= minimum]
+    usable = [j for j in jdks if _fits(j, minimum, maximum)]
     if usable:
         return Choice(jdk=usable[0], candidates=jdks)
     have = ", ".join(f"Java {j.version}" for j in jdks) or "none"
     return Choice(jdk=None, candidates=jdks,
-                  problem=f"no JDK {minimum} or later was found (found: {have}); Gradle "
-                          f"needs one to run")
+                  problem=f"no JDK in the range this build needs ({want}) was found "
+                          f"(found: {have})")

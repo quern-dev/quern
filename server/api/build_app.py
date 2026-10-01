@@ -469,7 +469,8 @@ def _android_summary(resp: BuildAndInstallResponse) -> str:
     if installed:
         parts.append(f"Installed on: {', '.join(d.udid for d in installed)}.")
     parts += [f"Note ({d.udid}): {d.note}." for d in installed if d.note]
-    parts += [f"Install failed ({d.udid}): {d.error}" for d in resp.devices if not d.installed]
+    parts += [f"Install failed ({d.udid}): {d.error.rstrip('.')}." for d in resp.devices
+              if not d.installed]
     parts += [build_records.summary_line(r) for r in resp.build_records]
     return " ".join(parts)
 

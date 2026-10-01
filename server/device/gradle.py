@@ -28,6 +28,7 @@ from server.models import BuildDiagnostic, BuildResult, EnvironmentProblem
 BUILD_TIMEOUT = 1800  # s
 
 _SETTINGS = ("settings.gradle.kts", "settings.gradle")
+_BUILD_FILES = ("build.gradle.kts", "build.gradle")
 
 
 class GradleProjectError(ValueError):
@@ -65,6 +66,8 @@ def find_project(path: str, module: str | None = None) -> GradleProject:
     `module`, defaulting to `app`, the name Android Studio gives it.
     """
     p = Path(path).expanduser().resolve()
+    if not p.exists():
+        raise GradleProjectError(f"{path} does not exist")
     root = _root_of(p)
     if root is None:
         raise GradleProjectError(f"{path} is not in a Gradle project: no settings.gradle(.kts) "
@@ -72,8 +75,15 @@ def find_project(path: str, module: str | None = None) -> GradleProject:
     if not (root / "gradlew").is_file():
         raise GradleProjectError(f"{root} has no gradlew; quern runs the project's own Gradle "
                                  f"wrapper (`gradle wrapper` creates one)")
-    if module is None:
-        module = ":".join(p.relative_to(root).parts) if p != root else "app"
+    if module is None and p != root:
+        # The nearest directory with a build file is the module: a path to
+        # app/src/main means app, not a module called app:src:main.
+        d = p if p.is_dir() else p.parent
+        while d != root and not any((d / f).is_file() for f in _BUILD_FILES):
+            d = d.parent
+        module = ":".join(d.relative_to(root).parts) if d != root else "app"
+    elif module is None:
+        module = "app"
     module = module.strip(":")
     module_dir = root.joinpath(*module.split(":"))
     if not module_dir.is_dir():
@@ -97,23 +107,41 @@ def gradle_version(project: GradleProject) -> tuple[int, ...] | None:
     return tuple(int(p) for p in m.group(1).split(".")) if m else None
 
 
-def launcher_minimum(project: GradleProject) -> tuple[int, str]:
-    """(the oldest JDK to start this build with, why).
+#: The newest Java each Gradle runs on, from Gradle's compatibility matrix:
+#: (first Gradle supporting it, Java). Newer than the last row is not known.
+_GRADLE_MAX_JAVA = ((7, 3), 17), ((7, 5), 18), ((7, 6), 19), ((8, 3), 20), ((8, 5), 21), \
+    ((8, 8), 22), ((8, 10), 23), ((8, 14), 24), ((9, 1), 25)
+
+
+def java_range(project: GradleProject) -> tuple[int, int | None, str]:
+    """(oldest, newest or None, why): the JDKs this build can start with.
 
     With Daemon JVM criteria, the JDK quern passes only starts Gradle's
     launcher, and Gradle runs the build on a JDK matching the criteria, which
-    it finds or downloads itself -- measured: Java 11 as JAVA_HOME built a
-    project asking for 21. Without them, that JDK is the build's own: 17 for
-    Gradle 8 and later (and the Android Gradle plugin 8 that goes with it), 11
-    before. An approximation where the build file could say otherwise; a build
-    that disagrees says so, and that is reported too.
+    it finds or downloads itself -- measured: Java 8 and Java 11 as JAVA_HOME
+    both built a project asking for 21. Without them, that JDK is the build's
+    own, and it needs a floor (17 for Gradle 8 and later and the Android Gradle
+    plugin 8, 11 before) and a ceiling: Java 21 failed a Gradle 7.6 build with
+    "Unsupported class file major version 65" (measured). An approximation where
+    the build file could say otherwise; a build that disagrees says so.
     """
     if daemon_jvm_version(project) is not None:
-        return 8, "the project's Daemon JVM criteria choose the build's own JDK"
+        return 8, None, "the project's Daemon JVM criteria choose the build's own JDK"
     version = gradle_version(project)
-    if version is None or version >= (8,):
-        return 17, "Gradle 8 and later, and the Android Gradle plugin 8, need Java 17"
-    return 11, "the Android Gradle plugin 7 needs Java 11"
+    if version is None:
+        return 17, None, "a current Android build needs Java 17"
+    minimum = 17 if version >= (8,) else 11
+    maximum = 16
+    for first, java in _GRADLE_MAX_JAVA:
+        if version >= first:
+            maximum = java
+    if version[:2] > _GRADLE_MAX_JAVA[-1][0]:
+        newest_known = None       # a Gradle newer than the table: no ceiling to state
+    else:
+        newest_known = maximum
+    named = ".".join(str(p) for p in version)
+    return minimum, newest_known, (f"Gradle {named} runs on Java {minimum}"
+                                   + (f" to {newest_known}" if newest_known else " or later"))
 
 
 def assemble_task(project: GradleProject, variant: str) -> str:
@@ -136,14 +164,23 @@ def android_sdk(project: GradleProject, env: dict[str, str], home: str) -> tuple
     return None, ""
 
 
-def jdk_problem(choice: jdk_mod.Choice, minimum: int) -> EnvironmentProblem:
+def jdk_problem(choice: jdk_mod.Choice, minimum: int,
+                maximum: int | None) -> EnvironmentProblem:
     found = [f"Java {j.version} at {j.home} ({j.source})" for j in choice.candidates]
-    usable = [j for j in choice.candidates if j.major >= minimum]
-    options = [f'run with java_home="{j.home}" (Java {j.version})' for j in usable[:3]]
+    usable = [j for j in choice.candidates
+              if j.major >= minimum and (maximum is None or j.major <= maximum)]
     if choice.forced_by:
-        options.insert(0, f"change or remove org.gradle.java.home in {choice.forced_by}")
-    options.append(f"install a JDK {minimum} or later (for example "
-                   f"`brew install openjdk@21`, or Android Studio, which bundles one)")
+        # org.gradle.java.home wins over JAVA_HOME, so java_home= cannot get
+        # past it; -D on the command line can, without editing a file.
+        options = [f'run with gradle_args=["-Dorg.gradle.java.home={j.home}"] '
+                   f'(Java {j.version})' for j in usable[:3]]
+        options.append(f"change or remove org.gradle.java.home in {choice.forced_by}")
+    else:
+        options = [f'run with java_home="{j.home}" (Java {j.version})' for j in usable[:3]]
+    newest = maximum or 21
+    options.append(f"install a JDK {jdk_mod._range(minimum, maximum).replace('Java ', '')} "
+                   f"(for example `brew install openjdk@{newest}`, or Android Studio, which "
+                   f"bundles one)")
     return EnvironmentProblem(kind="jdk", summary=choice.problem, found=found, options=options)
 
 
@@ -191,6 +228,8 @@ _KOTLIN = re.compile(r"^([ew]): (?:file://)?(/[^\s:]+\.kts?)"
                      r"(?::(\d+):(\d+)|: \((\d+), (\d+)\):)\s*(.*)$")
 _JAVAC = re.compile(r"^(/\S+\.java):(\d+): (error|warning): (.*)$")
 _AAPT = re.compile(r"^ERROR:\s*(/\S+?):(\d+):\s*AAPT: error: (.*)$")
+#: AGP 9: `com.example.app-main-5:/layout/main.xml:4: error: resource … not found.`
+_AAPT9 = re.compile(r"^[\w.\-]+:(/\S+?):(\d+): error: (.*)$")
 _WENT_WRONG = re.compile(r"\* What went wrong:\n(.*?)(?:\n\* Try:|\n\* Exception is:|\Z)", re.S)
 
 
@@ -198,23 +237,51 @@ def _environment(output: str, project: GradleProject,
                  candidates: list[jdk_mod.Jdk]) -> list[EnvironmentProblem]:
     """Failures that are about the machine, not the code."""
     problems = []
+    m = re.search(r"Downloading (https?://\S+gradle-[\w.\-]+\.zip)", output)
+    if m and ("Exception in thread" in output or "Could not install Gradle" in output):
+        problems.append(EnvironmentProblem(
+            kind="gradle_distribution",
+            summary=f"the Gradle wrapper could not download Gradle from {m.group(1)}",
+            options=["check the network, then build again: the wrapper downloads Gradle "
+                     "once and keeps it in ~/.gradle/wrapper/dists"]))
+    m = re.search(r"Unsupported class file major version (\d+)"
+                  r"|incompatible Java (\d+) and Gradle", output)
+    if m:
+        java = int(m.group(2)) if m.group(2) else int(m.group(1)) - 44
+        minimum, maximum, why = java_range(project)
+        fits = [j for j in candidates
+                if j.major >= minimum and (maximum is None or j.major <= maximum)]
+        problems.append(EnvironmentProblem(
+            kind="jdk",
+            summary=f"Gradle ran on Java {java}, which is too new for this project's Gradle "
+                    f"({why})",
+            found=[f"Java {j.version} at {j.home}" for j in candidates],
+            options=[f'run with java_home="{j.home}" (Java {j.version})' for j in fits[:3]]
+            + ["or update the project's Gradle wrapper (`./gradlew wrapper "
+               "--gradle-version <newer>`): a change to the project"]))
     m = re.search(r"languageVersion=(\d+)", output)
     if m and ("Cannot find a Java installation" in output
               or "No matching toolchains found" in output
               or "No locally installed toolchains match" in output):
         want = int(m.group(1))
-        for_daemon = "Daemon JVM" in output
+        # Gradle 9.5 does not say "Daemon JVM" when criteria fail; the
+        # project's own criteria asking for this version is what tells.
+        for_daemon = "Daemon JVM" in output or daemon_jvm_version(project) == want
         have = [j for j in candidates if j.major == want]
         paths = ",".join(j.home for j in have)
         options = []
         if have:
             options.append(f'let Gradle use the Java {want} it did not look for: '
-                           f'gradle_args=["-Porg.gradle.java.installations.paths={paths}"]')
+                           f'gradle_args=["-Dorg.gradle.java.installations.paths={paths}"]')
         options.append(f"install a JDK {want} where Gradle looks for one (for example "
                        f"`brew install openjdk@{want}` or `sdk install java {want}-tem`)")
-        options.append("or let Gradle download it: apply the "
-                       "`org.gradle.toolchains.foojay-resolver-convention` plugin in "
-                       "settings.gradle")
+        if for_daemon:
+            options.append("or let Gradle download it: the criteria's toolchainUrl entries "
+                           "do that unless org.gradle.java.installations.auto-download=false")
+        else:
+            options.append("or let Gradle download it: apply the "
+                           "`org.gradle.toolchains.foojay-resolver-convention` plugin in "
+                           "settings.gradle")
         problems.append(EnvironmentProblem(
             kind="toolchain_jdk",
             summary=(f"the project's Daemon JVM criteria ask for Java {want}, and Gradle "
@@ -224,19 +291,26 @@ def _environment(output: str, project: GradleProject,
             options=options))
     m = re.search(r"(?:Gradle requires JVM|Android Gradle plugin requires Java) (\d+)", output)
     if m:
+        need = int(m.group(1))
+        fits = [j for j in candidates if j.major >= need]
         problems.append(EnvironmentProblem(
             kind="jdk",
-            summary=f"Gradle ran on a JDK older than the Java {m.group(1)} this build needs",
-            options=["pass java_home= a newer JDK, or change org.gradle.java.home"]))
+            summary=f"Gradle ran on a JDK older than the Java {need} this build needs",
+            found=[f"Java {j.version} at {j.home}" for j in candidates],
+            options=[f'run with java_home="{j.home}" (Java {j.version})' for j in fits[:3]]
+            or [f"install a JDK {need} or later"]))
     if "SDK location not found" in output:
         problems.append(sdk_problem(project))
-    m = re.search(r"Failed to (?:find target with hash string '([^']+)'|install the following "
-                  r"Android SDK packages[^\n]*)", output)
+    m = re.search(r"Failed to (?:find target with hash string '([^']+)'|find Build Tools "
+                  r"revision ([\d.]+)|install the following (?:Android )?SDK (?:packages|"
+                  r"components)[^\n]*)", output)
     if m or "licences have not been accepted" in output or "License for package" in output:
         problems.append(EnvironmentProblem(
             kind="sdk_packages",
             summary="Android SDK packages the build needs are missing or their licences "
-                    "are not accepted" + (f" ({m.group(1)})" if m and m.group(1) else ""),
+                    "are not accepted"
+                    + (f" ({m.group(1) or 'build-tools ' + m.group(2)})"
+                       if m and (m.group(1) or m.group(2)) else ""),
             options=["install them with Android Studio's SDK Manager, or "
                      "`sdkmanager --licenses` then `sdkmanager \"<package>\"`"]))
     if re.search(r"NDK (?:not configured|at \S+ did not have a source\.properties)"
@@ -263,9 +337,19 @@ def parse(code: int, output: str, project: GradleProject,
                                 severity="error" if m.group(1) == "e" else "warning")
             (errors if d.severity == "error" else warnings).append(d)
         elif m := _JAVAC.match(line):
+            message = m.group(4)
+            # `cannot find symbol` names the symbol two lines down; without it
+            # two different missing symbols read the same.
+            for follow in lines[i + 1:i + 4]:
+                if follow.strip().startswith("symbol:"):
+                    message += f" ({' '.join(follow.split())})"
+                    break
             d = BuildDiagnostic(file=m.group(1), line=int(m.group(2)), severity=m.group(3),
-                                message=m.group(4))
+                                message=message)
             (errors if d.severity == "error" else warnings).append(d)
+        elif m := _AAPT9.match(line):
+            errors.append(BuildDiagnostic(file=m.group(1).lstrip("/"), line=int(m.group(2)),
+                                          message=f"resource: {m.group(3)}"))
         elif m := _AAPT.match(line):
             errors.append(BuildDiagnostic(file=m.group(1), line=int(m.group(2)),
                                           message=f"AAPT: {m.group(3)}"))
@@ -277,8 +361,13 @@ def parse(code: int, output: str, project: GradleProject,
         m = _WENT_WRONG.search(output)
         why = " ".join(m.group(1).split()) if m else ""
         if not why:
-            tail = [ln for ln in lines if ln.strip()][-5:]
-            why = " / ".join(tail) or f"gradlew exited {code} with no output"
+            # No summary block: the wrapper itself failed. Its exception says
+            # why; the stack frames under it do not.
+            cause = [ln.strip() for ln in lines
+                     if ln.startswith(("Exception in thread", "Caused by:", "Error:"))]
+            tail = [ln for ln in lines if ln.strip() and not ln.lstrip().startswith("at ")][-3:]
+            why = (" / ".join(cause[-2:]) or " / ".join(tail)
+                   or f"gradlew exited {code} with no output")
         errors.append(BuildDiagnostic(message=why))
     result = BuildResult(succeeded=succeeded, errors=errors, warnings=warnings,
                          warning_count=len(warnings), raw_line_count=len(lines))

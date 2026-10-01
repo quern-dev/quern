@@ -19,6 +19,7 @@ from fastapi import HTTPException
 from server.api import build_android, build_app
 from server.device import gradle
 from server.device import jdk as jdk_mod
+from server.models import BuildResult, DeviceError
 
 FIXTURES = Path(__file__).parent / "fixtures" / "gradle"
 
@@ -78,7 +79,7 @@ class TestChoosingAJdk:
     def test_none_new_enough_is_a_problem_naming_what_was_found(self, tmp_path):
         root = _project(tmp_path)
         c = self._choose(root, [jdk_mod.Jdk("/j11", "11.0.1", 11, "JAVA_HOME")])
-        assert c.jdk is None and "no JDK 17 or later" in c.problem and "Java 11.0.1" in c.problem
+        assert c.jdk is None and "(Java 17 or later)" in c.problem and "Java 11.0.1" in c.problem
 
     def test_org_gradle_java_home_is_authoritative(self, tmp_path):
         """Gradle runs on it whatever JAVA_HOME says, so it is validated, not
@@ -137,6 +138,7 @@ class TestTheProject:
     def test_a_module_directory_names_its_module(self, tmp_path):
         root = _project(tmp_path)
         (root / "feature" / "checkout").mkdir(parents=True)
+        (root / "feature" / "checkout" / "build.gradle.kts").write_text("")
         p = gradle.find_project(str(root / "feature" / "checkout"))
         assert p.module == "feature:checkout"
         assert gradle.assemble_task(p, "debug") == ":feature:checkout:assembleDebug"
@@ -155,14 +157,27 @@ class TestTheProject:
         with pytest.raises(gradle.GradleProjectError, match="module 'wear'"):
             gradle.find_project(str(_project(tmp_path)), "wear")
 
-    @pytest.mark.parametrize("daemon_jvm, gradle_v, minimum", [
-        (21, "9.5.1", 8),       # Gradle picks the build's JDK itself: measured, Java 11 built it
-        (None, "9.5.1", 17), (None, "8.7", 17), (None, "7.6.4", 11),
+    def test_a_path_inside_a_module_is_that_module(self, tmp_path):
+        """app/src/main is in module app, not a module called app:src:main."""
+        root = _project(tmp_path)
+        (root / "app" / "build.gradle.kts").write_text("")
+        (root / "app" / "src" / "main").mkdir(parents=True)
+        assert gradle.find_project(str(root / "app" / "src" / "main")).module == "app"
+
+    def test_a_path_that_does_not_exist_says_so(self, tmp_path):
+        with pytest.raises(gradle.GradleProjectError, match="does not exist"):
+            gradle.find_project(str(tmp_path / "nope"))
+
+    @pytest.mark.parametrize("daemon_jvm, gradle_v, minimum, maximum", [
+        (21, "9.5.1", 8, None),   # Gradle picks the build's JDK itself: measured, Java 11 built it
+        (None, "9.5.1", 17, None),  # newer than the table: no ceiling to state
+        (None, "9.1.0", 17, 25),    # a patch number does not lift it past the table
+        (None, "8.7", 17, 21), (None, "7.6.4", 11, 19), (None, "7.2", 11, 16),
     ])
-    def test_the_launcher_minimum_follows_the_project(self, tmp_path, daemon_jvm, gradle_v,
-                                                      minimum):
+    def test_the_java_range_follows_the_project(self, tmp_path, daemon_jvm, gradle_v,
+                                                minimum, maximum):
         p = gradle.find_project(str(_project(tmp_path, daemon_jvm=daemon_jvm, gradle_v=gradle_v)))
-        assert gradle.launcher_minimum(p)[0] == minimum
+        assert gradle.java_range(p)[:2] == (minimum, maximum)
 
     def test_the_sdk_from_local_properties_first(self, tmp_path):
         sdk = tmp_path / "sdk"
@@ -189,14 +204,14 @@ class TestParsingRealOutput:
         assert not result.succeeded and env == []
         [e] = result.errors
         assert e.file.endswith("probe/Foo.java") and e.line == 3
-        assert e.message == "cannot find symbol"
+        assert e.message == "cannot find symbol (symbol: variable missingSymbol)"
 
     def test_a_missing_toolchain_is_an_environment_problem(self, tmp_path):
         jdk23 = jdk_mod.Jdk("/jdk23", "23.0.1", 23, "sdkman")
         result, env = self._parse(tmp_path, "toolchain.out", candidates=[jdk23])
         [p] = env
         assert p.kind == "toolchain_jdk" and "Java 23 toolchain" in p.summary
-        assert "-Porg.gradle.java.installations.paths=/jdk23" in p.options[0]
+        assert "-Dorg.gradle.java.installations.paths=/jdk23" in p.options[0]
         assert "Cannot find a Java installation" in result.errors[0].message
 
     def test_a_launcher_too_old_is_an_environment_problem(self, tmp_path):
@@ -311,20 +326,26 @@ class TestPickingTheApk:
 
 
 class FakeAdb:
-    def __init__(self, results):
+    def __init__(self, results, abis=("arm64-v8a",), uninstall_error=None):
         self.results = list(results)      # (code, out, err) per install, in order
         self.calls = []
+        self.abis = abis                  # an exception: the device cannot be asked
+        self.uninstall_error = uninstall_error
 
     async def supported_abis(self, serial):
-        return ["arm64-v8a"]
+        if isinstance(self.abis, Exception):
+            raise self.abis
+        return list(self.abis)
 
     async def install_apk_result(self, serial, apk, allow_downgrade=False):
         self.calls.append(("install", serial) if not allow_downgrade
                           else ("install -d", serial))
         return self.results.pop(0)
 
-    async def uninstall_app(self, serial, package):
+    async def uninstall_app(self, serial, package, timeout=None):
         self.calls.append(("uninstall", serial, package))
+        if self.uninstall_error:
+            raise self.uninstall_error
 
 
 class FakeController:
@@ -379,6 +400,9 @@ def built(tmp_path, monkeypatch):
     return SimpleNamespace(root=root, ran=ran, recorded=recorded)
 
 
+NO_SDK_DOWNLOAD = "-Pandroid.builder.sdkDownload=false"
+
+
 def _go(controller, body):
     return asyncio.run(build_android.build_and_install(controller, body))
 
@@ -387,7 +411,7 @@ class TestTheRoute:
     def test_builds_installs_and_records(self, built):
         adb = FakeAdb([(0, "Success\n", "")])
         r = _go(FakeController(adb), _body(project_path=str(built.root)))
-        assert built.ran == [(":app:assembleDebug", "/jbr", [])]
+        assert built.ran == [(":app:assembleDebug", "/jbr", [NO_SDK_DOWNLOAD])]
         assert r["all_installed"] and r["devices"][0].installed
         assert built.recorded == ["debug"] and r["build_records"][0].installed_on == [
             "emulator-5554"]
@@ -434,7 +458,7 @@ class TestTheRoute:
         monkeypatch.setattr(jdk_mod, "candidates", lambda **kw: [mine])
         _go(FakeController(FakeAdb([(0, "Success\n", "")])),
             _body(project_path=str(built.root), java_home="/mine", gradle_args=["--offline"]))
-        assert built.ran == [(":app:assembleDebug", "/mine", ["--offline"])]
+        assert built.ran == [(":app:assembleDebug", "/mine", ["--offline", NO_SDK_DOWNLOAD])]
 
     def test_a_failed_build_installs_nothing(self, built, monkeypatch):
         async def run(*a, **k):
@@ -482,3 +506,274 @@ class TestRouteDispatch:
         assert build_app._is_gradle(str(root / "app"))
         assert not build_app._is_gradle(str(root / "ios"))
         assert not build_app._is_gradle(str(root / "ios" / "App.xcodeproj"))
+
+
+# ── the review's findings (#347) ─────────────────────────────────────────────
+
+
+class TestTheJdkRange:
+    """A JDK too new for the project's Gradle fails as surely as one too old:
+    Java 21 broke a Gradle 7.6.4 build (measured)."""
+
+    def _choose(self, root, found, **kw):
+        return jdk_mod.choose(root, env={"HOME": str(root.parent)}, home=str(root.parent),
+                              found=found, **kw)
+
+    def test_a_too_new_jdk_is_passed_over(self, tmp_path):
+        new = jdk_mod.Jdk("/jbr", "21.0.10", 21, "Android Studio")
+        ok = jdk_mod.Jdk("/j17", "17.0.2", 17, "sdkman")
+        assert self._choose(_project(tmp_path), [new, ok], minimum=11, maximum=19).jdk == ok
+
+    def test_only_too_new_ones_is_a_problem_naming_the_range(self, tmp_path):
+        new = jdk_mod.Jdk("/jbr", "21.0.10", 21, "Android Studio")
+        c = self._choose(_project(tmp_path), [new], minimum=11, maximum=19)
+        assert c.jdk is None and "Java 11 to 19" in c.problem
+
+    def test_a_too_new_java_home_is_refused(self, tmp_path):
+        new = jdk_mod.Jdk("/jbr", "21.0.10", 21, "the java_home you passed")
+        c = self._choose(_project(tmp_path), [new], java_home="/jbr", minimum=11, maximum=19)
+        assert c.jdk is None and "Java 21.0.10" in c.problem
+
+    def test_the_route_refuses_java_21_for_gradle_7(self, built, monkeypatch, tmp_path):
+        root = _project(tmp_path / "old", gradle_v="7.6.4")
+        r = _go(FakeController(FakeAdb([])), _body(project_path=str(root)))
+        [p] = r["environment"]
+        assert p.kind == "jdk" and "Java 11 to 19" in p.summary and built.ran == []
+        assert "Gradle 7.6.4" in p.summary
+
+    def test_gradle_saying_the_jdk_is_too_new_names_one_that_fits(self, tmp_path):
+        p = gradle.find_project(str(_project(tmp_path, gradle_v="7.6.4")))
+        j17 = jdk_mod.Jdk("/j17", "17.0.2", 17, "sdkman")
+        j21 = jdk_mod.Jdk("/jbr", "21.0.10", 21, "Android Studio")
+        out = ("FAILURE: Build failed with an exception.\n\n* What went wrong:\n"
+               "Could not open settings generic class cache for settings file.\n"
+               "> BUG! exception in phase 'semantic analysis' in source unit "
+               "'_BuildScript_' Unsupported class file major version 65\n")
+        _, [env] = gradle.parse(1, out, p, [j21, j17])
+        assert env.kind == "jdk" and "Java 21" in env.summary
+        assert any('java_home="/j17"' in o for o in env.options)
+        assert not any('java_home="/jbr"' in o for o in env.options)
+
+
+class TestWhoseJavaHomeWins:
+    """Gradle reads org.gradle.java.home from -D, then the user's
+    gradle.properties, then the project's -- and runs on it whatever JAVA_HOME
+    says, so the choice has to be read in the same order."""
+
+    def _choose(self, root, found, home, **kw):
+        return jdk_mod.choose(root, env={"HOME": str(home)}, home=str(home), found=found, **kw)
+
+    def test_the_users_properties_beat_the_projects(self, tmp_path):
+        j11 = _jdk_dir(tmp_path, "j11", "11.0.1")
+        j21 = _jdk_dir(tmp_path, "j21", "21.0.2")
+        home = tmp_path / "home"
+        (home / ".gradle").mkdir(parents=True)
+        (home / ".gradle" / "gradle.properties").write_text(f"org.gradle.java.home={j21}\n")
+        root = _project(tmp_path, props=f"org.gradle.java.home={j11}\n")
+        c = self._choose(root, [], home)
+        assert c.jdk.home == j21 and c.forced_by == "your ~/.gradle/gradle.properties"
+
+    def test_a_minus_d_argument_beats_both(self, tmp_path):
+        j11 = _jdk_dir(tmp_path, "j11", "11.0.1")
+        j21 = _jdk_dir(tmp_path, "j21", "21.0.2")
+        root = _project(tmp_path, props=f"org.gradle.java.home={j11}\n")
+        c = self._choose(root, [], tmp_path / "home",
+                         gradle_args=[f"-Dorg.gradle.java.home={j21}"])
+        assert c.jdk.home == j21 and "gradle_args" in c.forced_by
+
+    def test_a_refused_forced_home_still_lists_what_was_found(self, tmp_path):
+        """The options have to be able to name a JDK that works."""
+        j11 = _jdk_dir(tmp_path, "j11", "11.0.1")
+        root = _project(tmp_path, props=f"org.gradle.java.home={j11}\n")
+        jbr = jdk_mod.Jdk("/jbr", "21.0.10", 21, "Android Studio")
+        c = self._choose(root, [jbr], tmp_path / "home")
+        problem = gradle.jdk_problem(c, 17, None)
+        assert c.jdk is None and any("/jbr" in o for o in problem.options)
+
+    def test_a_tilde_java_home_is_expanded(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        seen = {}
+
+        def candidates(**kw):
+            seen.update(kw)
+            return []
+        monkeypatch.setattr(jdk_mod, "candidates", candidates)
+        jdk_mod.choose(_project(tmp_path), java_home="~/jdk", env={"HOME": str(tmp_path)},
+                       home=str(tmp_path))
+        assert seen["java_home"] == str(tmp_path / "jdk")
+
+
+class TestVariants:
+    def test_a_task_name_is_refused_with_the_variant_it_meant(self, built):
+        with pytest.raises(HTTPException, match='variant="stagingDebug"'):
+            _go(FakeController(FakeAdb([])), _body(project_path=str(built.root),
+                                                   variant="assembleStagingDebug"))
+
+    def test_the_outputs_are_found_whatever_the_case(self, built):
+        r = _go(FakeController(FakeAdb([(0, "Success\n", "")])),
+                _body(project_path=str(built.root), variant="Debug"))
+        assert r["all_installed"]
+
+    def test_a_flavour_wide_build_type_names_the_variants(self, built):
+        out = built.root / "app" / "build" / "outputs" / "apk"
+        for flavour in ("staging", "prod"):
+            d = out / flavour / "debug"
+            d.mkdir(parents=True)
+            (d / "output-metadata.json").write_text(json.dumps({
+                "variantName": f"{flavour}Debug",
+                "elements": [{"outputFile": "a.apk"}]}))
+        (out / "debug" / "output-metadata.json").unlink()
+        r = _go(FakeController(FakeAdb([])), _body(project_path=str(built.root)))
+        assert "prodDebug, stagingDebug" in r["devices"][0].error
+
+
+class TestInstalling:
+    def test_a_failed_reinstall_says_the_data_is_gone(self, built):
+        adb = FakeAdb([(1, "", "Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: sigs]"),
+                       (1, "", "Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]")])
+        r = _go(FakeController(adb), _body(project_path=str(built.root),
+                                           uninstall_on_signature_mismatch=True))
+        [d] = r["devices"]
+        assert not d.installed and "erased its data" in d.error
+        assert "INSUFFICIENT_STORAGE" in d.error
+
+    def test_a_failed_uninstall_is_said_and_nothing_more_is_tried(self, built):
+        adb = FakeAdb([(1, "", "Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: sigs]")],
+                      uninstall_error=DeviceError("adb uninstall failed: boom", tool="adb"))
+        r = _go(FakeController(adb), _body(project_path=str(built.root),
+                                           uninstall_on_signature_mismatch=True))
+        [d] = r["devices"]
+        assert not d.installed and "uninstall you allowed failed" in d.error
+        assert adb.calls[-1][0] == "uninstall"
+
+    def test_one_device_failing_is_not_all_installed(self, built):
+        adb = FakeAdb([(0, "Success\n", ""), (1, "", "Failure [INSTALL_FAILED_OLDER_SDK]")])
+        r = _go(FakeController(adb, android=("emulator-5554", "PIXEL")),
+                _body(project_path=str(built.root), udids=["emulator-5554", "PIXEL"]))
+        assert sum(d.installed for d in r["devices"]) == 1 and r["all_installed"] is False
+
+    def test_unreadable_abis_are_said_rather_than_read_as_a_mismatch(self, built):
+        d = built.root / "app" / "build" / "outputs" / "apk" / "debug"
+        (d / "output-metadata.json").write_text(json.dumps({
+            "applicationId": "com.example.app", "variantName": "debug",
+            "elements": [{"outputFile": "app-debug.apk",
+                          "filters": [{"filterType": "ABI", "value": "arm64-v8a"}]}]}))
+        adb = FakeAdb([], abis=DeviceError("device offline", tool="adb"))
+        r = _go(FakeController(adb), _body(project_path=str(built.root)))
+        assert "ABIs could not be read (device offline)" in r["devices"][0].error
+
+    def test_unreadable_abis_still_install_a_universal_apk(self, built):
+        adb = FakeAdb([(0, "Success\n", "")], abis=DeviceError("offline", tool="adb"))
+        r = _go(FakeController(adb), _body(project_path=str(built.root)))
+        assert r["all_installed"]
+
+    @pytest.mark.parametrize("code, out, err", [
+        (0, "", ""),                                          # no verdict at all
+        (0, "Performing Streamed Install\n", ""),
+        (0, "", "Failure [INSTALL_FAILED_OLDER_SDK]"),        # older adb exits 0 on failure
+    ])
+    def test_installed_needs_android_to_say_success(self, code, out, err):
+        assert gradle.install_outcome(code, out, err)[0] is False
+
+
+class TestTheBuildRun:
+    def test_sdk_downloads_stay_off_unless_asked_for(self, built):
+        _go(FakeController(FakeAdb([(0, "Success\n", "")])),
+            _body(project_path=str(built.root),
+                  gradle_args=["-Pandroid.builder.sdkDownload=true"]))
+        assert built.ran[0][2] == ["-Pandroid.builder.sdkDownload=true"]
+
+    def test_java_says_it_only_starts_gradle_under_daemon_criteria(self, built):
+        r = _go(FakeController(FakeAdb([(0, "Success\n", "")])),
+                _body(project_path=str(built.root)))
+        assert "starting Gradle" in r["java"] and "Java 21 the project's" in r["java"]
+
+    def test_a_timeout_is_reported_and_nothing_installs(self, built, monkeypatch):
+        async def run(*a, **k):
+            raise TimeoutError
+        monkeypatch.setattr(gradle, "run", run)
+        adb = FakeAdb([])
+        r = _go(FakeController(adb), _body(project_path=str(built.root)))
+        assert "did not finish within 30 minutes" in r["build_android"].errors[0].message
+        assert "timed out" in r["devices"][0].error and adb.calls == []
+
+    def test_an_unrunnable_wrapper_is_an_environment_problem(self, built, monkeypatch):
+        async def run(*a, **k):
+            raise PermissionError(13, "Permission denied")
+        monkeypatch.setattr(gradle, "run", run)
+        r = _go(FakeController(FakeAdb([])), _body(project_path=str(built.root)))
+        [p] = r["environment"]
+        assert p.kind == "gradle_wrapper" and "chmod +x" in p.options[0]
+
+    def test_a_timed_out_build_is_killed(self, tmp_path, monkeypatch):
+        killed = []
+
+        class Proc:
+            returncode = None
+
+            async def communicate(self):
+                await asyncio.sleep(60)
+
+            def kill(self):
+                killed.append(True)
+                self.returncode = -9
+
+            async def wait(self):
+                return -9
+
+        async def spawn(*a, **k):
+            return Proc()
+        monkeypatch.setattr(gradle.asyncio, "create_subprocess_exec", spawn)
+        p = gradle.find_project(str(_project(tmp_path)))
+        with pytest.raises(TimeoutError):
+            asyncio.run(gradle.run(p, ":app:assembleDebug", {}, [], timeout=0.05))
+        assert killed == [True]
+
+
+class TestMoreOutput:
+    def test_a_kotlin_warning_is_not_an_error(self, tmp_path):
+        p = gradle.find_project(str(_project(tmp_path)))
+        out = ("w: file:///p/app/src/A.kt:3:5 'x' is deprecated.\n"
+               "e: file:///p/app/src/B.kt:7:1 Unresolved reference 'y'.\n")
+        result, _ = gradle.parse(1, out, p)
+        assert [e.file for e in result.errors] == ["/p/app/src/B.kt"]
+        assert [w.file for w in result.warnings] == ["/p/app/src/A.kt"]
+
+    @pytest.mark.parametrize("line, file", [
+        ("ERROR: /p/app/src/main/res/layout/main.xml:4: AAPT: error: resource "
+         "string/nope not found.", "/p/app/src/main/res/layout/main.xml"),
+        ("com.example.app-main-5:/layout/main.xml:4: error: resource string/nope "
+         "not found.", "layout/main.xml"),
+    ])
+    def test_a_resource_error_has_its_file_and_line(self, tmp_path, line, file):
+        p = gradle.find_project(str(_project(tmp_path)))
+        result, _ = gradle.parse(1, line + "\n", p)
+        [e] = result.errors
+        assert (e.file, e.line) == (file, 4) and "string/nope" in e.message
+
+    def test_a_wrapper_that_cannot_download_gradle(self, tmp_path):
+        p = gradle.find_project(str(_project(tmp_path)))
+        out = ("Downloading https://services.gradle.org/distributions/gradle-9.5.1-bin.zip\n"
+               "Exception in thread \"main\" java.net.UnknownHostException: "
+               "services.gradle.org\n\tat java.base/sun.nio.ch.NioSocketImpl.connect\n")
+        result, [env] = gradle.parse(1, out, p)
+        assert env.kind == "gradle_distribution" and "gradle-9.5.1-bin.zip" in env.summary
+        assert "UnknownHostException" in result.errors[0].message
+        assert "NioSocketImpl" not in result.errors[0].message
+
+    def test_missing_daemon_criteria_jdk_is_labelled_as_such(self, tmp_path):
+        """Gradle 9.5 does not say "Daemon JVM" when the criteria fail."""
+        p = gradle.find_project(str(_project(tmp_path, daemon_jvm=23)))
+        _, [env] = gradle.parse(1, (FIXTURES / "toolchain.out").read_text(), p)
+        assert "Daemon JVM criteria ask for Java 23" in env.summary
+
+    def test_the_summary_ends_each_failure_once(self):
+        resp = build_app.BuildAndInstallResponse(
+            build_android=BuildResult(succeeded=True, summary="ok"), all_installed=False,
+            devices=[build_app.DeviceInstallResult(udid="a", installed=False,
+                                                   error="no room."),
+                     build_app.DeviceInstallResult(udid="b", installed=False,
+                                                   error="offline")],
+            java="Java 21")
+        text = build_app._android_summary(resp)
+        assert "Install failed (a): no room. Install failed (b): offline." in text

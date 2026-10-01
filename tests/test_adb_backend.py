@@ -213,7 +213,7 @@ class TestAppLifecycle:
         backend._run_adb_for_device = AsyncMock(return_value=("Success", ""))
         await backend.uninstall_app("emulator-5554", "com.example.app")
         backend._run_adb_for_device.assert_called_once_with(
-            "emulator-5554", "uninstall", "com.example.app"
+            "emulator-5554", "uninstall", "com.example.app", timeout=None
         )
 
     async def test_list_apps(self):
@@ -480,3 +480,45 @@ class TestOpenUrlReportsAnUnhandledUrl:
             "a refused launch was diagnosed as nothing being able to open it"
         )
         assert "permission" in message, "adb's own reason was dropped"
+
+
+class TestSupportedAbis:
+    async def test_the_list_preferred_first(self):
+        backend = AdbBackend()
+        backend._run_adb_for_device = AsyncMock(return_value=("arm64-v8a,armeabi-v7a\n", ""))
+        assert await backend.supported_abis("s") == ["arm64-v8a", "armeabi-v7a"]
+
+    async def test_a_device_that_cannot_be_asked_raises(self):
+        """Not [] -- that reads as "no ABI fits", which sends the reader to the APK."""
+        backend = AdbBackend()
+        backend._run_adb_for_device = AsyncMock(
+            side_effect=DeviceError("device offline", tool="adb"))
+        with pytest.raises(DeviceError, match="offline"):
+            await backend.supported_abis("s")
+
+
+class TestAdbTimeout:
+    async def test_a_hung_adb_is_killed_and_reported(self):
+        killed = []
+
+        class Proc:
+            returncode = None
+
+            async def communicate(self):
+                import asyncio
+                await asyncio.sleep(60)
+
+            def kill(self):
+                killed.append(True)
+                self.returncode = -9
+
+            async def wait(self):
+                return -9
+
+        backend = AdbBackend()
+        backend._adb_path = "/usr/bin/adb"
+        with patch("server.device.adb.asyncio.create_subprocess_exec",
+                   AsyncMock(return_value=Proc())):
+            with pytest.raises(DeviceError, match="did not answer within 0.05s"):
+                await backend._run_adb("-s", "x", "uninstall", "p", timeout=0.05)
+        assert killed == [True]

@@ -108,11 +108,14 @@ xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
       if (scheme) body.scheme = scheme;
       if (udids && udids.length > 0) body.udids = udids;
 
+      // A build answers when it is done, which can be well past fetch's
+      // 300s wait for headers; the server bounds it instead.
       const data = await apiRequest(
         "POST",
         "/api/v1/device/build-and-install",
         undefined,
-        body
+        body,
+        "none"
       );
 
       // Return concise summary on full success, full JSON on any failure

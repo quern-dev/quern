@@ -36,6 +36,14 @@ async def build_and_install(controller, body) -> dict:
             detail="variant is required for a Gradle project: the build variant to assemble, "
                    "a build type with any flavour before it, e.g. debug or stagingDebug")
     variant = body.variant.strip()
+    if variant.lower().startswith("assemble") and len(variant) > len("assemble"):
+        # The likeliest mistake: the task, not the variant. Gradle would be
+        # asked for assembleAssembleStagingDebug and say only "not found".
+        bare = variant[len("assemble"):]
+        raise HTTPException(
+            status_code=400,
+            detail=f"variant is the variant's name, not its task: pass "
+                   f"variant=\"{bare[:1].lower()}{bare[1:]}\"")
     try:
         project = gradle.find_project(body.project_path, body.module)
     except gradle.GradleProjectError as e:
@@ -47,19 +55,25 @@ async def build_and_install(controller, body) -> dict:
     # Gradle is asked, in words an agent can act on.
     env = dict(os.environ)
     home = env.get("HOME") or str(Path.home())
-    minimum, why_minimum = gradle.launcher_minimum(project)
+    minimum, maximum, why_range = gradle.java_range(project)
     choice = await asyncio.to_thread(jdk_mod.choose, project.root, java_home=body.java_home,
-                                     env=env, home=home, minimum=minimum)
+                                     env=env, home=home, minimum=minimum, maximum=maximum,
+                                     gradle_args=body.gradle_args)
     sdk, sdk_source = gradle.android_sdk(project, env, home)
     environment = []
     if choice.jdk is None:
-        problem = gradle.jdk_problem(choice, minimum)
-        problem.summary += f" ({why_minimum})"
+        problem = gradle.jdk_problem(choice, minimum, maximum)
+        problem.summary += f" ({why_range})"
         environment.append(problem)
     if sdk is None:
         environment.append(gradle.sdk_problem(project))
+    criteria = gradle.daemon_jvm_version(project)
     used = {
+        # With Daemon JVM criteria this JDK only starts Gradle, which runs the
+        # build on a Java `criteria` it finds itself: said, not implied.
         "java": (f"Java {choice.jdk.version} at {choice.jdk.home} ({choice.jdk.source})"
+                 + (f", starting Gradle, which builds on the Java {criteria} the project's "
+                    f"Daemon JVM criteria ask for" if criteria else "")
                  if choice.jdk else None),
         "android_sdk": f"{sdk} ({sdk_source})" if sdk else None,
     }
@@ -67,10 +81,16 @@ async def build_and_install(controller, body) -> dict:
         return _not_built(serials, environment, used, "the environment is not ready to build")
 
     task = gradle.assemble_task(project, variant)
+    args = list(body.gradle_args or [])
+    if not any(a.startswith("-Pandroid.builder.sdkDownload") for a in args):
+        # The Android Gradle plugin downloads missing SDK packages itself once
+        # their licences are accepted: an install on the user's machine nobody
+        # chose. Off, a missing package is an environment problem to decide on.
+        args.append("-Pandroid.builder.sdkDownload=false")
     logger.info("Building %s with %s (%s)", project.root, task, used["java"])
     try:
         code, output = await gradle.run(project, task, gradle.build_env(env, choice.jdk, sdk),
-                                        list(body.gradle_args or []))
+                                        args)
     except TimeoutError:
         result = BuildResult(errors=[BuildDiagnostic(
             message=f"the build did not finish within {gradle.BUILD_TIMEOUT // 60} minutes")])
@@ -150,15 +170,19 @@ async def _install_one(controller, serial: str, metadata: dict, may_uninstall: b
                        allow_downgrade: bool = False):
     from server.api.build_app import DeviceInstallResult
 
+    asked = ""
     try:
         abis = await controller.adb.supported_abis(serial)
-    except DeviceError:
-        abis = []
+    except DeviceError as e:
+        abis, asked = [], f"; the device's ABIs could not be read ({e})"
     apk = gradle.pick_apk(metadata, abis)
     if apk is None or not apk.is_file():
+        # "Could not ask" is not "nothing fits": with ABI splits and no
+        # universal APK, an unreadable device reads the same as a mismatch.
         return DeviceInstallResult(
             udid=serial, installed=False,
-            error=f"no APK in the build fits this device (ABIs: {', '.join(abis) or 'unknown'})")
+            error=f"no APK in the build fits this device (ABIs: "
+                  f"{', '.join(abis) or 'unknown'}){asked}")
     try:
         code, out, err = await controller.adb.install_apk_result(
             serial, str(apk), allow_downgrade=allow_downgrade)
@@ -170,12 +194,19 @@ async def _install_one(controller, serial: str, metadata: dict, may_uninstall: b
                                            error=f"{message}; and the package to uninstall "
                                                  f"is not in the build's metadata")
             logger.info("Uninstalling %s from %s: its signature does not match", package, serial)
-            await controller.adb.uninstall_app(serial, package)
+            try:
+                await controller.adb.uninstall_app(serial, package, timeout=120)
+            except DeviceError as e:
+                return DeviceInstallResult(
+                    udid=serial, installed=False, app_path=str(apk),
+                    error=f"{message}; the uninstall you allowed failed too: {e}")
+            gone = f"uninstalled {package} first, which erased its data, because its signature " \
+                   f"did not match"
             code, out, err = await controller.adb.install_apk_result(
                 serial, str(apk), allow_downgrade=allow_downgrade)
             ok, reason, message = gradle.install_outcome(code, out, err)
-            if ok:
-                message = f"uninstalled {package} first: its signature did not match"
+            # Whatever happens next, the app and its data are gone: said.
+            message = gone if ok else f"{gone}; then the install failed: {message}"
     except (DeviceError, OSError, TimeoutError) as e:
         return DeviceInstallResult(udid=serial, installed=False, app_path=str(apk),
                                    error=f"adb install could not run: {e}")

@@ -222,7 +222,9 @@ def _android_metadata(module_dir: Path, variant: str) -> dict:
             continue
         name = str(data.get("variantName") or "")
         seen.append(name)
-        if name == variant:
+        # Gradle matches task names case-insensitively, so `stagingdebug`
+        # builds stagingDebug; the outputs must be found the same way.
+        if name.lower() == variant.lower():
             elements = data.get("elements")
             if (not isinstance(elements, list) or not elements
                     or not all(isinstance(e, dict) for e in elements)):
@@ -235,6 +237,13 @@ def _android_metadata(module_dir: Path, variant: str) -> dict:
         raise AndroidBuildNotFound(
             f"no APK outputs under {outputs}: build the variant first, and pass the app "
             f"module's directory (the one with build.gradle), not the project root")
+    # `debug` on a flavoured project assembles every flavour's debug variant,
+    # none of which is called `debug`: name the ones it did build.
+    matches = sorted({n for n in seen if n.lower().endswith(variant.lower())})
+    if matches:
+        raise AndroidBuildNotFound(
+            f"{variant!r} is not one variant here but every flavour's: pass one of "
+            f"{', '.join(matches)}")
     raise AndroidBuildNotFound(
         f"no APK output for variant {variant!r} under {outputs}; built variants: "
         f"{', '.join(sorted(set(seen))) or 'none'}")
