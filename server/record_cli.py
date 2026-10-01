@@ -5,8 +5,8 @@ curl. This finds the running server the way `quern url` does and calls the
 recordings API. Standard library only, like the rest of the early dispatch.
 
 Exit codes are the point for a CI step: 0 done, 1 could not ask (no server,
-no key), 2 the server refused, 3 `stop --require-complete` on a recording
-that lost something.
+no key), 2 the server refused, 3 a recording that failed, or with
+`stop --require-complete` one that lost something.
 """
 
 from __future__ import annotations
@@ -112,6 +112,11 @@ def main(argv: list[str]) -> int:
         return 0
     if args.what == "stop":
         print(json.dumps(answer, indent=2))
+        if answer.get("state") not in ("stopped", None):
+            # A failed recording is not a success, flag or no flag.
+            print(f"quern record stop: {answer.get('id')} {answer.get('state')}: "
+                  f"{answer.get('error')}", file=sys.stderr)
+            return 3
         if args.require_complete and answer.get("complete") is not True:
             lost = {k: v for k, v in (answer.get("dropped") or {}).items() if v}
             print(f"quern record stop: {answer['id']} is not complete (state "

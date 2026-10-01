@@ -60,7 +60,7 @@ async def start_recording(request: Request, body: RecordingStartRequest) -> dict
         raise HTTPException(status_code=400, detail=str(e)) from e
     if "flows" in rec.filters.kinds and not _proxy_is_running(request):
         warnings.append("the proxy is not running, so no flows will be recorded until it is")
-    return {**rec.summary(), "warnings": warnings}
+    return {**rec.summary(), "warnings": [*warnings, *rec.warnings]}
 
 
 @router.post("/{recording_id}/stop")
@@ -113,7 +113,9 @@ async def recording_events(
         page = await asyncio.to_thread(
             recording_mod.read_events, directory, chosen, since=since, until=until,
             cursor=cursor, limit=limit, detail=detail, flow_id=flow_id)
-        loaded_holes = await asyncio.to_thread(recording_mod.load, directory)
+        manager = getattr(request.app.state, "recordings", None)
+        live = bool(manager and manager.is_live(directory))
+        loaded_holes = await asyncio.to_thread(recording_mod.load, directory, live=live)
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"{directory} could not be read: {e}") from e
     return {
@@ -122,6 +124,7 @@ async def recording_events(
         "holes": recording_mod.holes_in(loaded_holes, recording_mod.event_types(chosen),
                                         since, until),
         "stopped": loaded_holes.stopped,
+        "warnings": loaded_holes.warnings,
     }
 
 

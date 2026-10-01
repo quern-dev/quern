@@ -268,11 +268,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.capture_sessions = CaptureSessionManager()
     # After every buffer it reads from exists, and before anything can add
     # to them: a recording resumed late would miss what arrived meanwhile.
-    from server.api.trace import _ip_map as trace_ip_map
+    from server.api.trace import read_ip_map
     from server.recording import RecordingManager
     app.state.recordings = RecordingManager(
         server_buffer=server_buffer, ring_buffer=buffer, crash_buffer=crash_buffer,
-        flow_store=flow_store, ip_map=trace_ip_map)
+        flow_store=flow_store, ip_map=read_ip_map)
     try:
         resumed = await app.state.recordings.resume_all()
     except Exception:  # noqa: BLE001 -- a recording must never stop the server starting

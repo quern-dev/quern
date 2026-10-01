@@ -242,22 +242,26 @@ class TestCompleteness:
 
     async def test_a_write_that_fails_ends_the_recording_and_says_so(self, tmp_path,
                                                                      monkeypatch):
+        """Through the real flusher: a direct `_flush` call is what hid the
+        flusher looping on, untracked, after the failure (review)."""
         src = Sources()
         manager = src.manager()
+        monkeypatch.setattr(rec_mod, "FLUSH_INTERVAL", 0.01)
         rec = await manager.start(SIM, str(tmp_path / "r"), Filters())
+        flusher = rec._flusher_task
+        subs = list(rec._subs)
 
         def full(*a, **k):
             raise OSError(28, "No space left on device")
-        monkeypatch.setattr(RecordingManager, "_append", staticmethod(full))
+        monkeypatch.setattr(rec_mod, "_append", full)
         await src.flows.add(_flow())
-        await _settle()
-        await manager._flush(rec)
+        await asyncio.wait_for(flusher, 2)            # it ends, rather than looping on
         assert rec.state == "failed" and "No space left" in rec.error
         assert rec.complete is False
         manifest = json.loads((tmp_path / "r" / "manifest.json").read_text())
         assert manifest["state"] == "failed"
         # And it no longer listens: nothing is queued for a dead recording.
-        assert all(q not in src.flows._fanout for _, _, q in rec._subs)
+        assert all(q not in src.flows._fanout for _, _, q in subs)
 
 
 # ── surviving a restart ──────────────────────────────────────────────────────
@@ -502,6 +506,7 @@ class TestTheRoutes:
             {"type": "started", "at": t.isoformat(), "monotonic": 1.0, "udid": SIM},
             {"type": "dropped", "at": t.isoformat(), "monotonic": 2.0, "what": "flow",
              "count": 3, "first": t.isoformat(), "last": (t + timedelta(seconds=5)).isoformat()},
+            {"type": "stopped", "at": (t + timedelta(seconds=9)).isoformat(), "monotonic": 3.0},
         ]
         (tmp_path / "r" / "events.jsonl").write_text("\n".join(map(json.dumps, lines)) + "\n")
         with TestClient(_app(Sources())) as client:
@@ -509,7 +514,7 @@ class TestTheRoutes:
                 "recording": str(tmp_path / "r"),
                 "since": (t - timedelta(minutes=1)).isoformat()}).json()
         assert trace["flow_window_truncated"] is True and trace["log_window_truncated"] is False
-        assert trace["recording"]["stopped"] is False
+        assert trace["recording"]["stopped"] is True
         assert "3 flow dropped" in trace["recording"]["holes"][0]
 
     def test_an_unknown_recording_is_404(self, tmp_path):
@@ -721,3 +726,280 @@ class TestThePartsTheMutationsFound:
             client.post(f"/api/v1/recordings/{rid}/stop")
             trace = client.get("/api/v1/trace", params={"recording": rid}).json()
         assert [a["outcome"] for a in trace["actions"]] == ["ok"]
+
+
+
+# ── the review of phase 1 ────────────────────────────────────────────────────
+
+
+def _write_events(directory: Path, events: list[dict], tail: str = "") -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events) + tail)
+
+
+class TestTheReview:
+    async def test_a_torn_last_line_does_not_swallow_the_gap(self, tmp_path):
+        """The marker used to be glued onto the fragment: one unreadable line,
+        and the downtime read as covered."""
+        first = Sources().manager()
+        rec = await first.start(SIM, str(tmp_path / "r"), Filters())
+        await first._flush(rec)
+        with open(rec.events, "a") as f:
+            f.write('{"type": "flow", "at": "torn')
+        second = Sources().manager()
+        await second.resume_all()
+        await second.stop(rec.id)
+        loaded = rec_mod.load(tmp_path / "r")
+        assert loaded.unreadable_lines == 1 and loaded.stopped
+        assert any("quern was not running" in h[3] for h in loaded.holes)
+
+    async def test_a_resume_that_fails_is_kept_and_tried_again(self, tmp_path):
+        """Not forgotten on the first failure: listed, stoppable, and resumed
+        once its directory is back (an artifacts volume mounted late)."""
+        import shutil
+        first = Sources().manager()
+        rec = await first.start(SIM, str(tmp_path / "r"), Filters())
+        await first.shutdown()
+        shutil.move(tmp_path / "r", tmp_path / "away")
+
+        second = Sources().manager()
+        assert await second.resume_all() == []
+        assert second.get(rec.id).state == "interrupted"
+        assert rec.id in rec_mod._state_file().read_text(), "still saved to resume"
+
+        shutil.move(tmp_path / "away", tmp_path / "r")
+        third = Sources().manager()
+        assert await third.resume_all() == [rec.id]
+        await third.stop(rec.id)
+
+    async def test_an_interrupted_recording_can_be_stopped(self, tmp_path):
+        import shutil
+        first = Sources().manager()
+        rec = await first.start(SIM, str(tmp_path / "r"), Filters())
+        await first.shutdown()
+        shutil.rmtree(tmp_path / "r")
+        second = Sources().manager()
+        await second.resume_all()
+        done = await second.stop(rec.id)
+        assert done.state == "failed" and "gone" in done.error
+        assert rec.id not in rec_mod._state_file().read_text()
+
+    async def test_a_resume_whose_append_fails_is_interrupted_not_lost(self, tmp_path,
+                                                                      monkeypatch):
+        first = Sources().manager()
+        rec = await first.start(SIM, str(tmp_path / "r"), Filters())
+        await first.shutdown()
+
+        def readonly(*a, **k):
+            raise PermissionError(13, "Permission denied")
+        monkeypatch.setattr(rec_mod, "_append", readonly)
+        second = Sources().manager()
+        assert await second.resume_all() == []
+        assert second.get(rec.id).state == "interrupted"
+        assert rec.id in rec_mod._state_file().read_text()
+
+    async def test_stop_waits_for_a_write_in_flight(self, tmp_path, monkeypatch):
+        """Cancelling the flusher left its write running after the lock was
+        released: lines landed after `stopped` (review, forced timing)."""
+        import threading
+        src = Sources()
+        manager = src.manager()
+        monkeypatch.setattr(rec_mod, "FLUSH_INTERVAL", 0.01)
+        rec = await manager.start(SIM, str(tmp_path / "r"), Filters())
+        real, entered = rec_mod._append, threading.Event()
+
+        def slow(path, lines, sync=False):
+            if any('"type":"flow"' in line for line in lines):
+                entered.set()
+                import time as _t
+                _t.sleep(0.3)
+            real(path, lines, sync)
+        monkeypatch.setattr(rec_mod, "_append", slow)
+        await src.flows.add(_flow())
+        await asyncio.to_thread(entered.wait, 2)
+        await manager.stop(rec.id)
+        kinds = [e["type"] for e in _events(tmp_path / "r")]
+        assert kinds == ["started", "flow", "stopped"]
+
+    async def test_a_write_failing_while_stopping_is_not_complete(self, tmp_path, monkeypatch):
+        import threading
+        src = Sources()
+        manager = src.manager()
+        monkeypatch.setattr(rec_mod, "FLUSH_INTERVAL", 0.01)
+        rec = await manager.start(SIM, str(tmp_path / "r"), Filters())
+        entered = threading.Event()
+
+        def failing(path, lines, sync=False):
+            entered.set()
+            import time as _t
+            _t.sleep(0.2)
+            raise OSError(5, "I/O error")
+        monkeypatch.setattr(rec_mod, "_append", failing)
+        await src.flows.add(_flow())
+        await asyncio.to_thread(entered.wait, 2)
+        done = await manager.stop(rec.id)
+        assert done.state == "failed" and done.complete is False
+
+    async def test_counts_after_a_crash_come_from_the_file(self, tmp_path):
+        src = Sources()
+        first = src.manager()
+        rec = await first.start(SIM, str(tmp_path / "r"), Filters())
+        for _ in range(1100):
+            src.flows._fanout.publish(_flow())
+        await _settle()
+        await first._flush(rec)                     # then a crash: no shutdown, no save
+        second = Sources().manager()
+        await second.resume_all()
+        done = await second.stop(rec.id)
+        assert done.counts["flow"] == 1000 and done.dropped == {"flow": 100}
+
+    def test_a_gap_reaches_back_for_flows_in_flight(self):
+        """A request started before the gap and finished during it is missing
+        from a window that ends before the gap."""
+        t = datetime(2026, 10, 1, 12, tzinfo=UTC)
+        loaded = rec_mod.Loaded(actions=[], flows=[], logs=[], udid=SIM, stopped=True,
+                                unreadable_lines=0,
+                                holes=rec_mod._gap_holes(t, t + timedelta(minutes=1), "gap"))
+        before = (t - timedelta(minutes=3), t - timedelta(seconds=5))
+        assert rec_mod.holes_in(loaded, {"flow"}, *before)
+        assert not rec_mod.holes_in(loaded, {"log", "action"}, *before)
+        assert not rec_mod.holes_in(loaded, {"flow"}, t - timedelta(hours=1),
+                                    t - timedelta(minutes=10))
+
+    def test_no_stopped_line_is_a_hole_after_the_last_line(self, tmp_path):
+        t = datetime(2026, 10, 1, 12, tzinfo=UTC)
+        _write_events(tmp_path, [{"type": "started", "at": t.isoformat(), "monotonic": 1.0,
+                                  "udid": SIM}])
+        later = (t + timedelta(minutes=10), t + timedelta(hours=1))
+        dead = rec_mod.load(tmp_path)
+        assert any("did not stop cleanly" in h for h in rec_mod.holes_in(
+            dead, {"flow", "log"}, *later))
+        live = rec_mod.load(tmp_path, live=True)
+        assert any("still recording" in h for h in rec_mod.holes_in(live, {"log"}, *later))
+
+    def test_a_failed_recording_says_why_in_its_hole(self, tmp_path):
+        t = datetime(2026, 10, 1, 12, tzinfo=UTC)
+        _write_events(tmp_path, [
+            {"type": "started", "at": t.isoformat(), "monotonic": 1.0, "udid": SIM},
+            {"type": "failed", "at": t.isoformat(), "monotonic": 2.0, "error": "disk full"}])
+        assert any("disk full" in h for h in rec_mod.holes_in(rec_mod.load(tmp_path),
+                                                              {"flow"}, t, None))
+
+    async def test_two_starts_into_one_directory_one_wins_cleanly(self, tmp_path):
+        manager = Sources().manager()
+        results = await asyncio.gather(
+            manager.start(SIM, str(tmp_path / "r"), Filters()),
+            manager.start(SIM, str(tmp_path / "r"), Filters()), return_exceptions=True)
+        assert sum(isinstance(r, RecordingError) for r in results) == 1
+        assert [e["type"] for e in _events(tmp_path / "r")].count("started") == 1
+
+    async def test_an_unsaveable_state_file_is_a_warning_on_start(self, tmp_path, monkeypatch):
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("")
+        monkeypatch.setattr(config_mod, "CONFIG_DIR", blocker)
+        manager = Sources().manager()
+        rec = await manager.start(SIM, str(tmp_path / "r"), Filters())
+        assert any("will not resume" in w for w in rec.warnings)
+        await manager.stop(rec.id)
+
+    async def test_a_crash_report_with_no_device_is_kept(self, tmp_path):
+        src = Sources()
+
+        async def feed():
+            await src.crash.append(_log(device="", source=LogSource.CRASH))
+            await src.ring.append(_log(device=""))
+
+        _, rec = await _record(src, tmp_path / "r", feed)
+        assert rec.counts["crash"] == 1 and rec.counts["log"] == 0
+
+    async def test_an_unreadable_ip_map_is_said_once(self, tmp_path, monkeypatch):
+        src = Sources()
+
+        def broken():
+            raise OSError("cert state unreadable")
+        manager = RecordingManager(server_buffer=src.server, ring_buffer=src.ring,
+                                   crash_buffer=src.crash, flow_store=src.flows, ip_map=broken)
+        rec = await manager.start(SIM, str(tmp_path / "r"), Filters())
+        await src.flows.add(_flow())
+        manager._ip_map_at = -1e9
+        await src.flows.add(_flow())
+        await _settle()
+        await manager.stop(rec.id)
+        warnings = [e for e in _events(tmp_path / "r") if e["type"] == "warning"]
+        assert len(warnings) == 1 and "physical device" in warnings[0]["message"]
+        assert rec_mod.load(tmp_path / "r").warnings
+
+    async def test_the_filters_survive_a_restart(self, tmp_path):
+        first = Sources().manager()
+        f = Filters(kinds=("flows",), hosts=["a.com"], exclude_hosts=["b.a.com"],
+                    include_unattributed=True)
+        rec = await first.start(SIM, str(tmp_path / "r"), f)
+        await first.shutdown()
+        second = Sources().manager()
+        await second.resume_all()
+        assert second.get(rec.id).filters == f
+
+    def test_the_recording_trace_honours_its_window(self, tmp_path):
+        t = datetime(2026, 10, 1, 12, tzinfo=UTC)
+        events = [{"type": "started", "at": t.isoformat(), "monotonic": 1.0, "udid": SIM,
+                   "clock_anchor": {"wall": t.isoformat(), "monotonic": 1.0}}]
+        for i, name in enumerate(("early", "late")):
+            a = _action(name, at=t + timedelta(minutes=10 * i))
+            events.append({"type": "action", "at": t.isoformat(), "monotonic": 2.0 + i,
+                           "data": a.model_dump(mode="json")})
+        events.append({"type": "stopped", "at": t.isoformat(), "monotonic": 5.0})
+        _write_events(tmp_path / "r", events)
+        with TestClient(_app(Sources())) as client:
+            trace = client.get("/api/v1/trace", params={
+                "recording": str(tmp_path / "r"),
+                "until": (t + timedelta(minutes=5)).isoformat()}).json()
+        assert [a["action"] for a in trace["actions"]] == ["early"]
+        assert trace["clock_anchor"] == {"wall": t.isoformat(), "monotonic": 1.0}
+
+    def test_a_reboot_is_said(self, tmp_path):
+        t = datetime(2026, 10, 1, 12, tzinfo=UTC)
+        _write_events(tmp_path, [
+            {"type": "started", "at": t.isoformat(), "monotonic": 9000.0, "udid": SIM,
+             "clock_anchor": {"wall": t.isoformat(), "monotonic": 9000.0}},
+            {"type": "resumed", "at": t.isoformat(), "monotonic": 12.0,
+             "gap": {"from": t.isoformat(), "to": t.isoformat(), "reason": "x"},
+             "clock_anchor": {"wall": t.isoformat(), "monotonic": 12.0}}])
+        loaded = rec_mod.load(tmp_path)
+        assert loaded.monotonic_resets == 1 and len(loaded.clock_anchors) == 2
+
+    def test_the_recording_trace_canonicalises_its_udid(self, tmp_path, monkeypatch):
+        from server.device import devicectl
+        monkeypatch.setattr(devicectl, "_identity_aliases", {})
+        devicectl._remember_identity("CD-UUID", "00008030-HW")
+        t = datetime(2026, 10, 1, 12, tzinfo=UTC)
+        a = _action("tap", udid="CD-UUID", at=t)
+        _write_events(tmp_path / "r", [
+            {"type": "started", "at": t.isoformat(), "monotonic": 1.0, "udid": "CD-UUID"},
+            {"type": "action", "at": t.isoformat(), "monotonic": 2.0,
+             "data": a.model_dump(mode="json")},
+            {"type": "stopped", "at": t.isoformat(), "monotonic": 3.0}])
+        with TestClient(_app(Sources())) as client:
+            trace = client.get("/api/v1/trace", params={"recording": str(tmp_path / "r"),
+                                                        "udid": "00008030-HW"}).json()
+        assert len(trace["actions"]) == 1
+
+    def test_the_cli_fails_a_failed_recording_without_the_flag(self, monkeypatch):
+        monkeypatch.setattr(record_cli, "_call", lambda m, p, b=None: (200, {
+            "id": "r", "state": "failed", "error": "disk full", "complete": False}))
+        assert record_cli.main(["stop", "r"]) == 3
+
+
+class TestTheLiveTraceUntil:
+    def test_until_bounds_the_live_trace(self):
+        src = Sources()
+        t = _now(-120)
+        app = _app(src)
+        with TestClient(app) as client:
+            async def feed():
+                await src.server.append(_action("early", at=t))
+                await src.server.append(_action("late", at=t + timedelta(seconds=60)))
+            client.portal.call(feed)
+            trace = client.get("/api/v1/trace", params={
+                "since": (t - timedelta(seconds=5)).isoformat(),
+                "until": (t + timedelta(seconds=30)).isoformat()}).json()
+        assert [a["action"] for a in trace["actions"]] == ["early"]
