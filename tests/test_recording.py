@@ -328,13 +328,15 @@ class TestRestarts:
         assert [e["count"] for e in _events(tmp_path / "r") if e["type"] == "dropped"] == [
             100, 50]
 
-    async def test_a_recording_whose_directory_is_gone_is_not_resumed(self, tmp_path):
+    async def test_a_recording_whose_directory_is_gone_is_not_resumed(self, tmp_path,
+                                                                     caplog):
         import shutil
         first = Sources().manager()
-        await first.start(SIM, str(tmp_path / "r"), Filters())
+        rec = await first.start(SIM, str(tmp_path / "r"), Filters())
         await first.shutdown()
         shutil.rmtree(tmp_path / "r")
         assert await Sources().manager().resume_all() == []
+        assert f"{rec.id} cannot resume: {tmp_path / 'r'} is gone" in caplog.text
 
     async def test_an_unreadable_state_file_resumes_nothing_and_says_so(self, tmp_path,
                                                                         caplog):
@@ -423,6 +425,11 @@ class TestLoading:
         assert not rec_mod.holes_in(loaded, {"action"}, None, None)
         # An unknown start reaches back as far as it must: never read as covered.
         assert rec_mod.holes_in(loaded, {"log"}, t - timedelta(days=1), t - timedelta(hours=2))
+        # And an unknown end reaches forward.
+        open_ended = rec_mod.Loaded(actions=[], flows=[], logs=[], udid=SIM, stopped=False,
+                                    unreadable_lines=0,
+                                    holes=[(t, None, frozenset({"flow"}), "dropped")])
+        assert rec_mod.holes_in(open_ended, {"flow"}, t + timedelta(days=1), None)
 
 
 # ── the routes, the trace over a recording, and the CLI ─────────────────────
@@ -642,10 +649,13 @@ class TestReadingEvents:
     async def test_pages_join_up_with_nothing_lost_or_repeated(self, tmp_path):
         await self._recorded(tmp_path)
         seen, cursor = [], 0
-        while cursor is not None:
+        for _ in range(10):        # bounded: a reader ignoring the cursor must fail, not hang
             page = rec_mod.read_events(tmp_path / "r", ("flows",), cursor=cursor, limit=2)
             seen += [e["data"]["id"] for e in page["events"] if e["type"] == "flow"]
             cursor = page["next_cursor"]
+            if cursor is None:
+                break
+        assert cursor is None, "the pages never ended"
         assert len(seen) == 5 and len(set(seen)) == 5
 
     async def test_a_summary_leaves_the_bodies_out(self, tmp_path):
