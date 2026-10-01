@@ -200,30 +200,48 @@ def _canonical(data: dict) -> bytes:
     return plistlib.dumps(data, fmt=plistlib.FMT_XML, sort_keys=True)
 
 
-async def capture_preferences(udid: str, live: Path, copy: Path) -> None:
+async def capture_preferences(
+    udid: str, live: Path, copy: Path, standard: str | None = None,
+) -> None:
     """Overwrite each preference file copied from `live` into `copy` with
     what cfprefsd holds, which includes the app's writes not yet on disk.
+
+    `standard` names the container's own domain (`<bundle_id>.plist`, or the
+    group id for an app group). It is exported even with no file on disk: a
+    domain can live only in cfprefsd -- the app's first writes before a flush,
+    or a value quern just set -- and enumerating files alone skipped it, so
+    the checkpoint silently lacked values the app could see.
 
     Raises on failure: a checkpoint that may hold stale preferences is not
     one worth keeping, and `save_state` keeps the previous one instead.
     """
     if await get_device_state(udid) == "Shutdown":
         return
-    for source in preference_plists(live):
+    prefs = live / "Library" / "Preferences"
+    names = {p.name for p in preference_plists(live)}
+    if standard:
+        names.add(standard)
+    for name in sorted(names):
+        source = prefs / name
         data = await _export(udid, str(source.with_suffix("")))
-        dest = copy / "Library" / "Preferences" / source.name
+        if not data and not source.exists():
+            continue  # nothing anywhere: do not invent an empty file
+        dest = copy / "Library" / "Preferences" / name
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(plistlib.dumps(data, fmt=plistlib.FMT_BINARY))
 
 
-async def push_preferences(udid: str, live: Path, before: list[str]) -> list[str]:
+async def push_preferences(
+    udid: str, live: Path, before: list[str], standard: str | None = None,
+) -> list[str]:
     """Make cfprefsd serve exactly the preference files a restore put back.
 
     The files alone are not enough: cfprefsd keeps serving what it cached,
     and later writes it out over the restored file (measured: the relaunched
     app came back at 3 where the checkpoint said 1, and the file followed).
-    `before` names the preference files that existed before the restore, so a
-    domain the checkpoint does not have is emptied rather than left cached.
+    `before` names the preference files that existed before the restore, and
+    `standard` the container's own domain, which may exist only in cfprefsd;
+    a domain the checkpoint does not have is emptied rather than left cached.
 
     Never raises -- the files are already restored -- and returns a problem
     per domain that does not read back exactly as restored.
@@ -232,7 +250,10 @@ async def push_preferences(udid: str, live: Path, before: list[str]) -> list[str
         return []
     prefs = live / "Library" / "Preferences"
     problems: list[str] = []
-    for name in sorted(set(before) | {p.name for p in preference_plists(live)}):
+    names = set(before) | {p.name for p in preference_plists(live)}
+    if standard:
+        names.add(standard)
+    for name in sorted(names):
         restored = prefs / name
         domain = str(restored.with_suffix(""))
         try:

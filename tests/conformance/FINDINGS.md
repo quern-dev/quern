@@ -26,11 +26,11 @@ up can be counted separately from what a person noticed.
 | F7 Xcode 27 moved SimulatorKit | fixed, [#176](https://github.com/quern-dev/quern/pull/176) |
 | F8 Android `clear_text` deletes one character | [#177](https://github.com/quern-dev/quern/issues/177) |
 | F9 `scroll_to_element` intermittently misses a distant row | [#84](https://github.com/quern-dev/quern/issues/84), pre-existing |
-| F19 checkpoint names and plist paths could leave their root | fixed with #13's conformance work |
-| F20 a dotted plist key could not be set or removed | fixed with #13's conformance work |
-| F21 app-state errors classified by message text | fixed with #13's conformance work |
-| F22 restore silently undone by cfprefsd's cache | fixed with #13's conformance work |
-| F23 MCP `set_app_plist_value` wrote booleans as 1/0 | fixed with #13's conformance work |
+| F19 checkpoint names and plist paths could leave their root | fixed, [#367](https://github.com/quern-dev/quern/issues/367) |
+| F20 a dotted plist key could not be set or removed | fixed, [#367](https://github.com/quern-dev/quern/issues/367) |
+| F21 app-state errors classified by message text | fixed, [#367](https://github.com/quern-dev/quern/issues/367) |
+| F22 restore silently undone by cfprefsd's cache | fixed, [#367](https://github.com/quern-dev/quern/issues/367) |
+| F23 MCP `set_app_plist_value` wrote booleans as 1/0 | fixed, [#367](https://github.com/quern-dev/quern/issues/367) |
 
 ---
 

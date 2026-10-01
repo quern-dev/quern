@@ -380,7 +380,7 @@ async def _save_into(
     data_path = await get_data_container(udid, bundle_id)
     data_dest = checkpoint / "data-container"
     await _copy_container(data_path, data_dest)
-    await capture_preferences(udid, data_path, data_dest)
+    await capture_preferences(udid, data_path, data_dest, f"{bundle_id}.plist")
 
     # Copy app group containers
     groups = await get_app_groups(udid, bundle_id)
@@ -390,7 +390,7 @@ async def _save_into(
         for group_id, group_path in groups.items():
             dest = groups_dest / group_id
             await _copy_container(group_path, dest)
-            await capture_preferences(udid, group_path, dest)
+            await capture_preferences(udid, group_path, dest, f"{group_id}.plist")
 
     # Copy the keychain (outside every container — this is what carries the login)
     keychain_meta: dict = {"captured": False}
@@ -535,7 +535,9 @@ async def restore_state(
                 child.unlink()
         # Copy checkpoint back
         await asyncio.to_thread(shutil.copytree, str(data_src), str(live_data), dirs_exist_ok=True)
-        problems += await push_preferences(udid, live_data, prefs_before)
+        problems += await push_preferences(
+            udid, live_data, prefs_before, f"{bundle_id}.plist",
+        )
 
     # Restore app group containers — re-resolve live paths
     groups_src = checkpoint / "app-group"
@@ -560,7 +562,9 @@ async def restore_state(
             await asyncio.to_thread(
                 shutil.copytree, str(group_dir), str(live_group_path), dirs_exist_ok=True,
             )
-            problems += await push_preferences(udid, live_group_path, group_prefs_before)
+            problems += await push_preferences(
+                udid, live_group_path, group_prefs_before, f"{group_id}.plist",
+            )
 
     # Restore the keychain last: the container wipe above must not run after it.
     if should_restore_keychain:

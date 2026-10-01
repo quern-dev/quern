@@ -843,6 +843,39 @@ class TestSaveCapturesWhatCfprefsdHolds:
         saved = store / "com.example.App" / "b" / "data-container" / prefs.relative_to(live)
         assert plistlib.loads(saved.read_bytes()) == {"probe.counter": 3}
 
+    async def test_a_domain_only_cfprefsd_holds_is_captured(
+        self, store, tmp_path, cfprefsd,
+    ):
+        """No file on disk yet -- the app's first writes, or a value quern just
+        set through cfprefsd -- and enumerating files alone skipped it."""
+        live = tmp_path / "live"
+        (live / "Library" / "Preferences").mkdir(parents=True)
+        domain = str(live / "Library" / "Preferences" / "com.example.App")
+        cfprefsd.domains[domain] = {"first.launch": True}
+        with (
+            patch("server.device.app_state._terminate_app", AsyncMock()),
+            patch("server.device.app_state.get_data_container", AsyncMock(return_value=live)),
+            patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
+        ):
+            await save_state("TEST-UDID", "com.example.App", "b")
+        saved = (store / "com.example.App" / "b" / "data-container" / "Library"
+                 / "Preferences" / "com.example.App.plist")
+        assert plistlib.loads(saved.read_bytes()) == {"first.launch": True}
+
+    async def test_an_empty_standard_domain_does_not_invent_a_file(
+        self, store, tmp_path, cfprefsd,
+    ):
+        live = tmp_path / "live"
+        live.mkdir()
+        with (
+            patch("server.device.app_state._terminate_app", AsyncMock()),
+            patch("server.device.app_state.get_data_container", AsyncMock(return_value=live)),
+            patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
+        ):
+            await save_state("TEST-UDID", "com.example.App", "b")
+        prefs = store / "com.example.App" / "b" / "data-container" / "Library" / "Preferences"
+        assert not prefs.exists() or not any(prefs.iterdir())
+
     async def test_a_capture_that_fails_fails_the_save_and_keeps_the_old_one(
         self, store, tmp_path, cfprefsd, monkeypatch,
     ):
@@ -903,6 +936,19 @@ class TestRestorePushesTheFilesIntoCfprefsd:
         cfprefsd.domains[str(extra.with_suffix(""))] = {"x": 1}
         await self._restore(live)
         assert cfprefsd.domains[str(extra.with_suffix(""))] == {}
+
+    async def test_a_cached_only_standard_domain_is_emptied_when_the_checkpoint_lacks_it(
+        self, store, tmp_path, cfprefsd,
+    ):
+        checkpoint = store / "com.example.App" / "b"
+        (checkpoint / "data-container").mkdir(parents=True)
+        (checkpoint / ".quern-meta.json").write_text('{"label": "b"}')
+        live = tmp_path / "live"
+        live.mkdir()
+        domain = str(live / "Library" / "Preferences" / "com.example.App")
+        cfprefsd.domains[domain] = {"set.after.save": 1}
+        await self._restore(live)
+        assert cfprefsd.domains[domain] == {}
 
     async def test_a_value_cfprefsd_will_not_take_is_a_warning(self, setup, cfprefsd):
         live, live_prefs = setup
