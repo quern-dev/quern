@@ -453,6 +453,15 @@ class TestTheRoute:
         r = _go(FakeController(FakeAdb([])), _body(project_path=str(built.root)))
         assert [p.kind for p in r["environment"]] == ["android_sdk"] and built.ran == []
 
+    def test_a_java_home_in_gradle_args_decides_the_jdk(self, built, tmp_path):
+        """Gradle runs on -Dorg.gradle.java.home whatever JAVA_HOME says, so the
+        JDK quern reports and checks has to be that one."""
+        j17 = _jdk_dir(tmp_path, "j17", "17.0.2")
+        r = _go(FakeController(FakeAdb([(0, "Success\n", "")])),
+                _body(project_path=str(built.root),
+                      gradle_args=[f"-Dorg.gradle.java.home={j17}"]))
+        assert built.ran[0][1] == j17 and "gradle_args" in r["java"]
+
     def test_java_home_and_gradle_args_reach_gradle(self, built, monkeypatch):
         mine = jdk_mod.Jdk("/mine", "17.0.2", 17, "the java_home you passed")
         monkeypatch.setattr(jdk_mod, "candidates", lambda **kw: [mine])
@@ -624,7 +633,7 @@ class TestVariants:
                 "elements": [{"outputFile": "a.apk"}]}))
         (out / "debug" / "output-metadata.json").unlink()
         r = _go(FakeController(FakeAdb([])), _body(project_path=str(built.root)))
-        assert "prodDebug, stagingDebug" in r["devices"][0].error
+        assert "every flavour's: pass one of prodDebug, stagingDebug" in r["devices"][0].error
 
 
 class TestInstalling:
@@ -754,12 +763,17 @@ class TestMoreOutput:
     def test_a_wrapper_that_cannot_download_gradle(self, tmp_path):
         p = gradle.find_project(str(_project(tmp_path)))
         out = ("Downloading https://services.gradle.org/distributions/gradle-9.5.1-bin.zip\n"
-               "Exception in thread \"main\" java.net.UnknownHostException: "
-               "services.gradle.org\n\tat java.base/sun.nio.ch.NioSocketImpl.connect\n")
+               "Exception in thread \"main\" java.io.IOException: Downloading failed\n"
+               "\tat org.gradle.wrapper.Download.download(Download.java:83)\n"
+               "Caused by: java.net.UnknownHostException: services.gradle.org\n"
+               "\tat java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:567)\n"
+               "\t... 12 more\n")
         result, [env] = gradle.parse(1, out, p)
         assert env.kind == "gradle_distribution" and "gradle-9.5.1-bin.zip" in env.summary
-        assert "UnknownHostException" in result.errors[0].message
-        assert "NioSocketImpl" not in result.errors[0].message
+        # The exception and its cause, not the stack under them.
+        message = result.errors[0].message
+        assert "Downloading failed" in message and "UnknownHostException" in message
+        assert "NioSocketImpl" not in message and "12 more" not in message
 
     def test_missing_daemon_criteria_jdk_is_labelled_as_such(self, tmp_path):
         """Gradle 9.5 does not say "Daemon JVM" when the criteria fail."""
