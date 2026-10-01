@@ -585,6 +585,17 @@ class TestPreferencesGoThroughCfprefsd:
         })
         assert resp.status_code == 404, resp.text
 
+    async def test_an_empty_preference_file_reads_as_empty_not_missing(
+        self, app, auth_headers, mock_controller, container, cfprefsd,
+    ):
+        """An app that removed every key still has a preferences file."""
+        container.write_bytes(plistlib.dumps({}))
+        resp = await _call(app, auth_headers, "GET", "/plist", params={
+            "bundle_id": "com.example.App", "container": "data", "plist_path": PLIST,
+        })
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["data"] == {}
+
     async def test_deleting_a_key_cfprefsd_does_not_hold_is_404(
         self, app, auth_headers, mock_controller, container, cfprefsd,
     ):
