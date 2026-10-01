@@ -225,6 +225,14 @@ def _check_minimum_os(app_path: Path, device_os_version: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+@router.get("/build-progress")
+async def build_progress() -> dict:
+    """Gradle builds running now: the task asked for, how long it has run, and
+    the task Gradle is on. For a caller waiting on build-and-install, which
+    answers only when the build ends, to see the build is moving."""
+    return {"builds": [p.as_dict() for p in list(gradle.ACTIVE.values())]}
+
+
 @router.post("/build-and-install", response_model=BuildAndInstallResponse)
 @logged_action("build_and_install", category="build")
 async def build_and_install(request: Request, body: BuildAndInstallRequest):

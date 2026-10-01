@@ -1,0 +1,308 @@
+Starting a Gradle Daemon, 6 stopped Daemons could not be reused, use --status for details
+
+> Task :app:tasks
+
+------------------------------------------------------------
+Tasks runnable from project ':app'
+------------------------------------------------------------
+
+Android tasks
+-------------
+signingReport - Displays the signing info for the base and test modules
+
+Build tasks
+-----------
+assemble - Assemble main outputs for all the variants.
+assembleAndroidTest - Assembles all the Test applications.
+assembleUnitTest - Assembles all the unit test applications.
+build - Assembles and tests this project.
+buildDependents - Assembles and tests this project and all projects that depend on it.
+buildNeeded - Assembles and tests this project and all projects it depends on.
+bundle - Assemble bundles for all the variants.
+clean - Deletes the build directory.
+compileDebugAndroidTestSources
+compileDebugSources
+compileDebugUnitTestSources
+compileReleaseSources
+
+Help tasks
+----------
+artifactTransforms - Displays the Artifact Transforms that can be executed in project ':app'.
+buildEnvironment - Displays all buildscript dependencies declared in project ':app'.
+dependencies - Displays all dependencies declared in project ':app'.
+dependencyInsight - Displays the insight into a specific dependency in project ':app'.
+help - Displays a help message.
+javaToolchains - Displays the detected java toolchains.
+kotlinDslAccessorsReport - Prints the Kotlin code for accessing the currently available project extensions.
+outgoingVariants - Displays the outgoing variants of project ':app'.
+projects - Displays the sub-projects of project ':app'.
+properties - Displays the properties of project ':app'.
+resolvableConfigurations - Displays the configurations that can be resolved in project ':app'.
+tasks - Displays the tasks runnable from project ':app'.
+
+Install tasks
+-------------
+installDebug - Installs the Debug build.
+installDebugAndroidTest - Installs the android (on device) tests for the Debug build.
+uninstallAll - Uninstall all applications.
+uninstallDebug - Uninstalls the Debug build.
+uninstallDebugAndroidTest - Uninstalls the android (on device) tests for the Debug build.
+uninstallRelease - Uninstalls the Release build.
+
+Verification tasks
+------------------
+check - Runs all checks.
+checkJetifier - Checks whether Jetifier is needed for the current project
+connectedAndroidTest - Installs and runs instrumentation tests for all flavors on connected devices.
+connectedCheck - Runs all device checks on currently connected devices.
+connectedDebugAndroidTest - Installs and runs the tests for debug on connected devices.
+deviceAndroidTest - Installs and runs instrumentation tests using all Device Providers.
+deviceCheck - Runs all device checks using Device Providers and Test Servers.
+lint - Runs lint on the default variant.
+lintDebug - Print text output from the corresponding lint report task
+lintFix - Runs lint on the default variant and applies any safe suggestions to the source code.
+lintRelease - Print text output from the corresponding lint report task
+lintVitalRelease - Print text output from the corresponding lint report task
+test - Run unit tests for all variants.
+testDebugUnitTest - Run unit tests for the debug build.
+updateLintBaseline - Updates the lint baseline using the default variant.
+
+Other tasks
+-----------
+analyzeDebugAndroidTestDependencies
+analyzeDebugDependencies
+analyzeDebugUnitTestDependencies
+analyzeReleaseDependencies
+assembleDebug - Assembles main output for variant debug
+assembleDebugAndroidTest - Assembles main output for variant debugAndroidTest
+assembleDebugUnitTest - Assembles main output for variant debugUnitTest
+assembleRelease - Assembles main output for variant release
+buildDebugPreBundle
+buildReleasePreBundle
+bundleDebug - Assembles bundle for variant debug
+bundleDebugClassesToCompileJar
+bundleDebugClassesToRuntimeJar
+bundleDebugResources
+bundleRelease - Assembles bundle for variant release
+bundleReleaseClassesToCompileJar
+bundleReleaseClassesToRuntimeJar
+bundleReleaseResources
+checkDebugAarMetadata
+checkDebugAndroidTestAarMetadata
+checkDebugAndroidTestDuplicateClasses
+checkDebugDuplicateClasses
+checkDebugManifest
+checkReleaseAarMetadata
+checkReleaseDuplicateClasses
+checkReleaseManifest
+collectReleaseDependencies
+compileDebugAndroidTestJavaWithJavac
+compileDebugAndroidTestKotlin
+compileDebugAndroidTestNavigationResources
+compileDebugArtProfile
+compileDebugJavaWithJavac
+compileDebugKotlin
+compileDebugNavigationResources
+compileDebugUnitTestJavaWithJavac
+compileDebugUnitTestKotlin
+compileLint
+compileLintChecks
+compileReleaseArtProfile
+compileReleaseJavaWithJavac
+compileReleaseKotlin
+compileReleaseNavigationResources
+compressDebugAndroidTestAssets
+compressDebugAssets
+compressReleaseAssets
+configureReleaseDependencies
+consumeConfigAttr
+createDebugAndroidTestApkListingFileRedirect
+createDebugApkListingFileRedirect
+createDebugApksFromBundleListingFileRedirect
+createDebugBundleListingFileRedirect
+createDebugCompatibleScreenManifests
+createMockableJar
+createReleaseApkListingFileRedirect
+createReleaseApksFromBundleListingFileRedirect
+createReleaseBundleListingFileRedirect
+createReleaseCompatibleScreenManifests
+desugarDebugAndroidTestFileDependencies
+desugarDebugFileDependencies
+desugarReleaseFileDependencies
+dexBuilderDebug
+dexBuilderDebugAndroidTest
+dexBuilderRelease
+extractApksForDebug
+extractApksForRelease
+extractApksFromBundleForDebug
+extractApksFromBundleForRelease
+extractDebugNativeDebugMetadata
+extractDebugNativeSymbolTables
+extractDeepLinksDebug
+extractDeepLinksRelease
+extractProguardFiles
+extractReleaseNativeDebugMetadata
+extractReleaseNativeSymbolTables
+extractReleaseVersionControlInfo
+generateDebugAndroidTestAssets
+generateDebugAndroidTestGlobalSynthetics
+generateDebugAndroidTestLintModel
+generateDebugAndroidTestResources
+generateDebugAndroidTestRFile
+generateDebugAndroidTestSources
+generateDebugAssets
+generateDebugFeatureMetadata
+generateDebugFeatureTransitiveDeps
+generateDebugGlobalSynthetics
+generateDebugLintModel
+generateDebugLintReportModel
+generateDebugManifestClass
+generateDebugResources
+generateDebugRFile
+generateDebugSources
+generateDebugUnitTestAssets
+generateDebugUnitTestLintModel
+generateDebugUnitTestResources
+generateDebugUnitTestSources
+generateReleaseAssets
+generateReleaseFeatureMetadata
+generateReleaseFeatureTransitiveDeps
+generateReleaseLintModel
+generateReleaseLintReportModel
+generateReleaseLintVitalReportModel
+generateReleaseManifestClass
+generateReleaseResources
+generateReleaseRFile
+generateReleaseSources
+javaPreCompileDebug
+javaPreCompileDebugAndroidTest
+javaPreCompileDebugUnitTest
+javaPreCompileRelease
+lintAnalyzeDebug - Run lint analysis on the debug component
+lintAnalyzeDebugAndroidTest - Run lint analysis on the debugAndroidTest component
+lintAnalyzeDebugUnitTest - Run lint analysis on the debugUnitTest component
+lintAnalyzeRelease - Run lint analysis on the release component
+lintFixDebug - Fix lint on the debug variant
+lintFixRelease - Fix lint on the release variant
+lintReportDebug - Run lint on the debug variant
+lintReportRelease - Run lint on the release variant
+lintVitalAnalyzeRelease - Run lint analysis with only the fatal issues enabled 
+lintVitalReportRelease - Run lint with only the fatal issues enabled on the release variant
+makeApkFromBundleForDebug
+makeApkFromBundleForRelease
+mapDebugAndroidTestSourceSetPaths
+mapDebugSourceSetPaths
+mapReleaseSourceSetPaths
+mergeDebugAndroidTestAssets
+mergeDebugAndroidTestGeneratedProguardFiles
+mergeDebugAndroidTestJavaResource
+mergeDebugAndroidTestJniLibFolders
+mergeDebugAndroidTestManifest
+mergeDebugAndroidTestNativeLibs
+mergeDebugAndroidTestResources
+mergeDebugArtProfile
+mergeDebugAssets
+mergeDebugGeneratedProguardFiles
+mergeDebugJavaResource
+mergeDebugJniLibFolders
+mergeDebugNativeDebugMetadata
+mergeDebugNativeLibs
+mergeDebugResources
+mergeDebugStartupProfile
+mergeDexRelease
+mergeExtDexDebug
+mergeExtDexDebugAndroidTest
+mergeExtDexRelease
+mergeLibDexDebug
+mergeLibDexDebugAndroidTest
+mergeProjectDexDebug
+mergeProjectDexDebugAndroidTest
+mergeReleaseArtProfile
+mergeReleaseAssets
+mergeReleaseGeneratedProguardFiles
+mergeReleaseGlobalSynthetics
+mergeReleaseJavaResource
+mergeReleaseJniLibFolders
+mergeReleaseNativeDebugMetadata
+mergeReleaseNativeLibs
+mergeReleaseResources
+mergeReleaseStartupProfile
+optimizeReleaseResources
+packageDebug
+packageDebugAndroidTest
+packageDebugAndroidTestResources
+packageDebugBundle
+packageDebugResources
+packageDebugUniversalApk
+packageRelease
+packageReleaseBundle
+packageReleaseResources
+packageReleaseUniversalApk
+parseDebugAndroidTestLocalResources
+parseDebugIntegrityConfig
+parseDebugLocalResources
+parseReleaseIntegrityConfig
+parseReleaseLocalResources
+preBuild
+preDebugAndroidTestBuild
+preDebugBuild
+preDebugUnitTestBuild
+prepareLintJarForPublish
+preReleaseBuild
+processApplicationManifestDebugForBundle
+processApplicationManifestReleaseForBundle
+processDebugAndroidTestJavaRes
+processDebugAndroidTestManifest
+processDebugAndroidTestNavigationResources
+processDebugAndroidTestResources
+processDebugJavaRes
+processDebugMainManifest
+processDebugManifest
+processDebugManifestForPackage
+processDebugNavigationResources
+processDebugResources
+processDebugUnitTestJavaRes
+processManifestDebugForFeature
+processManifestReleaseForFeature
+processReleaseJavaRes
+processReleaseMainManifest
+processReleaseManifest
+processReleaseManifestForPackage
+processReleaseNavigationResources
+processReleaseResources
+produceDebugBundleIdeListingFile
+produceReleaseBundleIdeListingFile
+resolveConfigAttr
+sdkReleaseDependencyData
+signDebugBundle
+signingConfigWriterDebug
+signingConfigWriterDebugAndroidTest
+signingConfigWriterRelease
+signReleaseBundle
+stripDebugAndroidTestDebugSymbols
+stripDebugDebugSymbols
+stripReleaseDebugSymbols
+updateLintBaselineDebug - Update the lint baseline using the debug variant
+updateLintBaselineRelease - Update the lint baseline using the release variant
+validateSigningDebug
+validateSigningDebugAndroidTest
+writeDebugAndroidTestSigningConfigVersions
+writeDebugApplicationId
+writeDebugAppMetadata
+writeDebugModuleMetadata
+writeDebugSigningConfigVersions
+writeReleaseApplicationId
+writeReleaseAppMetadata
+writeReleaseModuleMetadata
+writeReleaseSigningConfigVersions
+zipApksForDebug
+zipApksForRelease
+
+Rules
+-----
+Pattern: clean<TaskName>: Cleans the output files of a task.
+Pattern: build<ConfigurationName>: Assembles the artifacts of a configuration.
+
+BUILD SUCCESSFUL in 4s
+1 actionable task: 1 executed
+Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.5.1/userguide/configuration_cache_enabling.html

@@ -1,17 +1,71 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { apiRequest } from "../http.js";
+import { progressMessage, type RunningBuild } from "./build-progress.js";
 import { strictParams } from "./helpers.js";
+
+/** What a tool handler is handed beyond its arguments, as much of it as is used here. */
+interface HandlerExtra {
+  _meta?: { progressToken?: string | number };
+  sendNotification: (notification: {
+    method: "notifications/progress";
+    params: { progressToken: string | number; progress: number; message?: string };
+  }) => Promise<void>;
+}
+
+/** How often a waiting caller hears that the build is moving. */
+const PROGRESS_EVERY_MS = 10_000;
+
+/**
+ * Send progress notifications while a build runs, if the caller asked for
+ * them with a progress token; returns the function that stops them. Best
+ * effort throughout: a progress poll that fails is skipped, never surfaced,
+ * because it says nothing about the build itself.
+ */
+function reportProgress(extra: HandlerExtra, projectPath: string): () => void {
+  const token = extra._meta?.progressToken;
+  if (token === undefined) return () => {};
+  const started = Date.now();
+  let busy = false;
+  const timer = setInterval(async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      const waited = (Date.now() - started) / 1000;
+      let builds: RunningBuild[] = [];
+      try {
+        const data = (await apiRequest("GET", "/api/v1/device/build-progress",
+                                       undefined, undefined, 5000)) as { builds?: RunningBuild[] };
+        builds = data?.builds ?? [];
+      } catch {
+        // An older server has no such route: progress is then just the wait.
+      }
+      // progress must only increase: seconds waited does.
+      await extra.sendNotification({
+        method: "notifications/progress",
+        params: { progressToken: token, progress: Math.round(waited),
+                  message: progressMessage(builds, projectPath, waited) },
+      });
+    } catch {
+      // The client went away; the build call itself will say so.
+    } finally {
+      busy = false;
+    }
+  }, PROGRESS_EVERY_MS);
+  return () => clearInterval(timer);
+}
 
 export function registerBuildTools(server: McpServer): void {
   server.registerTool("build_and_install", {
     description: `Build an app and install it on one or more devices: an Xcode scheme on iOS devices and simulators, or a Gradle project on Android devices and emulators.
 
-ANDROID (a Gradle project: project_path is the build root or a module inside it). Pass variant (e.g. "debug", "stagingDebug"); module defaults to "app". Runs the project's own ./gradlew :module:assemble<Variant>, installs the APK on each Android target in parallel (the split matching each device's CPU, or the universal one), and records the build -- its R8 mapping and native libraries -- so its crashes are symbolicated by get_latest_crash without a record_android_build call. quern finds a JDK and the Android SDK itself, since a daemon started from the menu bar does not see your shell's JAVA_HOME or sdkman, and the response names the ones it used (java, android_sdk). Gradle's own daemon stays running between builds, as it does under Android Studio.
+ANDROID (a Gradle project: project_path is the build root or a module inside it). Pass variant (e.g. "debug", "stagingDebug"); module defaults to "app". Omit variant to get an error listing the module's variants, then pick one and call again; a name that covers several (a build type on a flavoured app, like "debug") or that is not a variant is refused the same way, before anything builds. Runs the project's own ./gradlew :module:assemble<Variant>, installs the APK on each Android target in parallel (the split matching each device's CPU, or the universal one), and records the build -- its R8 mapping and native libraries -- so its crashes are symbolicated by get_latest_crash without a record_android_build call. quern finds a JDK and the Android SDK itself, since a daemon started from the menu bar does not see your shell's JAVA_HOME or sdkman, and the response names the ones it used (java, android_sdk). Gradle's own daemon stays running between builds, as it does under Android Studio.
 
 When the MACHINE rather than the code stops the build -- no suitable JDK, the toolchain JDK the build asks for, no Android SDK, missing SDK packages or licences, the NDK -- the response has an "environment" list instead of a build: each entry has a kind, a summary, what was found, and options, most direct first. Some options you can apply yourself by calling again: java_home="<a JDK it found>", or gradle_args=[...] (for example a toolchain path). Others -- installing a JDK or SDK package, editing gradle.properties or local.properties -- change the user's machine or project: ask the user before doing them. Never installs or edits anything itself.
 
-A failed build gives Gradle's reason: compile errors with file and line (Kotlin, Java, resources), or what went wrong otherwise. An install refused because the installed app is signed with a different key says so; uninstall_on_signature_mismatch=true uninstalls it first, which ERASES the app's data on that device -- ask the user before passing it. One refused because the installed build has a higher versionCode says so too; allow_downgrade=true installs over it (debuggable builds only) and keeps the data.
+A failed build gives Gradle's reason: compile errors with file and line (Kotlin, Java, resources), or what went wrong otherwise. An install refused because the installed app is signed with a different key says so; uninstall_on_signature_mismatch=true uninstalls it first, which ERASES the app's data on that device -- ask the user before passing it. One refused because the installed build has a higher versionCode says so too; allow_downgrade=true installs over it (debuggable builds only) and keeps the data. A release variant with no signing config builds an unsigned APK, which Android will not install: said, with the options. A keystore that is missing or will not open is an environment problem of kind "signing".
+
+A long build reports progress while it runs (the Gradle task it is on and the time so far) to a client that asks for progress notifications.
 
 iOS:
 
@@ -97,7 +151,8 @@ xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
     }),
   }, async ({ project_path, scheme, udids, configuration, skip_plugin_validation,
                variant, module, java_home, gradle_args, uninstall_on_signature_mismatch,
-               allow_downgrade }) => {
+               allow_downgrade }, extra) => {
+    const stopProgress = reportProgress(extra, project_path);
     try {
       const body: Record<string, unknown> = { project_path, configuration };
       if (skip_plugin_validation) body.skip_plugin_validation = true;
@@ -111,7 +166,8 @@ xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
       if (udids && udids.length > 0) body.udids = udids;
 
       // A build answers when it is done, which can be well past fetch's
-      // 300s wait for headers; the server bounds it instead.
+      // 300s wait for headers; the server bounds it instead, and
+      // reportProgress says it is still moving meanwhile.
       const data = await apiRequest(
         "POST",
         "/api/v1/device/build-and-install",
@@ -145,6 +201,8 @@ xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
         ],
         isError: true,
       };
+    } finally {
+      stopProgress();
     }
   });
 

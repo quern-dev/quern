@@ -18,7 +18,9 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -27,6 +29,9 @@ from server.models import BuildDiagnostic, BuildResult, EnvironmentProblem
 
 #: A clean build of a large app runs many minutes; this is for one that hangs.
 BUILD_TIMEOUT = 1800  # s
+#: Listing variants configures the project: about 1s on a warm daemon and 9s
+#: cold, measured on a 5-module app. This is for one that hangs.
+LIST_TIMEOUT = 300  # s
 
 _SETTINGS = ("settings.gradle.kts", "settings.gradle")
 _BUILD_FILES = ("build.gradle.kts", "build.gradle")
@@ -233,22 +238,179 @@ def build_env(base: dict[str, str], jdk: jdk_mod.Jdk, sdk: str) -> dict[str, str
     return env
 
 
+@dataclass
+class BuildProgress:
+    """A build under way, for whoever is waiting on it to see it is not hung."""
+
+    project: str
+    task: str
+    started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    started: float = field(default_factory=time.monotonic)
+    #: The last `> Task :app:compileStagingDebugKotlin` line Gradle printed.
+    current: str = ""
+    tasks_run: int = 0
+
+    def as_dict(self) -> dict:
+        return {"project": self.project, "task": self.task,
+                "started_at": self.started_at.isoformat(),
+                "elapsed_s": round(time.monotonic() - self.started, 1),
+                "current": self.current, "tasks_run": self.tasks_run}
+
+
+#: Builds running now, by identity. A build that ends removes itself.
+ACTIVE: dict[int, BuildProgress] = {}
+
+
 async def run(project: GradleProject, task: str, env: dict[str, str],
-              extra_args: list[str], timeout: float = BUILD_TIMEOUT) -> tuple[int, str]:
-    """Run the wrapper; (exit code, combined output). Raises TimeoutError."""
+              extra_args: list[str], timeout: float = BUILD_TIMEOUT,
+              progress: BuildProgress | None = None) -> tuple[int, str]:
+    """Run the wrapper; (exit code, combined output). Raises TimeoutError.
+
+    Output is read as it arrives rather than all at the end, so `progress`
+    can name the task Gradle is on. Read in chunks, not lines: one line of
+    Gradle output can exceed asyncio's 64 KiB line limit.
+    """
     proc = await asyncio.create_subprocess_exec(
         str(project.wrapper), task, "--console=plain", *extra_args,
         cwd=str(project.root), env=env,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
     )
+    chunks: list[bytes] = []
+
+    async def pump() -> None:
+        partial = b""
+        while chunk := await proc.stdout.read(65536):
+            chunks.append(chunk)
+            if progress is None:
+                continue
+            *lines, partial = (partial + chunk).split(b"\n")
+            for line in lines:
+                if line.startswith(b"> Task "):
+                    progress.current = line.decode(errors="replace").strip()
+                    progress.tasks_run += 1
+        await proc.wait()
+
     try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        await asyncio.wait_for(pump(), timeout=timeout)
     except BaseException:
         if proc.returncode is None:
             proc.kill()
             await asyncio.shield(proc.wait())
         raise
-    return proc.returncode or 0, out.decode(errors="replace")
+    return proc.returncode or 0, b"".join(chunks).decode(errors="replace")
+
+
+# ── variants ─────────────────────────────────────────────────────────────────
+
+#: `assembleStagingDebug - Assembles main output for variant stagingDebug`, as
+#: `tasks --all` prints it (measured, AGP 9.3.2); and the aggregates:
+#: `assembleDebug - Assembles main outputs for all Debug variants.`
+_VARIANT_TASK = re.compile(r"^assemble\w+ - Assembles main output for variant (\w+)\s*$", re.M)
+_AGGREGATE_TASK = re.compile(r"^assemble(\w+) - Assembles main outputs for all (\w+) "
+                             r"variants\.?\s*$", re.M)
+#: Test APKs are variants to AGP and not apps to install.
+_TEST_VARIANTS = ("AndroidTest", "UnitTest", "TestFixtures", "ScreenshotTest")
+
+
+@dataclass(frozen=True)
+class Variants:
+    """The variants a module can assemble, and the names that cover several:
+    a build type (`debug`) or a flavour (`staging`) across the others."""
+
+    names: tuple[str, ...]
+    groups: dict[str, tuple[str, ...]]
+
+    def find(self, variant: str) -> str | None:
+        """The variant's own spelling, or None. Case-insensitive, as Gradle's
+        task matching is."""
+        return next((n for n in self.names if n.lower() == variant.lower()), None)
+
+    def group(self, variant: str) -> tuple[str, ...]:
+        return next((g for k, g in self.groups.items() if k.lower() == variant.lower()), ())
+
+
+def _words(name: str) -> list[str]:
+    return [w.lower() for w in re.findall(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])", name)]
+
+
+def parse_variants(output: str) -> Variants | None:
+    """The variants `tasks --all` lists, or None if it lists none -- which is
+    not "no variants" but "not an Android application module", or output this
+    does not recognise."""
+    names = tuple(sorted({n for n in _VARIANT_TASK.findall(output)
+                          if not n.endswith(_TEST_VARIANTS)}))
+    if not names:
+        return None
+    groups = {}
+    for _, word in _AGGREGATE_TASK.findall(output):
+        want = _words(word)
+        covered = tuple(n for n in names
+                        if any(_words(n)[i:i + len(want)] == want
+                               for i in range(len(_words(n)))))
+        if len(covered) > 1 or (covered and covered[0].lower() != word.lower()):
+            groups[word[:1].lower() + word[1:]] = covered
+    return Variants(names=names, groups=groups)
+
+
+#: Variants found per module, with the build files they were read from. Only
+#: a positive answer is trusted from here: a flavour added in a convention
+#: plugin changes no file this keys on, so a variant missing from the cache is
+#: asked about again rather than refused.
+_VARIANT_CACHE: dict[tuple[str, str], tuple[tuple, Variants]] = {}
+
+
+def _build_files_key(project: GradleProject) -> tuple:
+    files = [*(project.root / s for s in _SETTINGS), *(project.root / b for b in _BUILD_FILES),
+             project.root / "gradle.properties", project.root / "gradle" / "libs.versions.toml",
+             *(project.module_dir / b for b in _BUILD_FILES)]
+    key = []
+    for f in files:
+        try:
+            key.append((str(f), f.stat().st_mtime_ns))
+        except OSError:
+            key.append((str(f), None))
+    return tuple(key)
+
+
+def cached_variants(project: GradleProject) -> Variants | None:
+    hit = _VARIANT_CACHE.get((str(project.root), project.module))
+    return hit[1] if hit and hit[0] == _build_files_key(project) else None
+
+
+def remember_variants(project: GradleProject, key: tuple, variants: Variants) -> None:
+    """Cache a listing under the build files' state *before* it ran, so an
+    edit made while Gradle was configuring invalidates it."""
+    _VARIANT_CACHE[(str(project.root), project.module)] = (key, variants)
+
+
+async def list_variants(project: GradleProject, env: dict[str, str],
+                        extra_args: list[str]) -> tuple[Variants | None, str]:
+    """(the module's variants, "") or (None, why they could not be read).
+
+    Runs `:<module>:tasks --all`, which configures the project and builds
+    nothing. A listing that fails is said as such, never as an empty list.
+    """
+    # Only the arguments that change what Gradle is: a -P or -D can add or
+    # remove flavours; a --offline or -q cannot hurt. A task name would.
+    args = [a for a in extra_args if a.startswith(("-P", "-D", "--offline", "-g",
+                                                   "--gradle-user-home", "--init-script",
+                                                   "-I"))]
+    try:
+        code, output = await run(project, f":{project.module}:tasks", env,
+                                 ["--all", "-q", *args], timeout=LIST_TIMEOUT)
+    except TimeoutError:
+        return None, f"listing them did not finish within {LIST_TIMEOUT // 60} minutes"
+    except OSError as e:
+        return None, f"{project.wrapper} could not be run: {e}"
+    found = parse_variants(output)
+    if code != 0 or found is None:
+        why = _WENT_WRONG.search(output)
+        said = " ".join(why.group(1).split()) if why else (
+            f"gradlew exited {code}" if code else
+            f"Gradle listed no variants for :{project.module}, which is not how an Android "
+            f"application module answers")
+        return None, said
+    return found, ""
 
 
 # ── reading the outcome ──────────────────────────────────────────────────────
@@ -383,6 +545,7 @@ def _environment(output: str, project: GradleProject, candidates: list[jdk_mod.J
                      'let the Android Gradle plugin install them as it builds: gradle_args='
                      '["-Pandroid.builder.sdkDownload=true"], once their licences are '
                      'accepted']))
+    problems += _signing(output)
     if re.search(r"NDK (?:not configured|at \S+ did not have a source\.properties)"
                  r"|No version of NDK matched", output):
         problems.append(EnvironmentProblem(
@@ -413,6 +576,47 @@ def quiet_logging(project: GradleProject, args: list[str], user_home: Path) -> b
                  or jdk_mod.gradle_property(project.root / "gradle.properties",
                                             "org.gradle.logging.level"))
     return (level or "").strip().lower() in _QUIET_LEVELS
+
+
+#: A daemon started from the menu bar has launchd's environment, not the
+#: shell's: a password the build reads from an exported variable is not set.
+_NOT_YOUR_SHELL = ("if the build reads it from an environment variable, quern's daemon may "
+                   "not see your shell's exports: pass the value as a Gradle property "
+                   "(gradle_args=[\"-P<name>=...\"]) where the build reads one, or start "
+                   "quern from that shell")
+
+
+def _signing(output: str) -> list[EnvironmentProblem]:
+    """A release signing config that cannot sign on this machine. Spellings
+    measured on AGP 9.3.2."""
+    debug_instead = "build a debug variant instead: it is signed with this machine's debug key"
+    if m := re.search(r"Keystore file '([^']+)' not found for signing config '([^']+)'", output):
+        return [EnvironmentProblem(
+            kind="signing",
+            summary=f"the keystore for signing config '{m.group(2)}', {m.group(1)}, is not on "
+                    f"this machine",
+            options=[debug_instead,
+                     f"put the keystore at {m.group(1)}, or point the signing config at where "
+                     f"it is: the user's to supply"])]
+    if m := re.search(r'Failed to read key (\S+) from store "([^"]+)": (.+)', output):
+        return [EnvironmentProblem(
+            kind="signing",
+            summary=f"key {m.group(1)} could not be read from {m.group(2)}: "
+                    f"{m.group(3).strip().rstrip('.')}",
+            options=[debug_instead,
+                     "check the signing config's passwords and key alias: the user's to "
+                     "supply",
+                     _NOT_YOUR_SHELL])]
+    return []
+
+
+def unsigned(metadata: dict) -> bool:
+    """Whether the build's APKs are unsigned: a release variant with no
+    signing config, which AGP names `app-release-unsigned.apk` and Android
+    refuses to install."""
+    elements = metadata.get("elements") or []
+    return bool(elements) and all(str(e.get("outputFile", "")).endswith("-unsigned.apk")
+                                  for e in elements if isinstance(e, dict))
 
 
 def parse(code: int, output: str, project: GradleProject,

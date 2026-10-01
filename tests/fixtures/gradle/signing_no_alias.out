@@ -1,0 +1,68 @@
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preStagingReleaseBuild UP-TO-DATE
+> Task :app:mergeStagingReleaseJniLibFolders UP-TO-DATE
+> Task :app:mergeStagingReleaseNativeLibs NO-SOURCE
+> Task :app:stripStagingReleaseDebugSymbols NO-SOURCE
+> Task :app:extractStagingReleaseNativeSymbolTables NO-SOURCE
+> Task :app:mergeStagingReleaseNativeDebugMetadata NO-SOURCE
+> Task :app:checkStagingReleaseDuplicateClasses UP-TO-DATE
+> Task :app:generateStagingReleaseResources UP-TO-DATE
+> Task :app:packageStagingReleaseResources UP-TO-DATE
+> Task :app:processStagingReleaseNavigationResources UP-TO-DATE
+> Task :app:parseStagingReleaseLocalResources UP-TO-DATE
+> Task :app:generateStagingReleaseRFile UP-TO-DATE
+> Task :app:compileStagingReleaseKotlin NO-SOURCE
+> Task :app:javaPreCompileStagingRelease UP-TO-DATE
+> Task :app:compileStagingReleaseJavaWithJavac NO-SOURCE
+> Task :app:checkStagingReleaseAarMetadata UP-TO-DATE
+> Task :app:mapStagingReleaseSourceSetPaths UP-TO-DATE
+> Task :app:compileStagingReleaseNavigationResources UP-TO-DATE
+> Task :app:mergeStagingReleaseResources UP-TO-DATE
+> Task :app:createStagingReleaseCompatibleScreenManifests UP-TO-DATE
+> Task :app:extractDeepLinksStagingRelease UP-TO-DATE
+> Task :app:processStagingReleaseMainManifest UP-TO-DATE
+> Task :app:processStagingReleaseManifest UP-TO-DATE
+> Task :app:processStagingReleaseManifestForPackage UP-TO-DATE
+> Task :app:processStagingReleaseResources UP-TO-DATE
+> Task :app:dexBuilderStagingRelease UP-TO-DATE
+> Task :app:desugarStagingReleaseFileDependencies UP-TO-DATE
+> Task :app:mergeStagingReleaseStartupProfile UP-TO-DATE
+> Task :app:mergeExtDexStagingRelease UP-TO-DATE
+> Task :app:mergeDexStagingRelease UP-TO-DATE
+> Task :app:mergeStagingReleaseArtProfile UP-TO-DATE
+> Task :app:mergeStagingReleaseGlobalSynthetics UP-TO-DATE
+> Task :app:compileStagingReleaseArtProfile UP-TO-DATE
+> Task :app:generateStagingReleaseAssets UP-TO-DATE
+> Task :app:mergeStagingReleaseAssets UP-TO-DATE
+> Task :app:compressStagingReleaseAssets UP-TO-DATE
+> Task :app:extractStagingReleaseVersionControlInfo UP-TO-DATE
+> Task :app:extractProguardFiles UP-TO-DATE
+> Task :app:generateStagingReleaseLintVitalReportModel
+> Task :app:processStagingReleaseJavaRes NO-SOURCE
+> Task :app:mergeStagingReleaseJavaResource UP-TO-DATE
+> Task :app:optimizeStagingReleaseResources UP-TO-DATE
+> Task :app:collectStagingReleaseDependencies UP-TO-DATE
+> Task :app:sdkStagingReleaseDependencyData UP-TO-DATE
+> Task :app:validateSigningStagingRelease UP-TO-DATE
+> Task :app:writeStagingReleaseAppMetadata UP-TO-DATE
+> Task :app:writeStagingReleaseSigningConfigVersions UP-TO-DATE
+> Task :app:lintVitalAnalyzeStagingRelease
+> Task :app:lintVitalReportStagingRelease
+> Task :app:lintVitalStagingRelease
+> Task :app:packageStagingRelease FAILED
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':app:packageStagingRelease' (registered by plugin 'com.android.internal.application').
+> A failure occurred while executing com.android.build.gradle.tasks.PackageAndroidArtifact$IncrementalSplitterRunnable
+   > com.android.ide.common.signing.KeytoolException: Failed to read key nokey from store "/Users/someone/src/probe.jks": No key with alias 'nokey' found in keystore /Users/someone/src/probe.jks
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights from a Build Scan (powered by Develocity).
+> Get more help at https://help.gradle.org.
+
+BUILD FAILED in 1s
+42 actionable tasks: 5 executed, 37 up-to-date

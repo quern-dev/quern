@@ -42,12 +42,7 @@ async def build_and_install(controller, body, *, env: dict[str, str] | None = No
     `env` is the environment Gradle and the JDK search see, the daemon's own
     by default; tests pass one so no lookup reaches the developer's machine.
     """
-    if not (body.variant or "").strip():
-        raise HTTPException(
-            status_code=400,
-            detail="variant is required for a Gradle project: the build variant to assemble, "
-                   "a build type with any flavour before it, e.g. debug or stagingDebug")
-    variant = body.variant.strip()
+    variant = (body.variant or "").strip()
     if variant.lower().startswith("assemble") and len(variant) > len("assemble"):
         # The likeliest mistake: the task, not the variant. Gradle would be
         # asked for assembleAssembleStagingDebug and say only "not found".
@@ -99,17 +94,21 @@ async def build_and_install(controller, body, *, env: dict[str, str] | None = No
     if environment:
         return _not_built(serials, environment, used, "the environment is not ready to build")
 
-    task = gradle.assemble_task(project, variant)
     args = list(body.gradle_args or [])
     if not any(a.startswith("-Pandroid.builder.sdkDownload") for a in args):
         # The Android Gradle plugin downloads missing SDK packages itself once
         # their licences are accepted: an install on the user's machine nobody
         # chose. Off, a missing package is an environment problem to decide on.
         args.append("-Pandroid.builder.sdkDownload=false")
+    gradle_env = gradle.build_env(env, choice.jdk, sdk)
+    variant = await _check_variant(project, variant, gradle_env, args)
+
+    task = gradle.assemble_task(project, variant)
     logger.info("Building %s with %s (%s)", project.root, task, used["java"])
+    progress = gradle.BuildProgress(project=str(project.root), task=task)
+    gradle.ACTIVE[id(progress)] = progress
     try:
-        code, output = await gradle.run(project, task, gradle.build_env(env, choice.jdk, sdk),
-                                        args)
+        code, output = await gradle.run(project, task, gradle_env, args, progress=progress)
     except TimeoutError:
         result = BuildResult(errors=[BuildDiagnostic(
             message=f"the build did not finish within {gradle.BUILD_TIMEOUT // 60} minutes")])
@@ -122,6 +121,8 @@ async def build_and_install(controller, body, *, env: dict[str, str] | None = No
         return _not_built(serials, [gradle.EnvironmentProblem(
             kind="gradle_wrapper", summary=f"{project.wrapper} could not be run: {e}",
             options=[fix])], used, "the Gradle wrapper could not be run")
+    finally:
+        gradle.ACTIVE.pop(id(progress), None)
     ran_on = criteria or (choice.jdk.major if choice.jdk else None)
     quiet = gradle.quiet_logging(project, args, jdk_mod.gradle_user_home(args, env, home))
     result, environment = gradle.parse(code, output, project, choice.candidates, ran_on=ran_on,
@@ -137,6 +138,16 @@ async def build_and_install(controller, body, *, env: dict[str, str] | None = No
     except build_records.AndroidBuildNotFound as e:
         # Gradle said it built; the outputs say otherwise. Said, not guessed.
         return {**_not_built(serials, [], used, f"the build left no APK: {e}"),
+                "build_android": result}
+    if gradle.unsigned(metadata):
+        # Android installs only signed APKs: said here, by the variant, not
+        # as INSTALL_PARSE_FAILED_NO_CERTIFICATES once per device.
+        apk = metadata["elements"][0].get("outputFile")
+        return {**_not_built(serials, [], used,
+                             f"the {variant} APK ({apk}) is unsigned: the variant has no signing "
+                             f"config, and Android installs only signed APKs. Build a debug "
+                             f"variant, which this machine's debug key signs, or give the "
+                             f"{variant} build type a signingConfig (a change to the project)"),
                 "build_android": result}
     if did is False:
         # Outputs for this variant exist, and this run did not make them: an
@@ -168,6 +179,49 @@ async def build_and_install(controller, body, *, env: dict[str, str] | None = No
         "environment": [],
         **used,
     }
+
+
+async def _check_variant(project: gradle.GradleProject, variant: str, env: dict[str, str],
+                         args: list[str]) -> str:
+    """The variant to build, in its own spelling, or a 400 that lists them.
+
+    Checked before the build, because Gradle's own answers come late or
+    wrong: `debug` on a flavoured project assembles every flavour's debug
+    (two minutes, measured, before anything could say so), and an
+    abbreviation (`stagingDeb`) builds stagingDebug while the outputs are
+    looked for under the name given. Listing costs about a second on a warm
+    daemon and is then cached for as long as the build files are unchanged.
+    """
+    cached = gradle.cached_variants(project)
+    if variant and cached and cached.find(variant):
+        return cached.find(variant)
+    key = gradle._build_files_key(project)
+    known, why = await gradle.list_variants(project, env, args)
+    if known is not None:
+        gradle.remember_variants(project, key, known)
+    where = f":{project.module}"
+    if known is None:
+        if not variant:
+            raise HTTPException(status_code=400,
+                                detail=f"variant is required for a Gradle project, and the "
+                                       f"variants of {where} could not be listed: {why}")
+        # The check could not run: said in the log, and the build decides.
+        # Refusing on a listing that failed would block builds that work.
+        logger.warning("Could not list the variants of %s %s: %s", project.root, where, why)
+        return variant
+    listed = ", ".join(known.names)
+    if not variant:
+        raise HTTPException(status_code=400,
+                            detail=f"variant is required for a Gradle project. Variants of "
+                                   f"{where}: {listed}")
+    if own := known.find(variant):
+        return own
+    if group := known.group(variant):
+        raise HTTPException(status_code=400,
+                            detail=f"{variant!r} is not one variant of {where} but several: "
+                                   f"pass one of {', '.join(group)}")
+    raise HTTPException(status_code=400,
+                        detail=f"{where} has no variant {variant!r}. Variants: {listed}")
 
 
 async def _android_targets(controller, body) -> list[str]:
