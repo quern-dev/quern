@@ -53,6 +53,11 @@ class CaptureSessionManager:
         self._sessions: dict[str, CaptureSession] = {}
         self._ttl = ttl_seconds
 
+    def simulator_udid(self, session_id: str) -> str | None:
+        """The simulator a live session is filtered to, without ending it."""
+        session = self._sessions.get(session_id)
+        return session.simulator_udid if session else None
+
     def start(self, request: CaptureStartRequest) -> CaptureSession:
         """Create a new capture session."""
         self._cleanup_expired()

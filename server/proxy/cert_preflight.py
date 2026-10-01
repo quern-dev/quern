@@ -85,6 +85,52 @@ async def simulators_without_cert(controller) -> list[dict[str, str]]:
         return []
 
 
+async def simulator_trust(controller) -> list[dict] | None:
+    """Every booted simulator with whether it trusts the CA, asked of each one.
+
+    Returns ``[{"udid", "name", "trusted"}]`` where ``trusted`` is True, False,
+    or None when the device could not be asked. Returns None when the device
+    list itself could not be read.
+
+    The opposite failure policy to `simulators_without_cert`, deliberately.
+    That one gates a call, and a gate that fails closed blocks capture over its
+    own bug, so it lets an unreadable device through. This one decides which
+    simulators' TLS gets *decrypted* (#354), where the safe answer to "could
+    not tell" is "do not decrypt": the cost is traffic we cannot read, never a
+    simulator whose every HTTPS request fails. So nothing here reads an error
+    as trusted, and when the whole lookup fails the caller trusts nobody: a
+    previous set may name a simulator erased since, which is the one mistake
+    this must not make.
+    """
+    if controller is None:
+        return None
+    try:
+        from server.models import DeviceState, DeviceType
+        from server.proxy import cert_manager
+
+        devices = await controller.list_devices()
+    except Exception as e:
+        logger.debug("Could not list devices for the trusted-simulator set: %s", e)
+        return None
+
+    result = []
+    for d in devices:
+        if d.device_type != DeviceType.SIMULATOR or d.state != DeviceState.BOOTED:
+            continue
+        try:
+            trusted: bool | None = bool(await cert_manager.is_cert_installed(
+                controller, d.udid, device_name=d.name,
+            ))
+        except Exception as e:
+            logger.debug(
+                "Could not check the CA on %s (%s); not decrypting it: %s",
+                d.name, d.udid[:8], e,
+            )
+            trusted = None
+        result.append({"udid": d.udid.upper(), "name": d.name, "trusted": trusted})
+    return result
+
+
 def trust_is_stale(udid: str, cert_data: dict, untrusted_udids: set[str]) -> bool:
     """Whether a stored `cert_installed: true` is contradicted by a live check.
 
@@ -214,7 +260,7 @@ async def warn_if_capture_lacks_trust(controller, processes: list[str]) -> list[
                 failed.append((dev, e))
                 logger.warning(
                     "auto_install_cert is set but installing the CA on %s (%s) "
-                    "failed, so HTTPS from it will not be captured: %s",
+                    "failed, so its TLS will be passed through, not decrypted: %s",
                     dev["name"], dev["udid"][:8], e,
                 )
         if installed:
@@ -226,10 +272,10 @@ async def warn_if_capture_lacks_trust(controller, processes: list[str]) -> list[
 
     logger.warning(
         "Local capture is enabled for %s, but %s do(es) not trust the mitmproxy "
-        "CA. Every HTTPS request from those simulators will fail, and nothing in "
-        "the app will point at the proxy as the cause. Install it with the "
-        "install_proxy_cert tool, or run `quern set-auto-install-cert on` to have "
-        "Quern handle it from now on.",
+        "CA. Their TLS is passed through rather than decrypted, so their apps "
+        "work but their HTTPS requests will not appear in quern (#354). Install "
+        "the CA with the install_proxy_cert tool, or run `quern "
+        "set-auto-install-cert on` to have Quern handle it from now on.",
         ", ".join(processes),
         ", ".join(f"{d['name']} ({d['udid'][:8]})" for d in missing),
     )

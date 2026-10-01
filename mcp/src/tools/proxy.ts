@@ -33,7 +33,7 @@ For an Android emulator, filter by device_serial (e.g. emulator-5554): its traff
       simulator_udid: z
         .string()
         .optional()
-        .describe("Filter by simulator UDID (only flows from this simulator)"),
+        .describe("Filter by simulator UDID (only flows from this simulator). If that simulator's TLS is passed through (it does not trust the CA), the result carries simulator_tls_note -- read it before concluding the app made no HTTPS requests."),
       device_serial: z
         .string()
         .optional()
@@ -131,7 +131,7 @@ Use exclude_hosts to filter out analytics/SDK noise (Firebase, AppsFlyer, Facebo
       id: z.string().optional().describe("Custom session ID (auto-generated if omitted)"),
       hosts: z.array(z.string()).optional().describe("Only capture flows to these hosts"),
       exclude_hosts: z.array(z.string()).optional().describe("Exclude flows to these hosts (analytics, SDKs, etc.)"),
-      simulator_udid: z.string().optional().describe("Filter to flows from this simulator"),
+      simulator_udid: z.string().optional().describe("Filter to flows from this simulator. If that simulator's TLS is passed through (it does not trust the CA), the result carries simulator_tls_note -- read it before concluding the app made no HTTPS requests."),
       device_serial: z.string().optional().describe("Filter to flows from this Android emulator (e.g. emulator-5554)"),
       client_ip: z.string().optional().describe("Filter by client IP (physical devices). Does not narrow to one Android emulator."),
       detail: z
@@ -202,7 +202,8 @@ Use this after triggering a UI action to observe the resulting network request w
         .string()
         .optional()
         .describe(
-          "Filter by simulator UDID (only flows from this simulator)"
+          "Filter by simulator UDID (only flows from this simulator)." +
+          " If that simulator's TLS is passed through (it does not trust the CA), the result carries simulator_tls_note -- read it before concluding the app made no HTTPS requests."
         ),
       device_serial: z
         .string()
@@ -338,7 +339,14 @@ is NOT being captured.
 The local_capture field is the list of entries being captured via mitmproxy
 local mode -- names, PIDs or ! exclusions (see set_local_capture). It is shared
 by every simulator: to see one simulator's traffic, filter flows by simulator_udid
-rather than changing this list. When non-empty, traffic from those processes is transparently captured
+rather than changing this list.
+
+The simulator_tls field (present while local capture is on) says, per booted
+simulator, whether its TLS is "decrypted" or "passed_through" -- passed
+through when it does not trust the mitmproxy CA, so its apps work but its
+HTTPS never shows up as flows. Each entry gives the reason, the fix, and how
+many connections were passed through. Check it before concluding a
+simulator's app made no requests. When non-empty, traffic from those processes is transparently captured
 without needing a system proxy. Empty list means disabled.
 Name the process that actually makes the requests: Safari's traffic leaves through
 com.apple.WebKit.Networking, not MobileSafari, so ["MobileSafari"] alone captures
@@ -675,7 +683,7 @@ For an Android emulator, pass device_serial (e.g. emulator-5554) — its traffic
       simulator_udid: z
         .string()
         .optional()
-        .describe("Filter to flows from a specific simulator UDID"),
+        .describe("Filter to flows from a specific simulator UDID. If that simulator's TLS is passed through (it does not trust the CA), the result carries simulator_tls_note -- read it before concluding the app made no HTTPS requests."),
       device_serial: z
         .string()
         .optional()
@@ -1032,15 +1040,15 @@ Note what only does NOT mean: the flag is not stored, but the list it writes
 IS, so it replaces whatever was configured before and start-up widens that
 stored list again. It is a one-shot narrowing, not a temporary view.
 
-CERTIFICATE CHECK. Enabling capture refuses with HTTP 428 when a booted
-simulator does not trust the mitmproxy CA and auto_install_cert is off. With
-that setting on it installs the CA instead of refusing, exactly as configure_system_proxy
-does and for the same reason: routing a process's traffic through the proxy
-from a device that does not trust the CA fails every HTTPS request from it with
-no indication the proxy is the cause. The refusal is NOT transient and retrying
-will not clear it; the body names the devices and the same three resolutions
-(install_proxy_cert, set auto_install_cert, or skip_cert_check). Ask the user
-which they want. Disabling capture is never refused.
+SIMULATORS THAT DO NOT TRUST THE CA. Capture is NOT refused over them. Their
+TLS is passed through untouched instead of decrypted: their apps keep working,
+but their HTTPS requests never appear as flows. The response's simulator_tls
+lists every booted simulator as "decrypted" or "passed_through", with the
+reason and the fix -- read it, because a passed-through simulator otherwise
+looks exactly like an app making no requests. To decrypt one, install the CA
+on it (install_proxy_cert); decryption starts within seconds, with no restart.
+With auto_install_cert on, the CA is installed first and everything is
+decrypted. Installing a root CA is the user's decision -- ask before doing it.
 
 On first use, macOS will prompt to allow the Mitmproxy Redirector system
 extension in System Settings > Privacy & Security.`,
@@ -1054,10 +1062,10 @@ extension in System Settings > Privacy & Security.`,
         .boolean()
         .optional()
         .describe(
-          "Enable capture even when a booted simulator does not trust the " +
-          "mitmproxy CA. Only pass this when the user has said so: capturing " +
-          "in that state fails every HTTPS request from that device with " +
-          "nothing pointing at the proxy. Correct when deliberately " +
+          "Decrypt EVERY simulator, including ones that do not trust the " +
+          "mitmproxy CA -- whose HTTPS then fails, with nothing pointing at " +
+          "the proxy. Without it those simulators are passed through instead. " +
+          "Only pass this when the user has said so; correct when deliberately " +
           "exercising TLS-failure paths."
         ),
       whole_mac: z
@@ -1089,9 +1097,10 @@ extension in System Settings > Privacy & Security.`,
       };
     } catch (e) {
       // The "is it running?" hint is for a transport failure. A refusal the
-      // server deliberately returned -- the 428 above says in terms that
-      // retrying will not clear it -- is not helped by being told the server
-      // may be down, and reads as a contradiction of the advice it follows.
+      // server deliberately returned -- the whole-Mac 400 above says in terms
+      // that retrying will not clear it -- is not helped by being told the
+      // server may be down, and reads as a contradiction of the advice it
+      // follows.
       const message = e instanceof Error ? e.message : String(e);
       const served = /^HTTP \d{3}:/.test(message);
       return {

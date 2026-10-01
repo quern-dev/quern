@@ -540,7 +540,14 @@ class TestTheCliCommandIsGatedToo:
             "server.device.controller.DeviceController", lambda: object()
         )
 
-    def test_it_refuses_and_writes_nothing(self, monkeypatch, capsys):
+    def test_it_enables_capture_and_names_what_is_passed_through(
+        self, monkeypatch, capsys
+    ):
+        """It used to refuse and exit 1. An untrusting simulator now has its
+        TLS passed through rather than broken (#354), so capture is enabled --
+        but the person running the command still has to learn which simulator
+        quern cannot see into, and how to change that. This is their only
+        report: proxy_status is HTTP-only."""
         from server import main
 
         self._refuses(monkeypatch, [{"udid": "AAAA1111", "name": "iPhone 16 Pro"}])
@@ -548,14 +555,17 @@ class TestTheCliCommandIsGatedToo:
         wrote = []
         monkeypatch.setattr(main, "set_local_capture_processes", wrote.append)
 
-        with pytest.raises(SystemExit) as exc:
-            main._cmd_enable_local_capture(["MyApp"])
+        main._cmd_enable_local_capture(["MyApp"])
 
-        assert exc.value.code == 1, "a script ignoring the text must still see failure"
-        assert wrote == [], "config.json was written by a refused command"
+        assert wrote and "MyApp" in wrote[0], "capture was not enabled"
         out = capsys.readouterr().out
-        assert "iPhone 16 Pro" in out, "the refusal has to name the device"
-        assert "--skip-cert-check" in out, "and the way past it"
+        assert "iPhone 16 Pro" in out, "the output has to name the device"
+        assert "passed through" in out, "and what that means for it"
+        assert "set-auto-install-cert" in out, "and the way to decrypt it"
+        assert "--skip-cert-check" not in out, (
+            "the CLI cannot make the server decrypt everything -- the flag is not "
+            "stored -- so naming it as the way would be advice that does nothing"
+        )
 
     def test_the_skip_flag_lets_it_through(self, monkeypatch):
         from server import main
@@ -735,9 +745,12 @@ class TestAutoInstallCertClearsEveryGate:
         assert [d["udid"] for d in still_missing] == ["AAAA1111"]
         assert "failed" in caplog.text
 
-    def test_a_failed_install_refuses_the_cli_rather_than_proceeding(
+    def test_a_failed_install_enables_capture_and_says_so(
         self, monkeypatch, _untrusting, capsys
     ):
+        """It used to exit 1. The simulator the install failed on now has its
+        TLS passed through rather than broken (#354), so capture is enabled --
+        and the output names the failure and what it means for that device."""
         from server import main
 
         async def _boom(_controller, udid, device_name=None):
@@ -750,11 +763,11 @@ class TestAutoInstallCertClearsEveryGate:
         wrote = []
         monkeypatch.setattr(main, "set_local_capture_processes", wrote.append)
 
-        with pytest.raises(SystemExit) as exc:
-            main._cmd_enable_local_capture(["MyApp"])
-        assert exc.value.code == 1
-        assert wrote == [], "capture was enabled after the install failed"
-        assert "installing the CA failed" in capsys.readouterr().out
+        main._cmd_enable_local_capture(["MyApp"])
+        assert wrote and "MyApp" in wrote[0], "capture was not enabled"
+        out = capsys.readouterr().out
+        assert "installing the CA failed" in out
+        assert "passed through" in out, "the consequence has to be said"
 
     def test_it_does_not_refuse_before_the_ca_exists(self, monkeypatch, tmp_path):
         """The CA is generated on the first proxy start, so a fresh machine

@@ -440,6 +440,12 @@ async def boot_device(request: Request, body: BootDeviceRequest):
             except Exception as exc:
                 logger.warning("Failed to auto-start proxy for %s: %s", udid[:12], exc)
 
+    # A booted simulator is on no trusted list until it is checked, so its TLS
+    # is passed through until then -- safe, but invisible. Check now rather than
+    # at the next periodic refresh (#354).
+    from server.proxy import sim_tls
+    await sim_tls.refresh_after(request.app, "booting a simulator")
+
     return {
         "status": "booted",
         "udid": udid,
@@ -513,6 +519,12 @@ async def erase_device(request: Request, body: ShutdownDeviceRequest):
             # request on the loop. It swallows its own exceptions, so the
             # best-effort contract is unchanged.
             await asyncio.to_thread(_invalidate_cert_record, resolved)
+            # An erased simulator no longer trusts the CA, so it must leave the
+            # trusted set now: decrypting it would fail every HTTPS request it
+            # makes. The periodic check would catch it, but not before it
+            # could boot again (#354).
+            from server.proxy import sim_tls
+            await sim_tls.refresh_after(request.app, "erasing a simulator")
             return {"status": "erased", "udid": resolved}
         except DeviceError as e:
             raise _handle_device_error(e)
