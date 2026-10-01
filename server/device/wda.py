@@ -1189,6 +1189,16 @@ def _allocate_sim_port(runners: dict[str, Any]) -> int:
     )
 
 
+def _runner_pid(udid: str) -> int | None:
+    """The recorded pid for this runner, or None if there is no record.
+
+    Read before any poll, never after: a concurrent stop_driver can remove the
+    entry while a poll is waiting, and indexing it afterwards raised KeyError
+    (CodeRabbit on #362).
+    """
+    return (read_wda_state().get("runners", {}).get(udid) or {}).get("pid")
+
+
 def simulator_runner_port(udid: str) -> int | None:
     """The port of a live WDA runner on this simulator, or None."""
     runner = read_wda_state().get("runners", {}).get(udid)
@@ -1226,8 +1236,8 @@ async def start_driver_simulator(udid: str) -> dict:
     if port is not None:
         # A live pid is not a working runner: it may be hung, or a start that
         # was cancelled mid-poll. Ask it.
-        if await _answers(port):
-            pid = read_wda_state()["runners"][udid]["pid"]
+        pid = _runner_pid(udid)
+        if await _answers(port) and pid is not None and simulator_runner_port(udid) == port:
             return {"status": "already_running", "udid": udid, "pid": pid,
                     "port": port, "ready": True}
         logger.info("WDA on simulator %s is alive but not answering; restarting", udid[:8])
@@ -1280,8 +1290,12 @@ async def start_driver_simulator(udid: str) -> dict:
             save_wda_state(state)
 
     if raced_port is not None:
+        pid = _runner_pid(udid)
         ready = await _answers(raced_port, timeout=SIM_DRIVER_START_TIMEOUT)
-        pid = read_wda_state()["runners"][udid]["pid"]
+        # Answering is not enough if the record went away during the poll:
+        # a concurrent stop removed it, and registering it now would route the
+        # simulator to a runner that is being torn down.
+        ready = ready and simulator_runner_port(udid) == raced_port
         return {"status": "already_running", "udid": udid, "pid": pid,
                 "port": raced_port, "ready": ready}
 

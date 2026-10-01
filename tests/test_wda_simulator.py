@@ -639,10 +639,13 @@ class TestACancelledBuildDoesNotLeaveXcodebuildRunning:
         monkeypatch.setattr(wda.asyncio, "create_subprocess_exec", AsyncMock(return_value=p))
 
         task = asyncio.create_task(wda.build_wda_simulator(force=True))
-        await started.wait()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        try:
+            await asyncio.wait_for(started.wait(), timeout=5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=5)
+        finally:
+            task.cancel()
         p.kill.assert_called_once()
         p.wait.assert_awaited_once()
 
@@ -687,11 +690,15 @@ class TestARaceForOneSimulatorDoesNotStallAnother:
                             AsyncMock(return_value=MagicMock(pid=4242)))
 
         sim_task = asyncio.create_task(wda.start_driver_simulator(SIM))
-        await asyncio.sleep(0.05)  # SIM is now polling
-        other = await asyncio.wait_for(wda.start_driver_simulator("OTHER"), timeout=2)
-        assert other["ready"] is True, "the other simulator waited behind SIM's poll"
-        release.set()
-        assert (await sim_task)["status"] == "already_running"
+        try:
+            await asyncio.sleep(0.05)  # SIM is now polling
+            other = await asyncio.wait_for(wda.start_driver_simulator("OTHER"), timeout=2)
+            assert other["ready"] is True, "the other simulator waited behind SIM's poll"
+            release.set()
+            assert (await asyncio.wait_for(sim_task, timeout=5))["status"] == "already_running"
+        finally:
+            release.set()
+            sim_task.cancel()
 
 
 class TestSwitchingBackendForgetsTheOldOnesState:
@@ -711,3 +718,39 @@ class TestSwitchingBackendForgetsTheOldOnesState:
         assert SIM not in c._ui_cache
         assert SIM not in c._web_overlay
         assert SIM not in c._last_read_backend
+
+
+
+class TestARunnerRemovedDuringThePoll:
+    """A concurrent stop_driver can remove the record while a poll waits; the
+    pid used to be read after the poll, which raised KeyError (CodeRabbit on
+    #362)."""
+
+    async def test_the_raced_path_reports_not_ready_instead_of_raising(
+        self, state, monkeypatch, tmp_path,
+    ):
+        monkeypatch.setattr(wda, "build_wda_simulator", AsyncMock(return_value=False))
+        monkeypatch.setattr(wda, "_find_sim_xctestrun", lambda: tmp_path / "x.xctestrun")
+        monkeypatch.setattr(wda, "_is_process_alive", lambda pid: True)
+        calls = {"n": 0}
+
+        def runner_port(udid):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return None  # free before the lock
+            if calls["n"] == 2:
+                state["runners"] = {SIM: {"pid": 9, "port": 8299, "simulator": True}}
+                return 8299  # started by a concurrent call
+            return None  # gone by the time the poll returns
+
+        monkeypatch.setattr(wda, "simulator_runner_port", runner_port)
+
+        async def poll(url, timeout):
+            state["runners"] = {}  # the concurrent stop_driver, mid-poll
+            return True
+
+        monkeypatch.setattr(wda, "_poll_wda_status", poll)
+        result = await wda.start_driver_simulator(SIM)
+        assert result["status"] == "already_running"
+        assert result["ready"] is False, "registering it would route to a runner being torn down"
+        assert result["pid"] == 9
