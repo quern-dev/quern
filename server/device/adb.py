@@ -739,9 +739,14 @@ class AdbBackend:
                 # deadline check below, holding the AVD's reservation with it
                 # (review of #361). A timeout is a DeviceError, so it reads as
                 # "not yet" and the deadline still decides.
+                # Never past the overall deadline either: a stall with 0.1s
+                # left must not buy five more seconds (review of #361). The
+                # first look on an already-spent budget keeps its own bound.
+                left = deadline - loop.time()
                 out, _ = await self._run_adb_for_device(
                     serial, "shell", "getprop", "sys.boot_completed",
-                    timeout=self._GETPROP_TIMEOUT,
+                    timeout=(min(self._GETPROP_TIMEOUT, left) if left > 0
+                             else self._GETPROP_TIMEOUT),
                 )
                 if out.strip() == "1":
                     return

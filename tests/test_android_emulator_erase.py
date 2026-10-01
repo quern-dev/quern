@@ -829,6 +829,20 @@ class TestABootPropertyReadCannotHang:
             await asyncio.wait_for(
                 backend.wait_for_boot_completed(OLD, timeout=0.0), timeout=5)
 
+    async def test_a_stall_near_the_deadline_does_not_overrun_it(self, monkeypatch):
+        """With the default five-second per-read bound and a 0.2s budget, a
+        stalled read must give up with the budget, not five seconds later."""
+        backend = adb_module.AdbBackend()
+        self._hanging_adb(monkeypatch, backend)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+
+        with pytest.raises(DeviceError, match="had not finished starting"):
+            await asyncio.wait_for(
+                backend.wait_for_boot_completed(OLD, timeout=0.2), timeout=3)
+
+        assert loop.time() - started < 2.0
+
     async def test_an_unbounded_call_is_still_unbounded_elsewhere(self, monkeypatch):
         """Scope: only the boot wait passes a timeout. Every other adb call
         behaves exactly as it did."""
