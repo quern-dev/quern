@@ -27,6 +27,7 @@ from server.models import (
     DeviceOperationUnsupportedError,
     DeviceState,
     DeviceType,
+    EraseIncompleteError,
     UIElement,
 )
 
@@ -1030,7 +1031,10 @@ class DeviceController(DeviceControllerUI):
 
     #: An erased emulator boots cold -- the wipe discards the snapshot and
     #: the first boot of fresh userdata is the slow one.
-    _ERASE_BOOT_TIMEOUT = 180.0
+    #: Boot and boot-completed share this one budget. With the kill's, the
+    #: worst case stays under the MCP client's 300s request timeout, so a slow
+    #: boot is reported by the server rather than as a dropped connection.
+    _ERASE_BOOT_TIMEOUT = 240.0
     _ERASE_KILL_TIMEOUT = 30.0
 
     async def erase(self, udid: str) -> str:
@@ -1045,6 +1049,10 @@ class DeviceController(DeviceControllerUI):
         """
         if self._is_android(udid):
             return await self._erase_android_emulator(udid)
+        if udid.startswith("avd:"):
+            # A shut-down AVD, listed under its name because it has no serial
+            # yet. Nothing to kill: booting it with `-wipe-data` *is* the erase.
+            return await self._erase_android_emulator(udid)
         self._require_simulator(udid, "Erase")
         # simctl erase requires the simulator to be shutdown
         try:
@@ -1057,11 +1065,18 @@ class DeviceController(DeviceControllerUI):
         return udid
 
     async def _erase_android_emulator(self, udid: str) -> str:
-        """Kill an emulator and boot its AVD again with `-wipe-data`."""
-        # The console, not the device kind -- the same reasoning, and the same
-        # refusals, as `shutdown`: `adb emu` travels only over the local
-        # `emulator-NNNN` serial.
-        if not self.adb.is_console_serial(udid):
+        """Kill an emulator and boot its AVD again with `-wipe-data`.
+
+        Everything that can refuse runs before the kill: the device kind, the
+        AVD name, whether this server can launch that AVD at all, and whether
+        something else is already booting or erasing it. After the kill there is
+        no undo, so a failure from there on says the emulator is gone.
+        """
+        shut_down = udid.startswith("avd:")
+        if not shut_down and not self.adb.is_console_serial(udid):
+            # The console, not the device kind -- the same reasoning, and the
+            # same refusals, as `shutdown`: `adb emu` travels only over the
+            # local `emulator-NNNN` serial.
             if self._device_type(udid) == DeviceType.ANDROID_EMULATOR:
                 raise DeviceOperationUnsupportedError(
                     f"{udid} is an emulator, but it is attached over TCP, and "
@@ -1071,43 +1086,105 @@ class DeviceController(DeviceControllerUI):
                 )
             raise DeviceOperationUnsupportedError(
                 f"Erase is not possible on a physical Android device ({udid}): a "
-                "factory reset needs the device's own settings or recovery mode, "
-                "and neither is reachable over adb without root.",
+                "factory reset needs input on the device itself -- in Settings, "
+                "or in recovery mode's menu -- so adb cannot perform one.",
                 tool="adb",
             )
 
-        avd = await self.adb.avd_name(udid)
-        headless = await self.adb.emulator_was_headless(avd)
+        avd = udid.removeprefix("avd:") if shut_down else await self.adb.avd_name(udid)
+        if avd in self.adb._booting_avds:
+            raise DeviceOperationUnsupportedError(
+                f"AVD '{avd}' is already being booted or erased; try again once "
+                "that has finished.",
+                tool="emulator",
+            )
+        headless = (
+            False if shut_down else await self.adb.emulator_was_headless(avd)
+        )
+        await self.adb.check_can_boot(avd)
         was_active = self._active_udid == udid
 
-        await self.adb._run_adb_for_device(udid, "emu", "kill")
-        await self._wait_until_gone(udid, self._ERASE_KILL_TIMEOUT)
+        # Held across the whole kill-and-boot, so the AVD does not read as
+        # shut down -- and so bootable by anyone else -- in the gap between.
+        self.adb._booting_avds.add(avd)
+        serial: str | None = None
+        try:
+            if not shut_down:
+                await self.adb._run_adb_for_device(udid, "emu", "kill")
+                await self._wait_until_gone(udid, avd, self._ERASE_KILL_TIMEOUT)
 
-        serial = await self.adb.boot_emulator(
-            avd, timeout=self._ERASE_BOOT_TIMEOUT, headless=headless, wipe_data=True,
-        )
-        # Report the outcome, not the request: listed by adb is not started.
-        await self.adb.wait_for_boot_completed(serial, self._ERASE_BOOT_TIMEOUT)
-        if serial != udid:
-            self._device_type_cache.pop(udid, None)
-        self._device_type_cache[serial] = DeviceType.ANDROID_EMULATOR
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + self._ERASE_BOOT_TIMEOUT
+            try:
+                serial = await self.adb.boot_emulator(
+                    avd, timeout=self._ERASE_BOOT_TIMEOUT,
+                    headless=headless, wipe_data=True,
+                )
+                # Follow the device before waiting on it, so a slow
+                # boot-completed leaves quern pointing at the emulator that
+                # exists rather than at a serial that is gone.
+                self._adopt_erased_serial(udid, serial, was_active)
+                # Report the outcome, not the request: listed by adb is not
+                # started. Measured: about nine seconds apart on an erase.
+                await self.adb.wait_for_boot_completed(
+                    serial, max(deadline - loop.time(), 5.0),
+                )
+            except DeviceError as e:
+                if serial is None:
+                    self._device_type_cache.pop(udid, None)
+                    if was_active:
+                        self._active_udid = None
+                what = (
+                    f"{udid} was shut down for the erase and did not come back"
+                    if serial is None else
+                    f"{udid} was relaunched as {serial} for the erase, but"
+                    " Android did not finish starting"
+                )
+                raise EraseIncompleteError(
+                    f"{what}: {e}. It may already be wiped.",
+                    previous_udid=udid, udid=serial, tool=e.tool,
+                ) from e
+        finally:
+            self.adb._booting_avds.discard(avd)
+        return serial
+
+    def _adopt_erased_serial(self, old: str, new: str, was_active: bool) -> None:
+        """Move what quern knows about the device to the serial it came back on."""
+        if new != old:
+            self._device_type_cache.pop(old, None)
+        self._device_type_cache[new] = DeviceType.ANDROID_EMULATOR
+        # Per-serial state describes the device as it was before the wipe: a
+        # UI tree of screens that no longer exist, and a cached uiautomator2
+        # connection to an agent the wipe removed.
+        for stale in {old, new}:
+            self._invalidate_ui_cache(stale)
+            self._input_checked.pop(stale, None)
+            self.u2._disconnect(stale)
         if was_active:
             # Unlike a simulator, which an erase leaves shut down, this device
             # is up and is the one the caller was using -- possibly on a new
             # serial, which they would otherwise have to go and find.
-            self._active_udid = serial
-        return serial
+            self._active_udid = new
 
-    async def _wait_until_gone(self, serial: str, timeout: float) -> None:
-        """Wait for adb to stop listing `serial`, so the boot cannot find it."""
+    async def _wait_until_gone(self, serial: str, avd: str, timeout: float) -> None:
+        """Wait until the emulator is gone -- from adb, and as a process.
+
+        adb alone is not enough: `list_devices` answers an empty list when
+        `adb devices` itself fails, which reads exactly like "gone". The
+        process check covers that. Measured, the process exits before adb drops
+        the serial, so on a healthy kill this costs nothing extra; when `ps`
+        cannot be run, adb's answer is all there is.
+        """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         while loop.time() < deadline:
-            if serial not in {d.udid for d in await self.adb.list_devices()}:
+            unlisted = serial not in {d.udid for d in await self.adb.list_devices()}
+            running = await self.adb.emulator_running(avd)
+            if unlisted and running is not True:
                 return
             await asyncio.sleep(1)
         raise DeviceError(
-            f"{serial} was told to shut down for the erase but was still listed "
+            f"{serial} was told to shut down for the erase but was still running "
             f"after {timeout:.0f}s; it has not been wiped.",
             tool="adb",
         )

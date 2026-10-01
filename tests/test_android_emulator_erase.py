@@ -22,7 +22,7 @@ from server.config import ServerConfig
 from server.device import adb as adb_module
 from server.device.controller import DeviceController
 from server.main import create_app
-from server.models import DeviceError, DeviceState, DeviceType
+from server.models import DeviceError, DeviceState, DeviceType, EraseIncompleteError
 
 OLD, NEW, AVD = "emulator-5554", "emulator-5556", "quern_probe_356"
 
@@ -31,7 +31,8 @@ def _listed(*serials):
     return [SimpleNamespace(udid=s, state=DeviceState.BOOTED) for s in serials]
 
 
-def _emulator(monkeypatch, *, headless=False, comes_back_as=OLD, listed_after_kill=()):
+def _emulator(monkeypatch, *, headless=False, comes_back_as=OLD, listed_after_kill=(),
+              still_running=False, boot_fails=None, completed_fails=None):
     """A controller whose adb behaves like a console-attached emulator."""
     ctrl = DeviceController()
     ctrl._device_type_cache[OLD] = DeviceType.ANDROID_EMULATOR
@@ -43,10 +44,17 @@ def _emulator(monkeypatch, *, headless=False, comes_back_as=OLD, listed_after_ki
 
     async def booted(serial, timeout):
         calls.append(f"boot_completed {serial}")
+        if completed_fails:
+            raise completed_fails
 
     async def boot(avd, timeout=60, headless=False, wipe_data=False):
         calls.append(f"boot {avd} headless={headless} wipe_data={wipe_data}")
+        if boot_fails:
+            raise boot_fails
         return comes_back_as
+
+    async def precheck(avd):
+        calls.append(f"precheck {avd}")
 
     monkeypatch.setattr(ctrl.adb, "avd_name", AsyncMock(return_value=AVD))
     monkeypatch.setattr(ctrl.adb, "emulator_was_headless", AsyncMock(return_value=headless))
@@ -55,6 +63,9 @@ def _emulator(monkeypatch, *, headless=False, comes_back_as=OLD, listed_after_ki
                         AsyncMock(return_value=_listed(*listed_after_kill)))
     monkeypatch.setattr(ctrl.adb, "boot_emulator", boot)
     monkeypatch.setattr(ctrl.adb, "wait_for_boot_completed", booted)
+    monkeypatch.setattr(ctrl.adb, "check_can_boot", precheck)
+    monkeypatch.setattr(ctrl.adb, "emulator_running",
+                        AsyncMock(return_value=still_running))
     return ctrl, calls
 
 
@@ -66,7 +77,8 @@ class TestAnEmulatorIsWipedByRelaunching:
 
         # And it answers only once Android has started -- measured live, adb
         # listed the device about nine seconds before it was usable.
-        assert calls == ["kill", f"boot {AVD} headless=False wipe_data=True",
+        assert calls == [f"precheck {AVD}", "kill",
+                         f"boot {AVD} headless=False wipe_data=True",
                          f"boot_completed {OLD}"]
 
     @pytest.mark.parametrize("headless", [True, False])
@@ -82,11 +94,14 @@ class TestAnEmulatorIsWipedByRelaunching:
     async def test_a_new_serial_takes_the_cache_and_the_active_device_with_it(
         self, monkeypatch,
     ):
-        ctrl, _ = _emulator(monkeypatch, comes_back_as=NEW)
+        ctrl, calls = _emulator(monkeypatch, comes_back_as=NEW)
         ctrl._active_udid = OLD
 
         assert await ctrl.erase(OLD) == NEW
 
+        # On a port change the old serial no longer exists; waiting on it
+        # would spend the whole budget on a device that is not coming back.
+        assert f"boot_completed {NEW}" in calls, calls
         assert ctrl._device_type_cache.get(NEW) == DeviceType.ANDROID_EMULATOR
         assert OLD not in ctrl._device_type_cache
         assert ctrl._active_udid == NEW
@@ -109,6 +124,107 @@ class TestAnEmulatorIsWipedByRelaunching:
             await ctrl.erase(OLD)
 
         assert not any(c.startswith("boot") for c in calls), calls
+
+    async def test_a_process_still_running_also_blocks_the_boot(self, monkeypatch):
+        """adb can stop listing a serial -- or fail outright, which
+        `list_devices` reports as an empty list -- while the emulator is still
+        up. The process is the second witness."""
+        ctrl, calls = _emulator(monkeypatch, still_running=True)
+        monkeypatch.setattr(DeviceController, "_ERASE_KILL_TIMEOUT", 0.01)
+
+        with pytest.raises(DeviceError, match="has not been wiped"):
+            await ctrl.erase(OLD)
+
+        assert not any(c.startswith("boot") for c in calls), calls
+
+    async def test_an_unknowable_process_state_falls_back_to_adb(self, monkeypatch):
+        """No `ps` is "could not look", not "still running": adb decides."""
+        ctrl, calls = _emulator(monkeypatch, still_running=None)
+
+        await ctrl.erase(OLD)
+
+        assert any(c.startswith("boot") for c in calls), calls
+
+    async def test_a_shut_down_avd_is_booted_wiped_without_a_kill(self, monkeypatch):
+        """Listed as `avd:NAME` because it has no serial. Previously refused as
+        'attached over TCP', which was false twice over."""
+        ctrl, calls = _emulator(monkeypatch, comes_back_as=NEW)
+
+        assert await ctrl.erase(f"avd:{AVD}") == NEW
+
+        assert "kill" not in calls
+        assert f"boot {AVD} headless=False wipe_data=True" in calls
+
+    async def test_the_old_serials_per_device_state_is_dropped(self, monkeypatch):
+        """A UI tree of screens the wipe removed, and a uiautomator2 connection
+        to an agent the wipe uninstalled, are both stale the moment it boots."""
+        ctrl, _ = _emulator(monkeypatch)
+        ctrl._ui_cache[OLD] = ([], 0.0)
+        ctrl._input_checked[OLD] = True
+        ctrl.u2._devices[OLD] = object()
+
+        await ctrl.erase(OLD)
+
+        assert OLD not in ctrl._ui_cache
+        assert OLD not in ctrl._input_checked
+        assert OLD not in ctrl.u2._devices
+
+
+class TestNothingIsKilledUntilTheBootCanHappen:
+    async def test_an_avd_this_server_cannot_launch_is_left_running(self, monkeypatch):
+        """No `emulator` binary, or an AVD from a different SDK or
+        `ANDROID_AVD_HOME`, used to be discovered by `boot_emulator` -- after
+        the kill, leaving the emulator dead and unwiped."""
+        ctrl, calls = _emulator(monkeypatch)
+
+        async def cannot(avd):
+            raise DeviceError("AVD not known here", tool="emulator")
+
+        monkeypatch.setattr(ctrl.adb, "check_can_boot", cannot)
+
+        with pytest.raises(DeviceError, match="not known here"):
+            await ctrl.erase(OLD)
+
+        assert "kill" not in calls
+
+    async def test_an_avd_already_booting_or_erasing_is_refused(self, monkeypatch):
+        """Two erases of one emulator both killed and both launched."""
+        ctrl, calls = _emulator(monkeypatch)
+        ctrl.adb._booting_avds.add(AVD)
+
+        with pytest.raises(DeviceError, match="already being booted or erased"):
+            await ctrl.erase(OLD)
+
+        assert "kill" not in calls
+
+
+class TestAFailureAfterTheKillSaysTheEmulatorIsGone:
+    async def test_a_boot_that_fails(self, monkeypatch):
+        ctrl, _ = _emulator(monkeypatch, boot_fails=DeviceError("timed out", tool="emulator"))
+        ctrl._active_udid = OLD
+
+        with pytest.raises(EraseIncompleteError) as e:
+            await ctrl.erase(OLD)
+
+        assert "did not come back" in str(e.value)
+        assert e.value.previous_udid == OLD and e.value.udid is None
+        # Not left pointing at a serial that no longer exists.
+        assert ctrl._active_udid is None
+        assert OLD not in ctrl._device_type_cache
+        assert AVD not in ctrl.adb._booting_avds
+
+    async def test_a_boot_that_never_completes_has_already_moved_quern(self, monkeypatch):
+        ctrl, _ = _emulator(monkeypatch, comes_back_as=NEW,
+                            completed_fails=DeviceError("slow", tool="adb"))
+        ctrl._active_udid = OLD
+
+        with pytest.raises(EraseIncompleteError) as e:
+            await ctrl.erase(OLD)
+
+        assert e.value.udid == NEW
+        assert ctrl._active_udid == NEW
+        assert ctrl._device_type_cache.get(NEW) == DeviceType.ANDROID_EMULATOR
+        assert AVD not in ctrl.adb._booting_avds
 
 
 class TestRefusalsComeBeforeAnythingIsKilled:
@@ -172,8 +288,16 @@ class TestTheAdbHelpers:
         ([f"/sdk/emulator/qemu/qemu-system-aarch64 -avd {AVD} -no-audio"], False),
         # Another AVD's flag is not ours -- and a name that merely *starts*
         # with ours is another AVD.
-        ([f"qemu -avd {AVD}_old -no-window", f"qemu -avd {AVD}"], False),
+        ([f"/sdk/emulator/qemu/qemu-system-aarch64 -avd {AVD}_old -no-window",
+          f"/sdk/emulator/qemu/qemu-system-aarch64 -avd {AVD}"], False),
         (["/usr/bin/zsh", "python -m server"], False),
+        # The launcher's other spelling.
+        ([f"/sdk/emulator/emulator @{AVD} -no-window"], True),
+        # Android Studio's embedded emulator.
+        ([f"/sdk/emulator/qemu/qemu-system-aarch64 -avd {AVD} -qt-hide-window"], True),
+        # The shell that launched it says `-no-window` too, and is not it.
+        ([f"zsh -c /sdk/emulator/emulator -avd {AVD} -no-window",
+          f"/sdk/emulator/qemu/qemu-system-aarch64 -avd {AVD}"], False),
     ])
     async def test_headlessness_is_read_off_the_process(
         self, monkeypatch, ps_lines, expected,
@@ -226,7 +350,9 @@ class TestTheRoute:
     def test_a_relaunched_emulator_reports_where_it_is_now(self, client, monkeypatch):
         tc, ctrl = client
         ctrl.erase = AsyncMock(return_value=NEW)
-        ctrl._device_type = lambda u: DeviceType.ANDROID_EMULATOR
+        # As in production after a port change: the erase dropped the old
+        # serial from the type cache, so only the new one answers.
+        ctrl._device_type = lambda u: DeviceType.ANDROID_EMULATOR if u == NEW else None
         invalidated = []
         monkeypatch.setattr("server.api.device._invalidate_cert_record", invalidated.append)
 
@@ -327,3 +453,106 @@ class TestWaitingForBootCompleted:
 
         with pytest.raises(DeviceError, match="had not finished starting"):
             await backend.wait_for_boot_completed(OLD, timeout=0.01)
+
+
+
+class TestReadingTheProcessTable:
+    async def test_a_launching_shell_is_not_counted_as_the_emulator(self, monkeypatch):
+        """Measured: the shell that started an emulator stayed alive as a
+        session leader for minutes after the emulator exited, carrying
+        `-avd NAME` on its own command line. Counted, it reads as an emulator
+        that will not die."""
+        class Proc:
+            async def communicate(self):
+                return f"zsh -c /sdk/emulator/emulator -avd {AVD} -no-window\n".encode(), b""
+
+        async def fake_exec(*_a, **_k):
+            return Proc()
+
+        monkeypatch.setattr(adb_module.asyncio, "create_subprocess_exec", fake_exec)
+        assert await adb_module.AdbBackend().emulator_running(AVD) is False
+
+    async def test_no_ps_is_unknown_not_none_running(self, monkeypatch):
+        async def missing(*_a, **_k):
+            raise FileNotFoundError("ps")
+
+        monkeypatch.setattr(adb_module.asyncio, "create_subprocess_exec", missing)
+        backend = adb_module.AdbBackend()
+        assert await backend.emulator_running(AVD) is None
+        # And the docstring's promise: "False when it cannot tell".
+        assert await backend.emulator_was_headless(AVD) is False
+
+
+class TestBootAdoptsOnlyItsOwnAvd:
+    async def test_another_avd_booting_at_the_same_moment_is_skipped(self, monkeypatch):
+        """`boot_emulator` returned the first new serial it saw. Another AVD
+        booting concurrently was adopted as this one, and an erase then moved
+        the active device to the wrong emulator."""
+        backend = adb_module.AdbBackend()
+        backend._emulator_path = "/sdk/emulator/emulator"
+        monkeypatch.setattr(backend, "list_avds", AsyncMock(return_value=[AVD]))
+        listings = [[], _listed("emulator-5556", "emulator-5558")]
+        monkeypatch.setattr(backend, "list_devices",
+                            AsyncMock(side_effect=lambda: listings.pop(0) if listings
+                                      else _listed("emulator-5556", "emulator-5558")))
+        names = {"emulator-5556": "SomeOtherAvd", "emulator-5558": AVD}
+        monkeypatch.setattr(backend, "avd_name",
+                            AsyncMock(side_effect=lambda serial: names[serial]))
+
+        async def spawned(*_a, **_k):
+            return None
+
+        monkeypatch.setattr(adb_module.asyncio, "create_subprocess_exec", spawned)
+        monkeypatch.setattr(adb_module.asyncio, "sleep", AsyncMock())
+
+        assert await backend.boot_emulator(AVD, timeout=30) == "emulator-5558"
+
+
+
+def test_an_incomplete_erase_still_withdraws_the_cert_record(monkeypatch):
+    """Once the `-wipe-data` launch has started the data is gone, whether or
+    not the boot finished -- so the record claiming the CA is trusted goes, for
+    both serials. A *refused* erase keeps it; that one destroyed nothing."""
+    app = create_app(config=ServerConfig(api_key="k"), enable_oslog=False,
+                     enable_crash=False, enable_proxy=False)
+    ctrl = MagicMock()
+    ctrl._active_udid = None
+    ctrl.resolve_udid = AsyncMock(side_effect=lambda udid=None: udid)
+    ctrl.erase = AsyncMock(side_effect=EraseIncompleteError(
+        "gone", previous_udid=OLD, udid=NEW))
+    app.state.device_controller = ctrl
+    app.state.proxy_adapter = None
+    app.state.flow_store = None
+    invalidated = []
+    monkeypatch.setattr("server.api.device._invalidate_cert_record", invalidated.append)
+
+    r = TestClient(app).post("/api/v1/device/erase", json={"udid": OLD},
+                             headers={"Authorization": "Bearer k"})
+
+    assert r.status_code >= 500, r.text
+    assert sorted(invalidated) == sorted([OLD, NEW])
+
+
+
+async def test_an_unattended_launch_never_stops_to_ask_about_a_crash(monkeypatch):
+    """A windowed launch after a recorded crash showed a consent dialog and
+    waited forever; quern reported only a boot timeout."""
+    backend = adb_module.AdbBackend()
+    backend._emulator_path = "/sdk/emulator/emulator"
+    monkeypatch.setattr(backend, "list_avds", AsyncMock(return_value=[AVD]))
+    monkeypatch.setattr(backend, "list_devices", AsyncMock(return_value=[]))
+    launched: list[tuple] = []
+
+    class Launched(Exception):
+        pass
+
+    async def fake_exec(*args, **_k):
+        launched.append(args)
+        raise Launched
+
+    monkeypatch.setattr(adb_module.asyncio, "create_subprocess_exec", fake_exec)
+    with pytest.raises(Launched):
+        await backend.boot_emulator(AVD)
+
+    argv = list(launched[0])
+    assert argv[argv.index("-crash-report-mode") + 1] == "never", argv

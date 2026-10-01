@@ -1608,6 +1608,26 @@ class DeviceOperationUnsupportedError(DeviceError):
     """
 
 
+class EraseIncompleteError(DeviceError):
+    """An erase destroyed the running device and did not get it back.
+
+    Distinct from a refusal and from an ordinary failure, because the caller's
+    device is now *gone* -- shut down, and possibly already wiped -- and a
+    message that only names the step that failed ("timed out waiting for
+    emulator to boot") does not say so. Carries both serials so the route can
+    withdraw the certificate-trust record for either: once the `-wipe-data`
+    launch has started, the data is gone whether or not the boot finished.
+    """
+
+    def __init__(
+        self, message: str, *, previous_udid: str, udid: str | None,
+        tool: str = "emulator",
+    ):
+        super().__init__(message, tool=tool)
+        self.previous_udid = previous_udid
+        self.udid = udid
+
+
 class SimBridgeSaturatedError(DeviceError):
     """Raised when sim-bridge has more queued work than it can usefully serve.
 

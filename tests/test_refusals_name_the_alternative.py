@@ -11,11 +11,14 @@ lack is an implementation, not a mechanism.
 Three situations, and conflating them costs the caller the only thing the
 refusal was for:
 
-- no equivalent exists (`Set hardware keyboard`)
+- no equivalent exists (nothing mapped today; absent from the table means this)
 - one exists and quern has not built it (the plist family, save/restore: #314)
-- one exists with different semantics (`Erase` and `-wipe-data`)
+- one exists with different semantics (`Set hardware keyboard`: `hw.keyboard`
+  is read only at boot, so honouring it means a restart -- #356)
 
-See #263.
+`Erase` sat in that last group until #356 built it for emulators by booting
+the AVD again with `-wipe-data`; it is refused now only for a physical phone or
+a TCP-attached emulator, with its own reason. See #263, #356.
 """
 
 from __future__ import annotations

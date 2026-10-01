@@ -18,6 +18,7 @@ from server.models import (
     DeviceError,
     DeviceOperationUnsupportedError,
     DeviceType,
+    EraseIncompleteError,
     GrantPermissionRequest,
     InstallAppRequest,
     LaunchAppRequest,
@@ -545,6 +546,15 @@ async def erase_device(request: Request, body: ShutdownDeviceRequest):
                 if now_at != resolved:
                     result["previous_udid"] = resolved
             return result
+        except EraseIncompleteError as e:
+            # The device is gone, and once the `-wipe-data` launch started its
+            # data went with it -- so the record claiming it trusts the CA is
+            # withdrawn for both serials even though the erase did not finish.
+            # `test_cert_api` keeps the record on a *refused* erase, which is
+            # right: that one destroyed nothing.
+            for serial in {e.previous_udid, e.udid} - {None}:
+                await asyncio.to_thread(_invalidate_cert_record, serial)
+            raise _handle_device_error(e)
         except DeviceError as e:
             raise _handle_device_error(e)
 
