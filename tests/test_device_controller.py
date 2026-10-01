@@ -1034,7 +1034,22 @@ class TestWdaDirectQuery:
         call = ctrl.wda_client.find_elements_by_query.call_args
         assert call[0][1] == "predicate string"
         assert "name == 'myBtn'" in call[0][2]
-        assert "type == 'XCUIElementTypeButton'" in call[0][2]
+        # Every type that could be this element on the other backend (#336):
+        # the caller's find_element applies the real rule afterwards.
+        assert (
+            "type IN {'XCUIElementTypeButton', 'XCUIElementTypeCell', "
+            "'XCUIElementTypeRadioButton', 'XCUIElementTypeStaticText'}"
+        ) in call[0][2]
+
+    async def test_type_with_no_equivalent_keeps_the_single_clause(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "PHYS-0001"
+        ctrl._device_type_cache["PHYS-0001"] = DeviceType.DEVICE
+        ctrl.wda_client.find_elements_by_query = AsyncMock(return_value=[])
+
+        await ctrl._wda_direct_query("PHYS-0001", label="Logo", element_type="Image")
+        value = ctrl.wda_client.find_elements_by_query.call_args[0][2]
+        assert value == "label ==[c] 'Logo' AND type == 'XCUIElementTypeImage'"
 
     async def test_label_with_single_quote_escaped(self):
         ctrl = DeviceController()

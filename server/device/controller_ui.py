@@ -9,6 +9,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from server.device.element_types import equivalence, related_type_names
 from server.device.probing import frame_key
 from server.device.screenshots import annotate_screenshot
 from server.device.ui_elements import (
@@ -211,6 +212,17 @@ def _effective_filter_label(
     return label
 
 logger = logging.getLogger(__name__)
+
+
+def _note_equivalence(result: dict, element_type: str | None, element: UIElement) -> None:
+    """Add `matched_via` when `element_type` matched only through equivalence.
+
+    So a caller can tell a `RadioButton` filter that found a `Button` (the same
+    tab item, read through WDA) from one that matched exactly. Exact matches,
+    and calls with no type, carry nothing -- see `element_types.equivalence`.
+    """
+    if element_type and (via := equivalence(element_type, element.type)):
+        result["matched_via"] = via
 
 
 #: Tools whose failure means the *backend* broke, not that the device
@@ -1162,12 +1174,20 @@ class DeviceControllerUI:
             """Escape single quotes for NSPredicate string literals."""
             return val.replace("'", "\\'")
 
-        xcui_type = f"XCUIElementType{element_type}" if element_type else None
+        # Every type that could stand for `element_type` on this backend, not
+        # just its own spelling: the caller's `find_element` applies the real
+        # rule afterwards, and a narrower query here would hide a `Button` from
+        # a caller asking for the `RadioButton` it is on the other backend.
+        # Sorted so the predicate, which is logged, is stable.
+        xcui_types = (
+            [f"XCUIElementType{t}" for t in related_type_names(element_type)]
+            if element_type else []
+        )
 
         any_label = label or label_contains or label_prefix
 
         # Choose the most efficient WDA locator strategy
-        if identifier and not any_label and not xcui_type:
+        if identifier and not any_label and not xcui_types:
             # Fastest: direct accessibility id lookup
             using = "accessibility id"
             value = identifier
@@ -1182,8 +1202,11 @@ class DeviceControllerUI:
                 clauses.append(f"label CONTAINS[c] '{_escape(label_contains)}'")
             elif label_prefix:
                 clauses.append(f"label BEGINSWITH[c] '{_escape(label_prefix)}'")
-            if xcui_type:
-                clauses.append(f"type == '{xcui_type}'")
+            if len(xcui_types) == 1:
+                clauses.append(f"type == '{xcui_types[0]}'")
+            elif xcui_types:
+                listed = ", ".join(f"'{t}'" for t in xcui_types)
+                clauses.append(f"type IN {{{listed}}}")
 
             if not clauses:
                 return [], 0.0
@@ -1243,7 +1266,7 @@ class DeviceControllerUI:
 
         if filter_label or filter_identifier or filter_type:
             web = find_element(web, label=filter_label, identifier=filter_identifier,
-                               element_type=filter_type)
+                               element_type=filter_type, prefilter=True)
         if not web:
             return elements
 
@@ -1435,7 +1458,8 @@ class DeviceControllerUI:
                 # If filters provided, apply them to cached elements (in-memory filtering is fast)
                 if has_filters:
                     filtered = find_element(cached_elements, label=filter_label,
-                                          identifier=filter_identifier, element_type=filter_type)
+                                          identifier=filter_identifier, element_type=filter_type,
+                                          prefilter=True)
                     return filtered, resolved
 
                 return cached_elements, resolved
@@ -1527,7 +1551,8 @@ class DeviceControllerUI:
             # Apply filters in memory if needed
             if has_filters:
                 elements = find_element(elements, label=filter_label,
-                                      identifier=filter_identifier, element_type=filter_type)
+                                      identifier=filter_identifier, element_type=filter_type,
+                                      prefilter=True)
 
         return elements, resolved
 
@@ -1619,6 +1644,7 @@ class DeviceControllerUI:
         result = el.model_dump()
         if len(matches) > 1:
             result["match_count"] = len(matches)
+        _note_equivalence(result, element_type, el)
 
         return result, resolved
 
@@ -1752,12 +1778,15 @@ class DeviceControllerUI:
 
             # Check condition
             if checker(current_element):
-                return {
+                result = {
                     "matched": True,
                     "elapsed_seconds": round(elapsed, 2),
                     "polls": polls,
                     "element": current_element.model_dump() if current_element else None,
-                }, resolved
+                }
+                if current_element is not None:
+                    _note_equivalence(result, element_type, current_element)
+                return result, resolved
 
             # Check timeout
             if elapsed >= timeout:
@@ -2210,6 +2239,7 @@ class DeviceControllerUI:
                         "source": (el.extra_attrs or {}).get("source"),
                     },
                 }
+                _note_equivalence(result, element_type, el)
                 if sweep.get("attempted"):
                     result["scroll"] = _scroll_report(sweep, scroll_to_find)
                 return result
@@ -2356,6 +2386,7 @@ class DeviceControllerUI:
             if value is not None:
                 result["previous_value"] = el.value or ""
                 result["requested_value"] = value
+            _note_equivalence(result, element_type, el)
             if sweep.get("attempted"):
                 result["scroll"] = _scroll_report(sweep, scroll_to_find)
             return result

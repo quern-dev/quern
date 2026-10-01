@@ -9,8 +9,11 @@ from fastapi import APIRouter, Query, Request
 
 from server.api.actions import logged_action
 from server.device.landmarks import (
+    FileConventions,
     LandmarkRegistry,
     SkippedFile,
+    check_conventions,
+    conventions_report,
     needs_page_urls,
     scan_knowledge_base,
 )
@@ -60,17 +63,21 @@ async def load_landmarks(request: Request, body: LoadLandmarksRequest):
             "source": body.source,
             "screens": count,
             "skipped": _serialize_skipped(skipped),
+            "conventions": conventions_report(registry.conventions(body.app)),
         }
 
     if body.landmarks:
         screens: list[ScreenLandmarks] = []
+        conventions: list[FileConventions] = []
         for screen_name, entry in body.landmarks.items():
             if isinstance(entry, dict):
                 raw = entry.get("landmarks") or []
                 raw_scrollable = entry.get("scrollable")
+                raw_declared = entry.get("landmark_conventions")
             else:
                 raw = entry
                 raw_scrollable = None
+                raw_declared = None
             # Anything but a literal bool reads as unset, matching the file
             # parser: a typo must mean "nobody has said" rather than quietly
             # asserting one of the two answers.
@@ -79,12 +86,17 @@ async def load_landmarks(request: Request, body: LoadLandmarksRequest):
             screens.append(ScreenLandmarks(
                 screen=screen_name, landmarks=landmarks, scrollable=scrollable,
             ))
-        count = registry.load(body.app, screens)
+            # No file to name, so the screen stands in for one.
+            conventions.append(check_conventions(
+                f"inline:{screen_name}", screen_name, raw_declared, landmarks,
+            ))
+        count = registry.load(body.app, screens, conventions)
         return {
             "loaded": body.app,
             "source": "inline",
             "screens": count,
             "skipped": [],
+            "conventions": conventions_report(conventions),
         }
 
     return {"error": "Provide either 'source' path or 'landmarks' inline data"}
@@ -175,17 +187,21 @@ async def validate_landmarks(
         scan = scan_knowledge_base(Path(source))
         skipped_payload = _serialize_skipped(scan.skipped)
         if not scan.screens:
-            return {
+            result = {
                 "collisions": [],
                 "no_landmarks": [],
                 "total_screens": 0,
                 "skipped": skipped_payload,
                 "error": "no_screens_found",
             }
+            if scan.conventions:
+                result["conventions"] = conventions_report(scan.conventions)
+            return result
         from server.device.landmarks import detect_collisions
         result = detect_collisions(scan.screens)
         if skipped_payload:
             result["skipped"] = skipped_payload
+        result["conventions"] = conventions_report(scan.conventions)
         return result
 
     return registry.validate(app=app)
