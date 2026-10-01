@@ -16,6 +16,8 @@ When the MACHINE rather than the code stops the build -- no suitable JDK, the to
 
 A failed build gives Gradle's reason: compile errors with file and line (Kotlin, Java, resources), or what went wrong otherwise. An install refused because the installed app is signed with a different key says so; uninstall_on_signature_mismatch=true uninstalls it first, which ERASES the app's data on that device -- ask the user before passing it. One refused because the installed build has a higher versionCode says so too; allow_downgrade=true installs over it (debuggable builds only) and keeps the data. A release variant with no signing config builds an unsigned APK, which Android will not install: said, with the options. A keystore that is missing or will not open is an environment problem of kind "signing".
 
+Builds often read environment variables (a version suffix from JOB_NAME, a signing password), and a daemon started from the menu bar does not see your shell's exports. The response's env_vars lists the variables the build scripts read and which were unset; pass env={...} to set them for this build.
+
 A long build reports progress while it runs (the Gradle task it is on and the time so far) to a client that asks for progress notifications.
 
 iOS:
@@ -91,6 +93,11 @@ xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
         "Android: install over an installed build with a higher versionCode (adb install -d). " +
         "Android allows it for a debuggable build only; the app's data is kept."
       ),
+      env: z.record(z.string(), z.string()).optional().describe(
+        "Android: environment variables for this Gradle build, e.g. {\"JOB_NAME\": \"ci\"}. " +
+        "quern's daemon may not have your shell's exports; the response's env_vars.unset names " +
+        "the ones the build scripts read that were not set. Values are never echoed back."
+      ),
       skip_plugin_validation: z.union([
         z.boolean(),
         z.enum(["true", "false"]).transform((v) => v === "true"),
@@ -102,7 +109,7 @@ xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
     }),
   }, async ({ project_path, scheme, udids, configuration, skip_plugin_validation,
                variant, module, java_home, gradle_args, uninstall_on_signature_mismatch,
-               allow_downgrade }, extra) => {
+               allow_downgrade, env }, extra) => {
     // Our own id for this build, so the progress read back is ours.
     const progressId = randomUUID();
     const stopProgress = reportProgress(extra as HandlerExtra, progressId, async () => {
@@ -119,6 +126,7 @@ xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
       if (gradle_args && gradle_args.length > 0) body.gradle_args = gradle_args;
       if (uninstall_on_signature_mismatch) body.uninstall_on_signature_mismatch = true;
       if (allow_downgrade) body.allow_downgrade = true;
+      if (env && Object.keys(env).length > 0) body.env = env;
       if (scheme) body.scheme = scheme;
       body.progress_id = progressId;
       if (udids && udids.length > 0) body.udids = udids;

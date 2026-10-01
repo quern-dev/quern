@@ -429,13 +429,18 @@ def built(tmp_path, monkeypatch):
     monkeypatch.setattr(gradle, "android_sdk", lambda *a: ("/sdk", "test"))
     ran = []
 
+    envs = []
+
     async def run(project, task, env, args, timeout=0, progress=None):
         ran.append((task, env["JAVA_HOME"], args))
+        envs.append(dict(env))
         return 0, "BUILD SUCCESSFUL in 9s\n"
     monkeypatch.setattr(gradle, "run", run)
     listed = []
+    listing_envs = []
 
     async def list_variants(project, env, args):
+        listing_envs.append(dict(env))
         # Real `tasks --all` output of an unflavoured AGP 9.3.2 app: debug, release.
         listed.append(project.module)
         return gradle.parse_variants((FIXTURES / "tasks_plain.out").read_text()), ""
@@ -453,7 +458,8 @@ def built(tmp_path, monkeypatch):
     monkeypatch.setattr(build_android.build_records, "record_android_build", record)
     monkeypatch.setattr(build_android.build_records, "save", lambda r: None)
     monkeypatch.setattr(build_android.build_records, "prune", lambda: [])
-    return SimpleNamespace(root=root, ran=ran, recorded=recorded, listed=listed)
+    return SimpleNamespace(root=root, ran=ran, recorded=recorded, listed=listed, envs=envs,
+                           listing_envs=listing_envs)
 
 
 NO_SDK_DOWNLOAD = "-Pandroid.builder.sdkDownload=false"
@@ -1685,3 +1691,105 @@ class TestTheReviewOfPartTwo:
                'from store "/k.jks": keystore password was incorrect\n')
         _, [env] = gradle.parse(1, out, p)
         assert env.summary.startswith("key my key could not be read from /k.jks")
+
+
+# ── environment variables the build reads (#347) ────────────────────────────
+
+
+class TestEnvironmentVariables:
+    def _scripts(self, root, files):
+        for rel, text in files.items():
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+
+    def test_every_way_a_script_reads_one(self, tmp_path):
+        root = _project(tmp_path)
+        self._scripts(root, {
+            "app/build.gradle.kts": 'versionNameSuffix = "-" + (System.getenv("JOB_NAME") ?: "x")\n'
+                                    'val n = providers.environmentVariable("BUILD_NUMBER")\n',
+            "lib/build.gradle": "def a = System.getenv('GROOVY_ONE')\n"
+                                "def b = System.env.GROOVY_TWO\n"
+                                "def c = System.env['GROOVY_THREE']\n"
+                                "def d = System.getenv()['MAP_STYLE']\n",
+        })
+        p = gradle.find_project(str(root))
+        assert gradle.env_reads(p) == (["BUILD_NUMBER", "GROOVY_ONE", "GROOVY_THREE",
+                                        "GROOVY_TWO", "JOB_NAME", "MAP_STYLE"], 0)
+
+    def test_convention_plugins_count_and_the_apps_own_code_does_not(self, tmp_path):
+        """`System.getenv` in app/src runs on the device, not in the build."""
+        root = _project(tmp_path)
+        self._scripts(root, {
+            "app/src/main/kotlin/A.kt": 'val x = System.getenv("APP_RUNTIME")\n',
+            "buildSrc/src/main/kotlin/Signing.kt": 'val p = System.getenv("KEYSTORE_PASSWORD")\n',
+            "conventions/src/main/kotlin/Ci.kt": 'val c = System.getenv("CI")\n',
+            "app/build/generated/X.kt": 'System.getenv("GENERATED")\n',
+        })
+        (root / "settings.gradle.kts").write_text(
+            'pluginManagement { includeBuild("conventions") }\ninclude(":app")\n')
+        names, _ = gradle.env_reads(gradle.find_project(str(root)))
+        assert names == ["CI", "KEYSTORE_PASSWORD"]
+
+    def test_a_computed_name_is_counted(self, tmp_path):
+        root = _project(tmp_path)
+        self._scripts(root, {"app/build.gradle.kts": 'val k = "X"\nSystem.getenv(k)\n'})
+        assert gradle.env_reads(gradle.find_project(str(root))) == ([], 1)
+
+    def test_the_response_names_what_is_read_and_unset_and_never_a_value(self, built,
+                                                                        monkeypatch):
+        (built.root / "app" / "build.gradle.kts").write_text(
+            'val a = System.getenv("JOB_NAME")\nval b = System.getenv("KEYSTORE_PASSWORD")\n')
+        r = _go(FakeController(FakeAdb([(0, "Success\n", "")])),
+                _body(project_path=str(built.root), env={"KEYSTORE_PASSWORD": "hunter2"}))
+        assert r["env_vars"] == {"read_by_build": ["JOB_NAME", "KEYSTORE_PASSWORD"],
+                                 "unset": ["JOB_NAME"], "passed": ["KEYSTORE_PASSWORD"],
+                                 "unnamed_reads": 0}
+        response = build_app.BuildAndInstallResponse(**r)
+        response.summary = build_app._android_summary(response)
+        assert "hunter2" not in response.model_dump_json()
+        assert "The build reads JOB_NAME, not set where quern ran Gradle" in response.summary
+
+    def test_passed_values_reach_gradle_and_the_listing(self, built):
+        _go(FakeController(FakeAdb([(0, "Success\n", "")])),
+            _body(project_path=str(built.root), env={"JOB_NAME": "ci", "BUILD_NUMBER": "42"}))
+        assert built.envs[0]["JOB_NAME"] == "ci" and built.envs[0]["BUILD_NUMBER"] == "42"
+        assert built.listing_envs[0]["JOB_NAME"] == "ci"
+
+    def test_a_passed_variable_is_seen_by_the_jdk_search(self, built, tmp_path):
+        """GRADLE_USER_HOME passed in env decides whose gradle.properties
+        forces the JDK, as it does for Gradle."""
+        j17 = _jdk_dir(tmp_path, "j17", "17.0.2")
+        guh = tmp_path / "passed-guh"
+        guh.mkdir()
+        (guh / "gradle.properties").write_text(f"org.gradle.java.home={j17}\n")
+        r = _go(FakeController(FakeAdb([(0, "Success\n", "")])),
+                _body(project_path=str(built.root), env={"GRADLE_USER_HOME": str(guh)}))
+        assert built.envs[0]["JAVA_HOME"] == j17 and str(guh) in r["java"]
+
+    def test_different_variables_are_a_different_listing(self, tmp_path):
+        p = gradle.find_project(str(_project(tmp_path)))
+        assert (gradle.variants_key(p, [], tmp_path, {"FLAVOURS": "all"})
+                != gradle.variants_key(p, [], tmp_path, None))
+
+    def test_the_key_holds_no_value(self, tmp_path):
+        p = gradle.find_project(str(_project(tmp_path)))
+        assert "hunter2" not in repr(gradle.variants_key(p, [], tmp_path, {"P": "hunter2"}))
+
+    def test_a_bad_name_is_refused(self):
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError, match="not environment variable names"):
+            _body(project_path="/x", env={"BAD NAME": "1"})
+
+    def test_env_on_an_xcode_project_is_refused_not_ignored(self, tmp_path):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        (tmp_path / "App.xcodeproj").mkdir()
+        app = FastAPI()
+        app.include_router(build_app.router)
+        app.state.device_controller = object()
+        with TestClient(app) as client:
+            r = client.post("/api/v1/device/build-and-install", json={
+                "project_path": str(tmp_path), "scheme": "App", "env": {"A": "1"}})
+        assert r.status_code == 400 and "Gradle builds" in r.json()["detail"]
+

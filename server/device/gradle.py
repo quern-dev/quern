@@ -16,6 +16,7 @@ build then takes seconds instead of minutes.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import time
@@ -413,20 +414,9 @@ def _newest_under(d: Path) -> tuple[int, int] | None:
     return count, newest
 
 
-def variants_key(project: GradleProject, args: list[str], user_home: Path) -> tuple:
-    """What a listing depends on, as far as files and arguments can say: the
-    build files, both gradle.properties, local.properties, the arguments
-    (`-P` can switch flavours on), and the convention plugins' sources."""
-    files = [*(project.root / s for s in _SETTINGS), *(project.root / b for b in _BUILD_FILES),
-             project.root / "gradle.properties", project.root / "local.properties",
-             project.root / "gradle" / "libs.versions.toml", user_home / "gradle.properties",
-             *(project.module_dir / b for b in _BUILD_FILES)]
-    key: list = [tuple(args)]
-    for f in files:
-        try:
-            key.append((str(f), f.stat().st_mtime_ns))
-        except OSError:
-            key.append((str(f), None))
+def _build_logic_dirs(project: GradleProject) -> list[Path]:
+    """Where convention plugins live: buildSrc, build-logic, and every build
+    the settings file includes with `includeBuild`."""
     logic = [project.root / d for d in _BUILD_LOGIC]
     for settings in (project.root / s for s in _SETTINGS):
         try:
@@ -435,8 +425,94 @@ def variants_key(project: GradleProject, args: list[str], user_home: Path) -> tu
             continue
         logic += [(project.root / m).resolve()
                   for m in re.findall(r"""includeBuild\(\s*["']([^"']+)["']""", text)]
-    key += [(str(d), _newest_under(d)) for d in logic]
+    return logic
+
+
+def _fingerprint(env: dict[str, str] | None) -> str:
+    """The variables passed for one build, as a hash: they can switch a
+    flavour on, so they are part of what a listing depends on, and a cache
+    key is no place for a password."""
+    import hashlib
+    blob = json.dumps(sorted((env or {}).items())).encode()
+    return hashlib.sha256(blob).hexdigest()
+
+
+def variants_key(project: GradleProject, args: list[str], user_home: Path,
+                 env: dict[str, str] | None = None) -> tuple:
+    """What a listing depends on, as far as files and arguments can say: the
+    build files, both gradle.properties, local.properties, the arguments
+    (`-P` can switch flavours on), the variables passed, and the convention
+    plugins' sources."""
+    files = [*(project.root / s for s in _SETTINGS), *(project.root / b for b in _BUILD_FILES),
+             project.root / "gradle.properties", project.root / "local.properties",
+             project.root / "gradle" / "libs.versions.toml", user_home / "gradle.properties",
+             *(project.module_dir / b for b in _BUILD_FILES)]
+    key: list = [tuple(args), _fingerprint(env)]
+    for f in files:
+        try:
+            key.append((str(f), f.stat().st_mtime_ns))
+        except OSError:
+            key.append((str(f), None))
+    key += [(str(d), _newest_under(d)) for d in _build_logic_dirs(project)]
     return tuple(key)
+
+
+# ── environment variables the build reads ───────────────────────────────────
+
+_NAME = r"([A-Za-z_][A-Za-z0-9_]*)"
+#: Every way a build script commonly names a variable it reads: Kotlin DSL and
+#: Groovy `System.getenv("X")` and `System.getenv()["X"]`, Gradle's
+#: `providers.environmentVariable("X")`, and Groovy's `System.env.X`.
+_ENV_READS = (
+    re.compile(r"""System\.getenv\(\s*["']""" + _NAME + r"""["']\s*\)"""),
+    re.compile(r"""System\.getenv\(\s*\)\s*(?:\[\s*|\.get\(\s*)["']""" + _NAME + "[\"']"),
+    re.compile(r"""environmentVariable\(\s*["']""" + _NAME + "[\"']"),
+    re.compile(r"""System\.env\.""" + _NAME),
+    re.compile(r"""System\.env\[\s*["']""" + _NAME + "[\"']"),
+)
+#: A read whose name is computed: counted, since it cannot be named.
+_ENV_UNNAMED = re.compile(r"""(?:System\.getenv|environmentVariable)\(\s*[^"'\s)]""")
+_SCRIPTS = (".gradle", ".gradle.kts")
+_LOGIC_SOURCES = (".gradle", ".kts", ".kt", ".groovy", ".java")
+#: Not build scripts: outputs, caches, and the app's own sources, whose
+#: `System.getenv` runs on the device, not in the build.
+_NOT_SCRIPTS = frozenset({"build", ".gradle", ".git", ".idea", "node_modules", "src",
+                          ".kotlin", ".cxx"})
+
+
+def env_reads(project: GradleProject) -> tuple[list[str], int]:
+    """(the variables the build scripts read by name, how many reads name
+    none). The scripts are every *.gradle(.kts) in the project and every
+    source of its convention plugins.
+
+    A daemon started from the menu bar has launchd's environment, not the
+    shell's, so a build that reads `JOB_NAME` for its version name, or a
+    password for signing, silently gets something else there. Measured: a
+    real app's dev build type reads JOB_NAME and BUILD_NUMBER into its
+    versionNameSuffix, and every build quern made of it said "DEBUG:IDE".
+    """
+    files: list[Path] = []
+    for here, dirs, names in os.walk(project.root):
+        dirs[:] = [d for d in dirs if d not in _NOT_SCRIPTS
+                   and not Path(here, d).is_symlink()]
+        files += [Path(here, n) for n in names if n.endswith(_SCRIPTS)]
+    for logic in _build_logic_dirs(project):
+        if not logic.is_dir():
+            continue
+        for here, dirs, names in os.walk(logic):
+            dirs[:] = [d for d in dirs if d not in ("build", ".gradle", ".kotlin")]
+            files += [Path(here, n) for n in names if n.endswith(_LOGIC_SOURCES)]
+    found: set[str] = set()
+    unnamed = 0
+    for f in dict.fromkeys(files):
+        try:
+            text = f.read_text(errors="replace")
+        except OSError:
+            continue
+        for pattern in _ENV_READS:
+            found.update(pattern.findall(text))
+        unnamed += len(_ENV_UNNAMED.findall(text))
+    return sorted(found), unnamed
 
 
 def cached_listing(project: GradleProject, key: tuple) -> tuple[Variants | None, str] | None:

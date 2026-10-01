@@ -67,6 +67,10 @@ async def build_and_install(controller, body, *, env: dict[str, str] | None = No
     # The machine first: a build that cannot start should say why before
     # Gradle is asked, in words an agent can act on.
     env = dict(os.environ if env is None else env)
+    # The caller's variables go in before anything reads the environment, so
+    # a GRADLE_USER_HOME or ANDROID_HOME passed here is the one the JDK and
+    # SDK search see as well as Gradle.
+    env.update(body.env or {})
     home = env.get("HOME") or str(Path.home())
     minimum, maximum, why_range = gradle.java_range(project)
     choice = await asyncio.to_thread(jdk_mod.choose, project.root, java_home=body.java_home,
@@ -120,8 +124,16 @@ async def _build(controller, body, project: gradle.GradleProject, variant: str,
         # chose. Off, a missing package is an environment problem to decide on.
         args.append("-Pandroid.builder.sdkDownload=false")
     gradle_env = gradle.build_env(env, choice.jdk, sdk)
+    # Names only, here and everywhere: a value may be a password.
+    read, unnamed = await asyncio.to_thread(gradle.env_reads, project)
+    used["env_vars"] = {
+        "read_by_build": read,
+        "unset": [n for n in read if not gradle_env.get(n)],
+        "passed": sorted(body.env or {}),
+        "unnamed_reads": unnamed,
+    }
     variant = await _check_variant(project, variant, gradle_env, args,
-                                   jdk_mod.gradle_user_home(args, env, home))
+                                   jdk_mod.gradle_user_home(args, env, home), body.env)
 
     task = gradle.assemble_task(project, variant)
     logger.info("Building %s with %s (%s)", project.root, task, used["java"])
@@ -200,7 +212,8 @@ async def _build(controller, body, project: gradle.GradleProject, variant: str,
 
 
 async def _check_variant(project: gradle.GradleProject, variant: str, env: dict[str, str],
-                         args: list[str], user_home: Path) -> str:
+                         args: list[str], user_home: Path,
+                         passed: dict[str, str] | None = None) -> str:
     """The variant to build, in its own spelling, or a 400 that lists them.
 
     Checked before the build, because Gradle's own answers come late or
@@ -210,7 +223,7 @@ async def _check_variant(project: gradle.GradleProject, variant: str, env: dict[
     looked for under the name given. Listing costs about a second on a warm
     daemon and is then cached for as long as the build files are unchanged.
     """
-    key = gradle.variants_key(project, args, user_home)
+    key = gradle.variants_key(project, args, user_home, passed)
     hit = gradle.cached_listing(project, key)
     if hit and hit[0] and variant and hit[0].find(variant) and not hit[0].group(variant):
         return hit[0].find(variant)
