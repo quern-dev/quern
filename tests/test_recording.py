@@ -691,3 +691,33 @@ class TestReadingEvents:
             assert client.post("/api/v1/recordings", json={
                 "udid": SIM, "output_dir": str(tmp_path / "x"),
                 "kinds": ["video"]}).status_code == 422
+
+
+class TestThePartsTheMutationsFound:
+    def test_a_physical_device_named_by_its_other_spelling(self, tmp_path, monkeypatch):
+        """Actions record one of a phone's two identifiers; a recording started
+        with the other would match none of them."""
+        from server.device import devicectl
+        monkeypatch.setattr(devicectl, "_identity_aliases", {})
+        devicectl._remember_identity("CD-UUID", "00008030-HW")
+        with TestClient(_app(Sources())) as client:
+            started = client.post("/api/v1/recordings", json={
+                "udid": "00008030-HW", "output_dir": str(tmp_path / "r")}).json()
+        assert started["udid"] == "CD-UUID"
+
+    def test_the_trace_over_a_recording_skips_started_markers(self, tmp_path):
+        """One row per thing that happened, as the live trace gives it."""
+        src = Sources()
+        t = _now(-60)
+        with TestClient(_app(src)) as client:
+            rid = client.post("/api/v1/recordings", json={
+                "udid": SIM, "output_dir": str(tmp_path / "r")}).json()["id"]
+
+            async def feed():
+                await src.server.append(_action("tap", outcome="started", at=t))
+                await src.server.append(_action("tap", at=t + timedelta(seconds=1)))
+                await _settle()
+            client.portal.call(feed)
+            client.post(f"/api/v1/recordings/{rid}/stop")
+            trace = client.get("/api/v1/trace", params={"recording": rid}).json()
+        assert [a["outcome"] for a in trace["actions"]] == ["ok"]
