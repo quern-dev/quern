@@ -5,7 +5,15 @@ import { strictParams } from "./helpers.js";
 
 export function registerBuildTools(server: McpServer): void {
   server.registerTool("build_and_install", {
-    description: `Build an Xcode scheme and install the resulting app on one or more devices or simulators.
+    description: `Build an app and install it on one or more devices: an Xcode scheme on iOS devices and simulators, or a Gradle project on Android devices and emulators.
+
+ANDROID (a Gradle project: project_path is the build root or a module inside it). Pass variant (e.g. "debug", "stagingDebug"); module defaults to "app". Runs the project's own ./gradlew :module:assemble<Variant>, installs the APK on each Android target in parallel (the split matching each device's CPU, or the universal one), and records the build -- its R8 mapping and native libraries -- so its crashes are symbolicated by get_latest_crash without a record_android_build call. quern finds a JDK and the Android SDK itself, since a daemon started from the menu bar does not see your shell's JAVA_HOME or sdkman, and the response names the ones it used (java, android_sdk). Gradle's own daemon stays running between builds, as it does under Android Studio.
+
+When the MACHINE rather than the code stops the build -- no suitable JDK, the toolchain JDK the build asks for, no Android SDK, missing SDK packages or licences, the NDK -- the response has an "environment" list instead of a build: each entry has a kind, a summary, what was found, and options, most direct first. Some options you can apply yourself by calling again: java_home="<a JDK it found>", or gradle_args=[...] (for example a toolchain path). Others -- installing a JDK or SDK package, editing gradle.properties or local.properties -- change the user's machine or project: ask the user before doing them. Never installs or edits anything itself.
+
+A failed build gives Gradle's reason: compile errors with file and line (Kotlin, Java, resources), or what went wrong otherwise. An install refused because the installed app is signed with a different key says so; uninstall_on_signature_mismatch=true uninstalls it first, which ERASES the app's data on that device -- ask the user before passing it.
+
+iOS:
 
 Builds once per required architecture — not once per device:
 - Physical devices  → generic/platform=iOS        (one build, installed on all physical targets)
@@ -36,7 +44,8 @@ A project whose Swift package plug-in or macro has not been approved in Xcode is
 xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
     inputSchema: strictParams({
       project_path: z.string().describe(
-        "Path to the .xcodeproj, .xcworkspace, or a directory containing one."
+        "iOS: the .xcodeproj, .xcworkspace, or a directory containing one. Android: the " +
+        "Gradle build's root (where settings.gradle is) or a module directory inside it."
       ),
       scheme: z.string().optional().describe(
         "Build scheme name. If omitted, returns an error listing available schemes."
@@ -48,6 +57,26 @@ xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
       configuration: z.string().optional().default("Debug").describe(
         "Build configuration (default: Debug)"
       ),
+      variant: z.string().optional().describe(
+        "Android/Gradle: the build variant to assemble, e.g. \"debug\" or \"stagingDebug\" " +
+        "(a build type with any flavour before it). Required for a Gradle project."
+      ),
+      module: z.string().optional().describe(
+        "Android/Gradle: the module to build when project_path is the build root (default \"app\")."
+      ),
+      java_home: z.string().optional().describe(
+        "Android/Gradle: a JDK to run Gradle with, typically one an environment problem listed."
+      ),
+      gradle_args: z.array(z.string()).optional().describe(
+        "Android/Gradle: extra arguments for gradlew, e.g. one an environment problem suggested."
+      ),
+      uninstall_on_signature_mismatch: z.union([
+        z.boolean(),
+        z.enum(["true", "false"]).transform((v) => v === "true"),
+      ]).optional().describe(
+        "Android: if an install is refused because the installed app has a different signing " +
+        "key, uninstall it and install again. ERASES the app's data on that device: ask first."
+      ),
       skip_plugin_validation: z.union([
         z.boolean(),
         z.enum(["true", "false"]).transform((v) => v === "true"),
@@ -57,10 +86,16 @@ xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
         "approving one is a trust decision. A build refused for this says so in its errors."
       ),
     }),
-  }, async ({ project_path, scheme, udids, configuration, skip_plugin_validation }) => {
+  }, async ({ project_path, scheme, udids, configuration, skip_plugin_validation,
+               variant, module, java_home, gradle_args, uninstall_on_signature_mismatch }) => {
     try {
       const body: Record<string, unknown> = { project_path, configuration };
       if (skip_plugin_validation) body.skip_plugin_validation = true;
+      if (variant) body.variant = variant;
+      if (module) body.module = module;
+      if (java_home) body.java_home = java_home;
+      if (gradle_args && gradle_args.length > 0) body.gradle_args = gradle_args;
+      if (uninstall_on_signature_mismatch) body.uninstall_on_signature_mismatch = true;
       if (scheme) body.scheme = scheme;
       if (udids && udids.length > 0) body.udids = udids;
 

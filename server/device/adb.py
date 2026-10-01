@@ -896,6 +896,34 @@ class AdbBackend:
         """Uninstall an app."""
         await self._run_adb_for_device(serial, "uninstall", package)
 
+    async def install_apk_result(self, serial: str, apk_path: str,
+                                 timeout: float = 300) -> tuple[int, str, str]:
+        """`adb install -r`, returning (exit code, stdout, stderr) unjudged.
+
+        For a caller that reads Android's verdict itself (`gradle.install_outcome`):
+        older adb exits 0 on `Failure [...]`, so the exit code alone is not the
+        answer `install_app` takes it for.
+        """
+        if not self._adb_path:
+            raise DeviceError("adb not found", tool="adb")
+        proc = await asyncio.create_subprocess_exec(
+            self._adb_path, "-s", serial, "install", "-r", apk_path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except BaseException:
+            if proc.returncode is None:
+                proc.kill()
+                await asyncio.shield(proc.wait())
+            raise
+        return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
+
+    async def supported_abis(self, serial: str) -> list[str]:
+        """The device's ABIs, preferred first (`arm64-v8a`, `armeabi-v7a`)."""
+        value = await self._get_device_property(serial, "ro.product.cpu.abilist")
+        return [a.strip() for a in value.split(",") if a.strip()]
+
     async def list_apps(self, serial: str) -> list[AppInfo]:
         """List third-party installed apps."""
         stdout, _ = await self._run_adb_for_device(serial, "shell", "pm", "list", "packages", "-3")

@@ -136,6 +136,7 @@ _MAP_ID = re.compile(r"^# pg_map_id: ([0-9a-f]+)\s*$")
 
 async def record_android_build(
     module_dir: Path, variant: str, *, root: Path | None = None, now: datetime | None = None,
+    just_built: bool = False,
 ) -> BuildRecord:
     """Record a Gradle build of `variant` in `module_dir` (the app module).
 
@@ -162,7 +163,10 @@ async def record_android_build(
         build_number=str(element.get("versionCode") or ""),
         version_codes=sorted({str(e["versionCode"]) for e in elements if e.get("versionCode")}),
     )
-    stale = _stale_outputs(Path(record.app_path), created)
+    # `just_built`: `build_and_install` ran Gradle a moment ago, which rebuilt
+    # what the source changed and left the rest up to date -- so an APK from
+    # last week is this source's APK, not a stale one.
+    stale = None if just_built else _stale_outputs(Path(record.app_path), created)
     if stale:
         record.notes.append(stale)
     partial, final = root / (build_id + _PARTIAL), root / build_id
