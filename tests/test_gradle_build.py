@@ -136,7 +136,10 @@ class TestTheProject:
 
     def test_a_module_directory_names_its_module(self, tmp_path):
         root = _project(tmp_path)
-        assert gradle.find_project(str(root / "app")).module == "app"
+        (root / "feature" / "checkout").mkdir(parents=True)
+        p = gradle.find_project(str(root / "feature" / "checkout"))
+        assert p.module == "feature:checkout"
+        assert gradle.assemble_task(p, "debug") == ":feature:checkout:assembleDebug"
 
     @pytest.mark.parametrize("break_it, says", [
         (lambda r: (r / "gradlew").unlink(), "no gradlew"),
