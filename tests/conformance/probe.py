@@ -679,6 +679,17 @@ class ProbeDriver:
                 timeout=90.0,
             )
             if resp.is_success:
+                status = (resp.json() or {}).get("status")
+                if status == "ambiguous":
+                    # Ambiguous is a 200 and taps nothing. The Controls and
+                    # Logs fragments' headings repeat their tab's label, so it
+                    # happens when already on that tab -- which is fine only
+                    # if that tab really is the selected one.
+                    if self._tab_selected(label):
+                        return
+                    raise AssertionError(
+                        f"tab {label!r} is ambiguous and not selected: {resp.text[:300]}"
+                    )
                 time.sleep(1.0)
                 return
             if resp.status_code != 404:
@@ -686,6 +697,12 @@ class ProbeDriver:
                     f"tapping tab {label!r} -> {resp.status_code}: {resp.text[:300]}"
                 )
         raise AssertionError(f"tab {label!r} not found after swiping the tab strip both ways")
+
+    def _tab_selected(self, label: str) -> bool:
+        return any(
+            e.get("label") == label and e.get("value") == "1"
+            for e in self.ui_tree().get("elements") or []
+        )
 
     def _swipe_tab_strip(self, toward: str) -> None:
         import time

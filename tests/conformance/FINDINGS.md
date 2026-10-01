@@ -775,7 +775,7 @@ docs: #369 (64359a3) now says `scrollable` is read on iOS only. The Android
 half of `test_a_miss_on_a_screen_known_not_to_scroll_says_so` asserts that
 contract, so a change to it is noticed.
 
-## F25 — an Android tap's screen context describes the transition, not the destination → fixed with #14
+## F25 — an Android tap's screen context describes the transition, not the destination → fixed with the category 14 conformance work
 
 `tap_element(include_screen_context=true)` on Android, from the Text tab to
 Links: three of three responses said `identified_as: null, confidence: none`,

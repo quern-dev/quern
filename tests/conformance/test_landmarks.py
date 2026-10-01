@@ -49,8 +49,19 @@ def knowledge(quern):
         return app, body
 
     yield _load
+    # Every unload attempted, and every failure reported. A set left loaded
+    # here makes later unscoped identifications ambiguous and turns the
+    # negative control into a skip -- quietly, which is the worse outcome.
+    leaked = []
     for app in loaded:
-        quern.delete(f"{LANDMARKS}/", params={"app": app}, timeout=30.0)
+        try:
+            resp = quern.delete(f"{LANDMARKS}/", params={"app": app}, timeout=30.0)
+            if not resp.is_success:
+                leaked.append(f"{app}: {resp.status_code}")
+        except Exception as exc:  # keep unloading the rest
+            leaked.append(f"{app}: {exc!r}")
+    if leaked:
+        pytest.fail(f"landmark sets left loaded on the server: {leaked}")
 
 
 @pytest.fixture
@@ -151,9 +162,8 @@ def test_an_action_says_which_screen_it_landed_on(quern, probe, probe_kb) -> Non
     context = resp.get("screen_context") or {}
     assert context.get("identified_as") == "links", (
         f"the tap landed on Links; its response says {context.get('identified_as')!r} "
-        f"({context.get('confidence')!r}). On Android this is F25: the context is "
-        "read before the pager has finished moving, so it describes a page in "
-        "passing. A read a second later identifies Links correctly."
+        f"({context.get('confidence')!r}). On Android this was F25 -- the context "
+        "read before the pager stopped moving -- fixed by waiting settle_delay."
     )
 
 
@@ -340,7 +350,14 @@ def test_a_screen_recorded_as_scrolling_is_swept_without_being_asked(
     quern, probe, probe_kb,
 ) -> None:
     """scroll_to_find unset, on a screen recorded `scrollable: true`: the row
-    is off screen and the tap has to scroll to reach it."""
+    is off screen and the tap has to scroll to reach it.
+
+    iOS only. Android sweeps on an unset scroll_to_find whatever the
+    knowledge base says (documented), so there this would pass without it and
+    prove nothing about `scrollable`.
+    """
+    if probe.contract.platform != "ios":
+        pytest.skip("Android does not read scrollable (documented)")
     probe.goto("scroll")
     probe.scroll_reset()
     target = probe.contract.row_locator(40)
@@ -352,3 +369,22 @@ def test_a_screen_recorded_as_scrolling_is_swept_without_being_asked(
         f"row 40 was not reached on a screen recorded as scrolling: "
         f"{resp.status_code}: {resp.text[:400]}"
     )
+
+
+def test_without_a_knowledge_base_a_distant_row_is_not_swept_for(quern, probe) -> None:
+    """The control for the test above: the same tap with nothing loaded must
+    fail fast, or that test shows the sweep and not the knowledge base."""
+    if probe.contract.platform != "ios":
+        pytest.skip("Android does not read scrollable (documented)")
+    sets = quern.json_ok("GET", f"{LANDMARKS}/", timeout=30.0)["sets"]
+    if sets:
+        pytest.skip(f"other landmarks are loaded on this server: {sorted(sets)}")
+    probe.goto("scroll")
+    probe.scroll_reset()
+    resp = quern.post(
+        "/api/v1/device/ui/tap-element",
+        json={"udid": probe.udid, **probe.contract.row_locator(40)}, timeout=120.0,
+    )
+    assert resp.status_code == 404, f"{resp.status_code}: {resp.text[:300]}"
+    scroll = (resp.json().get("detail") or {}).get("scroll") or {}
+    assert scroll.get("attempted") is False, scroll

@@ -349,3 +349,24 @@ class TestTapAndTypeSettleBeforeReadingTheScreen:
 
         assert r.status_code == 200, r.text
         assert ordered_app.state.events == [], ordered_app.state.events
+
+
+class TestScreenshotsAndContextTogether:
+    """With screenshots asked for too, the one settle wait before the after
+    screenshot serves both -- not two waits, and not none."""
+
+    async def test_one_wait_before_the_read(self, ordered_app, monkeypatch):
+        async def shot(controller, udid, label):
+            ordered_app.state.events.append(f"shot {label}")
+            return f"/tmp/{label}.png"
+
+        monkeypatch.setattr("server.api.device_ui._capture_action_screenshot", shot)
+        r = await _post(ordered_app, "/api/v1/device/ui/tap-element", {
+            "label": "Anchor", "include_screen_context": True,
+            "capture_screenshots": True, "settle_delay": 0.7,
+        })
+
+        assert r.status_code == 200, r.text
+        events = ordered_app.state.events
+        assert events.count("sleep 0.7") == 1, events
+        assert events.index("sleep 0.7") < events.index("read"), events
