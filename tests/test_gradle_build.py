@@ -1052,6 +1052,15 @@ class TestMoreFormats:
         [e] = gradle.parse(1, line + "\n", p)[0].errors
         assert (e.file, e.line, e.message) == (file, where, message)
 
+    def test_real_agp_9_missing_platform_output(self, tmp_path):
+        """AGP 9.3.2 with compileSdk = 99 and SDK downloads off. The package
+        path is spelled as the SDK spells it: platforms;android-37.0 is how an
+        installed 37 records itself."""
+        p = gradle.find_project(str(_project(tmp_path)))
+        out = (FIXTURES / "agp_missing_platform.out").read_text()
+        _, [env] = gradle.parse(1, out, p)
+        assert env.kind == "sdk_packages" and env.found == ["platforms;android-99.0"]
+
     def test_a_missing_platform_names_the_package(self, tmp_path):
         p = gradle.find_project(str(_project(tmp_path)))
         out = "> Failed to find Platform SDK with path: platforms;android-99\n"
