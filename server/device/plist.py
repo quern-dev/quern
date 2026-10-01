@@ -100,8 +100,12 @@ def _edit(path: Path, change) -> None:
         _write_atomically(path, data, fmt)
     except DeviceError:
         raise
-    except (OSError, ValueError, TypeError, OverflowError, plistlib.InvalidFileException) as e:
-        raise DeviceError(f"editing {path} failed: {e}", tool="plistlib") from e
+    except Exception as e:
+        # Broad on purpose. plistlib raises far more than its documented
+        # InvalidFileException -- `ExpatError` for broken XML, `AttributeError`
+        # for a bad <date>, OverflowError for a big int -- and each one that
+        # escaped here became an undetailed 500.
+        raise DeviceError(f"editing {path} failed: {type(e).__name__}: {e}", tool="plistlib") from e
 
 
 async def set_plist_values(path: Path, values: dict[str, Any]) -> None:

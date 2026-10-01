@@ -304,16 +304,19 @@ def checked_name(kind: str, value: str) -> str:
     Bundle ids, labels and group ids become directory names under
     `APP_STATES_DIR`, and delete is an `rmtree` of the result. Unchecked,
     `bundle_id="../.."` with an existing label named a directory beside
-    `~/.quern`, and `label=".."` named the whole store for that bundle.
+    `~/.quern`, and `label=".."` named the whole store for that bundle. A
+    leading dot is refused too: dot-names are how an in-progress save is
+    hidden from `list_states`, so a checkpoint called `.x` was saved and then
+    never listed.
     """
     if (
         not value
-        or value in (".", "..")
+        or value.startswith(".")
         or any(c in value for c in ("/", "\\", "\0"))
     ):
         raise InvalidAppStatePathError(
             f"{kind} {value!r} is not usable as a name: it must be a single path "
-            "segment, not empty, '.' or '..', with no '/', '\\' or NUL",
+            "segment, not empty, not starting with '.', with no '/', '\\' or NUL",
             tool="quern",
         )
     return value
@@ -358,11 +361,10 @@ async def sync_preferences(udid: str) -> dict:
     Never raises. The caller has usually already changed something, so the
     outcome is reported for the response to carry rather than thrown.
     """
-    state = await get_device_state(udid)
-    if state == "Shutdown":
-        return {"synced": True, "detail": "device is shut down; nothing is cached"}
     proc = None
     try:
+        if await get_device_state(udid) == "Shutdown":
+            return {"synced": True, "detail": "device is shut down; nothing is cached"}
         proc = await asyncio.create_subprocess_exec(
             "xcrun", "simctl", "spawn", udid, "launchctl", "stop", CFPREFSD,
             stdout=asyncio.subprocess.PIPE,
@@ -493,16 +495,27 @@ async def save_state(
     # old order deleted an existing checkpoint first, so a save that failed
     # part-way -- an app that is not installed is enough -- destroyed the
     # checkpoint it was replacing and left an empty directory in its place.
-    checkpoint = final.with_name(f".{label}.saving-{uuid.uuid4().hex[:8]}")
-    checkpoint.mkdir(parents=True)
+    # Fixed-length names, so a label near the filesystem's limit does not fail
+    # here having worked before staging existed.
+    token = uuid.uuid4().hex[:8]
+    checkpoint = final.with_name(f".saving-{token}")
+    displaced = final.with_name(f".replaced-{token}")
     try:
+        checkpoint.mkdir(parents=True)
         meta = await _save_into(checkpoint, udid, bundle_id, label, description, include_keychain)
+        # Move the old one aside rather than deleting it first, so there is no
+        # moment at which neither copy exists.
         if final.exists():
-            shutil.rmtree(final)
+            final.rename(displaced)
         checkpoint.rename(final)
+    except OSError as e:
+        if displaced.exists() and not final.exists():
+            displaced.rename(final)
+        raise DeviceError(f"Saving checkpoint {label!r} failed: {e}", tool="quern") from e
     finally:
-        if checkpoint.exists():
-            shutil.rmtree(checkpoint, ignore_errors=True)
+        for leftover in (checkpoint, displaced):
+            if leftover.exists():
+                shutil.rmtree(leftover, ignore_errors=True)
 
     logger.info("Saved app state %r for %s (udid=%s)", label, bundle_id, udid[:8])
     return meta
@@ -560,7 +573,7 @@ async def restore_state(
     # Terminate app before restoring, and flush cfprefsd so a write it is
     # still holding cannot land on top of the restored files afterwards.
     await _terminate_app(udid, bundle_id)
-    await sync_preferences(udid)
+    flushed = await sync_preferences(udid)
 
     # Restore data container — re-resolve live path (UUID may have rotated)
     data_src = checkpoint / "data-container"
@@ -617,7 +630,12 @@ async def restore_state(
     # And again now the files are back: cfprefsd still caches the values the
     # restore just replaced, and serves them to the relaunched app. Measured:
     # the file said `counter: 1` and the app said 4 until this was added.
-    meta["preferences"] = await sync_preferences(udid)
+    dropped = await sync_preferences(udid)
+    # Either failure is the one to report. A failed flush means a write cfprefsd
+    # was still holding can land on top of the restored files later -- and the
+    # second restart is exactly what lands it -- so a clean second result does
+    # not make the first one irrelevant.
+    meta["preferences"] = flushed if not flushed.get("synced") else dropped
 
     logger.info("Restored app state %r for %s (udid=%s)", label, bundle_id, udid[:8])
     return meta

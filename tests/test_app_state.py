@@ -639,12 +639,14 @@ class TestDataContainerDiscovery:
 
 
 class TestNamesStayInTheStore:
-    @pytest.mark.parametrize("bad", ["", ".", "..", "../..", "a/b", "a\\b", "a\0b"])
+    @pytest.mark.parametrize(
+        "bad", ["", ".", "..", "../..", "a/b", "a\\b", "a\0b", ".hidden", "..hidden"],
+    )
     def test_a_name_that_is_not_one_segment_is_refused(self, bad):
         with pytest.raises(InvalidAppStatePathError):
             checked_name("label", bad)
 
-    @pytest.mark.parametrize("ok", ["baseline", "com.example.App", "..hidden", "a..b", "v1.2"])
+    @pytest.mark.parametrize("ok", ["baseline", "com.example.App", "a..b", "v1.2", "x" * 245])
     def test_ordinary_names_pass(self, ok):
         assert checked_name("label", ok) == ok
 
@@ -694,6 +696,15 @@ class TestNamesStayInTheStore:
         with pytest.raises(InvalidAppStatePathError):
             contained_path(base, bad)
 
+    def test_a_container_reached_through_a_symlink_still_works(self, tmp_path):
+        """People relocate CoreSimulator/Devices behind a symlink. Containment
+        compares resolved paths on both sides, or every path is refused."""
+        real = tmp_path / "real"
+        (real / "Library").mkdir(parents=True)
+        link = tmp_path / "link"
+        link.symlink_to(real)
+        assert contained_path(link, "Library/p.plist") == real / "Library" / "p.plist"
+
     def test_a_nested_plist_path_is_fine(self, tmp_path):
         base = tmp_path / "container"
         base.mkdir()
@@ -741,6 +752,40 @@ class TestSaveIsAllOrNothing:
         assert sorted(p.name for p in old.parent.iterdir()) == ["baseline"], (
             "a staging directory was left behind"
         )
+
+    async def test_a_copy_that_fails_midway_is_a_device_error_and_keeps_the_old_one(
+        self, store, tmp_path,
+    ):
+        old = store / "com.example.App" / "baseline"
+        old.mkdir(parents=True)
+        (old / ".quern-meta.json").write_text('{"v": 1}')
+        data = tmp_path / "sim-data"
+        data.mkdir()
+        with (
+            patch("server.device.app_state._terminate_app", AsyncMock()),
+            patch("server.device.app_state.get_data_container", AsyncMock(return_value=data)),
+            patch(
+                "server.device.app_state._copy_container",
+                AsyncMock(side_effect=OSError(63, "File name too long")),
+            ),
+        ):
+            with pytest.raises(DeviceError, match="File name too long"):
+                await save_state("TEST-UDID", "com.example.App", "baseline")
+        assert json.loads((old / ".quern-meta.json").read_text()) == {"v": 1}
+        assert sorted(p.name for p in old.parent.iterdir()) == ["baseline"]
+
+    async def test_a_label_near_the_name_limit_saves(self, store, tmp_path):
+        """Staging once added the label's length to its own name."""
+        data = tmp_path / "sim-data"
+        data.mkdir()
+        label = "x" * 245
+        with (
+            patch("server.device.app_state._terminate_app", AsyncMock()),
+            patch("server.device.app_state.get_data_container", AsyncMock(return_value=data)),
+            patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
+        ):
+            await save_state("TEST-UDID", "com.example.App", label)
+        assert (store / "com.example.App" / label / ".quern-meta.json").exists()
 
     async def test_a_successful_save_replaces_the_previous_one(self, store, tmp_path):
         old = store / "com.example.App" / "baseline"
@@ -822,7 +867,44 @@ class TestPreferencesAreSynced:
         assert meta["preferences"] == {"synced": True}
 
 
+class TestRestoreReportsEitherSyncFailure:
+    async def test_a_failed_flush_is_reported_even_when_the_second_restart_works(
+        self, store, tmp_path, monkeypatch,
+    ):
+        """The failure that matters most is the first: a write cfprefsd still
+        held lands on the restored files when the second restart flushes it."""
+        results = iter([
+            {"synced": False, "detail": "timed out", "warning": "stale"},
+            {"synced": True},
+        ])
+
+        async def fake(udid):
+            return next(results)
+
+        monkeypatch.setattr(app_state_module, "sync_preferences", fake)
+        checkpoint = store / "com.example.App" / "b"
+        (checkpoint / "data-container").mkdir(parents=True)
+        (checkpoint / ".quern-meta.json").write_text('{"label": "b"}')
+        live = tmp_path / "live"
+        live.mkdir()
+        with (
+            patch("server.device.app_state._terminate_app", AsyncMock()),
+            patch("server.device.app_state.get_data_container", AsyncMock(return_value=live)),
+            patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
+        ):
+            meta = await restore_state("TEST-UDID", "com.example.App", "b")
+        assert meta["preferences"]["synced"] is False
+
+
 class TestSyncPreferences:
+    async def test_a_device_state_lookup_that_cannot_run_is_reported(self):
+        """It is documented never to raise, so the lookup is inside the guard."""
+        with patch(
+            "asyncio.create_subprocess_exec", side_effect=FileNotFoundError("xcrun"),
+        ):
+            result = await real_sync_preferences("TEST-UDID")
+        assert result["synced"] is False
+
     async def test_it_stops_the_simulators_cfprefsd(self):
         with (
             patch.object(app_state_module, "get_device_state", AsyncMock(return_value="Booted")),

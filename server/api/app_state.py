@@ -221,13 +221,16 @@ async def read_app_plist(
 async def _edit_live_plist(udid: str, body, edit) -> tuple[dict, dict]:
     """Resolve, flush cfprefsd, edit, then restart it so the edit is what is served.
 
-    Both restarts are needed. The first writes out anything the app changed
+    Both restarts are needed, and both are reported. The first writes out anything the app changed
     that cfprefsd is still holding -- otherwise that flush could land after
     the edit and overwrite it. The second drops the cache, which would
     otherwise keep serving the old values to the next launch.
     """
-    full_path = await _live_plist(udid, body.bundle_id, body.container, body.plist_path)
+    # Sync first: an app's first write can sit in cfprefsd for seconds before
+    # the file exists at all, and checking for it first answered 404 for a
+    # plist the app had already written.
     before = await sync_preferences(udid)
+    full_path = await _live_plist(udid, body.bundle_id, body.container, body.plist_path)
     await edit(full_path)
     after = await sync_preferences(udid)
     return before, after
@@ -384,6 +387,7 @@ async def start_plist_watch(request: Request, body: StartPlistWatchRequest):
         controller._require_simulator(udid, "start_plist_watch")
         # Checked here so a path outside the container, or a plist that is not
         # there, is a 400 or 404 rather than the adapter's generic 500.
+        await sync_preferences(udid)
         await _live_plist(udid, body.bundle_id, body.container, body.plist_path)
     except HTTPException:
         raise

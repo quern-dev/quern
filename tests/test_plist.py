@@ -94,6 +94,19 @@ class TestSetPlistValue:
         with pytest.raises(DeviceError, match="editing"):
             await set_plist_value(tmp_path / "missing.plist", "k", 1)
 
+    @pytest.mark.parametrize("body", [
+        b'<?xml version="1.0"?><plist><dict><key>a</key></plist>',
+        b'<?xml version="1.0"?><plist><dict><key>d</key><date>nope</date></dict></plist>',
+    ], ids=["broken-xml", "bad-date"])
+    async def test_a_malformed_plist_is_a_device_error(self, tmp_path, body):
+        """plistlib raises ExpatError and AttributeError here, neither of which
+        is an OSError or ValueError; both escaped as undetailed 500s."""
+        path = tmp_path / "p.plist"
+        path.write_bytes(body)
+        with pytest.raises(DeviceError, match="editing"):
+            await set_plist_value(path, "k", 1)
+        assert path.read_bytes() == body
+
     async def test_a_plist_that_is_not_a_dict_is_refused(self, tmp_path):
         path = _write(tmp_path / "p.plist", ["a"])
         with pytest.raises(DeviceError, match="not a dictionary"):
