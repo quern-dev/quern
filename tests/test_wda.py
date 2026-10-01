@@ -1432,3 +1432,20 @@ class TestSimulatorEndpointsInDetail:
             )
         assert resp.status_code == 200, resp.text
         mock_controller.wda_client.build_screen_skeleton.assert_awaited_once()
+
+
+class TestEverySwitchClearsTheOldBackendsState:
+    async def _post(self, app, headers, path, body):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            return await client.post(path, json=body, headers=headers)
+
+    async def test_start_and_stop_both_call_it(self, app, auth_headers, mock_controller):
+        switched = []
+        mock_controller._backend_switched = switched.append
+        started = {"status": "started", "udid": "AAAA-1111", "pid": 1, "port": 8200, "ready": True}
+        with patch("server.device.wda.start_driver_simulator", AsyncMock(return_value=started)):
+            await self._post(app, auth_headers, "/api/v1/device/wda/start", {"udid": "AAAA-1111"})
+        with patch("server.device.wda.stop_driver",
+                   AsyncMock(return_value={"status": "stopped", "udid": "AAAA-1111"})):
+            await self._post(app, auth_headers, "/api/v1/device/wda/stop", {"udid": "AAAA-1111"})
+        assert switched == ["AAAA-1111", "AAAA-1111"]

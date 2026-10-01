@@ -208,7 +208,9 @@ class TestStartingOnASimulator:
         assert stopped == [SIM]
         assert wda.simulator_runner_port(SIM) is None
 
-    async def test_a_live_answering_runner_is_reused(self, state, monkeypatch):
+    async def test_a_live_answering_runner_is_reused(self, env, state, monkeypatch):
+        """With `env`, a regression past the reuse path fails fast on the mocked
+        spawn instead of reaching a real clone and build (CodeRabbit on #362)."""
         state["runners"] = {SIM: {"pid": 77, "port": 8205, "simulator": True}}
         monkeypatch.setattr(wda, "_is_process_alive", lambda pid: True)
         monkeypatch.setattr(wda, "_poll_wda_status", AsyncMock(return_value=True))
@@ -606,3 +608,106 @@ class TestWebContentInWdaMode:
         c.wda_client.register_simulator(SIM, 8200)
         with pytest.raises(DeviceError, match="get_ui_tree"):
             await c.get_web_content(udid=SIM)
+
+
+
+# ---------------------------------------------------------------------------
+# From CodeRabbit on #362
+# ---------------------------------------------------------------------------
+
+
+class TestACancelledBuildDoesNotLeaveXcodebuildRunning:
+    async def test_cancellation_kills_and_reaps(self, state, monkeypatch, tmp_path):
+        """A client that gives up on the first start_driver cancels the task.
+        An xcodebuild left running goes on writing into the derived data the
+        next build will rmtree."""
+        import asyncio
+
+        monkeypatch.setattr(wda, "WDA_REPO", tmp_path / "repo")
+        (tmp_path / "repo").mkdir()
+        monkeypatch.setattr(wda, "WDA_DERIVED_SIM", tmp_path / "build-sim")
+        monkeypatch.setattr(wda, "_xcode_build_id", AsyncMock(return_value="27A1"))
+        started = asyncio.Event()
+        p = MagicMock(returncode=None)
+
+        async def never():
+            started.set()
+            await asyncio.Event().wait()
+
+        p.communicate = never
+        p.wait = AsyncMock()
+        monkeypatch.setattr(wda.asyncio, "create_subprocess_exec", AsyncMock(return_value=p))
+
+        task = asyncio.create_task(wda.build_wda_simulator(force=True))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        p.kill.assert_called_once()
+        p.wait.assert_awaited_once()
+
+
+class TestARaceForOneSimulatorDoesNotStallAnother:
+    async def test_the_poll_happens_outside_the_shared_lock(self, state, monkeypatch, tmp_path):
+        """The re-check path polled for up to 90s inside the lock every
+        simulator shares, so an unrelated start waited behind it."""
+        import asyncio
+
+        monkeypatch.setattr(wda, "build_wda_simulator", AsyncMock(return_value=False))
+        monkeypatch.setattr(wda, "_find_sim_xctestrun", lambda: tmp_path / "x.xctestrun")
+        monkeypatch.setattr(wda, "WDA_LOG_DIR", tmp_path)
+        monkeypatch.setattr(wda, "_port_is_free", lambda port: True)
+        monkeypatch.setattr(wda, "_is_process_alive", lambda pid: True)
+        state["runners"] = {}
+
+        # SIM looks free before the lock and already started inside it: the
+        # shape of a concurrent start for the same simulator.
+        calls = {"n": 0}
+        real_port = wda.simulator_runner_port
+
+        def runner_port(udid):
+            if udid == SIM:
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return None
+                state.setdefault("runners", {})[SIM] = {"pid": 9, "port": 8299, "simulator": True}
+                return 8299
+            return real_port(udid)
+
+        monkeypatch.setattr(wda, "simulator_runner_port", runner_port)
+        release = asyncio.Event()
+
+        async def poll(url, timeout):
+            if url.endswith(":8299"):
+                await release.wait()  # SIM's re-check poll, held open
+            return True
+
+        monkeypatch.setattr(wda, "_poll_wda_status", poll)
+        monkeypatch.setattr(wda.asyncio, "create_subprocess_exec",
+                            AsyncMock(return_value=MagicMock(pid=4242)))
+
+        sim_task = asyncio.create_task(wda.start_driver_simulator(SIM))
+        await asyncio.sleep(0.05)  # SIM is now polling
+        other = await asyncio.wait_for(wda.start_driver_simulator("OTHER"), timeout=2)
+        assert other["ready"] is True, "the other simulator waited behind SIM's poll"
+        release.set()
+        assert (await sim_task)["status"] == "already_running"
+
+
+class TestSwitchingBackendForgetsTheOldOnesState:
+    def test_cache_overlay_and_recorded_backend_are_cleared(self, monkeypatch):
+        """A web element in the overlay from the accessibility tree has a
+        different frame from the same element in WDA's tree, so it was not
+        deduplicated and a tap by label came back ambiguous."""
+        from server.device.controller import DeviceController
+        from server.models import UIElement
+
+        c = DeviceController()
+        el = UIElement(type="Link", label="Sign in")
+        c._ui_cache[SIM] = ([el], 0.0)
+        c._web_overlay[SIM] = ([el], 0.0)
+        c._last_read_backend[SIM] = "sim-bridge"
+        c._backend_switched(SIM)
+        assert SIM not in c._ui_cache
+        assert SIM not in c._web_overlay
+        assert SIM not in c._last_read_backend

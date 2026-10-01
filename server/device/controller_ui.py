@@ -293,6 +293,19 @@ class DeviceControllerUI:
             return self.sim_bridge
         return self.idb
 
+    def _backend_switched(self, udid: str) -> None:
+        """Forget everything the previous backend left for this device.
+
+        The recorded backend, the cached tree and the web overlay all came from
+        the backend that just stopped serving it. The overlay is the sharp one:
+        it is merged into every read for up to a minute, and a web element it
+        carries from the accessibility tree has a different frame from the same
+        element in WDA's tree, so the two are not deduplicated and a tap by
+        label comes back ambiguous (CodeRabbit on #362).
+        """
+        self._last_read_backend.pop(udid, None)
+        self._invalidate_ui_cache(udid)
+
     def _served_by_wda(self, udid: str) -> bool:
         """Whether WDA serves this device's UI -- a phone, or a simulator in
         WDA mode. Ask this, not `_is_physical`, before a WDA-only call: since

@@ -7,7 +7,7 @@ export function registerDeviceUITools(server: McpServer): void {
   server.registerTool("get_ui_tree", {
     description: `Get the full accessibility tree (all UI elements) from the current screen. Optionally scope to children of a specific element using children_of.
 
-Pass include_raw=true when debugging the platform normalizer itself — e.g., to see whether an Android node carries selected="true" or some other source attribute that didn't make it into our canonical fields. Each element gains an extra_attrs dict of the raw source attributes from the underlying provider (uiautomator2 XML on Android; iOS not yet populated). Default false to keep payloads small.\n\nThe response carries "backend": which of quern's UI backends actually did the work ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone, 'u2' on Android). You do not choose it and normally need not care -- quern probes at start-up and re-probes periodically. It is there for when behaviour surprises you: the simulator backends differ in ways that show up as odd results rather than errors, so "backend" is the first thing to check before assuming the app did something unexpected.`,
+Pass include_raw=true when debugging the platform normalizer itself — e.g., to see whether an Android node carries selected="true" or some other source attribute that didn't make it into our canonical fields. Each element gains an extra_attrs dict of the raw source attributes from the underlying provider (uiautomator2 XML on Android; iOS not yet populated). Default false to keep payloads small.\n\nThe response carries "backend": which of quern's UI backends actually did the work ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone or a simulator after start_driver, 'u2' on Android). You do not choose it and normally need not care -- quern probes at start-up and re-probes periodically. It is there for when behaviour surprises you: the simulator backends differ in ways that show up as odd results rather than errors, so "backend" is the first thing to check before assuming the app did something unexpected.`,
     inputSchema: strictParams({
       udid: z
         .string()
@@ -22,17 +22,17 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
         .min(1)
         .max(50)
         .optional()
-        .describe("WDA accessibility tree depth (1-50, default 10). Lower = faster but may miss labels. Higher = more detail but may hang on complex screens like maps. Only affects physical devices."),
+        .describe("WDA accessibility tree depth (1-50, default 10). Lower = faster but may miss labels. Higher = more detail but may hang on complex screens like maps. Only affects devices served by WDA (physical iPhones, or a simulator after start_driver)."),
       strategy: z
         .enum(["skeleton"])
         .optional()
-        .describe("Use 'skeleton' to skip /source timeout on complex screens (maps with many pins). Returns navigation chrome only. Physical devices only."),
+        .describe("Use 'skeleton' to skip /source timeout on complex screens (maps with many pins). Returns navigation chrome only. Only for devices served by WDA (physical iPhones, or a simulator after start_driver)."),
       source_timeout: z
         .coerce.number()
         .min(1)
         .max(60)
         .optional()
-        .describe("Override WDA /source timeout in seconds (default: 3s, 6s for older devices). Use 10-15 for slow screens like feeds/lists on older devices. Physical devices only."),
+        .describe("Override WDA /source timeout in seconds (default: 3s, 6s for older devices). Use 10-15 for slow screens like feeds/lists on older devices. Only for devices served by WDA (physical iPhones, or a simulator after start_driver)."),
       mode: z
         .enum(["flat"])
         .optional()
@@ -132,7 +132,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
   });
 
   server.registerTool("wait_for_element", {
-    description: `Wait for an element to satisfy a condition (server-side polling). Eliminates client-side retry loops and reduces API round-trips. Always returns with matched:true/false - timeouts are not errors. Supports conditions: exists, not_exists, visible, enabled, disabled, value_equals, value_contains. On a timeout the response carries screen_context, and with landmarks loaded that names the screen you are actually on (identified_as, confidence) -- a timeout is exactly when that is worth knowing, so you do not have to ask separately. It also carries "backend", naming which of quern's UI backends did the reads ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone, 'u2' on Android) -- for the same reason: an element that never appeared is the kind of odd-but-not-error result where the next question is what was driving the device.`,
+    description: `Wait for an element to satisfy a condition (server-side polling). Eliminates client-side retry loops and reduces API round-trips. Always returns with matched:true/false - timeouts are not errors. Supports conditions: exists, not_exists, visible, enabled, disabled, value_equals, value_contains. On a timeout the response carries screen_context, and with landmarks loaded that names the screen you are actually on (identified_as, confidence) -- a timeout is exactly when that is worth knowing, so you do not have to ask separately. It also carries "backend", naming which of quern's UI backends did the reads ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone or a simulator after start_driver, 'u2' on Android) -- for the same reason: an element that never appeared is the kind of odd-but-not-error result where the next question is what was driving the device.`,
     inputSchema: strictParams({
       label: z
         .string()
@@ -243,7 +243,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
   server.registerTool("get_screen_summary", {
     description: `Get an LLM-optimized text description of the current screen, including interactive elements and their locations. Uses smart truncation with prioritization (buttons with identifiers > form inputs > generic buttons > static text). Navigation chrome (tab bars, nav bars) is always included regardless of limit.
 
-This is the recommended first step before interacting with UI. Use this to discover element labels and identifiers, then use tap_element to tap by name instead of coordinates.\n\nThe response carries "backend": which of quern's UI backends actually did the work ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone, 'u2' on Android). You do not choose it and normally need not care -- quern probes at start-up and re-probes periodically. It is there for when behaviour surprises you: the simulator backends differ in ways that show up as odd results rather than errors, so "backend" is the first thing to check before assuming the app did something unexpected.`,
+This is the recommended first step before interacting with UI. Use this to discover element labels and identifiers, then use tap_element to tap by name instead of coordinates.\n\nThe response carries "backend": which of quern's UI backends actually did the work ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone or a simulator after start_driver, 'u2' on Android). You do not choose it and normally need not care -- quern probes at start-up and re-probes periodically. It is there for when behaviour surprises you: the simulator backends differ in ways that show up as odd results rather than errors, so "backend" is the first thing to check before assuming the app did something unexpected.`,
     inputSchema: strictParams({
       max_elements: z
         .coerce.number()
@@ -258,17 +258,17 @@ This is the recommended first step before interacting with UI. Use this to disco
         .min(1)
         .max(50)
         .optional()
-        .describe("WDA accessibility tree depth (1-50, default 10). Lower = faster but may miss labels. Higher = more detail but may hang on complex screens like maps. Only affects physical devices."),
+        .describe("WDA accessibility tree depth (1-50, default 10). Lower = faster but may miss labels. Higher = more detail but may hang on complex screens like maps. Only affects devices served by WDA (physical iPhones, or a simulator after start_driver)."),
       strategy: z
         .enum(["skeleton"])
         .optional()
-        .describe("Use 'skeleton' to skip /source timeout on complex screens (maps with many pins). Returns navigation chrome only. Physical devices only."),
+        .describe("Use 'skeleton' to skip /source timeout on complex screens (maps with many pins). Returns navigation chrome only. Only for devices served by WDA (physical iPhones, or a simulator after start_driver)."),
       source_timeout: z
         .coerce.number()
         .min(1)
         .max(60)
         .optional()
-        .describe("Override WDA /source timeout in seconds (default: 3s, 6s for older devices). Use 10-15 for slow screens like feeds/lists on older devices. Physical devices only."),
+        .describe("Override WDA /source timeout in seconds (default: 3s, 6s for older devices). Use 10-15 for slow screens like feeds/lists on older devices. Only for devices served by WDA (physical iPhones, or a simulator after start_driver)."),
       mode: z
         .enum(["flat"])
         .optional()
@@ -401,7 +401,7 @@ If coordinate taps are not landing on the expected element, use take_annotated_s
 
 This is the PREFERRED way to tap UI elements. Use get_screen_summary first to discover element labels/identifiers, then use this tool. Avoid using coordinate-based tap unless this tool cannot find the element.
 
-Success and not-found responses both carry "backend", naming which of quern's UI backends did the work ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone, 'u2' on Android). With scroll_to_find this runs the same held-swipe sweep as scroll_to_element, where the two simulator backends differ, so it is worth checking before concluding the element is absent.
+Success and not-found responses both carry "backend", naming which of quern's UI backends did the work ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone or a simulator after start_driver, 'u2' on Android). With scroll_to_find this runs the same held-swipe sweep as scroll_to_element, where the two simulator backends differ, so it is worth checking before concluding the element is absent.
 
 Label matching modes (mutually exclusive — use only one):
 - label: exact match (case-insensitive)
@@ -439,7 +439,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         .min(1)
         .max(60)
         .optional()
-        .describe("Override WDA /source timeout in seconds. Use 10-15 for slow screens on older devices. Physical devices only."),
+        .describe("Override WDA /source timeout in seconds. Use 10-15 for slow screens on older devices. Only for devices served by WDA (physical iPhones, or a simulator after start_driver)."),
       value: z
         .string()
         .optional()
@@ -451,7 +451,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
       include_screen_context: z
         .boolean()
         .default(false)
-        .describe("Include a screen summary in the response after the tap completes. Useful for verifying navigation. With landmarks loaded it also tries to identify the screen you landed on, so you do not need a follow-up get_screen_summary?identify=true: confidence is 'exact', 'ambiguous' (candidates lists them) or 'none', and identified_as is null when nothing matched. Nothing is added when no landmarks are loaded. The summary carries \"backend\", naming which of quern's UI backends read the screen ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone, 'u2' on Android) -- worth checking if the screen you landed on is not the one you expected."),
+        .describe("Include a screen summary in the response after the tap completes. Useful for verifying navigation. With landmarks loaded it also tries to identify the screen you landed on, so you do not need a follow-up get_screen_summary?identify=true: confidence is 'exact', 'ambiguous' (candidates lists them) or 'none', and identified_as is null when nothing matched. Nothing is added when no landmarks are loaded. The summary carries \"backend\", naming which of quern's UI backends read the screen ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone or a simulator after start_driver, 'u2' on Android) -- worth checking if the screen you landed on is not the one you expected."),
       capture_screenshots: z
         .boolean()
         .default(false)
@@ -724,7 +724,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
       include_screen_context: z
         .boolean()
         .default(false)
-        .describe("Include a screen summary in the response after typing. Useful for detecting autocorrect issues. With landmarks loaded it also tries to identify the screen you landed on, so you do not need a follow-up get_screen_summary?identify=true: confidence is 'exact', 'ambiguous' (candidates lists them) or 'none', and identified_as is null when nothing matched. Nothing is added when no landmarks are loaded. The summary carries \"backend\", naming which of quern's UI backends read the screen ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone, 'u2' on Android) -- worth checking if the screen you landed on is not the one you expected."),
+        .describe("Include a screen summary in the response after typing. Useful for detecting autocorrect issues. With landmarks loaded it also tries to identify the screen you landed on, so you do not need a follow-up get_screen_summary?identify=true: confidence is 'exact', 'ambiguous' (candidates lists them) or 'none', and identified_as is null when nothing matched. Nothing is added when no landmarks are loaded. The summary carries \"backend\", naming which of quern's UI backends read the screen ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone or a simulator after start_driver, 'u2' on Android) -- worth checking if the screen you landed on is not the one you expected."),
       capture_screenshots: z
         .boolean()
         .default(false)
