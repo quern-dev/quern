@@ -896,8 +896,8 @@ class AdbBackend:
         """Uninstall an app."""
         await self._run_adb_for_device(serial, "uninstall", package)
 
-    async def install_apk_result(self, serial: str, apk_path: str,
-                                 timeout: float = 300) -> tuple[int, str, str]:
+    async def install_apk_result(self, serial: str, apk_path: str, timeout: float = 300,
+                                 allow_downgrade: bool = False) -> tuple[int, str, str]:
         """`adb install -r`, returning (exit code, stdout, stderr) unjudged.
 
         For a caller that reads Android's verdict itself (`gradle.install_outcome`):
@@ -907,7 +907,8 @@ class AdbBackend:
         if not self._adb_path:
             raise DeviceError("adb not found", tool="adb")
         proc = await asyncio.create_subprocess_exec(
-            self._adb_path, "-s", serial, "install", "-r", apk_path,
+            self._adb_path, "-s", serial, "install", "-r",
+            *(["-d"] if allow_downgrade else []), apk_path,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         try:

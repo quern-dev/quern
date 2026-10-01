@@ -97,7 +97,8 @@ async def build_and_install(controller, body) -> dict:
     record_task = asyncio.create_task(_record(project, variant))
     try:
         devices = await asyncio.gather(*(
-            _install_one(controller, s, metadata, body.uninstall_on_signature_mismatch)
+            _install_one(controller, s, metadata, body.uninstall_on_signature_mismatch,
+                         body.allow_downgrade)
             for s in serials))
     except BaseException:
         record_task.cancel()
@@ -145,7 +146,8 @@ def _not_built(serials: list[str], environment: list, used: dict, why: str) -> d
     }
 
 
-async def _install_one(controller, serial: str, metadata: dict, may_uninstall: bool):
+async def _install_one(controller, serial: str, metadata: dict, may_uninstall: bool,
+                       allow_downgrade: bool = False):
     from server.api.build_app import DeviceInstallResult
 
     try:
@@ -158,7 +160,8 @@ async def _install_one(controller, serial: str, metadata: dict, may_uninstall: b
             udid=serial, installed=False,
             error=f"no APK in the build fits this device (ABIs: {', '.join(abis) or 'unknown'})")
     try:
-        code, out, err = await controller.adb.install_apk_result(serial, str(apk))
+        code, out, err = await controller.adb.install_apk_result(
+            serial, str(apk), allow_downgrade=allow_downgrade)
         ok, reason, message = gradle.install_outcome(code, out, err)
         if not ok and reason == "INSTALL_FAILED_UPDATE_INCOMPATIBLE" and may_uninstall:
             package = str(metadata.get("applicationId") or "")
@@ -168,7 +171,8 @@ async def _install_one(controller, serial: str, metadata: dict, may_uninstall: b
                                                  f"is not in the build's metadata")
             logger.info("Uninstalling %s from %s: its signature does not match", package, serial)
             await controller.adb.uninstall_app(serial, package)
-            code, out, err = await controller.adb.install_apk_result(serial, str(apk))
+            code, out, err = await controller.adb.install_apk_result(
+                serial, str(apk), allow_downgrade=allow_downgrade)
             ok, reason, message = gradle.install_outcome(code, out, err)
             if ok:
                 message = f"uninstalled {package} first: its signature did not match"

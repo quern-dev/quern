@@ -319,7 +319,8 @@ INSTALL_FAILURES = {
         "the installed app is signed with a different key; uninstalling it first erases its "
         "data -- pass uninstall_on_signature_mismatch=true to do that",
     "INSTALL_FAILED_VERSION_DOWNGRADE":
-        "the installed app has a higher versionCode",
+        "the installed app has a higher versionCode; for a debuggable build, "
+        "allow_downgrade=true installs over it and keeps its data",
     "INSTALL_FAILED_OLDER_SDK":
         "the device's Android version is below the app's minSdk",
     "INSTALL_FAILED_NO_MATCHING_ABIS":

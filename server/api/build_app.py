@@ -52,6 +52,9 @@ class BuildAndInstallRequest(BaseModel):
     # Opt-in, because uninstalling erases the app's data on that device:
     # an install refused for a different signing key is retried after it.
     uninstall_on_signature_mismatch: bool = False
+    # `adb install -d`: install over a higher versionCode. Android allows it
+    # for a debuggable build only, and keeps the app's data.
+    allow_downgrade: bool = False
 
 
 class DeviceInstallResult(BaseModel):

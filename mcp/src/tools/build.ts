@@ -11,7 +11,7 @@ ANDROID (a Gradle project: project_path is the build root or a module inside it)
 
 When the MACHINE rather than the code stops the build -- no suitable JDK, the toolchain JDK the build asks for, no Android SDK, missing SDK packages or licences, the NDK -- the response has an "environment" list instead of a build: each entry has a kind, a summary, what was found, and options, most direct first. Some options you can apply yourself by calling again: java_home="<a JDK it found>", or gradle_args=[...] (for example a toolchain path). Others -- installing a JDK or SDK package, editing gradle.properties or local.properties -- change the user's machine or project: ask the user before doing them. Never installs or edits anything itself.
 
-A failed build gives Gradle's reason: compile errors with file and line (Kotlin, Java, resources), or what went wrong otherwise. An install refused because the installed app is signed with a different key says so; uninstall_on_signature_mismatch=true uninstalls it first, which ERASES the app's data on that device -- ask the user before passing it.
+A failed build gives Gradle's reason: compile errors with file and line (Kotlin, Java, resources), or what went wrong otherwise. An install refused because the installed app is signed with a different key says so; uninstall_on_signature_mismatch=true uninstalls it first, which ERASES the app's data on that device -- ask the user before passing it. One refused because the installed build has a higher versionCode says so too; allow_downgrade=true installs over it (debuggable builds only) and keeps the data.
 
 iOS:
 
@@ -77,6 +77,13 @@ xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
         "Android: if an install is refused because the installed app has a different signing " +
         "key, uninstall it and install again. ERASES the app's data on that device: ask first."
       ),
+      allow_downgrade: z.union([
+        z.boolean(),
+        z.enum(["true", "false"]).transform((v) => v === "true"),
+      ]).optional().describe(
+        "Android: install over an installed build with a higher versionCode (adb install -d). " +
+        "Android allows it for a debuggable build only; the app's data is kept."
+      ),
       skip_plugin_validation: z.union([
         z.boolean(),
         z.enum(["true", "false"]).transform((v) => v === "true"),
@@ -87,7 +94,8 @@ xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
       ),
     }),
   }, async ({ project_path, scheme, udids, configuration, skip_plugin_validation,
-               variant, module, java_home, gradle_args, uninstall_on_signature_mismatch }) => {
+               variant, module, java_home, gradle_args, uninstall_on_signature_mismatch,
+               allow_downgrade }) => {
     try {
       const body: Record<string, unknown> = { project_path, configuration };
       if (skip_plugin_validation) body.skip_plugin_validation = true;
@@ -96,6 +104,7 @@ xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
       if (java_home) body.java_home = java_home;
       if (gradle_args && gradle_args.length > 0) body.gradle_args = gradle_args;
       if (uninstall_on_signature_mismatch) body.uninstall_on_signature_mismatch = true;
+      if (allow_downgrade) body.allow_downgrade = true;
       if (scheme) body.scheme = scheme;
       if (udids && udids.length > 0) body.udids = udids;
 

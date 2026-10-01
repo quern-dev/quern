@@ -201,6 +201,19 @@ class TestParsingRealOutput:
         assert [p.kind for p in env] == ["jdk"]
         assert "Gradle requires JVM 17" in result.errors[0].message
 
+    def test_a_kotlin_error_has_its_file_line_and_column(self, tmp_path):
+        result, env = self._parse(tmp_path, "kotlin.out")
+        [e] = result.errors
+        assert e.file.endswith("probe/Feed.kt") and (e.line, e.column) == (2, 16)
+        assert e.message == "Unresolved reference 'missingThing'." and env == []
+
+    def test_a_dependency_that_could_not_be_fetched_says_so(self, tmp_path):
+        """Not a compile error, and not the machine's JDK or SDK: Gradle's own
+        account of what went wrong is the error."""
+        result, env = self._parse(tmp_path, "offline_deps.out")
+        [e] = result.errors
+        assert "No cached version available for offline mode" in e.message and env == []
+
     def test_a_failure_never_reads_as_zero_errors(self, tmp_path):
         result, _ = self._parse(tmp_path, "jdk8.out")
         assert result.errors and "0 error" not in result.summary
@@ -302,8 +315,9 @@ class FakeAdb:
     async def supported_abis(self, serial):
         return ["arm64-v8a"]
 
-    async def install_apk_result(self, serial, apk):
-        self.calls.append(("install", serial))
+    async def install_apk_result(self, serial, apk, allow_downgrade=False):
+        self.calls.append(("install", serial) if not allow_downgrade
+                          else ("install -d", serial))
         return self.results.pop(0)
 
     async def uninstall_app(self, serial, package):
@@ -443,6 +457,18 @@ class TestTheRoute:
                              ("uninstall", "emulator-5554", "com.example.app"),
                              ("install", "emulator-5554")]
         assert r["devices"][0].installed and "uninstalled com.example.app" in r["devices"][0].note
+
+
+class TestDowngrade:
+    def test_a_downgrade_is_said_with_the_way_past_it(self, built):
+        adb = FakeAdb([(1, "", "Failure [INSTALL_FAILED_VERSION_DOWNGRADE: Downgrade detected]")])
+        r = _go(FakeController(adb), _body(project_path=str(built.root)))
+        assert "allow_downgrade=true" in r["devices"][0].error
+
+    def test_allowing_it_passes_minus_d(self, built):
+        adb = FakeAdb([(0, "Success\n", "")])
+        r = _go(FakeController(adb), _body(project_path=str(built.root), allow_downgrade=True))
+        assert adb.calls == [("install -d", "emulator-5554")] and r["all_installed"]
 
 
 class TestRouteDispatch:
