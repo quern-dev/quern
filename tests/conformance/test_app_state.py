@@ -155,10 +155,24 @@ def ios_state(quern, ios_probe):
     ios_probe.goto("state")
     harness.tap(Ids.STATE_RESET)
     harness.tap(Ids.STATE_INCREMENT)
-    harness.wait_for_file(
-        lambda d: d.get(COUNTER) == 1 and GREETING not in d and FLAG not in d,
-        f"{{{COUNTER}: 1}} alone",
-    )
+    try:
+        harness.wait_for_file(
+            lambda d: d.get(COUNTER) == 1 and GREETING not in d and FLAG not in d,
+            f"{{{COUNTER}: 1}} alone",
+        )
+    except AssertionError as exc:
+        # Seen about once per full run of this module and never by hand (39
+        # trials): the app's write does not reach the file despite a cfprefsd
+        # restart on every read. Whether it was late or lost is the open
+        # question, so say what the app showed and what survived a relaunch.
+        shown = harness.shown(Ids.STATE_COUNTER)
+        ios_probe.relaunch()
+        ios_probe.goto("state")
+        persisted = harness.shown(Ids.STATE_COUNTER)
+        raise AssertionError(
+            f"{exc} -- the app showed {shown!r}; after a relaunch it shows "
+            f"{persisted!r} and the file holds {harness.plist()}"
+        ) from exc
     yield harness
 
     for label in harness.checkpoints:
