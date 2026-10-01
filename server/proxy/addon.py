@@ -359,33 +359,10 @@ def _refresh_launchd_sim_cache() -> None:
 
 
 def _get_ppid(pid: int) -> int | None:
-    """Get parent PID using libproc (no subprocess overhead)."""
-    try:
-        libproc_path = ctypes.util.find_library("libproc")
-        if libproc_path is None:
-            # Direct path fallback on macOS
-            libproc_path = "/usr/lib/libproc.dylib"
-        libproc = ctypes.CDLL(libproc_path, use_errno=True)
-
-        # struct proc_bsdinfo
-        class ProcBsdInfo(ctypes.Structure):
-            _fields_ = [
-                ("pbi_flags", ctypes.c_uint32),
-                ("pbi_status", ctypes.c_uint32),
-                ("pbi_xstatus", ctypes.c_uint32),
-                ("pbi_pid", ctypes.c_uint32),
-                ("pbi_ppid", ctypes.c_uint32),
-                # ... more fields but we only need ppid
-            ]
-
-        buf = ProcBsdInfo()
-        # PROC_PIDTBSDINFO = 3
-        ret = libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(buf), ctypes.sizeof(buf))
-        if ret > 0:
-            return buf.pbi_ppid
-    except Exception:
-        pass
-
+    """Get parent PID, via libproc when it answers and `ps` when it does not."""
+    ppid = _ppid_fast(pid)
+    if ppid is not None:
+        return ppid
     # Fallback to ps
     try:
         result = subprocess.run(
@@ -491,6 +468,194 @@ DEFAULT_TIMEOUT_SECONDS = 30.0
 #: quern's own site cannot be captured through quern, and debugging quern.dev
 #: is not what this proxy is for.
 ALWAYS_BYPASS: tuple[str, ...] = ("quern.dev", "*.quern.dev")
+
+
+# ---------------------------------------------------------------------------
+# Simulators that do not trust the CA: pass their TLS through (#354)
+# ---------------------------------------------------------------------------
+#
+# Local capture spans every simulator on the Mac, and a simulator that does not
+# trust the mitmproxy CA fails every HTTPS request we terminate. So TLS from a
+# simulator is decrypted only when the server has told us that simulator
+# trusts the CA; anything else is passed through untouched -- its network
+# works, we just cannot read it.
+#
+# A list of TRUSTED simulators, never of untrusted ones, because trust changes
+# under a running proxy. A simulator booted, created or erased since the last
+# update is on no list yet: with an untrusted list it would be decrypted and
+# broken, silently; with a trusted list it is passed through, and the cost is
+# visibility, which the server reports. Staleness fails safe.
+
+#: The env var the server uses to hand over the trusted set at launch, so there
+#: is no window between mitmdump starting and the first stdin command. A
+#: comma-separated list of UDIDs, or "*" to decrypt every simulator (the
+#: caller's `skip_cert_check`). Unset means nothing is trusted.
+TRUSTED_SIMULATORS_ENV = "QUERN_TRUSTED_SIMULATORS"
+
+#: A connection from a simulator whose UDID is not known yet. Never trusted.
+UNKNOWN_SIMULATOR = "unknown-simulator"
+
+
+def _parse_trusted_simulators(value: str | None) -> frozenset[str] | None:
+    """`None` means decrypt every simulator; a set means only those."""
+    if value is None:
+        return frozenset()
+    value = value.strip()
+    if value == "*":
+        return None
+    return frozenset(u.strip().upper() for u in value.split(",") if u.strip())
+
+
+_libproc_handle: Any = None
+
+
+def _libproc() -> Any:
+    """libproc, loaded once. `_get_ppid` reloads it per call, which is fine
+    off the event loop and not inside a TLS handshake."""
+    global _libproc_handle
+    if _libproc_handle is None:
+        path = ctypes.util.find_library("libproc") or "/usr/lib/libproc.dylib"
+        _libproc_handle = ctypes.CDLL(path, use_errno=True)
+    return _libproc_handle
+
+
+class _ProcBsdInfo(ctypes.Structure):
+    """The whole of `struct proc_bsdinfo` (136 bytes), not just the fields read.
+
+    `proc_pidinfo` returns 0 for a buffer smaller than the struct. A version
+    with only the first five fields was here for a long time inside
+    `_get_ppid`, so its libproc path never once succeeded and every parent
+    lookup silently forked `ps` -- under a docstring promising no subprocess.
+    """
+    _fields_ = [
+        ("pbi_flags", ctypes.c_uint32),
+        ("pbi_status", ctypes.c_uint32),
+        ("pbi_xstatus", ctypes.c_uint32),
+        ("pbi_pid", ctypes.c_uint32),
+        ("pbi_ppid", ctypes.c_uint32),
+        ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32),
+        ("pbi_ruid", ctypes.c_uint32),
+        ("pbi_rgid", ctypes.c_uint32),
+        ("pbi_svuid", ctypes.c_uint32),
+        ("pbi_svgid", ctypes.c_uint32),
+        ("rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * 16),
+        ("pbi_name", ctypes.c_char * 32),
+        ("pbi_nfiles", ctypes.c_uint32),
+        ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32),
+        ("e_tdev", ctypes.c_uint32),
+        ("e_tpgid", ctypes.c_uint32),
+        ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
+
+
+def _ppid_fast(pid: int) -> int | None:
+    """Parent pid via libproc, never a subprocess."""
+    try:
+        buf = _ProcBsdInfo()
+        # PROC_PIDTBSDINFO = 3.
+        if _libproc().proc_pidinfo(pid, 3, 0, ctypes.byref(buf), ctypes.sizeof(buf)) > 0:
+            return int(buf.pbi_ppid)
+    except Exception:
+        pass
+    return None
+
+
+def _proc_name_fast(pid: int) -> str | None:
+    """Short process name via libproc, never a subprocess."""
+    try:
+        buf = ctypes.create_string_buffer(256)
+        if _libproc().proc_name(pid, buf, ctypes.sizeof(buf)) > 0:
+            return buf.value.decode("utf-8", errors="replace")
+    except Exception:
+        pass
+    return None
+
+
+_last_unknown_refresh = 0.0
+_UNKNOWN_REFRESH_INTERVAL = 2.0
+
+
+def _refresh_for_unknown_simulator() -> None:
+    """Rebuild the launchd_sim cache off-thread, at most every couple of
+    seconds -- an app retrying a handshake must not fork `ps` per attempt."""
+    global _last_unknown_refresh
+    now = time.monotonic()
+    with _cache_lock:
+        if now - _last_unknown_refresh < _UNKNOWN_REFRESH_INTERVAL:
+            return
+        _last_unknown_refresh = now
+    threading.Thread(target=_refresh_launchd_sim_cache, daemon=True).start()
+
+
+def _simulator_instance_for_pid(pid: int) -> tuple[str | None, int | None]:
+    """The simulator `pid` runs in, as ``(udid, launchd_sim pid)``, without
+    spawning anything.
+
+    For the TLS hook, which runs on mitmproxy's event loop:
+    `_resolve_simulator_udid` falls back to `ps` on a miss, which is fine when
+    a flow is serialised and not inside every handshake.
+
+    The launchd_sim pid identifies the *boot*, not just the device. An erase
+    leaves the UDID alone and recreates the TrustStore empty, so trust has to be
+    bound to the instance that was checked: a simulator rebooted since -- erased
+    or not -- is a new launchd_sim and reads as unconfirmed until re-checked.
+
+    Outcomes:
+    - ``(udid, lpid)``: an ancestor is a launchd_sim whose UDID is cached.
+    - ``(UNKNOWN_SIMULATOR, lpid)``: an ancestor is launchd_sim, UDID not cached
+      yet; a refresh is started.
+    - ``(None, None)``: the walk reached launchd -- an ordinary Mac process,
+      which this rule leaves alone.
+    - ``(UNKNOWN_SIMULATOR, None)``: the walk could not finish (a parent lookup
+      failed, a cycle, too deep). "Could not tell" is never "not a simulator":
+      that would decrypt whatever it was.
+    """
+    current: int | None = pid
+    seen: set[int] = set()
+    for _ in range(32):
+        if current is None or current in seen:
+            return UNKNOWN_SIMULATOR, None
+        if current <= 1:
+            return None, None
+        seen.add(current)
+        with _cache_lock:
+            udid = _launchd_sim_cache.get(current)
+        if udid:
+            return udid.upper(), current
+        if _proc_name_fast(current) == "launchd_sim":
+            _refresh_for_unknown_simulator()
+            return UNKNOWN_SIMULATOR, current
+        current = _ppid_fast(current)
+    return UNKNOWN_SIMULATOR, None
+
+
+def _is_local_mode(client: Any) -> bool:
+    """Whether a connection arrived through the macOS local redirector."""
+    try:
+        from mitmproxy.proxy.mode_specs import LocalMode
+
+        return isinstance(getattr(client, "proxy_mode", None), LocalMode)
+    except Exception:
+        return False
+
+
+def _bind_to_running_instances(udids: frozenset[str]) -> dict[str, int]:
+    """Each trusted UDID's current launchd_sim pid, read fresh.
+
+    Called off the event loop (the stdin thread, or a load thread): it runs
+    `ps`. A trusted UDID with no running launchd_sim is left unbound, which
+    means passed through -- the server only trusts booted simulators, so this
+    is a simulator that went away between the check and the command.
+    """
+    _refresh_launchd_sim_cache()
+    with _cache_lock:
+        running = {u.upper(): lpid for lpid, u in _launchd_sim_cache.items()}
+    return {u: running[u] for u in udids if u in running}
 
 
 def _write_json(obj: dict[str, Any]) -> None:
@@ -640,6 +805,19 @@ class IOSDebugAddon:
         self._bypass_patterns: list[str] = []
         self._bypass_lock = threading.Lock()
 
+        # Simulators whose TLS we may decrypt (#354). None = every simulator.
+        # Read from the environment so the set is in place before the first
+        # connection; replaced later by `set_trusted_simulators`.
+        # Bound to the launchd_sim pid each was running as when checked -- see
+        # `_simulator_instance_for_pid`. Unbound until `load` has read the
+        # process table, so nothing is decrypted before then.
+        import os
+        self._trusted_simulators: frozenset[str] | None = _parse_trusted_simulators(
+            os.environ.get(TRUSTED_SIMULATORS_ENV),
+        )
+        self._trusted_instances: dict[str, int] = {}
+        self._trust_lock = threading.Lock()
+
         # Intercept state — protected by _held_lock
         self._intercept_pattern: str | None = None
         self._intercept_compiled: Any | None = None  # flowfilter result, callable
@@ -662,8 +840,9 @@ class IOSDebugAddon:
         self._stdin_thread.start()
         self._timeout_thread = threading.Thread(target=self._run_timeout_loop, daemon=True)
         self._timeout_thread.start()
-        # Pre-populate launchd_sim → UDID cache for simulator flow tagging
-        threading.Thread(target=_refresh_launchd_sim_cache, daemon=True).start()
+        # Pre-populate launchd_sim → UDID cache for simulator flow tagging, and
+        # bind the trusted set handed over at spawn to the running instances.
+        threading.Thread(target=self._bind_trusted, daemon=True).start()
         _write_json({"type": "status", "event": "started", "timestamp": time.time()})
 
     def done(self) -> None:
@@ -706,6 +885,70 @@ class IOSDebugAddon:
         sni = data.context.client.sni
         if sni and self._is_bypassed(sni):
             data.ignore_connection = True
+            return
+        client = data.context.client
+        try:
+            udid = self._untrusted_simulator(client)
+        except Exception:
+            # mitmproxy swallows a hook's exception and carries on with the
+            # handshake -- which would decrypt. For a redirected connection that
+            # is the wrong way to fail.
+            udid = UNKNOWN_SIMULATOR if _is_local_mode(client) else None
+        if udid is not None:
+            data.ignore_connection = True
+            try:
+                self._report_passthrough(client, udid, sni)
+            except Exception:
+                pass
+
+    def _untrusted_simulator(self, client: Any) -> str | None:
+        """The UDID if this connection is from a simulator we may not decrypt.
+
+        Only local-redirector connections carry a pid at setup. A connection
+        from a device *using* the proxy has none and keeps today's behaviour --
+        the system proxy, which is how such devices arrive, still refuses over
+        the CA. A redirected connection with no pid is passed through.
+        """
+        if self._trusted_simulators is None:
+            return None
+        # The live entry only: `_lookup_process_info` can wait on a pending
+        # socket lookup, and nothing may block inside a handshake.
+        info = _client_process_info.get(getattr(client, "id", None) or "")
+        pid = info.get("pid") if info else None
+        if pid is None:
+            # The redirector always supplies a pid at connection setup, so a
+            # redirected connection without one means the attribution patch
+            # did not install -- and every simulator would otherwise be
+            # decrypted, silently. Anything else keeps today's behaviour.
+            return UNKNOWN_SIMULATOR if _is_local_mode(client) else None
+        udid, instance = _simulator_instance_for_pid(pid)
+        if udid is None:
+            return None
+        with self._trust_lock:
+            trusted = self._trusted_simulators
+            bound = self._trusted_instances.get(udid)
+        # Both, not either: in the current set *and* bound to this boot. A
+        # binding alone could outlive the set that created it.
+        if trusted is not None and udid in trusted and instance is not None and bound == instance:
+            return None
+        return udid
+
+    def _report_passthrough(self, client: Any, udid: str, sni: Any) -> None:
+        if isinstance(sni, bytes):
+            sni = sni.decode("utf-8", errors="replace")
+        # Counted even for hosts outside the filter -- the count is what says
+        # a simulator's traffic is invisible -- but those names are withheld,
+        # as `tls_failed_client` withholds them.
+        if self._host_filter and sni != self._host_filter:
+            sni = None
+        info = _client_process_info.get(getattr(client, "id", None) or "") or {}
+        _write_json({
+            "type": "tls_passthrough",
+            "simulator_udid": udid,
+            "sni": sni,
+            "source_process": info.get("process_name"),
+            "timestamp": time.time(),
+        })
 
     def tls_failed_client(self, data: Any) -> None:
         """A client refused the certificate we offered it.
@@ -980,6 +1223,8 @@ class IOSDebugAddon:
                     self._handle_clear_mock(cmd)
                 elif action == "set_bypass":
                     self._handle_set_bypass(cmd)
+                elif action == "set_trusted_simulators":
+                    self._handle_set_trusted_simulators(cmd)
                 elif action == "remove_bypass":
                     self._handle_remove_bypass(cmd)
                 elif action == "clear_bypass":
@@ -1176,6 +1421,67 @@ class IOSDebugAddon:
             "timestamp": time.time(),
         })
 
+
+    def _set_trusted(self, trusted: frozenset[str] | None) -> None:
+        """Replace the trusted set and bind it to the running instances.
+
+        The bindings are cleared before the new set is published, so there is
+        no moment where a new UDID is matched against an old instance.
+        """
+        with self._trust_lock:
+            self._trusted_instances = {}
+            self._trusted_simulators = trusted
+        if trusted:
+            bound = _bind_to_running_instances(trusted)
+            with self._trust_lock:
+                if self._trusted_simulators == trusted:
+                    self._trusted_instances = bound
+
+    def _bind_trusted(self) -> None:
+        """At load: bind the set handed over at spawn, and warm the cache.
+
+        Binds the snapshot and never publishes it. This runs on its own thread
+        while the stdin thread may already be applying a newer set, and calling
+        `_set_trusted` with the snapshot re-published it over that newer one --
+        an older, wider answer landing last (CodeRabbit on #357). So the
+        bindings are installed only if the set is still the very object that
+        was read; anything newer brought its own.
+        """
+        try:
+            with self._trust_lock:
+                initial = self._trusted_simulators
+            if not initial:
+                _refresh_launchd_sim_cache()
+                return
+            bound = _bind_to_running_instances(initial)
+            with self._trust_lock:
+                if self._trusted_simulators is initial:
+                    self._trusted_instances = bound
+        except Exception:
+            pass
+
+    def _handle_set_trusted_simulators(self, cmd: dict) -> None:
+        """Replace the set of simulators whose TLS may be decrypted.
+
+        `udids: null` decrypts every simulator. Anything malformed trusts
+        nobody -- the failure is missing traffic, never a broken simulator.
+        """
+        udids = cmd.get("udids")
+        if udids is None and "udids" in cmd:
+            trusted: frozenset[str] | None = None
+        elif isinstance(udids, list):
+            trusted = frozenset(
+                str(u).strip().upper() for u in udids if str(u).strip()
+            )
+        else:
+            trusted = frozenset()
+        self._set_trusted(trusted)
+        _write_json({
+            "type": "status",
+            "event": "trusted_simulators_updated",
+            "udids": None if trusted is None else sorted(trusted),
+            "timestamp": time.time(),
+        })
 
     def _handle_set_bypass(self, cmd: dict) -> None:
         """Add bypass patterns."""

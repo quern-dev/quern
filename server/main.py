@@ -274,6 +274,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     )
     adapters["proxy"] = proxy
     app.state.proxy_adapter = proxy
+    # Every spawn asks for the current trusted-simulator set first, so no start
+    # path -- this one, the endpoints, the watchdog -- launches mitmdump with a
+    # stale list (#354). The device controller does not exist yet at this first
+    # start, so this one trusts nobody; it is refreshed as soon as it does.
+    from server.proxy import sim_tls
+    sim_tls.install(app, proxy)
     if app.state.enable_proxy:
         await proxy.start()
 
@@ -334,6 +340,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Device controller (Phase 3)
     device_controller = DeviceController()
     app.state.device_controller = device_controller
+    # The proxy started before there was a controller to ask, and so trusts no
+    # simulator yet. Ask now, rather than leaving every simulator's TLS passed
+    # through until the first periodic refresh.
+    if proxy.is_running and proxy.local_capture:
+        try:
+            await sim_tls.refresh(app)
+        except Exception:
+            logger.exception("Initial trusted-simulator check failed")
     # One bound method, not the registry: `tap_element` needs a single
     # question answered before deciding to sweep (#274), and handing it the
     # whole registry would put knowledge-base types in the device layer for no
@@ -434,6 +448,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
         except Exception:
             logger.debug("Could not check CA trust at startup", exc_info=True)
+        # It may have just installed the CA (auto_install_cert), which only
+        # becomes decryption once the addon is told (#354).
+        await sim_tls.refresh_after(app, "the startup CA check")
 
         try:
             device_controller.refresh_active_device()
@@ -485,6 +502,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # meanwhile should not wait for the next start to show or clear.
 
     mcp_clients_task = asyncio.create_task(_refresh_mcp_clients_periodically())
+    sim_tls_task = asyncio.create_task(sim_tls.refresh_loop(app))
 
     # Network-change monitor — polls every ~15s so the server notices
     # SSID/IP changes proactively. Lets proxy_status surface "the network
@@ -519,7 +537,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Shutdown: cancel background tasks, stop adapters, flush deduplicator
     for task in (
         watchdog_task, update_check_task, network_monitor_task,
-        sim_bridge_resync_task, mcp_clients_task,
+        sim_bridge_resync_task, mcp_clients_task, sim_tls_task,
     ):
         if task and not task.done():
             task.cancel()
@@ -1059,9 +1077,10 @@ def _cmd_start(args: argparse.Namespace) -> None:
                     # remedy available here.
                     print(f"    added for you: {', '.join(_capture_added)}")
                     print("    (a webview's requests leave through WebKit and an")
-                    print("     OAuth hand-off through Safari; if the CA is not")
-                    print("     trusted on a booted simulator, their HTTPS will")
-                    print("     fail until it is -- run: quern doctor)")
+                    print("     OAuth hand-off through Safari; a booted simulator")
+                    print("     that does not trust the CA has its TLS passed")
+                    print("     through, not decrypted -- see simulator_tls in")
+                    print("     proxy_status, or run: quern doctor)")
             else:
                 print("  Local capture: disabled")
                 print("    Capture simulator traffic without a system proxy:")
@@ -1779,8 +1798,11 @@ def _local_capture_cert_gate(processes: list[str], skip_cert_check: bool) -> Non
     0.9s, near enough all of it `list_devices()` enumerating simulators. That
     is paid on every run of this command, booted simulators or not.
 
-    Exits non-zero rather than returning, so a script or an agent that ignores
-    the text still sees the failure.
+    It no longer refuses (#354). A simulator that does not trust the CA has its
+    TLS passed through rather than broken, so enabling capture is safe; this
+    says which simulators that applies to and how to change it, and exits 0
+    because capture is enabled and working. It still installs the CA when
+    `auto_install_cert` says to.
     """
     if not processes or skip_cert_check:
         return
@@ -1816,8 +1838,8 @@ def _local_capture_cert_gate(processes: list[str], skip_cert_check: bool) -> Non
                 except Exception as e:
                     # Not swallowed into the check's own error handler below.
                     # A failed install is not "could not check" -- the answer is
-                    # known and it is bad, and proceeding would enable capture
-                    # that cannot work for the user who asked us to handle this.
+                    # known, and the person has to be told that simulator will
+                    # be passed through rather than decrypted.
                     failed.append((dev, e))
             return None, failed
         return missing, []
@@ -1834,24 +1856,19 @@ def _local_capture_cert_gate(processes: list[str], skip_cert_check: bool) -> Non
         print("auto_install_cert is set, but installing the CA failed:")
         for dev, err in failed:
             print(f"  {dev['name']} ({dev['udid'][:8]}): {err}")
-        print()
-        print("Capture from those simulators would fail. Install the CA by hand,")
-        print("or rerun with --skip-cert-check to enable capture anyway.")
-        sys.exit(1)
+        missing = [dev for dev, _ in failed]
 
     if not missing:
         return
 
     names = ", ".join(f"{d['name']} ({d['udid'][:8]})" for d in missing)
-    print(f"Refusing: {len(missing)} booted simulator(s) do not trust the mitmproxy CA.")
-    print(f"  {names}")
-    print()
-    print("Every HTTPS request from them would fail, and nothing in the app would")
-    print("point at the proxy as the cause. Three ways forward:")
-    print("  - install the CA on those simulators, then rerun this")
-    print("  - quern set-auto-install-cert on   (Quern installs it from now on)")
-    print("  - quern enable-local-capture --skip-cert-check ...   (proceed anyway)")
-    sys.exit(1)
+    print(f"{len(missing)} booted simulator(s) do not trust the mitmproxy CA: {names}")
+    print("Their TLS will be passed through, not decrypted: their apps keep")
+    print("working, but quern will not see their HTTPS requests. To see them:")
+    print("  - install the CA on those simulators (new connections are decrypted")
+    print("    without a restart)")
+    if not failed:
+        print("  - quern set-auto-install-cert on   (Quern installs it from now on)")
 
 
 def _cmd_enable_local_capture(
@@ -2072,8 +2089,10 @@ def cli() -> None:
         "--skip-cert-check",
         action="store_true",
         help=(
-            "Enable capture even when a booted simulator does not trust the "
-            "mitmproxy CA. Correct when deliberately exercising TLS failure."
+            "Skip the CA check, and the install auto_install_cert would do. "
+            "Simulators that do not trust the CA still have their TLS passed "
+            "through: to decrypt them anyway, use skip_cert_check on the HTTP "
+            "endpoint or MCP tool, which applies to the running server."
         ),
     )
     enable_lc.add_argument(

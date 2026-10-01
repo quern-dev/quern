@@ -129,6 +129,10 @@ async def _get_proxy_status(
     )
     if untrusted:
         warnings.append("capture_without_cert")
+    # A failed simulator listing otherwise reads as "no simulators booted" in
+    # `simulator_tls` -- a failed check looking like a passing one (#354).
+    if getattr(request.app.state, "simulator_trust_failed", False):
+        warnings.append("simulator_trust_check_failed")
     # Which of those contradict what we recorded. The warning above says capture
     # would fail; this says which device's stored `cert_installed: true` is no
     # longer true, so a reader looking at one device does not have to correlate
@@ -219,6 +223,8 @@ async def _get_proxy_status(
         _proxy_logger.debug(f"Failed to load state: {e}")
 
     local_capture = getattr(request.app.state, "local_capture_processes", [])
+    from server.proxy import sim_tls
+    sim_tls_report = sim_tls.report(request.app)
 
     # Background network-monitor snapshot — populated by lifespan; None
     # in test apps that don't run lifespan.
@@ -254,6 +260,7 @@ async def _get_proxy_status(
             active_intercept=adapter._intercept_pattern,
             held_flows_count=len(adapter._held_flows),
             tls_rejections=list(adapter._tls_rejections),
+            simulator_tls=sim_tls_report,
             mock_rules_count=len(adapter._mock_rules),
             bypass_patterns=adapter.get_bypass_patterns(),
             local_capture=local_capture,
@@ -277,6 +284,7 @@ async def _get_proxy_status(
             active_intercept=adapter._intercept_pattern,
             held_flows_count=len(adapter._held_flows),
             tls_rejections=list(adapter._tls_rejections),
+            simulator_tls=sim_tls_report,
             mock_rules_count=len(adapter._mock_rules),
             bypass_patterns=adapter.get_bypass_patterns(),
             local_capture=local_capture,
@@ -303,11 +311,19 @@ async def _get_proxy_status(
         # and this branch is reachable with data in it when mitmdump died on its
         # own -- which is exactly when there is no other trace to go on.
         tls_rejections=list(adapter._tls_rejections),
+        simulator_tls=sim_tls_report,
         warnings=warnings,
         cert_setup=cert_setup,
         system_proxy=system_proxy_info,
         network_state=network_state_dict,
     )
+
+
+def _with_tls_note(request: Request, udid: str | None, response):
+    """Attach the passed-through-simulator note to a flow result (#354)."""
+    from server.proxy import sim_tls
+    response.simulator_tls_note = sim_tls.passthrough_note(request.app, udid)
+    return response
 
 
 def _require_running_proxy(request: Request):
@@ -465,7 +481,9 @@ async def stop_proxy(request: Request) -> dict:
 # ---------------------------------------------------------------------------
 
 
-async def _ensure_ca_is_trusted(request: Request, *, skip: bool = False) -> None:
+async def _ensure_ca_is_trusted(
+    request: Request, *, skip: bool = False, refuse: bool = True,
+) -> None:
     """Refuse to start capture that would silently fail, or fix it if allowed.
 
     Called from both paths that begin routing a device's traffic through the
@@ -483,6 +501,12 @@ async def _ensure_ca_is_trusted(request: Request, *, skip: bool = False) -> None
     Raises 428 when the user has not opted into automatic installation, and 500
     when they have and it failed -- proceeding anyway would recreate the state
     they opted out of.
+
+    ``refuse=False`` is for local capture, which no longer needs the refusal
+    (#354): a simulator that does not trust the CA has its TLS passed through
+    rather than broken, and is reported per simulator. It still installs when
+    ``auto_install_cert`` says to, and an install that fails leaves that
+    simulator passed through and reported, not the call failed.
     """
     if skip:
         return
@@ -496,6 +520,8 @@ async def _ensure_ca_is_trusted(request: Request, *, skip: bool = False) -> None
         return
 
     if not get_auto_install_cert():
+        if not refuse:
+            return
         # 428: the request is fine, the world is not ready for it yet.
         raise HTTPException(status_code=428, detail=refusal_detail(missing))
 
@@ -508,6 +534,12 @@ async def _ensure_ca_is_trusted(request: Request, *, skip: bool = False) -> None
                 "Auto-installed the CA on %s (%s)", dev["name"], dev["udid"][:8],
             )
         except Exception as e:
+            if not refuse:
+                _proxy_logger.warning(
+                    "auto_install_cert is set but installing the CA on %s failed; "
+                    "its TLS will be passed through: %s", dev["name"], e,
+                )
+                continue
             raise HTTPException(
                 status_code=500,
                 detail=(
@@ -671,7 +703,7 @@ async def query_flows(
     """Query captured HTTP flows with filters and pagination."""
     flow_store = request.app.state.flow_store
     if flow_store is None:
-        return FlowQueryResponse(total=0, has_more=False)
+        return _with_tls_note(request, simulator_udid, FlowQueryResponse(total=0, has_more=False))
 
     params = FlowQueryParams(
         host=host,
@@ -723,11 +755,13 @@ async def query_flows(
             )
             for f in flows
         ]
-        return FlowQueryResponse(
+        return _with_tls_note(request, simulator_udid, FlowQueryResponse(
             flow_summaries=summaries, total=total, has_more=has_more, **completeness,
-        )
+        ))
 
-    return FlowQueryResponse(flows=flows, total=total, has_more=has_more, **completeness)
+    return _with_tls_note(request, simulator_udid, FlowQueryResponse(
+        flows=flows, total=total, has_more=has_more, **completeness,
+    ))
 
 
 @router.get("/flows/summary", response_model=FlowSummaryResponse)
@@ -743,10 +777,10 @@ async def flow_summary(
     """Get an LLM-optimized summary of recent HTTP traffic."""
     flow_store = request.app.state.flow_store
     if flow_store is None:
-        return generate_flow_summary(
+        return _with_tls_note(request, simulator_udid, generate_flow_summary(
             [], window=window, host=host,
             simulator_udid=simulator_udid, client_ip=client_ip,
-        )
+        ))
 
     now = datetime.now(UTC)
     # Snapshot before reading, and read only up to it. Defensive today -- the
@@ -815,7 +849,7 @@ async def flow_summary(
             "Flows in this window were evicted before this summary, so the "
             "counts below may be low. "
         ) + summary.summary
-    return summary
+    return _with_tls_note(request, simulator_udid, summary)
 
 
 @router.get("/flows/stream")
@@ -929,7 +963,7 @@ async def wait_for_flow(request: Request, body: WaitForFlowRequest) -> WaitForFl
                 # still reported as it is. Null means "nothing was evicted",
                 # and saying that after evictions would be a false statement
                 # sitting next to a true answer (review).
-                return WaitForFlowResponse(
+                return _with_tls_note(request, body.simulator_udid, WaitForFlowResponse(
                     matched=True,
                     flow=flows[0],
                     elapsed_seconds=round(time.monotonic() - start, 3),
@@ -939,7 +973,7 @@ async def wait_for_flow(request: Request, body: WaitForFlowRequest) -> WaitForFl
                         simulator_udid=body.simulator_udid, client_ip=body.client_ip,
                         device_serial=body.device_serial,
                     ),
-                )
+                ))
 
         elapsed = time.monotonic() - start
         if elapsed >= body.timeout:
@@ -955,12 +989,12 @@ async def wait_for_flow(request: Request, body: WaitForFlowRequest) -> WaitForFl
                 )
                 if flow_store is not None else {}
             )
-            return WaitForFlowResponse(
+            return _with_tls_note(request, body.simulator_udid, WaitForFlowResponse(
                 matched=False,
                 elapsed_seconds=round(elapsed, 3),
                 polls=polls,
                 **completeness,
-            )
+            ))
 
         await asyncio.sleep(body.interval)
 
@@ -983,12 +1017,16 @@ async def stop_capture(request: Request, body: CaptureStopRequest) -> CaptureSto
     """Stop a capture session and return the flows captured during that window."""
     manager = request.app.state.capture_sessions
     flow_store = request.app.state.flow_store
+    # Read before `stop`, which ends the session and forgets its filter.
+    udid = manager.simulator_udid(body.session_id)
     if flow_store is None:
-        return CaptureStopResponse(
+        return _with_tls_note(request, udid, CaptureStopResponse(
             session_id=body.session_id, duration_seconds=0, total_flows=0,
-        )
+        ))
     try:
-        return await manager.stop(body.session_id, flow_store)
+        return _with_tls_note(
+            request, udid, await manager.stop(body.session_id, flow_store),
+        )
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -1052,10 +1090,12 @@ async def set_local_capture(
     Body: {"processes": ["Metatext", "MobileSafari"], "skip_cert_check": false}
     Empty list disables local capture.
 
-    Refuses with 428 when a booted simulator does not trust the mitmproxy CA,
-    matching `configure_system`: capturing in that state fails every HTTPS
-    request from the device with no indication the proxy is the cause. With
-    `auto_install_cert` set, it installs instead of refusing. Disabling capture
+    Does not refuse over the CA (#354). A booted simulator that does not trust
+    it has its TLS passed through, undecrypted, instead of failing every HTTPS
+    request; `simulator_tls` on the response says which simulators are
+    decrypted and which are not. With `auto_install_cert` set it installs the
+    CA first, so every simulator is decrypted. `skip_cert_check` decrypts every
+    simulator regardless, for exercising TLS failure. Disabling capture
     is never refused.
     """
     # FastAPI rejects a missing or non-list `processes` with 422 before this
@@ -1092,7 +1132,14 @@ async def set_local_capture(
     # the broken state and must never be refused because of it -- that would
     # trap someone in exactly the situation they are trying to leave.
     if processes:
-        await _ensure_ca_is_trusted(request, skip=body.skip_cert_check)
+        # Not a refusal any more (#354): a simulator that does not trust the CA
+        # has its TLS passed through instead of failing, and `simulator_tls` on
+        # the response says which. `skip_cert_check` now means "decrypt every
+        # simulator anyway", which is what exercising TLS failure needs.
+        await _ensure_ca_is_trusted(
+            request, skip=body.skip_cert_check, refuse=False,
+        )
+    request.app.state.decrypt_all_simulators = bool(body.skip_cert_check)
 
     # Say what this replaced. `set` semantics are right -- but they are silent,
     # and the response echoes only the new list, so dropping a process looks

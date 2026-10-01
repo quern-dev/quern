@@ -21,6 +21,7 @@ import sys
 import time
 import uuid
 from collections import deque
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -41,6 +42,12 @@ from server.proxy.flow_store import FlowStore
 from server.sources import BaseSourceAdapter, EntryCallback
 
 logger = logging.getLogger(__name__)
+
+#: How the trusted-simulator set reaches mitmdump at spawn (#354). Spelled out
+#: here rather than imported, because importing the addon into the server
+#: process would run its module-level monkey-patch of mitmproxy's connection
+#: handler here too. `tests/test_sim_tls.py` asserts the two spellings agree.
+TRUSTED_SIMULATORS_ENV = "QUERN_TRUSTED_SIMULATORS"
 
 
 def validate_filter_pattern(pattern: str) -> None:
@@ -143,6 +150,21 @@ class ProxyAdapter(BaseSourceAdapter):
 
         # Bypass state (server-side mirror)
         self._bypass_patterns: list[str] = []
+
+        # Simulators whose TLS the addon may decrypt (#354); None = all of
+        # them. Unlike the state above this is NOT cleared on stop: it is a
+        # fact about the simulators, not about this run of mitmdump. The
+        # starting value trusts nobody, which passes TLS through -- the safe
+        # direction.
+        self._trusted_simulators: list[str] | None = []
+        #: Refreshes the set just before every spawn, so no start path can
+        #: launch mitmdump with a stale list. Set by the lifespan.
+        self.trust_provider: Callable[[], Awaitable[list[str] | None]] | None = None
+        #: Connections passed through, per simulator, since the proxy started.
+        self._passthrough: dict[str, dict] = {}
+        #: Told about each passed-through connection, so the server can re-check
+        #: a simulator it has not confirmed rather than wait for the next tick.
+        self.on_passthrough: Callable[[str], None] | None = None
 
     @property
     def local_capture(self) -> bool:
@@ -282,9 +304,27 @@ class ProxyAdapter(BaseSourceAdapter):
         else:
             cmd.extend(["--listen-port", str(self.listen_port)])
 
+        # Before the spawn, so the addon starts with a current set rather than
+        # catching up from stdin while connections are already arriving. A
+        # provider that fails trusts nobody: the previous set may name a
+        # simulator erased since.
+        if self.trust_provider is not None:
+            try:
+                self._trusted_simulators = await self.trust_provider()
+            except Exception:
+                logger.exception("Could not refresh trusted simulators before start")
+                self._trusted_simulators = []
+        spawned_with = self.trusted_simulators
+        env = dict(os.environ)
+        env[TRUSTED_SIMULATORS_ENV] = (
+            "*" if self._trusted_simulators is None
+            else ",".join(self._trusted_simulators)
+        )
+
         try:
             self._process = await asyncio.create_subprocess_exec(
                 *cmd,
+                env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 stdin=asyncio.subprocess.PIPE,
@@ -303,6 +343,15 @@ class ProxyAdapter(BaseSourceAdapter):
         # sets `_running = False`, so the next `start()` would report the dead
         # subprocess's rejections against the new one.
         self._tls_rejections.clear()
+        self._passthrough.clear()
+        # A refresh that landed while mitmdump was being spawned updated the
+        # mirror but had no process to send to. Send it now, or the addon runs
+        # on the set from before it.
+        if self.trusted_simulators != spawned_with:
+            await self.send_command({
+                "action": "set_trusted_simulators",
+                "udids": self._trusted_simulators,
+            })
         self._read_task = asyncio.create_task(self._read_loop())
         self._stderr_task = asyncio.create_task(self._drain_stderr())
         logger.info(
@@ -357,6 +406,48 @@ class ProxyAdapter(BaseSourceAdapter):
             data = json.dumps(command, separators=(",", ":")) + "\n"
             self._process.stdin.write(data.encode("utf-8"))
             await self._process.stdin.drain()
+
+    @property
+    def trusted_simulators(self) -> list[str] | None:
+        """UDIDs whose TLS is decrypted; None means every simulator."""
+        return None if self._trusted_simulators is None else list(self._trusted_simulators)
+
+    async def set_trusted_simulators(self, udids: list[str] | None) -> None:
+        """Replace the set of simulators whose TLS may be decrypted.
+
+        Kept across restarts and handed to the next mitmdump at spawn; sent to
+        a running one over stdin.
+        """
+        self._trusted_simulators = (
+            None if udids is None else sorted({u.upper() for u in udids})
+        )
+        await self.send_command({
+            "action": "set_trusted_simulators",
+            "udids": self._trusted_simulators,
+        })
+
+    def passthrough_counts(self) -> dict[str, dict]:
+        """Connections passed through since start, keyed by simulator UDID."""
+        return {k: dict(v) for k, v in self._passthrough.items()}
+
+    def _handle_tls_passthrough(self, data: dict) -> None:
+        udid = data.get("simulator_udid")
+        if not udid:
+            return
+        entry = self._passthrough.setdefault(
+            udid, {"connections": 0, "last_host": None, "last_at": None},
+        )
+        entry["connections"] += 1
+        if data.get("sni"):
+            entry["last_host"] = data["sni"]
+        entry["last_at"] = datetime.fromtimestamp(
+            data.get("timestamp") or time.time(), tz=UTC,
+        ).isoformat()
+        if self.on_passthrough is not None:
+            try:
+                self.on_passthrough(udid)
+            except Exception:
+                logger.exception("on_passthrough failed")
 
     def status(self):
         """Override to report 'proxying' when running."""
@@ -575,6 +666,8 @@ class ProxyAdapter(BaseSourceAdapter):
                     await self._handle_status_event(data)
                 elif msg_type == "tls_rejected":
                     self._handle_tls_rejected(data)
+                elif msg_type == "tls_passthrough":
+                    self._handle_tls_passthrough(data)
                 elif msg_type == "error":
                     logger.warning("Addon error: %s", data)
         except asyncio.CancelledError:

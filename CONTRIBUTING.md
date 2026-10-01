@@ -247,11 +247,12 @@ cannot be captured through quern, which is not what this proxy is for.
 **The same rule governs the CA.** Installing a MITM root certificate authority
 is a *larger* commitment than a system-proxy toggle, not a smaller one: it
 persists across sessions, outlives the capture window that motivated it, and
-the user has to know it happened in order to undo it. So enabling capture
-refuses with 428 when a booted simulator does not trust the CA, names the
+the user has to know it happened in order to undo it. So enabling the system
+proxy refuses with 428 when a booted simulator does not trust the CA, names the
 devices, and offers three ways out rather than one -- offering only "install
 the certificate" railroads every user into trusting a CA, which is the outcome
-the refusal exists to make deliberate.
+the refusal exists to make deliberate. (Local capture used to refuse too, and
+now passes such a simulator through instead -- see below.)
 
 Every path that begins routing a device's traffic through the proxy shares one
 `_ensure_ca_is_trusted` helper: `configure_system_proxy`, `set_local_capture`,
@@ -260,16 +261,64 @@ until 0.18.0, which is how a field report reached exactly the failure the first
 one exists to prevent -- and the third was found during that work, reachable in
 one call from the tool the refusal had just told the caller to stop using. A
 guard on one path does not cover its siblings, twice over now, so a new capture
-path calls the helper rather than repeating the block.
+path calls the helper rather than repeating the block. Local capture now calls
+it in a non-refusing mode, for the reason below, but it still calls it -- so
+`auto_install_cert` keeps meaning the same thing there.
 
 Only *enabling* is gated. Refusing to disable capture would trap someone in the
 state they are trying to leave, and starting the bare listener routes nothing.
 
+**Local capture passes an untrusting simulator through instead of refusing**
+(#354). It spans every simulator on the Mac, so a refusal over one simulator
+withheld capture from all the others, and the only way past it
+(`skip_cert_check`) broke the one it was about. Now the addon decrypts TLS only
+from simulators the server has confirmed trust the CA, and sets
+`ignore_connection` for the rest in `tls_clienthello` -- the same passthrough
+`ALWAYS_BYPASS` uses -- so their apps work and their HTTPS is simply not seen.
+The system proxy has no equivalent, because its connections' pids are found
+too late for the TLS hook, so it still refuses.
+
+The rule that makes this safe is directional: **the addon is given the
+simulators that *do* trust the CA, never the ones that don't.** Trust changes
+under a running proxy -- a simulator boots, is created, or is erased -- and
+anything not yet checked must land on the side that costs visibility rather
+than the side that breaks it. With a trusted list a stale answer means "passed
+through until the next check"; with an untrusted list it would mean "decrypted
+and failing, silently", which is the state the gate exists to prevent. Every
+"could not tell" follows the same rule: an unchecked or unreadable simulator, a
+UDID not yet cached, a failed device listing (trusts nobody, not the previous
+set), a malformed command, a parent walk that cannot finish, a redirected
+connection with no pid, an exception inside the hook. `server/proxy/sim_tls.py`
+holds the rest, and `tests/test_sim_tls.py` pins each direction.
+
+**Trust is bound to a boot, not a UDID.** That is what makes the list safe
+against an erase quern did not see. An erase keeps the UDID and empties the
+TrustStore, and the simulator has to boot again to be used -- so the addon
+records the `launchd_sim` pid each trusted UDID was running as when the list
+arrived, and a simulator rebooted since (erased or not) is a new instance it
+will not decrypt until the server checks it again. The first version bound only
+the UDID, and an independent review found the gap: erase from Simulator.app,
+reboot inside the 15s refresh, and the simulator came back trusted with an
+empty TrustStore. The re-check happens on the simulator's first passed-through
+connection (`on_passthrough`), which also covers every boot path, in quern or
+out, without the server having to see the boot. What remains is the time
+between the server reading a TrustStore and the addon binding the result --
+an erase and reboot inside that window would be bound as trusted. It is the
+length of one `ps` call, not a polling interval.
+
+Passthrough is only safe if it is visible, because zero HTTPS flows from a
+simulator reads exactly like an app making no requests. So it is reported
+where the caller looks: `simulator_tls` on `proxy_status` and the
+`set_local_capture` response, and `simulator_tls_note` on any flow result
+filtered to a passed-through simulator -- on the empty result most of all.
+
 Two surfaces cannot use the helper and are handled in kind. `quern
 enable-local-capture` writes `config.json` in one process and the lifespan
 starts routing from it in another, so it runs the same preflight in-process --
-a `DeviceController` needs no server -- and refuses before the write, exiting
-non-zero. Server startup cannot refuse at all: the decision was made in an
+a `DeviceController` needs no server. Since #354 it no longer refuses: it
+installs when `auto_install_cert` says to, and otherwise names the simulators
+whose TLS will be passed through and how to change that, because the terminal
+is the only report that person gets. Server startup cannot refuse at all: the decision was made in an
 earlier process and failing to boot over one device's certificate is worse than
 the state it prevents, so it warns, and installs when `auto_install_cert` says
 to.

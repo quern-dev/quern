@@ -225,6 +225,18 @@ class TopIssue(BaseModel):
     resolved: bool = False
 
 
+class SimulatorTlsNote(BaseModel):
+    """Mixin for flow results that can be filtered to one simulator (#354)."""
+
+    simulator_tls_note: str | None = None
+    """Set when the result is filtered to a simulator whose TLS local capture
+    passes through undecrypted, because it does not trust the CA. Its HTTPS
+    requests are not in this result, and this says why and how to see them.
+    Present even when there are no flows -- that is when it matters, since a
+    passed-through simulator otherwise reads exactly like an app making no
+    requests."""
+
+
 class Completeness(BaseModel):
     """Whether an answer drawn from a fixed-size store can be trusted whole.
 
@@ -853,7 +865,7 @@ class FlowSummaryItem(BaseModel):
     total_ms: float | None = None
 
 
-class FlowQueryResponse(Completeness):
+class FlowQueryResponse(Completeness, SimulatorTlsNote):
     """Response from flow query endpoint."""
 
     flows: list[FlowRecord] = []
@@ -889,7 +901,7 @@ class CaptureStopRequest(BaseModel):
     session_id: str
 
 
-class CaptureStopResponse(Completeness):
+class CaptureStopResponse(Completeness, SimulatorTlsNote):
     """Response from POST /api/v1/proxy/capture/stop."""
 
     session_id: str
@@ -918,7 +930,7 @@ class WaitForFlowRequest(BaseModel):
     since: UtcDatetime | None = None  # defaults to now - 5s if omitted
 
 
-class WaitForFlowResponse(Completeness):
+class WaitForFlowResponse(Completeness, SimulatorTlsNote):
     """Response from POST /api/v1/proxy/flows/wait."""
 
     matched: bool
@@ -1164,6 +1176,29 @@ class TraceResponse(BaseModel):
     flow_window_truncated: bool
 
 
+class SimulatorTls(BaseModel):
+    """Whether local capture decrypts a simulator's TLS or passes it through.
+
+    Local capture spans every simulator, and a simulator that does not trust
+    the mitmproxy CA would fail every HTTPS request we terminate -- so its TLS
+    is passed through untouched instead (#354). Its network works; its HTTPS
+    is invisible to quern. That reads exactly like an app making no requests,
+    which is why each simulator's state is reported where an agent looks
+    rather than only logged.
+    """
+
+    udid: str
+    name: str | None = None
+    tls: Literal["decrypted", "passed_through"]
+    reason: str | None = None
+    """Why it is passed through, or a caveat on why it is decrypted."""
+    fix: str | None = None
+    """How to start decrypting it, when there is a way."""
+    connections_passed_through: int = 0
+    """TLS connections passed through since the proxy started."""
+    last_host: str | None = None
+
+
 class ProxyStatusResponse(BaseModel):
     """Response from GET /api/v1/proxy/status."""
 
@@ -1190,6 +1225,10 @@ class ProxyStatusResponse(BaseModel):
     held_flows_count: int = 0
     tls_rejections: list[TlsRejection] = Field(default_factory=list)
     """Clients that refused our certificate since the proxy started."""
+    simulator_tls: list[SimulatorTls] | None = None
+    """Per booted simulator, whether local capture decrypts its TLS or passes
+    it through because it does not trust the CA. None when local capture is
+    off. A passed-through simulator's HTTPS never appears as flows."""
     mock_rules_count: int = 0
     bypass_patterns: list[str] = Field(default_factory=list)
     error: str | None = None
@@ -1209,7 +1248,13 @@ class ProxyStatusResponse(BaseModel):
     ``"multi_interface_active"`` — more than one interface is on a distinct
     /24, so ``local_ip`` is not the right answer for every device.
     ``"capture_without_cert"`` — a booted simulator does not trust the
-    mitmproxy CA, so HTTPS from it fails with nothing pointing at the proxy."""
+    mitmproxy CA. Under the system proxy HTTPS from it fails with nothing
+    pointing at the proxy; under local capture its TLS is passed through
+    undecrypted instead -- see ``simulator_tls``.
+    ``"simulator_trust_check_failed"`` — the last check could not list
+    simulators, so every simulator's TLS is being passed through and
+    ``simulator_tls`` may be empty for that reason, not because none are
+    booted."""
     auto_install_cert: bool = False
     """Whether Quern will install the CA by itself when capture needs it.
     Reported because a persistent, silent CA-install policy would be worse
@@ -1272,7 +1317,7 @@ class SlowRequest(BaseModel):
     status_code: int | None = None
 
 
-class FlowSummaryResponse(Completeness):
+class FlowSummaryResponse(Completeness, SimulatorTlsNote):
     """Response from GET /api/v1/proxy/flows/summary."""
 
     cursor_reset: bool = Field(

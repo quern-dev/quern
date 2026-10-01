@@ -1079,9 +1079,17 @@ class TestLocalCaptureIsGatedToo:
         app.state.local_capture_processes = []
         return adapter
 
-    def test_enabling_capture_is_refused_when_the_ca_is_not_trusted(
+    def test_an_untrusting_simulator_no_longer_refuses_local_capture(
         self, client, auth_headers, app, monkeypatch
     ):
+        """It used to be a 428. Local capture now passes an untrusting
+        simulator's TLS through instead of breaking it (#354), so refusing
+        would only withhold capture from the simulators that do trust the CA.
+
+        What must still hold is that nothing *decrypts* the untrusting one:
+        `decrypt_all_simulators` is the switch that would, and only an explicit
+        `skip_cert_check` may set it.
+        """
         self._app_with_proxy(app)
         self._no_trust(monkeypatch)
         monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
@@ -1091,9 +1099,12 @@ class TestLocalCaptureIsGatedToo:
             json={"processes": ["MobileSafari"]},
             headers=auth_headers,
         )
-        assert r.status_code == 428, "capture was enabled into a state that cannot work"
+        assert r.status_code == 200, r.text
+        assert app.state.decrypt_all_simulators is False, (
+            "an untrusting simulator would be decrypted, and its HTTPS would fail"
+        )
 
-    def test_the_string_false_does_not_switch_the_gate_off(
+    def test_the_string_false_does_not_switch_decryption_on(
         self, client, auth_headers, app, monkeypatch
     ):
         """`bool("false")` is `True`.
@@ -1102,6 +1113,10 @@ class TestLocalCaptureIsGatedToo:
         `bool(...)`, so a JSON string `"false"` disabled the cert gate --
         meaning the exact opposite of what was sent. Every other value a client
         might reasonably use for false does the same: "no", "0", "False".
+
+        The gate no longer refuses local capture (#354), but the same mistake
+        would now do something worse: `skip_cert_check` decrypts every
+        simulator, so a string "false" would break every untrusting one.
         """
         self._app_with_proxy(app)
         self._no_trust(monkeypatch)
@@ -1113,9 +1128,29 @@ class TestLocalCaptureIsGatedToo:
                 json={"processes": ["MobileSafari"], "skip_cert_check": falsey},
                 headers=auth_headers,
             )
-            assert r.status_code == 428, (
-                f"skip_cert_check={falsey!r} disabled the gate"
+            assert r.status_code == 200, r.text
+            assert app.state.decrypt_all_simulators is False, (
+                f"skip_cert_check={falsey!r} switched on decrypting every simulator"
             )
+
+    def test_skip_cert_check_does_not_outlive_the_call_that_passed_it(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        """It decrypts every simulator, breaking the untrusting ones. A later
+        call that does not pass it must not inherit it -- otherwise one
+        deliberate TLS-failure test leaves every later capture breaking them."""
+        self._app_with_proxy(app)
+        self._no_trust(monkeypatch)
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+
+        for skip, expected in ((True, True), (False, False)):
+            r = client.post(
+                "/api/v1/proxy/local-capture",
+                json={"processes": ["MobileSafari"], "skip_cert_check": skip},
+                headers=auth_headers,
+            )
+            assert r.status_code == 200, r.text
+            assert app.state.decrypt_all_simulators is expected
 
     def test_a_genuine_skip_still_works(
         self, client, auth_headers, app, monkeypatch
@@ -1132,6 +1167,7 @@ class TestLocalCaptureIsGatedToo:
             headers=auth_headers,
         )
         assert r.status_code == 200
+        assert app.state.decrypt_all_simulators is True
 
     def test_a_malformed_body_is_rejected_not_coerced(
         self, client, auth_headers, app, monkeypatch
@@ -1845,11 +1881,17 @@ class TestAutoInstallCertClearsEveryHttpGate:
         assert r.status_code != 428, "the setting did not answer the question"
         assert _installs == ["AAAA1111"], "the gate was never reached"
 
-    def test_a_failed_install_is_a_500_not_a_silent_proceed(
+    def test_a_failed_install_does_not_fail_local_capture(
         self, client, auth_headers, app, monkeypatch
     ):
-        """Consent does not make a broken install work. Proceeding would enable
-        capture that cannot succeed, for the user who asked us to handle it."""
+        """It used to be a 500, because proceeding would enable capture that
+        cannot succeed. Under local capture it now can (#354): the simulator the
+        install failed on stays untrusted and has its TLS passed through, and
+        `simulator_tls` reports it. Failing the call would only take capture
+        away from the simulators that do trust the CA.
+
+        The 500 still stands on the system-proxy gates, where nothing passes
+        through -- see the next test."""
         async def _boom(_controller, udid, device_name=None):
             raise RuntimeError("no CA file")
 
@@ -1860,7 +1902,23 @@ class TestAutoInstallCertClearsEveryHttpGate:
             json={"processes": ["MyApp"]},
             headers=auth_headers,
         )
-        assert r.status_code == 500
+        assert r.status_code == 200, r.text
+        assert app.state.decrypt_all_simulators is False
+
+    def test_a_failed_install_still_refuses_the_system_proxy(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        """The system proxy has no passthrough: a failed install there would
+        still enable capture that cannot work, so it stays a 500."""
+        async def _boom(_controller, udid, device_name=None):
+            raise RuntimeError("no CA file")
+
+        monkeypatch.setattr("server.proxy.cert_manager.install_cert", _boom)
+        self._adapter(app)
+        r = client.post(
+            "/api/v1/proxy/start", json={"system_proxy": True}, headers=auth_headers,
+        )
+        assert r.status_code == 500, r.text
         assert "auto_install_cert is set" in r.text
 
 
@@ -2109,3 +2167,23 @@ class TestCertEligibilityFollowsRootabilityNotKind:
             r = client.post("/api/v1/proxy/cert/install", json={}, headers=auth_headers)
 
         assert r.json()["skipped"] == []
+
+
+async def test_installing_the_ca_refreshes_the_trusted_set(
+    client, auth_headers, mock_cert_path, mock_cert_state, app, monkeypatch,
+):
+    """Decryption of a simulator that now trusts the CA should start at once,
+    without waiting for the periodic check or restarting the proxy (#354).
+    Driven through the endpoint: a test that grepped its source passed with
+    the call under `if False:`."""
+    from server.proxy import sim_tls
+
+    refresh = AsyncMock()
+    monkeypatch.setattr(sim_tls, "refresh_after", refresh)
+    app.state.device_controller.list_devices = AsyncMock()
+    with patch("server.proxy.cert_manager.install_cert", return_value=True):
+        r = client.post(
+            "/api/v1/proxy/cert/install", json={"udid": "test-udid"}, headers=auth_headers,
+        )
+    assert r.status_code == 200, r.text
+    refresh.assert_awaited_once()

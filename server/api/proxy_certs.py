@@ -555,6 +555,12 @@ async def install_cert(
                     "error": str(e),
                 })
 
+    # Decryption of a simulator that now trusts the CA starts here, not at
+    # the next periodic check and without restarting the proxy (#354).
+    if any(r["success"] for r in results):
+        from server.proxy import sim_tls
+        await sim_tls.refresh_after(request.app, "installing the CA")
+
     success_count = sum(1 for r in results if r["success"])
     return {
         "total": len(results),
