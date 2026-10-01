@@ -161,10 +161,9 @@ def ios_state(quern, ios_probe):
             f"{{{COUNTER}: 1}} alone",
         )
     except AssertionError as exc:
-        # Seen about once per full run of this module and never by hand (39
-        # trials): the app's write does not reach the file despite a cfprefsd
-        # restart on every read. Whether it was late or lost is the open
-        # question, so say what the app showed and what survived a relaunch.
+        # Seen about once per full run while reads restarted cfprefsd under
+        # the running app; they now go through it instead. If it recurs, the
+        # first thing to know is whether the write was late or lost.
         shown = harness.shown(Ids.STATE_COUNTER)
         ios_probe.relaunch()
         ios_probe.goto("state")
@@ -207,8 +206,8 @@ def test_the_apps_own_write_reaches_the_plist(ios_state) -> None:
 
 def test_a_read_sees_the_apps_write_without_waiting(ios_state) -> None:
     """cfprefsd writes to disk on its own schedule -- measured 3s to over 15s
-    behind the app. The read flushes it first, so it answers with what the
-    app has, not with what the daemon has got round to saving."""
+    behind the app. The read goes through cfprefsd, so it answers with what
+    the app has, not with what the daemon has got round to saving."""
     ios_state.launch()
     for _ in range(3):
         ios_state.tap(Ids.STATE_INCREMENT)
@@ -219,9 +218,8 @@ def test_a_read_sees_the_apps_write_without_waiting(ios_state) -> None:
     resp = ios_state.read(COUNTER)
     assert resp.status_code == 200, resp.text[:300]
     if resp.json()["value"] != 4:
-        # Seen intermittently (2 runs in about 9) and not reproduced by hand in
-        # 15 trials. What matters is whether the write was late or lost, so
-        # the failure says which: keep reading, then terminate and read again.
+        # Seen 2 runs in about 9 while reads restarted cfprefsd; they now go
+        # through it. If it recurs, say whether the write was late or lost.
         later = []
         for _ in range(4):
             time.sleep(1.5)
@@ -235,8 +233,8 @@ def test_a_read_sees_the_apps_write_without_waiting(ios_state) -> None:
 
 
 def test_a_read_does_not_disturb_the_running_app(ios_state) -> None:
-    """The flush restarts cfprefsd under a running app. Its next write must
-    still land, and survive a relaunch."""
+    """A read under a running app must not cost the app its next write --
+    the first fix restarted cfprefsd here, and intermittently did."""
     ios_state.launch()
     assert ios_state.read(COUNTER).status_code == 200
     ios_state.tap(Ids.STATE_INCREMENT)
@@ -304,6 +302,20 @@ def test_values_written_while_terminated_are_what_the_app_sees(ios_state) -> Non
     assert ios_state.shown(Ids.STATE_GREETING) == "greeting: hello conformance"
     assert ios_state.shown(Ids.STATE_COUNTER) == "counter: 42"
     assert ios_state.shown(Ids.STATE_FLAG) == "flag: true"
+
+
+def test_a_value_set_while_the_app_runs_is_seen_on_its_next_read(ios_state) -> None:
+    """Written through cfprefsd, so no relaunch is needed: the app's next read
+    of its defaults sees it. Writing the file directly could not do this --
+    cfprefsd kept serving its cached value until the simulator rebooted."""
+    ios_state.launch()
+    ios_state.set(GREETING, "while running")
+    assert ios_state.shown(Ids.STATE_GREETING) == "greeting: while running"
+    ios_state.terminate()
+    ios_state.launch()
+    assert ios_state.shown(Ids.STATE_GREETING) == "greeting: while running", (
+        "seen by the running app but gone after a relaunch"
+    )
 
 
 def test_a_batch_write_sets_every_key(ios_state) -> None:

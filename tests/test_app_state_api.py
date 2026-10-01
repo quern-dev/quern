@@ -9,7 +9,6 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from server.config import ServerConfig
-from server.device import plist as plist_module
 from server.device.controller import DeviceController
 from server.main import create_app
 from server.models import AppStateNotFoundError, DeviceError
@@ -31,22 +30,55 @@ def auth_headers():
 
 
 @pytest.fixture(autouse=True)
-def syncs(monkeypatch):
-    """Stand in for the cfprefsd restart, recording when it ran.
+def shut_down(monkeypatch):
+    """By default the simulator reads as shut down: no cfprefsd, so every plist
+    is a file. `cfprefsd` below boots it for the tests of that path."""
+    monkeypatch.setattr(
+        "server.device.live_plist.get_device_state", AsyncMock(return_value="Shutdown"),
+    )
 
-    Tests append their own markers to the same list, so ordering between the
-    restarts and the edit can be asserted.
+
+class FakeCfprefsd:
+    """`defaults` inside a booted simulator, as an in-memory cache per domain.
+
+    Deliberately separate from the file: the whole point of that path is that
+    cfprefsd holds values the file does not have yet.
     """
-    calls: list[str] = []
-    result = {"synced": True}
 
-    async def fake(udid):
-        calls.append("sync")
-        return dict(result)
+    def __init__(self):
+        self.domains: dict[str, dict] = {}
+        self.calls: list[tuple] = []
+        self.drop_writes = False
+        self.fail_on_key: str | None = None
 
-    monkeypatch.setattr("server.api.app_state.sync_preferences", fake)
-    fake.calls = calls
-    fake.result = result
+    async def __call__(self, udid, *args):
+        self.calls.append(args)
+        verb, domain = args[0], args[1]
+        store = self.domains.setdefault(domain, {})
+        if verb == "export":
+            return plistlib.dumps(store)
+        if verb == "write":
+            key, flag, text = args[2], args[3], args[4]
+            if key == self.fail_on_key:
+                raise DeviceError("defaults write failed: boom", tool="defaults")
+            value = {"-bool": lambda t: t == "true", "-int": int, "-float": float,
+                     "-string": str}[flag](text)
+            if not self.drop_writes:
+                store[key] = value
+            return b""
+        if verb == "delete":
+            store.pop(args[2], None)
+            return b""
+        raise AssertionError(f"unexpected defaults verb {verb}")
+
+
+@pytest.fixture
+def cfprefsd(monkeypatch):
+    fake = FakeCfprefsd()
+    monkeypatch.setattr(
+        "server.device.live_plist.get_device_state", AsyncMock(return_value="Booted"),
+    )
+    monkeypatch.setattr("server.device.live_plist._defaults", fake)
     return fake
 
 
@@ -219,16 +251,6 @@ class TestReadPlistEndpoint:
         assert resp.status_code == 200, resp.text
         assert resp.json()["key"] == "existing" and resp.json()["value"] == 1
 
-    async def test_a_read_flushes_cfprefsd_first(
-        self, app, auth_headers, mock_controller, container, syncs,
-    ):
-        """The file lags the app by seconds until cfprefsd writes it out."""
-        resp = await _call(app, auth_headers, "GET", "/plist", params={
-            "bundle_id": "com.example.App", "container": "data", "plist_path": PLIST,
-        })
-        assert resp.status_code == 200
-        assert syncs.calls == ["sync"]
-
     @pytest.mark.parametrize("bad", ["../../../../etc/x.plist", "/etc/hosts"])
     async def test_a_plist_path_outside_the_container_is_400(
         self, app, auth_headers, mock_controller, container, bad,
@@ -260,75 +282,6 @@ class TestSetPlistValueEndpoint:
         })
         assert resp.status_code == 200, resp.text
         assert plistlib.loads(container.read_bytes())["probe.greeting"] == "hi"
-
-    async def test_cfprefsd_is_restarted_before_and_after_the_write(
-        self, app, auth_headers, mock_controller, container, syncs,
-    ):
-        """Before, so a pending flush cannot land on top of the edit; after, so
-        the cache stops serving the old value."""
-        async def recording(path, values):
-            syncs.calls.append("write")
-            await plist_module.set_plist_values(path, values)
-
-        with patch("server.api.app_state.set_plist_values", recording):
-            resp = await _call(app, auth_headers, "POST", "/plist", json={
-                "bundle_id": "com.example.App", "container": "data", "plist_path": PLIST,
-                "key": "k", "value": 1,
-            })
-        assert resp.status_code == 200, resp.text
-        assert syncs.calls == ["sync", "write", "sync"]
-
-    async def test_a_failed_sync_is_a_warning_on_the_response(
-        self, app, auth_headers, mock_controller, container, syncs,
-    ):
-        syncs.result.clear()
-        syncs.result.update({"synced": False, "detail": "x", "warning": "stale, beware"})
-        resp = await _call(app, auth_headers, "POST", "/plist", json={
-            "bundle_id": "com.example.App", "container": "data", "plist_path": PLIST,
-            "key": "k", "value": 1,
-        })
-        assert resp.status_code == 200
-        assert resp.json()["warning"] == "stale, beware"
-        assert resp.json()["preferences"]["synced"] is False
-
-    async def test_a_failed_first_sync_is_reported_when_the_second_succeeds(
-        self, app, auth_headers, mock_controller, container, monkeypatch,
-    ):
-        results = iter([
-            {"synced": False, "detail": "x", "warning": "flush failed"},
-            {"synced": True},
-        ])
-
-        async def fake(udid):
-            return next(results)
-
-        monkeypatch.setattr("server.api.app_state.sync_preferences", fake)
-        resp = await _call(app, auth_headers, "POST", "/plist", json={
-            "bundle_id": "com.example.App", "container": "data", "plist_path": PLIST,
-            "key": "k", "value": 1,
-        })
-        assert resp.status_code == 200
-        assert resp.json()["warning"] == "flush failed"
-
-    async def test_a_plist_the_app_wrote_but_cfprefsd_had_not_saved_is_found(
-        self, app, auth_headers, mock_controller, container, monkeypatch,
-    ):
-        """The file appears only when cfprefsd flushes it, so the existence
-        check has to come after the sync, not before."""
-        container.unlink()
-
-        async def flush(udid):
-            if not container.exists():
-                container.write_bytes(plistlib.dumps({"from_app": 1}))
-            return {"synced": True}
-
-        monkeypatch.setattr("server.api.app_state.sync_preferences", flush)
-        resp = await _call(app, auth_headers, "POST", "/plist", json={
-            "bundle_id": "com.example.App", "container": "data", "plist_path": PLIST,
-            "key": "k", "value": 2,
-        })
-        assert resp.status_code == 200, resp.text
-        assert plistlib.loads(container.read_bytes()) == {"from_app": 1, "k": 2}
 
     @pytest.mark.parametrize("value", [None, [1, 2], {"x": True}])
     async def test_a_value_that_is_not_a_scalar_is_refused(
@@ -429,7 +382,7 @@ class TestDiffEndpoint:
 
     @pytest.mark.parametrize("label, status", [("nope", 404), ("..", 400)])
     async def test_a_bad_checkpoint_is_refused_before_the_device_is_touched(
-        self, app, auth_headers, mock_controller, container, checkpoint, syncs,
+        self, app, auth_headers, mock_controller, container, checkpoint, cfprefsd,
         label, status,
     ):
         resp = await _call(app, auth_headers, "GET", "/plist/diff", params={
@@ -437,18 +390,7 @@ class TestDiffEndpoint:
             "checkpoint_label": label,
         })
         assert resp.status_code == status, resp.text
-        assert syncs.calls == [], "cfprefsd was restarted for a request that was refused"
-
-    async def test_the_live_side_is_flushed_before_it_is_read(
-        self, app, auth_headers, mock_controller, container, checkpoint, syncs,
-    ):
-        resp = await _call(app, auth_headers, "GET", "/plist/diff", params={
-            "bundle_id": "com.example.App", "container": "data", "plist_path": PLIST,
-            "checkpoint_label": "base",
-        })
-        assert resp.status_code == 200
-        assert syncs.calls == ["sync"]
-
+        assert cfprefsd.calls == [], "cfprefsd was asked for a request that was refused"
 
 class TestErrorsAreClassifiedByType:
     async def test_a_failure_quoting_a_container_path_is_not_a_404(
@@ -530,3 +472,169 @@ class TestWatchStartChecksThePath:
             "plist_path": "Library/Preferences/none.plist",
         })
         assert resp.status_code == 404, resp.text
+
+
+DOMAIN_SUFFIX = "Library/Preferences/com.example.App"
+
+
+def _domain(container):
+    return str(container.with_suffix(""))
+
+
+class TestPreferencesGoThroughCfprefsd:
+    """On a booted simulator, a preference file is read and written through
+    cfprefsd. Restarting cfprefsd instead, the first fix, intermittently
+    swallowed a running app's own writes."""
+
+    async def test_a_read_returns_what_cfprefsd_holds_not_the_stale_file(
+        self, app, auth_headers, mock_controller, container, cfprefsd,
+    ):
+        cfprefsd.domains[_domain(container)] = {"existing": 4}
+        resp = await _call(app, auth_headers, "GET", "/plist", params={
+            "bundle_id": "com.example.App", "container": "data", "plist_path": PLIST,
+            "key": "existing",
+        })
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["value"] == 4, "read the file (1), not what the app wrote (4)"
+
+    async def test_a_write_goes_through_defaults_with_its_type(
+        self, app, auth_headers, mock_controller, container, cfprefsd,
+    ):
+        resp = await _call(app, auth_headers, "POST", "/plist/batch", json={
+            "bundle_id": "com.example.App", "container": "data", "plist_path": PLIST,
+            "values": {"a.flag": True, "a.n": 7, "a.r": 2.5, "a.s": "hi"},
+        })
+        assert resp.status_code == 200, resp.text
+        writes = [c[2:] for c in cfprefsd.calls if c[0] == "write"]
+        assert writes == [
+            ("a.flag", "-bool", "true"), ("a.n", "-int", "7"),
+            ("a.r", "-float", "2.5"), ("a.s", "-string", "hi"),
+        ]
+        assert all(c[1] == _domain(container) for c in cfprefsd.calls)
+        assert plistlib.loads(container.read_bytes()) == {"existing": 1}, (
+            "the file was edited behind cfprefsd's back"
+        )
+
+    async def test_a_write_that_does_not_read_back_is_an_error(
+        self, app, auth_headers, mock_controller, container, cfprefsd,
+    ):
+        """Accepted by `defaults` and not kept is a failure, not a success."""
+        cfprefsd.drop_writes = True
+        resp = await _call(app, auth_headers, "POST", "/plist", json={
+            "bundle_id": "com.example.App", "container": "data", "plist_path": PLIST,
+            "key": "k", "value": 1,
+        })
+        assert resp.status_code == 500, resp.text
+        assert "did not read back" in resp.text
+
+    async def test_a_bool_that_reads_back_as_an_int_is_an_error(
+        self, app, auth_headers, mock_controller, container, cfprefsd, monkeypatch,
+    ):
+        real = FakeCfprefsd.__call__
+
+        async def as_int(self, udid, *args):
+            if args[0] == "write" and args[3] == "-bool":
+                args = (*args[:3], "-int", "1" if args[4] == "true" else "0")
+            return await real(self, udid, *args)
+
+        monkeypatch.setattr(FakeCfprefsd, "__call__", as_int)
+        resp = await _call(app, auth_headers, "POST", "/plist", json={
+            "bundle_id": "com.example.App", "container": "data", "plist_path": PLIST,
+            "key": "k", "value": True,
+        })
+        assert resp.status_code == 500, resp.text
+
+    async def test_a_batch_that_fails_midway_names_what_was_written(
+        self, app, auth_headers, mock_controller, container, cfprefsd,
+    ):
+        cfprefsd.fail_on_key = "b"
+        resp = await _call(app, auth_headers, "POST", "/plist/batch", json={
+            "bundle_id": "com.example.App", "container": "data", "plist_path": PLIST,
+            "values": {"a": 1, "b": 2, "c": 3},
+        })
+        assert resp.status_code == 500, resp.text
+        assert "after writing ['a']" in resp.text
+
+    async def test_a_preference_can_be_set_before_the_app_has_written_any(
+        self, app, auth_headers, mock_controller, container, cfprefsd,
+    ):
+        container.unlink()
+        resp = await _call(app, auth_headers, "POST", "/plist", json={
+            "bundle_id": "com.example.App", "container": "data", "plist_path": PLIST,
+            "key": "first.launch.flag", "value": False,
+        })
+        assert resp.status_code == 200, resp.text
+
+    async def test_a_preference_the_app_wrote_but_cfprefsd_has_not_saved_is_found(
+        self, app, auth_headers, mock_controller, container, cfprefsd,
+    ):
+        container.unlink()
+        cfprefsd.domains[_domain(container)] = {"from_app": 1}
+        resp = await _call(app, auth_headers, "GET", "/plist", params={
+            "bundle_id": "com.example.App", "container": "data", "plist_path": PLIST,
+        })
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["data"] == {"from_app": 1}
+
+    async def test_a_preference_that_exists_nowhere_is_404(
+        self, app, auth_headers, mock_controller, container, cfprefsd,
+    ):
+        container.unlink()
+        resp = await _call(app, auth_headers, "GET", "/plist", params={
+            "bundle_id": "com.example.App", "container": "data", "plist_path": PLIST,
+        })
+        assert resp.status_code == 404, resp.text
+
+    async def test_deleting_a_key_cfprefsd_does_not_hold_is_404(
+        self, app, auth_headers, mock_controller, container, cfprefsd,
+    ):
+        resp = await _call(app, auth_headers, "DELETE", "/plist/key", json={
+            "bundle_id": "com.example.App", "container": "data", "plist_path": PLIST,
+            "key": "nope",
+        })
+        assert resp.status_code == 404, resp.text
+        assert not [c for c in cfprefsd.calls if c[0] == "delete"]
+
+    async def test_a_delete_goes_through_defaults(
+        self, app, auth_headers, mock_controller, container, cfprefsd,
+    ):
+        cfprefsd.domains[_domain(container)] = {"probe.counter": 3}
+        resp = await _call(app, auth_headers, "DELETE", "/plist/key", json={
+            "bundle_id": "com.example.App", "container": "data", "plist_path": PLIST,
+            "key": "probe.counter",
+        })
+        assert resp.status_code == 200, resp.text
+        assert cfprefsd.domains[_domain(container)] == {}
+
+    async def test_a_plist_outside_preferences_is_still_a_file(
+        self, app, auth_headers, mock_controller, container, cfprefsd,
+    ):
+        """cfprefsd does not manage an app's own config plists."""
+        other = container.parent.parent / "config.plist"
+        other.write_bytes(plistlib.dumps({"a": 1}))
+        resp = await _call(app, auth_headers, "POST", "/plist", json={
+            "bundle_id": "com.example.App", "container": "data",
+            "plist_path": "Library/config.plist", "key": "b", "value": 2,
+        })
+        assert resp.status_code == 200, resp.text
+        assert plistlib.loads(other.read_bytes()) == {"a": 1, "b": 2}
+        assert cfprefsd.calls == []
+
+    async def test_the_diff_reads_the_live_side_through_cfprefsd(
+        self, app, auth_headers, mock_controller, container, cfprefsd, tmp_path, monkeypatch,
+    ):
+        import server.device.app_state as module
+
+        root = tmp_path / "state" / "app-states"
+        monkeypatch.setattr(module, "APP_STATES_DIR", root)
+        saved = root / "com.example.App" / "base" / "data-container" / PLIST
+        saved.parent.mkdir(parents=True)
+        saved.write_bytes(plistlib.dumps({"existing": 1}))
+        cfprefsd.domains[_domain(container)] = {"existing": 4}
+        resp = await _call(app, auth_headers, "GET", "/plist/diff", params={
+            "bundle_id": "com.example.App", "container": "data", "plist_path": PLIST,
+            "checkpoint_label": "base",
+        })
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["changed"] == {"existing": {"old": 1, "new": 4}}
+

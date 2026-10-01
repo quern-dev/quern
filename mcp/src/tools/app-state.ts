@@ -144,7 +144,7 @@ If key is omitted, returns the entire plist as JSON.`,
   server.registerTool("set_app_plist_value", {
     description: `Set a key in a plist file inside a simulator app's container. More surgical than a full state restore — flip a single feature flag without touching anything else. Simulator only.
 
-The key is taken literally: "com.example.flag" is one top-level key, not a path. Terminate the app first -- a running app keeps the values it has in memory. Type inference: a boolean is stored as a plist boolean, an integer as an integer, a float as a real, anything else as a string.`,
+The key is taken literally: "com.example.flag" is one top-level key, not a path. A preference file (Library/Preferences/*.plist) on a booted simulator is written through cfprefsd, so even a running app sees the value on its next read; the value is read back before success is reported. Type inference: a boolean is stored as a plist boolean, an integer as an integer, a float as a real, anything else as a string.`,
     inputSchema: strictParams({
       bundle_id: z.string().describe("App bundle identifier"),
       container: z.string().describe('"data" or a group ID (e.g. "group.com.example")'),
@@ -170,7 +170,7 @@ The key is taken literally: "com.example.flag" is one top-level key, not a path.
   server.registerTool("set_app_plist_values", {
     description: `Set multiple keys in a plist file in one call. More efficient than calling set_app_plist_value repeatedly — set all coaching flags, feature flags, or preferences at once. Simulator only.
 
-All keys are written in one step, or none are. Keys are taken literally, as in set_app_plist_value. Type inference per value: boolean → plist boolean, integer → integer, float → real, everything else → string.`,
+Keys are taken literally and every value is read back, as in set_app_plist_value. A failure part-way names the keys already written. Type inference per value: boolean → plist boolean, integer → integer, float → real, everything else → string.`,
     inputSchema: strictParams({
       bundle_id: z.string().describe("App bundle identifier"),
       container: z.string().describe('"data" or a group ID (e.g. "group.com.example")'),

@@ -15,9 +15,13 @@ from server.device.app_state import (
     resolve_container,
     restore_state,
     save_state,
-    sync_preferences,
 )
-from server.device.plist import diff_plists, read_plist, remove_plist_key, set_plist_values
+from server.device.live_plist import (
+    read_live_plist,
+    remove_live_plist_key,
+    set_live_plist_values,
+)
+from server.device.plist import diff_plists, read_plist
 from server.models import (
     AppStateNotFoundError,
     ClearPlistWatchConfigRequest,
@@ -66,20 +70,6 @@ def _handle_device_error(e: DeviceError) -> HTTPException:
     return HTTPException(status_code=500, detail=f"[{e.tool}] {msg}")
 
 
-def _with_sync(result: dict, *syncs: dict) -> dict:
-    """Attach the cfprefsd outcome, promoting a failure to a top-level warning.
-
-    The warning is the part that changes what the result means -- the app may
-    not see the change -- so it goes where a caller reading the body will see
-    it, not only in the server log.
-    """
-    failed = next((x for x in syncs if not x.get("synced")), None)
-    result["preferences"] = failed or (syncs[-1] if syncs else {"synced": True})
-    if failed:
-        result["warning"] = failed["warning"]
-    return result
-
-
 def _warn_if_unsynced(result: dict, meta: dict) -> dict:
     prefs = meta.get("preferences") or {}
     if prefs.get("synced") is False:
@@ -87,12 +77,9 @@ def _warn_if_unsynced(result: dict, meta: dict) -> dict:
     return result
 
 
-async def _live_plist(udid: str, bundle_id: str, container: str, plist_path: str):
+async def _resolve(udid: str, bundle_id: str, container: str, plist_path: str):
     container_path = await resolve_container(udid, bundle_id, container)
-    full_path = contained_path(container_path, plist_path)
-    if not full_path.exists():
-        raise HTTPException(status_code=404, detail=f"Plist not found: {plist_path}")
-    return full_path
+    return container_path, contained_path(container_path, plist_path)
 
 
 # ---------------------------------------------------------------------------
@@ -194,68 +181,53 @@ async def read_app_plist(
 ):
     """Read a plist value (or entire plist) from an app container.
 
-    cfprefsd is flushed first, so the file reflects what the app last wrote
-    rather than what the daemon had got round to saving.
+    A preference file on a booted simulator is read through cfprefsd, so the
+    answer is what the app sees -- including writes not yet on disk.
     """
     controller = _get_controller(request)
     try:
         udid_resolved = await controller.resolve_udid(udid)
         controller._require_simulator(udid_resolved, "read_app_plist")
-        sync = await sync_preferences(udid_resolved)
-        full_path = await _live_plist(udid_resolved, bundle_id, container, plist_path)
-        data = await read_plist(full_path)
+        container_path, full_path = await _resolve(udid_resolved, bundle_id, container, plist_path)
+        data = await read_live_plist(udid_resolved, container_path, full_path)
         if key is not None:
             if key not in data:
                 raise HTTPException(status_code=404, detail=f"Key {key!r} not found in plist")
-            return _with_sync({
+            return {
                 "key": key, "value": data[key],
                 "plist_path": plist_path, "container": container,
-            }, sync)
-        return _with_sync({"data": data, "plist_path": plist_path, "container": container}, sync)
+            }
+        return {"data": data, "plist_path": plist_path, "container": container}
     except HTTPException:
         raise
     except DeviceError as e:
         raise _handle_device_error(e)
 
 
-async def _edit_live_plist(udid: str, body, edit) -> tuple[dict, dict]:
-    """Resolve, flush cfprefsd, edit, then restart it so the edit is what is served.
-
-    Both restarts are needed, and both are reported. The first writes out anything the app changed
-    that cfprefsd is still holding -- otherwise that flush could land after
-    the edit and overwrite it. The second drops the cache, which would
-    otherwise keep serving the old values to the next launch.
-    """
-    # Sync first: an app's first write can sit in cfprefsd for seconds before
-    # the file exists at all, and checking for it first answered 404 for a
-    # plist the app had already written.
-    before = await sync_preferences(udid)
-    full_path = await _live_plist(udid, body.bundle_id, body.container, body.plist_path)
-    await edit(full_path)
-    after = await sync_preferences(udid)
-    return before, after
-
-
 @router.post("/plist")
 @logged_action("set_app_plist_value", category="device.action")
 async def set_app_plist_value(request: Request, body: SetAppPlistValueRequest):
-    """Set a top-level plist key in an app container. The key is taken
-    literally: `com.example.flag` is one key, not a path."""
+    """Set a top-level plist key in an app container, and confirm it reads back.
+
+    The key is taken literally: `com.example.flag` is one key, not a path. A
+    preference file on a booted simulator is written through cfprefsd, so a
+    running app sees the value on its next read.
+    """
     controller = _get_controller(request)
     try:
         udid = await controller.resolve_udid(body.udid)
         controller._require_simulator(udid, "set_app_plist_value")
-        before, after = await _edit_live_plist(
-            udid, body,
-            lambda path: set_plist_values(path, {body.key: body.value}),
+        container_path, full_path = await _resolve(
+            udid, body.bundle_id, body.container, body.plist_path,
         )
-        return _with_sync({
+        await set_live_plist_values(udid, container_path, full_path, {body.key: body.value})
+        return {
             "status": "ok",
             "key": body.key,
             "value": body.value,
             "plist_path": body.plist_path,
             "container": body.container,
-        }, before, after)
+        }
     except HTTPException:
         raise
     except DeviceError as e:
@@ -265,26 +237,26 @@ async def set_app_plist_value(request: Request, body: SetAppPlistValueRequest):
 @router.post("/plist/batch")
 @logged_action("set_app_plist_values", category="device.action")
 async def set_app_plist_values(request: Request, body: SetAppPlistValuesRequest):
-    """Set multiple plist keys in one write: all of them, or none.
+    """Set multiple plist keys, and confirm every one reads back.
 
-    This used to report HTTP 200 with `status: "partial"` and `keys_set: 0`
-    when every key had failed. A failure is now an error response, and the
-    file is left as it was.
+    A failure is an error response naming the keys already written. This used
+    to answer HTTP 200 with `status: "partial"` and `keys_set: 0` when every
+    key had failed.
     """
     controller = _get_controller(request)
     try:
         udid = await controller.resolve_udid(body.udid)
         controller._require_simulator(udid, "set_app_plist_values")
-        before, after = await _edit_live_plist(
-            udid, body,
-            lambda path: set_plist_values(path, body.values),
+        container_path, full_path = await _resolve(
+            udid, body.bundle_id, body.container, body.plist_path,
         )
-        return _with_sync({
+        await set_live_plist_values(udid, container_path, full_path, body.values)
+        return {
             "status": "ok",
             "keys_set": len(body.values),
             "plist_path": body.plist_path,
             "container": body.container,
-        }, before, after)
+        }
     except HTTPException:
         raise
     except DeviceError as e:
@@ -317,22 +289,23 @@ async def diff_app_plist(
         )
         checkpoint_data = await read_plist(checkpoint_path)
 
-        sync = await sync_preferences(udid_resolved)
+        container_path, live_path = await _resolve(
+            udid_resolved, bundle_id, container, plist_path,
+        )
         try:
-            live_path = await _live_plist(udid_resolved, bundle_id, container, plist_path)
-        except HTTPException as e:
+            live_data = await read_live_plist(udid_resolved, container_path, live_path)
+        except AppStateNotFoundError as e:
             raise HTTPException(
                 status_code=404, detail=f"Live plist not found: {plist_path}",
             ) from e
-        live_data = await read_plist(live_path)
 
         diff = diff_plists(checkpoint_data, live_data)
-        return _with_sync({
+        return {
             "checkpoint_label": checkpoint_label,
             "plist_path": plist_path,
             "container": container,
             **diff,
-        }, sync)
+        }
     except HTTPException:
         raise
     except DeviceError as e:
@@ -350,16 +323,16 @@ async def delete_app_plist_key(request: Request, body: DeleteAppPlistKeyRequest)
     try:
         udid = await controller.resolve_udid(body.udid)
         controller._require_simulator(udid, "delete_app_plist_key")
-        before, after = await _edit_live_plist(
-            udid, body,
-            lambda path: remove_plist_key(path, body.key),
+        container_path, full_path = await _resolve(
+            udid, body.bundle_id, body.container, body.plist_path,
         )
-        return _with_sync({
+        await remove_live_plist_key(udid, container_path, full_path, body.key)
+        return {
             "status": "ok",
             "key": body.key,
             "plist_path": body.plist_path,
             "container": body.container,
-        }, before, after)
+        }
     except HTTPException:
         raise
     except DeviceError as e:
@@ -387,8 +360,9 @@ async def start_plist_watch(request: Request, body: StartPlistWatchRequest):
         controller._require_simulator(udid, "start_plist_watch")
         # Checked here so a path outside the container, or a plist that is not
         # there, is a 400 or 404 rather than the adapter's generic 500.
-        await sync_preferences(udid)
-        await _live_plist(udid, body.bundle_id, body.container, body.plist_path)
+        _, full_path = await _resolve(udid, body.bundle_id, body.container, body.plist_path)
+        if not full_path.exists():
+            raise HTTPException(status_code=404, detail=f"Plist not found: {body.plist_path}")
     except HTTPException:
         raise
     except DeviceError as e:
