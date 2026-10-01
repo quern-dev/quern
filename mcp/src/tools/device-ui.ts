@@ -96,7 +96,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
       element_type: z
         .string()
         .optional()
-        .describe("Element type to narrow results (e.g., 'Button', 'TextField'). These are the types quern reports in `type`, which on a simulator come from the accessibility tree by default -- XCUITest names some controls differently (tab-bar items are RadioButton here, XCUIElementTypeButton to XCUITest). For an XCUITest selector use xcui_type, present while WDA serves the device (start_driver)."),
+        .describe("Element type to narrow results (e.g., 'Button', 'TextField'). Matched against `type`, across backends: with a label or identifier, a type also finds the same element under the name the other backend uses (RadioButton finds the Button WDA reports for a tab item; with an identifier, Button also finds a Cell). Exact matches win, and an equivalence is reported as matched_via. Type alone matches exactly. For an XCUITest selector use xcui_type, present while WDA serves the device (start_driver)."),
       udid: z
         .string()
         .optional()
@@ -153,7 +153,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
       element_type: z
         .string()
         .optional()
-        .describe("Element type to narrow results (e.g., 'Button', 'TextField'). These are the types quern reports in `type`, which on a simulator come from the accessibility tree by default -- XCUITest names some controls differently (tab-bar items are RadioButton here, XCUIElementTypeButton to XCUITest). For an XCUITest selector use xcui_type, present while WDA serves the device (start_driver)."),
+        .describe("Element type to narrow results (e.g., 'Button', 'TextField'). Matched against `type`, across backends: with a label or identifier, a type also finds the same element under the name the other backend uses (RadioButton finds the Button WDA reports for a tab item; with an identifier, Button also finds a Cell). Exact matches win, and an equivalence is reported as matched_via. Type alone matches exactly. For an XCUITest selector use xcui_type, present while WDA serves the device (start_driver)."),
       condition: z
         .enum([
           "exists",
@@ -429,7 +429,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
       element_type: z
         .string()
         .optional()
-        .describe('Element type to filter by (e.g. "Button", "TextField"). Matched against `type`, which on a simulator comes from the accessibility tree by default -- XCUITest names some controls differently (tab-bar items are RadioButton here, XCUIElementTypeButton to XCUITest). For an XCUITest selector use xcui_type, present while WDA serves the device (start_driver).'),
+        .describe('Element type to filter by (e.g. "Button", "TextField"). Matched against `type`, across backends: alongside a label or identifier, a type also finds the same element under the name the other backend uses (RadioButton finds the Button WDA reports for a tab item; with an identifier, Button also finds a Cell). Exact matches win, and an equivalence is reported as matched_via on the response. For an XCUITest selector use xcui_type, present while WDA serves the device (start_driver).'),
       udid: z
         .string()
         .optional()

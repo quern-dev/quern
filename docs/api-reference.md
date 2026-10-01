@@ -387,11 +387,11 @@ holds in `flow_store`. `flows_captured` is only what survived.
 | MCP Tool | Method | Path | Description |
 |---|---|---|---|
 | `init_app_knowledge` | — | — | Scaffolds or detects a `.quern/knowledge/` directory on disk; performs no server call |
-| `load_landmarks` | POST | `/api/v1/landmarks/load` | Load landmarks from a knowledge base path or inline JSON. Returns `screens` count and a categorized `skipped[]` array (legacy-format files, stubs, malformed YAML). |
+| `load_landmarks` | POST | `/api/v1/landmarks/load` | Load landmarks from a knowledge base path or inline JSON. Returns `screens` count, a categorized `skipped[]` array (legacy-format files, stubs, malformed YAML), and a `conventions` block: each file's declared `landmark_conventions` beside the findings quern computed. |
 | `identify_screen` | POST | `/api/v1/landmarks/identify` | Match the live UI tree against loaded landmarks. Returns matched screen, confidence, and full per-landmark detail in `partial_matches`. |
 | `list_landmarks` | GET | `/api/v1/landmarks` | List loaded landmark sets per app |
 | `unload_landmarks` | DELETE | `/api/v1/landmarks` | Unload landmarks for an app or all apps |
-| `validate_landmarks` | POST | `/api/v1/landmarks/validate` | Detect collisions between screens with overlapping landmark sets |
+| `validate_landmarks` | POST | `/api/v1/landmarks/validate` | Detect collisions between screens with overlapping landmark sets, and report the same `conventions` block as `load_landmarks` |
 
 ### WebDriverAgent (physical devices, and simulators on request)
 

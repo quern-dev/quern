@@ -292,6 +292,10 @@ class TestConventionChecks:
         entry = check_conventions("f", "s", 2, [Landmark(element="Group", label="Bar")])
         assert _codes(entry) == ["needs_identifier"]
 
+    def test_a_generic_type_with_an_identifier_is_portable(self):
+        entry = check_conventions("f", "s", 2, [Landmark(element="Group", identifier="tabs")])
+        assert entry.findings == []
+
     def test_a_type_with_no_counterpart_is_flagged_even_with_an_identifier(self):
         lm = Landmark(element="NavigationBar", identifier="Home")
         entry = check_conventions("f", "s", 2, [lm])
@@ -410,6 +414,22 @@ class TestScanning:
         registry.load_from_path("app", str(kb))
         registry.unload("app")
         assert registry.conventions() == []
+
+    def test_a_load_of_only_legacy_files_still_explains_itself(self, tmp_path):
+        """Zero screens load, so validate takes its no-landmarks branch -- and
+        the conventions are the only thing that says why."""
+        (tmp_path / "screens").mkdir()
+        _write(tmp_path / "screens", "old.md", """
+            ---
+            identify_by:
+              - element: Button
+            ---
+        """)
+        registry = LandmarkRegistry()
+        registry.load_from_path("app", str(tmp_path))
+        result = registry.validate("app")
+        assert result["error"] == "no_landmarks_loaded"
+        assert result["conventions"]["files"][0]["findings"][0]["code"] == "legacy_format"
 
     def test_validating_the_loaded_set_reports_them(self, kb):
         registry = LandmarkRegistry()

@@ -1,7 +1,9 @@
 # Landmarks across backends, and versioned landmark conventions — Spec
 
-**Status:** specification for the follow-up to #336 / #362. Nothing here is
-implemented.
+**Status:** implemented in the follow-up to #336 / #362. The tables live in
+`server/device/element_types.py`; the conventions check in
+`server/device/landmarks.py`. User-facing reference:
+[`../screen-landmarks.md`](../screen-landmarks.md#across-backends).
 **Raised:** 2026-10-01, while landing #362 (WDA on simulators).
 **Related:** #336, #362; [`knowledge-base-health.md`](knowledge-base-health.md)
 (where knowledge-base warnings belong) and
@@ -111,6 +113,13 @@ backend calls it `Button`, `StaticText` or `Cell` is vocabulary, not identity.
 
 Comparison stays case-insensitive, as it is today.
 
+**An exact match wins.** When an element of exactly the named type matches, the
+equivalents are dropped. Equivalence is how a selector written on one backend
+finds its element on the other, not a way to widen a selector that already
+found it: otherwise a screen holding both a `Button` and a `RadioButton`
+labelled "Home" would turn an unambiguous `tap_element` into an ambiguous one.
+(Settled during implementation.)
+
 ### 2.2 The tables
 
 **Safe pairs** — equated on label or identifier:
@@ -197,7 +206,14 @@ how the one that matters gets missed.
 - **v2** — this spec. The computed checks:
   1. A landmark whose type is in a §1.1 pair or family, and which lacks the
      identifier or label that §2.1 needs for that pair to be safe. It matches
-     on one backend only.
+     on one backend only. Implemented as: a type-only landmark on a paired type
+     (`needs_identifier_or_label`), and a landmark on a type that is in a
+     family but no pair, without an identifier (`needs_identifier`). A
+     labelled `Button` or `StaticText` is *not* flagged, although each is also
+     in a family: it is portable to a tab item and not to a table row, quern
+     cannot tell which a landmark means, and flagging the two commonest
+     landmarks would bury the certain findings. (Settled during
+     implementation.)
   2. A landmark on a type with no labelled counterpart in the accessibility
      tree (`SearchField`, `DatePicker`, `Picker`, `NavigationBar`). It is not
      portable; anchor the screen on its title instead.

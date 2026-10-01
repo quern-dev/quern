@@ -86,7 +86,7 @@ This structured data in config.json complements the prose in the knowledge base 
 What you'll see from the accessibility tree — the default on a simulator — and what these are for:
 
 - **Navigation**: `navigationBar`, `tabBar`, `toolbar`
-- **Tab bar items**: often `RadioButton` in the accessibility tree; `XCUIElementTypeButton` to XCUITest. Correct in `tap_element element_type=...`, **wrong in an XCUITest selector**. Tab items may use identifiers like `_TabName button` with a leading underscore.
+- **Tab bar items**: often `RadioButton` in the accessibility tree; `XCUIElementTypeButton` to XCUITest. Correct in `tap_element element_type=...` and in landmarks — quern matches it against the `Button` WDA reports when a label or identifier also pins the element (see [Across backends](screen-landmarks.md#across-backends)) — but **wrong in an XCUITest selector**. Tab items may use identifiers like `_TabName button` with a leading underscore.
 - **Buttons**: `button`, `link` (for hyperlink-style buttons)
 - **Text**: `staticText`, `textField`, `secureTextField`, `textView`
 - **Containers**: `scrollView`, `table`, `collectionView`, `cell`
@@ -167,7 +167,14 @@ A landmark is an element selector that must be present (or absent) for a screen 
 4. **Unique label text** — works for screens with no stable identifier. Locale-dependent; flag with a comment if the app is localized.
 5. **`absent: true`** — sometimes the cleanest disambiguator is "the parent screen's compose button is *not* present." Use sparingly.
 
-After authoring, run `validate_landmarks` (or the `quern validate` HTTP endpoint) on the knowledge base to catch overlapping landmarks. Two screens whose landmark sets are subsets of each other will collide — at least one needs a distinguishing element.
+**Make landmarks portable across backends.** The same screen is read through the accessibility tree on a simulator and through WDA on a phone (or a simulator after `start_driver`), and they name some elements differently. Quern matches across the two when a landmark carries enough to make it safe, so:
+
+- Give every landmark a label or an identifier; a type-only landmark is matched exactly, so it holds on one backend only.
+- Give generic types (`Group`, `Other`, `GenericElement`, `Cell`) an identifier; a label is not enough for them.
+- Don't anchor on `navigationBar`, `searchField`, `datePicker` or `picker`: the accessibility tree exposes none of them with a label or identifier. Use the screen title — a `Heading` with its label — instead.
+- Start each new screen file with `landmark_conventions: 2`. It is the version you wrote the file for, not a claim it complies; quern computes that on load. See [Auditing a knowledge base](screen-landmarks.md#auditing-a-knowledge-base).
+
+After authoring, run `validate_landmarks` (or the `quern validate` HTTP endpoint) on the knowledge base to catch overlapping landmarks and read its `conventions` block. Two screens whose landmark sets are subsets of each other will collide — at least one needs a distinguishing element.
 
 ### When a Knowledge Base Has No Landmarks
 
@@ -217,6 +224,17 @@ If the file still carries an `identify_by:` block, delete it while you are there
 - Whenever you're already touching a screen for another reason — opportunistic re-verification keeps drift small and easy to fix.
 
 There's no scheduled audit or calendar-based heuristic; drift surfaces through the agent's normal use of `identify_screen`. When `confidence: "none"` appears, treat it as a maintenance signal, not a transient bug to ignore.
+
+### Auditing an Existing Knowledge Base
+
+A knowledge base written before landmark conventions were versioned declares nothing, and is read as v1: it loads and matches as before, including across backends. To bring one up to date:
+
+1. `load_landmarks` it and read the `conventions` block: counts for every file, and each file not reported `current` with the landmarks at fault and why.
+2. Fix the findings — usually an identifier on a type-only or generic landmark, or a landmark moved off a `navigationBar` onto the screen title.
+3. Add `landmark_conventions: 2` to each file you have fixed, and reload until it reports `current`.
+4. Where you can, identify the live screen twice — on the default backend, then after `start_driver` — to confirm the landmarks hold on both.
+
+`grep -L "landmark_conventions: 2" .quern/knowledge/screens/*.md` lists the files still to migrate without loading anything. The full reference is [Auditing a knowledge base](screen-landmarks.md#auditing-a-knowledge-base).
 
 ### Identifier Reliability
 

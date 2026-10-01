@@ -12,7 +12,11 @@ The response includes a 'skipped' array listing screen files the loader couldn't
   - no_landmarks: file has neither field (likely a stub).
   - no_frontmatter / yaml_error / invalid_entries: file is malformed.
 
-When skipped[] contains legacy_format entries, the recommended workflow is to surface them to the user, propose a per-file migration (see the app-knowledge-guide), and rewrite each file after review.`,
+When skipped[] contains legacy_format entries, the recommended workflow is to surface them to the user, propose a per-file migration (see the app-knowledge-guide), and rewrite each file after review.
+
+The response also carries a 'conventions' block. Each screen file may declare 'landmark_conventions: N', the conventions it is written for — a target, not a claim; quern never writes it. Quern checks every file against the current conventions anyway and reports counts for all of them plus, in 'files', each one not 'current': 'undeclared' (read as v1), 'behind', 'failing' (declares current but has findings), or 'newer'. Findings name the landmark and why it matches on one backend only (needs_identifier_or_label, needs_identifier, no_portable_counterpart) or is malformed (legacy_format, invalid_declaration). Fix the findings, then set the declaration — see 'Auditing a knowledge base' in docs/screen-landmarks.md.
+
+Element types are matched across backends: a landmark on the accessibility tree's RadioButton matches the Button WDA reports for the same tab item, when the landmark also has a label or identifier.`,
     inputSchema: strictParams({
       app: z
         .string()
@@ -77,7 +81,9 @@ When skipped[] contains legacy_format entries, the recommended workflow is to su
   server.registerTool("identify_screen", {
     description: `Identify the current screen by matching the live UI tree against loaded landmarks. Returns the matched screen name, confidence level (exact/ambiguous/none), and partial matches. Load landmarks first with load_landmarks.
 
-partial_matches contains EVERY non-fully-matched screen (including zero-match), sorted by descending match count so the best candidate is first. Each entry has a 'landmarks' array with per-landmark match results, so you can debug "why didn't my landmarks match?" without re-running identification — the failing selectors are right there in the response.`,
+partial_matches contains EVERY non-fully-matched screen (including zero-match), sorted by descending match count so the best candidate is first. Each entry has a 'landmarks' array with per-landmark match results, so you can debug "why didn't my landmarks match?" without re-running identification — the failing selectors are right there in the response.
+
+A landmark that matched only because its element type is named differently on this backend carries matched_via, e.g. "RadioButton≈Button": the landmark was written on the accessibility tree and the screen was read through WDA, or the reverse. Exact matches carry nothing.`,
     inputSchema: strictParams({
       app: z
         .string()
@@ -169,7 +175,7 @@ partial_matches contains EVERY non-fully-matched screen (including zero-match), 
   });
 
   server.registerTool("validate_landmarks", {
-    description: `Check for landmark collisions across screens. Reports pairs of screens whose landmarks overlap (one could be mistaken for the other) and screens with no landmarks defined. Can validate loaded landmarks or scan a knowledge base path directly.`,
+    description: `Check for landmark collisions across screens. Reports pairs of screens whose landmarks overlap (one could be mistaken for the other) and screens with no landmarks defined. Can validate loaded landmarks or scan a knowledge base path directly. Also returns the same 'conventions' block as load_landmarks: which files declare the current landmark conventions, and which landmarks would match on one backend only.`,
     inputSchema: strictParams({
       app: z
         .string()

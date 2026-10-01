@@ -2,6 +2,14 @@
 screen: ""
 status: documented
 
+# The landmark conventions this file is written for. A target, not a claim:
+# quern never writes it, and checks every file against the current conventions
+# on load_landmarks and validate_landmarks whatever it says. Keep it at the
+# version you wrote or last migrated the file to; `grep -L` across screens/ then
+# shows which files nobody has migrated. See "Auditing a knowledge base" in
+# docs/screen-landmarks.md.
+landmark_conventions: 2
+
 # Does this screen scroll? Worth recording: quern cannot work it out by looking.
 # Measured on a booted simulator, Settings and Safari both scroll and both
 # report ZERO scroll containers in `type` and in `role` — the accessibility tree
@@ -39,7 +47,15 @@ scrollable:
 # knowledge-base authoring guide.
 #
 # Available fields per landmark:
-#   element          - element type (required, e.g. "navigationBar", "Button")
+#   element          - element type (required, e.g. "Heading", "Button").
+#                      Matched across backends: a RadioButton landmark finds
+#                      the same tab item read through WDA as a Button, when
+#                      the landmark also carries a label or identifier. Give
+#                      generic types (Group, Other, GenericElement, Cell) an
+#                      identifier, and avoid NavigationBar, SearchField,
+#                      DatePicker and Picker -- the accessibility tree exposes
+#                      them with no label or identifier, so a landmark on one
+#                      matches through WDA only. Anchor on the title instead.
 #   identifier       - exact-match accessibility identifier (preferred)
 #   label            - exact-match (case-insensitive) label text
 #   label_contains   - substring match for dynamic labels

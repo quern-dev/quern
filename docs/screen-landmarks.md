@@ -21,17 +21,17 @@ A landmark is an element selector that must be present (or absent) on a specific
 ```yaml
 # In a screen document's frontmatter
 landmarks:
-  - { element: "navigationBar", label: "Settings" }
-  - { element: "staticText", label: "Account" }
+  - { element: "Heading", label: "Settings" }
+  - { element: "StaticText", label: "Account" }
 ```
 
-This says: "If the screen has a navigation bar titled 'Settings' and a static text element labeled 'Account', this is the Settings screen."
+This says: "If the screen has a title 'Settings' and a static text element labeled 'Account', this is the Settings screen." The title is a `Heading` on a simulator's accessibility tree and a `StaticText` through WDA; with a label, the landmark matches either (see [Across backends](#across-backends)).
 
 ### Landmark selection priorities
 
 Not all elements make good landmarks. In order of reliability:
 
-1. **Navigation bar title** — Most unique, most stable. One per screen.
+1. **Screen title** — Most unique, most stable. One per screen. Name it as a `Heading` with its label, not as a `navigationBar`: the accessibility tree exposes no navigation bar a landmark can name, so a `navigationBar` landmark matches through WDA only.
 2. **Tab bar selection state** — Which tab is active. Stable across app versions.
 3. **Unique static text** — Section headers, screen titles outside nav bars.
 4. **Unique interactive elements** — A button or field that only exists on this screen.
@@ -64,6 +64,28 @@ Matching rules:
 - `selected: true` requires the element's UI selection state to be on. Both iOS (`AXValue == "1"` from idb) and Android (uiautomator `selected="true"` for tabs, `checked="true"` for checkable widgets) are normalized to `AXValue == "1"` so the same landmark works cross-platform.
 - If multiple fields are specified, all must match (AND)
 - All landmarks for a screen must match (AND across the list)
+
+### Across backends
+
+The element type depends on which backend read the screen. A simulator is read through the accessibility tree by default; a physical device, and a simulator after `start_driver`, through WebDriverAgent, which reports XCUITest's types. The same tab-bar item is a `RadioButton` in one and a `Button` in the other.
+
+So `element` is matched across the two, as far as the landmark's other fields make safe:
+
+| Landmark has | Type matches |
+|---|---|
+| an `identifier` | the same type, its safe pair, or its family |
+| a `label` or `label_contains`, no identifier | the same type or its safe pair |
+| neither | the same type only |
+
+**Safe pairs** — `RadioButton`↔`Button`, `Heading`↔`StaticText`, `TextField`↔`SecureTextField`, `CheckBox`↔`Switch`, `TabGroup`↔`SegmentedControl`, `TextArea`↔`TextView`, `Slider`↔`PageIndicator`.
+
+**Families** — containers (`Group`, `Other`, `TabBar`, `NavigationBar`, `Toolbar`, `Table`, `CollectionView`); rows (`Button`, `StaticText`, `Cell`); indicators (`GenericElement`, `ProgressIndicator`, `ActivityIndicator`, `ColorWell`, `StaticText`); headers (`Heading`, `Other`, `StaticText`).
+
+Families need an identifier because the accessibility tree's generic types stand for many specific ones — `Group` was the tab bar, the navigation bar, the toolbar, the table and the collection view on one probe app. And `Button`↔`StaticText` is never equated by label: a list row is one `Button` to the accessibility tree and a `Cell` holding a `StaticText` to XCUITest, so the label lands on the text *inside* the row.
+
+A landmark that matched only through an equivalence says so in its per-landmark result, as `matched_via: "RadioButton≈Button"`. An exact match carries nothing, and wins when both are on screen. The same rule applies to `element_type` on `tap_element`, `get_element` and `wait_for_element`, whose responses carry `matched_via` the same way.
+
+The tables are measured, not inferred, and live in `server/device/element_types.py`; the measurement is in [`proposals/landmark-conventions.md`](proposals/landmark-conventions.md).
 
 ### Screen properties: `scrollable`
 
@@ -312,6 +334,65 @@ The response includes:
   - `no_landmarks` — file has neither field, likely a stub.
   - `no_frontmatter` / `yaml_error` / `invalid_entries` — file is malformed; `error` is populated where applicable.
   - `read_error` — couldn't read the file.
+
+## Auditing a knowledge base
+
+Each screen file may declare the landmark conventions it is written for:
+
+```yaml
+---
+screen: home
+landmark_conventions: 2
+landmarks:
+  - { element: RadioButton, identifier: tab.home, selected: true }
+---
+```
+
+This is a **target, not a claim of compliance**. Quern never writes it. It checks every file against the current conventions on `load_landmarks` and `validate_landmarks`, whatever the file declares, and reports the result in a `conventions` block:
+
+```json
+"conventions": {
+  "current_version": 2,
+  "counts": {"current": 40, "failing": 1, "behind": 0, "undeclared": 12},
+  "files": [
+    {"file": "screens/list.md", "screen": "list", "declared": null, "state": "undeclared",
+     "findings": [{"landmark": {"element": "Group", "label": "Toolbar"},
+                   "code": "needs_identifier", "message": "..."}]}
+  ],
+  "how_to_migrate": "..."
+}
+```
+
+`counts` covers every file; `files` lists only those not reported `current`. The states:
+
+| Declared | Findings | State |
+|---|---|---|
+| nothing | — | `undeclared` — read as v1 |
+| older than current | — | `behind` |
+| current | some | `failing` |
+| current | none | `current` |
+| newer than this quern | — | `newer` — update quern |
+
+The findings are the same whatever the file declares, so for an undeclared or older file they are exactly what migrating would change. The v2 checks:
+
+- `needs_identifier_or_label` — a type-only landmark on a type with a safe pair. It matches on one backend only.
+- `needs_identifier` — a landmark on a generic type (`Group`, `Other`, `GenericElement`, `Cell`, `TabBar`, …) with no identifier. A label does not make it portable.
+- `no_portable_counterpart` — a landmark on `NavigationBar`, `SearchField`, `DatePicker` or `Picker`, which the accessibility tree exposes with no label or identifier. Anchor the screen on its title instead.
+- `legacy_format` — `identify_by:` without `landmarks:`.
+- `invalid_declaration` — `landmark_conventions` is not a positive integer. Read as undeclared.
+
+A labelled `Button` or `StaticText` is not flagged even though each is in a family: a labelled `Button` is portable to a tab item and not to a table row, quern cannot tell which a landmark means, and flagging the two commonest landmarks there are would bury the findings that are certain.
+
+To audit:
+
+1. **Load the knowledge base and read the `conventions` block.**
+2. **Fix what it reports.** Typically: add an `identifier` to a type-only landmark, or move a landmark off a non-portable type onto the screen title.
+3. **Set `landmark_conventions: 2`** on each file once it is fixed, and reload to confirm it reports `current`.
+4. **Optionally, confirm behaviour as well as form.** Identify the live screen on the default backend, then again after `start_driver`. A landmark that identifies the screen on only one of them is the thing this exists to catch.
+
+Steps 1–3 check the file against the conventions; step 4 checks it against the app. A file can pass the first three and still be wrong about the app — see [Keeping Landmarks in Sync](app-knowledge-guide.md#keeping-landmarks-in-sync).
+
+Two views, two questions: `grep -L "landmark_conventions: 2" screens/*.md` lists the files nobody has migrated, with nothing loaded; the `conventions` block says which files actually comply.
 
 ## Validation tools
 
