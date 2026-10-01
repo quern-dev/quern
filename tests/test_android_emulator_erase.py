@@ -564,6 +564,10 @@ class TestTheReservationHoldsForTheWholeErase:
         it on the way out, dropping the erase's reservation mid-erase. The
         first test of this mocked `boot_emulator` and so could not see it."""
         ctrl, _ = _emulator(monkeypatch)
+        # The real `boot_emulator` refuses before reaching the marker when no
+        # emulator binary was found -- true on CI's Linux runner, which has no
+        # Android SDK, so without this the test failed there for that reason.
+        ctrl.adb._emulator_path = "/sdk/emulator/emulator"
         monkeypatch.setattr(ctrl.adb, "boot_emulator",
                             adb_module.AdbBackend.boot_emulator.__get__(ctrl.adb))
 
@@ -585,6 +589,7 @@ class TestTheReservationHoldsForTheWholeErase:
 
     async def test_a_plain_boot_still_releases_its_own_marker(self, monkeypatch):
         backend = adb_module.AdbBackend()
+        backend._emulator_path = "/sdk/emulator/emulator"   # as above: no SDK on CI
 
         async def inner(avd, timeout, headless, wipe_data):
             return OLD
