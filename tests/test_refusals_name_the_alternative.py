@@ -278,3 +278,20 @@ class TestTheAdviceHasNoRoomToMakeAClaim:
         assert DeviceController._needs_debuggable("start_plist_watch") is False
         assert DeviceController._needs_debuggable("Erase") is False
         assert DeviceController._needs_debuggable("not an operation") is False
+
+
+
+@pytest.mark.parametrize("operation", ["Erase", "Set hardware keyboard"])
+def test_restart_shaped_refusals_point_at_the_issue_that_holds_them(operation):
+    """These pointed at #263 after it closed as fixed, so a caller following
+    "quern does not expose it yet -- see #263" landed on "both defects are
+    fixed" for work that was never part of that issue. #356 holds them, open,
+    with the design question they actually need. Rendered rather than read off
+    the table, because the caller sees the sentence, not the tuple."""
+    ctrl = DeviceController()
+    ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR
+    with pytest.raises(DeviceError) as excinfo:
+        ctrl._require_simulator("emulator-5554", operation)
+    msg = str(excinfo.value)
+    assert "#356" in msg, msg
+    assert "#263" not in msg, msg

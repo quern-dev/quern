@@ -463,10 +463,15 @@ class DeviceController(DeviceControllerUI):
         "start_plist_watch": ("watching an app's own files for changes", "inotifyd", 314),
         "save_app_state": ("archiving an app's own data directory", "run-as", 314),
         "restore_app_state": ("restoring an app's own data directory", "run-as", 314),
+        # Both restart-shaped -- a launch flag and a boot-time AVD property --
+        # so whether to build them at all is the open question, and #356 holds
+        # it. They pointed at #263 until it closed as fixed, which sent a
+        # caller to "both defects are fixed" for work that was never part of
+        # it. A pointer here is a claim that the work is pending somewhere.
         "Set hardware keyboard": (
-            "the hardware-keyboard setting", "the hw.keyboard AVD property", 263,
+            "the hardware-keyboard setting", "the hw.keyboard AVD property", 356,
         ),
-        "Erase": ("wiping an emulator", "the -wipe-data launch flag", 263),
+        "Erase": ("wiping an emulator", "the -wipe-data launch flag", 356),
     }
 
     #: Entries whose mechanism is `run-as`, which the platform refuses for a
