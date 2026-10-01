@@ -1136,7 +1136,7 @@ class DeviceController(DeviceControllerUI):
                 # Report the outcome, not the request: listed by adb is not
                 # started. Measured: about nine seconds apart on an erase.
                 await self.adb.wait_for_boot_completed(
-                    serial, max(deadline - loop.time(), 5.0),
+                    serial, max(deadline - loop.time(), 0.0),
                 )
             except DeviceError as e:
                 if serial is None:

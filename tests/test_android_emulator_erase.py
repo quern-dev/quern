@@ -669,3 +669,39 @@ class TestAKillThatReportsFailureIsJudgedByWhatHappened:
         with pytest.raises(DeviceError, match="has not been wiped"):
             await ctrl.erase(OLD)
         assert not any(c.startswith("boot ") for c in calls), calls
+
+
+class TestASpentBudgetStillLooksOnce:
+    """The callers pass whatever is left of a shared deadline, with no floor --
+    a five-second minimum let the erase overrun its budget (review of #360).
+    That is only safe because the wait reads before judging the deadline."""
+
+    async def test_a_finished_boot_is_seen_with_no_time_left(self, monkeypatch):
+        backend = adb_module.AdbBackend()
+        reads = []
+
+        async def getprop(serial, *args):
+            reads.append(1)
+            return "1\n", ""
+
+        monkeypatch.setattr(backend, "_run_adb_for_device", getprop)
+
+        await backend.wait_for_boot_completed(OLD, timeout=0.0)
+
+        assert reads == [1]
+
+    async def test_an_unfinished_boot_with_no_time_left_fails_after_one_look(
+        self, monkeypatch,
+    ):
+        backend = adb_module.AdbBackend()
+        reads = []
+
+        async def getprop(serial, *args):
+            reads.append(1)
+            return "\n", ""
+
+        monkeypatch.setattr(backend, "_run_adb_for_device", getprop)
+
+        with pytest.raises(DeviceError, match="had not finished starting"):
+            await backend.wait_for_boot_completed(OLD, timeout=0.0)
+        assert reads == [1]

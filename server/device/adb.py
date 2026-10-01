@@ -670,7 +670,9 @@ class AdbBackend:
                     # deadline covers both waits, which is why the default
                     # timeout went from 60s to 120s.
                     remaining = deadline - asyncio.get_event_loop().time()
-                    await self.wait_for_boot_completed(d.udid, max(remaining, 5.0))
+                    # No floor: the wait reads once even with nothing left,
+                    # so the budget is honoured without failing a finished boot.
+                    await self.wait_for_boot_completed(d.udid, max(remaining, 0.0))
                     logger.info("Android emulator booted: %s (AVD: %s)", d.udid, avd_name)
                     return d.udid
 
@@ -690,7 +692,10 @@ class AdbBackend:
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
-        while loop.time() < deadline:
+        while True:
+            # Read before judging the deadline, so a caller whose budget is
+            # already spent still learns a boot that *has* finished, instead
+            # of being told it failed without anyone looking (review of #360).
             try:
                 out, _ = await self._run_adb_for_device(
                     serial, "shell", "getprop", "sys.boot_completed",
@@ -699,6 +704,8 @@ class AdbBackend:
                     return
             except DeviceError:
                 pass  # adb can refuse a shell while the device is still coming up
+            if loop.time() >= deadline:
+                break
             await asyncio.sleep(1)
         raise DeviceError(
             f"{serial} came back but Android had not finished starting after "
