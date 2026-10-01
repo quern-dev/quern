@@ -11,6 +11,9 @@ export interface RunningBuild {
   elapsed_s: number;
   current: string;
   tasks_run: number;
+  /** "checking the variant", "building", "installing on 2 device(s)"; absent
+   * from a server older than the field. */
+  stage?: string;
 }
 
 function duration(seconds: number): string {
@@ -41,6 +44,10 @@ export function progressMessage(
     // or an Xcode build, which does not report its tasks.
     return `working (${duration(waitedS)})`;
   }
+  const took = duration(build.elapsed_s);
+  if (build.stage && build.stage !== "building") {
+    return `${build.task || "Gradle"}: ${build.stage} (${took})`;
+  }
   const now = build.current ? build.current.replace(/^> Task /, "") : "starting Gradle";
-  return `${build.task}: ${now} (${duration(build.elapsed_s)}, ${build.tasks_run} tasks)`;
+  return `${build.task}: ${now} (${took}, ${build.tasks_run} tasks)`;
 }

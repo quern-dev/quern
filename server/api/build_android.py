@@ -94,6 +94,24 @@ async def build_and_install(controller, body, *, env: dict[str, str] | None = No
     if environment:
         return _not_built(serials, environment, used, "the environment is not ready to build")
 
+    # Listed for /build-progress from here until this returns: through the
+    # variant check, Gradle, and the installs after it, so a caller waiting
+    # on a long build never sees a gap and reads it as hung.
+    progress = gradle.BuildProgress(project=str(project.root), task="",
+                                    stage="checking the variant")
+    gradle.ACTIVE[id(progress)] = progress
+    try:
+        return await _build(controller, body, project, variant, serials, env, home, choice,
+                            sdk, criteria, used, progress)
+    finally:
+        gradle.ACTIVE.pop(id(progress), None)
+
+
+async def _build(controller, body, project: gradle.GradleProject, variant: str,
+                 serials: list[str], env: dict[str, str], home: str, choice: jdk_mod.Choice,
+                 sdk: str, criteria: int | None, used: dict,
+                 progress: gradle.BuildProgress) -> dict:
+    """Check the variant, run Gradle, and install what it built."""
     args = list(body.gradle_args or [])
     if not any(a.startswith("-Pandroid.builder.sdkDownload") for a in args):
         # The Android Gradle plugin downloads missing SDK packages itself once
@@ -105,8 +123,7 @@ async def build_and_install(controller, body, *, env: dict[str, str] | None = No
 
     task = gradle.assemble_task(project, variant)
     logger.info("Building %s with %s (%s)", project.root, task, used["java"])
-    progress = gradle.BuildProgress(project=str(project.root), task=task)
-    gradle.ACTIVE[id(progress)] = progress
+    progress.task, progress.stage = task, "building"
     try:
         code, output = await gradle.run(project, task, gradle_env, args, progress=progress)
     except TimeoutError:
@@ -121,8 +138,6 @@ async def build_and_install(controller, body, *, env: dict[str, str] | None = No
         return _not_built(serials, [gradle.EnvironmentProblem(
             kind="gradle_wrapper", summary=f"{project.wrapper} could not be run: {e}",
             options=[fix])], used, "the Gradle wrapper could not be run")
-    finally:
-        gradle.ACTIVE.pop(id(progress), None)
     ran_on = criteria or (choice.jdk.major if choice.jdk else None)
     quiet = gradle.quiet_logging(project, args, jdk_mod.gradle_user_home(args, env, home))
     result, environment = gradle.parse(code, output, project, choice.candidates, ran_on=ran_on,
@@ -146,8 +161,8 @@ async def build_and_install(controller, body, *, env: dict[str, str] | None = No
         return {**_not_built(serials, [], used,
                              f"the {variant} APK ({apk}) is unsigned: the variant has no signing "
                              f"config, and Android installs only signed APKs. Build a debug "
-                             f"variant, which this machine's debug key signs, or give the "
-                             f"{variant} build type a signingConfig (a change to the project)"),
+                             f"variant, which this machine's debug key signs, or give its build "
+                             f"type a signingConfig (a change to the project)"),
                 "build_android": result}
     if did is False:
         # Outputs for this variant exist, and this run did not make them: an
@@ -160,6 +175,7 @@ async def build_and_install(controller, body, *, env: dict[str, str] | None = No
                              f"{metadata['_dir']} is from an earlier build{packaged_here}"),
                 "build_android": result}
 
+    progress.stage = f"installing on {len(serials)} device(s)"
     record_task = asyncio.create_task(_record(project, str(metadata.get("variantName")
                                                            or variant)))
     try:

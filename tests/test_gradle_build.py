@@ -1470,3 +1470,27 @@ class TestProgress:
         monkeypatch.setattr(gradle, "run", run)
         _go(FakeController(FakeAdb([])), _body(project_path=str(built.root)))
         assert gradle.ACTIVE == {}
+
+    def test_the_build_stays_listed_through_each_stage(self, built, monkeypatch):
+        """Through the variant check and the installs, not only Gradle: a gap
+        reads as a hung build to whoever is waiting."""
+        stages = []
+
+        async def list_variants(project, env, args):
+            stages.append([b["stage"] for b in (await build_app.build_progress())["builds"]])
+            return gradle.parse_variants((FIXTURES / "tasks_plain.out").read_text()), ""
+        monkeypatch.setattr(gradle, "list_variants", list_variants)
+
+        async def run(project, task, env, args, timeout=0, progress=None):
+            stages.append([b["stage"] for b in (await build_app.build_progress())["builds"]])
+            return 0, "BUILD SUCCESSFUL in 9s\n"
+        monkeypatch.setattr(gradle, "run", run)
+
+        class Adb(FakeAdb):
+            async def install_apk_result(self, serial, apk, allow_downgrade=False):
+                stages.append([b["stage"] for b in (await build_app.build_progress())["builds"]])
+                return await super().install_apk_result(serial, apk, allow_downgrade)
+
+        _go(FakeController(Adb([(0, "Success\n", "")])), _body(project_path=str(built.root)))
+        assert stages == [["checking the variant"], ["building"], ["installing on 1 device(s)"]]
+        assert gradle.ACTIVE == {}

@@ -249,12 +249,14 @@ class BuildProgress:
     #: The last `> Task :app:compileStagingDebugKotlin` line Gradle printed.
     current: str = ""
     tasks_run: int = 0
+    #: What quern is doing: checking the variant, building, installing.
+    stage: str = "building"
 
     def as_dict(self) -> dict:
         return {"project": self.project, "task": self.task,
                 "started_at": self.started_at.isoformat(),
                 "elapsed_s": round(time.monotonic() - self.started, 1),
-                "current": self.current, "tasks_run": self.tasks_run}
+                "current": self.current, "tasks_run": self.tasks_run, "stage": self.stage}
 
 
 #: Builds running now, by identity. A build that ends removes itself.

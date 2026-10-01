@@ -37,3 +37,15 @@ test("a build with no task yet says Gradle is starting", () => {
   assert.match(progressMessage([{ ...build, current: "", tasks_run: 0 }], "/src/app-root", 2),
     /starting Gradle \(2m14s, 0 tasks\)/);
 });
+
+test("after Gradle, the install is what is happening", () => {
+  // Measured: the last notification of a 130s build read "working (2m10s)"
+  // while quern installed, because the build had already left the list.
+  assert.equal(progressMessage([{ ...build, stage: "installing on 1 device(s)" }], "/src/app-root", 130),
+    ":app:assembleStagingDebug: installing on 1 device(s) (2m14s)");
+});
+
+test("before the task is known, the stage names what is happening", () => {
+  assert.equal(progressMessage([{ ...build, task: "", stage: "checking the variant" }], "/src/app-root", 9),
+    "Gradle: checking the variant (2m14s)");
+});
