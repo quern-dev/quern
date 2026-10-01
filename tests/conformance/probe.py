@@ -274,13 +274,13 @@ CONTRACTS = {"ios": IOS, "android": ANDROID}
 #: Tabs reachable directly on the iOS bar, in order.
 #:
 #: A UITabBar shows at most five *items*, and when there are more tabs than that
-#: the fifth item is "More" rather than a tab -- so eight tabs means four are on
-#: the bar and the other four are behind More, which keeps its own navigation
+#: the fifth item is "More" rather than a tab -- so with ten tabs four are on
+#: the bar and the other six are behind More, which keeps its own navigation
 #: stack. Counting "five on the bar" is the easy mistake: it is five items, four
 #: tabs. Measured against the live screen, which reports exactly
 #: `Text, Controls, Scroll, Links, More`.
 IOS_BAR_TABS = ("text", "controls", "scroll", "links")
-IOS_MORE_TABS = ("logs", "location", "web", "diag", "state")
+IOS_MORE_TABS = ("logs", "location", "web", "diag", "state", "widgets", "lists")
 
 
 class ProbeUnavailable(RuntimeError):

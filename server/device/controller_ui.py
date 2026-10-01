@@ -9,6 +9,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from server.device.element_types import equivalence, related_type_names
 from server.device.probing import frame_key
 from server.device.screenshots import annotate_screenshot
 from server.device.ui_elements import (
@@ -211,6 +212,37 @@ def _effective_filter_label(
     return label
 
 logger = logging.getLogger(__name__)
+
+
+def _with_queried_identifier(raw: list[dict], identifier: str | None) -> list[dict]:
+    """Restore the identifier a WDA query matched on, where WDA left it out.
+
+    A query naming the identifier -- `name == '...'` in a predicate -- returns
+    only elements carrying it, but WDA's compact response often echoes the
+    class name in `name`, which the mapper rightly discards. The element then
+    came back with no identifier, and the caller's own `find_element`, which
+    checks the identifier again, dropped it: `tap_element` with an identifier
+    *and* an element type was not_found on every WDA device, while the same
+    identifier alone worked. `find_elements_by_query` already does this for the
+    `accessibility id` strategy; this is the predicate path, which does not
+    pass through that branch.
+    """
+    if identifier:
+        for item in raw:
+            if not item.get("AXUniqueId"):
+                item["AXUniqueId"] = identifier
+    return raw
+
+
+def _note_equivalence(result: dict, element_type: str | None, element: UIElement) -> None:
+    """Add `matched_via` when `element_type` matched only through equivalence.
+
+    So a caller can tell a `RadioButton` filter that found a `Button` (the same
+    tab item, read through WDA) from one that matched exactly. Exact matches,
+    and calls with no type, carry nothing -- see `element_types.equivalence`.
+    """
+    if element_type and (via := equivalence(element_type, element.type)):
+        result["matched_via"] = via
 
 
 #: Tools whose failure means the *backend* broke, not that the device
@@ -1162,12 +1194,20 @@ class DeviceControllerUI:
             """Escape single quotes for NSPredicate string literals."""
             return val.replace("'", "\\'")
 
-        xcui_type = f"XCUIElementType{element_type}" if element_type else None
+        # Every type that could stand for `element_type` on this backend, not
+        # just its own spelling: the caller's `find_element` applies the real
+        # rule afterwards, and a narrower query here would hide a `Button` from
+        # a caller asking for the `RadioButton` it is on the other backend.
+        # Sorted so the predicate, which is logged, is stable.
+        xcui_types = (
+            [f"XCUIElementType{t}" for t in related_type_names(element_type)]
+            if element_type else []
+        )
 
         any_label = label or label_contains or label_prefix
 
         # Choose the most efficient WDA locator strategy
-        if identifier and not any_label and not xcui_type:
+        if identifier and not any_label and not xcui_types:
             # Fastest: direct accessibility id lookup
             using = "accessibility id"
             value = identifier
@@ -1182,8 +1222,11 @@ class DeviceControllerUI:
                 clauses.append(f"label CONTAINS[c] '{_escape(label_contains)}'")
             elif label_prefix:
                 clauses.append(f"label BEGINSWITH[c] '{_escape(label_prefix)}'")
-            if xcui_type:
-                clauses.append(f"type == '{xcui_type}'")
+            if len(xcui_types) == 1:
+                clauses.append(f"type == '{xcui_types[0]}'")
+            elif xcui_types:
+                listed = ", ".join(f"'{t}'" for t in xcui_types)
+                clauses.append(f"type IN {{{listed}}}")
 
             if not clauses:
                 return [], 0.0
@@ -1195,7 +1238,7 @@ class DeviceControllerUI:
         start = time.perf_counter()
         raw = await self.wda_client.find_elements_by_query(udid, using, value)
         elapsed = time.perf_counter() - start
-        elements = parse_elements(raw)
+        elements = parse_elements(_with_queried_identifier(raw, identifier))
 
         # If accessibility id returned nothing, retry with predicate string —
         # but only if the first query was fast (<2s). On dense screens, WDA
@@ -1208,7 +1251,7 @@ class DeviceControllerUI:
                 pred_value, udid[:8],
             )
             raw = await self.wda_client.find_elements_by_query(udid, "predicate string", pred_value)
-            elements = parse_elements(raw)
+            elements = parse_elements(_with_queried_identifier(raw, identifier))
         elif not elements and elapsed >= 2.0:
             logger.info(
                 "[WDA DIRECT] skipping predicate retry "
@@ -1243,7 +1286,7 @@ class DeviceControllerUI:
 
         if filter_label or filter_identifier or filter_type:
             web = find_element(web, label=filter_label, identifier=filter_identifier,
-                               element_type=filter_type)
+                               element_type=filter_type, prefilter=True)
         if not web:
             return elements
 
@@ -1435,7 +1478,8 @@ class DeviceControllerUI:
                 # If filters provided, apply them to cached elements (in-memory filtering is fast)
                 if has_filters:
                     filtered = find_element(cached_elements, label=filter_label,
-                                          identifier=filter_identifier, element_type=filter_type)
+                                          identifier=filter_identifier, element_type=filter_type,
+                                          prefilter=True)
                     return filtered, resolved
 
                 return cached_elements, resolved
@@ -1527,7 +1571,8 @@ class DeviceControllerUI:
             # Apply filters in memory if needed
             if has_filters:
                 elements = find_element(elements, label=filter_label,
-                                      identifier=filter_identifier, element_type=filter_type)
+                                      identifier=filter_identifier, element_type=filter_type,
+                                      prefilter=True)
 
         return elements, resolved
 
@@ -1619,6 +1664,7 @@ class DeviceControllerUI:
         result = el.model_dump()
         if len(matches) > 1:
             result["match_count"] = len(matches)
+        _note_equivalence(result, element_type, el)
 
         return result, resolved
 
@@ -1752,12 +1798,15 @@ class DeviceControllerUI:
 
             # Check condition
             if checker(current_element):
-                return {
+                result = {
                     "matched": True,
                     "elapsed_seconds": round(elapsed, 2),
                     "polls": polls,
                     "element": current_element.model_dump() if current_element else None,
-                }, resolved
+                }
+                if current_element is not None:
+                    _note_equivalence(result, element_type, current_element)
+                return result, resolved
 
             # Check timeout
             if elapsed >= timeout:
@@ -2129,7 +2178,16 @@ class DeviceControllerUI:
                     report=sweep,
                 )
                 if scrolled is not None:
-                    matches = [scrolled]
+                    # The sweep finds by label or identifier alone, so the
+                    # element it lands on must still pass the type rule. It
+                    # used to replace the matches unchecked: a Button request
+                    # tapped a StaticText, and matched_via then reported the
+                    # pairing spec §1.3 forbids as if it were an equivalence.
+                    matches = find_element(
+                        [scrolled], label=label, label_contains=label_contains,
+                        label_prefix=label_prefix, identifier=identifier,
+                        element_type=element_type,
+                    )
                 # The tree moved, so context gathered before the sweep is stale.
                 all_elements = None
 
@@ -2210,6 +2268,7 @@ class DeviceControllerUI:
                         "source": (el.extra_attrs or {}).get("source"),
                     },
                 }
+                _note_equivalence(result, element_type, el)
                 if sweep.get("attempted"):
                     result["scroll"] = _scroll_report(sweep, scroll_to_find)
                 return result
@@ -2356,6 +2415,7 @@ class DeviceControllerUI:
             if value is not None:
                 result["previous_value"] = el.value or ""
                 result["requested_value"] = value
+            _note_equivalence(result, element_type, el)
             if sweep.get("attempted"):
                 result["scroll"] = _scroll_report(sweep, scroll_to_find)
             return result
@@ -2890,7 +2950,7 @@ class DeviceControllerUI:
 
     def _matching_fields(self, elements, label: str | None, identifier: str | None):
         """Text fields matching every selector given."""
-        fields = [e for e in elements if e.type in self._TEXT_FIELD_TYPES and e.frame]
+        fields = [e for e in elements if e.type.lower() in self._TEXT_FIELD_TYPES and e.frame]
         return find_element(fields, label=label, identifier=identifier)
 
     async def _find_text_field(
@@ -2960,7 +3020,12 @@ class DeviceControllerUI:
         matches = self._matching_fields(elements, label, identifier)
         return (matches[0].value or "") if matches else None
 
-    _TEXT_FIELD_TYPES = ("TextField", "SecureTextField", "TextArea", "SearchField")
+    #: Lowercased. `TextView` is WDA's name for a UITextView, which the
+    #: accessibility tree calls `TextArea` (spec §1.1); without it, `type_text`
+    #: and `clear_text` refused every multi-line field read through WDA.
+    _TEXT_FIELD_TYPES = frozenset(
+        {"textfield", "securetextfield", "textarea", "textview", "searchfield"},
+    )
 
     # Points in from the field's trailing edge for the caret-placing tap. Inside
     # the field, past the end of any text that fits.
@@ -2996,7 +3061,7 @@ class DeviceControllerUI:
         elements, _ = await self.get_ui_elements(udid=resolved)
         text_fields = [
             e for e in elements
-            if e.type in self._TEXT_FIELD_TYPES and e.frame
+            if e.type.lower() in self._TEXT_FIELD_TYPES and e.frame
         ]
 
         target = None

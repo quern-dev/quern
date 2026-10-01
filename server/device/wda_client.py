@@ -1495,6 +1495,7 @@ class WdaBackend:
             "TextField": "XCUIElementTypeTextField",
             "SecureTextField": "XCUIElementTypeSecureTextField",
             "TextArea": "XCUIElementTypeTextView",
+            "TextView": "XCUIElementTypeTextView",
         }
 
         # Build ordered list of class names to try (preferred type first)

@@ -10,6 +10,13 @@ import logging
 import time
 from collections import Counter
 
+from server.device.element_types import (
+    TypeRule,
+    element_rule,
+    related_types,
+    rule_for,
+    type_matches,
+)
 from server.models import UIElement
 
 logger = logging.getLogger(__name__)
@@ -33,7 +40,10 @@ def parse_elements(raw: list[dict], filter_label: str | None = None,
         raw: List of raw element dicts from idb
         filter_label: If provided, only parse elements with this exact label (case-insensitive)
         filter_identifier: If provided, only parse elements with this exact identifier
-        filter_type: If provided, only parse elements with this exact type (case-insensitive)
+        filter_type: If provided, only parse elements of this type or one that
+            could stand for it on another backend (`related_types`). Wider than
+            any rule on purpose: this runs before the caller's `find_element`,
+            which applies the real one, so it must not drop an equivalent first.
 
     Returns:
         List of parsed UIElement objects (only matching elements if filters provided)
@@ -52,7 +62,7 @@ def parse_elements(raw: list[dict], filter_label: str | None = None,
 
     # Pre-compute lowercase versions for case-insensitive matching
     filter_label_lower = filter_label.lower() if filter_label else None
-    filter_type_lower = filter_type.lower() if filter_type else None
+    filter_types = related_types(filter_type) if filter_type else None
 
     for item in raw:
         # Fast string checks before expensive parsing
@@ -68,9 +78,9 @@ def parse_elements(raw: list[dict], filter_label: str | None = None,
                 skipped_count += 1
                 continue  # Skip - label doesn't match
 
-        if filter_type_lower:
+        if filter_types is not None:
             item_type = item.get("type") or ""
-            if item_type.lower() != filter_type_lower:
+            if item_type.lower() not in filter_types:
                 skipped_count += 1
                 continue  # Skip - type doesn't match
 
@@ -155,10 +165,34 @@ def find_by_identifier(elements: list[UIElement], identifier: str) -> list[UIEle
     return [e for e in elements if e.identifier == identifier]
 
 
-def find_by_type(elements: list[UIElement], element_type: str) -> list[UIElement]:
-    """Find elements by exact case-insensitive type match."""
+def find_by_type(
+    elements: list[UIElement], element_type: str, rule: TypeRule = "exact",
+    identifier: str | None = None,
+) -> list[UIElement]:
+    """Find elements of a type, widened across backends as `rule` allows.
+
+    When any element matches exactly, only the exact matches are returned.
+    Equivalence is how a selector written on one backend finds its element on
+    the other, not a way to widen a selector that already found it: without
+    this, a screen with both a `Button` and a `RadioButton` labelled "Home"
+    would turn a tap that used to be unambiguous into an ambiguous one.
+
+    `identifier` is the selector's, when it gave one: an element whose label
+    merely repeats it gets the label rule (`element_rule`).
+    """
+    matches = [
+        e for e in elements
+        if type_matches(element_type, e.type, element_rule(rule, identifier, e.label))
+    ]
     lower = element_type.lower()
-    return [e for e in elements if e.type.lower() == lower]
+    exact = [e for e in matches if e.type.lower() == lower]
+    return exact or matches
+
+
+def find_by_related_type(elements: list[UIElement], element_type: str) -> list[UIElement]:
+    """Every element of a type any rule could accept. For pre-filters only."""
+    related = related_types(element_type)
+    return [e for e in elements if e.type.lower() in related]
 
 
 def find_element(
@@ -168,6 +202,8 @@ def find_element(
     label_prefix: str | None = None,
     identifier: str | None = None,
     element_type: str | None = None,
+    *,
+    prefilter: bool = False,
 ) -> list[UIElement]:
     """Find elements matching label/identifier/type filters.
 
@@ -185,7 +221,13 @@ def find_element(
         label_contains: Case-insensitive substring match on label
         label_prefix: Case-insensitive prefix match on label
         identifier: Exact case-sensitive identifier match
-        element_type: Exact case-insensitive type match (narrows results)
+        element_type: Case-insensitive type match (narrows results). Widened
+            to the same element's type on another backend when an identifier or
+            a label also pins it down; see `server/device/element_types.py`.
+        prefilter: Accept every related type instead of applying the rule.
+            For reads narrowed before the caller's own `find_element` runs --
+            they see only `filter_label`, never `label_contains`, so applying
+            the rule there would drop an equivalent the caller's rule accepts.
 
     Returns:
         List of matching elements (empty if no matches)
@@ -201,6 +243,8 @@ def find_element(
         matches = find_by_identifier(elements, identifier)
     elif element_type:
         # Type-only query — return all elements matching the type
+        if prefilter:
+            return find_by_related_type(elements, element_type)
         return find_by_type(elements, element_type)
     else:
         # No search criteria provided
@@ -211,7 +255,13 @@ def find_element(
     if identifier and matches:
         matches = [e for e in matches if e.identifier == identifier]
     if element_type and matches:
-        matches = find_by_type(matches, element_type)
+        if prefilter:
+            matches = find_by_related_type(matches, element_type)
+        else:
+            rule = rule_for(
+                identifier=identifier, label=label or label_contains or label_prefix,
+            )
+            matches = find_by_type(matches, element_type, rule, identifier)
 
     return matches
 
