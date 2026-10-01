@@ -592,33 +592,70 @@ def _refresh_for_unknown_simulator() -> None:
     threading.Thread(target=_refresh_launchd_sim_cache, daemon=True).start()
 
 
-def _simulator_for_pid_fast(pid: int) -> str | None:
-    """The simulator `pid` runs in, without spawning anything.
+def _simulator_instance_for_pid(pid: int) -> tuple[str | None, int | None]:
+    """The simulator `pid` runs in, as ``(udid, launchd_sim pid)``, without
+    spawning anything.
 
     For the TLS hook, which runs on mitmproxy's event loop:
     `_resolve_simulator_udid` falls back to `ps` on a miss, which is fine when
     a flow is serialised and not inside every handshake.
 
-    Returns the UDID; `UNKNOWN_SIMULATOR` when an ancestor is `launchd_sim` but
-    its UDID is not cached yet (a refresh is started, and this connection is
-    passed through -- never decrypted on a guess); `None` when no ancestor is
-    `launchd_sim`, i.e. an ordinary Mac process, which this rule leaves alone.
+    The launchd_sim pid identifies the *boot*, not just the device. An erase
+    leaves the UDID alone and recreates the TrustStore empty, so trust has to be
+    bound to the instance that was checked: a simulator rebooted since -- erased
+    or not -- is a new launchd_sim and reads as unconfirmed until re-checked.
+
+    Outcomes:
+    - ``(udid, lpid)``: an ancestor is a launchd_sim whose UDID is cached.
+    - ``(UNKNOWN_SIMULATOR, lpid)``: an ancestor is launchd_sim, UDID not cached
+      yet; a refresh is started.
+    - ``(None, None)``: the walk reached launchd -- an ordinary Mac process,
+      which this rule leaves alone.
+    - ``(UNKNOWN_SIMULATOR, None)``: the walk could not finish (a parent lookup
+      failed, a cycle, too deep). "Could not tell" is never "not a simulator":
+      that would decrypt whatever it was.
     """
     current: int | None = pid
     seen: set[int] = set()
-    for _ in range(16):
-        if current is None or current <= 1 or current in seen:
-            return None
+    for _ in range(32):
+        if current is None or current in seen:
+            return UNKNOWN_SIMULATOR, None
+        if current <= 1:
+            return None, None
         seen.add(current)
         with _cache_lock:
             udid = _launchd_sim_cache.get(current)
         if udid:
-            return udid.upper()
+            return udid.upper(), current
         if _proc_name_fast(current) == "launchd_sim":
             _refresh_for_unknown_simulator()
-            return UNKNOWN_SIMULATOR
+            return UNKNOWN_SIMULATOR, current
         current = _ppid_fast(current)
-    return None
+    return UNKNOWN_SIMULATOR, None
+
+
+def _is_local_mode(client: Any) -> bool:
+    """Whether a connection arrived through the macOS local redirector."""
+    try:
+        from mitmproxy.proxy.mode_specs import LocalMode
+
+        return isinstance(getattr(client, "proxy_mode", None), LocalMode)
+    except Exception:
+        return False
+
+
+def _bind_to_running_instances(udids: frozenset[str]) -> dict[str, int]:
+    """Each trusted UDID's current launchd_sim pid, read fresh.
+
+    Called off the event loop (the stdin thread, or a load thread): it runs
+    `ps`. A trusted UDID with no running launchd_sim is left unbound, which
+    means passed through -- the server only trusts booted simulators, so this
+    is a simulator that went away between the check and the command.
+    """
+    _refresh_launchd_sim_cache()
+    with _cache_lock:
+        running = {u.upper(): lpid for lpid, u in _launchd_sim_cache.items()}
+    return {u: running[u] for u in udids if u in running}
 
 
 def _write_json(obj: dict[str, Any]) -> None:
@@ -771,10 +808,15 @@ class IOSDebugAddon:
         # Simulators whose TLS we may decrypt (#354). None = every simulator.
         # Read from the environment so the set is in place before the first
         # connection; replaced later by `set_trusted_simulators`.
+        # Bound to the launchd_sim pid each was running as when checked -- see
+        # `_simulator_instance_for_pid`. Unbound until `load` has read the
+        # process table, so nothing is decrypted before then.
         import os
         self._trusted_simulators: frozenset[str] | None = _parse_trusted_simulators(
             os.environ.get(TRUSTED_SIMULATORS_ENV),
         )
+        self._trusted_instances: dict[str, int] = {}
+        self._trust_lock = threading.Lock()
 
         # Intercept state — protected by _held_lock
         self._intercept_pattern: str | None = None
@@ -798,8 +840,9 @@ class IOSDebugAddon:
         self._stdin_thread.start()
         self._timeout_thread = threading.Thread(target=self._run_timeout_loop, daemon=True)
         self._timeout_thread.start()
-        # Pre-populate launchd_sim → UDID cache for simulator flow tagging
-        threading.Thread(target=_refresh_launchd_sim_cache, daemon=True).start()
+        # Pre-populate launchd_sim → UDID cache for simulator flow tagging, and
+        # bind the trusted set handed over at spawn to the running instances.
+        threading.Thread(target=self._bind_trusted, daemon=True).start()
         _write_json({"type": "status", "event": "started", "timestamp": time.time()})
 
     def done(self) -> None:
@@ -843,29 +886,50 @@ class IOSDebugAddon:
         if sni and self._is_bypassed(sni):
             data.ignore_connection = True
             return
-        udid = self._untrusted_simulator(data.context.client)
+        client = data.context.client
+        try:
+            udid = self._untrusted_simulator(client)
+        except Exception:
+            # mitmproxy swallows a hook's exception and carries on with the
+            # handshake -- which would decrypt. For a redirected connection that
+            # is the wrong way to fail.
+            udid = UNKNOWN_SIMULATOR if _is_local_mode(client) else None
         if udid is not None:
             data.ignore_connection = True
-            self._report_passthrough(data.context.client, udid, sni)
+            try:
+                self._report_passthrough(client, udid, sni)
+            except Exception:
+                pass
 
     def _untrusted_simulator(self, client: Any) -> str | None:
         """The UDID if this connection is from a simulator we may not decrypt.
 
-        Only local-redirector connections carry a pid at setup; anything else
-        (a device using the proxy, a socket lookup still pending) returns None
-        and keeps today's behaviour, which the CA gate still covers.
+        Only local-redirector connections carry a pid at setup. A connection
+        from a device *using* the proxy has none and keeps today's behaviour --
+        the system proxy, which is how such devices arrive, still refuses over
+        the CA. A redirected connection with no pid is passed through.
         """
-        trusted = self._trusted_simulators
-        if trusted is None:
+        if self._trusted_simulators is None:
             return None
         # The live entry only: `_lookup_process_info` can wait on a pending
         # socket lookup, and nothing may block inside a handshake.
         info = _client_process_info.get(getattr(client, "id", None) or "")
         pid = info.get("pid") if info else None
         if pid is None:
+            # The redirector always supplies a pid at connection setup, so a
+            # redirected connection without one means the attribution patch
+            # did not install -- and every simulator would otherwise be
+            # decrypted, silently. Anything else keeps today's behaviour.
+            return UNKNOWN_SIMULATOR if _is_local_mode(client) else None
+        udid, instance = _simulator_instance_for_pid(pid)
+        if udid is None:
             return None
-        udid = _simulator_for_pid_fast(pid)
-        if udid is None or udid in trusted:
+        with self._trust_lock:
+            trusted = self._trusted_simulators
+            bound = self._trusted_instances.get(udid)
+        # Both, not either: in the current set *and* bound to this boot. A
+        # binding alone could outlive the set that created it.
+        if trusted is not None and udid in trusted and instance is not None and bound == instance:
             return None
         return udid
 
@@ -1358,6 +1422,28 @@ class IOSDebugAddon:
         })
 
 
+    def _set_trusted(self, trusted: frozenset[str] | None) -> None:
+        """Replace the trusted set and bind it to the running instances.
+
+        The bindings are cleared before the new set is published, so there is
+        no moment where a new UDID is matched against an old instance.
+        """
+        with self._trust_lock:
+            self._trusted_instances = {}
+            self._trusted_simulators = trusted
+        if trusted:
+            bound = _bind_to_running_instances(trusted)
+            with self._trust_lock:
+                if self._trusted_simulators == trusted:
+                    self._trusted_instances = bound
+
+    def _bind_trusted(self) -> None:
+        """At load: bind the set handed over at spawn (it also warms the cache)."""
+        try:
+            self._set_trusted(self._trusted_simulators)
+        except Exception:
+            pass
+
     def _handle_set_trusted_simulators(self, cmd: dict) -> None:
         """Replace the set of simulators whose TLS may be decrypted.
 
@@ -1366,14 +1452,14 @@ class IOSDebugAddon:
         """
         udids = cmd.get("udids")
         if udids is None and "udids" in cmd:
-            self._trusted_simulators = None
+            trusted: frozenset[str] | None = None
         elif isinstance(udids, list):
-            self._trusted_simulators = frozenset(
+            trusted = frozenset(
                 str(u).strip().upper() for u in udids if str(u).strip()
             )
         else:
-            self._trusted_simulators = frozenset()
-        trusted = self._trusted_simulators
+            trusted = frozenset()
+        self._set_trusted(trusted)
         _write_json({
             "type": "status",
             "event": "trusted_simulators_updated",

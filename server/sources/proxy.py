@@ -162,6 +162,9 @@ class ProxyAdapter(BaseSourceAdapter):
         self.trust_provider: Callable[[], Awaitable[list[str] | None]] | None = None
         #: Connections passed through, per simulator, since the proxy started.
         self._passthrough: dict[str, dict] = {}
+        #: Told about each passed-through connection, so the server can re-check
+        #: a simulator it has not confirmed rather than wait for the next tick.
+        self.on_passthrough: Callable[[str], None] | None = None
 
     @property
     def local_capture(self) -> bool:
@@ -303,12 +306,15 @@ class ProxyAdapter(BaseSourceAdapter):
 
         # Before the spawn, so the addon starts with a current set rather than
         # catching up from stdin while connections are already arriving. A
-        # provider that fails leaves the previous set, never a wider one.
+        # provider that fails trusts nobody: the previous set may name a
+        # simulator erased since.
         if self.trust_provider is not None:
             try:
                 self._trusted_simulators = await self.trust_provider()
             except Exception:
                 logger.exception("Could not refresh trusted simulators before start")
+                self._trusted_simulators = []
+        spawned_with = self.trusted_simulators
         env = dict(os.environ)
         env[TRUSTED_SIMULATORS_ENV] = (
             "*" if self._trusted_simulators is None
@@ -338,6 +344,14 @@ class ProxyAdapter(BaseSourceAdapter):
         # subprocess's rejections against the new one.
         self._tls_rejections.clear()
         self._passthrough.clear()
+        # A refresh that landed while mitmdump was being spawned updated the
+        # mirror but had no process to send to. Send it now, or the addon runs
+        # on the set from before it.
+        if self.trusted_simulators != spawned_with:
+            await self.send_command({
+                "action": "set_trusted_simulators",
+                "udids": self._trusted_simulators,
+            })
         self._read_task = asyncio.create_task(self._read_loop())
         self._stderr_task = asyncio.create_task(self._drain_stderr())
         logger.info(
@@ -429,6 +443,11 @@ class ProxyAdapter(BaseSourceAdapter):
         entry["last_at"] = datetime.fromtimestamp(
             data.get("timestamp") or time.time(), tz=UTC,
         ).isoformat()
+        if self.on_passthrough is not None:
+            try:
+                self.on_passthrough(udid)
+            except Exception:
+                logger.exception("on_passthrough failed")
 
     def status(self):
         """Override to report 'proxying' when running."""

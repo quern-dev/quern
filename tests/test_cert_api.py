@@ -1133,6 +1133,25 @@ class TestLocalCaptureIsGatedToo:
                 f"skip_cert_check={falsey!r} switched on decrypting every simulator"
             )
 
+    def test_skip_cert_check_does_not_outlive_the_call_that_passed_it(
+        self, client, auth_headers, app, monkeypatch
+    ):
+        """It decrypts every simulator, breaking the untrusting ones. A later
+        call that does not pass it must not inherit it -- otherwise one
+        deliberate TLS-failure test leaves every later capture breaking them."""
+        self._app_with_proxy(app)
+        self._no_trust(monkeypatch)
+        monkeypatch.setattr("server.config.get_auto_install_cert", lambda: False)
+
+        for skip, expected in ((True, True), (False, False)):
+            r = client.post(
+                "/api/v1/proxy/local-capture",
+                json={"processes": ["MobileSafari"], "skip_cert_check": skip},
+                headers=auth_headers,
+            )
+            assert r.status_code == 200, r.text
+            assert app.state.decrypt_all_simulators is expected
+
     def test_a_genuine_skip_still_works(
         self, client, auth_headers, app, monkeypatch
     ):
@@ -2148,3 +2167,23 @@ class TestCertEligibilityFollowsRootabilityNotKind:
             r = client.post("/api/v1/proxy/cert/install", json={}, headers=auth_headers)
 
         assert r.json()["skipped"] == []
+
+
+async def test_installing_the_ca_refreshes_the_trusted_set(
+    client, auth_headers, mock_cert_path, mock_cert_state, app, monkeypatch,
+):
+    """Decryption of a simulator that now trusts the CA should start at once,
+    without waiting for the periodic check or restarting the proxy (#354).
+    Driven through the endpoint: a test that grepped its source passed with
+    the call under `if False:`."""
+    from server.proxy import sim_tls
+
+    refresh = AsyncMock()
+    monkeypatch.setattr(sim_tls, "refresh_after", refresh)
+    app.state.device_controller.list_devices = AsyncMock()
+    with patch("server.proxy.cert_manager.install_cert", return_value=True):
+        r = client.post(
+            "/api/v1/proxy/cert/install", json={"udid": "test-udid"}, headers=auth_headers,
+        )
+    assert r.status_code == 200, r.text
+    refresh.assert_awaited_once()

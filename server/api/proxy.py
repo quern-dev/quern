@@ -129,6 +129,10 @@ async def _get_proxy_status(
     )
     if untrusted:
         warnings.append("capture_without_cert")
+    # A failed simulator listing otherwise reads as "no simulators booted" in
+    # `simulator_tls` -- a failed check looking like a passing one (#354).
+    if getattr(request.app.state, "simulator_trust_failed", False):
+        warnings.append("simulator_trust_check_failed")
     # Which of those contradict what we recorded. The warning above says capture
     # would fail; this says which device's stored `cert_installed: true` is no
     # longer true, so a reader looking at one device does not have to correlate

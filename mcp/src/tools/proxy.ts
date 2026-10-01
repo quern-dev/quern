@@ -131,7 +131,7 @@ Use exclude_hosts to filter out analytics/SDK noise (Firebase, AppsFlyer, Facebo
       id: z.string().optional().describe("Custom session ID (auto-generated if omitted)"),
       hosts: z.array(z.string()).optional().describe("Only capture flows to these hosts"),
       exclude_hosts: z.array(z.string()).optional().describe("Exclude flows to these hosts (analytics, SDKs, etc.)"),
-      simulator_udid: z.string().optional().describe("Filter to flows from this simulator. If that simulator's TLS is passed through (it does not trust the CA), the result carries simulator_tls_note -- read it before concluding the app made no HTTPS requests."),
+      simulator_udid: z.string().optional().describe("Filter to flows from this simulator. If its TLS is passed through (it does not trust the CA), stop_capture_session's result carries simulator_tls_note -- read it before concluding the app made no HTTPS requests."),
       device_serial: z.string().optional().describe("Filter to flows from this Android emulator (e.g. emulator-5554)"),
       client_ip: z.string().optional().describe("Filter by client IP (physical devices). Does not narrow to one Android emulator."),
       detail: z
@@ -339,19 +339,23 @@ is NOT being captured.
 The local_capture field is the list of entries being captured via mitmproxy
 local mode -- names, PIDs or ! exclusions (see set_local_capture). It is shared
 by every simulator: to see one simulator's traffic, filter flows by simulator_udid
-rather than changing this list.
+rather than changing this list. When non-empty, traffic from those processes is transparently captured
+without needing a system proxy. Empty list means disabled.
+Name the process that actually makes the requests: Safari's traffic leaves through
+com.apple.WebKit.Networking, not MobileSafari, so ["MobileSafari"] alone captures
+nothing. The default is ["MobileSafari", "com.apple.WebKit.Networking"].
+Use set_local_capture to change the process list on the fly.
 
 The simulator_tls field (present while local capture is on) says, per booted
 simulator, whether its TLS is "decrypted" or "passed_through" -- passed
 through when it does not trust the mitmproxy CA, so its apps work but its
 HTTPS never shows up as flows. Each entry gives the reason, the fix, and how
 many connections were passed through. Check it before concluding a
-simulator's app made no requests. When non-empty, traffic from those processes is transparently captured
-without needing a system proxy. Empty list means disabled.
-Name the process that actually makes the requests: Safari's traffic leaves through
-com.apple.WebKit.Networking, not MobileSafari, so ["MobileSafari"] alone captures
-nothing. The default is ["MobileSafari", "com.apple.WebKit.Networking"].
-Use set_local_capture to change the process list on the fly.
+simulator's app made no requests. A simulator that has just booted or
+rebooted is passed through until it is confirmed, which happens on its first
+connection; a connection opened before that stays undecrypted while it stays
+open. A "simulator_trust_check_failed" warning means simulators could not be
+listed, so everything is being passed through.
 
 The local_ip field is the Mac's outward-facing IP address — use this as a
 fallback proxy address when configuring a physical device's Wi-Fi proxy settings,
@@ -1046,7 +1050,8 @@ but their HTTPS requests never appear as flows. The response's simulator_tls
 lists every booted simulator as "decrypted" or "passed_through", with the
 reason and the fix -- read it, because a passed-through simulator otherwise
 looks exactly like an app making no requests. To decrypt one, install the CA
-on it (install_proxy_cert); decryption starts within seconds, with no restart.
+on it (install_proxy_cert): new connections are decrypted within seconds, with
+no restart; ones already open stay as they were until they close.
 With auto_install_cert on, the CA is installed first and everything is
 decrypted. Installing a root CA is the user's decision -- ask before doing it.
 

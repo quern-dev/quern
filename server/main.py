@@ -279,8 +279,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # stale list (#354). The device controller does not exist yet at this first
     # start, so this one trusts nobody; it is refreshed as soon as it does.
     from server.proxy import sim_tls
-    app.state.decrypt_all_simulators = False
-    proxy.trust_provider = lambda: sim_tls.compute_trusted(app)
+    sim_tls.install(app, proxy)
     if app.state.enable_proxy:
         await proxy.start()
 
@@ -1839,8 +1838,8 @@ def _local_capture_cert_gate(processes: list[str], skip_cert_check: bool) -> Non
                 except Exception as e:
                     # Not swallowed into the check's own error handler below.
                     # A failed install is not "could not check" -- the answer is
-                    # known and it is bad, and proceeding would enable capture
-                    # that cannot work for the user who asked us to handle this.
+                    # known, and the person has to be told that simulator will
+                    # be passed through rather than decrypted.
                     failed.append((dev, e))
             return None, failed
         return missing, []
@@ -1866,8 +1865,10 @@ def _local_capture_cert_gate(processes: list[str], skip_cert_check: bool) -> Non
     print(f"{len(missing)} booted simulator(s) do not trust the mitmproxy CA: {names}")
     print("Their TLS will be passed through, not decrypted: their apps keep")
     print("working, but quern will not see their HTTPS requests. To see them:")
-    print("  - install the CA on those simulators (decryption starts without a restart)")
-    print("  - quern set-auto-install-cert on   (Quern installs it from now on)")
+    print("  - install the CA on those simulators (new connections are decrypted")
+    print("    without a restart)")
+    if not failed:
+        print("  - quern set-auto-install-cert on   (Quern installs it from now on)")
 
 
 def _cmd_enable_local_capture(

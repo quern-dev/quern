@@ -287,8 +287,24 @@ through until the next check"; with an untrusted list it would mean "decrypted
 and failing, silently", which is the state the gate exists to prevent. Every
 "could not tell" follows the same rule: an unchecked or unreadable simulator, a
 UDID not yet cached, a failed device listing (trusts nobody, not the previous
-set), a malformed command. `server/proxy/sim_tls.py` holds the rest, and
-`tests/test_sim_tls.py` pins each direction.
+set), a malformed command, a parent walk that cannot finish, a redirected
+connection with no pid, an exception inside the hook. `server/proxy/sim_tls.py`
+holds the rest, and `tests/test_sim_tls.py` pins each direction.
+
+**Trust is bound to a boot, not a UDID.** That is what makes the list safe
+against an erase quern did not see. An erase keeps the UDID and empties the
+TrustStore, and the simulator has to boot again to be used -- so the addon
+records the `launchd_sim` pid each trusted UDID was running as when the list
+arrived, and a simulator rebooted since (erased or not) is a new instance it
+will not decrypt until the server checks it again. The first version bound only
+the UDID, and an independent review found the gap: erase from Simulator.app,
+reboot inside the 15s refresh, and the simulator came back trusted with an
+empty TrustStore. The re-check happens on the simulator's first passed-through
+connection (`on_passthrough`), which also covers every boot path, in quern or
+out, without the server having to see the boot. What remains is the time
+between the server reading a TrustStore and the addon binding the result --
+an erase and reboot inside that window would be bound as trusted. It is the
+length of one `ps` call, not a polling interval.
 
 Passthrough is only safe if it is visible, because zero HTTPS flows from a
 simulator reads exactly like an app making no requests. So it is reported

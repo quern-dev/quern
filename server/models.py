@@ -1250,7 +1250,11 @@ class ProxyStatusResponse(BaseModel):
     ``"capture_without_cert"`` — a booted simulator does not trust the
     mitmproxy CA. Under the system proxy HTTPS from it fails with nothing
     pointing at the proxy; under local capture its TLS is passed through
-    undecrypted instead -- see ``simulator_tls``."""
+    undecrypted instead -- see ``simulator_tls``.
+    ``"simulator_trust_check_failed"`` — the last check could not list
+    simulators, so every simulator's TLS is being passed through and
+    ``simulator_tls`` may be empty for that reason, not because none are
+    booted."""
     auto_install_cert: bool = False
     """Whether Quern will install the CA by itself when capture needs it.
     Reported because a persistent, silent CA-install policy would be worse
