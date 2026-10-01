@@ -472,6 +472,25 @@ class TestApi:
             "inline:Home": "failing", "inline:Other": "undeclared",
         }
 
+    @pytest.mark.parametrize(("screens", "fragment"), [
+        ({"Bad": [{"label": "no element"}]}, "landmark 0: "),
+        ({"Bad": [{"web_url_contains": "/x", "label": "both"}]}, "cannot be combined"),
+        ({"Bad": {"landmarks": {"element": "Button"}}}, "must be a list"),
+        ({"Bad": {"landmarks": ["Button"]}}, "must be an object"),
+    ])
+    async def test_an_invalid_inline_landmark_is_a_400_naming_it(self, client, screens, fragment):
+        """It was a bare 500, hidden over MCP only while the schema there
+        required `element` -- which URL landmarks cannot have."""
+        r = await client.post("/api/v1/landmarks/load", json={"app": "a", "landmarks": screens})
+        assert r.status_code == 400
+        assert "'Bad'" in r.json()["detail"] and fragment in r.json()["detail"]
+
+    async def test_an_invalid_screen_loads_nothing(self, client):
+        await client.post("/api/v1/landmarks/load", json={"app": "a", "landmarks": {
+            "Good": [{"element": "Button", "label": "OK"}], "Bad": [{"label": "x"}],
+        }})
+        assert (await client.get("/api/v1/landmarks/")).json()["sets"] == {}
+
     async def test_validate_a_path_reports_conventions(self, client, kb):
         r = await client.post("/api/v1/landmarks/validate", params={"source": str(kb)})
         assert r.json()["conventions"]["counts"]["undeclared"] == 1

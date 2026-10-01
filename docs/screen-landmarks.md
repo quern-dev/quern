@@ -325,6 +325,22 @@ load_landmarks(path="/Users/dev/myapp/.quern/knowledge/")
 
 Quern scans screen documents, extracts `landmarks` from frontmatter, and holds them in memory for identification queries.
 
+Landmarks can also be loaded inline, keyed by screen name. Each value is either a list of landmarks, or an object that says more about the screen — the same fields a screen file's frontmatter carries:
+
+```
+load_landmarks(app="com.example.app", landmarks={
+  "Home": [{"element": "Heading", "label": "Home"}],
+  "Settings": {
+    "landmark_conventions": 2,
+    "scrollable": true,
+    "landmarks": [{"element": "RadioButton", "identifier": "tab_settings", "selected": true}]
+  },
+  "Help": [{"web_url_contains": "/help", "web_process": "com.apple.SafariViewService"}]
+})
+```
+
+An invalid landmark refuses the whole load with a 400 that names the screen and the landmark, and loads nothing.
+
 The response includes:
 - `loaded`: the app identifier
 - `source`: the path that was scanned (or `"inline"` for inline-loaded landmarks)

@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 from dataclasses import asdict
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import ValidationError
 
 from server.api.actions import logged_action
 from server.device.landmarks import (
@@ -32,6 +33,40 @@ def _serialize_skipped(skipped: list[SkippedFile]) -> list[dict]:
         {k: v for k, v in asdict(s).items() if v is not None}
         for s in skipped
     ]
+
+def _inline_landmarks(screen: str, raw: object) -> list[Landmark]:
+    """Parse one inline screen's landmarks, or refuse with the reason.
+
+    An invalid entry used to escape as a bare 500, which tells the caller
+    nothing about which screen or which field. The MCP schema hid it while it
+    required `element` on every landmark; a URL landmark needs it optional, so
+    the server has to say what is wrong itself.
+    """
+    if not isinstance(raw, list):
+        raise HTTPException(
+            status_code=400,
+            detail=f"screen {screen!r}: landmarks must be a list of landmark objects",
+        )
+    landmarks: list[Landmark] = []
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise HTTPException(
+                status_code=400,
+                detail=f"screen {screen!r}, landmark {index}: must be an object",
+            )
+        try:
+            landmarks.append(Landmark(**entry))
+        except (ValidationError, TypeError) as e:
+            reason = (
+                "; ".join(err["msg"] for err in e.errors())
+                if isinstance(e, ValidationError) else str(e)
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=f"screen {screen!r}, landmark {index}: {reason}",
+            ) from e
+    return landmarks
+
 
 router = APIRouter(prefix="/api/v1/landmarks", tags=["landmarks"])
 logger = logging.getLogger(__name__)
@@ -82,7 +117,7 @@ async def load_landmarks(request: Request, body: LoadLandmarksRequest):
             # parser: a typo must mean "nobody has said" rather than quietly
             # asserting one of the two answers.
             scrollable = raw_scrollable if isinstance(raw_scrollable, bool) else None
-            landmarks = [Landmark(**lm) for lm in raw]
+            landmarks = _inline_landmarks(screen_name, raw)
             screens.append(ScreenLandmarks(
                 screen=screen_name, landmarks=landmarks, scrollable=scrollable,
             ))

@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { apiRequest } from "../http.js";
 import { strictParams } from "./helpers.js";
+import { inlineLandmarks } from "./landmark-schema.js";
 
 export function registerLandmarkTools(server: McpServer): void {
   server.registerTool("load_landmarks", {
@@ -27,31 +28,7 @@ Element types are matched across backends: a landmark on the accessibility tree'
         .describe(
           "Path to the knowledge base directory containing screens/ with landmark-annotated markdown files"
         ),
-      landmarks: z
-        .record(
-          z.string(),
-          z.array(
-            z.object({
-              element: z.string(),
-              identifier: z.string().optional(),
-              label: z.string().optional(),
-              label_contains: z.string().optional(),
-              absent: z.boolean().optional(),
-              selected: z
-                .boolean()
-                .optional()
-                .describe(
-                  "Selection state for tabs, switches, radios, checkboxes. " +
-                  "true = element must be selected (e.g. the active tab); " +
-                  "false = element must not be selected. Omit to ignore."
-                ),
-            })
-          )
-        )
-        .optional()
-        .describe(
-          "Inline landmarks: object keyed by screen name, each value is an array of landmark selectors"
-        ),
+      landmarks: inlineLandmarks.optional(),
     }),
   }, async ({ app, path, landmarks }) => {
     try {
