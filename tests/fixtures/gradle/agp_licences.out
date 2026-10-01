@@ -1,0 +1,26 @@
+Checking the license for package Android SDK Build-Tools 36 in /Users/someone/src/fake-sdk/licenses
+Warning: License for package Android SDK Build-Tools 36 not accepted.
+Checking the license for package Android SDK Platform 36 in /Users/someone/src/fake-sdk/licenses
+Warning: License for package Android SDK Platform 36 not accepted.
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Could not determine the dependencies of task ':app:compileDebugJavaWithJavac'.
+> Failed to install the following Android SDK packages as some licences have not been accepted.
+     build-tools;36.0.0 Android SDK Build-Tools 36
+     platforms;android-36 Android SDK Platform 36
+  To build this project, accept the SDK license agreements and install the missing components using the Android Studio SDK Manager.
+  All licenses can be accepted using the sdkmanager command line tool:
+  sdkmanager --licenses
+  Or, to transfer the license agreements from one workstation to another, see https://developer.android.com/studio/intro/update.html#download-with-gradle
+  
+  Using Android SDK: /Users/someone/src/fake-sdk
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights from a Build Scan (powered by Develocity).
+> Get more help at https://help.gradle.org.
+
+BUILD FAILED in 5s

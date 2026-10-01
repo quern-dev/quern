@@ -24,7 +24,14 @@ from fastapi import HTTPException
 from server.device import build_records, gradle
 from server.device import jdk as jdk_mod
 from server.device.adb import AdbTimeout
-from server.models import BuildDiagnostic, BuildRecord, BuildResult, DeviceError, DeviceState
+from server.models import (
+    BuildDiagnostic,
+    BuildRecord,
+    BuildResult,
+    DeviceError,
+    DeviceState,
+    DeviceType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +56,12 @@ async def build_and_install(controller, body, *, env: dict[str, str] | None = No
             status_code=400,
             detail=f"variant is the variant's name, not its task: pass "
                    f"variant=\"{bare[:1].lower()}{bare[1:]}\"")
+    if {"-m", "--dry-run"} & set(body.gradle_args or []):
+        # Gradle prints every task SKIPPED and BUILD SUCCESSFUL: what is on
+        # disk would be installed as though this run had built it.
+        raise HTTPException(status_code=400,
+                            detail="gradle_args asks for a dry run (-m / --dry-run), which builds "
+                                   "nothing to install")
     try:
         project = gradle.find_project(body.project_path, body.module)
     except gradle.GradleProjectError as e:
@@ -110,9 +123,9 @@ async def build_and_install(controller, body, *, env: dict[str, str] | None = No
             kind="gradle_wrapper", summary=f"{project.wrapper} could not be run: {e}",
             options=[fix])], used, "the Gradle wrapper could not be run")
     ran_on = criteria or (choice.jdk.major if choice.jdk else None)
+    quiet = gradle.quiet_logging(project, args, jdk_mod.gradle_user_home(args, env, home))
     result, environment = gradle.parse(code, output, project, choice.candidates, ran_on=ran_on,
-                                       forced_by=choice.forced_by,
-                                       quiet=bool({"-q", "--quiet"} & set(args)))
+                                       forced_by=choice.forced_by, quiet=quiet)
     if not result.succeeded:
         return {**_not_built(serials, environment, used, "the build failed"),
                 "build_android": result}
@@ -183,20 +196,23 @@ async def _default_android(controller) -> str:
     Not simply the active device: that is often an iOS simulator, and
     refusing it as "not an Android device ... check the id" answers a
     question about an id the caller never gave.
+
+    The active device is read, not resolved: `resolve_udid(None)` with
+    nothing active goes to the device pool, which picks an iPhone simulator,
+    boots it if none is booted, and makes it active -- an Android build
+    booting an iOS simulator. And it must be booted to be chosen: an
+    emulator that is not running fails only at install, after the build.
     """
-    try:
-        active = await controller.resolve_udid(None, set_active=False)
-    except DeviceError:
-        active = None
-    if active and controller._is_android(active):
-        return await controller.resolve_udid(active)
+    active = controller._active_udid
     try:
         devices = await controller.list_devices()
     except (DeviceError, OSError) as e:
         raise HTTPException(status_code=400, detail=f"no device named, and the device list "
                                                     f"could not be read: {e}") from e
-    booted = [d.udid for d in devices
-              if d.state == DeviceState.BOOTED and controller._is_android(d.udid)]
+    booted = [d.udid for d in devices if d.state == DeviceState.BOOTED
+              and d.device_type in (DeviceType.ANDROID_EMULATOR, DeviceType.ANDROID_DEVICE)]
+    if active in booted:
+        return await controller.resolve_udid(active)
     if len(booted) == 1:
         return await controller.resolve_udid(booted[0])
     if booted:
@@ -205,7 +221,7 @@ async def _default_android(controller) -> str:
                                    f"booted: pass udid or udids from {', '.join(booted)}")
     raise HTTPException(status_code=400,
                         detail="no device named, and no Android device or emulator is booted"
-                               + (f" (the active device, {active}, is not Android)"
+                               + (f" (the active device, {active}, is not one)"
                                   if active else "")
                                + ": boot one, or pass its udid")
 
@@ -285,9 +301,13 @@ async def _install_one(controller, serial: str, metadata: dict, may_uninstall: b
             message = gone if ok else f"{gone}; then the install failed: {message}"
     except (DeviceError, OSError, TimeoutError) as e:
         why = str(e) or type(e).__name__
+        # A timeout is not "could not run": adb was killed mid-install, and
+        # the device may have finished regardless.
+        what = (f"adb install did not finish ({why}); it may still have installed: check with "
+                f"list_apps" if isinstance(e, AdbTimeout | TimeoutError)
+                else f"adb install could not run: {why}")
         return DeviceInstallResult(udid=serial, installed=False, app_path=str(apk),
-                                   error=(f"{gone}; then " if gone else "")
-                                   + f"adb install could not run: {why}")
+                                   error=(f"{gone}; then " if gone else "") + what)
     return DeviceInstallResult(udid=serial, installed=ok, app_path=str(apk),
                                error=None if ok else message,
                                note=message if ok and message else None)

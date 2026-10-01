@@ -20,6 +20,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import unquote
 
 from server.device import jdk as jdk_mod
 from server.models import BuildDiagnostic, BuildResult, EnvironmentProblem
@@ -250,8 +251,11 @@ async def run(project: GradleProject, task: str, env: dict[str, str],
 #: msg`), and what annotation processors print through it: kapt as
 #: `e: /p/kapt3/stubs/X.java:130: error: [Dagger/MissingBinding] …` and KSP as
 #: `e: [ksp] /p/Foo.kt:12: msg`. Paths may hold spaces, so a path runs to the
-#: first source extension rather than the first blank.
-_KOTLIN = re.compile(r"^(?P<sev>[ew]): (?:\[ksp\] )?(?:file://)?(?P<file>/.+?\.(?:kts?|java))"
+#: source extension followed by `:` or a blank -- not the first `.kt` anywhere,
+#: which a directory called `Shared.java` would supply. Kotlin 2's `file://`
+#: form is a URI, so `My%20Project` is decoded (measured).
+_KOTLIN = re.compile(r"^(?P<sev>[ew]): (?:\[ksp\] )?(?P<uri>file://)?"
+                     r"(?P<file>/.+?\.(?:kts?|java))(?=[:\s]|$)"
                      r"(?::(?P<l1>\d+):(?P<c1>\d+)|:(?P<l2>\d+)"
                      r"|: \((?P<l3>\d+), (?P<c3>\d+)\))?:?\s*(?:(?:error|warning): )?"
                      r"(?P<msg>.*)$")
@@ -353,7 +357,10 @@ def _environment(output: str, project: GradleProject, candidates: list[jdk_mod.J
         + [f"build-tools;{v}" for v in re.findall(r"Failed to find Build Tools revision "
                                                   r"([\d.]+)", output)]
         + re.findall(r"Failed to find Platform SDK with path: (\S+)", output)
-        + re.findall(r"^\s*-\s.*\(([a-z\-]+;[^)]+)\)\s*$", output, re.M)))
+        # AGP 9 lists them under its licence refusal, id first (measured):
+        #      build-tools;36.0.0 Android SDK Build-Tools 36
+        + re.findall(r"^\s+([a-z][a-z\-]*;\S+) \S",
+                     output.partition("Failed to install the following")[2], re.M)))
     unlicensed = ("licences have not been accepted" in output
                   or "License for package" in output
                   or re.search(r"install the following (?:Android )?SDK (?:packages|components)",
@@ -380,14 +387,36 @@ def _environment(output: str, project: GradleProject, candidates: list[jdk_mod.J
     return problems
 
 
+_QUIET_LEVELS = ("quiet", "warn")
+
+
+def quiet_logging(project: GradleProject, args: list[str], user_home: Path) -> bool:
+    """Whether Gradle runs at a log level that does not print BUILD
+    SUCCESSFUL: `-q`/`-w`, `-Dorg.gradle.logging.level`, or that property in
+    the user's or the project's gradle.properties -- read in Gradle's order,
+    the command line first."""
+    level = None
+    for arg in args:
+        if arg in ("-q", "--quiet", "-w", "--warn"):
+            return True
+        if arg.startswith("-Dorg.gradle.logging.level="):
+            level = arg.split("=", 1)[1]
+    if level is None:
+        level = (jdk_mod.gradle_property(user_home / "gradle.properties",
+                                         "org.gradle.logging.level")
+                 or jdk_mod.gradle_property(project.root / "gradle.properties",
+                                            "org.gradle.logging.level"))
+    return (level or "").strip().lower() in _QUIET_LEVELS
+
+
 def parse(code: int, output: str, project: GradleProject,
           candidates: list[jdk_mod.Jdk] | None = None, *, ran_on: int | None = None,
           forced_by: str = "", quiet: bool = False,
           ) -> tuple[BuildResult, list[EnvironmentProblem]]:
     """The build's result, and any environment problems it ran into.
 
-    `quiet` is a build run with `-q`, which prints no BUILD SUCCESSFUL: there
-    the exit code is all Gradle says.
+    `quiet` is a build run at quiet or warn level (`quiet_logging`), which
+    prints no BUILD SUCCESSFUL: there the exit code is all Gradle says.
     """
     lines = output.splitlines()
     errors: list[BuildDiagnostic] = []
@@ -396,7 +425,8 @@ def parse(code: int, output: str, project: GradleProject,
         if m := _KOTLIN.match(line):
             where = m.group("l1") or m.group("l2") or m.group("l3")
             col = m.group("c1") or m.group("c3")
-            d = BuildDiagnostic(file=m.group("file"), line=int(where) if where else None,
+            file = unquote(m.group("file")) if m.group("uri") else m.group("file")
+            d = BuildDiagnostic(file=file, line=int(where) if where else None,
                                 column=int(col) if col else None, message=m.group("msg"),
                                 severity="error" if m.group("sev") == "e" else "warning")
             (errors if d.severity == "error" else warnings).append(d)

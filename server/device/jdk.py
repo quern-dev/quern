@@ -100,21 +100,40 @@ def _unescape(text: str) -> str:
     return "".join(out)
 
 
+def _logical_lines(text: str) -> list[str]:
+    """Physical lines joined where one ends in an odd run of backslashes, the
+    continuation's leading blanks dropped -- as java.util.Properties does."""
+    lines, held = [], ""
+    for raw in text.splitlines():
+        line = raw.lstrip()
+        if not held and (not line or line.startswith(("#", "!"))):
+            continue
+        trailing = len(line) - len(line.rstrip("\\"))
+        if trailing % 2:
+            held += line[:-1]
+            continue
+        lines.append(held + line)
+        held = ""
+    if held:
+        lines.append(held)
+    return lines
+
+
 def gradle_property(path: Path, key: str) -> str | None:
     """A property from a gradle.properties, read as Gradle reads it (Java
-    Properties: `=`, `:` or a space between, backslash escapes), or None."""
+    Properties: `=`, `:` or a space between, backslash escapes and line
+    continuations, the last of a repeated key winning), or None."""
     try:
         text = path.read_text()
     except (OSError, ValueError):
         return None
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith(("#", "!")):
-            continue
+    found = None
+    for line in _logical_lines(text):
         m = _PROPERTY.match(line)
         if m and _unescape(m.group(1)) == key:
-            return _unescape(m.group(2).strip())
-    return None
+            # Properties keeps trailing blanks in a value; so does Gradle.
+            found = _unescape(m.group(2))
+    return found
 
 
 def _java_home_tool(run: Callable[..., subprocess.CompletedProcess]) -> list[str]:
@@ -260,12 +279,14 @@ def choose(project_root: Path, *, java_home: str | None = None,
     jdks = found if found is not None else candidates(java_home=java_home, env=env, home=home)
     want = _range(minimum, maximum)
     user_props = gradle_user_home(gradle_args, env, home) / "gradle.properties"
+    # Labels name the file: "change it in ..." must point where it is, and
+    # -g or GRADLE_USER_HOME can put the user's file anywhere.
+    project_props = project_root / "gradle.properties"
     forced_sources = [(java_home_override(gradle_args), "-Dorg.gradle.java.home in gradle_args"),
                       (gradle_property(user_props, "org.gradle.java.home"),
-                       "your ~/.gradle/gradle.properties"),
-                      (gradle_property(project_root / "gradle.properties",
-                                       "org.gradle.java.home"),
-                       "the project's gradle.properties")]
+                       f"your Gradle user home's gradle.properties ({user_props})"),
+                      (gradle_property(project_props, "org.gradle.java.home"),
+                       f"the project's gradle.properties ({project_props})")]
     for forced, label in forced_sources:
         if not forced:
             continue

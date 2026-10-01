@@ -20,7 +20,7 @@ from server.api import build_android, build_app
 from server.device import gradle
 from server.device import jdk as jdk_mod
 from server.device.adb import AdbTimeout
-from server.models import BuildDiagnostic, BuildResult, DeviceError, DeviceState
+from server.models import BuildDiagnostic, BuildResult, DeviceError, DeviceState, DeviceType
 
 FIXTURES = Path(__file__).parent / "fixtures" / "gradle"
 
@@ -101,7 +101,7 @@ class TestChoosingAJdk:
         root = _project(tmp_path, props=f"org.gradle.java.home={old}\n")
         c = self._choose(root, [jdk_mod.Jdk("/jbr", "21.0.10", 21, "Android Studio")])
         assert c.jdk.home == old and "older than" in c.warning
-        assert c.forced_by == "the project's gradle.properties"
+        assert c.forced_by.startswith("the project's gradle.properties (")
 
     def test_an_unreadable_org_gradle_java_home_is_a_problem(self, tmp_path):
         root = _project(tmp_path, props=f"org.gradle.java.home={tmp_path / 'gone'}\n")
@@ -383,18 +383,22 @@ class FakeController:
     def __init__(self, adb, android=("emulator-5554",), active="emulator-5554", booted=None):
         self.adb = adb
         self.android = set(android)
-        self.active = active
+        self._active_udid = active
         self.booted = list(android if booted is None else booted)
+        self.resolved = []
 
     async def resolve_udid(self, udid, set_active=True):
-        if udid:
-            return udid
-        if self.active is None:
-            raise DeviceError("no device", tool="test")
-        return self.active
+        # The real one, given None, asks the device pool -- which picks, boots
+        # and activates an iPhone simulator. Nothing here may call it so.
+        assert udid, "resolve_udid(None) would go to the device pool"
+        self.resolved.append(udid)
+        return udid
 
     async def list_devices(self):
-        return [SimpleNamespace(udid=u, state=DeviceState.BOOTED) for u in self.booted]
+        return [SimpleNamespace(udid=u, state=DeviceState.BOOTED,
+                                device_type=DeviceType.ANDROID_EMULATOR if u in self.android
+                                else DeviceType.SIMULATOR)
+                for u in self.booted]
 
     def _is_android(self, udid):
         return udid in self.android
@@ -634,7 +638,9 @@ class TestWhoseJavaHomeWins:
         (home / ".gradle" / "gradle.properties").write_text(f"org.gradle.java.home={j21}\n")
         root = _project(tmp_path, props=f"org.gradle.java.home={j11}\n")
         c = self._choose(root, [], home)
-        assert c.jdk.home == j21 and c.forced_by == "your ~/.gradle/gradle.properties"
+        assert c.jdk.home == j21
+        assert c.forced_by == (f"your Gradle user home's gradle.properties "
+                               f"({home / '.gradle' / 'gradle.properties'})")
 
     def test_a_minus_d_argument_beats_both(self, tmp_path):
         j11 = _jdk_dir(tmp_path, "j11", "11.0.1")
@@ -925,7 +931,7 @@ class TestTheDefaultDevice:
 
     def test_none_booted_says_so_and_names_the_active_one(self, built):
         c = FakeController(FakeAdb([]), active="SIM-1", booted=[])
-        with pytest.raises(HTTPException, match=r"no Android device .*SIM-1, is not Android"):
+        with pytest.raises(HTTPException, match=r"no Android device .*SIM-1, is not one"):
             _go(c, _body(project_path=str(built.root), udids=None))
 
     def test_a_named_ios_device_is_still_refused_by_name(self, built):
@@ -1112,3 +1118,90 @@ class TestTheMcpToolWaits:
         call = re.search(r'apiRequest\(\s*"POST",\s*"/api/v1/device/build-and-install",'
                          r'(?P<rest>[^;]*)\);', src)
         assert call and '"none"' in call.group("rest")
+
+    def test_an_active_android_wins_among_several_booted(self, built):
+        c = FakeController(FakeAdb([(0, "Success\n", "")]), android=("emulator-5554", "PIXEL"),
+                           active="PIXEL")
+        r = _go(c, _body(project_path=str(built.root), udids=None))
+        assert [d.udid for d in r["devices"]] == ["PIXEL"]
+
+    def test_an_active_android_that_is_not_running_is_passed_over(self, built):
+        c = FakeController(FakeAdb([(0, "Success\n", "")]), android=("emulator-5554", "PIXEL"),
+                           active="PIXEL", booted=["emulator-5554"])
+        r = _go(c, _body(project_path=str(built.root), udids=None))
+        assert [d.udid for d in r["devices"]] == ["emulator-5554"]
+
+
+class TestTheThirdReview:
+    @pytest.mark.parametrize("flag", ["-m", "--dry-run"])
+    def test_a_dry_run_is_refused(self, built, flag):
+        with pytest.raises(HTTPException, match="dry run"):
+            _go(FakeController(FakeAdb([])), _body(project_path=str(built.root),
+                                                   gradle_args=[flag]))
+        assert built.ran == []
+
+    @pytest.mark.parametrize("args, props, quiet", [
+        (["-w"], "", True), (["--warn"], "", True), (["-q"], "", True),
+        (["-Dorg.gradle.logging.level=warn"], "", True),
+        ([], "org.gradle.logging.level=quiet\n", True),
+        (["-Dorg.gradle.logging.level=lifecycle"], "org.gradle.logging.level=quiet\n", False),
+        ([], "org.gradle.logging.level=info\n", False), ([], "", False),
+    ])
+    def test_the_log_level_decides_whether_success_is_printed(self, tmp_path, args, props,
+                                                             quiet):
+        p = gradle.find_project(str(_project(tmp_path, props=props)))
+        assert gradle.quiet_logging(p, args, tmp_path / "guh") is quiet
+
+    def test_a_warn_level_build_installs(self, built, monkeypatch):
+        async def run(*a, **k):
+            return 0, ""
+        monkeypatch.setattr(gradle, "run", run)
+        r = _go(FakeController(FakeAdb([(0, "Success\n", "")])),
+                _body(project_path=str(built.root), gradle_args=["-w"]))
+        assert r["all_installed"]
+
+    def test_a_directory_named_like_a_source_file_is_not_the_file(self, tmp_path):
+        p = gradle.find_project(str(_project(tmp_path)))
+        line = "e: /Users/me/Projects/Shared.java/app/src/main/Foo.kt:3:1 Unresolved reference 'x'."
+        [e] = gradle.parse(1, line + "\n", p)[0].errors
+        assert (e.file, e.line, e.column) == ("/Users/me/Projects/Shared.java/app/src/main/Foo.kt",
+                                              3, 1)
+
+    def test_kotlin_2_percent_encodes_a_spaced_path(self, tmp_path):
+        """Real Kotlin 2.4.10 output from a project under `sp ace/`."""
+        p = gradle.find_project(str(_project(tmp_path)))
+        out = (FIXTURES / "kotlin_spaced_path.out").read_text()
+        [e] = gradle.parse(1, out, p)[0].errors
+        assert e.file == "/Users/someone/src/sp ace/probe/app/src/main/kotlin/Feed.kt"
+        assert (e.line, e.column) == (1, 11)
+
+    def test_real_agp_licence_refusal_names_its_packages(self, tmp_path):
+        """AGP 9.3.2 with SDK downloads on, against an empty SDK."""
+        p = gradle.find_project(str(_project(tmp_path)))
+        out = (FIXTURES / "agp_licences.out").read_text()
+        _, [env] = gradle.parse(1, out, p)
+        assert env.found == ["build-tools;36.0.0", "platforms;android-36"]
+        assert 'sdkmanager "build-tools;36.0.0" "platforms;android-36"' in env.options[0]
+
+    def test_properties_last_wins_and_continuations_join(self, tmp_path):
+        p = tmp_path / "gradle.properties"
+        p.write_text("org.gradle.java.home=/old\norg.gradle.java.home=/new\n"
+                     "k=/Library/Java/\\\n    JavaVirtualMachines/x\n"
+                     "# a comment ending in a backslash \\\nz=a\\ \n")
+        assert jdk_mod.gradle_property(p, "org.gradle.java.home") == "/new"
+        assert jdk_mod.gradle_property(p, "k") == "/Library/Java/JavaVirtualMachines/x"
+        assert jdk_mod.gradle_property(p, "z") == "a "
+
+    def test_the_forced_label_names_the_file_minus_g_moved(self, tmp_path):
+        j21 = _jdk_dir(tmp_path, "j21", "21.0.2")
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "gradle.properties").write_text(f"org.gradle.java.home={j21}\n")
+        c = jdk_mod.choose(_project(tmp_path), env={}, home=str(tmp_path / "home"), found=[],
+                           gradle_args=["-g", str(elsewhere)])
+        assert str(elsewhere / "gradle.properties") in c.forced_by
+
+    def test_a_first_install_that_times_out_may_have_installed(self, built):
+        adb = FakeAdb([AdbTimeout("adb install did not finish within 300s", tool="adb")])
+        r = _go(FakeController(adb), _body(project_path=str(built.root)))
+        assert "may still have installed" in r["devices"][0].error
