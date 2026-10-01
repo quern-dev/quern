@@ -400,7 +400,7 @@ You can also update the list at runtime via the `set_local_capture` MCP tool wit
 
 Manage iOS simulators and physical devices, and interact with running apps.
 
-- **Device management** — list, boot, shutdown, and erase simulators; discover physical devices and Android emulators
+- **Device management** — list, boot, shutdown, and erase simulators and Android emulators; discover physical devices
 - **App management** — install, launch, terminate, uninstall, list apps; build an Xcode scheme and install it across several devices in one call
 - **Screenshots** — capture with configurable scale and format, annotated screenshots with accessibility overlays, and screenshot timelines that auto-capture after every UI action so a whole run can be reviewed frame by frame
 - **Live preview** — real-time video windows for USB-connected physical devices and booted simulators, independently per-device

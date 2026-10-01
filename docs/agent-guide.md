@@ -263,7 +263,7 @@ When the question is "what screen am I on right now?" — for verifying navigati
 
 | Field | Purpose |
 |---|---|
-| `element` | Element type, required (e.g. `Button`, `RadioButton`, `navigationBar`). Matched against `type`, which follows the backend that read the screen — a simulator's tab is `RadioButton` from the accessibility tree and `Button` while it is in WDA mode — so record landmarks with the backend you will identify with |
+| `element` | Element type, required (e.g. `Button`, `RadioButton`, `Heading`). Matched against `type`, which follows the backend that read the screen — a simulator's tab is `RadioButton` from the accessibility tree and `Button` through WDA. With an `identifier` or a `label` as well, quern matches the same element under either name, and says so with `matched_via: "RadioButton≈Button"`; a type-only landmark is matched exactly. Avoid `navigationBar`: the accessibility tree does not expose one, so anchor on the screen title as a `Heading` |
 | `identifier` | Accessibility identifier, exact match (preferred — locale-independent) |
 | `label` | Label text, case-insensitive exact match |
 | `label_contains` | Substring match for elements with dynamic content in their label |
@@ -273,6 +273,8 @@ When the question is "what screen am I on right now?" — for verifying navigati
 **A knowledge base with no landmarks:** If `load_landmarks` returns `screens: 0` and a populated `skipped[]`, each entry says why. `legacy_format` means the file uses `identify_by:`, the field that preceded `landmarks:` and that the loader has never evaluated; the original entries come back in the response, so the rename can be done from it directly (keep `element`/`identifier`/`label`/`label_contains`/`absent`, turn `value: "1"` into `selected: true`, drop the rest). Check the result against the running app rather than translating blind — a knowledge base old enough to use that field is old enough to have drifted.
 
 **Validating before relying on landmarks**: Run `validate_landmarks(app="...")` after loading. Reports collisions (two screens whose landmark sets overlap — one could be mistaken for the other) and screens with no landmarks. Fix collisions by adding a distinguishing element to one of the screens.
+
+**Checking a knowledge base against the current conventions**: `load_landmarks` and `validate_landmarks` both return a `conventions` block — counts over every screen file, and each file not `current` with the landmarks at fault and why (for example a type-only landmark that matches on one backend only). A file's `landmark_conventions: 2` is what it is written for, not a claim it complies; the block is the computed answer. "Auditing a knowledge base" in `docs/screen-landmarks.md` is the procedure.
 
 **When `confidence: "none"` on a known-good screen**: the landmarks are likely stale — the app has shipped UI changes since the knowledge base was authored. Surface this to the user before continuing; downstream automation built on top of stale landmarks will silently produce wrong results (you'll act on the wrong screen and misreport state). The fix is to navigate to the screen, run `get_ui_tree`, and re-author the landmarks block from what's actually there. See "Keeping Landmarks in Sync" in the knowledge-base authoring guide.
 
