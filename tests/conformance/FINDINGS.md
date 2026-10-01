@@ -763,3 +763,30 @@ coerced number, so it reached the server as `1` and was stored as an integer --
 while the tool description promised a boolean. The batch tool's schema was not
 affected. Now one non-coercing `plistValue` schema serves both.
 
+## F24 — Android's `tap_element` never consults `scrollable`
+
+`docs/screen-landmarks.md` says an unset `scroll_to_find` "identifies the
+screen and sweeps only on `scrollable: true`". On Android it always sweeps: a
+miss on the probe's Text tab, recorded `scrollable: false`, came back
+`attempted: true` with no `screen`, and so did the same miss with no knowledge
+base loaded at all. The code says this is deliberate -- Android's tap is a
+no-tree-read fast path, and identifying the screen costs the tree read it
+avoids -- but the docs do not say the tri-state is iOS-only, so a caller on
+Android who records `scrollable: false` gets the swipes anyway and nothing
+says why. Found by `test_landmarks.py`; no issue yet.
+
+## F25 — an Android tap's screen context describes the transition, not the destination
+
+`tap_element(include_screen_context=true)` on Android, from the Text tab to
+Links: three of three responses said `identified_as: null, confidence: none`,
+and an identification taken immediately afterwards agreed. A screenshot showed
+Links fully drawn, and a read seconds later identified Links. The tree read
+right after the tap held the *Logs* page's heading -- the ViewPager was still
+travelling across the pages between the two. The same check on iOS, pushing
+the State screen from More, named State correctly in three of three.
+
+`settle_delay` exists on the request but is applied only when screenshots are
+captured; the screen context is read immediately. The context's whole job is
+to say where the action landed, so reading it mid-transition reports the
+journey. Found by `test_landmarks.py`; no issue yet.
+
