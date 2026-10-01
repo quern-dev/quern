@@ -843,6 +843,47 @@ class TestABootPropertyReadCannotHang:
 
         assert loop.time() - started < 2.0
 
+    async def test_an_unset_read_then_a_stall_still_ends_with_the_budget(self, monkeypatch):
+        """The first read answers "not yet" just inside the budget; the pause
+        before the next must not carry past the deadline, and that next read
+        must not get the five-second fallback meant only for a first look on a
+        spent budget (review of #361)."""
+        backend = adb_module.AdbBackend()
+        backend._adb_path = "/sdk/platform-tools/adb"
+        spawned = []
+
+        class Answers:
+            returncode = 0
+
+            async def communicate(self):
+                return b"\n", b""          # sys.boot_completed not set yet
+
+        class Hangs:
+            returncode = None
+
+            async def communicate(self):
+                await asyncio.Event().wait()
+
+            def kill(self):
+                pass
+
+            async def wait(self):
+                return -9
+
+        async def spawn(*_a, **_k):
+            spawned.append(1)
+            return Answers() if len(spawned) == 1 else Hangs()
+
+        monkeypatch.setattr(adb_module.asyncio, "create_subprocess_exec", spawn)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+
+        with pytest.raises(DeviceError, match="had not finished starting"):
+            await asyncio.wait_for(
+                backend.wait_for_boot_completed(OLD, timeout=0.3), timeout=4)
+
+        assert loop.time() - started < 1.5, "the wait outran its 0.3s budget"
+
     async def test_an_unbounded_call_is_still_unbounded_elsewhere(self, monkeypatch):
         """Scope: only the boot wait passes a timeout. Every other adb call
         behaves exactly as it did."""

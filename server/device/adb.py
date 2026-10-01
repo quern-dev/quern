@@ -729,20 +729,22 @@ class AdbBackend:
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
+        first = True
         while True:
-            # Read before judging the deadline, so a caller whose budget is
-            # already spent still learns a boot that *has* finished, instead
-            # of being told it failed without anyone looking (review of #360).
+            left = deadline - loop.time()
+            # Only the first look may happen past the deadline -- so a caller
+            # whose budget is already spent still learns of a boot that *has*
+            # finished, instead of being told it failed without anyone looking
+            # (review of #360). Every later read must fit inside the budget.
+            if not first and left <= 0:
+                break
+            first = False
             try:
-                # Bounded per read. A half-started device can leave adb
-                # hanging, and an unbounded read never returned to the
-                # deadline check below, holding the AVD's reservation with it
-                # (review of #361). A timeout is a DeviceError, so it reads as
-                # "not yet" and the deadline still decides.
-                # Never past the overall deadline either: a stall with 0.1s
-                # left must not buy five more seconds (review of #361). The
-                # first look on an already-spent budget keeps its own bound.
-                left = deadline - loop.time()
+                # Bounded per read, and never past the deadline: a
+                # half-started device can leave adb hanging, and an unbounded
+                # read never returned to the deadline check, holding the AVD's
+                # reservation with it. A timeout is a DeviceError, so it reads
+                # as "not yet" and the deadline still decides (review of #361).
                 out, _ = await self._run_adb_for_device(
                     serial, "shell", "getprop", "sys.boot_completed",
                     timeout=(min(self._GETPROP_TIMEOUT, left) if left > 0
@@ -752,9 +754,12 @@ class AdbBackend:
                     return
             except DeviceError:
                 pass  # adb can refuse a shell while the device is still coming up
-            if loop.time() >= deadline:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
                 break
-            await asyncio.sleep(1)
+            # Capped, so the pause between reads cannot itself carry the wait
+            # past the deadline (review of #361).
+            await asyncio.sleep(min(1.0, remaining))
         raise DeviceError(
             f"{serial} came back but Android had not finished starting after "
             f"{timeout:.0f}s",
