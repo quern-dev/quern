@@ -1,59 +1,10 @@
+import { randomUUID } from "node:crypto";
+
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { apiRequest } from "../http.js";
-import { progressMessage, type RunningBuild } from "./build-progress.js";
+import { reportProgress, type HandlerExtra, type RunningBuild } from "./build-progress.js";
 import { strictParams } from "./helpers.js";
-
-/** What a tool handler is handed beyond its arguments, as much of it as is used here. */
-interface HandlerExtra {
-  _meta?: { progressToken?: string | number };
-  sendNotification: (notification: {
-    method: "notifications/progress";
-    params: { progressToken: string | number; progress: number; message?: string };
-  }) => Promise<void>;
-}
-
-/** How often a waiting caller hears that the build is moving. */
-const PROGRESS_EVERY_MS = 10_000;
-
-/**
- * Send progress notifications while a build runs, if the caller asked for
- * them with a progress token; returns the function that stops them. Best
- * effort throughout: a progress poll that fails is skipped, never surfaced,
- * because it says nothing about the build itself.
- */
-function reportProgress(extra: HandlerExtra, projectPath: string): () => void {
-  const token = extra._meta?.progressToken;
-  if (token === undefined) return () => {};
-  const started = Date.now();
-  let busy = false;
-  const timer = setInterval(async () => {
-    if (busy) return;
-    busy = true;
-    try {
-      const waited = (Date.now() - started) / 1000;
-      let builds: RunningBuild[] = [];
-      try {
-        const data = (await apiRequest("GET", "/api/v1/device/build-progress",
-                                       undefined, undefined, 5000)) as { builds?: RunningBuild[] };
-        builds = data?.builds ?? [];
-      } catch {
-        // An older server has no such route: progress is then just the wait.
-      }
-      // progress must only increase: seconds waited does.
-      await extra.sendNotification({
-        method: "notifications/progress",
-        params: { progressToken: token, progress: Math.round(waited),
-                  message: progressMessage(builds, projectPath, waited) },
-      });
-    } catch {
-      // The client went away; the build call itself will say so.
-    } finally {
-      busy = false;
-    }
-  }, PROGRESS_EVERY_MS);
-  return () => clearInterval(timer);
-}
 
 export function registerBuildTools(server: McpServer): void {
   server.registerTool("build_and_install", {
@@ -152,7 +103,13 @@ xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
   }, async ({ project_path, scheme, udids, configuration, skip_plugin_validation,
                variant, module, java_home, gradle_args, uninstall_on_signature_mismatch,
                allow_downgrade }, extra) => {
-    const stopProgress = reportProgress(extra, project_path);
+    // Our own id for this build, so the progress read back is ours.
+    const progressId = randomUUID();
+    const stopProgress = reportProgress(extra as HandlerExtra, progressId, async () => {
+      const data = (await apiRequest("GET", "/api/v1/device/build-progress",
+                                     undefined, undefined, 5000)) as { builds?: RunningBuild[] };
+      return data?.builds ?? [];
+    });
     try {
       const body: Record<string, unknown> = { project_path, configuration };
       if (skip_plugin_validation) body.skip_plugin_validation = true;
@@ -163,6 +120,7 @@ xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
       if (uninstall_on_signature_mismatch) body.uninstall_on_signature_mismatch = true;
       if (allow_downgrade) body.allow_downgrade = true;
       if (scheme) body.scheme = scheme;
+      body.progress_id = progressId;
       if (udids && udids.length > 0) body.udids = udids;
 
       // A build answers when it is done, which can be well past fetch's

@@ -98,7 +98,8 @@ async def build_and_install(controller, body, *, env: dict[str, str] | None = No
     # variant check, Gradle, and the installs after it, so a caller waiting
     # on a long build never sees a gap and reads it as hung.
     progress = gradle.BuildProgress(project=str(project.root), task="",
-                                    stage="checking the variant")
+                                    stage="checking the variant",
+                                    progress_id=body.progress_id or "")
     gradle.ACTIVE[id(progress)] = progress
     try:
         return await _build(controller, body, project, variant, serials, env, home, choice,
@@ -119,7 +120,8 @@ async def _build(controller, body, project: gradle.GradleProject, variant: str,
         # chose. Off, a missing package is an environment problem to decide on.
         args.append("-Pandroid.builder.sdkDownload=false")
     gradle_env = gradle.build_env(env, choice.jdk, sdk)
-    variant = await _check_variant(project, variant, gradle_env, args)
+    variant = await _check_variant(project, variant, gradle_env, args,
+                                   jdk_mod.gradle_user_home(args, env, home))
 
     task = gradle.assemble_task(project, variant)
     logger.info("Building %s with %s (%s)", project.root, task, used["java"])
@@ -154,10 +156,10 @@ async def _build(controller, body, project: gradle.GradleProject, variant: str,
         # Gradle said it built; the outputs say otherwise. Said, not guessed.
         return {**_not_built(serials, [], used, f"the build left no APK: {e}"),
                 "build_android": result}
-    if gradle.unsigned(metadata):
+    if unsigned := await asyncio.to_thread(gradle.unsigned_apks, metadata):
         # Android installs only signed APKs: said here, by the variant, not
         # as INSTALL_PARSE_FAILED_NO_CERTIFICATES once per device.
-        apk = metadata["elements"][0].get("outputFile")
+        apk = ", ".join(unsigned)
         return {**_not_built(serials, [], used,
                              f"the {variant} APK ({apk}) is unsigned: the variant has no signing "
                              f"config, and Android installs only signed APKs. Build a debug "
@@ -198,7 +200,7 @@ async def _build(controller, body, project: gradle.GradleProject, variant: str,
 
 
 async def _check_variant(project: gradle.GradleProject, variant: str, env: dict[str, str],
-                         args: list[str]) -> str:
+                         args: list[str], user_home: Path) -> str:
     """The variant to build, in its own spelling, or a 400 that lists them.
 
     Checked before the build, because Gradle's own answers come late or
@@ -208,13 +210,15 @@ async def _check_variant(project: gradle.GradleProject, variant: str, env: dict[
     looked for under the name given. Listing costs about a second on a warm
     daemon and is then cached for as long as the build files are unchanged.
     """
-    cached = gradle.cached_variants(project)
-    if variant and cached and cached.find(variant):
-        return cached.find(variant)
-    key = gradle._build_files_key(project)
-    known, why = await gradle.list_variants(project, env, args)
-    if known is not None:
-        gradle.remember_variants(project, key, known)
+    key = gradle.variants_key(project, args, user_home)
+    hit = gradle.cached_listing(project, key)
+    if hit and hit[0] and variant and hit[0].find(variant) and not hit[0].group(variant):
+        return hit[0].find(variant)
+    if hit and hit[0] is None:
+        known, why = hit          # failed recently, nothing it depends on has changed
+    else:
+        known, why = await gradle.list_variants(project, env, args)
+        gradle.remember_listing(project, key, known, why)
     where = f":{project.module}"
     if known is None:
         if not variant:
@@ -233,6 +237,11 @@ async def _check_variant(project: gradle.GradleProject, variant: str, env: dict[
     if own := known.find(variant):
         return own
     if group := known.group(variant):
+        if len(group) == 1:
+            # A flavour with one variant left (the rest disabled in the build).
+            raise HTTPException(status_code=400,
+                                detail=f"{variant!r} names a flavour of {where}, not a variant: "
+                                       f"its only variant is {group[0]}")
         raise HTTPException(status_code=400,
                             detail=f"{variant!r} is not one variant of {where} but several: "
                                    f"pass one of {', '.join(group)}")

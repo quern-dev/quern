@@ -19,6 +19,7 @@ import asyncio
 import os
 import re
 import time
+import zipfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -251,12 +252,16 @@ class BuildProgress:
     tasks_run: int = 0
     #: What quern is doing: checking the variant, building, installing.
     stage: str = "building"
+    #: The caller's own id for this build, so it reads its build's progress
+    #: and not another one's: two builds can run at once.
+    progress_id: str = ""
 
     def as_dict(self) -> dict:
         return {"project": self.project, "task": self.task,
                 "started_at": self.started_at.isoformat(),
                 "elapsed_s": round(time.monotonic() - self.started, 1),
-                "current": self.current, "tasks_run": self.tasks_run, "stage": self.stage}
+                "current": self.current, "tasks_run": self.tasks_run, "stage": self.stage,
+                "progress_id": self.progress_id}
 
 
 #: Builds running now, by identity. A build that ends removes itself.
@@ -331,8 +336,32 @@ class Variants:
         return next((g for k, g in self.groups.items() if k.lower() == variant.lower()), ())
 
 
-def _words(name: str) -> list[str]:
-    return [w.lower() for w in re.findall(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])", name)]
+def _segments(name: str, parts: set[str]) -> bool:
+    """Whether `name` (lowercased) is a run of `parts`: Gradle's aggregate
+    names, which are exactly the flavours, build types and their combinations."""
+    ok = [True] + [False] * len(name)
+    for end in range(1, len(name) + 1):
+        ok[end] = any(ok[start] and name[start:end] in parts for start in range(end))
+    return ok[len(name)]
+
+
+def _members(word: str, names: tuple[str, ...], parts: set[str]) -> tuple[str, ...]:
+    """The variants an aggregate covers. By segmentation, not substring: with
+    flavours `free` and `freeTrial`, freeTrialStagingDebug contains "free" and
+    is not a free variant -- what is left, "trialstagingdebug", is no run of
+    names Gradle printed."""
+    w = word.lower()
+    out = []
+    for n in names:
+        low = n.lower()
+        for at in range(len(low) - len(w) + 1):
+            if low[at:at + len(w)] != w:
+                continue
+            before, after = low[:at], low[at + len(w):]
+            if (not before or _segments(before, parts)) and (not after or _segments(after, parts)):
+                out.append(n)
+                break
+    return tuple(out)
 
 
 def parse_variants(output: str) -> Variants | None:
@@ -343,46 +372,119 @@ def parse_variants(output: str) -> Variants | None:
                           if not n.endswith(_TEST_VARIANTS)}))
     if not names:
         return None
+    words = [word for _, word in _AGGREGATE_TASK.findall(output)]
+    parts = {w.lower() for w in words}
     groups = {}
-    for _, word in _AGGREGATE_TASK.findall(output):
-        want = _words(word)
-        covered = tuple(n for n in names
-                        if any(_words(n)[i:i + len(want)] == want
-                               for i in range(len(_words(n)))))
-        if len(covered) > 1 or (covered and covered[0].lower() != word.lower()):
+    for word in words:
+        covered = _members(word, names, parts)
+        if covered and not (len(covered) == 1 and covered[0].lower() == word.lower()):
             groups[word[:1].lower() + word[1:]] = covered
     return Variants(names=names, groups=groups)
 
 
-#: Variants found per module, with the build files they were read from. Only
-#: a positive answer is trusted from here: a flavour added in a convention
-#: plugin changes no file this keys on, so a variant missing from the cache is
-#: asked about again rather than refused.
-_VARIANT_CACHE: dict[tuple[str, str], tuple[tuple, Variants]] = {}
+#: Listings per module: (key, when, variants or None, why). A positive answer
+#: is trusted while the key holds; a variant missing from it is asked about
+#: again, since a flavour can come from somewhere no key covers (an
+#: environment variable a build script reads). A failed listing is kept for
+#: FAILED_LISTING_TTL, so a module whose listing always fails does not pay
+#: for it before every build, and a transient one is tried again.
+_VARIANT_CACHE: dict[tuple[str, str], tuple[tuple, float, Variants | None, str]] = {}
+FAILED_LISTING_TTL = 600  # s
+
+#: Where convention plugins live, whose edits can add a flavour.
+_BUILD_LOGIC = ("buildSrc", "build-logic")
+_BUILD_LOGIC_SOURCES = (".gradle", ".kts", ".kt", ".java", ".groovy", ".properties", ".toml")
 
 
-def _build_files_key(project: GradleProject) -> tuple:
+def _newest_under(d: Path) -> tuple[int, int] | None:
+    """(file count, newest mtime) of the build-logic sources under `d`."""
+    if not d.is_dir():
+        return None
+    count, newest = 0, 0
+    for here, dirs, files in os.walk(d):
+        dirs[:] = [x for x in dirs if x not in ("build", ".gradle", ".kotlin")]
+        for f in files:
+            if f.endswith(_BUILD_LOGIC_SOURCES):
+                try:
+                    newest = max(newest, os.stat(os.path.join(here, f)).st_mtime_ns)
+                    count += 1
+                except OSError:
+                    pass
+    return count, newest
+
+
+def variants_key(project: GradleProject, args: list[str], user_home: Path) -> tuple:
+    """What a listing depends on, as far as files and arguments can say: the
+    build files, both gradle.properties, local.properties, the arguments
+    (`-P` can switch flavours on), and the convention plugins' sources."""
     files = [*(project.root / s for s in _SETTINGS), *(project.root / b for b in _BUILD_FILES),
-             project.root / "gradle.properties", project.root / "gradle" / "libs.versions.toml",
+             project.root / "gradle.properties", project.root / "local.properties",
+             project.root / "gradle" / "libs.versions.toml", user_home / "gradle.properties",
              *(project.module_dir / b for b in _BUILD_FILES)]
-    key = []
+    key: list = [tuple(args)]
     for f in files:
         try:
             key.append((str(f), f.stat().st_mtime_ns))
         except OSError:
             key.append((str(f), None))
+    logic = [project.root / d for d in _BUILD_LOGIC]
+    for settings in (project.root / s for s in _SETTINGS):
+        try:
+            text = settings.read_text()
+        except (OSError, ValueError):
+            continue
+        logic += [(project.root / m).resolve()
+                  for m in re.findall(r"""includeBuild\(\s*["']([^"']+)["']""", text)]
+    key += [(str(d), _newest_under(d)) for d in logic]
     return tuple(key)
 
 
-def cached_variants(project: GradleProject) -> Variants | None:
+def cached_listing(project: GradleProject, key: tuple) -> tuple[Variants | None, str] | None:
+    """The listing remembered for this key, or None if there is none (or a
+    remembered failure has expired)."""
     hit = _VARIANT_CACHE.get((str(project.root), project.module))
-    return hit[1] if hit and hit[0] == _build_files_key(project) else None
+    if not hit or hit[0] != key:
+        return None
+    _, when, variants, why = hit
+    if variants is None and time.monotonic() - when > FAILED_LISTING_TTL:
+        return None
+    return variants, why
 
 
-def remember_variants(project: GradleProject, key: tuple, variants: Variants) -> None:
-    """Cache a listing under the build files' state *before* it ran, so an
-    edit made while Gradle was configuring invalidates it."""
-    _VARIANT_CACHE[(str(project.root), project.module)] = (key, variants)
+def remember_listing(project: GradleProject, key: tuple, variants: Variants | None,
+                     why: str) -> None:
+    """Cache a listing under the key computed *before* it ran, so an edit
+    made while Gradle was configuring invalidates it."""
+    _VARIANT_CACHE[(str(project.root), project.module)] = (key, time.monotonic(), variants, why)
+
+
+#: Gradle options that take the next argument as their value.
+_VALUE_OPTIONS = frozenset({
+    "-P", "--project-prop", "-D", "--system-prop", "-g", "--gradle-user-home",
+    "-I", "--init-script", "-p", "--project-dir", "-c", "--settings-file",
+    "-x", "--exclude-task", "--include-build", "--project-cache-dir",
+    "-F", "--dependency-verification", "--warning-mode", "--priority",
+})
+#: Not for a listing: one publishes a build scan, one never returns.
+_NOT_FOR_LISTING = frozenset({"--scan", "--continuous", "-t"})
+
+
+def listing_args(args: list[str]) -> list[str]:
+    """The build's arguments a listing needs too: every option, with its value
+    kept beside it, and no task name. A `-P` can add flavours; `-g` moves
+    the user home, and splitting it from its value would make the next
+    argument the user home -- a directory in the user's project."""
+    out, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a in _VALUE_OPTIONS and i + 1 < len(args):
+            out += [a, args[i + 1]]
+            i += 2
+            continue
+        if a.startswith("-") and a not in _NOT_FOR_LISTING:
+            out.append(a)
+        i += 1
+    return out
 
 
 async def list_variants(project: GradleProject, env: dict[str, str],
@@ -392,14 +494,10 @@ async def list_variants(project: GradleProject, env: dict[str, str],
     Runs `:<module>:tasks --all`, which configures the project and builds
     nothing. A listing that fails is said as such, never as an empty list.
     """
-    # Only the arguments that change what Gradle is: a -P or -D can add or
-    # remove flavours; a --offline or -q cannot hurt. A task name would.
-    args = [a for a in extra_args if a.startswith(("-P", "-D", "--offline", "-g",
-                                                   "--gradle-user-home", "--init-script",
-                                                   "-I"))]
     try:
         code, output = await run(project, f":{project.module}:tasks", env,
-                                 ["--all", "-q", *args], timeout=LIST_TIMEOUT)
+                                 ["--all", "-q", *listing_args(extra_args)],
+                                 timeout=LIST_TIMEOUT)
     except TimeoutError:
         return None, f"listing them did not finish within {LIST_TIMEOUT // 60} minutes"
     except OSError as e:
@@ -600,7 +698,17 @@ def _signing(output: str) -> list[EnvironmentProblem]:
             options=[debug_instead,
                      f"put the keystore at {m.group(1)}, or point the signing config at where "
                      f"it is: the user's to supply"])]
-    if m := re.search(r'Failed to read key (\S+) from store "([^"]+)": (.+)', output):
+    if m := re.search(r'SigningConfig "([^"]+)" is missing required property "([^"]+)"',
+                      output):
+        # The shape a password read from an unset environment variable takes
+        # (measured, AGP 9.3.2: System.getenv(...) as storePassword).
+        return [EnvironmentProblem(
+            kind="signing",
+            summary=f"signing config '{m.group(1)}' has no {m.group(2)}",
+            options=[debug_instead, _NOT_YOUR_SHELL,
+                     f"set {m.group(2)} where the signing config reads it: the user's to "
+                     f"supply"])]
+    if m := re.search(r'Failed to read key (.+?) from store "([^"]+)": (.+)', output):
         return [EnvironmentProblem(
             kind="signing",
             summary=f"key {m.group(1)} could not be read from {m.group(2)}: "
@@ -612,13 +720,52 @@ def _signing(output: str) -> list[EnvironmentProblem]:
     return []
 
 
-def unsigned(metadata: dict) -> bool:
-    """Whether the build's APKs are unsigned: a release variant with no
-    signing config, which AGP names `app-release-unsigned.apk` and Android
-    refuses to install."""
-    elements = metadata.get("elements") or []
-    return bool(elements) and all(str(e.get("outputFile", "")).endswith("-unsigned.apk")
-                                  for e in elements if isinstance(e, dict))
+_SIG_BLOCK_MAGIC = b"APK Sig Block 42"
+
+
+def apk_signed(path: Path) -> bool | None:
+    """Whether the APK carries a signature: an APK Signing Block (v2 and
+    later), which sits just before the zip's central directory, or v1's
+    META-INF/*.RSA|DSA|EC. None when the file cannot be read as a zip, so
+    "could not tell" is never "unsigned"."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 65557))
+            tail = f.read()
+            at = tail.rfind(b"PK\x05\x06")
+            if at < 0 or len(tail) < at + 22:
+                return None
+            cd_offset = int.from_bytes(tail[at + 16:at + 20], "little")
+            if cd_offset == 0xFFFFFFFF or cd_offset < 16:
+                return None
+            f.seek(cd_offset - 16)
+            if f.read(16) == _SIG_BLOCK_MAGIC:
+                return True
+        with zipfile.ZipFile(path) as z:
+            return any(re.fullmatch(r"META-INF/[^/]+\.(?:RSA|DSA|EC)", n, re.I)
+                       for n in z.namelist())
+    except (OSError, ValueError, EOFError):
+        return None
+
+
+def unsigned_apks(metadata: dict) -> list[str]:
+    """The build's APKs that are unsigned: a release variant with no signing
+    config, which Android refuses to install. Read from each APK's own
+    signature, not its name -- a signed build type called `unsigned` makes
+    `app-unsigned.apk` too. Only an APK that cannot be read falls back to
+    AGP's `-unsigned.apk` naming."""
+    apk_dir = Path(metadata.get("_dir") or ".")
+    out = []
+    for e in metadata.get("elements") or []:
+        name = str(e.get("outputFile") or "") if isinstance(e, dict) else ""
+        if not name:
+            continue
+        signed = apk_signed(apk_dir / name)
+        if signed is False or (signed is None and name.endswith("-unsigned.apk")):
+            out.append(name)
+    return out
 
 
 def parse(code: int, output: str, project: GradleProject,

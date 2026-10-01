@@ -43,6 +43,9 @@ class BuildAndInstallRequest(BaseModel):
     # Gradle projects (#347). `variant` is what Xcode calls a scheme and
     # configuration together: a build type with any flavour before it.
     variant: str | None = None
+    # The caller's id for this build, echoed in /build-progress, so a client
+    # reads its own build's progress when several run at once.
+    progress_id: str | None = None
     # The module to build, for a project root: `app` unless named.
     module: str | None = None
     # A JDK to run Gradle with, from an environment problem's options.
