@@ -278,15 +278,39 @@ class DeviceControllerUI:
         """Return the appropriate UI automation backend for a device.
 
         Android devices use U2Backend; iOS physical devices use WdaBackend;
-        iOS simulators use SimBridgeBackend (preferred) or IdbBackend (fallback).
+        iOS simulators use SimBridgeBackend (preferred) or IdbBackend (fallback)
+        -- unless WDA has been started on that simulator, in which case WDA
+        serves it until it is stopped (#336). That is the opt-in for seeing what
+        XCUITest sees; the default is unchanged.
         """
         if self._is_android(udid):
             return self.u2
         if self._is_physical(udid):
             return self.wda_client
+        if self.wda_client.serves_simulator(udid):
+            return self.wda_client
         if self._sim_bridge_ok:
             return self.sim_bridge
         return self.idb
+
+    def _backend_switched(self, udid: str) -> None:
+        """Forget everything the previous backend left for this device.
+
+        The recorded backend, the cached tree and the web overlay all came from
+        the backend that just stopped serving it. The overlay is the sharp one:
+        it is merged into every read for up to a minute, and a web element it
+        carries from the accessibility tree has a different frame from the same
+        element in WDA's tree, so the two are not deduplicated and a tap by
+        label comes back ambiguous (CodeRabbit on #362).
+        """
+        self._last_read_backend.pop(udid, None)
+        self._invalidate_ui_cache(udid)
+
+    def _served_by_wda(self, udid: str) -> bool:
+        """Whether WDA serves this device's UI -- a phone, or a simulator in
+        WDA mode. Ask this, not `_is_physical`, before a WDA-only call: since
+        #336 the two are not the same question."""
+        return self._ui_backend(udid) is self.wda_client
 
     #: Backend name per device, written by `get_ui_elements` when it selects
     #: one. Read by the error paths that follow a read, so the label names the
@@ -1417,7 +1441,11 @@ class DeviceControllerUI:
                 return cached_elements, resolved
 
         # WDA direct query: physical device + filters + cache miss → query directly
-        if has_filters and self._is_physical(resolved):
+        if has_filters and self._served_by_wda(resolved):
+            # Recorded here too: this path returns before the general one
+            # below, so `backend` went on naming whatever served the last full
+            # read -- `sim-bridge` on a simulator just put in WDA mode (#336).
+            self._last_read_backend[resolved] = self.wda_client.TOOL_NAME
             elements, query_elapsed = await self._wda_direct_query(
                 resolved, label=filter_label,
                 identifier=filter_identifier, element_type=filter_type,
@@ -1783,8 +1811,9 @@ class DeviceControllerUI:
             mode: 'flat' to use flat idb output (for custom companion). Default uses nested.
         """
         resolved = await self.resolve_udid(udid)
-        asked_for_skeleton = strategy == "skeleton" and self._is_physical(resolved)
+        asked_for_skeleton = strategy == "skeleton" and self._served_by_wda(resolved)
         if asked_for_skeleton:
+            self._last_read_backend[resolved] = self.wda_client.TOOL_NAME
             raw = await self.wda_client.build_screen_skeleton(resolved)
             elements = parse_elements(raw)
         else:
@@ -2604,6 +2633,17 @@ class DeviceControllerUI:
             raise DeviceError(
                 "get_web_content is for iOS simulators; the Web Inspector service "
                 "used here is the simulator's. Use get_ui_tree on a physical device.",
+                tool="web-content",
+            )
+        if self._served_by_wda(resolved):
+            # Its fallback hit-tests point by point through the backend, and
+            # WDA has no point lookup: each probe would be a full /source. Nor
+            # is it needed -- XCUITest enumerates web views itself, so the WDA
+            # tree already carries the content this exists to find (#336).
+            raise DeviceError(
+                "This simulator is in WDA mode, and its get_ui_tree already "
+                "includes web content -- XCUITest enumerates web views itself. "
+                "Use get_ui_tree, or stop_driver to use get_web_content.",
                 tool="web-content",
             )
 

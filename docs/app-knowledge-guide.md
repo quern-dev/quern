@@ -79,17 +79,21 @@ This structured data in config.json complements the prose in the knowledge base 
 
 ### Common iOS Element Types
 
-When exploring with `get_ui_tree`, you'll encounter these element types. Knowing what to expect saves trial-and-error:
+**Where these names come from matters.** On a simulator, `get_ui_tree` normally reads the **accessibility tree** (sim-bridge, or idb as a fallback). XCUITest does not classify every element the same way, so a type that is right for driving quern can be wrong in an XCUITest selector — and nothing at runtime says why it failed. The sharpest case is tab-bar items: the accessibility tree reports them as `RadioButton`, while XCUITest sees `XCUIElementTypeButton` inside a `XCUIElementTypeTabBar`, so `app.radioButtons["Home"]` finds nothing.
+
+**To see what XCUITest sees on a simulator, run `start_driver` on it.** While WebDriverAgent runs there, every read and action on that simulator goes through it, elements read from it (`get_ui_tree`, `get_element`, `wait_for_element`) carry `xcui_type` (XCUITest's own type, e.g. `XCUIElementTypeButton`), and `backend` on the response says `wda`. `stop_driver` returns the simulator to the default. Physical devices always go through WDA, so their elements always carry `xcui_type`.
+
+What you'll see from the accessibility tree — the default on a simulator — and what these are for:
 
 - **Navigation**: `navigationBar`, `tabBar`, `toolbar`
-- **Tab bar items**: Often `button` or `radioButton` (not `tabBarButton` — the actual tappable items inside a tab bar are frequently `radioButton` type). Tab items may use identifiers like `_TabName button` with a leading underscore.
+- **Tab bar items**: often `RadioButton` in the accessibility tree; `XCUIElementTypeButton` to XCUITest. Correct in `tap_element element_type=...`, **wrong in an XCUITest selector**. Tab items may use identifiers like `_TabName button` with a leading underscore.
 - **Buttons**: `button`, `link` (for hyperlink-style buttons)
 - **Text**: `staticText`, `textField`, `secureTextField`, `textView`
 - **Containers**: `scrollView`, `table`, `collectionView`, `cell`
 - **Toggles**: `switch`, `segmentedControl`
 - **Indicators**: `activityIndicator`, `progressIndicator`, `image`
 
-Element types and identifier patterns vary by app framework (UIKit vs SwiftUI) and how the developer set up accessibility. Don't assume — verify with `get_ui_tree` on each screen.
+Element types and identifier patterns vary by app framework (UIKit vs SwiftUI) and how the developer set up accessibility. Don't assume — verify on each screen, **against the oracle that matches what you are writing**: `get_ui_tree` as it comes for driving quern (`tap_element`, landmarks), and `xcui_type` from a simulator in WDA mode for an XCUITest.
 
 ### What to Capture Per Screen
 
@@ -149,7 +153,8 @@ Copy `screens/_template.md` and fill it in. Key principles:
 - **`landmarks` is the most important field.** Quern evaluates it server-side against the live UI tree to answer "what screen am I on?" — it's the foundation of `identify_screen`, `get_screen_summary?identify=true`, and any future automation that needs to recognize where the agent is. Use the most unique, stable elements (nav bar titles, screen-specific identifiers).
 - **`landmarks` is the only field consulted for matching.** Screens written before April 2026 may also carry `identify_by:`; nothing reads it. Put prose notes in the body of the document instead, where they will be read.
 - **Include actual quern tool calls.** Don't write "tap the login button" — write `tap_element label="Sign In" element_type="button"`. The agent will copy-paste these.
-- **Be precise about element types.** Use the exact types from `get_ui_tree` — don't guess. See "Common iOS Element Types" above.
+- **Be precise about element types.** Use the exact types from `get_ui_tree` for quern tool calls — don't guess. For anything that will become an XCUITest selector, use `xcui_type` from a simulator with `start_driver` running, not `type`. See "Common iOS Element Types" above.
+- **Record landmarks on the backend you will identify with.** Landmarks match an element's `type`, and `type` follows the backend: the tab a landmark recorded on sim-bridge calls `RadioButton` is `Button` while the simulator is in WDA mode, and will not match there.
 - **Document failure modes.** What alerts, errors, or unexpected states can occur? How should the agent recover?
 
 ### Choosing Landmarks

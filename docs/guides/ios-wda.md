@@ -1,10 +1,12 @@
 # WebDriverAgent Guide
 
-WebDriverAgent (WDA) is how Quern controls physical iOS devices — tapping buttons, reading screen content, typing text, swiping. It runs on the device and exposes an API that your agent talks to. Quern manages WDA automatically, but understanding how it works helps when things go sideways.
+WebDriverAgent (WDA) is how Quern controls physical iOS devices — tapping buttons, reading screen content, typing text, swiping. It runs on the device and exposes an API that your agent talks to. Quern manages WDA automatically, but understanding how it works helps when things go sideways. It can also run on a simulator, on request — see below.
 
 ## What You Need to Know
 
-**On simulators**, Quern uses `idb` (Facebook's iOS Development Bridge) for UI automation. No setup needed — it works out of the box.
+**On simulators**, Quern reads the accessibility tree by default (sim-bridge, or `idb` as a fallback). No setup needed — it works out of the box.
+
+**WDA on a simulator** is the way to see what XCUITest sees. The accessibility tree and XCUITest classify some elements differently — tab-bar items are `RadioButton` in one and `XCUIElementTypeButton` in the other — so if you are writing or debugging an XCUITest, run `start_driver` on the simulator. While WDA runs there, every read and action on that simulator goes through it, elements read from it carry `xcui_type`, and `backend` says `wda`; `stop_driver` switches it back. A simulator needs no signing team, no provisioning and no install: the first `start_driver` builds an unsigned simulator copy of WDA (about a minute), and later starts take a few seconds. Each simulator gets its own port from 8200–8299. Switching back costs about two seconds on the first read while the accessibility bridge recovers from WDA.
 
 **On physical devices**, Quern needs WDA. Your agent will set it up the first time you interact with a physical device. Here's what happens and what might require your input.
 

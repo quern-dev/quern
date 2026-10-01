@@ -340,6 +340,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Device controller (Phase 3)
     device_controller = DeviceController()
     app.state.device_controller = device_controller
+    # Simulators in WDA mode (#336). Their runners outlive the server -- they
+    # are tracked by pid in wda-state.json -- but the routing is in memory, so
+    # without this a restart would quietly move them back to sim-bridge while
+    # WDA went on running underneath.
+    try:
+        from server.device.wda import restore_simulator_mode
+
+        await restore_simulator_mode(device_controller.wda_client)
+    except Exception:
+        # A warning, not debug: this failing is exactly the quiet move back to
+        # sim-bridge the restore exists to prevent.
+        logger.warning("Could not restore simulators in WDA mode", exc_info=True)
     # The proxy started before there was a controller to ask, and so trusts no
     # simulator yet. Ask now, rather than leaving every simulator's TLS passed
     # through until the first periodic refresh.
