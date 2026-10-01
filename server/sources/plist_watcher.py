@@ -10,7 +10,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from server.device.app_state import resolve_container
+from server.device.app_state import contained_path, resolve_container
 from server.device.plist import diff_plists, read_plist
 from server.models import LogEntry, LogLevel, LogSource
 from server.sources import BaseSourceAdapter
@@ -72,7 +72,7 @@ class PlistWatcherAdapter(BaseSourceAdapter):
     async def start(self) -> None:
         try:
             container_path = await resolve_container(self.udid, self.bundle_id, self.container)
-            self._resolved_path = container_path / self.plist_path
+            self._resolved_path = contained_path(container_path, self.plist_path)
             if not self._resolved_path.exists():
                 self._error = f"Plist not found: {self._resolved_path}"
                 return

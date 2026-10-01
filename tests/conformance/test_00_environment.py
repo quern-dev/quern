@@ -71,7 +71,7 @@ def test_reported_device_types_are_the_documented_set(
     the affected tier reports "no hardware" on a machine that has it.
     """
     known = set(ROLE_DEVICE_TYPE.values())
-    unknown = {d.device_type for d in environment.devices} - known
+    unknown = {d.device_type for d in environment.listed_devices} - known
     assert not unknown, (
         f"device types {sorted(unknown)} are not in the role map {sorted(known)}; "
         "tests for those devices would be skipped as 'no hardware'"
@@ -90,7 +90,7 @@ def test_device_list_filters_agree_with_the_full_list(
     """
     for role, device_type in ROLE_DEVICE_TYPE.items():
         expected = {
-            d.udid for d in environment.devices if d.device_type == device_type
+            d.udid for d in environment.listed_devices if d.device_type == device_type
         }
         body = quern.json_ok(
             "GET",
@@ -115,7 +115,7 @@ def test_state_filter_matches_the_full_list(
     device fixtures answer, and getting it wrong wastes a boot or targets a
     shut-down device.
     """
-    expected = {d.udid for d in environment.devices if d.state == "booted"}
+    expected = {d.udid for d in environment.listed_devices if d.state == "booted"}
     body = quern.json_ok(
         "GET", "/api/v1/device/list", params={"state": "booted"}, timeout=90.0
     )

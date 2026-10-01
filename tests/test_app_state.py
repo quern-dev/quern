@@ -10,12 +10,47 @@ import pytest
 
 import server.device.app_state as app_state_module
 from server.device.app_state import (
+    checked_name,
+    contained_path,
+    delete_state,
     get_app_groups,
+    get_checkpoint_plist_path,
     list_states,
     restore_state,
     save_state,
 )
-from server.models import DeviceError
+from server.device.app_state import sync_preferences as real_sync_preferences
+from server.models import AppStateNotFoundError, DeviceError, InvalidAppStatePathError
+
+
+@pytest.fixture(autouse=True)
+def _no_cfprefsd(monkeypatch):
+    """Every save and restore restarts the simulator's cfprefsd; never for real.
+
+    Records the calls, so ordering tests can place them among the copies.
+    `real_sync_preferences` is imported before this patch and is what the
+    tests of the sync itself call.
+    """
+    calls: list[str] = []
+
+    async def fake(udid):
+        calls.append("sync")
+        return {"synced": True}
+
+    monkeypatch.setattr(app_state_module, "sync_preferences", fake)
+    return calls
+
+
+@pytest.fixture
+def store(tmp_path, monkeypatch):
+    """APP_STATES_DIR in a temp tree, with a directory beside it to protect."""
+    root = tmp_path / "state" / "app-states"
+    root.mkdir(parents=True)
+    monkeypatch.setattr(app_state_module, "APP_STATES_DIR", root)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "precious.txt").write_text("keep me")
+    return root
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -596,3 +631,261 @@ class TestDataContainerDiscovery:
             pytest.raises(DeviceError, match="Could not get data container"),
         ):
             await app_state_module.get_data_container("TEST-UDID", "com.missing.App")
+
+
+# ---------------------------------------------------------------------------
+# Names and paths cannot leave their root
+# ---------------------------------------------------------------------------
+
+
+class TestNamesStayInTheStore:
+    @pytest.mark.parametrize("bad", ["", ".", "..", "../..", "a/b", "a\\b", "a\0b"])
+    def test_a_name_that_is_not_one_segment_is_refused(self, bad):
+        with pytest.raises(InvalidAppStatePathError):
+            checked_name("label", bad)
+
+    @pytest.mark.parametrize("ok", ["baseline", "com.example.App", "..hidden", "a..b", "v1.2"])
+    def test_ordinary_names_pass(self, ok):
+        assert checked_name("label", ok) == ok
+
+    def test_delete_with_a_climbing_bundle_id_touches_nothing(self, store, tmp_path):
+        """`../..` from `state/app-states` is `tmp_path`, where `victim` lives.
+
+        The bug this pins: delete was an unchecked `rmtree` of
+        `APP_STATES_DIR / bundle_id / label`.
+        """
+        with pytest.raises(InvalidAppStatePathError):
+            delete_state("../..", "victim")
+        assert (tmp_path / "victim" / "precious.txt").read_text() == "keep me"
+
+    def test_delete_with_a_dot_dot_label_keeps_every_checkpoint(self, store):
+        (store / "com.example.App" / "keep").mkdir(parents=True)
+        with pytest.raises(InvalidAppStatePathError):
+            delete_state("com.example.App", "..")
+        assert (store / "com.example.App" / "keep").is_dir()
+
+    async def test_save_with_a_climbing_bundle_id_touches_nothing(self, store, tmp_path):
+        """Save `rmtree`d an existing directory at the target before copying."""
+        with (
+            patch("server.device.app_state._terminate_app", AsyncMock()) as terminate,
+            patch("server.device.app_state.get_data_container", AsyncMock()),
+        ):
+            with pytest.raises(InvalidAppStatePathError):
+                await save_state("TEST-UDID", "../..", "victim")
+        assert (tmp_path / "victim" / "precious.txt").read_text() == "keep me"
+        terminate.assert_not_called()
+
+    async def test_restore_with_a_climbing_label_is_refused_before_the_app_is_touched(
+        self, store,
+    ):
+        with patch("server.device.app_state._terminate_app", AsyncMock()) as terminate:
+            with pytest.raises(InvalidAppStatePathError):
+                await restore_state("TEST-UDID", "com.example.App", "..")
+        terminate.assert_not_called()
+
+    def test_list_refuses_a_climbing_bundle_id(self, store):
+        with pytest.raises(InvalidAppStatePathError):
+            list_states("..")
+
+    @pytest.mark.parametrize("bad", ["../../../etc/x.plist", "/etc/x.plist", "a/../../x.plist"])
+    def test_a_plist_path_cannot_leave_its_container(self, tmp_path, bad):
+        base = tmp_path / "container"
+        base.mkdir()
+        with pytest.raises(InvalidAppStatePathError):
+            contained_path(base, bad)
+
+    def test_a_nested_plist_path_is_fine(self, tmp_path):
+        base = tmp_path / "container"
+        base.mkdir()
+        got = contained_path(base, "Library/Preferences/../Preferences/a.plist")
+        assert got == (base / "Library" / "Preferences" / "a.plist").resolve()
+
+    def test_a_checkpoint_plist_path_cannot_leave_the_checkpoint(self, store):
+        (store / "com.example.App" / "base" / "data-container").mkdir(parents=True)
+        with pytest.raises(InvalidAppStatePathError):
+            get_checkpoint_plist_path("com.example.App", "base", "data", "../../../../victim")
+        with pytest.raises(InvalidAppStatePathError):
+            get_checkpoint_plist_path("com.example.App", "base", "../..", "x.plist")
+
+
+class TestNotFoundIsTyped:
+    async def test_restoring_a_missing_checkpoint(self, store):
+        with pytest.raises(AppStateNotFoundError):
+            await restore_state("TEST-UDID", "com.example.App", "nope")
+
+    def test_deleting_a_missing_checkpoint(self, store):
+        with pytest.raises(AppStateNotFoundError):
+            delete_state("com.example.App", "nope")
+
+
+# ---------------------------------------------------------------------------
+# A failed save does not cost the checkpoint it was replacing
+# ---------------------------------------------------------------------------
+
+
+class TestSaveIsAllOrNothing:
+    async def test_a_failed_save_keeps_the_previous_checkpoint(self, store, tmp_path):
+        old = store / "com.example.App" / "baseline"
+        old.mkdir(parents=True)
+        (old / ".quern-meta.json").write_text('{"label": "baseline", "v": 1}')
+        with (
+            patch("server.device.app_state._terminate_app", AsyncMock()),
+            patch(
+                "server.device.app_state.get_data_container",
+                AsyncMock(side_effect=DeviceError("app not installed", tool="simctl")),
+            ),
+        ):
+            with pytest.raises(DeviceError, match="not installed"):
+                await save_state("TEST-UDID", "com.example.App", "baseline")
+        assert json.loads((old / ".quern-meta.json").read_text())["v"] == 1
+        assert sorted(p.name for p in old.parent.iterdir()) == ["baseline"], (
+            "a staging directory was left behind"
+        )
+
+    async def test_a_successful_save_replaces_the_previous_one(self, store, tmp_path):
+        old = store / "com.example.App" / "baseline"
+        old.mkdir(parents=True)
+        (old / "stale.txt").write_text("old")
+        data = tmp_path / "sim-data"
+        data.mkdir()
+        (data / "new.txt").write_text("new")
+        with (
+            patch("server.device.app_state._terminate_app", AsyncMock()),
+            patch("server.device.app_state.get_data_container", AsyncMock(return_value=data)),
+            patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
+        ):
+            await save_state("TEST-UDID", "com.example.App", "baseline")
+        assert not (old / "stale.txt").exists()
+        assert (old / "data-container" / "new.txt").read_text() == "new"
+        assert sorted(p.name for p in old.parent.iterdir()) == ["baseline"]
+
+    def test_a_save_in_progress_is_not_listed(self, store):
+        staging = store / "com.example.App" / ".baseline.saving-1234"
+        staging.mkdir(parents=True)
+        (staging / ".quern-meta.json").write_text('{"label": "baseline"}')
+        assert list_states("com.example.App") == []
+
+
+# ---------------------------------------------------------------------------
+# cfprefsd: flushed before a copy out, dropped after a copy in
+# ---------------------------------------------------------------------------
+
+
+class TestPreferencesAreSynced:
+    async def test_save_flushes_after_terminating_and_before_copying(
+        self, store, tmp_path, _no_cfprefsd,
+    ):
+        order = _no_cfprefsd
+
+        async def terminate(udid, bundle_id):
+            order.append("terminate")
+
+        async def get_data(udid, bundle_id):
+            order.append("copy")
+            d = tmp_path / "sim-data"
+            d.mkdir(exist_ok=True)
+            return d
+
+        with (
+            patch("server.device.app_state._terminate_app", side_effect=terminate),
+            patch("server.device.app_state.get_data_container", side_effect=get_data),
+            patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
+        ):
+            meta = await save_state("TEST-UDID", "com.example.App", "b")
+        assert order == ["terminate", "sync", "copy"]
+        assert meta["preferences"] == {"synced": True}
+
+    async def test_restore_flushes_before_the_wipe_and_drops_the_cache_after(
+        self, store, tmp_path, _no_cfprefsd,
+    ):
+        """The second sync is the one that makes a restore visible to the app."""
+        order = _no_cfprefsd
+        checkpoint = store / "com.example.App" / "b"
+        (checkpoint / "data-container").mkdir(parents=True)
+        (checkpoint / "data-container" / "prefs.plist").write_text("saved")
+        (checkpoint / ".quern-meta.json").write_text('{"label": "b"}')
+        live = tmp_path / "live"
+        live.mkdir()
+
+        async def get_data(udid, bundle_id):
+            order.append("copy")
+            return live
+
+        with (
+            patch("server.device.app_state._terminate_app", AsyncMock()),
+            patch("server.device.app_state.get_data_container", side_effect=get_data),
+            patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
+        ):
+            meta = await restore_state("TEST-UDID", "com.example.App", "b")
+        assert order == ["sync", "copy", "sync"]
+        assert (live / "prefs.plist").read_text() == "saved"
+        assert meta["preferences"] == {"synced": True}
+
+
+class TestSyncPreferences:
+    async def test_it_stops_the_simulators_cfprefsd(self):
+        with (
+            patch.object(app_state_module, "get_device_state", AsyncMock(return_value="Booted")),
+            patch("asyncio.create_subprocess_exec", return_value=_mock_proc(0)) as spawn,
+        ):
+            result = await real_sync_preferences("TEST-UDID")
+        assert result == {"synced": True}
+        assert spawn.call_args[0] == (
+            "xcrun", "simctl", "spawn", "TEST-UDID",
+            "launchctl", "stop", "com.apple.cfprefsd.xpc.daemon",
+        )
+
+    async def test_a_shut_down_device_has_nothing_to_sync(self):
+        with (
+            patch.object(app_state_module, "get_device_state", AsyncMock(return_value="Shutdown")),
+            patch("asyncio.create_subprocess_exec") as spawn,
+        ):
+            result = await real_sync_preferences("TEST-UDID")
+        assert result["synced"] is True
+        spawn.assert_not_called()
+
+    async def test_a_failure_is_reported_not_raised(self):
+        with (
+            patch.object(app_state_module, "get_device_state", AsyncMock(return_value="Booted")),
+            patch(
+                "asyncio.create_subprocess_exec",
+                return_value=_mock_proc(3, stderr=b"no such service"),
+            ),
+        ):
+            result = await real_sync_preferences("TEST-UDID")
+        assert result["synced"] is False
+        assert "no such service" in result["detail"]
+        assert "cached preferences" in result["warning"]
+
+    async def test_an_unrunnable_simctl_is_reported(self):
+        with (
+            patch.object(app_state_module, "get_device_state", AsyncMock(return_value="unknown")),
+            patch("asyncio.create_subprocess_exec", side_effect=FileNotFoundError("xcrun")),
+        ):
+            result = await real_sync_preferences("TEST-UDID")
+        assert result["synced"] is False
+
+    async def test_a_hung_stop_is_killed_and_reported(self, monkeypatch):
+        import asyncio
+
+        monkeypatch.setattr(app_state_module, "_SYNC_TIMEOUT", 0.05)
+        proc = MagicMock()
+        proc.returncode = None
+
+        async def hang():
+            await asyncio.sleep(10)
+
+        def kill():
+            proc.returncode = -9
+
+        proc.communicate = hang
+        proc.kill = MagicMock(side_effect=kill)
+        proc.wait = AsyncMock()
+        with (
+            patch.object(app_state_module, "get_device_state", AsyncMock(return_value="Booted")),
+            patch("asyncio.create_subprocess_exec", return_value=proc),
+        ):
+            result = await real_sync_preferences("TEST-UDID")
+        assert result["synced"] is False and "timed out" in result["detail"]
+        proc.kill.assert_called_once()
+        proc.wait.assert_awaited()

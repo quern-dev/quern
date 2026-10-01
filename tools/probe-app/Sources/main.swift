@@ -22,8 +22,8 @@ enum ProbeTabs {
             // Order matters: an iPhone tab bar shows five items and moves the
             // rest into a More list, which keeps its own navigation stack and
             // is markedly more awkward to drive. The five the self-test
-            // exercises on every run go on the bar; Location, Web and Diag are
-            // reached through More.
+            // exercises on every run go on the bar; Location, Web, Diag and
+            // State are reached through More.
             (TextInputViewController(), "Text", "keyboard"),
             (ControlsViewController(), "Controls", "switch.2"),
             (ScrollViewController(), "Scroll", "list.bullet"),
@@ -32,6 +32,7 @@ enum ProbeTabs {
             (LocationViewController(), "Location", "location"),
             (WebViewController(), "Web", "globe"),
             (DiagViewController(), "Diag", "exclamationmark.triangle"),
+            (StateViewController(), "State", "externaldrive"),
         ]
 
         let tabBarController = UITabBarController()

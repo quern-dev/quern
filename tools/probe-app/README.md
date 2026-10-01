@@ -69,13 +69,14 @@ does, and the mismatch surfaces at install as a signature error.
 | Location | *(in More)* | `set_location` / simulated movement — live lat/lon/speed labels and an update counter |
 | Web | *(in More)* | `WKWebView` with fixed local content and named DOM ids; `isInspectable` on 16.4+ |
 | Diag | *(in More)* | Crash (uncaught exception, `fatalError`) and main-thread hang |
+| State | *(in More)* | The only persistent surface: UserDefaults keys `probe.greeting` (string), `probe.counter` (int) and `probe.flag` (bool), mirrored in `state_greeting` / `state_counter` / `state_flag`; `state_increment`, `state_toggle_flag`, `state_reload`, `state_reset`. An absent key shows `—`, not its zero value |
 
 The tab bar itself doubles as a fixture for hidden tab-bar-children probing.
 
 **Tab order is load bearing.** An iPhone tab bar shows five items and moves the
 rest into a More list, which keeps its own navigation stack and is markedly
 harder to drive. The five the self-test exercises on every run are on the bar;
-Location, Web and Diag are reached through More by `goto()`, which handles the
+Location, Web, Diag and State are reached through More by `goto()`, which handles the
 list, the nav stack, and the fact that "More" names two different elements — the
 tab (a `RadioButton`) and the back button (a `Button`).
 

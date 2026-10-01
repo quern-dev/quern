@@ -1614,6 +1614,27 @@ class DeviceOperationUnsupportedError(DeviceError):
     """
 
 
+class AppStateNotFoundError(DeviceError):
+    """A checkpoint, container, plist or key that the request named is not there.
+
+    Typed so the app-state routes answer 404 by what happened rather than by
+    what the message says. They used to match "not found" plus "container" in
+    the text, and every simulator container path contains `Containers` -- so a
+    plutil failure whose stderr said "Key path not found" was reported as a
+    404 for a container that existed.
+    """
+
+
+class InvalidAppStatePathError(DeviceError):
+    """A bundle id, label, container or plist path that would leave its root.
+
+    Checkpoints are directories named after the bundle id and label, and
+    delete is an `rmtree` of that directory -- so `bundle_id="../.."` once
+    reached a directory beside `~/.quern`. Refused with a 400 before any path
+    is touched.
+    """
+
+
 class BootIncompleteError(DeviceError):
     """An emulator came up -- adb lists it -- but Android did not finish starting.
 

@@ -3,6 +3,14 @@ import { z } from "zod";
 import { apiRequest } from "../http.js";
 import { strictParams } from "./helpers.js";
 
+/**
+ * A plist value as the caller typed it. Boolean first and nothing coerced:
+ * the old `z.union([z.string(), z.coerce.number(), z.coerce.boolean()])`
+ * let `true` fail the string arm and then succeed as `z.coerce.number()` --
+ * so every boolean sent through set_app_plist_value was written as 1 or 0.
+ */
+export const plistValue = z.union([z.boolean(), z.number(), z.string()]);
+
 export function registerAppStateTools(server: McpServer): void {
   // ---------------------------------------------------------------------------
   // Checkpoint tools
@@ -136,13 +144,13 @@ If key is omitted, returns the entire plist as JSON.`,
   server.registerTool("set_app_plist_value", {
     description: `Set a key in a plist file inside a simulator app's container. More surgical than a full state restore — flip a single feature flag without touching anything else. Simulator only.
 
-Type inference: boolean values set -bool, integers set -integer, floats set -float, everything else -string.`,
+The key is taken literally: "com.example.flag" is one top-level key, not a path. Terminate the app first -- a running app keeps the values it has in memory. Type inference: a boolean is stored as a plist boolean, an integer as an integer, a float as a real, anything else as a string.`,
     inputSchema: strictParams({
       bundle_id: z.string().describe("App bundle identifier"),
       container: z.string().describe('"data" or a group ID (e.g. "group.com.example")'),
       plist_path: z.string().describe("Relative path to the plist within the container"),
       key: z.string().describe("Plist key to set"),
-      value: z.union([z.string(), z.coerce.number(), z.coerce.boolean()]).describe("Value to set (type is inferred)"),
+      value: plistValue.describe("Value to set (type is inferred)"),
       udid: z.string().optional().describe("Simulator UDID (defaults to active device)"),
     }),
   }, async ({ bundle_id, container, plist_path, key, value, udid }) => {
@@ -162,12 +170,12 @@ Type inference: boolean values set -bool, integers set -integer, floats set -flo
   server.registerTool("set_app_plist_values", {
     description: `Set multiple keys in a plist file in one call. More efficient than calling set_app_plist_value repeatedly — set all coaching flags, feature flags, or preferences at once. Simulator only.
 
-Type inference per value: boolean → -bool, integer → -integer, float → -float, everything else → -string.`,
+All keys are written in one step, or none are. Keys are taken literally, as in set_app_plist_value. Type inference per value: boolean → plist boolean, integer → integer, float → real, everything else → string.`,
     inputSchema: strictParams({
       bundle_id: z.string().describe("App bundle identifier"),
       container: z.string().describe('"data" or a group ID (e.g. "group.com.example")'),
       plist_path: z.string().describe("Relative path to the plist within the container"),
-      values: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).describe("Object mapping plist keys to values (e.g. {\"flag1\": true, \"flag2\": false, \"count\": 42})"),
+      values: z.record(z.string(), plistValue).describe("Object mapping plist keys to values (e.g. {\"flag1\": true, \"flag2\": false, \"count\": 42})"),
       udid: z.string().optional().describe("Simulator UDID (defaults to active device)"),
     }),
   }, async ({ bundle_id, container, plist_path, values, udid }) => {
