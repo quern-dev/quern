@@ -126,6 +126,14 @@ than a boolean.
 It is a hint, never a gate — an explicit `scroll_to_find=true` overrides it, so
 a wrong entry costs a slowdown rather than making an element unreachable.
 
+**iOS only.** Android does not read `scrollable`. A `tap_element` by exact
+`label` or `identifier` alone goes through the native selector, and with
+`scroll_to_find` unset it sweeps whenever the element is not in view, as it
+did before the field existed; `false` still stops it. Asking the knowledge
+base there would cost the full tree read that path exists to avoid. Android
+taps that add a type, a value or a substring match take the tree path, which
+does not sweep at all.
+
 **Write an unquoted boolean.** `scrollable: "true"` is a string, and anything
 that is not a literal boolean is read as "nobody has said" — a typo must never
 be read as consent to swipe someone's screen. Note that the coercion is
