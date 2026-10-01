@@ -1110,7 +1110,16 @@ class DeviceController(DeviceControllerUI):
         serial: str | None = None
         try:
             if not shut_down:
-                await self.adb._run_adb_for_device(udid, "emu", "kill")
+                try:
+                    await self.adb._run_adb_for_device(udid, "emu", "kill")
+                except DeviceError:
+                    # A kill is a write, not retryable, and a non-zero exit
+                    # after the command was sent can still mean it ran. So the
+                    # exit status decides nothing: `_wait_until_gone` watches
+                    # what actually happened, and either sees it go or says it
+                    # was not wiped (review).
+                    logger.warning("`emu kill` on %s reported failure; "
+                                   "checking whether it went anyway", udid)
                 await self._wait_until_gone(udid, avd, self._ERASE_KILL_TIMEOUT)
 
             loop = asyncio.get_running_loop()

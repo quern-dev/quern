@@ -584,13 +584,19 @@ class AdbBackend:
         if not self._emulator_path:
             raise DeviceError("emulator command not found", tool="emulator")
 
+        # Release the marker only if this call set it. An erase holds it
+        # across kill, boot and boot-completed; discarding it on the way out
+        # of here dropped that reservation mid-erase, and a second erase in
+        # the gap killed the emulator during its first wiped boot (review).
+        owns_marker = avd_name not in self._booting_avds
         self._booting_avds.add(avd_name)
         try:
             return await self._boot_emulator_inner(
                 avd_name, timeout, headless, wipe_data,
             )
         finally:
-            self._booting_avds.discard(avd_name)
+            if owns_marker:
+                self._booting_avds.discard(avd_name)
 
     async def _boot_emulator_inner(
         self, avd_name: str, timeout: float, headless: bool,

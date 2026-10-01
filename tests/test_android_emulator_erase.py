@@ -556,3 +556,69 @@ async def test_an_unattended_launch_never_stops_to_ask_about_a_crash(monkeypatch
 
     argv = list(launched[0])
     assert argv[argv.index("-crash-report-mode") + 1] == "never", argv
+
+
+class TestTheReservationHoldsForTheWholeErase:
+    async def test_it_is_still_held_while_boot_completed_is_awaited(self, monkeypatch):
+        """Uses the *real* `boot_emulator`: it set the marker too and discarded
+        it on the way out, dropping the erase's reservation mid-erase. The
+        first test of this mocked `boot_emulator` and so could not see it."""
+        ctrl, _ = _emulator(monkeypatch)
+        monkeypatch.setattr(ctrl.adb, "boot_emulator",
+                            adb_module.AdbBackend.boot_emulator.__get__(ctrl.adb))
+
+        async def inner(avd, timeout, headless, wipe_data):
+            return OLD
+
+        monkeypatch.setattr(ctrl.adb, "_boot_emulator_inner", inner)
+        held_during_wait = []
+
+        async def booted(serial, timeout):
+            held_during_wait.append(AVD in ctrl.adb._booting_avds)
+
+        monkeypatch.setattr(ctrl.adb, "wait_for_boot_completed", booted)
+
+        await ctrl.erase(OLD)
+
+        assert held_during_wait == [True]
+        assert AVD not in ctrl.adb._booting_avds   # and released at the end
+
+    async def test_a_plain_boot_still_releases_its_own_marker(self, monkeypatch):
+        backend = adb_module.AdbBackend()
+
+        async def inner(avd, timeout, headless, wipe_data):
+            return OLD
+
+        monkeypatch.setattr(backend, "_boot_emulator_inner", inner)
+        await backend.boot_emulator(AVD)
+        assert AVD not in backend._booting_avds
+
+
+class TestAKillThatReportsFailureIsJudgedByWhatHappened:
+    """`emu kill` is a write and not retryable; a non-zero exit after the
+    command went out can still mean the emulator died."""
+
+    async def test_it_went_anyway_so_the_erase_continues(self, monkeypatch):
+        ctrl, calls = _emulator(monkeypatch)
+
+        async def run(serial, *args):
+            calls.append("kill")
+            raise DeviceError("adb: connection reset", tool="adb")
+
+        monkeypatch.setattr(ctrl.adb, "_run_adb_for_device", run)
+
+        assert await ctrl.erase(OLD) == OLD
+        assert any(c.startswith("boot ") for c in calls), calls
+
+    async def test_it_is_still_running_so_it_was_not_wiped(self, monkeypatch):
+        ctrl, calls = _emulator(monkeypatch, listed_after_kill=(OLD,), still_running=True)
+        monkeypatch.setattr(DeviceController, "_ERASE_KILL_TIMEOUT", 0.01)
+
+        async def run(serial, *args):
+            raise DeviceError("adb: connection reset", tool="adb")
+
+        monkeypatch.setattr(ctrl.adb, "_run_adb_for_device", run)
+
+        with pytest.raises(DeviceError, match="has not been wiped"):
+            await ctrl.erase(OLD)
+        assert not any(c.startswith("boot ") for c in calls), calls
