@@ -505,6 +505,15 @@ async def tap_element(request: Request, body: TapElementRequest):
             if body.include_screen_context and result.get("status") not in (
                 "not_found", "ambiguous",
             ):
+                # The context says where the tap *landed*, so it waits for the
+                # same settle the after-screenshot does. Without it, an Android
+                # tab switch was read mid-ViewPager-transition: Text -> Links
+                # came back `identified_as: null` three times in three, holding
+                # the Logs page the pager was passing through (F25).
+                # `launch_app` and `open_url` already waited; this and
+                # `type_text` did not, though the setting says it covers both.
+                if not body.capture_screenshots:
+                    await asyncio.sleep(body.settle_delay)
                 result["screen_context"] = await _capture_screen_context(
                     controller, resolved, request.app.state.landmark_registry,
                 )
@@ -724,6 +733,9 @@ async def type_text(request: Request, body: TypeTextRequest):
                 after = await _capture_action_screenshot(controller, udid, "type_after")
                 result["screenshots"] = {"before": before, "after": after}
             if body.include_screen_context:
+                # Waits like every other action's context does; see tap above.
+                if not body.capture_screenshots:
+                    await asyncio.sleep(body.settle_delay)
                 result["screen_context"] = await _capture_screen_context(
                     controller, udid, request.app.state.landmark_registry,
                 )

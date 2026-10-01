@@ -290,3 +290,62 @@ class TestTheHandlersActuallyPassTheRegistry:
         assert r.status_code == 200, r.text
         ctx = r.json().get("screen_context") or {}
         assert ctx.get("identified_as") == "Home", ctx
+
+
+@pytest.fixture
+def ordered_app(identifying_app, monkeypatch):
+    """`identifying_app`, plus tap and type, recording when the settle wait
+    happens relative to the screen read."""
+    events: list[str] = []
+    ctrl = identifying_app.state.device_controller
+    ctrl.tap_element = AsyncMock(return_value={
+        "status": "ok", "tapped": {"label": "Anchor", "type": "Button"},
+    })
+    ctrl.type_text = AsyncMock(return_value={"udid": "AAAA-1111", "verified": True})
+    summary = ctrl.get_screen_summary
+
+    async def read(*args, **kwargs):
+        events.append("read")
+        return await summary(*args, **kwargs)
+
+    async def sleep(seconds):
+        events.append(f"sleep {seconds}")
+
+    ctrl.get_screen_summary = read
+    monkeypatch.setattr("server.api.device_ui.asyncio.sleep", sleep)
+    identifying_app.state.events = events
+    return identifying_app
+
+
+class TestTapAndTypeSettleBeforeReadingTheScreen:
+    """F25: the context of an Android tab switch was read while the pager was
+    still moving, and named no screen. `launch_app` and `open_url` already
+    waited `settle_delay` before the context; tap and type did not, though the
+    setting is documented as covering it."""
+
+    @pytest.mark.parametrize("path, body", [
+        ("/api/v1/device/ui/tap-element", {"label": "Anchor"}),
+        ("/api/v1/device/ui/type", {"text": "hi"}),
+    ], ids=["tap", "type"])
+    async def test_the_context_waits_and_names_the_screen(self, ordered_app, path, body):
+        r = await _post(ordered_app, path, {
+            **body, "include_screen_context": True, "settle_delay": 0.7,
+        })
+
+        assert r.status_code == 200, r.text
+        assert (r.json().get("screen_context") or {}).get("identified_as") == "Home", r.json()
+        events = ordered_app.state.events
+        assert "sleep 0.7" in events and "read" in events, events
+        assert events.index("sleep 0.7") < events.index("read"), (
+            f"the screen was read before the settle wait: {events}"
+        )
+
+    @pytest.mark.parametrize("path, body", [
+        ("/api/v1/device/ui/tap-element", {"label": "Anchor"}),
+        ("/api/v1/device/ui/type", {"text": "hi"}),
+    ], ids=["tap", "type"])
+    async def test_no_context_asked_for_means_no_wait(self, ordered_app, path, body):
+        r = await _post(ordered_app, path, {**body, "settle_delay": 0.7})
+
+        assert r.status_code == 200, r.text
+        assert ordered_app.state.events == [], ordered_app.state.events
