@@ -198,11 +198,26 @@ def test_a_read_sees_the_apps_write_without_waiting(ios_state) -> None:
     ios_state.launch()
     for _ in range(3):
         ios_state.tap(Ids.STATE_INCREMENT)
+    # Asked of the app, not assumed: a tap that never landed reads exactly
+    # like a flush that never happened.
+    shown = ios_state.probe.text_of(ios_state.probe.contract.id_for(Ids.STATE_COUNTER))
+    assert shown == "counter: 4", f"the taps did not all land; the app shows {shown!r}"
     resp = ios_state.read(COUNTER)
     assert resp.status_code == 200, resp.text[:300]
-    assert resp.json()["value"] == 4, (
-        f"the app shows 4 and the read returned {resp.json()['value']!r}"
-    )
+    if resp.json()["value"] != 4:
+        # Seen intermittently (2 runs in about 9) and not reproduced by hand in
+        # 15 trials. What matters is whether the write was late or lost, so
+        # the failure says which: keep reading, then terminate and read again.
+        later = []
+        for _ in range(4):
+            time.sleep(1.5)
+            later.append(ios_state.read(COUNTER).json().get("value"))
+        ios_state.terminate()
+        final = ios_state.read(COUNTER).json().get("value")
+        raise AssertionError(
+            f"the app shows {shown!r} and the read returned {resp.json()['value']!r}; "
+            f"reads every 1.5s after: {later}; after terminating the app: {final!r}"
+        )
 
 
 def test_a_read_does_not_disturb_the_running_app(ios_state) -> None:
