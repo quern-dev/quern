@@ -455,9 +455,8 @@ class RecordingManager:
                 await asyncio.wait_for(rec._wake.wait(), FLUSH_INTERVAL)
             if rec._closing:
                 return
+            # A failed write ends it too: `_fail` sets `_closing`.
             await self._flush(rec)
-            if rec.state != "recording":
-                return            # it failed: nothing more to write
 
     async def _flush(self, rec: Recording, *, sync: bool = False) -> bool:
         """Write what is pending; False if the write failed (and the

@@ -1003,3 +1003,28 @@ class TestTheLiveTraceUntil:
                 "since": (t - timedelta(seconds=5)).isoformat(),
                 "until": (t + timedelta(seconds=30)).isoformat()}).json()
         assert [a["action"] for a in trace["actions"]] == ["early"]
+
+
+async def test_a_failure_is_written_into_the_file_when_the_file_still_takes_lines(
+        tmp_path, monkeypatch):
+    """A write can fail once (a full disk freeing up) and the next succeed:
+    the reader of the file must then see why it ends."""
+    src = Sources()
+    manager = src.manager()
+    rec = await manager.start(SIM, str(tmp_path / "r"), Filters())
+    real, failed = rec_mod._append, []
+
+    def once(path, lines, sync=False):
+        if not failed:
+            failed.append(1)
+            raise OSError(28, "No space left on device")
+        real(path, lines, sync)
+    monkeypatch.setattr(rec_mod, "_append", once)
+    await src.flows.add(_flow())
+    await _settle()
+    await manager._flush(rec)
+    [marker] = [e for e in _events(tmp_path / "r") if e["type"] == "failed"]
+    assert "No space left" in marker["error"]
+    assert any("No space left" in h for h in rec_mod.holes_in(
+        rec_mod.load(tmp_path / "r"), {"flow"}, None, None))
+
