@@ -967,6 +967,14 @@ class LocalCaptureRequest(BaseModel):
     than as an opinion about our defaults -- ``only: true`` states an intent,
     where a ``no_defaults`` flag would state a complaint.
     """
+    whole_mac: bool = False
+    """Allow a list that starts with an exclusion.
+
+    Such a list captures every process on the Mac except those excluded,
+    because mitmproxy takes its starting point from the first entry. That is
+    refused unless asked for by name: it is far larger than any list of
+    includes, and ``["!12345"]`` reads like a narrowing rather than a widening.
+    """
     skip_cert_check: bool = False
     """Enable capture even when a booted simulator does not trust the CA.
 

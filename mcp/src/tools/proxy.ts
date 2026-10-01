@@ -335,8 +335,10 @@ The system_proxy field shows whether the macOS system proxy is currently
 configured. If null/false, the user's browser works normally and traffic
 is NOT being captured.
 
-The local_capture field is a list of process names being captured via mitmproxy
-local mode. When non-empty, traffic from those processes is transparently captured
+The local_capture field is the list of entries being captured via mitmproxy
+local mode -- names, PIDs or ! exclusions (see set_local_capture). It is shared
+by every simulator: to see one simulator's traffic, filter flows by simulator_udid
+rather than changing this list. When non-empty, traffic from those processes is transparently captured
 without needing a system proxy. Empty list means disabled.
 Name the process that actually makes the requests: Safari's traffic leaves through
 com.apple.WebKit.Networking, not MobileSafari, so ["MobileSafari"] alone captures
@@ -987,9 +989,31 @@ The bypass_patterns field in proxy_status shows the current list.`,
   });
 
   server.registerTool("set_local_capture", {
-    description: `Set the list of process names for local capture mode. Uses mitmproxy's
+    description: `Set the list of processes for local capture mode. Uses mitmproxy's
 macOS System Extension to transparently capture traffic from specific processes
 without configuring a system proxy.
+
+ONE SIMULATOR? Don't configure anything here. Capture is by process and spans
+every simulator on the Mac; it cannot be scoped to one device. Per-simulator is
+a FILTER: every captured flow is attributed to its simulator through process
+ancestry, so pass simulator_udid to query_flows, get_flow_summary, wait_for_flow
+or start_capture_session. That attribution includes the simulator's WebKit
+traffic. An entry here matching a UDID catches only processes whose executable
+path contains it, which is not the same set.
+
+ENTRY SYNTAX. Each entry goes to mitmproxy's local mode unchanged, so it takes
+mitmproxy's forms, not only names:
+- a name matches as a case-sensitive SUBSTRING of the process's full executable
+  path -- the same path flows report as source_process, so any fragment of it
+  works, not just the final component;
+- a bare number is a PID;
+- a leading ! excludes, either form: "!12345", "!Helper".
+Entries apply in order and the FIRST one sets the starting point. A list that
+begins with an exclusion captures EVERY process on the Mac except the ones
+excluded, and the minimum below is appended after your entries, so it does not
+narrow that. Such a list is REFUSED with 400 unless you pass whole_mac: true.
+To drop one process from a capture, put the exclusion after an include:
+["MyApp", "!12345"], not ["!12345"].
 
 Restarts the proxy automatically to apply the new configuration — no server
 restart needed. Pass an empty list to disable local capture.
@@ -1024,7 +1048,7 @@ extension in System Settings > Privacy & Security.`,
       processes: z
         .array(z.string())
         .describe(
-          'List of process names to capture. For web traffic include com.apple.WebKit.Networking -- Safari and in-app web views egress through it, so ["MobileSafari"] alone captures nothing. Default: ["MobileSafari", "com.apple.WebKit.Networking"], and those two are kept even when you name others. Replaces the rest of the current list; empty list disables local capture.'
+          'Entries to capture: a name (case-sensitive substring of the executable path shown as source_process on flows), a PID, or either prefixed with ! to exclude. Order matters: a list that starts with an exclusion captures every other process on the Mac. For web traffic include com.apple.WebKit.Networking -- Safari and in-app web views egress through it, so ["MobileSafari"] alone captures nothing. Default: ["MobileSafari", "com.apple.WebKit.Networking"], and those two are kept even when you name others. Replaces the rest of the current list; empty list disables local capture.'
         ),
       skip_cert_check: z
         .boolean()
@@ -1036,11 +1060,21 @@ extension in System Settings > Privacy & Security.`,
           "nothing pointing at the proxy. Correct when deliberately " +
           "exercising TLS-failure paths."
         ),
+      whole_mac: z
+        .boolean()
+        .optional()
+        .describe(
+          "Allow a list that starts with an exclusion, which captures EVERY " +
+          "process on the Mac except those excluded. Refused without this. " +
+          "Only pass it when the user has asked to capture the whole machine; " +
+          "to narrow a capture, put exclusions after an include instead."
+        ),
     }),
-  }, async ({ processes, skip_cert_check: skipCertCheck }) => {
+  }, async ({ processes, skip_cert_check: skipCertCheck, whole_mac: wholeMac }) => {
     try {
       const body: Record<string, unknown> = { processes };
       if (skipCertCheck) body.skip_cert_check = true;
+      if (wholeMac) body.whole_mac = true;
       const data = await apiRequest(
         "POST",
         "/api/v1/proxy/local-capture",

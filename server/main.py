@@ -52,6 +52,7 @@ from server.config import (
     ServerConfig,
     get_crash_retention_days,
     get_local_capture_processes,
+    leading_exclusion,
     set_local_capture_processes,
     with_capture_minimum,
 )
@@ -984,6 +985,18 @@ def _cmd_start(args: argparse.Namespace) -> None:
         local_capture_processes, _capture_added = with_capture_minimum(
             get_local_capture_processes(),
         )
+        # Warn rather than refuse, as with the CA: the list was chosen in an
+        # earlier process, perhaps deliberately with whole_mac (which is not
+        # stored), and failing to boot over it is worse than the state itself.
+        _leading = leading_exclusion(local_capture_processes)
+        if _leading:
+            logger.warning(
+                "local_capture starts with the exclusion %r, so it captures "
+                "every process on the Mac except those excluded: %s",
+                _leading, local_capture_processes,
+            )
+            print(f"  Warning: local capture starts with {_leading!r}, so it "
+                  "captures EVERY process on the Mac except those excluded.")
 
     # Auto-fix developer dir before any tool checks
     developer_dir_msg = _fix_developer_dir()
@@ -1843,8 +1856,17 @@ def _local_capture_cert_gate(processes: list[str], skip_cert_check: bool) -> Non
 
 def _cmd_enable_local_capture(
     process_names: list[str], skip_cert_check: bool = False,
+    whole_mac: bool = False,
 ) -> None:
     """Enable local capture mode for specific processes."""
+    from server.config import leading_exclusion, whole_mac_refusal
+
+    # First, before anything is widened, gated or written -- the same refusal
+    # the HTTP endpoint makes. Both write the list the lifespan routes from.
+    leading = leading_exclusion(process_names)
+    if leading and not whole_mac:
+        print(whole_mac_refusal(leading, "--whole-mac"), file=sys.stderr)
+        sys.exit(1)
     # Same widening as the HTTP endpoint. This command writes config.json and
     # the lifespan routes from it, so a narrow list here has exactly the same
     # effect as a narrow list there -- and `quern enable-local-capture MyApp`
@@ -2054,6 +2076,14 @@ def cli() -> None:
             "mitmproxy CA. Correct when deliberately exercising TLS failure."
         ),
     )
+    enable_lc.add_argument(
+        "--whole-mac",
+        action="store_true",
+        help=(
+            "Allow a list that starts with an exclusion (!name or !pid), which "
+            "captures every process on the Mac except those excluded."
+        ),
+    )
     subparsers.add_parser("disable-local-capture", help="Disable local traffic capture")
 
     # mcp-install / grant-full-perms (handled in __main__.py, listed here for help)
@@ -2106,7 +2136,9 @@ def cli() -> None:
         key = ServerConfig.regenerate_api_key()
         print(f"New API key: {key}")
     elif args.command == "enable-local-capture":
-        _cmd_enable_local_capture(args.processes, args.skip_cert_check)
+        _cmd_enable_local_capture(
+            args.processes, args.skip_cert_check, whole_mac=args.whole_mac,
+        )
     elif args.command == "disable-local-capture":
         _cmd_disable_local_capture()
     elif args.command == "capture-env":

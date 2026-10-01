@@ -12,7 +12,11 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
 from server.api.actions import logged_action
-from server.config import with_capture_minimum
+from server.config import (
+    leading_exclusion,
+    whole_mac_refusal,
+    with_capture_minimum,
+)
 from server.lifecycle.state import (
     detect_current_ssid,
     detect_host_ip_for_subnet,
@@ -1057,6 +1061,15 @@ async def set_local_capture(
     # FastAPI rejects a missing or non-list `processes` with 422 before this
     # runs; only the empty-string filtering is left to do.
     processes = [p for p in body.processes if p]
+
+    # Before the CA gate, so a refused request cannot install a root CA on
+    # its way to being refused.
+    leading = leading_exclusion(processes)
+    if leading and not body.whole_mac:
+        raise HTTPException(
+            status_code=400,
+            detail=whole_mac_refusal(leading, "whole_mac: true"),
+        )
 
     # Widened unless the caller said `only`. Naming an app used to replace the
     # list, silently dropping the process its web traffic actually leaves

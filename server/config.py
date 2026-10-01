@@ -391,6 +391,38 @@ def with_capture_minimum(processes: list[str]) -> tuple[list[str], list[str]]:
     return [*processes, *added], added
 
 
+def leading_exclusion(processes: list[str]) -> str | None:
+    """The first non-blank entry if it is an exclusion (``!...``), else None.
+
+    mitmproxy's local mode takes its starting point from the *first* entry
+    (``InterceptConf::new`` in mitmproxy_rs): a list that opens with ``!X``
+    intercepts every process on the Mac except X, and later entries can only
+    add to that. ``with_capture_minimum`` appends after the caller's entries,
+    so it does not narrow it either. ``["!12345"]`` therefore means "the whole
+    machine minus one PID" -- and excluding one process is the natural first
+    thing to try, so every entry point refuses it unless whole-Mac capture was
+    asked for by name.
+    """
+    for entry in processes:
+        entry = entry.strip()
+        if entry:
+            return entry if entry.startswith("!") else None
+    return None
+
+
+def whole_mac_refusal(entry: str, how_to_ask: str) -> str:
+    """Why an exclusion-first list is refused, and the two ways forward."""
+    return (
+        f"The capture list starts with the exclusion {entry!r}. mitmproxy takes "
+        "its starting point from the first entry, so this would capture EVERY "
+        "process on the Mac except the ones excluded -- not the processes you "
+        "named, minus one. To exclude something from a capture, put the "
+        f"exclusion after an include: [\"MyApp\", \"{entry}\"]. To work with one "
+        "simulator, don't change the list at all: filter flows by "
+        f"simulator_udid. If you do mean every process on the Mac, pass {how_to_ask}."
+    )
+
+
 def set_local_capture_processes(processes: list[str]) -> None:
     """Set the local_capture process list in ~/.quern/config.json.
 
