@@ -12,6 +12,7 @@ the first is still listed.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -705,3 +706,71 @@ class TestASpentBudgetStillLooksOnce:
         with pytest.raises(DeviceError, match="had not finished starting"):
             await backend.wait_for_boot_completed(OLD, timeout=0.0)
         assert reads == [1]
+
+
+class TestAnEmulatorThatCameBackButIsSlowIsNotReportedGone:
+    """With the boot-completed wait inside `boot_emulator`, a slow Android
+    made it raise without returning the serial it had found, and erase then
+    reported "did not come back" and cleared the active device -- for an
+    emulator that was running. Drives the real launcher path, not a mocked
+    `boot_emulator`, which is how the first tests missed it."""
+
+    async def test_the_erase_follows_the_serial_carried_by_the_error(self, monkeypatch):
+        ctrl, _ = _emulator(monkeypatch)
+        ctrl._active_udid = OLD
+        backend = ctrl.adb
+        backend._emulator_path = "/sdk/emulator/emulator"
+        monkeypatch.setattr(backend, "boot_emulator",
+                            adb_module.AdbBackend.boot_emulator.__get__(backend))
+        monkeypatch.setattr(backend, "_boot_emulator_inner",
+                            adb_module.AdbBackend._boot_emulator_inner.__get__(backend))
+        monkeypatch.setattr(backend, "list_avds", AsyncMock(return_value=[AVD]))
+        # The new serial appears once the emulator has been launched, and not
+        # before -- a fixed list of answers got consumed by the earlier
+        # gone-check, the launcher then saw the serial as pre-existing, never
+        # adopted it, and spun until its real deadline.
+        launched = []
+        monkeypatch.setattr(backend, "list_devices", AsyncMock(
+            side_effect=lambda: _listed(NEW) if launched else []))
+        monkeypatch.setattr(backend, "avd_name", AsyncMock(return_value=AVD))
+
+        async def spawned(*_a, **_k):
+            launched.append(1)
+
+        monkeypatch.setattr(adb_module.asyncio, "create_subprocess_exec", spawned)
+        monkeypatch.setattr(adb_module.asyncio, "sleep", AsyncMock())
+        # Bounded, so a mistake here fails fast rather than spinning out the
+        # real four-minute budget on a no-op sleep.
+        monkeypatch.setattr(DeviceController, "_ERASE_BOOT_TIMEOUT", 2.0)
+        monkeypatch.setattr(backend, "wait_for_boot_completed", AsyncMock(
+            side_effect=DeviceError("had not finished starting", tool="adb")))
+
+        with pytest.raises(EraseIncompleteError) as e:
+            await asyncio.wait_for(ctrl.erase(OLD), timeout=10)
+
+        assert e.value.udid == NEW
+        assert "did not come back" not in str(e.value)
+        assert ctrl._active_udid == NEW
+        assert ctrl._device_type_cache.get(NEW) == DeviceType.ANDROID_EMULATOR
+
+    async def test_boot_emulator_names_the_serial_in_its_error(self, monkeypatch):
+        backend = adb_module.AdbBackend()
+        backend._emulator_path = "/sdk/emulator/emulator"
+        monkeypatch.setattr(backend, "list_avds", AsyncMock(return_value=[AVD]))
+        listings = [[]]
+        monkeypatch.setattr(backend, "list_devices", AsyncMock(
+            side_effect=lambda: listings.pop(0) if listings else _listed(NEW)))
+        monkeypatch.setattr(backend, "avd_name", AsyncMock(return_value=AVD))
+
+        async def spawned(*_a, **_k):
+            return None
+
+        monkeypatch.setattr(adb_module.asyncio, "create_subprocess_exec", spawned)
+        monkeypatch.setattr(adb_module.asyncio, "sleep", AsyncMock())
+        monkeypatch.setattr(backend, "wait_for_boot_completed", AsyncMock(
+            side_effect=DeviceError("had not finished starting", tool="adb")))
+
+        from server.models import BootIncompleteError
+        with pytest.raises(BootIncompleteError) as e:
+            await asyncio.wait_for(backend.boot_emulator(AVD, timeout=2), timeout=10)
+        assert e.value.serial == NEW

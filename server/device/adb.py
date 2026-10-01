@@ -9,7 +9,14 @@ import shutil
 from pathlib import Path
 
 from server.device.tool_probe import probe_command
-from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType
+from server.models import (
+    AppInfo,
+    BootIncompleteError,
+    DeviceError,
+    DeviceInfo,
+    DeviceState,
+    DeviceType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -672,7 +679,14 @@ class AdbBackend:
                     remaining = deadline - asyncio.get_event_loop().time()
                     # No floor: the wait reads once even with nothing left,
                     # so the budget is honoured without failing a finished boot.
-                    await self.wait_for_boot_completed(d.udid, max(remaining, 0.0))
+                    try:
+                        await self.wait_for_boot_completed(
+                            d.udid, max(remaining, 0.0),
+                        )
+                    except DeviceError as e:
+                        raise BootIncompleteError(
+                            str(e), serial=d.udid, tool=e.tool,
+                        ) from e
                     logger.info("Android emulator booted: %s (AVD: %s)", d.udid, avd_name)
                     return d.udid
 
