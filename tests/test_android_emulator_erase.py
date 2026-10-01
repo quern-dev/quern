@@ -12,6 +12,7 @@ the first is still listed.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -433,7 +434,7 @@ class TestWaitingForBootCompleted:
         backend = adb_module.AdbBackend()
         answers = [DeviceError("device offline"), ("\n", ""), ("1\n", "")]
 
-        async def getprop(serial, *args):
+        async def getprop(serial, *args, **_kw):
             a = answers.pop(0)
             if isinstance(a, Exception):
                 raise a
@@ -504,8 +505,50 @@ class TestBootAdoptsOnlyItsOwnAvd:
 
         monkeypatch.setattr(adb_module.asyncio, "create_subprocess_exec", spawned)
         monkeypatch.setattr(adb_module.asyncio, "sleep", AsyncMock())
+        monkeypatch.setattr(backend, "wait_for_boot_completed", AsyncMock())
 
         assert await backend.boot_emulator(AVD, timeout=30) == "emulator-5558"
+
+
+class TestBootReturnsOnlyOnceAndroidHasStarted:
+    """`boot_emulator` returned when adb listed the serial, about nine seconds
+    before `sys.boot_completed` -- measured. Every caller inherited that:
+    `boot`, the device pool, and erase. Waiting here fixes all three."""
+
+    @staticmethod
+    def _backend(monkeypatch):
+        backend = adb_module.AdbBackend()
+        backend._emulator_path = "/sdk/emulator/emulator"
+        monkeypatch.setattr(backend, "list_avds", AsyncMock(return_value=[AVD]))
+        listings = [[]]
+        monkeypatch.setattr(backend, "list_devices", AsyncMock(
+            side_effect=lambda: listings.pop(0) if listings else _listed(OLD)))
+        monkeypatch.setattr(backend, "avd_name", AsyncMock(return_value=AVD))
+
+        async def spawned(*_a, **_k):
+            return None
+
+        monkeypatch.setattr(adb_module.asyncio, "create_subprocess_exec", spawned)
+        monkeypatch.setattr(adb_module.asyncio, "sleep", AsyncMock())
+        return backend
+
+    async def test_it_waits_for_boot_completed_on_the_serial_it_adopted(self, monkeypatch):
+        backend = self._backend(monkeypatch)
+        waited = AsyncMock()
+        monkeypatch.setattr(backend, "wait_for_boot_completed", waited)
+
+        assert await backend.boot_emulator(AVD, timeout=30) == OLD
+
+        waited.assert_awaited_once()
+        assert waited.await_args.args[0] == OLD
+
+    async def test_a_boot_that_never_completes_is_not_reported_as_booted(self, monkeypatch):
+        backend = self._backend(monkeypatch)
+        monkeypatch.setattr(backend, "wait_for_boot_completed", AsyncMock(
+            side_effect=DeviceError("had not finished starting", tool="adb")))
+
+        with pytest.raises(DeviceError, match="had not finished starting"):
+            await backend.boot_emulator(AVD, timeout=30)
 
 
 
@@ -627,3 +670,230 @@ class TestAKillThatReportsFailureIsJudgedByWhatHappened:
         with pytest.raises(DeviceError, match="has not been wiped"):
             await ctrl.erase(OLD)
         assert not any(c.startswith("boot ") for c in calls), calls
+
+
+class TestASpentBudgetStillLooksOnce:
+    """The callers pass whatever is left of a shared deadline, with no floor --
+    a five-second minimum let the erase overrun its budget (review of #360).
+    That is only safe because the wait reads before judging the deadline."""
+
+    async def test_a_finished_boot_is_seen_with_no_time_left(self, monkeypatch):
+        backend = adb_module.AdbBackend()
+        reads = []
+
+        async def getprop(serial, *args, **_kw):
+            reads.append(1)
+            return "1\n", ""
+
+        monkeypatch.setattr(backend, "_run_adb_for_device", getprop)
+
+        await backend.wait_for_boot_completed(OLD, timeout=0.0)
+
+        assert reads == [1]
+
+    async def test_an_unfinished_boot_with_no_time_left_fails_after_one_look(
+        self, monkeypatch,
+    ):
+        backend = adb_module.AdbBackend()
+        reads = []
+
+        async def getprop(serial, *args, **_kw):
+            reads.append(1)
+            return "\n", ""
+
+        monkeypatch.setattr(backend, "_run_adb_for_device", getprop)
+
+        with pytest.raises(DeviceError, match="had not finished starting"):
+            await backend.wait_for_boot_completed(OLD, timeout=0.0)
+        assert reads == [1]
+
+
+class TestAnEmulatorThatCameBackButIsSlowIsNotReportedGone:
+    """With the boot-completed wait inside `boot_emulator`, a slow Android
+    made it raise without returning the serial it had found, and erase then
+    reported "did not come back" and cleared the active device -- for an
+    emulator that was running. Drives the real launcher path, not a mocked
+    `boot_emulator`, which is how the first tests missed it."""
+
+    async def test_the_erase_follows_the_serial_carried_by_the_error(self, monkeypatch):
+        ctrl, _ = _emulator(monkeypatch)
+        ctrl._active_udid = OLD
+        backend = ctrl.adb
+        backend._emulator_path = "/sdk/emulator/emulator"
+        monkeypatch.setattr(backend, "boot_emulator",
+                            adb_module.AdbBackend.boot_emulator.__get__(backend))
+        monkeypatch.setattr(backend, "_boot_emulator_inner",
+                            adb_module.AdbBackend._boot_emulator_inner.__get__(backend))
+        monkeypatch.setattr(backend, "list_avds", AsyncMock(return_value=[AVD]))
+        # The new serial appears once the emulator has been launched, and not
+        # before -- a fixed list of answers got consumed by the earlier
+        # gone-check, the launcher then saw the serial as pre-existing, never
+        # adopted it, and spun until its real deadline.
+        launched = []
+        monkeypatch.setattr(backend, "list_devices", AsyncMock(
+            side_effect=lambda: _listed(NEW) if launched else []))
+        monkeypatch.setattr(backend, "avd_name", AsyncMock(return_value=AVD))
+
+        async def spawned(*_a, **_k):
+            launched.append(1)
+
+        monkeypatch.setattr(adb_module.asyncio, "create_subprocess_exec", spawned)
+        monkeypatch.setattr(adb_module.asyncio, "sleep", AsyncMock())
+        # Bounded, so a mistake here fails fast rather than spinning out the
+        # real four-minute budget on a no-op sleep.
+        monkeypatch.setattr(DeviceController, "_ERASE_BOOT_TIMEOUT", 2.0)
+        monkeypatch.setattr(backend, "wait_for_boot_completed", AsyncMock(
+            side_effect=DeviceError("had not finished starting", tool="adb")))
+
+        with pytest.raises(EraseIncompleteError) as e:
+            await asyncio.wait_for(ctrl.erase(OLD), timeout=10)
+
+        assert e.value.udid == NEW
+        assert "did not come back" not in str(e.value)
+        assert ctrl._active_udid == NEW
+        assert ctrl._device_type_cache.get(NEW) == DeviceType.ANDROID_EMULATOR
+
+    async def test_boot_emulator_names_the_serial_in_its_error(self, monkeypatch):
+        backend = adb_module.AdbBackend()
+        backend._emulator_path = "/sdk/emulator/emulator"
+        monkeypatch.setattr(backend, "list_avds", AsyncMock(return_value=[AVD]))
+        listings = [[]]
+        monkeypatch.setattr(backend, "list_devices", AsyncMock(
+            side_effect=lambda: listings.pop(0) if listings else _listed(NEW)))
+        monkeypatch.setattr(backend, "avd_name", AsyncMock(return_value=AVD))
+
+        async def spawned(*_a, **_k):
+            return None
+
+        monkeypatch.setattr(adb_module.asyncio, "create_subprocess_exec", spawned)
+        monkeypatch.setattr(adb_module.asyncio, "sleep", AsyncMock())
+        monkeypatch.setattr(backend, "wait_for_boot_completed", AsyncMock(
+            side_effect=DeviceError("had not finished starting", tool="adb")))
+
+        from server.models import BootIncompleteError
+        with pytest.raises(BootIncompleteError) as e:
+            await asyncio.wait_for(backend.boot_emulator(AVD, timeout=2), timeout=10)
+        assert e.value.serial == NEW
+
+
+
+class TestABootPropertyReadCannotHang:
+    """A half-started device can leave `adb shell getprop` hanging. Unbounded,
+    the boot wait never got back to its deadline check, and held the AVD's
+    reservation with it (review of #361)."""
+
+    @staticmethod
+    def _hanging_adb(monkeypatch, backend):
+        procs = []
+
+        class Hangs:
+            returncode = None
+
+            def __init__(self):
+                self.killed = self.waited = False
+
+            async def communicate(self):
+                await asyncio.Event().wait()     # never answers
+
+            def kill(self):
+                self.killed = True
+
+            async def wait(self):
+                self.waited = True
+                return -9
+
+        async def spawn(*_a, **_k):
+            procs.append(Hangs())
+            return procs[-1]
+
+        backend._adb_path = "/sdk/platform-tools/adb"
+        monkeypatch.setattr(adb_module.asyncio, "create_subprocess_exec", spawn)
+        return procs
+
+    async def test_a_bounded_adb_call_is_killed_reaped_and_reported(self, monkeypatch):
+        backend = adb_module.AdbBackend()
+        procs = self._hanging_adb(monkeypatch, backend)
+
+        with pytest.raises(DeviceError, match="did not answer"):
+            await asyncio.wait_for(
+                backend._run_adb("-s", OLD, "shell", "getprop", timeout=0.05), timeout=5)
+
+        assert procs[0].killed and procs[0].waited
+
+    async def test_the_boot_wait_ends_on_its_deadline_even_when_adb_hangs(self, monkeypatch):
+        backend = adb_module.AdbBackend()
+        self._hanging_adb(monkeypatch, backend)
+        monkeypatch.setattr(adb_module.AdbBackend, "_GETPROP_TIMEOUT", 0.05)
+
+        with pytest.raises(DeviceError, match="had not finished starting"):
+            await asyncio.wait_for(
+                backend.wait_for_boot_completed(OLD, timeout=0.0), timeout=5)
+
+    async def test_a_stall_near_the_deadline_does_not_overrun_it(self, monkeypatch):
+        """With the default five-second per-read bound and a 0.2s budget, a
+        stalled read must give up with the budget, not five seconds later."""
+        backend = adb_module.AdbBackend()
+        self._hanging_adb(monkeypatch, backend)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+
+        with pytest.raises(DeviceError, match="had not finished starting"):
+            await asyncio.wait_for(
+                backend.wait_for_boot_completed(OLD, timeout=0.2), timeout=3)
+
+        assert loop.time() - started < 2.0
+
+    async def test_an_unset_read_then_a_stall_still_ends_with_the_budget(self, monkeypatch):
+        """The first read answers "not yet" just inside the budget; the pause
+        before the next must not carry past the deadline, and that next read
+        must not get the five-second fallback meant only for a first look on a
+        spent budget (review of #361)."""
+        backend = adb_module.AdbBackend()
+        backend._adb_path = "/sdk/platform-tools/adb"
+        spawned = []
+
+        class Answers:
+            returncode = 0
+
+            async def communicate(self):
+                return b"\n", b""          # sys.boot_completed not set yet
+
+        class Hangs:
+            returncode = None
+
+            async def communicate(self):
+                await asyncio.Event().wait()
+
+            def kill(self):
+                pass
+
+            async def wait(self):
+                return -9
+
+        async def spawn(*_a, **_k):
+            spawned.append(1)
+            return Answers() if len(spawned) == 1 else Hangs()
+
+        monkeypatch.setattr(adb_module.asyncio, "create_subprocess_exec", spawn)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+
+        with pytest.raises(DeviceError, match="had not finished starting"):
+            await asyncio.wait_for(
+                backend.wait_for_boot_completed(OLD, timeout=0.3), timeout=4)
+
+        assert loop.time() - started < 1.5, "the wait outran its 0.3s budget"
+
+    async def test_an_unbounded_call_is_still_unbounded_elsewhere(self, monkeypatch):
+        """Scope: only the boot wait passes a timeout. Every other adb call
+        behaves exactly as it did."""
+        backend = adb_module.AdbBackend()
+        seen = {}
+
+        async def run(*args, timeout=None):
+            seen["timeout"] = timeout
+            return "", ""
+
+        monkeypatch.setattr(backend, "_run_adb", run)
+        await backend._run_adb_for_device(OLD, "shell", "true")
+        assert seen["timeout"] is None

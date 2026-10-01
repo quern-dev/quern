@@ -22,6 +22,7 @@ from server.lifecycle.state import read_active_udid, write_active_udid
 from server.logging_ext import current_action
 from server.models import (
     AppInfo,
+    BootIncompleteError,
     DeviceError,
     DeviceInfo,
     DeviceOperationUnsupportedError,
@@ -1136,9 +1137,14 @@ class DeviceController(DeviceControllerUI):
                 # Report the outcome, not the request: listed by adb is not
                 # started. Measured: about nine seconds apart on an erase.
                 await self.adb.wait_for_boot_completed(
-                    serial, max(deadline - loop.time(), 5.0),
+                    serial, max(deadline - loop.time(), 0.0),
                 )
             except DeviceError as e:
+                if serial is None and isinstance(e, BootIncompleteError):
+                    # It came back -- adb lists it -- and only Android is
+                    # slow. Follow it, rather than reporting it gone.
+                    serial = e.serial
+                    self._adopt_erased_serial(udid, serial, was_active)
                 if serial is None:
                     self._device_type_cache.pop(udid, None)
                     if was_active:

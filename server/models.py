@@ -1614,6 +1614,21 @@ class DeviceOperationUnsupportedError(DeviceError):
     """
 
 
+class BootIncompleteError(DeviceError):
+    """An emulator came up -- adb lists it -- but Android did not finish starting.
+
+    Carries the serial, because the emulator *exists*: a caller that only saw
+    a plain error concluded it never came back. Erase did exactly that once the
+    boot-completed wait moved inside `boot_emulator`, clearing the active device
+    and reporting "did not come back" for an emulator that was running (review
+    of #361).
+    """
+
+    def __init__(self, message: str, *, serial: str, tool: str = "adb"):
+        super().__init__(message, tool=tool)
+        self.serial = serial
+
+
 class EraseIncompleteError(DeviceError):
     """An erase destroyed the running device and did not get it back.
 
