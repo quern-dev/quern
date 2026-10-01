@@ -341,60 +341,6 @@ def _checkpoint_dir(bundle_id: str, label: str) -> Path:
     return APP_STATES_DIR / checked_name("bundle_id", bundle_id) / checked_name("label", label)
 
 
-#: The simulator's preferences daemon. It caches every app's UserDefaults and
-#: writes them to disk on its own schedule -- measured at 3s to more than 15s
-#: behind the app.
-CFPREFSD = "com.apple.cfprefsd.xpc.daemon"
-_SYNC_TIMEOUT = 15.0
-
-
-async def sync_preferences(udid: str) -> dict:
-    """Make the preferences files on disk the truth, in both directions.
-
-    Stopping cfprefsd flushes its pending writes before it exits (measured: a
-    file reading `counter: 1` read `3` half a second later, matching the app)
-    and drops its cache, so the next reader loads from disk; launchd restarts
-    it on demand. Without this a checkpoint captured a file seconds stale, and
-    a restore was silently undone: the file said 1 and the relaunched app said
-    4, served from the cache.
-
-    Never raises. The caller has usually already changed something, so the
-    outcome is reported for the response to carry rather than thrown.
-    """
-    proc = None
-    try:
-        if await get_device_state(udid) == "Shutdown":
-            return {"synced": True, "detail": "device is shut down; nothing is cached"}
-        proc = await asyncio.create_subprocess_exec(
-            "xcrun", "simctl", "spawn", udid, "launchctl", "stop", CFPREFSD,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=_SYNC_TIMEOUT)
-    except (OSError, TimeoutError) as e:
-        if proc is not None and proc.returncode is None:
-            proc.kill()
-            await proc.wait()
-        if isinstance(e, TimeoutError):
-            return _unsynced(f"timed out after {_SYNC_TIMEOUT:.0f}s")
-        return _unsynced(str(e))
-    if proc.returncode != 0:
-        return _unsynced(stderr.decode(errors="replace").strip() or f"exit {proc.returncode}")
-    return {"synced": True}
-
-
-def _unsynced(detail: str) -> dict:
-    logger.warning("Could not restart cfprefsd: %s", detail)
-    return {
-        "synced": False,
-        "detail": detail,
-        "warning": (
-            "cfprefsd could not be restarted, so the app may still see its "
-            "cached preferences rather than the files on disk"
-        ),
-    }
-
-
 async def _terminate_app(udid: str, bundle_id: str) -> None:
     """Terminate the app, swallowing DeviceError if it's not running."""
     try:
@@ -425,15 +371,16 @@ async def _save_into(
     description: str,
     include_keychain: bool,
 ) -> dict:
-    # Terminate app before copying, then have cfprefsd write out what it is
-    # holding -- otherwise the copy is of a preferences file seconds stale.
-    await _terminate_app(udid, bundle_id)
-    preferences = await sync_preferences(udid)
+    from server.device.live_plist import capture_preferences
 
-    # Copy data container
+    await _terminate_app(udid, bundle_id)
+
+    # Copy data container, then replace its preference files with what
+    # cfprefsd holds: the files on disk trail the app by seconds.
     data_path = await get_data_container(udid, bundle_id)
     data_dest = checkpoint / "data-container"
     await _copy_container(data_path, data_dest)
+    await capture_preferences(udid, data_path, data_dest)
 
     # Copy app group containers
     groups = await get_app_groups(udid, bundle_id)
@@ -443,6 +390,7 @@ async def _save_into(
         for group_id, group_path in groups.items():
             dest = groups_dest / group_id
             await _copy_container(group_path, dest)
+            await capture_preferences(udid, group_path, dest)
 
     # Copy the keychain (outside every container — this is what carries the login)
     keychain_meta: dict = {"captured": False}
@@ -458,7 +406,6 @@ async def _save_into(
         "captured_at": captured_at,
         "udid": udid,
         "keychain": keychain_meta,
-        "preferences": preferences,
         "containers": {
             "data": str(data_path),
             "groups": {gid: str(p) for gid, p in groups.items()},
@@ -570,15 +517,16 @@ async def restore_state(
     if should_restore_keychain:
         await _require_shutdown(udid, "Restoring a checkpoint that contains a keychain")
 
-    # Terminate app before restoring, and flush cfprefsd so a write it is
-    # still holding cannot land on top of the restored files afterwards.
+    from server.device.live_plist import preference_plists, push_preferences
+
     await _terminate_app(udid, bundle_id)
-    flushed = await sync_preferences(udid)
+    problems: list[str] = []
 
     # Restore data container — re-resolve live path (UUID may have rotated)
     data_src = checkpoint / "data-container"
     if data_src.exists():
         live_data = await get_data_container(udid, bundle_id)
+        prefs_before = [p.name for p in preference_plists(live_data)]
         # Wipe live container contents
         for child in live_data.iterdir():
             if child.is_dir():
@@ -587,6 +535,7 @@ async def restore_state(
                 child.unlink()
         # Copy checkpoint back
         await asyncio.to_thread(shutil.copytree, str(data_src), str(live_data), dirs_exist_ok=True)
+        problems += await push_preferences(udid, live_data, prefs_before)
 
     # Restore app group containers — re-resolve live paths
     groups_src = checkpoint / "app-group"
@@ -600,6 +549,7 @@ async def restore_state(
                 logger.warning("Group %r not found in live simulator, skipping restore", group_id)
                 continue
             live_group_path = live_groups[group_id]
+            group_prefs_before = [p.name for p in preference_plists(live_group_path)]
             # Wipe live group contents
             for child in live_group_path.iterdir():
                 if child.is_dir():
@@ -610,6 +560,7 @@ async def restore_state(
             await asyncio.to_thread(
                 shutil.copytree, str(group_dir), str(live_group_path), dirs_exist_ok=True,
             )
+            problems += await push_preferences(udid, live_group_path, group_prefs_before)
 
     # Restore the keychain last: the container wipe above must not run after it.
     if should_restore_keychain:
@@ -627,15 +578,16 @@ async def restore_state(
                 label,
             )
 
-    # And again now the files are back: cfprefsd still caches the values the
-    # restore just replaced, and serves them to the relaunched app. Measured:
-    # the file said `counter: 1` and the app said 4 until this was added.
-    dropped = await sync_preferences(udid)
-    # Either failure is the one to report. A failed flush means a write cfprefsd
-    # was still holding can land on top of the restored files later -- and the
-    # second restart is exactly what lands it -- so a clean second result does
-    # not make the first one irrelevant.
-    meta["preferences"] = flushed if not flushed.get("synced") else dropped
+    meta["preferences"] = {"synced": not problems}
+    if problems:
+        logger.warning("Restored %r, but cfprefsd disagrees: %s", label, problems)
+        meta["preferences"].update({
+            "detail": problems,
+            "warning": (
+                "the files were restored, but cfprefsd still serves other values for "
+                "some preferences, so the app may not see the restored state"
+            ),
+        })
 
     logger.info("Restored app state %r for %s (udid=%s)", label, bundle_id, udid[:8])
     return meta

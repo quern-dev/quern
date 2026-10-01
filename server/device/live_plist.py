@@ -180,3 +180,71 @@ async def remove_live_plist_key(udid: str, container: Path, full_path: Path, key
     await _defaults(udid, "delete", domain, key)
     if key in await _export(udid, domain):
         raise DeviceError(f"{key!r} was still present after deleting it", tool="defaults")
+
+
+# ---------------------------------------------------------------------------
+# Checkpoints: what a save captures and what a restore hands back
+# ---------------------------------------------------------------------------
+
+
+def preference_plists(container: Path) -> list[Path]:
+    """The preference files in a container, by name."""
+    prefs = container / "Library" / "Preferences"
+    if not prefs.is_dir():
+        return []
+    return sorted(p for p in prefs.glob("*.plist") if p.is_file())
+
+
+def _canonical(data: dict) -> bytes:
+    # Sorted keys and typed values: `1` and `True` differ here, as they must.
+    return plistlib.dumps(data, fmt=plistlib.FMT_XML, sort_keys=True)
+
+
+async def capture_preferences(udid: str, live: Path, copy: Path) -> None:
+    """Overwrite each preference file copied from `live` into `copy` with
+    what cfprefsd holds, which includes the app's writes not yet on disk.
+
+    Raises on failure: a checkpoint that may hold stale preferences is not
+    one worth keeping, and `save_state` keeps the previous one instead.
+    """
+    if await get_device_state(udid) == "Shutdown":
+        return
+    for source in preference_plists(live):
+        data = await _export(udid, str(source.with_suffix("")))
+        dest = copy / "Library" / "Preferences" / source.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(plistlib.dumps(data, fmt=plistlib.FMT_BINARY))
+
+
+async def push_preferences(udid: str, live: Path, before: list[str]) -> list[str]:
+    """Make cfprefsd serve exactly the preference files a restore put back.
+
+    The files alone are not enough: cfprefsd keeps serving what it cached,
+    and later writes it out over the restored file (measured: the relaunched
+    app came back at 3 where the checkpoint said 1, and the file followed).
+    `before` names the preference files that existed before the restore, so a
+    domain the checkpoint does not have is emptied rather than left cached.
+
+    Never raises -- the files are already restored -- and returns a problem
+    per domain that does not read back exactly as restored.
+    """
+    if await get_device_state(udid) == "Shutdown":
+        return []
+    prefs = live / "Library" / "Preferences"
+    problems: list[str] = []
+    for name in sorted(set(before) | {p.name for p in preference_plists(live)}):
+        restored = prefs / name
+        domain = str(restored.with_suffix(""))
+        try:
+            target = plistlib.loads(restored.read_bytes()) if restored.exists() else {}
+            current = await _export(udid, domain)
+            if target:
+                # `import` merges, so keys the checkpoint lacks are removed below.
+                await _defaults(udid, "import", domain, str(restored))
+            for key in sorted(set(current) - set(target)):
+                await _defaults(udid, "delete", domain, key)
+            if _canonical(await _export(udid, domain)) != _canonical(target):
+                problems.append(f"{name}: cfprefsd does not hold the restored values")
+        except Exception as e:  # one domain must not stop the others
+            problems.append(f"{name}: {e}")
+    return problems

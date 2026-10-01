@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import plistlib
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -49,6 +50,7 @@ class FakeCfprefsd:
         self.domains: dict[str, dict] = {}
         self.calls: list[tuple] = []
         self.drop_writes = False
+        self.drop_imports = False
         self.fail_on_key: str | None = None
 
     async def __call__(self, udid, *args):
@@ -65,6 +67,10 @@ class FakeCfprefsd:
                      "-string": str}[flag](text)
             if not self.drop_writes:
                 store[key] = value
+            return b""
+        if verb == "import":
+            if not self.drop_imports:
+                store.update(plistlib.loads(Path(args[2]).read_bytes()))
             return b""
         if verb == "delete":
             store.pop(args[2], None)
@@ -649,3 +655,18 @@ class TestPreferencesGoThroughCfprefsd:
         assert resp.status_code == 200, resp.text
         assert resp.json()["changed"] == {"existing": {"old": 1, "new": 4}}
 
+
+
+class TestRestoreWarningReachesTheCaller:
+    async def test_a_cfprefsd_disagreement_is_a_top_level_warning(
+        self, app, auth_headers, mock_controller,
+    ):
+        meta = {"label": "b", "preferences": {
+            "synced": False, "detail": ["p.plist: x"], "warning": "app may not see it",
+        }}
+        with patch("server.api.app_state.restore_state", AsyncMock(return_value=meta)):
+            resp = await _call(app, auth_headers, "POST", "/restore", json={
+                "bundle_id": "com.example.App", "label": "b",
+            })
+        assert resp.status_code == 200
+        assert resp.json()["warning"] == "app may not see it"

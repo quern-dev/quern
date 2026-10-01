@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import plistlib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -19,26 +20,28 @@ from server.device.app_state import (
     restore_state,
     save_state,
 )
-from server.device.app_state import sync_preferences as real_sync_preferences
 from server.models import AppStateNotFoundError, DeviceError, InvalidAppStatePathError
 
 
 @pytest.fixture(autouse=True)
-def _no_cfprefsd(monkeypatch):
-    """Every save and restore restarts the simulator's cfprefsd; never for real.
+def _shut_down(monkeypatch):
+    """By default the simulator reads as shut down, so save and restore have
+    no cfprefsd to talk to. `cfprefsd` boots it for the tests that need one."""
+    monkeypatch.setattr(
+        "server.device.live_plist.get_device_state", AsyncMock(return_value="Shutdown"),
+    )
 
-    Records the calls, so ordering tests can place them among the copies.
-    `real_sync_preferences` is imported before this patch and is what the
-    tests of the sync itself call.
-    """
-    calls: list[str] = []
 
-    async def fake(udid):
-        calls.append("sync")
-        return {"synced": True}
+@pytest.fixture
+def cfprefsd(monkeypatch):
+    from tests.test_app_state_api import FakeCfprefsd
 
-    monkeypatch.setattr(app_state_module, "sync_preferences", fake)
-    return calls
+    fake = FakeCfprefsd()
+    monkeypatch.setattr(
+        "server.device.live_plist.get_device_state", AsyncMock(return_value="Booted"),
+    )
+    monkeypatch.setattr("server.device.live_plist._defaults", fake)
+    return fake
 
 
 @pytest.fixture
@@ -812,162 +815,110 @@ class TestSaveIsAllOrNothing:
 
 
 # ---------------------------------------------------------------------------
-# cfprefsd: flushed before a copy out, dropped after a copy in
+# cfprefsd: a save captures what it holds; a restore hands it the files back
 # ---------------------------------------------------------------------------
 
 
-class TestPreferencesAreSynced:
-    async def test_save_flushes_after_terminating_and_before_copying(
-        self, store, tmp_path, _no_cfprefsd,
+def _prefs(container: Path, name: str = "com.example.App.plist") -> Path:
+    path = container / "Library" / "Preferences" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+class TestSaveCapturesWhatCfprefsdHolds:
+    async def test_the_checkpoint_has_the_apps_unflushed_writes(
+        self, store, tmp_path, cfprefsd,
     ):
-        order = _no_cfprefsd
-
-        async def terminate(udid, bundle_id):
-            order.append("terminate")
-
-        async def get_data(udid, bundle_id):
-            order.append("copy")
-            d = tmp_path / "sim-data"
-            d.mkdir(exist_ok=True)
-            return d
-
-        with (
-            patch("server.device.app_state._terminate_app", side_effect=terminate),
-            patch("server.device.app_state.get_data_container", side_effect=get_data),
-            patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
-        ):
-            meta = await save_state("TEST-UDID", "com.example.App", "b")
-        assert order == ["terminate", "sync", "copy"]
-        assert meta["preferences"] == {"synced": True}
-
-    async def test_restore_flushes_before_the_wipe_and_drops_the_cache_after(
-        self, store, tmp_path, _no_cfprefsd,
-    ):
-        """The second sync is the one that makes a restore visible to the app."""
-        order = _no_cfprefsd
-        checkpoint = store / "com.example.App" / "b"
-        (checkpoint / "data-container").mkdir(parents=True)
-        (checkpoint / "data-container" / "prefs.plist").write_text("saved")
-        (checkpoint / ".quern-meta.json").write_text('{"label": "b"}')
+        """The file on disk says 1; the app had written 3."""
         live = tmp_path / "live"
-        live.mkdir()
-
-        async def get_data(udid, bundle_id):
-            order.append("copy")
-            return live
-
-        with (
-            patch("server.device.app_state._terminate_app", AsyncMock()),
-            patch("server.device.app_state.get_data_container", side_effect=get_data),
-            patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
-        ):
-            meta = await restore_state("TEST-UDID", "com.example.App", "b")
-        assert order == ["sync", "copy", "sync"]
-        assert (live / "prefs.plist").read_text() == "saved"
-        assert meta["preferences"] == {"synced": True}
-
-
-class TestRestoreReportsEitherSyncFailure:
-    async def test_a_failed_flush_is_reported_even_when_the_second_restart_works(
-        self, store, tmp_path, monkeypatch,
-    ):
-        """The failure that matters most is the first: a write cfprefsd still
-        held lands on the restored files when the second restart flushes it."""
-        results = iter([
-            {"synced": False, "detail": "timed out", "warning": "stale"},
-            {"synced": True},
-        ])
-
-        async def fake(udid):
-            return next(results)
-
-        monkeypatch.setattr(app_state_module, "sync_preferences", fake)
-        checkpoint = store / "com.example.App" / "b"
-        (checkpoint / "data-container").mkdir(parents=True)
-        (checkpoint / ".quern-meta.json").write_text('{"label": "b"}')
-        live = tmp_path / "live"
-        live.mkdir()
+        prefs = _prefs(live)
+        prefs.write_bytes(plistlib.dumps({"probe.counter": 1}))
+        cfprefsd.domains[str(prefs.with_suffix(""))] = {"probe.counter": 3}
         with (
             patch("server.device.app_state._terminate_app", AsyncMock()),
             patch("server.device.app_state.get_data_container", AsyncMock(return_value=live)),
             patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
         ):
-            meta = await restore_state("TEST-UDID", "com.example.App", "b")
+            await save_state("TEST-UDID", "com.example.App", "b")
+        saved = store / "com.example.App" / "b" / "data-container" / prefs.relative_to(live)
+        assert plistlib.loads(saved.read_bytes()) == {"probe.counter": 3}
+
+    async def test_a_capture_that_fails_fails_the_save_and_keeps_the_old_one(
+        self, store, tmp_path, cfprefsd, monkeypatch,
+    ):
+        old = store / "com.example.App" / "b"
+        old.mkdir(parents=True)
+        (old / ".quern-meta.json").write_text('{"v": 1}')
+        live = tmp_path / "live"
+        _prefs(live).write_bytes(plistlib.dumps({}))
+
+        async def broken(udid, *args):
+            raise DeviceError("defaults export failed: boom", tool="defaults")
+
+        monkeypatch.setattr("server.device.live_plist._defaults", broken)
+        with (
+            patch("server.device.app_state._terminate_app", AsyncMock()),
+            patch("server.device.app_state.get_data_container", AsyncMock(return_value=live)),
+            patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
+        ):
+            with pytest.raises(DeviceError, match="boom"):
+                await save_state("TEST-UDID", "com.example.App", "b")
+        assert json.loads((old / ".quern-meta.json").read_text()) == {"v": 1}
+
+
+class TestRestorePushesTheFilesIntoCfprefsd:
+    @pytest.fixture
+    def setup(self, store, tmp_path):
+        checkpoint = store / "com.example.App" / "b"
+        saved = _prefs(checkpoint / "data-container")
+        saved.write_bytes(plistlib.dumps({"probe.counter": 1, "probe.greeting": "saved"}))
+        (checkpoint / ".quern-meta.json").write_text('{"label": "b"}')
+        live = tmp_path / "live"
+        live_prefs = _prefs(live)
+        live_prefs.write_bytes(plistlib.dumps({"probe.counter": 3}))
+        return live, live_prefs
+
+    async def _restore(self, live):
+        with (
+            patch("server.device.app_state._terminate_app", AsyncMock()),
+            patch("server.device.app_state.get_data_container", AsyncMock(return_value=live)),
+            patch("server.device.app_state.get_app_groups", AsyncMock(return_value={})),
+        ):
+            return await restore_state("TEST-UDID", "com.example.App", "b")
+
+    async def test_cfprefsd_ends_up_holding_exactly_the_checkpoint(self, setup, cfprefsd):
+        """It held 3 and a key the checkpoint never had. Measured live: left
+        alone, cfprefsd served the 3 and later wrote it over the file."""
+        live, live_prefs = setup
+        domain = str(live_prefs.with_suffix(""))
+        cfprefsd.domains[domain] = {"probe.counter": 3, "probe.flag": True}
+        meta = await self._restore(live)
+        assert cfprefsd.domains[domain] == {"probe.counter": 1, "probe.greeting": "saved"}
+        assert meta["preferences"] == {"synced": True}
+
+    async def test_a_domain_the_checkpoint_lacks_is_emptied(self, setup, cfprefsd):
+        live, _ = setup
+        extra = _prefs(live, "com.example.Other.plist")
+        extra.write_bytes(plistlib.dumps({"x": 1}))
+        cfprefsd.domains[str(extra.with_suffix(""))] = {"x": 1}
+        await self._restore(live)
+        assert cfprefsd.domains[str(extra.with_suffix(""))] == {}
+
+    async def test_a_value_cfprefsd_will_not_take_is_a_warning(self, setup, cfprefsd):
+        live, live_prefs = setup
+        cfprefsd.domains[str(live_prefs.with_suffix(""))] = {"probe.counter": 3}
+        cfprefsd.drop_imports = True
+        meta = await self._restore(live)
         assert meta["preferences"]["synced"] is False
+        assert "may not see the restored state" in meta["preferences"]["warning"]
 
+    async def test_cfprefsd_is_never_restarted(self, setup, cfprefsd):
+        live, _ = setup
+        await self._restore(live)
+        assert {c[0] for c in cfprefsd.calls} <= {"export", "import", "delete"}
 
-class TestSyncPreferences:
-    async def test_a_device_state_lookup_that_cannot_run_is_reported(self):
-        """It is documented never to raise, so the lookup is inside the guard."""
-        with patch(
-            "asyncio.create_subprocess_exec", side_effect=FileNotFoundError("xcrun"),
-        ):
-            result = await real_sync_preferences("TEST-UDID")
-        assert result["synced"] is False
-
-    async def test_it_stops_the_simulators_cfprefsd(self):
-        with (
-            patch.object(app_state_module, "get_device_state", AsyncMock(return_value="Booted")),
-            patch("asyncio.create_subprocess_exec", return_value=_mock_proc(0)) as spawn,
-        ):
-            result = await real_sync_preferences("TEST-UDID")
-        assert result == {"synced": True}
-        assert spawn.call_args[0] == (
-            "xcrun", "simctl", "spawn", "TEST-UDID",
-            "launchctl", "stop", "com.apple.cfprefsd.xpc.daemon",
-        )
-
-    async def test_a_shut_down_device_has_nothing_to_sync(self):
-        with (
-            patch.object(app_state_module, "get_device_state", AsyncMock(return_value="Shutdown")),
-            patch("asyncio.create_subprocess_exec") as spawn,
-        ):
-            result = await real_sync_preferences("TEST-UDID")
-        assert result["synced"] is True
-        spawn.assert_not_called()
-
-    async def test_a_failure_is_reported_not_raised(self):
-        with (
-            patch.object(app_state_module, "get_device_state", AsyncMock(return_value="Booted")),
-            patch(
-                "asyncio.create_subprocess_exec",
-                return_value=_mock_proc(3, stderr=b"no such service"),
-            ),
-        ):
-            result = await real_sync_preferences("TEST-UDID")
-        assert result["synced"] is False
-        assert "no such service" in result["detail"]
-        assert "cached preferences" in result["warning"]
-
-    async def test_an_unrunnable_simctl_is_reported(self):
-        with (
-            patch.object(app_state_module, "get_device_state", AsyncMock(return_value="unknown")),
-            patch("asyncio.create_subprocess_exec", side_effect=FileNotFoundError("xcrun")),
-        ):
-            result = await real_sync_preferences("TEST-UDID")
-        assert result["synced"] is False
-
-    async def test_a_hung_stop_is_killed_and_reported(self, monkeypatch):
-        import asyncio
-
-        monkeypatch.setattr(app_state_module, "_SYNC_TIMEOUT", 0.05)
-        proc = MagicMock()
-        proc.returncode = None
-
-        async def hang():
-            await asyncio.sleep(10)
-
-        def kill():
-            proc.returncode = -9
-
-        proc.communicate = hang
-        proc.kill = MagicMock(side_effect=kill)
-        proc.wait = AsyncMock()
-        with (
-            patch.object(app_state_module, "get_device_state", AsyncMock(return_value="Booted")),
-            patch("asyncio.create_subprocess_exec", return_value=proc),
-        ):
-            result = await real_sync_preferences("TEST-UDID")
-        assert result["synced"] is False and "timed out" in result["detail"]
-        proc.kill.assert_called_once()
-        proc.wait.assert_awaited()
+    async def test_a_shut_down_simulator_needs_nothing_but_the_files(self, setup):
+        live, live_prefs = setup
+        meta = await self._restore(live)
+        assert plistlib.loads(live_prefs.read_bytes())["probe.counter"] == 1
+        assert meta["preferences"] == {"synced": True}
