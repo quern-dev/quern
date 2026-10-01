@@ -557,10 +557,18 @@ async def test_reports_left_on_the_phone_are_not_new_twice(tmp_crash_dir):
     again, to the same paths. That must not turn one crash into a new report
     on each pull, nor after a restart."""
     fresh = []    # stamped at the first copy, after start; the same bytes each time
+    # Named for a moment inside the pull window, computed once so every pull
+    # copies the same path. It was a fixed date, 2026-09-27 14:35:10, and a
+    # pull keeps only reports dated within its window (3 days plus a day of
+    # margin) -- so on 2026-10-01 at 14:35 the report aged out, the first pull
+    # found nothing new, and this test failed on every branch at once.
+    from datetime import datetime, timedelta
+
+    name = f"Calculator-{datetime.now() - timedelta(minutes=5):%Y-%m-%d-%H%M%S}.ips"
 
     async def write(target):
         fresh[:] = fresh or [_fresh_ips()]
-        (target / "Calculator-2026-09-27-143510.ips").write_text(fresh[0])
+        (target / name).write_text(fresh[0])
 
     adapter = CrashAdapter(watch_dir=tmp_crash_dir, poll_interval=60)
     entries = _collect_entries(adapter)
