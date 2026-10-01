@@ -1041,6 +1041,28 @@ class TestWdaDirectQuery:
             "'XCUIElementTypeRadioButton', 'XCUIElementTypeStaticText'}"
         ) in call[0][2]
 
+    async def test_an_identifier_and_type_query_keeps_the_identifier(self):
+        """WDA's compact /elements response echoes the class name in `name`, so
+        the element came back with no identifier and the caller's own
+        find_element dropped it. Measured on a simulator in WDA mode:
+        tap_element(identifier="tab_controls", element_type="Button") was
+        not_found while the identifier alone tapped."""
+        from server.device.ui_elements import find_element
+
+        ctrl = DeviceController()
+        ctrl._active_udid = "PHYS-0001"
+        ctrl._device_type_cache["PHYS-0001"] = DeviceType.DEVICE
+        ctrl.wda_client.find_elements_by_query = AsyncMock(return_value=[{
+            "type": "Button", "AXUniqueId": "", "AXLabel": "Controls",
+            "frame": {"x": 0, "y": 0, "width": 10, "height": 10},
+        }])
+
+        elements, _ = await ctrl._wda_direct_query(
+            "PHYS-0001", identifier="tab_controls", element_type="RadioButton",
+        )
+        assert [e.identifier for e in elements] == ["tab_controls"]
+        assert find_element(elements, identifier="tab_controls", element_type="RadioButton")
+
     async def test_type_with_no_equivalent_keeps_the_single_clause(self):
         ctrl = DeviceController()
         ctrl._active_udid = "PHYS-0001"

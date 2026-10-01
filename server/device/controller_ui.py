@@ -214,6 +214,26 @@ def _effective_filter_label(
 logger = logging.getLogger(__name__)
 
 
+def _with_queried_identifier(raw: list[dict], identifier: str | None) -> list[dict]:
+    """Restore the identifier a WDA query matched on, where WDA left it out.
+
+    A query naming the identifier -- `name == '...'` in a predicate -- returns
+    only elements carrying it, but WDA's compact response often echoes the
+    class name in `name`, which the mapper rightly discards. The element then
+    came back with no identifier, and the caller's own `find_element`, which
+    checks the identifier again, dropped it: `tap_element` with an identifier
+    *and* an element type was not_found on every WDA device, while the same
+    identifier alone worked. `find_elements_by_query` already does this for the
+    `accessibility id` strategy; this is the predicate path, which does not
+    pass through that branch.
+    """
+    if identifier:
+        for item in raw:
+            if not item.get("AXUniqueId"):
+                item["AXUniqueId"] = identifier
+    return raw
+
+
 def _note_equivalence(result: dict, element_type: str | None, element: UIElement) -> None:
     """Add `matched_via` when `element_type` matched only through equivalence.
 
@@ -1218,7 +1238,7 @@ class DeviceControllerUI:
         start = time.perf_counter()
         raw = await self.wda_client.find_elements_by_query(udid, using, value)
         elapsed = time.perf_counter() - start
-        elements = parse_elements(raw)
+        elements = parse_elements(_with_queried_identifier(raw, identifier))
 
         # If accessibility id returned nothing, retry with predicate string —
         # but only if the first query was fast (<2s). On dense screens, WDA
@@ -1231,7 +1251,7 @@ class DeviceControllerUI:
                 pred_value, udid[:8],
             )
             raw = await self.wda_client.find_elements_by_query(udid, "predicate string", pred_value)
-            elements = parse_elements(raw)
+            elements = parse_elements(_with_queried_identifier(raw, identifier))
         elif not elements and elapsed >= 2.0:
             logger.info(
                 "[WDA DIRECT] skipping predicate retry "
