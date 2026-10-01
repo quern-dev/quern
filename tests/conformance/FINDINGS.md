@@ -730,28 +730,30 @@ simulator's cfprefsd caches each app's defaults and serves the cache, not the
 file; it also writes the app's changes out 3s to more than 15s late, so a save
 could capture a stale file and a read could report one.
 
-The fix has two halves, and the first attempt at the second one was wrong.
+The fix is to talk to cfprefsd rather than around it, with `defaults` run
+inside the simulator. quern never restarts it.
 
-**Save and restore** restart cfprefsd: `launchctl stop
-com.apple.cfprefsd.xpc.daemon` inside the simulator flushes pending writes
-before exiting (measured: a file reading 1 read 3 half a second later) and
-drops the cache, and launchd restarts it on demand. The app has already been
-terminated by then, so it has nothing in flight. A failure to restart is
-reported on the response as a `warning`.
+- **Reads** use `defaults export`. Measured: with the file at 1 and the app at
+  3, it returned 3.
+- **Writes** use `defaults write` / `delete`, and every value is read back,
+  typed, before success is reported. A running app sees the value on its next
+  read; it survives a relaunch.
+- **Save** replaces each copied preference file with `defaults export`, so the
+  checkpoint holds the app's unflushed writes.
+- **Restore** imports each restored file into cfprefsd, deletes the keys the
+  checkpoint lacks, and verifies cfprefsd reads back exactly the checkpoint;
+  a mismatch is a `warning` on the response. Measured: a plain file restore
+  came back with the app's unflushed value in 1 of 3 trials; with the import,
+  3 of 3 were correct, including that case.
 
-**Reads and writes of a preference file** go *through* cfprefsd instead, with
-`defaults export` / `write` / `delete` run inside the simulator. Measured: with
-the file at 1 and the app at 3, `defaults export` returned 3; a value written
-with `defaults write` was seen by the *running* app on its next read and
-survived a relaunch. Every write is read back before success is reported.
+A shut-down simulator has no cfprefsd, and there the files are the truth.
 
-The first version restarted cfprefsd around reads and writes too. About once
-per full conformance run, a running app's own write then failed to reach the
-file -- 2 where the app showed 4, and in another run a write that never landed
-in 15s of reads -- while 39 hand-driven trials never reproduced it. Whatever
-the mechanism, it only happened when the daemon was restarted under a running
-app, so that is no longer done. The tests that caught it still report lag
-versus loss if it recurs.
+The first version restarted cfprefsd instead (`launchctl stop`, which does
+flush before exiting). That made the files current, but restarting the
+daemon under a running app intermittently swallowed the app's own writes --
+about once per full conformance run, never in 39 hand-driven trials -- and a
+restore's restart put every other running app on the simulator at the same
+risk. The tests that caught it still report lag versus loss if it recurs.
 
 ## F23 — MCP `set_app_plist_value` wrote booleans as 1 and 0
 
