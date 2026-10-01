@@ -521,8 +521,12 @@ async def erase_device(request: Request, body: ShutdownDeviceRequest):
         try:
             resolved = await controller.resolve_udid(body.udid)
             act.udid = resolved
-            # `or resolved`: a controller that returns nothing erased in place.
-            now_at = await controller.erase(udid=resolved) or resolved
+            # Only a string is "where the device is now"; anything else -- None
+            # from a controller that erased in place -- means it stayed put.
+            # Taken loosely, a test double's return value reached the JSON
+            # encoder and recursed (test_sim_tls::test_erasing_refreshes).
+            erased_to = await controller.erase(udid=resolved)
+            now_at = erased_to if isinstance(erased_to, str) and erased_to else resolved
             # In a thread: the helper does blocking reads, an exclusive flock
             # and a write, and a contended lock would stall every other
             # request on the loop. It swallows its own exceptions, so the
