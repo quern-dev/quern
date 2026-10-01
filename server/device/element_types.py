@@ -112,6 +112,29 @@ def rule_for(*, identifier: object, label: object) -> TypeRule:
     return "exact"
 
 
+def element_rule(rule: TypeRule, identifier: str | None, label: str | None) -> TypeRule:
+    """The rule for one element: an identifier equal to its label is a label.
+
+    WebDriverAgent reports `name` -- the identifier, or the label when the
+    element has none -- and there is no attribute holding the identifier alone
+    (measured: `rawIdentifier` and `identifier` are both rejected in a
+    predicate). So on WDA a screen title with no identifier reads as
+    identifier "Settings", label "Settings", and treating that as an
+    identifier would widen a `Button` selector to the whole rows family and
+    land on the title -- the label match spec §1.3 forbids. An identifier
+    that only repeats the label pins nothing more than the label does, on any
+    backend, so it earns the label rule.
+    """
+    if (
+        rule == "identifier"
+        and identifier
+        and label
+        and identifier.lower() == label.lower()
+    ):
+        return "label"
+    return rule
+
+
 def type_matches(wanted: str, actual: str, rule: TypeRule) -> bool:
     """Whether an element of type `actual` satisfies a request for `wanted`.
 

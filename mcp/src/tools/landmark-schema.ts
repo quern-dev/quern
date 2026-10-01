@@ -10,39 +10,44 @@ import { z } from "zod";
  * (`web_url_contains`), which has no element.
  */
 
-export const landmarkSelector = z.object({
-  element: z
-    .string()
-    .optional()
-    .describe(
-      "Element type, e.g. 'Button' or 'Heading'. Required unless web_url_contains is given. " +
-      "Matched across backends: with a label or identifier, RadioButton also matches the " +
-      "Button WDA reports for the same tab item."
-    ),
-  identifier: z.string().optional(),
-  label: z.string().optional(),
-  label_contains: z.string().optional(),
-  absent: z.boolean().optional(),
-  selected: z
-    .boolean()
-    .optional()
-    .describe(
-      "Selection state for tabs, switches, radios, checkboxes. " +
-      "true = element must be selected (e.g. the active tab); " +
-      "false = element must not be selected. Omit to ignore."
-    ),
-  web_url_contains: z
-    .string()
-    .optional()
-    .describe(
-      "Match a loaded web page's URL instead of an element, for a screen whose identity is " +
-      "entirely web. Cannot be combined with element, identifier or label fields."
-    ),
-  web_process: z
-    .string()
-    .optional()
-    .describe("Bundle id hosting the page; only with web_url_contains."),
-});
+export const landmarkSelector = z
+  .object({
+    element: z
+      .string()
+      .optional()
+      .describe(
+        "Element type, e.g. 'Button' or 'Heading'. Required unless web_url_contains is given. " +
+        "Matched across backends: with a label or identifier, RadioButton also matches the " +
+        "Button WDA reports for the same tab item."
+      ),
+    identifier: z.string().optional(),
+    label: z.string().optional(),
+    label_contains: z.string().optional(),
+    absent: z.boolean().optional(),
+    selected: z
+      .boolean()
+      .optional()
+      .describe(
+        "Selection state for tabs, switches, radios, checkboxes. " +
+        "true = element must be selected (e.g. the active tab); " +
+        "false = element must not be selected. Omit to ignore."
+      ),
+    web_url_contains: z
+      .string()
+      .optional()
+      .describe(
+        "Match a loaded web page's URL instead of an element, for a screen whose identity is " +
+        "entirely web. Cannot be combined with element, identifier or label fields."
+      ),
+    web_process: z
+      .string()
+      .optional()
+      .describe("Bundle id hosting the page; only with web_url_contains."),
+  })
+  // Strict for the same reason as the screen object below, and with more at
+  // stake: a dropped `lable` leaves a type-only landmark, which matches far
+  // more than the one its author meant.
+  .strict();
 
 // Strict: a misspelt `landmark_convention` must be refused, not dropped and
 // read as undeclared with nothing said.

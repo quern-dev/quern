@@ -44,3 +44,9 @@ test("a non-integer declaration is refused", () => {
   });
   assert.equal(result.success, false);
 });
+
+test("a misspelt landmark field is refused, not dropped", () => {
+  // Dropped, {element: "Button", lable: "Home"} is a type-only landmark.
+  const result = inlineLandmarks.safeParse({ Home: [{ element: "Button", lable: "Home" }] });
+  assert.equal(result.success, false);
+});

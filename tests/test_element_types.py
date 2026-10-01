@@ -511,3 +511,311 @@ class TestApi:
 
 def test_portability_finding_is_none_for_a_pinned_pair():
     assert portability_finding("TextField", identifier="email", label=None) is None
+
+
+# ---------------------------------------------------------------------------
+# From the independent review of the branch
+# ---------------------------------------------------------------------------
+
+
+class TestAnIdentifierThatRepeatsTheLabelIsALabel:
+    """WDA reports `name`: the identifier, or the label when there is none.
+    Measured on a simulator: `name == 'More'` matches the More tab, which has
+    no identifier, and the full tree reports the title `StaticText "Text"` with
+    identifier "Text". Treating that as an identifier widened `Button` to the
+    rows family and landed on the title -- the label match §1.3 forbids."""
+
+    def test_filter_does_not_reach_the_family_through_a_label_in_disguise(self):
+        title = _el("StaticText", "Settings", identifier="Settings")
+        assert find_element([title], identifier="Settings", element_type="Button") == []
+
+    def test_a_real_identifier_still_earns_the_family(self):
+        row = _el("Cell", "Detail row", identifier="lists_row_2")
+        assert find_element([row], identifier="lists_row_2", element_type="Button") == [row]
+
+    def test_the_safe_pair_still_holds(self):
+        tab = _el("Button", "More", identifier="More")
+        assert find_element([tab], identifier="More", element_type="RadioButton") == [tab]
+
+    def test_landmarks_follow_the_same_rule(self):
+        lm = Landmark(element="Button", identifier="Settings")
+        assert match_landmark_via([_el("StaticText", "Settings", identifier="Settings")], lm) == (
+            False, None,
+        )
+        assert match_landmark_via([_el("Cell", "Row", identifier="Settings")], lm) == (
+            True, "Button≈Cell",
+        )
+
+
+class TestTheScrollSweepPassesTheTypeRule:
+    """The sweep finds by label or identifier alone, and its result replaced
+    the matches unchecked: a Button request tapped a StaticText, and
+    matched_via reported the forbidden pairing as an equivalence."""
+
+    @staticmethod
+    def _ctrl(swept: UIElement):
+        from unittest.mock import MagicMock
+
+        ctrl = DeviceController()
+        ctrl.resolve_udid = AsyncMock(return_value="SIM-1")
+        ctrl._warn_if_input_is_suppressed = AsyncMock()
+        ctrl._is_android = lambda udid: False
+        ctrl.get_ui_elements = AsyncMock(return_value=([], "SIM-1"))
+        ctrl._ios_scroll_to_element = AsyncMock(return_value=swept)
+        ctrl._identify_for_miss = AsyncMock(return_value={})
+        backend = MagicMock()
+        backend.tap = AsyncMock()
+        ctrl._ui_backend = lambda udid: backend
+        return ctrl, backend
+
+    async def test_a_swept_element_of_a_forbidden_type_is_not_tapped(self, monkeypatch):
+        import server.device.controller_ui as cui
+
+        monkeypatch.setattr(cui, "_capture_screenshot", AsyncMock(return_value=None))
+        ctrl, backend = self._ctrl(_el("StaticText", "Wi-Fi"))
+        result = await ctrl.tap_element(
+            label="Wi-Fi", element_type="Button", udid="SIM-1",
+            scroll_to_find=True, skip_stability_check=True,
+        )
+        assert result["status"] == "not_found" and "matched_via" not in result
+        assert result["scroll"]["attempted"] is True
+        ctrl._ios_scroll_to_element.assert_awaited_once()
+        backend.tap.assert_not_called()
+
+    async def test_a_swept_equivalent_is_tapped_and_reported(self, monkeypatch):
+        import server.device.controller_ui as cui
+
+        monkeypatch.setattr(cui, "_capture_screenshot", AsyncMock(return_value=None))
+        ctrl, backend = self._ctrl(_el("Button", "Wi-Fi"))
+        result = await ctrl.tap_element(
+            label="Wi-Fi", element_type="RadioButton", udid="SIM-1",
+            scroll_to_find=True, skip_stability_check=True,
+        )
+        assert result["status"] == "ok"
+        assert result["matched_via"] == "RadioButton≈Button"
+        backend.tap.assert_awaited_once()
+
+
+class TestTapElementReportsTheEquivalence:
+    async def test_main_path(self):
+        from unittest.mock import MagicMock
+
+        ctrl = DeviceController()
+        ctrl.resolve_udid = AsyncMock(return_value="SIM-1")
+        ctrl._warn_if_input_is_suppressed = AsyncMock()
+        ctrl._is_android = lambda udid: False
+        ctrl.get_ui_elements = AsyncMock(return_value=([_el("Button", "Home")], "SIM-1"))
+        backend = MagicMock()
+        backend.tap = AsyncMock()
+        ctrl._ui_backend = lambda udid: backend
+        result = await ctrl.tap_element(
+            label="Home", element_type="RadioButton", udid="SIM-1", skip_stability_check=True,
+        )
+        assert result["status"] == "ok"
+        assert result["matched_via"] == "RadioButton≈Button"
+
+
+class TestTextFieldsIncludeWdasTextView:
+    def test_text_view_is_a_text_field(self):
+        ctrl = DeviceController()
+        notes = _el("TextView", "Notes")
+        assert ctrl._matching_fields([notes], "Notes", None) == [notes]
+
+    def test_the_comparison_ignores_case(self):
+        ctrl = DeviceController()
+        field = _el("textField", "Email")
+        assert ctrl._matching_fields([field], "Email", None) == [field]
+
+
+class TestEveryReadPathKeepsTheEquivalent:
+    async def test_cold_read_filtered_by_type_alone(self):
+        from unittest.mock import MagicMock
+
+        ctrl = DeviceController()
+        ctrl.resolve_udid = AsyncMock(return_value="SIM-1")
+        ctrl._is_android = lambda udid: False
+        ctrl._served_by_wda = lambda udid: False
+        backend = MagicMock()
+        backend.describe_all = AsyncMock(return_value=[
+            {"type": "Button", "AXLabel": "Home tab"}, {"type": "Slider", "AXLabel": "x"},
+        ])
+        ctrl._ui_backend = lambda udid: backend
+        # use_cache=True with a cold cache: the full tree is parsed, cached,
+        # and then filtered in memory -- the post-fetch path.
+        elements, _ = await ctrl.get_ui_elements("SIM-1", filter_type="RadioButton")
+        assert [e.type for e in elements] == ["Button"]
+
+    def test_the_web_overlay_merge(self):
+        ctrl = DeviceController()
+        ctrl._web_overlay["SIM-1"] = ([_el("Button", "Submit")], time.time())
+        merged = ctrl._merge_web_overlay("SIM-1", [], filter_type="RadioButton")
+        assert [e.type for e in merged] == ["Button"]
+
+    def test_narrowing_after_a_label_also_widens_as_a_prefilter(self):
+        els = [_el("Cell", "Row", identifier="r1")]
+        assert find_element(els, label="Row", element_type="Button", prefilter=True) == els
+
+    async def test_the_predicate_retry_keeps_the_identifier(self):
+        ctrl = DeviceController()
+        ctrl._active_udid = "PHYS-0001"
+        ctrl._device_type_cache["PHYS-0001"] = DeviceType.DEVICE
+        ctrl.wda_client.find_elements_by_query = AsyncMock(side_effect=[[], [{
+            "type": "Button", "AXUniqueId": "", "AXLabel": "Controls",
+            "frame": {"x": 0, "y": 0, "width": 10, "height": 10},
+        }]])
+        elements, _ = await ctrl._wda_direct_query("PHYS-0001", identifier="tab_controls")
+        assert [e.identifier for e in elements] == ["tab_controls"]
+
+
+class TestLandmarkGuardsTheReviewFoundUncovered:
+    def test_label_contains_earns_the_pair(self):
+        lm = Landmark(element="RadioButton", label_contains="Hom")
+        assert match_landmark_via([_el("Button", "Home")], lm) == (True, "RadioButton≈Button")
+
+    def test_an_absent_landmark_reports_no_equivalence(self):
+        lm = Landmark(element="RadioButton", label="Gone", absent=True)
+        assert match_landmark_via([_el("Button", "Home")], lm) == (True, None)
+
+    @pytest.mark.parametrize("other", [
+        Landmark(element="Button", identifier="x", label="Home"),
+        Landmark(element="Button", label_contains="Home"),
+        Landmark(element="RadioButton", label_contains="Set"),
+        Landmark(element="Button", label="Home", absent=True),
+    ])
+    def test_selectors_differing_in_another_field_do_not_collide(self, other):
+        mine = (
+            Landmark(element="RadioButton", label_contains="Hom")
+            if other.label_contains == "Set"
+            else Landmark(element="RadioButton", label="Home")
+        )
+        a = ScreenLandmarks(screen="A", landmarks=[mine])
+        b = ScreenLandmarks(screen="B", landmarks=[other])
+        assert detect_collisions([a, b])["collisions"] == []
+
+    def test_different_urls_do_not_collide(self):
+        a = ScreenLandmarks(screen="A", landmarks=[Landmark(web_url_contains="/a")])
+        b = ScreenLandmarks(screen="B", landmarks=[Landmark(web_url_contains="/b")])
+        assert detect_collisions([a, b])["collisions"] == []
+
+    def test_the_subset_can_be_either_side(self):
+        big = ScreenLandmarks(screen="A", landmarks=[
+            Landmark(element="Button", label="Home"), Landmark(element="StaticText", label="x"),
+        ])
+        small = ScreenLandmarks(
+            screen="B", landmarks=[Landmark(element="RadioButton", label="Home")],
+        )
+        assert detect_collisions([big, small])["collisions"]
+
+    def test_label_contains_counts_as_a_label_in_the_conventions_check(self):
+        lm = Landmark(element="RadioButton", label_contains="Ho")
+        assert check_conventions("f", "s", 2, [lm]).findings == []
+
+
+class TestAFileThatLoadsNothingIsNeverCurrent:
+    def test_all_landmarks_invalid(self, tmp_path):
+        (tmp_path / "screens").mkdir()
+        _write(tmp_path / "screens", "typo.md", """
+            ---
+            screen: typo
+            landmark_conventions: 2
+            landmarks:
+              - elemnt: Button
+                label: OK
+            ---
+        """)
+        entry = scan_knowledge_base(tmp_path).conventions[0]
+        assert entry.state == "failing"
+        assert _codes(entry) == ["invalid_entries", "invalid_landmark"]
+
+    def test_a_stub(self, tmp_path):
+        (tmp_path / "screens").mkdir()
+        _write(tmp_path / "screens", "stub.md", """
+            ---
+            screen: stub
+            landmark_conventions: 2
+            ---
+        """)
+        entry = scan_knowledge_base(tmp_path).conventions[0]
+        assert entry.state == "failing" and _codes(entry) == ["no_landmarks"]
+
+    def test_a_dropped_entry_beside_valid_ones_is_reported(self, tmp_path):
+        (tmp_path / "screens").mkdir()
+        _write(tmp_path / "screens", "partly.md", """
+            ---
+            screen: partly
+            landmark_conventions: 2
+            landmarks:
+              - {element: Button, label: OK}
+              - {elemnt: Button, label: Cancel}
+              - just a string
+            ---
+        """)
+        entry = scan_knowledge_base(tmp_path).conventions[0]
+        assert entry.state == "failing"
+        assert _codes(entry) == ["invalid_landmark", "invalid_landmark"]
+        assert "Landmark 1 was ignored" in entry.findings[0]["message"]
+        assert entry.findings[1]["landmark"] == "'just a string'"
+
+    def test_an_unreadable_file_is_counted(self, tmp_path):
+        (tmp_path / "screens").mkdir()
+        _write(tmp_path / "screens", "ok.md", """
+            ---
+            screen: ok
+            landmarks:
+              - {element: Button, label: OK}
+            ---
+        """)
+        (tmp_path / "screens" / "broken.md").write_text("---\nscreen: [\n---\n")
+        (tmp_path / "screens" / "bare.md").write_text("no frontmatter here\n")
+        report = conventions_report(scan_knowledge_base(tmp_path).conventions)
+        assert sum(report["counts"].values()) == 3
+        unread = {f["file"]: f["findings"][0]["code"] for f in report["files"] if "findings" in f}
+        assert unread == {"screens/broken.md": "yaml_error", "screens/bare.md": "no_frontmatter"}
+
+
+class TestSeveralApps:
+    @staticmethod
+    def _two(tmp_path):
+        for app in ("one", "two"):
+            (tmp_path / app / "screens").mkdir(parents=True)
+            _write(tmp_path / app / "screens", "home.md", """
+                ---
+                screen: home
+                landmarks:
+                  - {element: Button, label: OK}
+                ---
+            """)
+        registry = LandmarkRegistry()
+        registry.load_from_path("one", str(tmp_path / "one"))
+        registry.load_from_path("two", str(tmp_path / "two"))
+        return registry
+
+    def test_entries_name_their_app(self, tmp_path):
+        files = self._two(tmp_path).validate()["conventions"]["files"]
+        assert sorted(f["app"] for f in files) == ["one", "two"]
+
+    def test_validate_for_one_app_reports_only_that_app(self, tmp_path):
+        files = self._two(tmp_path).validate("one")["conventions"]["files"]
+        assert [f["app"] for f in files] == ["one"]
+
+    def test_unloading_everything_forgets_every_app(self, tmp_path):
+        registry = self._two(tmp_path)
+        registry.unload()
+        assert registry.conventions() == []
+
+
+class TestInlineObjectForm:
+    async def test_missing_landmarks_is_refused(self, client):
+        r = await client.post("/api/v1/landmarks/load", json={"app": "a", "landmarks": {
+            "Home": {"landmark_conventions": 2, "scrollable": True},
+        }})
+        assert r.status_code == 400 and "'Home'" in r.json()["detail"]
+
+    async def test_an_empty_screen_is_not_current(self, client):
+        r = await client.post("/api/v1/landmarks/load", json={"app": "a", "landmarks": {
+            "Home": {"landmark_conventions": 2, "landmarks": []},
+        }})
+        files = r.json()["conventions"]["files"]
+        assert [(f["state"], f["findings"][0]["code"]) for f in files] == [
+            ("failing", "no_landmarks"),
+        ]

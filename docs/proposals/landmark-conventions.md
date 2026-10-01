@@ -113,6 +113,15 @@ backend calls it `Button`, `StaticText` or `Cell` is vocabulary, not identity.
 
 Comparison stays case-insensitive, as it is today.
 
+**An identifier that repeats the element's label is a label.** WDA reports
+`name` -- the identifier, or the label when there is none -- and has no
+attribute holding the identifier alone (measured: `rawIdentifier` and
+`identifier` are rejected in a predicate, and `name == 'More'` matches the
+More tab, which has no identifier). So the family rule applies per element,
+and only where the identifier differs from that element's label; otherwise
+a `Button` selector would reach the rows family and land on a title.
+(Found by independent review.)
+
 **An exact match wins.** When an element of exactly the named type matches, the
 equivalents are dropped. Equivalence is how a selector written on one backend
 finds its element on the other, not a way to widen a selector that already

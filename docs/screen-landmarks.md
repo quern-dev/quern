@@ -48,7 +48,7 @@ Each landmark is a selector with optional fields:
 
 ```yaml
 landmarks:
-  - element: "navigationBar"    # element type (required)
+  - element: "Heading"          # element type (required)
     label: "Settings"           # label to match (optional, but almost always used)
     label_contains: "Set"       # substring match for dynamic labels (optional)
     identifier: "settings_nav"  # accessibility identifier (optional, use when label is ambiguous)
@@ -83,6 +83,8 @@ So `element` is matched across the two, as far as the landmark's other fields ma
 
 Families need an identifier because the accessibility tree's generic types stand for many specific ones — `Group` was the tab bar, the navigation bar, the toolbar, the table and the collection view on one probe app. And `Button`↔`StaticText` is never equated by label: a list row is one `Button` to the accessibility tree and a `Cell` holding a `StaticText` to XCUITest, so the label lands on the text *inside* the row.
 
+**An identifier that only repeats the element's label counts as a label.** WebDriverAgent reports an element's identifier, or its label when it has none, and nothing distinguishes the two — so on WDA a screen title with no identifier reads as identifier "Settings", label "Settings". An identifier pins more than a label only when it says something the label does not, so such an element gets the label rule, not the family.
+
 A landmark that matched only through an equivalence says so in its per-landmark result, as `matched_via: "RadioButton≈Button"`. An exact match carries nothing, and wins when both are on screen. The same rule applies to `element_type` on `tap_element`, `get_element` and `wait_for_element`, whose responses carry `matched_via` the same way.
 
 The tables are measured, not inferred, and live in `server/device/element_types.py`; the measurement is in [`proposals/landmark-conventions.md`](proposals/landmark-conventions.md).
@@ -96,7 +98,7 @@ Alongside its landmarks, a screen may record whether it scrolls:
 screen: OrderHistory
 scrollable: true      # false = known not to; omit = nobody has said
 landmarks:
-  - element: "navigationBar"
+  - element: "Heading"
     label: "Orders"
 ---
 ```
@@ -145,7 +147,7 @@ status: documented
 # Machine-evaluable screen identity.
 # All landmarks must match for this screen to be recognized.
 landmarks:
-  - { element: "navigationBar", label: "Settings" }
+  - { element: "Heading", label: "Settings" }
 ```
 
 The two coexisted in the template for a transition period after April 2026 and
@@ -182,7 +184,7 @@ After all screens are documented, run a validation pass:
 
 1. Load all screen documents and their landmarks
 2. For each pair of screens, check if their landmark sets overlap — could one screen's landmarks also match another screen?
-3. Report collisions: "Settings and Account Settings both match on `navigationBar: Settings` — need a distinguishing landmark"
+3. Report collisions: "Settings and Account Settings both match on `Heading: Settings` — need a distinguishing landmark"
 4. Agent (or human) refines colliding screens by adding a distinguishing landmark
 
 This two-phase approach avoids over-engineering landmarks upfront. Most screens are trivially distinct. Only the ambiguous pairs need refinement.
@@ -217,12 +219,12 @@ POST /api/v1/device/screen/identify
     },
     "Home": {
       "landmarks": [
-        {"element": "navigationBar", "label": "Home"}
+        {"element": "Heading", "label": "Home"}
       ]
     },
     "Settings": {
       "landmarks": [
-        {"element": "navigationBar", "label": "Settings"}
+        {"element": "Heading", "label": "Settings"}
       ]
     }
   },
@@ -246,7 +248,7 @@ Response:
       "matched": 0,
       "total": 1,
       "landmarks": [
-        {"landmark": {"element": "navigationBar", "label": "Home"}, "matched": false}
+        {"landmark": {"element": "Heading", "label": "Home"}, "matched": false}
       ]
     },
     {
@@ -254,7 +256,7 @@ Response:
       "matched": 0,
       "total": 1,
       "landmarks": [
-        {"landmark": {"element": "navigationBar", "label": "Settings"}, "matched": false}
+        {"landmark": {"element": "Heading", "label": "Settings"}, "matched": false}
       ]
     }
   ]
@@ -422,7 +424,7 @@ Or via MCP:
 ```
 validate_landmarks(path="/Users/dev/myapp/.quern/knowledge/")
 → 2 collisions found:
-  - "Settings" and "Account Settings" share landmarks: navigationBar="Settings"
+  - "Settings" and "Account Settings" share landmarks: Heading="Settings"
   - "Home" and "Explore" share landmarks: tabBar selected="Home"
   3 screens have no landmarks: stub-profile, stub-help, stub-about
 ```

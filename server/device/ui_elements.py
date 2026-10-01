@@ -10,7 +10,13 @@ import logging
 import time
 from collections import Counter
 
-from server.device.element_types import TypeRule, related_types, rule_for, type_matches
+from server.device.element_types import (
+    TypeRule,
+    element_rule,
+    related_types,
+    rule_for,
+    type_matches,
+)
 from server.models import UIElement
 
 logger = logging.getLogger(__name__)
@@ -161,6 +167,7 @@ def find_by_identifier(elements: list[UIElement], identifier: str) -> list[UIEle
 
 def find_by_type(
     elements: list[UIElement], element_type: str, rule: TypeRule = "exact",
+    identifier: str | None = None,
 ) -> list[UIElement]:
     """Find elements of a type, widened across backends as `rule` allows.
 
@@ -169,8 +176,14 @@ def find_by_type(
     the other, not a way to widen a selector that already found it: without
     this, a screen with both a `Button` and a `RadioButton` labelled "Home"
     would turn a tap that used to be unambiguous into an ambiguous one.
+
+    `identifier` is the selector's, when it gave one: an element whose label
+    merely repeats it gets the label rule (`element_rule`).
     """
-    matches = [e for e in elements if type_matches(element_type, e.type, rule)]
+    matches = [
+        e for e in elements
+        if type_matches(element_type, e.type, element_rule(rule, identifier, e.label))
+    ]
     lower = element_type.lower()
     exact = [e for e in matches if e.type.lower() == lower]
     return exact or matches
@@ -248,7 +261,7 @@ def find_element(
             rule = rule_for(
                 identifier=identifier, label=label or label_contains or label_prefix,
             )
-            matches = find_by_type(matches, element_type, rule)
+            matches = find_by_type(matches, element_type, rule, identifier)
 
     return matches
 

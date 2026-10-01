@@ -56,11 +56,8 @@ def _inline_landmarks(screen: str, raw: object) -> list[Landmark]:
             )
         try:
             landmarks.append(Landmark(**entry))
-        except (ValidationError, TypeError) as e:
-            reason = (
-                "; ".join(err["msg"] for err in e.errors())
-                if isinstance(e, ValidationError) else str(e)
-            )
+        except ValidationError as e:
+            reason = "; ".join(err["msg"] for err in e.errors())
             raise HTTPException(
                 status_code=400,
                 detail=f"screen {screen!r}, landmark {index}: {reason}",
@@ -106,7 +103,15 @@ async def load_landmarks(request: Request, body: LoadLandmarksRequest):
         conventions: list[FileConventions] = []
         for screen_name, entry in body.landmarks.items():
             if isinstance(entry, dict):
-                raw = entry.get("landmarks") or []
+                # Missing is refused rather than read as []: the object form
+                # exists to say more about a screen, and one that names no
+                # landmarks loaded as an empty screen counted in `screens`.
+                if "landmarks" not in entry:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"screen {screen_name!r}: the object form needs a landmarks list",
+                    )
+                raw = entry["landmarks"]
                 raw_scrollable = entry.get("scrollable")
                 raw_declared = entry.get("landmark_conventions")
             else:
@@ -124,6 +129,7 @@ async def load_landmarks(request: Request, body: LoadLandmarksRequest):
             # No file to name, so the screen stands in for one.
             conventions.append(check_conventions(
                 f"inline:{screen_name}", screen_name, raw_declared, landmarks,
+                unloaded=None if landmarks else "no_landmarks",
             ))
         count = registry.load(body.app, screens, conventions)
         return {

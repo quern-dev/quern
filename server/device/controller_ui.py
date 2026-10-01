@@ -2178,7 +2178,16 @@ class DeviceControllerUI:
                     report=sweep,
                 )
                 if scrolled is not None:
-                    matches = [scrolled]
+                    # The sweep finds by label or identifier alone, so the
+                    # element it lands on must still pass the type rule. It
+                    # used to replace the matches unchecked: a Button request
+                    # tapped a StaticText, and matched_via then reported the
+                    # pairing spec §1.3 forbids as if it were an equivalence.
+                    matches = find_element(
+                        [scrolled], label=label, label_contains=label_contains,
+                        label_prefix=label_prefix, identifier=identifier,
+                        element_type=element_type,
+                    )
                 # The tree moved, so context gathered before the sweep is stale.
                 all_elements = None
 
@@ -2941,7 +2950,7 @@ class DeviceControllerUI:
 
     def _matching_fields(self, elements, label: str | None, identifier: str | None):
         """Text fields matching every selector given."""
-        fields = [e for e in elements if e.type in self._TEXT_FIELD_TYPES and e.frame]
+        fields = [e for e in elements if e.type.lower() in self._TEXT_FIELD_TYPES and e.frame]
         return find_element(fields, label=label, identifier=identifier)
 
     async def _find_text_field(
@@ -3011,7 +3020,12 @@ class DeviceControllerUI:
         matches = self._matching_fields(elements, label, identifier)
         return (matches[0].value or "") if matches else None
 
-    _TEXT_FIELD_TYPES = ("TextField", "SecureTextField", "TextArea", "SearchField")
+    #: Lowercased. `TextView` is WDA's name for a UITextView, which the
+    #: accessibility tree calls `TextArea` (spec §1.1); without it, `type_text`
+    #: and `clear_text` refused every multi-line field read through WDA.
+    _TEXT_FIELD_TYPES = frozenset(
+        {"textfield", "securetextfield", "textarea", "textview", "searchfield"},
+    )
 
     # Points in from the field's trailing edge for the caret-placing tap. Inside
     # the field, past the end of any text that fits.
@@ -3047,7 +3061,7 @@ class DeviceControllerUI:
         elements, _ = await self.get_ui_elements(udid=resolved)
         text_fields = [
             e for e in elements
-            if e.type in self._TEXT_FIELD_TYPES and e.frame
+            if e.type.lower() in self._TEXT_FIELD_TYPES and e.frame
         ]
 
         target = None

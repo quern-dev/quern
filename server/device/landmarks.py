@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -13,6 +13,7 @@ import yaml
 from pydantic import ValidationError
 
 from server.device.element_types import (
+    element_rule,
     equivalence,
     portability_finding,
     rule_for,
@@ -95,6 +96,9 @@ class FileConventions:
     screen: str | None
     declared: int | None
     findings: list[dict] = field(default_factory=list)
+    app: str | None = None
+    """Set by the registry, so entries from several loaded apps that share a
+    file name (every app has a `screens/home.md`) can be told apart."""
 
     @property
     def state(self) -> str:
@@ -110,6 +114,8 @@ class FileConventions:
 
     def to_dict(self) -> dict:
         out: dict = {"file": self.file}
+        if self.app is not None:
+            out["app"] = self.app
         if self.screen is not None:
             out["screen"] = self.screen
         out["declared"] = self.declared
@@ -140,6 +146,30 @@ def _declared_conventions(raw: object) -> tuple[int | None, dict | None]:
     }
 
 
+#: Why a file loaded no screen, as a finding. A file that identifies nothing
+#: must never read as `current` -- a declared target over an empty or
+#: unreadable file satisfied "reload until it reports current" while matching
+#: no screen at all, which is a failed check reading as a passing one.
+_UNLOADED = {
+    "no_landmarks": "The file has no landmarks, so it identifies no screen. "
+                    "Add landmarks, or leave it as a stub without a declaration.",
+    "invalid_entries": "Every landmark in the file is invalid, so it identifies "
+                       "no screen. See this file's skipped[] entry.",
+    "no_frontmatter": "The file has no '---' frontmatter block, so it was not read.",
+    "yaml_error": "The frontmatter is not valid YAML, so it was not read. See "
+                  "this file's skipped[] entry.",
+    "read_error": "The file could not be read.",
+}
+
+
+def unloaded_finding(reason: str) -> dict:
+    """The finding for a file skipped for `reason`."""
+    return {
+        "code": reason,
+        "message": _UNLOADED.get(reason, "The file loaded no screen."),
+    }
+
+
 def check_conventions(
     file: str,
     screen: str | None,
@@ -147,16 +177,25 @@ def check_conventions(
     landmarks: Sequence[Landmark],
     *,
     identify_by: bool = False,
+    unloaded: str | None = None,
+    invalid_entries: Sequence[dict] = (),
 ) -> FileConventions:
     """Check one screen's landmarks against the current conventions (§3.3).
 
     Every file is checked, whatever it declares: an undeclared or older file
     gets the same findings, which are exactly what migrating it would change.
+
+    `unloaded` is the skip reason when the file loaded no screen;
+    `invalid_entries` lists landmarks the loader dropped, which would
+    otherwise vanish while the rest of the file reads as compliant.
     """
     declared, invalid = _declared_conventions(raw_declared)
     findings: list[dict] = []
     if invalid is not None:
         findings.append(invalid)
+    if unloaded is not None:
+        findings.append(unloaded_finding(unloaded))
+    findings.extend(invalid_entries)
     if identify_by:
         findings.append({
             "code": "legacy_format",
@@ -310,7 +349,10 @@ def match_landmark_via(
         identifier=landmark.identifier,
         label=landmark.label or landmark.label_contains,
     )
-    candidates = [e for e in candidates if type_matches(wanted, e.type, rule)]
+    candidates = [
+        e for e in candidates
+        if type_matches(wanted, e.type, element_rule(rule, landmark.identifier, e.label))
+    ]
 
     # Filter by identifier (primary, locale-independent)
     if landmark.identifier is not None:
@@ -633,22 +675,32 @@ def parse_screen_landmarks(
         return ParseResult(skip=SkippedFile(
             file=label, screen=screen_name, reason="no_landmarks",
         ), web_content=hints, conventions=check_conventions(
-            label, screen_name, raw_declared, [],
+            label, screen_name, raw_declared, [], unloaded="no_landmarks",
         ))
 
     landmarks: list[Landmark] = []
-    for entry in raw_landmarks:
+    dropped: list[dict] = []
+    for index, entry in enumerate(raw_landmarks):
         if not isinstance(entry, dict):
+            dropped.append(_invalid_landmark(index, entry, "not a mapping"))
             continue
         try:
             landmarks.append(Landmark(**entry))
-        except (ValidationError, TypeError):
+        except (ValidationError, TypeError) as e:
             # Enforced by the model: a landmark naming neither an element nor a
             # URL can match nothing, and treating it as satisfied would make its
             # screen match everything.
-            continue
+            reason = (
+                "; ".join(err["msg"] for err in e.errors())
+                if isinstance(e, ValidationError) else str(e)
+            )
+            dropped.append(_invalid_landmark(index, entry, reason))
 
-    conventions = check_conventions(label, screen_name, raw_declared, landmarks)
+    conventions = check_conventions(
+        label, screen_name, raw_declared, landmarks,
+        unloaded=None if landmarks else "invalid_entries",
+        invalid_entries=dropped,
+    )
 
     if not landmarks:
         return ParseResult(skip=SkippedFile(
@@ -668,6 +720,20 @@ def parse_screen_landmarks(
         web_content=hints,
         conventions=conventions,
     )
+
+
+def _invalid_landmark(index: int, entry: object, reason: str) -> dict:
+    """A finding for a landmark entry the loader dropped.
+
+    Dropped entries used to vanish: a misspelt `elemnt:` beside a valid
+    landmark left the file loading, checked and reported compliant on the
+    landmarks that survived, with nothing saying one had been discarded.
+    """
+    return {
+        "code": "invalid_landmark",
+        "landmark": entry if isinstance(entry, dict) else repr(entry),
+        "message": f"Landmark {index} was ignored: {reason}.",
+    }
 
 
 def _parse_web_content(raw: object, screen: str) -> list[WebContentHint]:
@@ -717,6 +783,13 @@ def scan_knowledge_base(path: Path) -> KnowledgeBaseScan:
         scan.web_content.extend(result.web_content)
         if result.conventions is not None:
             scan.conventions.append(result.conventions)
+        elif result.skip is not None:
+            # Failed before the frontmatter parsed. Still a file in the
+            # knowledge base, so it is counted -- `counts` claims every file.
+            scan.conventions.append(FileConventions(
+                file=result.skip.file, screen=result.skip.screen, declared=None,
+                findings=[unloaded_finding(result.skip.reason)],
+            ))
         if result.screen is not None:
             scan.screens.append(result.screen)
         elif result.skip is not None:
@@ -750,7 +823,9 @@ class LandmarkRegistry:
         loaded.
         """
         self._sets[app] = screens
-        self._conventions[app] = list(conventions or [])
+        self._conventions[app] = [
+            replace(entry, app=app) for entry in conventions or []
+        ]
         return len(screens)
 
     def conventions(self, app: str | None = None) -> list[FileConventions]:

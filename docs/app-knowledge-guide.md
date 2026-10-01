@@ -85,7 +85,7 @@ This structured data in config.json complements the prose in the knowledge base 
 
 What you'll see from the accessibility tree — the default on a simulator — and what these are for:
 
-- **Navigation**: `navigationBar`, `tabBar`, `toolbar`
+- **Navigation**: the tab bar, navigation bar and toolbar mostly appear as a generic `Group`, and a screen's title as a `Heading`. WDA names them `TabBar`, `NavigationBar`, `Toolbar` and `StaticText`.
 - **Tab bar items**: often `RadioButton` in the accessibility tree; `XCUIElementTypeButton` to XCUITest. Correct in `tap_element element_type=...` and in landmarks — quern matches it against the `Button` WDA reports when a label or identifier also pins the element (see [Across backends](screen-landmarks.md#across-backends)) — but **wrong in an XCUITest selector**. Tab items may use identifiers like `_TabName button` with a leading underscore.
 - **Buttons**: `button`, `link` (for hyperlink-style buttons)
 - **Text**: `staticText`, `textField`, `secureTextField`, `textView`
@@ -169,7 +169,8 @@ A landmark is an element selector that must be present (or absent) for a screen 
 
 **Make landmarks portable across backends.** The same screen is read through the accessibility tree on a simulator and through WDA on a phone (or a simulator after `start_driver`), and they name some elements differently. Quern matches across the two when a landmark carries enough to make it safe, so:
 
-- Give every landmark a label or an identifier; a type-only landmark is matched exactly, so it holds on one backend only.
+- Give every landmark a label or an identifier. A type-only landmark is matched exactly, so on a type the two backends name differently (`RadioButton`, `Heading`, `Group`, …) it holds on one backend only.
+- An identifier that only repeats the element's label pins no more than the label does. WDA reports the label as the identifier when an element has none, so such a landmark gets the label rule, not the family.
 - Give generic types (`Group`, `Other`, `GenericElement`, `Cell`) an identifier; a label is not enough for them.
 - Don't anchor on `navigationBar`, `searchField`, `datePicker` or `picker`: the accessibility tree exposes none of them with a label or identifier. Use the screen title — a `Heading` with its label — instead.
 - Start each new screen file with `landmark_conventions: 2`. It is the version you wrote the file for, not a claim it complies; quern computes that on load. See [Auditing a knowledge base](screen-landmarks.md#auditing-a-knowledge-base).
