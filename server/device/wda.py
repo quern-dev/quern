@@ -15,6 +15,7 @@ import plistlib
 import re
 import shutil
 import signal
+import weakref
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -1021,6 +1022,34 @@ async def stop_driver(udid: str) -> dict:
 # against a simulator destination installs the runner itself.
 
 
+_SIM_LOCKS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _sim_lock(name: str) -> asyncio.Lock:
+    """A lock per running event loop.
+
+    Not a module-level `asyncio.Lock()`: that binds to the first loop that
+    contends for it and raises on any other, so a second loop in the same
+    process -- every async test, any embedding -- breaks on its first
+    contended start. Held weakly, so a finished loop takes its locks with it.
+
+    - "build": two simulator builds at once would each `rmtree` the other's
+      derived data and race xcodebuild into it.
+    - "start": choosing a port and recording it are separated by the spawn's
+      await, so without this two simulators started together were both handed
+      8200 -- and whichever WDA won the port answered both, sending one
+      simulator's reads and taps to the other with both reporting ready. Found
+      by review, reproduced with two concurrent starts.
+    """
+    loop = asyncio.get_running_loop()
+    locks = _SIM_LOCKS.get(loop)
+    if locks is None:
+        locks = _SIM_LOCKS[loop] = {}
+    return locks.setdefault(name, asyncio.Lock())
+
+
 def _find_sim_xctestrun() -> Path | None:
     products = WDA_DERIVED_SIM / "Build" / "Products"
     if products.exists():
@@ -1050,8 +1079,21 @@ async def build_wda_simulator(force: bool = False) -> bool:
     """Build WDA for the iOS Simulator. Returns True if it built.
 
     Unsigned: a simulator does not enforce code signing on a test runner, so
-    there is no team to choose and nothing to provision.
+    there is no team to choose and nothing to provision. Serialised: a second
+    caller waits, then finds the first one's build current.
     """
+    async with _sim_lock("build"):
+        return await _build_wda_simulator(force)
+
+
+def _clear_sim_build_fingerprint() -> None:
+    state = read_wda_state()
+    state.pop("sim_build_xcode", None)
+    state.pop("sim_build_deployment_target", None)
+    save_wda_state(state)
+
+
+async def _build_wda_simulator(force: bool) -> bool:
     state = read_wda_state()
     if not force and await _sim_build_is_current(state):
         return False
@@ -1060,6 +1102,11 @@ async def build_wda_simulator(force: bool = False) -> bool:
         await clone_wda()
         customize_wda()
 
+    # Cleared before anything is removed or built, so no failure path -- a
+    # timeout included -- can leave a fingerprint describing an artifact that
+    # is gone. (The first version cleared it after the build, which a timeout
+    # raised past.)
+    _clear_sim_build_fingerprint()
     if WDA_DERIVED_SIM.exists():
         import shutil
         shutil.rmtree(WDA_DERIVED_SIM)
@@ -1085,13 +1132,6 @@ async def build_wda_simulator(force: bool = False) -> bool:
         proc.kill()
         await proc.wait()
         raise RuntimeError(f"xcodebuild (simulator) timed out after {BUILD_TIMEOUT}s")
-
-    # Cleared on every failure path: a fingerprint must never describe an
-    # artifact that is not there.
-    state = read_wda_state()
-    state.pop("sim_build_xcode", None)
-    state.pop("sim_build_deployment_target", None)
-    save_wda_state(state)
 
     if proc.returncode != 0:
         tail = "\n".join((stderr.decode() + stdout.decode()).splitlines()[-25:])
@@ -1158,6 +1198,10 @@ def live_simulator_runners() -> dict[str, int]:
     return out
 
 
+async def _answers(port: int, timeout: float = 3.0) -> bool:
+    return await _poll_wda_status(f"http://127.0.0.1:{port}", timeout=timeout)
+
+
 async def start_driver_simulator(udid: str) -> dict:
     """Start WDA on a simulator, building it first if needed.
 
@@ -1166,49 +1210,63 @@ async def start_driver_simulator(udid: str) -> dict:
     """
     port = simulator_runner_port(udid)
     if port is not None:
-        pid = read_wda_state()["runners"][udid]["pid"]
-        return {"status": "already_running", "udid": udid, "pid": pid,
-                "port": port, "ready": True}
+        # A live pid is not a working runner: it may be hung, or a start that
+        # was cancelled mid-poll. Ask it.
+        if await _answers(port):
+            pid = read_wda_state()["runners"][udid]["pid"]
+            return {"status": "already_running", "udid": udid, "pid": pid,
+                    "port": port, "ready": True}
+        logger.info("WDA on simulator %s is alive but not answering; restarting", udid[:8])
+        await stop_driver(udid)
 
     built = await build_wda_simulator()
     xctestrun = _find_sim_xctestrun()
     if xctestrun is None:
         raise RuntimeError("WDA simulator build missing after build_wda_simulator()")
 
-    state = read_wda_state()
-    runners = state.get("runners", {})
-    runners.pop(udid, None)  # a dead entry for this simulator
-    port = _allocate_sim_port(runners)
+    async with _sim_lock("start"):
+        # Re-checked under the lock: a concurrent start for this simulator
+        # may have just spawned one.
+        port = simulator_runner_port(udid)
+        if port is not None:
+            ready = await _answers(port, timeout=SIM_DRIVER_START_TIMEOUT)
+            pid = read_wda_state()["runners"][udid]["pid"]
+            return {"status": "already_running", "udid": udid, "pid": pid,
+                    "port": port, "ready": ready}
 
-    WDA_LOG_DIR.mkdir(parents=True, exist_ok=True)
-    log_path = WDA_LOG_DIR / f"runner-{udid[:8]}.log"
-    log_file = open(log_path, "w")
-    env = dict(os.environ)
-    # xcodebuild hands TEST_RUNNER_* variables to the runner with the prefix
-    # removed; WDA reads USE_PORT.
-    env["TEST_RUNNER_USE_PORT"] = str(port)
-    logger.info("Starting WDA on simulator %s, port %d", udid[:8], port)
-    proc = await asyncio.create_subprocess_exec(
-        "xcodebuild", "test-without-building",
-        "-xctestrun", str(xctestrun),
-        "-destination", f"id={udid}",
-        stdout=log_file, stderr=log_file, env=env,
-    )
-    log_file.close()
+        state = read_wda_state()
+        runners = state.get("runners", {})
+        runners.pop(udid, None)  # a dead entry for this simulator
+        port = _allocate_sim_port(runners)
 
-    state = read_wda_state()
-    state.setdefault("runners", {})[udid] = {
-        "pid": proc.pid,
-        "port": port,
-        "simulator": True,
-        "log_path": str(log_path),
-        "started_at": datetime.now(UTC).isoformat(),
-    }
-    save_wda_state(state)
+        WDA_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        log_path = WDA_LOG_DIR / f"runner-{udid[:8]}.log"
+        env = dict(os.environ)
+        # xcodebuild hands TEST_RUNNER_* variables to the runner with the
+        # prefix removed; WDA reads USE_PORT.
+        env["TEST_RUNNER_USE_PORT"] = str(port)
+        logger.info("Starting WDA on simulator %s, port %d", udid[:8], port)
+        with open(log_path, "w") as log_file:
+            proc = await asyncio.create_subprocess_exec(
+                "xcodebuild", "test-without-building",
+                "-xctestrun", str(xctestrun),
+                "-destination", f"id={udid}",
+                stdout=log_file, stderr=log_file, env=env,
+            )
 
-    ready = await _poll_wda_status(
-        f"http://127.0.0.1:{port}", timeout=SIM_DRIVER_START_TIMEOUT,
-    )
+        # Recorded before the lock is released: this entry is what reserves
+        # the port against the next start.
+        state = read_wda_state()
+        state.setdefault("runners", {})[udid] = {
+            "pid": proc.pid,
+            "port": port,
+            "simulator": True,
+            "log_path": str(log_path),
+            "started_at": datetime.now(UTC).isoformat(),
+        }
+        save_wda_state(state)
+
+    ready = await _answers(port, timeout=SIM_DRIVER_START_TIMEOUT)
     result: dict[str, Any] = {
         "status": "started", "udid": udid, "pid": proc.pid,
         "port": port, "ready": ready, "built": built,
@@ -1226,6 +1284,40 @@ async def start_driver_simulator(udid: str) -> dict:
         )
         result["log_path"] = str(log_path)
     return result
+
+
+async def restore_simulator_mode(wda_client: Any) -> list[str]:
+    """Re-register every simulator whose WDA runner survived a restart and
+    still answers. Returns the UDIDs restored.
+
+    Runners outlive the server -- they are tracked by pid in wda-state.json --
+    but the routing is in memory, so without this a restart would quietly move
+    them back to sim-bridge while WDA went on running underneath.
+    """
+    restored = []
+    for udid, port in (await answering_simulator_runners()).items():
+        wda_client.register_simulator(udid, port)
+        logger.info("Simulator %s is in WDA mode (port %d)", udid[:8], port)
+        restored.append(udid)
+    return restored
+
+
+async def answering_simulator_runners() -> dict[str, int]:
+    """Simulators whose WDA runner is alive *and answering*, as {udid: port}.
+
+    For the startup restore. A pid check alone would register a hung runner,
+    or a recycled pid that is now something else entirely.
+    """
+    out = {}
+    for udid, port in live_simulator_runners().items():
+        if await _answers(port, timeout=2.0):
+            out[udid] = port
+        else:
+            logger.warning(
+                "WDA on simulator %s is not answering on port %d; leaving it on "
+                "sim-bridge (start_driver again to use WDA)", udid[:8], port,
+            )
+    return out
 
 
 # ---------------------------------------------------------------------------

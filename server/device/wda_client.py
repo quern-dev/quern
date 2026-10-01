@@ -431,9 +431,33 @@ class WdaBackend:
     def unregister_simulator(self, udid: str) -> None:
         self._simulator_ports.pop(udid, None)
         self._connections.pop(udid, None)
+        # Per-session state that a later session must not inherit: a stale
+        # depth would skip the depth POST on the new session.
+        for attr in ("_current_depth", "_last_interaction"):
+            store = getattr(self, attr, None)
+            if isinstance(store, dict):
+                store.pop(udid, None)
 
     def serves_simulator(self, udid: str) -> bool:
         return udid in self._simulator_ports
+
+    def _wda_mode_hint(self, udid: str) -> str:
+        """What a failure means for a simulator in WDA mode, and the way out.
+
+        Its runner can die on its own -- the simulator shut down or rebooted,
+        xcodebuild exited -- and nothing unregisters it, so every read then
+        fails. Not unregistered here: switching it back to sim-bridge silently
+        would change the vocabulary under a caller writing XCUITest selectors.
+        So the error says what happened and names both ways forward.
+        """
+        port = self._simulator_ports.get(udid)
+        if port is None:
+            return ""
+        return (
+            f". This simulator is in WDA mode and its WDA (port {port}) is not "
+            "answering -- start_driver to restart it, or stop_driver to return "
+            "the simulator to the default backend"
+        )
 
     async def _get_base_url(self, udid: str) -> str:
         """Get (or create) the WDA base URL for a device.
@@ -692,14 +716,16 @@ class WdaBackend:
                     )
             except httpx.HTTPError as exc:  # base class: a ProxyError is as fatal (#296)
                 raise DeviceError(
-                    f"WDA session creation failed on {udid[:8]} ({type(exc).__name__})",
+                    f"WDA session creation failed on {udid[:8]} ({type(exc).__name__})"
+                    + self._wda_mode_hint(udid),
                     tool="wda",
                 )
 
             error = _parse_wda_error(resp, udid)
             if error is not None:
                 raise DeviceError(
-                    f"WDA session creation failed (status {resp.status_code})",
+                    f"WDA session creation failed (status {resp.status_code})"
+                    + self._wda_mode_hint(udid),
                     tool="wda",
                 )
 

@@ -118,6 +118,7 @@ async def get_ui_elements(
                 resolved_udid = await controller.resolve_udid(udid)
                 if controller._served_by_wda(resolved_udid):
                     asked_for_skeleton = True
+                    controller._last_read_backend[resolved_udid] = controller.wda_client.TOOL_NAME
                     raw = await controller.wda_client.build_screen_skeleton(resolved_udid)
                     from server.device.ui_elements import parse_elements
                     elements = parse_elements(raw)

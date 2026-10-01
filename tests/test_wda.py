@@ -1357,3 +1357,78 @@ class TestTheDeploymentTargetIsOverridden:
             f"{version} is above the 17.0 ceiling, so it would narrow the "
             "device range rather than just satisfy the compiler"
         )
+
+
+class TestSimulatorEndpointsInDetail:
+    """API-level gaps the review of #336's first commit found untested."""
+
+    async def _post(self, app, headers, path, body):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            return await client.post(path, json=body, headers=headers)
+
+    async def test_android_is_still_refused(self, app, auth_headers, mock_controller):
+        android = DeviceInfo(
+            udid="emulator-5554", name="Pixel", state=DeviceState.BOOTED,
+            device_type=DeviceType.ANDROID_EMULATOR, os_version="16",
+        )
+        mock_controller.list_devices = AsyncMock(return_value=[android])
+        for path in ("/api/v1/device/wda/setup", "/api/v1/device/wda/start",
+                     "/api/v1/device/wda/stop"):
+            resp = await self._post(app, auth_headers, path, {"udid": "emulator-5554"})
+            assert resp.status_code == 400, (path, resp.text)
+
+    async def test_registration_uses_the_port_wda_got(self, app, auth_headers, mock_controller):
+        started = {"status": "started", "udid": "AAAA-1111", "pid": 1,
+                   "port": 8237, "ready": True}
+        with patch("server.device.wda.start_driver_simulator", AsyncMock(return_value=started)):
+            await self._post(app, auth_headers, "/api/v1/device/wda/start", {"udid": "AAAA-1111"})
+        assert mock_controller.wda_client._simulator_ports["AAAA-1111"] == 8237
+
+    async def test_stop_reports_the_backend_actually_selected(
+        self, app, auth_headers, mock_controller,
+    ):
+        """idb where sim-bridge is unavailable -- not a literal."""
+        mock_controller._sim_bridge_ok = False
+        mock_controller.wda_client.register_simulator("AAAA-1111", 8200)
+        with patch("server.device.wda.stop_driver",
+                   AsyncMock(return_value={"status": "stopped", "udid": "AAAA-1111"})):
+            resp = await self._post(app, auth_headers, "/api/v1/device/wda/stop", {"udid": "AAAA-1111"})
+        assert resp.json()["backend"] == "idb"
+
+    async def test_setup_passes_force_through(self, app, auth_headers, mock_controller):
+        build = AsyncMock(return_value=True)
+        with patch("server.device.wda.build_wda_simulator", build):
+            await self._post(app, auth_headers, "/api/v1/device/wda/setup",
+                             {"udid": "AAAA-1111", "force": True})
+        build.assert_awaited_once_with(force=True)
+
+    async def test_stopping_a_phone_leaves_simulator_state_alone(
+        self, app, auth_headers, mock_controller,
+    ):
+        """The unregister in stop's `finally` is for simulators only."""
+        from server.device.wda_client import _WdaConnection
+
+        mock_controller.wda_client._connections["00008030-AABBCCDD"] = _WdaConnection(
+            base_url="http://[fd00::1]:8100",
+        )
+        with patch("server.device.wda.stop_driver",
+                   AsyncMock(return_value={"status": "stopped"})):
+            resp = await self._post(app, auth_headers, "/api/v1/device/wda/stop",
+                                    {"udid": "00008030-AABBCCDD"})
+        assert resp.status_code == 200, resp.text
+        assert "backend" not in resp.json()
+        assert "00008030-AABBCCDD" in mock_controller.wda_client._connections
+
+    async def test_the_api_skeleton_follows_the_backend(self, app, auth_headers, mock_controller):
+        """`get_ui_tree strategy=skeleton` asked `_is_physical`, so a simulator in
+        WDA mode was sent down the accessibility path for a WDA-only read."""
+        mock_controller.wda_client.register_simulator("AAAA-1111", 8200)
+        mock_controller.wda_client.build_screen_skeleton = AsyncMock(return_value=[])
+        mock_controller.resolve_udid = AsyncMock(return_value="AAAA-1111")
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get(
+                "/api/v1/device/ui", params={"udid": "AAAA-1111", "strategy": "skeleton"},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200, resp.text
+        mock_controller.wda_client.build_screen_skeleton.assert_awaited_once()

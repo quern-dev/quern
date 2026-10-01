@@ -59,7 +59,7 @@ async def setup_wda(request: Request, body: SetupWdaRequest):
 
         try:
             built = await build_wda_simulator(force=body.force)
-        except RuntimeError as e:
+        except (RuntimeError, OSError) as e:
             raise HTTPException(status_code=500, detail=str(e))
         return {
             "status": "ok", "udid": body.udid, "simulator": True, "built": built,
@@ -138,10 +138,12 @@ async def start_wda_driver(request: Request, body: StartDriverRequest):
 
         try:
             result = await start_driver_simulator(body.udid)
-        except RuntimeError as e:
+        except (RuntimeError, OSError) as e:
             raise HTTPException(status_code=500, detail=str(e))
         if result.get("ready"):
             controller.wda_client.register_simulator(body.udid, result["port"])
+            # Forget what served the last read: it was the other backend.
+            controller._last_read_backend.pop(body.udid, None)
             result["backend"] = "wda"
             result["message"] = (
                 "This simulator's UI reads and actions now go through WDA, so "
@@ -191,6 +193,7 @@ async def stop_wda_driver(request: Request, body: StopDriverRequest):
         # bridge WDA poisoned on its next read (#337, #343).
         if device.device_type == DeviceType.SIMULATOR:
             controller.wda_client.unregister_simulator(body.udid)
+            controller._last_read_backend.pop(body.udid, None)
 
     if device.device_type == DeviceType.SIMULATOR:
         # What the router now picks, not a literal: it is idb where sim-bridge

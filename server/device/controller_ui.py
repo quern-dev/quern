@@ -1429,6 +1429,10 @@ class DeviceControllerUI:
 
         # WDA direct query: physical device + filters + cache miss → query directly
         if has_filters and self._served_by_wda(resolved):
+            # Recorded here too: this path returns before the general one
+            # below, so `backend` went on naming whatever served the last full
+            # read -- `sim-bridge` on a simulator just put in WDA mode (#336).
+            self._last_read_backend[resolved] = self.wda_client.TOOL_NAME
             elements, query_elapsed = await self._wda_direct_query(
                 resolved, label=filter_label,
                 identifier=filter_identifier, element_type=filter_type,
@@ -1796,6 +1800,7 @@ class DeviceControllerUI:
         resolved = await self.resolve_udid(udid)
         asked_for_skeleton = strategy == "skeleton" and self._served_by_wda(resolved)
         if asked_for_skeleton:
+            self._last_read_backend[resolved] = self.wda_client.TOOL_NAME
             raw = await self.wda_client.build_screen_skeleton(resolved)
             elements = parse_elements(raw)
         else:
@@ -2615,6 +2620,17 @@ class DeviceControllerUI:
             raise DeviceError(
                 "get_web_content is for iOS simulators; the Web Inspector service "
                 "used here is the simulator's. Use get_ui_tree on a physical device.",
+                tool="web-content",
+            )
+        if self._served_by_wda(resolved):
+            # Its fallback hit-tests point by point through the backend, and
+            # WDA has no point lookup: each probe would be a full /source. Nor
+            # is it needed -- XCUITest enumerates web views itself, so the WDA
+            # tree already carries the content this exists to find (#336).
+            raise DeviceError(
+                "This simulator is in WDA mode, and its get_ui_tree already "
+                "includes web content -- XCUITest enumerates web views itself. "
+                "Use get_ui_tree, or stop_driver to use get_web_content.",
                 tool="web-content",
             )
 

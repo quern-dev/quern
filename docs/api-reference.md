@@ -393,13 +393,13 @@ holds in `flow_store`. `flows_captured` is only what survived.
 | `unload_landmarks` | DELETE | `/api/v1/landmarks` | Unload landmarks for an app or all apps |
 | `validate_landmarks` | POST | `/api/v1/landmarks/validate` | Detect collisions between screens with overlapping landmark sets |
 
-### Physical device (WDA)
+### WebDriverAgent (physical devices, and simulators on request)
 
 | MCP Tool | Method | Path | Description |
 |---|---|---|---|
-| `setup_wda` | POST | `/api/v1/device/wda/setup` | Build and install WDA on physical device |
-| `start_driver` | POST | `/api/v1/device/wda/start` | Start WDA driver |
-| `stop_driver` | POST | `/api/v1/device/wda/stop` | Stop WDA driver |
+| `setup_wda` | POST | `/api/v1/device/wda/setup` | Build and install WDA on a physical device; on a simulator, build the unsigned simulator artifact (optional — `start_driver` builds on first use) |
+| `start_driver` | POST | `/api/v1/device/wda/start` | Start WDA driver. On a simulator this puts it in WDA mode: once WDA answers, its UI reads and actions go through WDA, elements read from it carry `xcui_type`, and `backend` reports `wda`. A runner that does not answer leaves the simulator on the default backend, with `status: failed` |
+| `stop_driver` | POST | `/api/v1/device/wda/stop` | Stop WDA driver. A simulator returns to the default backend, reported as `backend`; it leaves WDA mode even if stopping fails |
 
 ## Endpoints with no MCP tool
 
