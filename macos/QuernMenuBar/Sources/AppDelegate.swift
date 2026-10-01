@@ -206,14 +206,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if lifecycle.hasFailed, let img = button.image {
             button.image = Self.tinted(img, .systemRed)
         }
-        if lifecycle.hasFailed {
-            button.toolTip = "Quern could not start — open the menu"
-        } else if updateAvailable {
-            let version = snapshot.update.latestVersion.map { " (v\($0))" } ?? ""
-            button.toolTip = "Quern — update available\(version)"
-        } else {
-            button.toolTip = running ? "Quern is running" : "Quern is stopped"
-        }
+        button.toolTip = UpdateMenuItem.tooltip(failed: lifecycle.hasFailed,
+                                                updateAvailable: updateAvailable,
+                                                running: running)
     }
 
     /// A non-template copy of `image` painted in `color`.
@@ -333,8 +328,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // A git install is updated in Terminal: its update needs npm and
             // a git that may prompt, and a GUI app has neither the user's
             // Node nor anywhere to show a prompt. See InstallKind.swift.
-            switch UpdateMenuItem.forStaged(latestVersion: u.latestVersion,
-                                            install: InstallKind.current) {
+            switch UpdateMenuItem.forStaged(install: InstallKind.current) {
             case .restartToUpdate(let title):
                 menu.addItem(action(title, #selector(restartToUpdate)))
             case .updateInTerminal(let title, let reason):
@@ -560,7 +554,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lifecycle.clearUpdateRecovery()
         let reason: TerminalReason
         if case .updateInTerminal(_, let r) = UpdateMenuItem.forStaged(
-            latestVersion: nil, install: InstallKind.current) { reason = r }
+            install: InstallKind.current) { reason = r }
         else { reason = .gitInstall }
         TerminalUpdate.open(reason: reason) { [weak self] error in
             guard let error else { return }
