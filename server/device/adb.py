@@ -128,6 +128,11 @@ def _is_wifi_inet_line(line: str) -> bool:
     return name.startswith("wlan") and "inet" in parts
 
 
+class AdbTimeout(DeviceError):
+    """adb did not finish in time, and was killed. Distinct from a refusal:
+    whatever it was doing may have happened on the device regardless."""
+
+
 class AdbBackend:
     """Manages Android devices and emulators via adb subprocess calls."""
 
@@ -172,7 +177,9 @@ class AdbBackend:
                 proc.kill()
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(proc.wait(), 1.0)
-                raise DeviceError(
+                # AdbTimeout, a DeviceError: a caller that must tell "adb was
+                # killed mid-way" from "adb refused" can, and others need not.
+                raise AdbTimeout(
                     f"adb {' '.join(args[:4])} did not answer within {timeout:g}s",
                     tool="adb",
                 ) from None
@@ -892,10 +899,9 @@ class AdbBackend:
         """Force-stop an app."""
         await self._run_adb_for_device(serial, "shell", "am", "force-stop", package)
 
-    async def uninstall_app(self, serial: str, package: str,
-                            timeout: float | None = None) -> None:
+    async def uninstall_app(self, serial: str, package: str) -> None:
         """Uninstall an app."""
-        await self._run_adb_for_device(serial, "uninstall", package, timeout=timeout)
+        await self._run_adb_for_device(serial, "uninstall", package)
 
     async def install_apk_result(self, serial: str, apk_path: str, timeout: float = 300,
                                  allow_downgrade: bool = False) -> tuple[int, str, str]:
@@ -905,19 +911,35 @@ class AdbBackend:
         older adb exits 0 on `Failure [...]`, so the exit code alone is not the
         answer `install_app` takes it for.
         """
+        return await self._run_unjudged(serial, "install", "-r",
+                                        *(["-d"] if allow_downgrade else []), apk_path,
+                                        timeout=timeout)
+
+    async def uninstall_result(self, serial: str, package: str,
+                               timeout: float = 120) -> tuple[int, str, str]:
+        """`adb uninstall`, returning (exit code, stdout, stderr) unjudged:
+        older adb exits 0 on `Failure [DELETE_FAILED_...]` here too."""
+        return await self._run_unjudged(serial, "uninstall", package, timeout=timeout)
+
+    async def _run_unjudged(self, serial: str, *args: str,
+                            timeout: float) -> tuple[int, str, str]:
+        """Run adb for a device and return what it said; raises AdbTimeout
+        (after killing adb) when it does not finish within `timeout`."""
         if not self._adb_path:
             raise DeviceError("adb not found", tool="adb")
         proc = await asyncio.create_subprocess_exec(
-            self._adb_path, "-s", serial, "install", "-r",
-            *(["-d"] if allow_downgrade else []), apk_path,
+            self._adb_path, "-s", serial, *args,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except BaseException:
+        except BaseException as e:
             if proc.returncode is None:
                 proc.kill()
                 await asyncio.shield(proc.wait())
+            if isinstance(e, TimeoutError):
+                raise AdbTimeout(f"adb {args[0]} did not finish within {timeout:g}s",
+                                 tool="adb") from e
             raise
         return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
 

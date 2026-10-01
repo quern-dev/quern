@@ -210,7 +210,12 @@ def _stale_outputs(apk: Path, now: datetime) -> str:
             f"or its lines will not match the source")
 
 
-def _android_metadata(module_dir: Path, variant: str) -> dict:
+def _android_metadata(module_dir: Path, variant: str, *, after_build: bool = False) -> dict:
+    """The variant's output-metadata.json, with `_dir` set to its directory.
+
+    `after_build`: quern has just run the build, so "build the variant first"
+    is the wrong advice and the module is the likelier mistake.
+    """
     outputs = module_dir / "build" / "outputs" / "apk"
     seen = []
     for path in sorted(outputs.rglob("output-metadata.json")):
@@ -234,6 +239,11 @@ def _android_metadata(module_dir: Path, variant: str) -> dict:
             data["_dir"] = path.parent
             return data
     if not outputs.is_dir():
+        if after_build:
+            raise AndroidBuildNotFound(
+                f"Gradle reported success and wrote no APK outputs under {outputs}: is "
+                f"{module_dir.name} the application module? Pass module= naming the one "
+                f"that applies com.android.application")
         raise AndroidBuildNotFound(
             f"no APK outputs under {outputs}: build the variant first, and pass the app "
             f"module's directory (the one with build.gradle), not the project root")

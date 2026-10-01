@@ -80,19 +80,40 @@ def read_jdk(home: str, source: str, *,
     return Jdk(home=str(home), version=m.group(1), major=major, source=source)
 
 
+#: A java.util.Properties line: the key runs to the first unescaped `=`, `:`
+#: or whitespace, and one separator (with blanks around it) follows.
+_PROPERTY = re.compile(r"^((?:\\.|[^\\=:\s])+)\s*[=:\s]?\s*(.*)$")
+
+
+def _unescape(text: str) -> str:
+    r"""`\ ` to a space, `\t` to a tab and so on, as Properties reads them:
+    `/Applications/Android\ Studio.app` is how a hand-written path looks."""
+    out, i = [], 0
+    while i < len(text):
+        if text[i] == "\\" and i + 1 < len(text):
+            out.append({"t": "\t", "n": "\n", "r": "\r", "f": "\f"}.get(text[i + 1],
+                                                                       text[i + 1]))
+            i += 2
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
 def gradle_property(path: Path, key: str) -> str | None:
-    """A `key=value` from a gradle.properties, or None."""
+    """A property from a gradle.properties, read as Gradle reads it (Java
+    Properties: `=`, `:` or a space between, backslash escapes), or None."""
     try:
         text = path.read_text()
     except (OSError, ValueError):
         return None
     for line in text.splitlines():
         line = line.strip()
-        if line.startswith("#") or "=" not in line:
+        if not line or line.startswith(("#", "!")):
             continue
-        k, _, v = line.partition("=")
-        if k.strip() == key:
-            return v.strip()
+        m = _PROPERTY.match(line)
+        if m and _unescape(m.group(1)) == key:
+            return _unescape(m.group(2).strip())
     return None
 
 
@@ -165,21 +186,48 @@ def _fits(jdk: Jdk, minimum: int, maximum: int | None) -> bool:
     return jdk.major >= minimum and (maximum is None or jdk.major <= maximum)
 
 
-def _beyond(jdk: Jdk, maximum: int | None) -> str:
-    """Why a JDK above the ceiling is used anyway, or "" if it is not above."""
-    if maximum is None or jdk.major <= maximum:
-        return ""
-    return (f"Java {jdk.major} is newer than this project's Gradle supports (up to {maximum}); "
-            f"a Kotlin DSL build may still work, a Groovy build script will not")
+def _outside(jdk: Jdk, minimum: int, maximum: int | None) -> str:
+    """Why a JDK outside the range is used anyway, or "" if it is inside."""
+    if jdk.major < minimum:
+        return (f"Java {jdk.major} is older than the Java {minimum} this project's Gradle "
+                f"is expected to need; it is used because it was chosen, and Gradle says "
+                f"if it cannot run on it")
+    if maximum is not None and jdk.major > maximum:
+        return (f"Java {jdk.major} is newer than this project's Gradle supports (up to "
+                f"{maximum}); it may still build -- Kotlin DSL scripts and a warm script "
+                f"cache did, measured -- and a Groovy build script compiled on it fails")
+    return ""
+
+
+def _last_arg(gradle_args: list[str] | None, prefixes: tuple[str, ...],
+              flags: tuple[str, ...] = ()) -> str | None:
+    """The value of the last `-Dx=v` (or `-g v`) among the arguments: the one
+    Gradle uses when a property is given twice."""
+    found = None
+    args = list(gradle_args or [])
+    for i, arg in enumerate(args):
+        for p in prefixes:
+            if arg.startswith(p):
+                found = arg[len(p):]
+        if arg in flags and i + 1 < len(args):
+            found = args[i + 1]
+    return found
 
 
 def java_home_override(gradle_args: list[str] | None) -> str | None:
     """`-Dorg.gradle.java.home=<path>` among the arguments, which Gradle
     honours over both gradle.properties files."""
-    for arg in gradle_args or []:
-        if arg.startswith("-Dorg.gradle.java.home="):
-            return arg.split("=", 1)[1]
-    return None
+    return _last_arg(gradle_args, ("-Dorg.gradle.java.home=",))
+
+
+def gradle_user_home(gradle_args: list[str] | None, env: dict[str, str], home: str) -> Path:
+    """Where Gradle keeps its own gradle.properties: `-g`, then
+    `-Dgradle.user.home`, then GRADLE_USER_HOME, then ~/.gradle."""
+    given = (_last_arg(gradle_args, ("--gradle-user-home=",), ("-g", "--gradle-user-home"))
+             or _last_arg(gradle_args, ("-Dgradle.user.home=",)))
+    if given:
+        return Path(os.path.expanduser(given))
+    return Path(env.get("GRADLE_USER_HOME") or Path(home) / ".gradle")
 
 
 def choose(project_root: Path, *, java_home: str | None = None,
@@ -196,20 +244,22 @@ def choose(project_root: Path, *, java_home: str | None = None,
     can name one that works. Otherwise the first candidate in range wins, an
     explicit `java_home` first.
 
-    `minimum` is a wall and `maximum` a preference. Below the minimum Gradle
-    does not start. Above the maximum it depends on the build, measured on
-    Gradle 7.6.4 with Java 21: a Groovy build script failed ("Unsupported class
-    file major version 65") and the same project in Kotlin DSL built. So a JDK
-    in range is preferred, and one above it is used, with `warning` saying so,
-    when it is all there is or what the caller chose; Gradle's own failure, if
-    it comes, is the answer `parse` reports.
+    The range is what quern chooses within, not what it refuses. Both ends
+    are approximations: the floor follows the Gradle version though the
+    Android Gradle plugin sets its own (a Gradle 8 + AGP 7 build runs on Java
+    11), and above the ceiling it depends on the build -- measured on Gradle
+    7.6.4 with Java 21, a Groovy build script failed ("Unsupported class file
+    major version 65") and the same project in Kotlin DSL built. So a JDK in
+    range is preferred; one newer is used when it is all there is; and a JDK
+    the caller or the project chose is used wherever it falls, with `warning`
+    saying so. Gradle's own refusal, if it comes, is what `parse` reports.
     """
     env = dict(os.environ if env is None else env)
     home = home or env.get("HOME") or str(Path.home())
     java_home = os.path.expanduser(java_home) if java_home else None
     jdks = found if found is not None else candidates(java_home=java_home, env=env, home=home)
     want = _range(minimum, maximum)
-    user_props = Path(env.get("GRADLE_USER_HOME") or Path(home) / ".gradle") / "gradle.properties"
+    user_props = gradle_user_home(gradle_args, env, home) / "gradle.properties"
     forced_sources = [(java_home_override(gradle_args), "-Dorg.gradle.java.home in gradle_args"),
                       (gradle_property(user_props, "org.gradle.java.home"),
                        "your ~/.gradle/gradle.properties"),
@@ -220,30 +270,32 @@ def choose(project_root: Path, *, java_home: str | None = None,
         if not forced:
             continue
         jdk = read_jdk(os.path.expanduser(forced), f"org.gradle.java.home, from {label}")
-        if jdk and jdk.major >= minimum:
-            return Choice(jdk=jdk, candidates=jdks, forced_by=label,
-                          warning=_beyond(jdk, maximum))
-        what = f"Java {jdk.version}" if jdk else "not a JDK quern can read"
-        return Choice(jdk=None, candidates=jdks, forced_by=label,
-                      problem=f"org.gradle.java.home ({label}) is {forced} ({what}); Gradle "
-                              f"uses it whatever JAVA_HOME says, and this build needs {want}")
+        if jdk is None:
+            return Choice(jdk=None, candidates=jdks, forced_by=label,
+                          problem=f"org.gradle.java.home ({label}) is {forced}, which is not "
+                                  f"a JDK quern can read; Gradle uses it whatever JAVA_HOME "
+                                  f"says, and this build needs {want}")
+        notes = [_outside(jdk, minimum, maximum)]
+        if java_home and os.path.realpath(java_home) != os.path.realpath(jdk.home):
+            notes.append(f"the java_home you passed ({java_home}) is not used: Gradle runs "
+                         f"on org.gradle.java.home ({label}) whatever JAVA_HOME says; pass "
+                         f"-Dorg.gradle.java.home in gradle_args to choose instead")
+        return Choice(jdk=jdk, candidates=jdks, forced_by=label,
+                      warning="; ".join(n for n in notes if n))
     if java_home:
         given = next((j for j in jdks if j.source.startswith("the java_home")), None)
         if given is None:
             return Choice(jdk=None, candidates=jdks,
                           problem=f"the java_home you passed, {java_home}, is not a JDK")
-        if given.major < minimum:
-            return Choice(jdk=None, candidates=jdks,
-                          problem=f"the java_home you passed is Java {given.version}; this "
-                                  f"build needs {want}")
-        return Choice(jdk=given, candidates=jdks, warning=_beyond(given, maximum))
+        return Choice(jdk=given, candidates=jdks, warning=_outside(given, minimum, maximum))
     usable = [j for j in jdks if _fits(j, minimum, maximum)]
     if usable:
         return Choice(jdk=usable[0], candidates=jdks)
     newer = sorted((j for j in jdks if j.major >= minimum), key=lambda j: j.major)
     if newer:
         # The closest above the ceiling: the likeliest to work.
-        return Choice(jdk=newer[0], candidates=jdks, warning=_beyond(newer[0], maximum))
+        return Choice(jdk=newer[0], candidates=jdks,
+                      warning=_outside(newer[0], minimum, maximum))
     have = ", ".join(f"Java {j.version}" for j in jdks) or "none"
     return Choice(jdk=None, candidates=jdks,
                   problem=f"no JDK in the range this build needs ({want}) was found "

@@ -460,6 +460,13 @@ def _android_summary(resp: BuildAndInstallResponse) -> str:
         for p in resp.environment:
             parts.append(f"[{p.kind}] {p.summary}.")
             parts += [f"  - {o}" for o in p.options]
+        # The errors Gradle printed too: an environment reading can be wrong,
+        # and hiding the compiler's own words behind it would compound that.
+        errors = resp.build_android.errors if resp.build_android else []
+        if any(e.file for e in errors):
+            parts.append("Errors Gradle reported:")
+            parts += [f"  {e.file}:{e.line}: {e.message}" if e.file else f"  {e.message}"
+                      for e in errors[:5]]
         return "\n".join(parts)
     build = resp.build_android
     if build is None or not build.succeeded:

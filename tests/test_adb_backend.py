@@ -213,7 +213,7 @@ class TestAppLifecycle:
         backend._run_adb_for_device = AsyncMock(return_value=("Success", ""))
         await backend.uninstall_app("emulator-5554", "com.example.app")
         backend._run_adb_for_device.assert_called_once_with(
-            "emulator-5554", "uninstall", "com.example.app", timeout=None
+            "emulator-5554", "uninstall", "com.example.app"
         )
 
     async def test_list_apps(self):
@@ -521,4 +521,59 @@ class TestAdbTimeout:
                    AsyncMock(return_value=Proc())):
             with pytest.raises(DeviceError, match="did not answer within 0.05s"):
                 await backend._run_adb("-s", "x", "uninstall", "p", timeout=0.05)
+        assert killed == [True]
+
+
+class TestUnjudgedRuns:
+    """`install_apk_result` and `uninstall_result` hand adb's words back for
+    the caller to judge, and kill adb rather than leave it running."""
+
+    @staticmethod
+    def _spawn(seen, proc):
+        async def spawn(*argv, **kw):
+            seen.append(argv)
+            return proc
+        return spawn
+
+    async def test_allow_downgrade_passes_minus_d(self):
+        class Proc:
+            returncode = 0
+
+            async def communicate(self):
+                return b"Success\n", b""
+
+        seen = []
+        backend = AdbBackend()
+        backend._adb_path = "/usr/bin/adb"
+        with patch("server.device.adb.asyncio.create_subprocess_exec", self._spawn(seen, Proc())):
+            await backend.install_apk_result("s", "/a.apk")
+            assert await backend.install_apk_result("s", "/a.apk", allow_downgrade=True) == (
+                0, "Success\n", "")
+        assert seen[0][1:] == ("-s", "s", "install", "-r", "/a.apk")
+        assert seen[1][1:] == ("-s", "s", "install", "-r", "-d", "/a.apk")
+
+    async def test_a_hung_install_is_killed_and_raises_a_timeout(self):
+        from server.device.adb import AdbTimeout
+
+        killed = []
+
+        class Proc:
+            returncode = None
+
+            async def communicate(self):
+                import asyncio
+                await asyncio.sleep(60)
+
+            def kill(self):
+                killed.append(True)
+                self.returncode = -9
+
+            async def wait(self):
+                return -9
+
+        backend = AdbBackend()
+        backend._adb_path = "/usr/bin/adb"
+        with patch("server.device.adb.asyncio.create_subprocess_exec", self._spawn([], Proc())):
+            with pytest.raises(AdbTimeout, match="install did not finish within 0.05s"):
+                await backend.install_apk_result("s", "/a.apk", timeout=0.05)
         assert killed == [True]

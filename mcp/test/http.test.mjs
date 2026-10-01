@@ -12,7 +12,7 @@ function serve(handler) {
   });
 }
 
-test("a slow answer arrives, with its body and status", async () => {
+test("a delayed answer arrives, with its body and status", async () => {
   const server = await serve((req, res) => {
     let got = "";
     req.on("data", (c) => (got += c));
