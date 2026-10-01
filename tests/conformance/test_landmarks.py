@@ -302,31 +302,38 @@ def _tap_missing(quern, probe) -> dict:
 
 def test_a_miss_on_a_screen_known_not_to_scroll_says_so(quern, probe, probe_kb) -> None:
     """`scrollable: false` lets a miss say the element is not on this screen,
-    without the two swipes it would otherwise take to find that out."""
+    without the two swipes it would otherwise take to find that out.
+
+    iOS only, as documented: Android's native-selector tap does not read the
+    knowledge base (identifying the screen would cost the tree read that path
+    exists to avoid), so there an unset `scroll_to_find` sweeps. The Android
+    half asserts that contract instead, so a change to it is noticed.
+    """
     probe.goto("text")
     started = time.monotonic()
     scroll = _tap_missing(quern, probe)
-    assert scroll.get("reason") == "screen_not_scrollable", (
-        f"{scroll} -- on Android this is F24: the tap path never consults "
-        "`scrollable`, so an unset scroll_to_find always sweeps"
-    )
+    if probe.contract.platform != "ios":
+        assert scroll.get("attempted") is True, (
+            f"{scroll} -- Android is documented to sweep when scroll_to_find is unset"
+        )
+        return
+    assert scroll.get("reason") == "screen_not_scrollable", scroll
     assert scroll.get("screen") == "text", scroll
     assert scroll.get("attempted") is False, scroll
     assert time.monotonic() - started < 30, "a miss on a non-scrolling screen still swept"
 
 
 def test_without_a_knowledge_base_the_same_miss_cannot_say(quern, probe) -> None:
-    """The negative control for the test above: with nothing loaded the
-    answer must be "unknown", or the test above proves nothing."""
+    """The negative control for the iOS test above: with nothing loaded the
+    answer must be "unknown", or that test proves nothing."""
+    if probe.contract.platform != "ios":
+        pytest.skip("Android does not read scrollable (documented); nothing to control for")
     sets = quern.json_ok("GET", f"{LANDMARKS}/", timeout=30.0)["sets"]
     if sets:
         pytest.skip(f"other landmarks are loaded on this server: {sorted(sets)}")
     probe.goto("text")
     scroll = _tap_missing(quern, probe)
-    assert scroll.get("reason") == "scrollability_unknown", (
-        f"{scroll} -- on Android this is F24: an unset scroll_to_find sweeps "
-        "whatever the knowledge base says, including when it says nothing"
-    )
+    assert scroll.get("reason") == "scrollability_unknown", scroll
 
 
 def test_a_screen_recorded_as_scrolling_is_swept_without_being_asked(

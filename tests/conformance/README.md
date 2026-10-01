@@ -144,7 +144,7 @@ parametrisation; probe-driven tests run once per platform present.
 | 11 | UI: tree, tap, type, swipe, scroll, wait | `test_ui.py` | **done** — 23 tests, run against both platforms' QuernProbe |
 | 12 | Screenshots, annotation, timeline | `test_screenshots.py` | todo |
 | 13 | App state checkpoints & plist | `test_app_state.py` | **in progress** — 17 tests (24 with parametrisation) on QuernProbe's new State tab; 7 fail on current `main` (F19–F22) |
-| 14 | Landmarks & screen identification | `test_landmarks.py` | **in progress** — 13 tests on each probe app's own knowledge base (`contract.screens`); found F24, F25 |
+| 14 | Landmarks & screen identification | `test_landmarks.py` | **in progress** — 13 tests on each probe app's own knowledge base (`contract.screens`); found F24 (resolved in #369) and F25 |
 | 15 | Device configuration (locale, font, density, GPS) | `test_device_config.py` | todo |
 | 16 | Certificates & trust | `test_certs.py` | todo — destructive |
 | 17 | Builds & crash parsing | `test_builds.py` | todo |

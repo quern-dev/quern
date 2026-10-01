@@ -763,17 +763,17 @@ coerced number, so it reached the server as `1` and was stored as an integer --
 while the tool description promised a boolean. The batch tool's schema was not
 affected. Now one non-coercing `plistValue` schema serves both.
 
-## F24 — Android's `tap_element` never consults `scrollable`
+## F24 — Android's `tap_element` does not read `scrollable`, and the docs did not say so → resolved in #369
 
-`docs/screen-landmarks.md` says an unset `scroll_to_find` "identifies the
+`docs/screen-landmarks.md` said an unset `scroll_to_find` "identifies the
 screen and sweeps only on `scrollable: true`". On Android it always sweeps: a
 miss on the probe's Text tab, recorded `scrollable: false`, came back
-`attempted: true` with no `screen`, and so did the same miss with no knowledge
-base loaded at all. The code says this is deliberate -- Android's tap is a
-no-tree-read fast path, and identifying the screen costs the tree read it
-avoids -- but the docs do not say the tri-state is iOS-only, so a caller on
-Android who records `scrollable: false` gets the swipes anyway and nothing
-says why. Found by `test_landmarks.py`; no issue yet.
+`attempted: true`, and so did the same miss with no knowledge base at all. The
+code calls this deliberate -- Android's native-selector tap reads no tree, and
+identifying the screen would cost the read it avoids -- so the fix was to the
+docs: #369 (64359a3) now says `scrollable` is read on iOS only. The Android
+half of `test_a_miss_on_a_screen_known_not_to_scroll_says_so` asserts that
+contract, so a change to it is noticed.
 
 ## F25 — an Android tap's screen context describes the transition, not the destination
 
