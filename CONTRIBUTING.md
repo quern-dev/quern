@@ -310,7 +310,8 @@ Passthrough is only safe if it is visible, because zero HTTPS flows from a
 simulator reads exactly like an app making no requests. So it is reported
 where the caller looks: `simulator_tls` on `proxy_status` and the
 `set_local_capture` response, and `simulator_tls_note` on any flow result
-filtered to a passed-through simulator -- on the empty result most of all.
+filtered to a passed-through simulator -- on the empty result most of all --
+and on `start_capture_session`, where it arrives before anything is captured.
 
 Two surfaces cannot use the helper and are handled in kind. `quern
 enable-local-capture` writes `config.json` in one process and the lifespan

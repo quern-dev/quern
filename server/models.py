@@ -888,8 +888,14 @@ class CaptureStartRequest(BaseModel):
     detail: Literal["full", "summary"] = "full"
 
 
-class CaptureStartResponse(BaseModel):
-    """Response from POST /api/v1/proxy/capture/start."""
+class CaptureStartResponse(SimulatorTlsNote):
+    """Response from POST /api/v1/proxy/capture/start.
+
+    Carries the passed-through note too, and here it is worth the most: an
+    agent told at the start that a simulator's HTTPS will not be decrypted can
+    install the CA before driving the app, instead of finding the capture empty
+    when it stops.
+    """
 
     session_id: str
     start_time: datetime
