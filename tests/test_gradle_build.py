@@ -1308,6 +1308,13 @@ class TestListingVariants:
         _, _, (v, why) = self._listing(tmp_path, monkeypatch, (1, out))
         assert v is None and "Keystore file" in why
 
+    def test_a_listing_that_fails_part_way_is_not_trusted(self, tmp_path, monkeypatch):
+        """Variants printed and then a non-zero exit: the list may be partial,
+        and a partial list would refuse a variant that exists."""
+        out = (FIXTURES / "tasks_plain.out").read_text() + "\nBUILD FAILED in 2s\n"
+        _, _, (v, why) = self._listing(tmp_path, monkeypatch, (1, out))
+        assert v is None and why
+
     def test_a_module_with_no_variants_says_so(self, tmp_path, monkeypatch):
         _, _, (v, why) = self._listing(tmp_path, monkeypatch, (0, "BUILD SUCCESSFUL\n"))
         assert v is None and "listed no variants for :app" in why
