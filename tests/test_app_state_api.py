@@ -409,3 +409,23 @@ class TestCheckpointNamesStayInTheStore:
         assert resp.status_code == 400, resp.text
         assert (store / "precious.txt").read_text() == "keep me"
         terminate.assert_not_called()
+
+
+class TestWatchStartChecksThePath:
+    async def test_a_plist_path_outside_the_container_is_400(
+        self, app, auth_headers, mock_controller, container,
+    ):
+        resp = await _call(app, auth_headers, "POST", "/plist/watch/start", json={
+            "bundle_id": "com.example.App", "container": "data",
+            "plist_path": "../../../../etc/x.plist",
+        })
+        assert resp.status_code == 400, resp.text
+
+    async def test_a_missing_plist_is_404_not_500(
+        self, app, auth_headers, mock_controller, container,
+    ):
+        resp = await _call(app, auth_headers, "POST", "/plist/watch/start", json={
+            "bundle_id": "com.example.App", "container": "data",
+            "plist_path": "Library/Preferences/none.plist",
+        })
+        assert resp.status_code == 404, resp.text
