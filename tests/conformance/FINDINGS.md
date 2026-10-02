@@ -763,3 +763,32 @@ coerced number, so it reached the server as `1` and was stored as an integer --
 while the tool description promised a boolean. The batch tool's schema was not
 affected. Now one non-coercing `plistValue` schema serves both.
 
+## F24 — Android's `tap_element` does not read `scrollable`, and the docs did not say so → resolved in #369
+
+`docs/screen-landmarks.md` said an unset `scroll_to_find` "identifies the
+screen and sweeps only on `scrollable: true`". On Android it always sweeps: a
+miss on the probe's Text tab, recorded `scrollable: false`, came back
+`attempted: true`, and so did the same miss with no knowledge base at all. The
+code calls this deliberate -- Android's native-selector tap reads no tree, and
+identifying the screen would cost the read it avoids -- so the fix was to the
+docs: #369 (64359a3) now says `scrollable` is read on iOS only. The Android
+half of `test_a_miss_on_a_screen_known_not_to_scroll_says_so` asserts that
+contract, so a change to it is noticed.
+
+## F25 — an Android tap's screen context describes the transition, not the destination → fixed with the category 14 conformance work
+
+`tap_element(include_screen_context=true)` on Android, from the Text tab to
+Links: three of three responses said `identified_as: null, confidence: none`,
+and an identification taken immediately afterwards agreed. A screenshot showed
+Links fully drawn, and a read seconds later identified Links. The tree read
+right after the tap held the *Logs* page's heading -- the ViewPager was still
+travelling across the pages between the two. The same check on iOS, pushing
+the State screen from More, named State correctly in three of three.
+
+`settle_delay` exists on the request but is applied only when screenshots are
+captured; the screen context is read immediately. The context's whole job is
+to say where the action landed, so reading it mid-transition reports the
+journey. `launch_app` and `open_url` already waited `settle_delay` before
+their context; `tap_element` and `type_text` now do too, and the two route
+tests that pin it are the first that drive those endpoints' context at all.
+

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A tap's or a typed entry's screen context describes where it landed, not the transition (F25).** `tap_element` and `type_text` with `include_screen_context` read the screen immediately unless screenshots were also requested, so an Android tab switch was read mid-transition and named no screen. They now wait `settle_delay` (default 1.0s) first, as `launch_app` and `open_url` already did and as the setting is documented to do. That second is the cost of asking for the context.
+
 ## [0.23.0] - 2026-10-01
 
 ### Added

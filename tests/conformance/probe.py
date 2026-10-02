@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 #: Both apps ship under the same id, deliberately.
@@ -144,6 +144,11 @@ class ProbeContract:
     #: Polled after launch, because a blind sleep is either too short on a
     #: cold start or wasted on every warm one.
     ready_identifier: str = ""
+    #: The fixture's own knowledge base: tab name -> landmarks, plus whether the
+    #: screen scrolls. Written to landmark conventions v2 and checked against
+    #: the live app by `test_landmarks.py`, so it is also a worked example of
+    #: what a portable knowledge base looks like for each platform.
+    screens: dict[str, dict] = field(default_factory=dict)
 
     def id_for(self, logical: str) -> str | None:
         return self.ids.get(logical)
@@ -218,6 +223,56 @@ IOS = ProbeContract(
     row_identifier_template="row_{index}",
     row_label_template="Row {index}",
     ready_identifier="tab_text",
+    screens={
+        # Bar tabs: the navigation title plus the selected tab item.
+        "text": {"scrollable": False, "landmarks": [
+            {"element": "Heading", "label": "Text"},
+            {"element": "RadioButton", "identifier": "tab_text", "selected": True},
+        ]},
+        "controls": {"scrollable": False, "landmarks": [
+            {"element": "Heading", "label": "Controls"},
+            {"element": "RadioButton", "identifier": "tab_controls", "selected": True},
+        ]},
+        # The Scroll tab's title is the live row range ("rows 0-17 of 200"), so
+        # it is the one screen whose title is not a landmark.
+        "scroll": {"scrollable": True, "landmarks": [
+            {"element": "RadioButton", "identifier": "tab_scroll", "selected": True},
+            {"element": "Group", "identifier": "scroll_table"},
+        ]},
+        "links": {"scrollable": False, "landmarks": [
+            {"element": "Heading", "label": "Links"},
+            {"element": "RadioButton", "identifier": "tab_links", "selected": True},
+        ]},
+        # Behind More: the title plus one control only that screen has.
+        "logs": {"landmarks": [
+            {"element": "Heading", "label": "Logs"},
+            {"element": "Button", "identifier": "log_start"},
+        ]},
+        "location": {"landmarks": [
+            {"element": "Heading", "label": "Location"},
+            {"element": "StaticText", "identifier": "location_auth"},
+        ]},
+        "web": {"landmarks": [
+            {"element": "Heading", "label": "Web"},
+            {"element": "StaticText", "identifier": "web_heading_native"},
+        ]},
+        "diag": {"landmarks": [
+            {"element": "Heading", "label": "Diag"},
+            {"element": "Button", "identifier": "diag_crash_uncaught"},
+        ]},
+        "state": {"landmarks": [
+            {"element": "Heading", "label": "State"},
+            {"element": "StaticText", "identifier": "state_counter"},
+        ]},
+        "widgets": {"landmarks": [
+            {"element": "Heading", "label": "Widgets"},
+            {"element": "Button", "identifier": "widget_nav_done"},
+        ]},
+        "lists": {"landmarks": [
+            {"element": "Heading", "label": "Lists"},
+            {"element": "Group", "identifier": "lists_table"},
+        ]},
+    },
 )
 
 ANDROID = ProbeContract(
@@ -266,6 +321,38 @@ ANDROID = ProbeContract(
     row_identifier_template=None,
     row_label_template="Row {index}",
     ready_identifier="probe_tabs",
+    screens={
+        # Each fragment's own heading, plus the selected tab. The tab strip is
+        # StaticText labels whose `selected` state quern normalises to "1".
+        "text": {"scrollable": False, "landmarks": [
+            {"element": "StaticText", "identifier": "text_heading"},
+            {"element": "StaticText", "label": "Text", "selected": True},
+        ]},
+        "controls": {"scrollable": False, "landmarks": [
+            {"element": "StaticText", "identifier": "control_heading"},
+            {"element": "StaticText", "label": "Controls", "selected": True},
+        ]},
+        "scroll": {"scrollable": True, "landmarks": [
+            {"element": "StaticText", "label": "Scroll", "selected": True},
+            {"element": "ScrollView", "identifier": "scroll_list"},
+        ]},
+        "logs": {"landmarks": [
+            {"element": "StaticText", "identifier": "log_heading"},
+            {"element": "StaticText", "label": "Logs", "selected": True},
+        ]},
+        "links": {"landmarks": [
+            {"element": "StaticText", "identifier": "link_heading"},
+            {"element": "StaticText", "label": "Links", "selected": True},
+        ]},
+        "web": {"landmarks": [
+            {"element": "StaticText", "identifier": "web_heading_native"},
+            {"element": "StaticText", "label": "Web", "selected": True},
+        ]},
+        "diag": {"landmarks": [
+            {"element": "StaticText", "identifier": "diag_heading"},
+            {"element": "StaticText", "label": "Diag", "selected": True},
+        ]},
+    },
 )
 
 CONTRACTS = {"ios": IOS, "android": ANDROID}
@@ -546,8 +633,7 @@ class ProbeDriver:
         import time
 
         if self.contract.platform != "ios":
-            self.tap_label(tab.capitalize())
-            time.sleep(1.0)
+            self._goto_android(tab.capitalize())
             return
 
         name = tab.lower()
@@ -572,6 +658,70 @@ class ProbeDriver:
                 time.sleep(1.0)
         self.tap_label(tab.capitalize())
         time.sleep(1.2)
+
+    def _goto_android(self, label: str) -> None:
+        """Tap a tab in Android's horizontally scrolling tab strip.
+
+        Seven tabs do not fit: selecting one scrolls the strip, so after
+        visiting Diag the Text tab is off screen and a plain tap misses. That
+        surfaced as a 404 from the *next* test's `goto("text")` -- reading as a
+        broken tap rather than a tab that was simply scrolled away. So on a
+        miss, swipe the strip back to its start and then on to its end.
+        """
+        import time
+
+        for swipe_to in (None, "start", "end", "end"):
+            if swipe_to:
+                self._swipe_tab_strip(swipe_to)
+            resp = self.client.post(
+                "/api/v1/device/ui/tap-element",
+                json={"udid": self.udid, "label": label, **self.NO_SCROLL},
+                timeout=90.0,
+            )
+            if resp.is_success:
+                status = (resp.json() or {}).get("status")
+                if status == "ambiguous":
+                    # Ambiguous is a 200 and taps nothing. The Controls and
+                    # Logs fragments' headings repeat their tab's label, so it
+                    # happens when already on that tab -- which is fine only
+                    # if that tab really is the selected one.
+                    if self._tab_selected(label):
+                        return
+                    raise AssertionError(
+                        f"tab {label!r} is ambiguous and not selected: {resp.text[:300]}"
+                    )
+                time.sleep(1.0)
+                return
+            if resp.status_code != 404:
+                raise AssertionError(
+                    f"tapping tab {label!r} -> {resp.status_code}: {resp.text[:300]}"
+                )
+        raise AssertionError(f"tab {label!r} not found after swiping the tab strip both ways")
+
+    def _tab_selected(self, label: str) -> bool:
+        return any(
+            e.get("label") == label and e.get("value") == "1"
+            for e in self.ui_tree().get("elements") or []
+        )
+
+    def _swipe_tab_strip(self, toward: str) -> None:
+        import time
+
+        strip = self.element("probe_tabs")
+        frame = (strip or {}).get("frame")
+        if not frame:
+            raise AssertionError("the tab strip `probe_tabs` is not on screen")
+        y = frame["y"] + frame["height"] / 2
+        left = frame["x"] + frame["width"] * 0.15
+        right = frame["x"] + frame["width"] * 0.85
+        start_x, end_x = (left, right) if toward == "start" else (right, left)
+        self.client.json_ok(
+            "POST", "/api/v1/device/ui/swipe",
+            json={"udid": self.udid, "start_x": start_x, "start_y": y,
+                  "end_x": end_x, "end_y": y, "duration": 0.3},
+            timeout=90.0,
+        )
+        time.sleep(0.8)
 
     def relaunch(self) -> None:
         """Terminate and relaunch, returning the app to its initial state.
