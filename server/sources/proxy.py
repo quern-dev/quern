@@ -656,6 +656,8 @@ class ProxyAdapter(BaseSourceAdapter):
                 msg_type = data.get("type")
                 if msg_type == "flow":
                     await self._handle_flow(data)
+                elif msg_type == "request_started":
+                    self._handle_started(data)
                 elif msg_type == "intercepted":
                     self._handle_intercepted(data)
                 elif msg_type == "released":
@@ -678,6 +680,10 @@ class ProxyAdapter(BaseSourceAdapter):
                 logger.exception("Proxy read loop failed")
         finally:
             self._running = False
+            # Nothing mitmdump was carrying will finish now. Left in place,
+            # they would read as in flight forever.
+            if dropped := self.flow_store.drop_pending():
+                logger.info("Proxy stopped with %d request(s) in flight", dropped)
 
     async def _drain_stderr(self) -> None:
         """Read and log stderr from mitmdump so errors aren't lost."""
@@ -754,6 +760,12 @@ class ProxyAdapter(BaseSourceAdapter):
             "Client %s refused the certificate we offered for %s (%s)",
             client_ip or "?", sni or "?", alert or "no alert reported",
         )
+
+    def _handle_started(self, data: dict) -> None:
+        """A request has started (#364): in flight until its flow arrives."""
+        flow = self._parse_flow(data)
+        if flow is not None:
+            self.flow_store.note_started(flow)
 
     async def _handle_flow(self, data: dict) -> None:
         """Process a flow event from the addon."""
@@ -927,6 +939,7 @@ class ProxyAdapter(BaseSourceAdapter):
                 simulator_udid=data.get("simulator_udid"),
                 device_serial=data.get("device_serial"),
                 client_ip=data.get("client_ip"),
+                started_monotonic=data.get("started_monotonic"),
             )
         except Exception as e:
             logger.warning("Failed to parse flow data: %s", e)

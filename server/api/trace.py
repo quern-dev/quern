@@ -77,6 +77,11 @@ def _serialise(attribution: Attribution, ip_map: dict[str, tuple[str, bool]]) ->
                 "method": flow.request.method,
                 "url": flow.request.url,
                 "status": flow.response.status_code if flow.response else None,
+                # Set for a request with no response: in flight, or one a
+                # recording has a start for and no end (#364).
+                "error": flow.error,
+                # On the video clock, as `started_monotonic` on the action.
+                "started_monotonic": flow.started_monotonic,
                 "source_process": flow.source_process,
                 # On every flow, not only the doubtful ones. A reader should
                 # never have to infer the good case from silence.
@@ -273,6 +278,13 @@ async def get_trace(
     flow_window_truncated = False
     if flow_store is not None:
         flows = await flow_store.get_since(window_start)
+        # Requests still in flight, as flows with no response: a hung request
+        # is the one a trace most needs to show, and the store holds a flow
+        # only once it is answered (#364).
+        now = datetime.now(UTC)
+        flows += [p.model_copy(update={"error": f"in flight: no response after "
+                                                f"{(now - p.timestamp).total_seconds():.0f}s"})
+                  for p in flow_store.pending() if p.timestamp >= window_start]
         if until is not None:
             flows = [f for f in flows if f.timestamp <= until]
         # Sorted, because the store is not. It is an OrderedDict in insertion
@@ -399,7 +411,8 @@ async def _trace_from_recording(request: Request, ref: str, since: datetime | No
     actions_over_limit = len(actions) > limit
     if actions_over_limit:
         actions = actions[-limit:]
-    flows = sorted((f for f in loaded.flows if inside(f.timestamp)), key=lambda f: f.timestamp)
+    flows = sorted((f for f in [*loaded.flows, *loaded.unfinished] if inside(f.timestamp)),
+                   key=lambda f: f.timestamp)
     logs = sorted((e for e in loaded.logs if inside(e.timestamp)), key=lambda e: e.timestamp)
     ip_map = await asyncio.to_thread(_ip_map)
     attributions = await asyncio.to_thread(build_trace, actions, flows, logs, ip_map=ip_map)
@@ -423,14 +436,14 @@ async def _trace_from_recording(request: Request, ref: str, since: datetime | No
         "actions_over_limit": actions_over_limit,
         "action_window_truncated": bool(holes("action")),
         "flows_over_limit": False,
-        "flow_window_truncated": bool(holes("flow")),
+        "flow_window_truncated": bool(holes("flow", "request_started")),
         # Not recorded: whether capture was on is a fact about the run, and
         # this server's proxy today says nothing about it.
         "proxy_running": None,
         "recording": {
             "directory": str(directory),
             "stopped": loaded.stopped,
-            "holes": holes("action", "flow", "log", "crash"),
+            "holes": holes("action", "flow", "request_started", "log", "crash"),
             "unreadable_lines": loaded.unreadable_lines,
             "clock_anchors": loaded.clock_anchors,
             # A reboot during the run: `started_monotonic` values on either

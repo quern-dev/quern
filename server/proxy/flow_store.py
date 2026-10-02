@@ -7,6 +7,7 @@ All public methods are async with a lock to match the RingBuffer pattern.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import OrderedDict
 from collections.abc import Callable
 from datetime import datetime
@@ -14,6 +15,8 @@ from datetime import datetime
 from server.models import FlowQueryParams, FlowRecord
 from server.storage.arrival import ArrivalClock
 from server.storage.fanout import Fanout, Missed
+
+logger = logging.getLogger(__name__)
 
 #: How many devices' eviction marks are kept individually. Past this the
 #: least recently evicted fold into a floor that applies to every device.
@@ -61,6 +64,32 @@ def _device_keys(
     return keys
 
 
+#: In-flight requests kept at once. An app has tens in flight; thousands
+#: means requests that will never finish, and the oldest go first.
+PENDING_MAX = 2000
+#: Ids of finished requests remembered after their flows may be evicted, so
+#: a start reported late is still known to be over. Ids only, so cheap; well
+#: past how far a start report can lag its finish.
+FINISHED_MAX = 10_000
+
+
+class _Starts:
+    """The started-requests feed, shaped like a buffer's subscription API so a
+    recording subscribes to it the way it subscribes to everything else."""
+
+    def __init__(self, fanout: Fanout[FlowRecord]) -> None:
+        self._fanout = fanout
+
+    def subscribe(self, accept=None):
+        return self._fanout.subscribe(accept)
+
+    def unsubscribe(self, queue) -> None:
+        self._fanout.unsubscribe(queue)
+
+    def missed(self, queue) -> Missed:
+        return self._fanout.missed(queue)
+
+
 class FlowStore:
     """Thread-safe in-memory store for HTTP flow records."""
 
@@ -102,6 +131,22 @@ class FlowStore:
         # New flows taken in, as opposed to updates of ones already held.
         # `size` is what survived; this is what arrived.
         self._added = 0
+        # Requests that have started and not yet finished (#364): kept apart
+        # from the flows, so nothing that queries or waits on flows matches
+        # a request with no response yet. Bounded, since a request may never
+        # end; what the bound pushes out is counted, never silent.
+        self._pending: OrderedDict[str, FlowRecord] = OrderedDict()
+        self._pending_max = PENDING_MAX
+        self._pending_evicted = 0
+        #: Finished ids, kept apart from `_flows`, whose bound can evict a
+        #: flow before its late start report arrives -- which then put a
+        #: finished request back in flight for good (CodeRabbit).
+        self._finished: OrderedDict[str, None] = OrderedDict()
+        self._start_fanout: Fanout[FlowRecord] = Fanout(maxsize=1000)
+        self.starts = _Starts(self._start_fanout)
+        #: Told when the proxy stops with requests in flight: a recording
+        #: writes it, so what the stop cut off is not read as a hang.
+        self.pending_dropped_listeners: list[Callable[[int], None]] = []
 
     @property
     def size(self) -> int:
@@ -114,6 +159,12 @@ class FlowStore:
     async def add(self, flow: FlowRecord) -> None:
         """Insert or update a flow record, evicting oldest if at capacity."""
         async with self._lock:
+            # It finished (or failed): no longer in flight, and never again.
+            self._pending.pop(flow.id, None)
+            self._finished[flow.id] = None
+            self._finished.move_to_end(flow.id)
+            while len(self._finished) > FINISHED_MAX:
+                self._finished.popitem(last=False)
             if flow.id in self._flows:
                 # Update existing — move to end
                 del self._flows[flow.id]
@@ -289,6 +340,44 @@ class FlowStore:
         """Return all flows (snapshot under lock)."""
         async with self._lock:
             return list(self._flows.values())
+
+    def note_started(self, flow: FlowRecord) -> None:
+        """A request has started and has no response yet.
+
+        Kept until `add` sees the same id complete, or the proxy stops.
+        Published to `starts` subscribers, which is how a recording learns
+        of a request that may never finish.
+        """
+        if flow.id in self._flows or flow.id in self._finished:
+            return                  # already finished: a late start says nothing new
+        self._pending.pop(flow.id, None)
+        self._pending[flow.id] = flow
+        while len(self._pending) > self._pending_max:
+            self._pending.popitem(last=False)
+            self._pending_evicted += 1
+        self._start_fanout.publish(flow)
+
+    def pending(self) -> list[FlowRecord]:
+        """Requests in flight now, oldest first."""
+        return list(self._pending.values())
+
+    @property
+    def pending_evicted(self) -> int:
+        """In-flight requests pushed out by the bound: there were more than
+        `PENDING_MAX` at once, so `pending()` is not all of them."""
+        return self._pending_evicted
+
+    def drop_pending(self) -> int:
+        """The proxy stopped: nothing it was carrying will finish. Returns how
+        many were dropped."""
+        dropped = len(self._pending)
+        self._pending.clear()
+        for listener in list(self.pending_dropped_listeners):
+            try:
+                listener(dropped)
+            except Exception:  # noqa: BLE001 -- one listener must not stop the others
+                logger.exception("A pending-dropped listener failed")
+        return dropped
 
     def subscribe(
         self, accept: Callable[[FlowRecord], bool] | None = None,

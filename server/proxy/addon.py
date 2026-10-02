@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import base64
+import contextlib
 import ctypes
 import ctypes.util
 import fnmatch
@@ -144,6 +145,56 @@ def _lookup_process_info(client_id: str | None) -> dict | None:
         info["pid"] = pid
         info["process_name"] = process_name
     return info
+
+
+#: Where `request_started` reports are written from: never mitmproxy's event
+#: loop, whose request hook must not wait. Resolving a report's device can
+#: run `ps`, `lsof` and libproc (measured ~40ms for lsof), so it is done here,
+#: on threads of its own rather than the socket-lookup pool's, which other
+#: connections' attribution waits on.
+_START_REPORT_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="quern-start")
+
+
+def _peek_process_info(client_id: str | None, wait: float = 0.5) -> tuple[int | None, str | None]:
+    """(pid, process name) for a connection, read without changing anything.
+
+    For worker threads: `_lookup_process_info` replaces the shared per-
+    connection entry in place, which only the event loop may do -- a read
+    there racing a write here saw an empty entry and went unattributed.
+    """
+    if not client_id:
+        return None, None
+    info = _client_process_info.get(client_id)
+    if info is None:
+        with _cache_lock:
+            info = _recent_process_info.get(client_id)
+    if not info:
+        return None, None
+    future = info.get("future")
+    if future is None:
+        return info.get("pid"), info.get("process_name")
+    try:
+        return future.result(timeout=wait)
+    except Exception:  # noqa: BLE001 -- a lookup that failed is an unknown, not an error
+        return None, None
+
+
+def _lookup_in_progress(client_id: str | None):
+    """The connection's process lookup if it has not finished yet, else None.
+
+    For the `request` hook, which must not wait: `_lookup_process_info` waits
+    up to 0.5s for it, inside mitmproxy's event loop, and in the request
+    hook that stalled forwarding for every connection (measured: a second
+    request through the proxy reached it late while the first waited).
+    """
+    if not client_id:
+        return None
+    info = _client_process_info.get(client_id)
+    if info is None:
+        with _cache_lock:
+            info = _recent_process_info.get(client_id)
+    future = info.get("future") if info else None
+    return future if future is not None and not future.done() else None
 
 
 # ---------------------------------------------------------------------------
@@ -658,6 +709,40 @@ def _bind_to_running_instances(udids: frozenset[str]) -> dict[str, int]:
     return {u: running[u] for u in udids if u in running}
 
 
+def _quern_id(flow: http.HTTPFlow) -> str:
+    """The id this flow goes by, the same when it starts and when it ends.
+
+    Kept in mitmproxy's per-flow metadata, so the `request_started` event and
+    the completed flow name one request -- which is how a request that
+    started and never finished is told apart from one that never started.
+    """
+    metadata = getattr(flow, "metadata", None)
+    if isinstance(metadata, dict) and isinstance(metadata.get("quern_id"), str):
+        return metadata["quern_id"]
+    flow_id = f"f_{uuid.uuid4().hex[:12]}"
+    if isinstance(metadata, dict):
+        metadata["quern_id"] = flow_id
+    return flow_id
+
+
+def _started_monotonic(flow: http.HTTPFlow) -> float | None:
+    """When the request started, on `time.monotonic()`: the clock video frames
+    are stamped with (#290), so a flow can be placed against a frame with no
+    conversion. Read once, at the `request` hook, and kept with the flow."""
+    metadata = getattr(flow, "metadata", None)
+    if isinstance(metadata, dict) and isinstance(
+            metadata.get("quern_started_monotonic"), float):
+        return metadata["quern_started_monotonic"]
+    started = getattr(flow.request, "timestamp_start", None)
+    now_wall, now_mono = time.time(), time.monotonic()
+    # The hook runs once the request has been read; its start is earlier by
+    # however long that took, on the wall clock.
+    value = now_mono - max(0.0, now_wall - started) if isinstance(started, float) else now_mono
+    if isinstance(metadata, dict):
+        metadata["quern_started_monotonic"] = value
+    return value
+
+
 def _write_json(obj: dict[str, Any]) -> None:
     """Write a JSON object as a single line to stdout."""
     data = json.dumps(obj, separators=(",", ":"), default=str)
@@ -1073,6 +1158,46 @@ class IOSDebugAddon:
                     "request": _serialize_request(flow.request),
                 })
 
+        # 3. Say it started (#364). A flow is otherwise reported only when its
+        # response arrives or it errors, so a request the server never
+        # answers is invisible while it hangs -- the one a run most needs.
+        #
+        # Its id and start are taken now; the report waits, if it must, for
+        # the connection's process lookup -- on that lookup's own thread, never
+        # here. A start without its device would be dropped by a recording
+        # of that device, and waiting here stalls every request.
+        _quern_id(flow)
+        _started_monotonic(flow)
+        client_id = flow.client_conn.id if flow.client_conn else None
+        lookup = _lookup_in_progress(client_id)
+        try:
+            if lookup is None:
+                _START_REPORT_POOL.submit(self._report_started, flow)
+            else:
+                # Queued once the lookup is done, still on the report pool:
+                # the lookup's own worker is not held for it.
+                lookup.add_done_callback(
+                    lambda _f: _START_REPORT_POOL.submit(self._report_started, flow))
+        except RuntimeError:
+            pass                      # the pool is shut down: mitmdump is exiting
+
+    def _report_started(self, flow: http.HTTPFlow) -> None:
+        """Write the `request_started` event. Never raises: a report that
+        fails must not break the request it describes."""
+        try:
+            _write_json({
+                "type": "request_started",
+                "id": _quern_id(flow),
+                "timestamp": flow.request.timestamp_start or time.time(),
+                "started_monotonic": _started_monotonic(flow),
+                "request": _serialize_request(flow.request),
+                **self._attribution(flow, from_worker=True),
+            })
+        except Exception as e:  # noqa: BLE001 -- never let the report break the request
+            # The addon has no logger: it tells the server, which logs it.
+            with contextlib.suppress(Exception):
+                _write_json({"type": "error", "message": f"request_started not reported: {e}"})
+
     def response(self, flow: http.HTTPFlow) -> None:
         """Called when a complete response has been received."""
         if self._host_filter and flow.request.pretty_host != self._host_filter:
@@ -1107,12 +1232,12 @@ class IOSDebugAddon:
 
     def _serialize_flow(self, flow: http.HTTPFlow) -> dict[str, Any]:
         """Convert an mitmproxy flow to our JSON format."""
-        flow_id = f"f_{uuid.uuid4().hex[:12]}"
-
         result: dict[str, Any] = {
             "type": "flow",
-            "id": flow_id,
+            # The id `request_started` gave it, so the two pair up.
+            "id": _quern_id(flow),
             "timestamp": flow.request.timestamp_start or time.time(),
+            "started_monotonic": _started_monotonic(flow),
             "request": _serialize_request(flow.request),
         }
 
@@ -1124,10 +1249,21 @@ class IOSDebugAddon:
         result["timing"] = _compute_timing(flow)
         result["tls"] = _get_tls_info(flow)
         result["error"] = str(flow.error) if flow.error else None
+        result.update(self._attribution(flow))
+        return result
 
+    def _attribution(self, flow: http.HTTPFlow, *, from_worker: bool = False) -> dict[str, Any]:
+        """Which process, simulator, emulator or address a flow came from:
+        the same answer for its start and its end. `from_worker`: called off
+        the event loop, so the connection's entry is read, never rewritten."""
+        result: dict[str, Any] = {}
         # Source process tagging (from monkey-patched connection handler)
         client_id = flow.client_conn.id if flow.client_conn else None
-        info = _lookup_process_info(client_id)
+        if from_worker:
+            pid, name = _peek_process_info(client_id)
+            info = {"pid": pid, "process_name": name} if (pid or name) else None
+        else:
+            info = _lookup_process_info(client_id)
         if info:
             pid = info.get("pid")
             result["source_process"] = info.get("process_name")
