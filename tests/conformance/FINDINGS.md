@@ -922,3 +922,25 @@ spends most of its time inside each cell. Open: whether quern's default depth
 for WDA should change, or whether the endpoints that read on the caller's
 behalf (`tap_element`, `get_element`) should take `snapshot_depth` too.
 
+**Resolved by giving them one, default 12.** No single default fits every
+screen, measured on the same iPhone 11:
+
+| screen | depth 12 | depth 13 |
+|---|---|---|
+| system More list | rows missing | rows found, 1.2s |
+| 200-row table | 3.4s, all 200 rows | 26.4s, 852 elements |
+
+So reads made for the caller default to 12, a miss says the depth it used and
+how to go deeper, and the suite's `goto` asks for 13 on the More list where it
+knows it needs it. Recording that per screen is #375.
+
+## F36 — through WDA, a value-aware tap toggled a switch that was already set → fixed here
+
+WDA's element query returns no values (measured: a switch came back with type,
+rect, label and enabled only), so `tap_element(value="1")` saw the current
+value as unknown, tapped anyway, and turned an "on" switch off on the second
+call. It now reads the element's `value` attribute through WDA when the match
+has none, and refuses rather than guesses if that fails. Matching that read to
+the element uses the frame's centre: a switch's tap point is its knob, 85%
+across, and matching by it found nothing.
+

@@ -790,7 +790,12 @@ class ProbeDriver:
             # "More" is that screen's back button. Pop to the list.
             self._tap_center(mores[0])
             time.sleep(1.0)
-        self.tap_label(tab.capitalize())
+        # The system More list's rows sit one level below quern's default WDA
+        # depth (12): measured on an iPhone 11, they appear at 13 (1.2s), while
+        # 13 on the 200-row Scroll table costs 26s -- so the depth is asked for
+        # here, where it is known to be needed, not raised for every read.
+        # Ignored off WDA. See #375.
+        self.tap_label(tab.capitalize(), snapshot_depth=13)
         time.sleep(1.2)
 
     def _goto_android(self, label: str) -> None:
