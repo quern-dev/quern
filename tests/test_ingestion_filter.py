@@ -348,3 +348,86 @@ class TestPipelineIntegration:
         results, total = await buf.query(LogQueryParams(limit=100))
         assert total == 10
         assert all(e.process == "MyApp" for e in results)
+
+
+class TestQuietSubsystems:
+    """Chatter dropped, problems kept: the rule that lets Apple's frameworks
+    be quiet without hiding a TLS trust failure."""
+
+    def _filter(self, **kw) -> IngestionFilter:
+        f = IngestionFilter()
+        f.update_filter(FilterConfig(**kw))
+        return f
+
+    def test_below_the_level_is_dropped_and_at_it_kept(self):
+        f = self._filter(quiet_subsystems=("com.apple.",))
+        for level in (LogLevel.DEBUG, LogLevel.INFO, LogLevel.NOTICE, LogLevel.WARNING):
+            assert not f.should_admit(_make_entry(subsystem="com.apple.network", level=level))
+        for level in (LogLevel.ERROR, LogLevel.FAULT):
+            assert f.should_admit(_make_entry(subsystem="com.apple.CFNetwork", level=level,
+                                              message="TLS Trust evaluation failed(-9807)"))
+
+    def test_it_is_a_prefix_and_only_a_prefix(self):
+        f = self._filter(quiet_subsystems=("com.apple.",))
+        assert not f.should_admit(_make_entry(subsystem="com.apple.defaults", level=LogLevel.DEBUG))
+        for other in ("com.appsflyer.lib", "com.myapp", "notcom.apple.x", "com.applesauce"):
+            assert f.should_admit(_make_entry(subsystem=other, level=LogLevel.DEBUG)), other
+
+    def test_an_entry_with_no_subsystem_is_never_quieted(self):
+        f = self._filter(quiet_subsystems=("com.apple.",))
+        assert f.should_admit(_make_entry(subsystem="", level=LogLevel.DEBUG))
+
+    def test_the_level_can_be_set(self):
+        f = self._filter(quiet_subsystems=("com.apple.",), quiet_below=LogLevel.INFO)
+        assert not f.should_admit(_make_entry(subsystem="com.apple.UIKit", level=LogLevel.DEBUG))
+        assert f.should_admit(_make_entry(subsystem="com.apple.UIKit", level=LogLevel.INFO))
+
+    def test_the_level_alone_quiets_nothing(self):
+        f = self._filter(quiet_below=LogLevel.FAULT)
+        assert f.should_admit(_make_entry(subsystem="com.apple.network", level=LogLevel.DEBUG))
+
+    def test_simulator_quiet_carries_the_rule(self):
+        f = IngestionFilter()
+        f.update_filter(build_config(preset="simulator-quiet"))
+        assert not f.should_admit(_make_entry(subsystem="com.apple.network", level=LogLevel.INFO))
+        assert f.should_admit(_make_entry(subsystem="com.apple.CFNetwork", level=LogLevel.ERROR))
+        assert f.should_admit(_make_entry(subsystem="com.groundspeak.app", level=LogLevel.DEBUG))
+        # And what it dropped before, it still drops, at every level.
+        assert not f.should_admit(_make_entry(subsystem="com.apple.CoreFoundation",
+                                              level=LogLevel.ERROR))
+        assert not f.should_admit(_make_entry(message="HangTracer: hang", level=LogLevel.ERROR))
+
+    def test_device_quiet_is_unchanged(self):
+        assert build_config(preset="device-quiet").quiet_subsystems == ()
+
+    def test_an_override_can_take_the_rule_off_a_preset(self):
+        config = build_config(preset="simulator-quiet", quiet_subsystems=[])
+        assert config.quiet_subsystems == ()
+
+    def test_it_serialises_with_its_effective_level(self):
+        assert FilterConfig(quiet_subsystems=["com.apple."]).to_dict() == {
+            "quiet_subsystems": ["com.apple."], "quiet_below": "error"}
+
+    def test_the_route_takes_both_fields_and_refuses_a_bad_level(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from server.api.logs import router
+        from server.storage.ring_buffer import RingBuffer
+
+        app = FastAPI()
+        app.include_router(router)
+        app.state.ingestion_filter = IngestionFilter()
+        app.state.ring_buffer = RingBuffer(max_size=10)
+        app.state.device_log_adapters, app.state.sim_log_adapters = {}, {}
+        with TestClient(app) as client:
+            r = client.post("/api/v1/logs/filter", json={
+                "device_id": "SIM-1", "preset": "device-quiet",
+                "quiet_subsystems": ["com.apple."], "quiet_below": "warning"})
+            assert r.status_code == 200, r.text
+            assert r.json()["filter"]["quiet_subsystems"] == ["com.apple."]
+            assert r.json()["filter"]["quiet_below"] == "warning"
+            assert "kernel" in r.json()["filter"]["exclude_processes"], "the preset is the base"
+            bad = client.post("/api/v1/logs/filter", json={"quiet_subsystems": ["com.apple."],
+                                                           "quiet_below": "loud"})
+            assert bad.status_code == 422 and "Unknown level" in bad.json()["detail"]
