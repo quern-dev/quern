@@ -402,3 +402,19 @@ class TestValueAwareTapReadsTheValueThroughWda:
         client.element_attribute = AsyncMock(return_value=raw)
         got = await client.element_value("U", identifier="x", label=None, center=(1, 1))
         assert got == expected
+
+
+async def test_lookups_use_the_centre_not_the_switch_knob():
+    """A switch's tap point is the knob, 85% across; the WDA lookup matches by
+    frame centre, so passing the tap point found no candidate and refused."""
+    sw = UIElement(type="Switch", identifier="control_switch",
+                   frame={"x": 20.0, "y": 120.0, "width": 63.0, "height": 28.0})
+    ctrl, _ = _controller([sw])
+    ctrl.wda_client.element_value = AsyncMock(return_value="1")
+    await ctrl.tap_element(
+        identifier="control_switch", value="1", udid="PHONE",
+        scroll_to_find=False, skip_stability_check=True,
+    )
+    centre = (20.0 + 63.0 / 2, 120.0 + 28.0 / 2)
+    assert ctrl.wda_client.element_value.call_args.kwargs["center"] == centre
+    assert ctrl.wda_client.is_hittable.call_args.kwargs["center"] == centre

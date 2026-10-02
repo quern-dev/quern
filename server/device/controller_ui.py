@@ -743,9 +743,12 @@ class DeviceControllerUI:
                 )
                 reason = "off_screen"
             else:
+                # The element's centre, not its tap point: for a switch the
+                # tap point is the knob, and the lookup matches candidates by
+                # the centre of their frame.
                 hittable = await self.wda_client.is_hittable(
                     resolved, identifier=m.identifier, label=m.label or None,
-                    center=(cx, cy),
+                    center=get_center(m),
                 )
                 if hittable is False:
                     why = (
@@ -2456,7 +2459,7 @@ class DeviceControllerUI:
                 # than guess, since a guess flips real state.
                 read = await self.wda_client.element_value(
                     resolved, identifier=el.identifier, label=el.label or None,
-                    center=get_tap_point(el),
+                    center=get_center(el),
                 )
                 if read is None:
                     raise DeviceError(
