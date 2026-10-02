@@ -108,6 +108,12 @@ class Ids:
     # Diag tab
     CRASH_UNCAUGHT = "crash_uncaught"
 
+    # Location tab
+    LOCATION_AUTH = "location_auth"
+    LOCATION_LAT = "location_lat"
+    LOCATION_LON = "location_lon"
+    LOCATION_COUNT = "location_count"
+
     # State tab -- the app's one persistent surface, for the app-state tools
     STATE_GREETING = "state_greeting"
     STATE_COUNTER = "state_counter"
@@ -211,6 +217,10 @@ IOS = ProbeContract(
         Ids.WEB_VIEW: "web_view",
         Ids.WEB_HEADING_NATIVE: "web_heading_native",
         Ids.CRASH_UNCAUGHT: "diag_crash_uncaught",
+        Ids.LOCATION_AUTH: "location_auth",
+        Ids.LOCATION_LAT: "location_lat",
+        Ids.LOCATION_LON: "location_lon",
+        Ids.LOCATION_COUNT: "location_count",
         Ids.STATE_GREETING: "state_greeting",
         Ids.STATE_COUNTER: "state_counter",
         Ids.STATE_FLAG: "state_flag",
@@ -307,6 +317,10 @@ ANDROID = ProbeContract(
         Ids.WEB_VIEW: "web_view",
         Ids.WEB_HEADING_NATIVE: "web_heading_native",
         Ids.CRASH_UNCAUGHT: "diag_crash_uncaught",
+        Ids.LOCATION_AUTH: "location_auth",
+        Ids.LOCATION_LAT: "location_lat",
+        Ids.LOCATION_LON: "location_lon",
+        Ids.LOCATION_COUNT: "location_count",
         # No State tab: the app-state tools are simulator-only and refuse on
         # Android (#314), so there is nothing for one to exercise yet.
         Ids.STATE_GREETING: None,
@@ -351,6 +365,10 @@ ANDROID = ProbeContract(
         "diag": {"landmarks": [
             {"element": "StaticText", "identifier": "diag_heading"},
             {"element": "StaticText", "label": "Diag", "selected": True},
+        ]},
+        "location": {"landmarks": [
+            {"element": "StaticText", "identifier": "location_heading"},
+            {"element": "StaticText", "label": "Location", "selected": True},
         ]},
     },
 )

@@ -907,10 +907,58 @@ class TestSetLocation:
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.post(
                 "/api/v1/device/location",
-                json={"latitude": 999, "longitude": 999},
+                json={"latitude": 10, "longitude": 10},
                 headers=auth_headers,
             )
         assert resp.status_code == 500
+
+    @pytest.mark.parametrize("lat, lon", [
+        (90.5, 0), (-91, 0), (0, 180.5), (0, -181), (999, 999),
+    ])
+    async def test_a_coordinate_off_the_globe_is_refused_before_the_device(
+        self, app, auth_headers, mock_controller, lat, lon,
+    ):
+        """simctl and the emulator console both answered ok for latitude 91 (F29)."""
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/location",
+                json={"latitude": lat, "longitude": lon},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 422, resp.text
+        mock_controller.set_location.assert_not_called()
+
+    @pytest.mark.parametrize("lat, lon", [(90, 180), (-90, -180)])
+    async def test_the_poles_and_the_antimeridian_are_on_the_globe(
+        self, app, auth_headers, mock_controller, lat, lon,
+    ):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/location",
+                json={"latitude": lat, "longitude": lon},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200, resp.text
+
+    async def test_a_physical_android_refusal_is_a_400(
+        self, app, auth_headers, mock_controller,
+    ):
+        """It was a 500 prefixed `[adb]` on every physical phone (F28)."""
+        from server.models import DeviceOperationUnsupportedError
+
+        mock_controller.set_location = AsyncMock(side_effect=DeviceOperationUnsupportedError(
+            "Location simulation needs the emulator console", tool="adb",
+        ))
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/location",
+                json={"latitude": 10, "longitude": 10},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 400, resp.text
 
 
 # ---------------------------------------------------------------------------

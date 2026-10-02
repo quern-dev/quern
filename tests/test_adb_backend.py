@@ -577,3 +577,22 @@ class TestUnjudgedRuns:
             with pytest.raises(AdbTimeout, match="install did not finish within 0.05s"):
                 await backend.install_apk_result("s", "/a.apk", timeout=0.05)
         assert killed == [True]
+
+
+class TestSetLocationRefusesWithoutAConsole:
+    async def test_a_physical_serial_is_a_typed_refusal_and_runs_nothing(self):
+        """F28: as a plain DeviceError this became a 500 on every physical phone."""
+        from server.models import DeviceOperationUnsupportedError
+
+        backend = AdbBackend()
+        with patch.object(backend, "_run_adb_for_device", AsyncMock()) as run:
+            with pytest.raises(DeviceOperationUnsupportedError, match="emulator console"):
+                await backend.set_location("8BAY0WCL7", 37.0, -122.0)
+        run.assert_not_called()
+
+    async def test_an_emulator_serial_sends_longitude_first(self):
+        backend = AdbBackend()
+        with patch.object(backend, "_run_adb_for_device", AsyncMock()) as run:
+            await backend.set_location("emulator-5554", 37.5, -122.25)
+        args = run.call_args[0]
+        assert args[:6] == ("emulator-5554", "emu", "geo", "fix", "-122.25", "37.5"), args

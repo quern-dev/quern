@@ -423,6 +423,15 @@ def _install_and_launch(
         "POST", "/api/v1/device/app/install",
         json={"udid": udid, "app_path": str(artifact)}, timeout=300.0,
     )
+    # Before the first launch, because an install resets permissions and the
+    # Location tab otherwise raises its prompt -- over every test that visits
+    # it, on a fresh device. Not required: a physical iPhone cannot be granted
+    # one, and the Location tests read `location_auth` and say so themselves.
+    client.post(
+        "/api/v1/device/permission",
+        json={"udid": udid, "bundle_id": bundle_id, "permission": "location"},
+        timeout=60.0,
+    )
     client.json_ok(
         "POST", "/api/v1/device/app/launch",
         json={"udid": udid, "bundle_id": bundle_id}, timeout=180.0,

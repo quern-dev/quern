@@ -2266,8 +2266,11 @@ class PressButtonRequest(BaseModel):
 class SetLocationRequest(BaseModel):
     """Request body for POST /device/location."""
 
-    latitude: float
-    longitude: float
+    #: Bounded, so a coordinate off the globe is refused here rather than
+    #: handed to simctl or the emulator console to fail -- or not -- in its own
+    #: way. Both answered `ok` for latitude 91 (F29).
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
     udid: str | None = None
 
 
