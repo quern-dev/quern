@@ -91,14 +91,19 @@ def _addon(*rules: tuple[str, str | None]) -> IOSDebugAddon:
 
 
 def _attributed_to(udid_by_client: dict[str, str | None]):
-    """Patch the two lookups `_flow_simulator_udid` makes, per client id."""
+    """Each client id's connection, as the addon records it, in a simulator.
+
+    The connection's process info goes into the addon's real table, so
+    `_settled_process_info` is exercised; only the walk of the live process
+    tree is patched. Returns two context managers, entered together.
+    """
     pids = {cid: 1000 + i for i, cid in enumerate(udid_by_client)}
     udids = {pids[cid]: udid for cid, udid in udid_by_client.items()}
+    table = {cid: {"pid": pid, "process_name": "App"} for cid, pid in pids.items()}
     return (
-        patch.object(addon_mod, "_lookup_process_info",
-                     side_effect=lambda cid: {"pid": pids[cid]} if cid in pids else None),
-        patch.object(addon_mod, "_resolve_simulator_udid",
-                     side_effect=lambda pid: udids.get(pid)),
+        patch.dict(addon_mod._client_process_info, table),
+        patch.object(addon_mod, "_simulator_instance_for_pid",
+                     side_effect=lambda pid: (udids.get(pid), 50 if udids.get(pid) else None)),
     )
 
 
@@ -129,20 +134,79 @@ class TestAScopedRule:
             _run(a, flow)
         assert flow.response is None and _mocked_by(flow) is None
 
-    @pytest.mark.parametrize("why", ["no process info", "no pid", "no simulator", "raises"])
+    @pytest.mark.parametrize("why", [
+        "no process info", "no pid", "not a simulator", "udid not cached yet",
+        "walk unfinished", "raises",
+    ])
     def test_fails_closed_when_the_simulator_cannot_be_told(self, why):
+        """Each case alone. The walk answers ALPHA unless the case is about the
+        walk, so only the guard named can be what stops the mock."""
         a = _addon(("only_alpha", ALPHA))
         flow = _flow("alpha")
-        lookup = {
-            "no process info": lambda cid: None,
-            "no pid": lambda cid: {"pid": None},
-            "no simulator": lambda cid: {"pid": 4242},
-            "raises": MagicMock(side_effect=OSError("lookup failed")),
-        }[why]
-        with patch.object(addon_mod, "_lookup_process_info", side_effect=lookup), \
-             patch.object(addon_mod, "_resolve_simulator_udid", return_value=None):
+        info = {} if why == "no process info" else {
+            "alpha": {"pid": None if why == "no pid" else 4242, "process_name": "App"},
+        }
+        walk = {
+            "not a simulator": (None, None),
+            "udid not cached yet": (addon_mod.UNKNOWN_SIMULATOR, 50),
+            "walk unfinished": (addon_mod.UNKNOWN_SIMULATOR, None),
+        }.get(why, (ALPHA, 50))
+        walker = (MagicMock(side_effect=OSError("libproc failed")) if why == "raises"
+                  else MagicMock(return_value=walk))
+        with patch.dict(addon_mod._client_process_info, info), \
+             patch.object(addon_mod, "_simulator_instance_for_pid", walker):
             _run(a, flow)
         assert flow.response is None and _mocked_by(flow) is None
+
+    def test_a_lookup_still_running_is_not_waited_for(self):
+        """The system proxy's socket lookup may still be running when the
+        request arrives. Waiting blocked mitmproxy's event loop for up to 0.5s
+        per request, every connection with it; now it is "cannot tell"."""
+        from concurrent.futures import Future
+
+        a = _addon(("only_alpha", ALPHA))
+        flow = _flow("alpha")
+        pending: Future = Future()
+        with patch.dict(addon_mod._client_process_info, {"alpha": {"future": pending}}), \
+             patch.object(addon_mod, "_simulator_instance_for_pid", return_value=(ALPHA, 50)):
+            started = time.monotonic()
+            _run(a, flow)
+            waited = time.monotonic() - started
+        assert waited < 0.1
+        assert _mocked_by(flow) is None
+
+    def test_a_finished_lookup_is_used(self):
+        from concurrent.futures import Future
+
+        a = _addon(("only_alpha", ALPHA))
+        flow = _flow("alpha")
+        done: Future = Future()
+        done.set_result((4242, "App"))
+        with patch.dict(addon_mod._client_process_info, {"alpha": {"future": done}}), \
+             patch.object(addon_mod, "_simulator_instance_for_pid", return_value=(ALPHA, 50)):
+            _run(a, flow)
+        assert _mocked_by(flow) == "only_alpha"
+
+    def test_the_decision_never_reads_the_pid_cache(self):
+        """A reused pid: the cache says ALPHA (the pid's previous owner), the
+        live tree says BRAVO. ALPHA's mock must not answer BRAVO (#374 review)."""
+        a = _addon(("only_alpha", ALPHA))
+        flow = _flow("bravo")
+        lookup, walk = _attributed_to({"bravo": BRAVO})
+        with lookup, walk, patch.object(addon_mod, "_resolve_simulator_udid",
+                                        return_value=ALPHA) as cached:
+            _run(a, flow)
+        assert _mocked_by(flow) is None
+        cached.assert_not_called()
+
+    def test_the_requesters_udid_is_compared_without_case(self):
+        a = _addon(("only_alpha", ALPHA))
+        flow = _flow("alpha")
+        with patch.dict(addon_mod._client_process_info, {"alpha": {"pid": 7}}), \
+             patch.object(addon_mod, "_simulator_instance_for_pid",
+                          return_value=(ALPHA.lower(), 50)):
+            _run(a, flow)
+        assert _mocked_by(flow) == "only_alpha"
 
     def test_scope_is_compared_without_case(self):
         a = _addon(("only_alpha", ALPHA.lower()))
@@ -151,6 +215,23 @@ class TestAScopedRule:
         with lookup, resolve:
             _run(a, flow)
         assert _mocked_by(flow) == "only_alpha"
+
+    def test_a_scoped_rule_beats_an_earlier_catch_all(self):
+        """A catch-all set first used to shadow the scoped rule for good."""
+        a = _addon(("everyone", None), ("only_alpha", ALPHA))
+        flow = _flow("alpha")
+        lookup, resolve = _attributed_to({"alpha": ALPHA})
+        with lookup, resolve:
+            _run(a, flow)
+        assert _mocked_by(flow) == "only_alpha"
+
+    def test_re_setting_a_rule_replaces_it_in_place(self):
+        a = _addon(("only_alpha", ALPHA), ("also_alpha", ALPHA))
+        with patch("server.proxy.addon.flowfilter.parse", return_value=lambda f: True), Out():
+            a._handle_set_mock({"rule_id": "only_alpha", "pattern": "~d x",
+                                "response": {"body": "new"}, "simulator_udid": ALPHA})
+        assert [r["rule_id"] for r in a._mock_rules] == ["only_alpha", "also_alpha"]
+        assert a._mock_rules[0]["response"] == {"body": "new"}
 
     def test_a_scoped_miss_falls_through_to_a_later_rule(self):
         a = _addon(("only_alpha", ALPHA), ("everyone", None))
@@ -163,11 +244,11 @@ class TestAScopedRule:
     def test_the_simulator_is_looked_up_once_per_request(self):
         a = _addon(("r1", BRAVO), ("r2", BRAVO), ("r3", ALPHA))
         flow = _flow("alpha")
-        lookup, resolve = _attributed_to({"alpha": ALPHA})
-        with lookup as looked, resolve:
+        lookup, walk = _attributed_to({"alpha": ALPHA})
+        with lookup, walk as walked:
             _run(a, flow)
         assert _mocked_by(flow) == "r3"
-        assert looked.call_count == 1
+        assert walked.call_count == 1
 
 
 class TestAnUnscopedRule:
@@ -186,7 +267,8 @@ class TestAMockedRequestIsRecordedOnce:
         a = _addon(("only_alpha", ALPHA))
         flow = _flow("alpha")
         lookup, resolve = _attributed_to({"alpha": ALPHA})
-        with lookup, resolve, Out() as out:
+        with lookup, resolve, Out() as out, \
+             patch.object(addon_mod, "_resolve_simulator_udid", return_value=ALPHA):
             _run(a, flow)
             assert out.lines == []
             with patch.object(addon_mod, "_serialize_response", return_value={}), \
@@ -238,6 +320,7 @@ def adapter():
     a._mock_rules = []
     a.send_command = AsyncMock()
     a._running = True
+    a.local_capture_processes = ["MockProbe"]
     return a
 
 
@@ -329,3 +412,97 @@ class TestUpdatingAScope:
         rid = self._rule(client)
         r = client.patch(f"/api/v1/proxy/mocks/{rid}", headers=AUTH, json={})
         assert r.status_code == 400
+
+
+class TestTheWarningSaysWhyAScopedMockMayNotFire:
+    def test_local_capture_off(self, client, adapter):
+        adapter.local_capture_processes = []
+        r = _set(client, simulator_udid=ALPHA)
+        assert "Local capture is off" in r.json()["warning"]
+
+    def test_https_passed_through_for_that_simulator(self, client):
+        from server.models import SimulatorTls
+
+        passed = [SimulatorTls(udid=ALPHA, name="alpha", tls="passed_through",
+                               reason="does not trust the mitmproxy CA", fix=None,
+                               connections_passed_through=0, last_host=None)]
+        with patch("server.proxy.sim_tls.report", return_value=passed):
+            r = _set(client, simulator_udid=ALPHA)
+        assert "passed through" in r.json()["warning"]
+
+    def test_a_decrypted_simulator_says_nothing_about_tls(self, client):
+        from server.models import SimulatorTls
+
+        ok = [SimulatorTls(udid=ALPHA, name="alpha", tls="decrypted", reason=None, fix=None,
+                           connections_passed_through=0, last_host=None)]
+        with patch("server.proxy.sim_tls.report", return_value=ok):
+            r = _set(client, simulator_udid=ALPHA)
+        assert "warning" not in r.json()
+
+    def test_a_hung_listing_does_not_hang_the_response(self, client):
+        import asyncio
+
+        async def hang():
+            await asyncio.sleep(60)
+
+        client.app.state.device_controller.simctl.list_devices = hang
+        with patch("server.api.proxy_intercept._SCOPE_LISTING_TIMEOUT_S", 0.05):
+            started = time.monotonic()
+            r = _set(client, simulator_udid=ALPHA)
+        assert time.monotonic() - started < 5
+        assert r.status_code == 200 and r.json()["warning"].startswith("Could not list")
+
+    def test_a_failing_listing_is_could_not_check_not_a_500(self, client):
+        from server.models import DeviceError
+
+        client.app.state.device_controller.simctl.list_devices = AsyncMock(
+            side_effect=DeviceError("simctl broke", tool="simctl"),
+        )
+        r = _set(client, simulator_udid=ALPHA)
+        assert r.status_code == 200 and r.json()["warning"].startswith("Could not list")
+
+    def test_an_unscoped_update_warns_about_nothing(self, client):
+        """The warning is about the scope, so an update that leaves the scope
+        alone says nothing even when that scope's simulator is shut down."""
+        rid = _set(client, simulator_udid=BRAVO).json()["rule_id"]
+        r = client.patch(f"/api/v1/proxy/mocks/{rid}", headers=AUTH, json={"body": "b"})
+        assert "warning" not in r.json()
+
+
+class TestAnUpdateKeepsItsPlace:
+    async def test_the_adapter_replaces_in_place_and_sends_no_clear(self, adapter):
+        await adapter.set_mock("~d a", {"body": "1"}, rule_id="only_alpha", simulator_udid=ALPHA)
+        await adapter.set_mock("~d a", {"body": "2"}, rule_id="everyone")
+        adapter.send_command.reset_mock()
+        await adapter.update_mock("only_alpha", response={"body": "new"})
+        assert [r["rule_id"] for r in adapter._mock_rules] == ["only_alpha", "everyone"]
+        actions = [c.args[0]["action"] for c in adapter.send_command.await_args_list]
+        assert actions == ["set_mock"]
+
+
+class TestThePidCacheSurvivesPidReuse:
+    """Flows are filed by `_resolve_simulator_udid`, whose cache was keyed by
+    pid alone: a pid reused by another simulator's process inherited the
+    first's UDID, for as long as the proxy ran."""
+
+    def test_a_reused_pid_is_resolved_again(self):
+        launchd = {11: ALPHA, 22: BRAVO}
+        parent = {5000: 11}
+        starts = iter([(100, 0), (100, 0), (200, 0)])
+        with patch.dict(addon_mod._launchd_sim_cache, launchd, clear=True), \
+             patch.dict(addon_mod._pid_to_udid_cache, clear=True), \
+             patch.object(addon_mod, "_get_ppid", side_effect=lambda p: parent.get(p)), \
+             patch.object(addon_mod, "_proc_start_fast", side_effect=lambda p: next(starts)), \
+             patch.object(addon_mod, "_refresh_launchd_sim_cache"):
+            assert addon_mod._resolve_simulator_udid(5000) == ALPHA
+            assert addon_mod._resolve_simulator_udid(5000) == ALPHA  # cached, same process
+            parent[5000] = 22  # the pid now belongs to a process in BRAVO
+            assert addon_mod._resolve_simulator_udid(5000) == BRAVO
+
+    def test_no_start_time_means_no_caching(self):
+        with patch.dict(addon_mod._launchd_sim_cache, {11: ALPHA}, clear=True), \
+             patch.dict(addon_mod._pid_to_udid_cache, clear=True), \
+             patch.object(addon_mod, "_get_ppid", return_value=11), \
+             patch.object(addon_mod, "_proc_start_fast", return_value=None):
+            assert addon_mod._resolve_simulator_udid(5000) == ALPHA
+            assert addon_mod._pid_to_udid_cache == {}

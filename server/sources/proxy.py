@@ -540,13 +540,15 @@ class ProxyAdapter(BaseSourceAdapter):
         new_scope = simulator_udid if scope_given else rule.get("simulator_udid")
         if pattern is not None:
             validate_filter_pattern(new_pattern)
-        self._mock_rules = [r for r in self._mock_rules if r["rule_id"] != rule_id]
-        await self.send_command({"action": "clear_mock", "rule_id": rule_id})
         updated = {
             "rule_id": rule_id, "pattern": new_pattern,
             "response": new_response, "simulator_udid": new_scope,
         }
-        self._mock_rules.append(updated)
+        # Replaced in place, here and in the addon, which replaces a rule_id
+        # it already holds. Clearing and re-adding moved the rule to the end,
+        # behind rules set after it -- so updating a scoped rule's body could
+        # leave it shadowed by a catch-all.
+        self._mock_rules = [updated if r["rule_id"] == rule_id else r for r in self._mock_rules]
         await self.send_command({
             "action": "set_mock",
             "rule_id": rule_id,

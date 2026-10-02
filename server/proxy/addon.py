@@ -370,7 +370,12 @@ def _emulator_serial_for_pid(pid: int) -> str | None:
 # launchd_sim PID -> UDID
 _launchd_sim_cache: dict[int, str] = {}
 # source PID -> resolved UDID (stable while simulator is booted)
-_pid_to_udid_cache: dict[int, str | None] = {}
+#: Keyed by (pid, start time), never the pid alone. Pids are reused -- XNU
+#: assigns them sequentially and wraps -- and a proxy runs for days, so a pid
+#: cached as one simulator's app could later be a process in another, and its
+#: flows were filed under the first. A process whose start time cannot be read
+#: is not cached at all.
+_pid_to_udid_cache: dict[tuple[int, tuple[int, int]], str | None] = {}
 _cache_lock = threading.Lock()
 
 # UDID pattern in launchd_sim command line
@@ -451,33 +456,63 @@ def _mock_marker(flow: Any) -> dict | None:
     return mark if isinstance(mark, dict) and mark.get("rule_id") else None
 
 
+def _settled_process_info(client_id: str | None) -> dict | None:
+    """`_lookup_process_info`, without ever waiting.
+
+    For the request hook, which runs on mitmproxy's event loop before the
+    request goes upstream. A socket lookup still running (the system proxy's
+    `lsof` path) is not waited for: blocking the loop there stalls every
+    connection, and the attribution it would produce is only a guess until it
+    finishes. None, which a scoped rule reads as "cannot tell".
+    """
+    if not client_id:
+        return None
+    info = _client_process_info.get(client_id)
+    if info is None:
+        with _cache_lock:
+            info = _recent_process_info.get(client_id)
+    if info is None:
+        return None
+    future = info.get("future")
+    if future is not None and not future.done():
+        return None
+    return _lookup_process_info(client_id)
+
+
 def _flow_simulator_udid(flow: Any) -> str | None:
     """The simulator a request came from, or None when that cannot be told.
 
-    The same attribution `_serialize_flow` records -- the connecting process,
-    walked up to its `launchd_sim` -- so a scoped mock decides on exactly what
-    the flow is later filed under. Ancestry, not the executable path, so a
-    simulator's WebKit and nsurlsessiond requests are attributed too.
+    Decided from the live process tree (`_simulator_instance_for_pid`), not
+    the pid cache `_serialize_flow` uses: no `ps`, no waiting, and nothing a
+    reused pid can inherit. The trust check in `tls_clienthello` decides from
+    the same function for the same reasons. Ancestry, not the executable path,
+    so a simulator's WebKit traffic is attributed too.
 
-    Every failure is None, which matches no scoped rule.
+    Every failure is None, which matches no scoped rule -- including a
+    simulator whose UDID is not cached yet (`UNKNOWN_SIMULATOR`); that starts
+    a refresh, so its next request can match.
     """
     try:
         client = getattr(flow, "client_conn", None)
-        info = _lookup_process_info(getattr(client, "id", None) if client else None)
+        info = _settled_process_info(getattr(client, "id", None) if client else None)
         pid = info.get("pid") if info else None
         if pid is None:
             return None
-        udid = _resolve_simulator_udid(pid)
-        return udid if isinstance(udid, str) and udid else None
+        udid, _instance = _simulator_instance_for_pid(pid)
+        if not isinstance(udid, str) or not udid or udid == UNKNOWN_SIMULATOR:
+            return None
+        return udid
     except Exception:
         return None
 
 
 def _resolve_simulator_udid(pid: int) -> str | None:
     """Walk parent chain to find a launchd_sim ancestor → simulator UDID."""
+    started = _proc_start_fast(pid)
+    key = (pid, started) if started is not None else None
     with _cache_lock:
-        if pid in _pid_to_udid_cache:
-            return _pid_to_udid_cache[pid]
+        if key is not None and key in _pid_to_udid_cache:
+            return _pid_to_udid_cache[key]
 
     # Walk up to 10 levels of parent chain
     current = pid
@@ -490,8 +525,9 @@ def _resolve_simulator_udid(pid: int) -> str | None:
         with _cache_lock:
             udid = _launchd_sim_cache.get(current)
         if udid:
-            with _cache_lock:
-                _pid_to_udid_cache[pid] = udid
+            if key is not None:
+                with _cache_lock:
+                    _pid_to_udid_cache[key] = udid
             return udid
 
         current = _get_ppid(current)
@@ -510,15 +546,17 @@ def _resolve_simulator_udid(pid: int) -> str | None:
         with _cache_lock:
             udid = _launchd_sim_cache.get(current)
         if udid:
-            with _cache_lock:
-                _pid_to_udid_cache[pid] = udid
+            if key is not None:
+                with _cache_lock:
+                    _pid_to_udid_cache[key] = udid
             return udid
 
         current = _get_ppid(current)
 
     # Not from a simulator
-    with _cache_lock:
-        _pid_to_udid_cache[pid] = None
+    if key is not None:
+        with _cache_lock:
+            _pid_to_udid_cache[key] = None
     return None
 
 # Maximum body size to include inline (100KB)
@@ -657,6 +695,22 @@ def _ppid_fast(pid: int) -> int | None:
         # PROC_PIDTBSDINFO = 3.
         if _libproc().proc_pidinfo(pid, 3, 0, ctypes.byref(buf), ctypes.sizeof(buf)) > 0:
             return int(buf.pbi_ppid)
+    except Exception:
+        pass
+    return None
+
+
+def _proc_start_fast(pid: int) -> tuple[int, int] | None:
+    """A process's start time via libproc, never a subprocess.
+
+    With the pid, it names one process for its whole life: a reused pid has a
+    different start time. None when it cannot be read.
+    """
+    try:
+        buf = _ProcBsdInfo()
+        # PROC_PIDTBSDINFO = 3.
+        if _libproc().proc_pidinfo(pid, 3, 0, ctypes.byref(buf), ctypes.sizeof(buf)) > 0:
+            return int(buf.pbi_start_tvsec), int(buf.pbi_start_tvusec)
     except Exception:
         pass
     return None
@@ -1162,7 +1216,11 @@ class IOSDebugAddon:
 
         # 1. Check mock rules first (mock takes priority over intercept)
         with self._mock_lock:
-            rules = list(self._mock_rules)
+            # Rules scoped to a simulator first, then unscoped ones, each in
+            # the order they were set. A scoped rule is the more specific: if
+            # a catch-all set earlier came first, the simulator it was written
+            # for would never see it, with nothing to say why.
+            rules = sorted(self._mock_rules, key=lambda r: r.get("simulator_udid") is None)
         # Resolved at most once per request, and only when a scoped rule's
         # pattern has already matched: most requests meet no scoped rule.
         unresolved = object()
@@ -1580,14 +1638,22 @@ class IOSDebugAddon:
             })
             return
 
+        rule = {
+            "rule_id": rule_id,
+            "pattern_str": pattern,
+            "compiled": compiled,
+            "response": response,
+            "simulator_udid": scope,
+        }
         with self._mock_lock:
-            self._mock_rules.append({
-                "rule_id": rule_id,
-                "pattern_str": pattern,
-                "compiled": compiled,
-                "response": response,
-                "simulator_udid": scope,
-            })
+            # Replaced where it stands, so an update does not move a rule
+            # behind ones that were set after it.
+            for i, existing in enumerate(self._mock_rules):
+                if existing["rule_id"] == rule_id:
+                    self._mock_rules[i] = rule
+                    break
+            else:
+                self._mock_rules.append(rule)
 
         _write_json({
             "type": "status",

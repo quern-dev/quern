@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -200,37 +201,79 @@ async def replay_flow(
 # ---------------------------------------------------------------------------
 
 
-async def _mock_scope_warning(request: Request, udid: str | None) -> str | None:
-    """Why a mock scoped to `udid` may not fire yet, or None if it can.
+#: How long the simulator listing behind a scope warning may take. The rule is
+#: already live by then, so a slow CoreSimulator must not hang the response --
+#: a caller that times out and retries ends up with the rule twice.
+_SCOPE_LISTING_TIMEOUT_S = 5.0
 
-    A scoped rule fails closed, so a UDID that names no simulator here is a
-    mock that never fires and says nothing. Accepted anyway -- the simulator
-    may be created or booted later -- but said on the response, where the
-    caller looks. An empty listing is "could not check", never "no such
-    simulator": `simctl.list_devices` returns [] when it cannot parse.
+
+async def _mock_scope_warning(request: Request, udid: str | None) -> str | None:
+    """Why a mock scoped to `udid` may not fire, or None if nothing is known.
+
+    A scoped rule fails closed, so a scope that cannot match is a mock that
+    never fires and says nothing. Accepted anyway -- the simulator may be
+    created, booted or trusted later -- but said on the response, where the
+    caller looks. Every reason found is reported, not only the first.
     """
     if udid is None:
         return None
+    reasons: list[str] = []
+
+    adapter = getattr(request.app.state, "proxy_adapter", None)
+    if adapter is not None and not getattr(adapter, "local_capture", False):
+        reasons.append(
+            "Local capture is off. A scoped mock is decided from the process "
+            "that opened the connection; under the system proxy that is looked "
+            "up after the connection opens and may not be ready when the "
+            "request arrives, and then the request is not mocked."
+        )
+
+    try:
+        from server.proxy import sim_tls
+        tls = sim_tls.report(request.app) or []
+    except Exception:
+        _logger.debug("simulator TLS report for a mock scope failed", exc_info=True)
+        tls = []
+    entry = next((t for t in tls if t.udid.upper() == udid), None)
+    if entry is not None and entry.tls == "passed_through":
+        reasons.append(
+            f"Simulator {udid}'s HTTPS is passed through, not decrypted "
+            f"({entry.reason or 'it does not trust the CA'}), so an HTTPS "
+            "request from it cannot be mocked. Install the CA on it first."
+        )
+
     controller = getattr(request.app.state, "device_controller", None)
     try:
-        sims = await controller.simctl.list_devices() if controller else []
+        sims = (
+            await asyncio.wait_for(controller.simctl.list_devices(), _SCOPE_LISTING_TIMEOUT_S)
+            if controller else []
+        )
     except Exception:
+        # TimeoutError included: the rule is live, and this is only a check.
         _logger.debug("simulator listing for a mock scope failed", exc_info=True)
         sims = []
     if not sims:
-        return (
+        # `simctl.list_devices` returns [] when it cannot parse, so an empty
+        # listing is "could not check", never "no such simulator".
+        reasons.append(
             f"Could not list this Mac's simulators to confirm {udid} exists. The "
             "mock applies only to requests attributed to that simulator."
         )
-    match = next((d for d in sims if d.udid.upper() == udid), None)
-    if match is None:
-        return (
-            f"No simulator with UDID {udid} on this Mac, so this mock will not "
-            "fire until one exists. Check the UDID with list_devices."
-        )
-    if getattr(match.state, "value", match.state) != "booted":
-        return f"Simulator {udid} ({match.name}) is not booted; the mock applies once it is."
-    return None
+    else:
+        match = next((d for d in sims if d.udid.upper() == udid), None)
+        if match is None:
+            reasons.append(
+                f"No simulator with UDID {udid} in simctl's list, so this mock "
+                "fires only if one exists that it does not list (an XCTest "
+                "parallel-testing clone, for example). Check the UDID with "
+                "list_devices."
+            )
+        elif getattr(match.state, "value", match.state) != "booted":
+            reasons.append(
+                f"Simulator {udid} ({match.name}) is not booted; the mock "
+                "applies once it is."
+            )
+    return " ".join(reasons) or None
 
 
 @router.post("/mocks")
