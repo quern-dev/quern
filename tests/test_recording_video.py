@@ -145,6 +145,30 @@ class TestTheRecorder:
             await recorder.start(SIM, tmp_path / "video-1.mp4")
         assert "USAGE" not in str(e.value), "the error, not the usage printed after it"
 
+    async def test_a_port_taken_in_between_is_tried_again_on_another(self, tmp_path):
+        attempts = []
+
+        async def spawn(*argv, **kw):
+            attempts.append(int(argv[6]))
+            process = (FakeProcess(["error: cannot bind port 1: Address already in use"],
+                                   exits_at_once=2) if len(attempts) == 1
+                       else FakeProcess([STREAMING]))
+            process.log = Path(kw["stderr"].name)
+            process._write(process.lines)
+            return process
+
+        async def binary():
+            return Path("/bin/quern-media")
+        seg = await VideoRecorder(binary=binary, spawn=spawn).start(SIM, tmp_path / "v.mp4")
+        assert len(attempts) == 2 and seg.port == attempts[1]
+
+    async def test_a_port_that_stays_taken_is_given_up_on(self, tmp_path):
+        recorder, seen = self._recorder(FakeProcess(
+            ["error: cannot bind port 1: Address already in use"], exits_at_once=2))
+        with pytest.raises(VideoError, match="cannot bind port"):
+            await recorder.start(SIM, tmp_path / "v.mp4")
+        assert len(seen) == 3
+
     async def test_a_simulator_not_booted_is_a_start_failure(self, tmp_path):
         """quern-media binds its port before it finds the simulator is not
         booted, then exits: readiness is the capture, not the port (review).

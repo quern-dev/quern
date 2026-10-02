@@ -53,6 +53,8 @@ STOP_TIMEOUT = 65.0  # s
 #: A keyframe request is fire-and-forget: one slow answer must not hold the
 #: action that asked.
 KEYFRAME_TIMEOUT = 1.0  # s
+#: Starts tried on a fresh port when quern-media finds its port taken.
+BIND_ATTEMPTS = 3
 
 #: `[record] 1234 frames over 5.40s from host 612668.550500, 2 dropped -> /p.mp4`
 _SUMMARY = re.compile(r"\[record\] (\d+) frames over ([\d.]+)s from host ([\d.]+), "
@@ -141,6 +143,19 @@ class VideoRecorder:
 
     async def start(self, udid: str, path: Path) -> Segment:
         binary = await self._binary()
+        # The port is found free and then bound by another process, and
+        # something can take it in between -- measured once, live. Asked
+        # again on a new port rather than refusing the recording.
+        for attempt in range(BIND_ATTEMPTS):
+            try:
+                return await self._start(binary, udid, path)
+            except VideoError as e:
+                if "cannot bind port" not in str(e) or attempt == BIND_ATTEMPTS - 1:
+                    raise
+                logger.warning("quern-media could not bind its port; trying another: %s", e)
+        raise AssertionError("unreachable")
+
+    async def _start(self, binary: Path, udid: str, path: Path) -> Segment:
         seg = Segment(path=path, udid=udid, port=_free_port())
         log = log_path(path)
         with open(log, "wb") as out:            # truncated: a summary must be this run's
