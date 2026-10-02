@@ -618,3 +618,95 @@ class TestTheReviewOfPhaseTwo:
         ids = [f["id"] for a in trace["actions"] for f in a["flows"]]
         assert ids == ["now"]
 
+
+
+class TestWhereReportsAreWritten:
+    def test_a_slow_device_lookup_never_holds_the_request_hook(self, output, monkeypatch):
+        """Resolving the device runs ps and lsof: on the event loop that
+        stalled every request (review)."""
+        import server.proxy.addon as addon_mod
+
+        def slow(pid):
+            time.sleep(0.3)
+            return None
+        monkeypatch.setattr(addon_mod, "_emulator_serial_for_pid", slow)
+        addon = IOSDebugAddon()
+        addon._running = True
+        flow = _real_flow()
+        flow.client_conn.id = "conn-2"
+        addon_mod._client_process_info["conn-2"] = {"pid": 77, "process_name": "host-app"}
+        try:
+            started = time.monotonic()
+            addon.request(flow)
+            assert time.monotonic() - started < 0.1, "the request hook resolved the device"
+            assert _wait_for(output, "request_started")
+        finally:
+            addon_mod._client_process_info.pop("conn-2", None)
+
+    def test_a_deferred_report_runs_on_the_report_pool_and_leaves_the_entry_alone(
+            self, monkeypatch):
+        """Not on the lookup's worker -- other connections wait on that pool --
+        and reading, not rewriting, the shared per-connection entry, which only
+        the event loop may change (review: a racing read saw it empty)."""
+        import threading
+        from concurrent.futures import Future
+
+        import server.proxy.addon as addon_mod
+        threads = []
+        real = addon_mod._write_json
+
+        def spy(obj):
+            if obj.get("type") == "request_started":
+                threads.append(threading.current_thread().name)
+            real(obj)
+        monkeypatch.setattr(addon_mod, "_write_json", spy)
+        cap = CapturedOutput().install()
+        addon = IOSDebugAddon()
+        addon._running = True
+        flow = _real_flow()
+        flow.client_conn.id = "conn-3"
+        lookup: Future = Future()
+        entry = {"future": lookup}
+        addon_mod._client_process_info["conn-3"] = entry
+        try:
+            addon.request(flow)
+            lookup.set_result((4243, "MyApp"))     # the callback runs in this thread
+            [report] = _wait_for(cap, "request_started")
+            assert report["source_process"] == "MyApp"
+            assert threads and threads[0].startswith("quern-start"), threads
+            assert entry == {"future": lookup}, "a worker rewrote the connection's entry"
+        finally:
+            cap.restore()
+            addon_mod._client_process_info.pop("conn-3", None)
+
+
+class TestCausesInTime:
+    def test_a_gap_before_the_request_is_not_its_cause(self, tmp_path):
+        t = datetime(2026, 10, 1, 12, tzinfo=UTC)
+        lines = [
+            {"type": "started", "at": t.isoformat(), "monotonic": 1.0, "udid": SIM,
+             "format_version": 2},
+            {"type": "resumed", "at": (t + timedelta(minutes=2)).isoformat(), "monotonic": 2.0,
+             "gap": {"from": t.isoformat(), "to": (t + timedelta(minutes=1)).isoformat(),
+                     "reason": "quern was not running"}},
+            {"type": "request_started", "at": (t + timedelta(minutes=3)).isoformat(),
+             "monotonic": 3.0, "data": _flow("late", status=None,
+                                              at=t + timedelta(minutes=3)).model_dump(mode="json")},
+            {"type": "stopped", "at": (t + timedelta(minutes=4)).isoformat(), "monotonic": 4.0}]
+        (tmp_path / "events.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
+        [late] = rec_mod.load(tmp_path).unfinished
+        assert late.error == "no response: it had not finished when the recording stopped"
+
+    def test_in_flight_requests_before_the_window_do_not_count_against_it(self):
+        """The bound is spent on the window: requests in flight since long
+        before it must not push `flows_over_limit` (limit 1 bounds flows at 10)."""
+        store = FlowStore()
+        app = _app(store)
+        t = datetime.now(UTC) - timedelta(seconds=30)
+        for i in range(12):
+            store.note_started(_flow(f"old{i}", status=None, at=t - timedelta(hours=1)))
+        with TestClient(app) as client:
+            client.portal.call(app.state.server_buffer.append, _action(t + timedelta(seconds=1)))
+            trace = client.get("/api/v1/trace", params={
+                "since": (t - timedelta(seconds=5)).isoformat(), "limit": 1}).json()
+        assert trace["flows_over_limit"] is False
