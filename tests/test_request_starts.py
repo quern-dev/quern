@@ -427,3 +427,44 @@ class TestTheReadLoop:
         assert queue.get_nowait().id == "f_9", "the addon reported a start and it was dropped"
         # mitmdump's output ended: nothing it carried will finish.
         assert store.pending() == []
+
+
+class TestTheRequestHookNeverWaits:
+    def test_a_pending_lookup_defers_the_report_and_not_the_request(self, output):
+        """The hook runs in mitmproxy's event loop: waiting there for the
+        connection's process lookup stalled every request (measured live)."""
+        from concurrent.futures import Future
+
+        import server.proxy.addon as addon_mod
+        addon = IOSDebugAddon()
+        addon._running = True
+        flow = _real_flow()
+        flow.client_conn.id = "conn-1"
+        lookup: Future = Future()
+        addon_mod._client_process_info["conn-1"] = {"future": lookup}
+        try:
+            started = time.monotonic()
+            addon.request(flow)
+            assert time.monotonic() - started < 0.1, "the request hook waited"
+            assert output.of_type("request_started") == [], "reported before its device was known"
+            lookup.set_result((4242, "MyApp"))
+            [report] = output.of_type("request_started")
+            assert report["source_process"] == "MyApp" and report["source_pid"] == 4242
+            # Its start was taken at the hook, not when the report went out.
+            assert report["started_monotonic"] <= started
+        finally:
+            addon_mod._client_process_info.pop("conn-1", None)
+
+    def test_a_start_reported_after_its_flow_is_not_unfinished(self, tmp_path):
+        """A slow lookup can let the response win: the late start says nothing new."""
+        t = datetime.now(UTC)
+        done = _flow("f1", at=t).model_dump(mode="json")
+        start = _flow("f1", status=None, at=t).model_dump(mode="json")
+        lines = [{"type": "started", "at": t.isoformat(), "monotonic": 1.0, "udid": SIM,
+                  "format_version": 2},
+                 {"type": "flow", "at": t.isoformat(), "monotonic": 2.0, "data": done},
+                 {"type": "request_started", "at": t.isoformat(), "monotonic": 3.0, "data": start},
+                 {"type": "stopped", "at": t.isoformat(), "monotonic": 4.0}]
+        (tmp_path / "events.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
+        loaded = rec_mod.load(tmp_path)
+        assert loaded.unfinished == [] and [f.id for f in loaded.flows] == ["f1"]

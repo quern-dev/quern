@@ -147,6 +147,21 @@ def _lookup_process_info(client_id: str | None) -> dict | None:
     return info
 
 
+def _lookup_in_progress(client_id: str | None):
+    """The connection's process lookup if it has not finished yet, else None.
+
+    For the `request` hook, which must not wait: `_lookup_process_info` waits
+    up to 0.5s for it, inside mitmproxy's event loop, and in the request
+    hook that stalled forwarding for every connection (measured: a second
+    request through the proxy reached it late while the first waited).
+    """
+    if not client_id:
+        return None
+    info = _client_process_info.get(client_id)
+    future = info.get("future") if info else None
+    return future if future is not None and not future.done() else None
+
+
 # ---------------------------------------------------------------------------
 # Local socket → PID, for devices that reach the proxy over the network
 # ---------------------------------------------------------------------------
@@ -1111,6 +1126,23 @@ class IOSDebugAddon:
         # 3. Say it started (#364). A flow is otherwise reported only when its
         # response arrives or it errors, so a request the server never
         # answers is invisible while it hangs -- the one a run most needs.
+        #
+        # Its id and start are taken now; the report waits, if it must, for
+        # the connection's process lookup -- on that lookup's own thread, never
+        # here. A start without its device would be dropped by a recording
+        # of that device, and waiting here stalls every request.
+        _quern_id(flow)
+        _started_monotonic(flow)
+        client_id = flow.client_conn.id if flow.client_conn else None
+        lookup = _lookup_in_progress(client_id)
+        if lookup is None:
+            self._report_started(flow)
+        else:
+            lookup.add_done_callback(lambda _f: self._report_started(flow))
+
+    def _report_started(self, flow: http.HTTPFlow) -> None:
+        """Write the `request_started` event. Never raises: a report that
+        fails must not break the request it describes."""
         try:
             _write_json({
                 "type": "request_started",
