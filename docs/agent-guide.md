@@ -473,6 +473,10 @@ Use this to test error handling, slow network conditions, and malformed response
 
 Use `set_mock` to return synthetic responses for specific endpoints. This lets you create reliable, repeatable test scenarios — fixed user data, specific error conditions, or edge-case payloads — without depending on backend state. Use `update_mock` to modify an existing rule's pattern or response without deleting and recreating it.
 
+**Mocking one simulator only.** A mock applies to every device whose request matches, so on a Mac where other simulators are running too (a CI machine running XCUITests, another agent) an unscoped mock answers their requests as well. Pass `simulator_udid` to `set_mock` to mock only that simulator: every other device's matching requests reach the real server and are captured as usual. No filter pattern can do this, because every simulator's traffic arrives from `127.0.0.1`; quern decides from the process that opened the connection, which also covers that simulator's web views. A request quern cannot attribute to a simulator is not mocked by a scoped rule.
+
+A mocked request is recorded once, with `mock_rule_id` set and the tag `mocked`, so captured traffic distinguishes synthetic responses from real ones.
+
 Mock rules take priority over intercept rules. Clear them with `clear_mocks` when done.
 Clearing one rule by id now **errors with 404** if no such rule exists, where it used to
 report success — so teardown can tell "removed it" from "it was never there", and a rule

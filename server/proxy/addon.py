@@ -427,6 +427,52 @@ def _get_ppid(pid: int) -> int | None:
     return None
 
 
+_MOCK_METADATA_KEY = "quern_mock"
+
+
+def _mark_mocked(flow: Any, rule_id: str, scope: str | None) -> None:
+    """Record on the flow that a mock rule supplied its response."""
+    meta = getattr(flow, "metadata", None)
+    if isinstance(meta, dict):
+        meta[_MOCK_METADATA_KEY] = {"rule_id": rule_id, "simulator_udid": scope}
+
+
+def _mock_marker(flow: Any) -> dict | None:
+    """The mark `_mark_mocked` left, or None.
+
+    A strict dict check: anything else -- including a test double whose every
+    attribute is truthy -- is no marker, so an unmocked flow is never reported
+    as mocked.
+    """
+    meta = getattr(flow, "metadata", None)
+    if not isinstance(meta, dict):
+        return None
+    mark = meta.get(_MOCK_METADATA_KEY)
+    return mark if isinstance(mark, dict) and mark.get("rule_id") else None
+
+
+def _flow_simulator_udid(flow: Any) -> str | None:
+    """The simulator a request came from, or None when that cannot be told.
+
+    The same attribution `_serialize_flow` records -- the connecting process,
+    walked up to its `launchd_sim` -- so a scoped mock decides on exactly what
+    the flow is later filed under. Ancestry, not the executable path, so a
+    simulator's WebKit and nsurlsessiond requests are attributed too.
+
+    Every failure is None, which matches no scoped rule.
+    """
+    try:
+        client = getattr(flow, "client_conn", None)
+        info = _lookup_process_info(getattr(client, "id", None) if client else None)
+        pid = info.get("pid") if info else None
+        if pid is None:
+            return None
+        udid = _resolve_simulator_udid(pid)
+        return udid if isinstance(udid, str) and udid else None
+    except Exception:
+        return None
+
+
 def _resolve_simulator_udid(pid: int) -> str | None:
     """Walk parent chain to find a launchd_sim ancestor → simulator UDID."""
     with _cache_lock:
@@ -1116,34 +1162,37 @@ class IOSDebugAddon:
 
         # 1. Check mock rules first (mock takes priority over intercept)
         with self._mock_lock:
-            for rule in self._mock_rules:
-                compiled = rule["compiled"]
-                if compiled and compiled(flow):
-                    # Return synthetic response
-                    resp = rule["response"]
-                    flow.response = http.Response.make(
-                        resp.get("status_code", 200),
-                        resp.get("body", "").encode("utf-8"),
-                        resp.get("headers", {"content-type": "application/json"}),
-                    )
-                    flow_id = f"f_{uuid.uuid4().hex[:12]}"
-                    _write_json({
-                        "type": "mock_hit",
-                        "id": flow_id,
-                        "rule_id": rule["rule_id"],
-                        "timestamp": time.time(),
-                        "request": _serialize_request(flow.request),
-                        "response": {
-                            "status_code": resp.get("status_code", 200),
-                            "reason": "",
-                            "headers": resp.get("headers", {}),
-                            "body": resp.get("body", ""),
-                            "body_size": len(resp.get("body", "").encode("utf-8")),
-                            "body_truncated": False,
-                            "body_encoding": "utf-8",
-                        },
-                    })
-                    return
+            rules = list(self._mock_rules)
+        # Resolved at most once per request, and only when a scoped rule's
+        # pattern has already matched: most requests meet no scoped rule.
+        unresolved = object()
+        requester: Any = unresolved
+        for rule in rules:
+            compiled = rule["compiled"]
+            if not (compiled and compiled(flow)):
+                continue
+            scope = rule.get("simulator_udid")
+            if scope is not None:
+                if requester is unresolved:
+                    requester = _flow_simulator_udid(flow)
+                # Fails closed: a request whose simulator cannot be told
+                # matches no scoped rule. "Only simulator A" must never land
+                # on simulator B because the lookup came back empty.
+                if requester is None or requester.upper() != scope:
+                    continue
+            resp = rule["response"]
+            flow.response = http.Response.make(
+                resp.get("status_code", 200),
+                resp.get("body", "").encode("utf-8"),
+                resp.get("headers", {"content-type": "application/json"}),
+            )
+            # Marked rather than reported here. The response hook still runs
+            # for a flow whose response this hook supplied, and records it --
+            # attributed, like any other flow. Writing a record here as well
+            # stored every mocked request twice, the copy from here with no
+            # simulator, process or address, and neither saying it was a mock.
+            _mark_mocked(flow, rule["rule_id"], scope)
+            return
 
         # 2. Check intercept pattern
         with self._held_lock:
@@ -1249,6 +1298,9 @@ class IOSDebugAddon:
         result["timing"] = _compute_timing(flow)
         result["tls"] = _get_tls_info(flow)
         result["error"] = str(flow.error) if flow.error else None
+        mock = _mock_marker(flow)
+        if mock is not None:
+            result["mock_rule_id"] = mock["rule_id"]
         result.update(self._attribution(flow))
         return result
 
@@ -1509,6 +1561,10 @@ class IOSDebugAddon:
         rule_id = cmd.get("rule_id", f"mock_{uuid.uuid4().hex[:8]}")
         pattern = cmd.get("pattern", "")
         response = cmd.get("response", {})
+        # Upper-cased once here, so the comparison per request is a plain
+        # equality against what `_resolve_simulator_udid` returns.
+        raw_scope = cmd.get("simulator_udid")
+        scope = raw_scope.upper() if isinstance(raw_scope, str) and raw_scope else None
 
         try:
             compiled = flowfilter.parse(pattern)
@@ -1530,6 +1586,7 @@ class IOSDebugAddon:
                 "pattern_str": pattern,
                 "compiled": compiled,
                 "response": response,
+                "simulator_udid": scope,
             })
 
         _write_json({
@@ -1537,6 +1594,7 @@ class IOSDebugAddon:
             "event": "mock_set",
             "rule_id": rule_id,
             "pattern": pattern,
+            "simulator_udid": scope,
             "timestamp": time.time(),
         })
 

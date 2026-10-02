@@ -297,9 +297,9 @@ holds in `flow_store`. `flows_captured` is only what survived.
 | `list_held_flows` | GET | `/api/v1/proxy/intercept/held` | List held flows |
 | `release_flow` | POST | `/api/v1/proxy/intercept/release` | Release a held flow |
 | `replay_flow` | POST | `/api/v1/proxy/replay/{id}` | Replay a captured flow |
-| `set_mock` | POST | `/api/v1/proxy/mocks` | Add mock rule |
-| `list_mocks` | GET | `/api/v1/proxy/mocks` | List mock rules |
-| `update_mock` | PATCH | `/api/v1/proxy/mocks/{id}` | Update a mock rule's pattern and/or response |
+| `set_mock` | POST | `/api/v1/proxy/mocks` | Add mock rule. Optional `simulator_udid` mocks only that simulator's requests, failing closed when a request cannot be attributed; a UDID that is not a booted simulator is accepted with a `warning`. |
+| `list_mocks` | GET | `/api/v1/proxy/mocks` | List mock rules, each with its `simulator_udid` scope (null = every device) |
+| `update_mock` | PATCH | `/api/v1/proxy/mocks/{id}` | Update a mock rule's pattern, response or `simulator_udid` (omit to keep the scope, null to clear it) |
 | `clear_mocks` | DELETE | `/api/v1/proxy/mocks/{id}` | Delete a specific mock rule |
 
 ### Device

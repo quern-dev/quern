@@ -200,6 +200,39 @@ async def replay_flow(
 # ---------------------------------------------------------------------------
 
 
+async def _mock_scope_warning(request: Request, udid: str | None) -> str | None:
+    """Why a mock scoped to `udid` may not fire yet, or None if it can.
+
+    A scoped rule fails closed, so a UDID that names no simulator here is a
+    mock that never fires and says nothing. Accepted anyway -- the simulator
+    may be created or booted later -- but said on the response, where the
+    caller looks. An empty listing is "could not check", never "no such
+    simulator": `simctl.list_devices` returns [] when it cannot parse.
+    """
+    if udid is None:
+        return None
+    controller = getattr(request.app.state, "device_controller", None)
+    try:
+        sims = await controller.simctl.list_devices() if controller else []
+    except Exception:
+        _logger.debug("simulator listing for a mock scope failed", exc_info=True)
+        sims = []
+    if not sims:
+        return (
+            f"Could not list this Mac's simulators to confirm {udid} exists. The "
+            "mock applies only to requests attributed to that simulator."
+        )
+    match = next((d for d in sims if d.udid.upper() == udid), None)
+    if match is None:
+        return (
+            f"No simulator with UDID {udid} on this Mac, so this mock will not "
+            "fire until one exists. Check the UDID with list_devices."
+        )
+    if getattr(match.state, "value", match.state) != "booted":
+        return f"Simulator {udid} ({match.name}) is not booted; the mock applies once it is."
+    return None
+
+
 @router.post("/mocks")
 @logged_action("set_mock", category="proxy")
 async def set_mock(request: Request, body: SetMockRequest) -> dict:
@@ -209,10 +242,18 @@ async def set_mock(request: Request, body: SetMockRequest) -> dict:
         rule_id = await adapter.set_mock(
             pattern=body.pattern,
             response=body.response.model_dump(),
+            simulator_udid=body.simulator_udid,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return {"status": "accepted", "rule_id": rule_id, "pattern": body.pattern}
+    result = {
+        "status": "accepted", "rule_id": rule_id, "pattern": body.pattern,
+        "simulator_udid": body.simulator_udid,
+    }
+    warning = await _mock_scope_warning(request, body.simulator_udid)
+    if warning:
+        result["warning"] = warning
+    return result
 
 
 @router.get("/mocks", response_model=MockListResponse)
@@ -227,6 +268,7 @@ async def list_mocks(request: Request) -> MockListResponse:
             rule_id=r["rule_id"],
             pattern=r["pattern"],
             response=MockResponseSpec(**r["response"]) if r.get("response") else MockResponseSpec(),
+            simulator_udid=r.get("simulator_udid"),
         )
         for r in adapter._mock_rules
     ]
@@ -238,25 +280,35 @@ async def list_mocks(request: Request) -> MockListResponse:
 async def update_mock(request: Request, rule_id: str, body: UpdateMockRequest) -> dict:
     """Update an existing mock rule's pattern and/or response."""
     adapter = _require_running_proxy(request)
-    if body.pattern is None and body.response is None:
+    scope_given = "simulator_udid" in body.model_fields_set
+    if body.pattern is None and body.response is None and not scope_given:
         raise HTTPException(
             status_code=400,
-            detail="Must provide at least one of 'pattern' or 'response'",
+            detail="Must provide at least one of 'pattern', 'response' or 'simulator_udid'",
         )
     try:
         rule = await adapter.update_mock(
             rule_id=rule_id,
             pattern=body.pattern,
             response=body.response.model_dump() if body.response else None,
+            simulator_udid=body.simulator_udid,
+            scope_given=scope_given,
         )
     except ValueError as e:
         detail = str(e)
         status = 404 if "not found" in detail else 400
         raise HTTPException(status_code=status, detail=detail)
-    return {
+    result = {
         "status": "updated", "rule_id": rule_id,
         "pattern": rule["pattern"], "response": rule["response"],
+        "simulator_udid": rule.get("simulator_udid"),
     }
+    warning = (
+        await _mock_scope_warning(request, rule.get("simulator_udid")) if scope_given else None
+    )
+    if warning:
+        result["warning"] = warning
+    return result
 
 
 @router.delete("/mocks/{rule_id}")

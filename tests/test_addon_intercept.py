@@ -75,6 +75,9 @@ def _make_mock_flow(
     flow.client_conn = MagicMock()
     flow.client_conn.tls_version = None
     flow.client_conn.sni = None
+    # A real dict, as mitmproxy gives every flow: a MagicMock here would answer
+    # every lookup with something truthy and read as a mocked flow.
+    flow.metadata = {}
 
     # intercept() and resume() are the key methods
     flow.intercept = MagicMock()
@@ -150,7 +153,10 @@ def test_request_non_matching_intercept_passthrough(addon, output):
 
 
 def test_request_mock_match_returns_response(addon, output):
-    """Matching mock rule should set flow.response and emit mock_hit."""
+    """A matching rule sets the response and marks the flow, writing nothing.
+
+    The response hook records the flow, once; a separate mock_hit record here
+    stored every mocked request twice (#374)."""
     addon._mock_rules.append(
         {
             "rule_id": "mock_1",
@@ -172,10 +178,8 @@ def test_request_mock_match_returns_response(addon, output):
         addon.request(flow)
         mock_make.assert_called_once()
 
-    events = output.of_type("mock_hit")
-    assert len(events) == 1
-    assert events[0]["rule_id"] == "mock_1"
-    assert events[0]["response"]["status_code"] == 200
+    assert output.lines == []
+    assert flow.metadata["quern_mock"] == {"rule_id": "mock_1", "simulator_udid": None}
 
     # Flow should NOT be intercepted (mock takes priority)
     flow.intercept.assert_not_called()
@@ -208,10 +212,7 @@ def test_request_mock_custom_status_code(addon, output):
             {"content-type": "text/plain"},
         )
 
-    events = output.of_type("mock_hit")
-    assert len(events) == 1
-    assert events[0]["response"]["status_code"] == 404
-    assert events[0]["response"]["body"] == '{"error": "not found"}'
+    assert flow.metadata["quern_mock"]["rule_id"] == "mock_404"
 
 
 def test_mock_priority_over_intercept(addon, output):
@@ -234,8 +235,8 @@ def test_mock_priority_over_intercept(addon, output):
         mock_make.return_value = MagicMock()
         addon.request(flow)
 
-    # Mock hit, not intercepted
-    assert len(output.of_type("mock_hit")) == 1
+    # Mocked, not intercepted
+    assert flow.metadata["quern_mock"]["rule_id"] == "mock_priority"
     assert len(output.of_type("intercepted")) == 0
     flow.intercept.assert_not_called()
 
