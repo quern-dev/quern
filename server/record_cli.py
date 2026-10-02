@@ -20,6 +20,7 @@ import urllib.request
 USAGE = """\
 Usage: quern record start --udid UDID [--out DIR] [--kinds actions,flows,logs]
                           [--host H]... [--exclude-host H]... [--include-unattributed]
+                          [--video]
        quern record stop RECORDING_ID [--require-complete]
        quern record list
 
@@ -77,6 +78,7 @@ def main(argv: list[str]) -> int:
     start.add_argument("--exclude-host", action="append")
     start.add_argument("--kinds")
     start.add_argument("--include-unattributed", action="store_true")
+    start.add_argument("--video", action="store_true")
     stop = sub.add_parser("stop", add_help=False)
     stop.add_argument("recording_id")
     stop.add_argument("--require-complete", action="store_true")
@@ -92,7 +94,7 @@ def main(argv: list[str]) -> int:
                 else None
             body = {"udid": args.udid, "output_dir": args.out, "kinds": kinds,
                     "hosts": args.host, "exclude_hosts": args.exclude_host,
-                    "include_unattributed": args.include_unattributed}
+                    "include_unattributed": args.include_unattributed, "video": args.video}
             status, answer = _call("POST", "/api/v1/recordings", body)
         elif args.what == "stop":
             status, answer = _call("POST", f"/api/v1/recordings/{args.recording_id}/stop")
@@ -119,9 +121,16 @@ def main(argv: list[str]) -> int:
             return 3
         if args.require_complete and answer.get("complete") is not True:
             lost = {k: v for k, v in (answer.get("dropped") or {}).items() if v}
+            # The video's own reasons, when it is part of why: otherwise a
+            # run that lost only its movie read "dropped nothing, 0 gaps"
+            # and named no cause at all (CodeRabbit).
+            video = ""
+            if answer.get("video_lost"):
+                why = [w for w in answer.get("warnings") or [] if w.startswith("video")]
+                video = f"; video lost: {'; '.join(why) or 'no movie was recorded'}"
             print(f"quern record stop: {answer['id']} is not complete (state "
                   f"{answer.get('state')}, dropped {lost or 'nothing'}, "
-                  f"{len(answer.get('gaps') or [])} gap(s))", file=sys.stderr)
+                  f"{len(answer.get('gaps') or [])} gap(s){video})", file=sys.stderr)
             return 3
         return 0
     print(json.dumps(answer, indent=2))

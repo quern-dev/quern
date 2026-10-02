@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextvars
 import logging
+import weakref
 from typing import Final, Protocol
 
 #: The closed category vocabulary. A call site that does not fit one of these
@@ -249,6 +250,44 @@ class _NoAction:
 
 
 _NO_ACTION = _NoAction()
+
+
+#: Told when a running action learns its device, as `(udid, action)`: the
+#: start of the action, for all practical purposes, since resolving the
+#: device is the first thing an action does. A recording with video asks
+#: for a keyframe here, so every action is a seek point (#290, #364).
+_ACTION_DEVICE_LISTENERS: list = []
+
+
+def add_action_device_listener(listener) -> None:
+    """Held weakly when it is a bound method, so an owner that goes away --
+    a recording manager in a test, say -- drops out rather than living on."""
+    ref = weakref.WeakMethod(listener) if hasattr(listener, "__self__") else (lambda: listener)
+    _ACTION_DEVICE_LISTENERS.append(ref)
+
+
+def remove_action_device_listener(listener) -> None:
+    _ACTION_DEVICE_LISTENERS[:] = [r for r in _ACTION_DEVICE_LISTENERS
+                                   if r() is not None and r() != listener]
+
+
+def note_action_device(udid: str) -> None:
+    """Tell listeners the current action now has a device. Nothing when no
+    action is running; a listener that fails is logged, never raised into
+    the action."""
+    action = _CURRENT.get()
+    if action is None or not udid:
+        return
+    live = [r for r in _ACTION_DEVICE_LISTENERS if r() is not None]
+    _ACTION_DEVICE_LISTENERS[:] = live
+    for ref in live:
+        listener = ref()
+        if listener is None:
+            continue
+        try:
+            listener(udid, action)
+        except Exception:  # noqa: BLE001 -- a listener must never break an action
+            logging.getLogger(__name__).exception("An action-device listener failed")
 
 
 def current_action() -> ActionRecorder:

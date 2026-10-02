@@ -775,7 +775,7 @@ Read \`caveats\` and \`overlaps\` before trusting an attribution. Attribution is
 
 With several agents on one server, pass \`udid\` to get only your own device's actions.
 
-Pass \`recording\` (an id from start_recording, or the directory it wrote) to build the same trace from a recording instead of the live buffers, over any window of it (\`since\`, \`until\`) -- for a run longer than the buffers hold. Its \`recording.holes\` lists spans the recording says it does not cover, and the *_truncated fields are set when one overlaps the window.`,
+Pass \`recording\` (an id from start_recording, or the directory it wrote) to build the same trace from a recording instead of the live buffers, over any window of it (\`since\`, \`until\`) -- for a run longer than the buffers hold. Its \`recording.holes\` lists spans the recording says it does not cover, and the *_truncated fields are set when one overlaps the window. A recording made with video gives each action and flow \`video: {path, offset_s}\` -- the movie and the offset to seek to -- or null when no movie of its quern run covers it, and lists the movies in \`recording.video\`, each with an \`error\` if it was lost.`,
     inputSchema: strictParams({
       since: z
         .string()

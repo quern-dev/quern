@@ -553,6 +553,20 @@ class TestTheCli:
         monkeypatch.setattr(record_cli, "_call", lambda m, p, b=None: (200, answer))
         assert record_cli.main(["stop", "r", "--require-complete"]) == code
 
+    @pytest.mark.parametrize("warnings, said", [
+        (["video segment 1: quern-media gave no recording summary: killed"],
+         "video lost: video segment 1: quern-media gave no recording summary: killed"),
+        ([], "video lost: no movie was recorded"),
+    ])
+    def test_stop_names_lost_video_as_the_reason(self, monkeypatch, capsys, warnings, said):
+        """Lost video alone read "dropped nothing, 0 gap(s)": a CI log with
+        no cause in it (CodeRabbit)."""
+        monkeypatch.setattr(record_cli, "_call", lambda m, p, b=None: (200, {
+            "id": "r", "complete": False, "state": "stopped", "video_lost": True,
+            "warnings": warnings}))
+        assert record_cli.main(["stop", "r", "--require-complete"]) == 3
+        assert said in capsys.readouterr().err
+
     def test_an_incomplete_stop_without_the_flag_is_zero(self, monkeypatch):
         monkeypatch.setattr(record_cli, "_call", lambda m, p, b=None: (200, {
             "id": "r", "complete": False}))

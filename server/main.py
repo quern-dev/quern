@@ -269,10 +269,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # After every buffer it reads from exists, and before anything can add
     # to them: a recording resumed late would miss what arrived meanwhile.
     from server.api.trace import read_ip_map
+    from server.device.media_engine import build_media_engine
     from server.recording import RecordingManager
+    from server.recording_video import VideoRecorder
     app.state.recordings = RecordingManager(
         server_buffer=server_buffer, ring_buffer=buffer, crash_buffer=crash_buffer,
-        flow_store=flow_store, ip_map=read_ip_map)
+        flow_store=flow_store, ip_map=read_ip_map,
+        # Built on first use: a cold build is seconds, and a recording
+        # without video never needs it.
+        video=VideoRecorder(binary=build_media_engine))
     try:
         resumed = await app.state.recordings.resume_all()
     except Exception:  # noqa: BLE001 -- a recording must never stop the server starting
@@ -2099,6 +2104,7 @@ def cli() -> None:
     record_start.add_argument("--exclude-host", action="append")
     record_start.add_argument("--kinds")
     record_start.add_argument("--include-unattributed", action="store_true")
+    record_start.add_argument("--video", action="store_true")
     record_stop = record_sub.add_parser("stop")
     record_stop.add_argument("recording_id")
     record_stop.add_argument("--require-complete", action="store_true")

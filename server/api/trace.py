@@ -430,7 +430,7 @@ async def _trace_from_recording(request: Request, ref: str, since: datetime | No
         "clock_anchor": ({k: v for k, v in loaded.clock_anchors[0].items() if k != "segment"}
                          if loaded.clock_anchors else
                          {"wall": datetime.now(UTC).isoformat(), "monotonic": time.monotonic()}),
-        "actions": [_serialise(a, ip_map) for a in attributions],
+        "actions": [_with_video(_serialise(a, ip_map), a, loaded) for a in attributions],
         "log_window_truncated": bool(holes("log", "crash")),
         "logs_over_limit": False,
         "actions_over_limit": actions_over_limit,
@@ -451,8 +451,24 @@ async def _trace_from_recording(request: Request, ref: str, since: datetime | No
             # its own anchor.
             "monotonic_resets": loaded.monotonic_resets,
             "warnings": loaded.warnings,
+            # Each segment's path, run and start_host_time: what the
+            # `video` on actions and flows was joined from.
+            "video": loaded.video,
         },
     }
+
+
+def _with_video(row: dict, attribution: Attribution, loaded) -> dict:
+    """Where the action, and each of its flows, is in the recording's movie:
+    `{path, offset_s}` from the segment of the same quern run, or None. The
+    offset is what to seek to -- the movie's own timeline runs in host
+    seconds, not from zero (#290)."""
+    row["video"] = loaded.video_at(row.get("started_monotonic"),
+                                   loaded.runs.get(attribution.action.id, 0))
+    for flow in row["flows"]:
+        flow["video"] = loaded.video_at(flow.get("started_monotonic"),
+                                        loaded.runs.get(flow["id"], 0))
+    return row
 
 
 def read_ip_map() -> dict[str, tuple[str, bool]]:
