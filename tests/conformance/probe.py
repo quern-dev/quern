@@ -392,13 +392,18 @@ class ProbeUnavailable(RuntimeError):
     """The fixture app could not be built or installed, with the reason."""
 
 
-def build_ios(*, scene: bool = False, timeout: float = 600.0) -> Path:
+def build_ios(
+    *, scene: bool = False, device_udid: str | None = None, timeout: float = 600.0,
+) -> Path:
     """Build the iOS probe app and return the bundle path.
 
     `scene` builds the scene-lifecycle variant instead. The two are the same
     sources under two Info.plists, so which one a test runs against changes the
     lifecycle and nothing the contract names -- see `scene_lifecycle_required`
     for when the choice is forced.
+
+    `device_udid` builds for that physical device, signed with a development
+    profile that lists it (`find-profile.py` says what to do when none does).
 
     Raises `ProbeUnavailable` rather than failing a test directly, so the caller
     decides between skip and fail. A missing Xcode is a skip; a build that breaks
@@ -412,7 +417,11 @@ def build_ios(*, scene: bool = False, timeout: float = 600.0) -> Path:
 
     try:
         result = subprocess.run(  # noqa: S603 - fixed path in this repo
-            [str(script), *(["--scene"] if scene else [])],
+            [
+                str(script),
+                *(["--scene"] if scene else []),
+                *(["--device", device_udid] if device_udid else []),
+            ],
             cwd=str(IOS.source_dir),
             capture_output=True,
             text=True,
@@ -425,7 +434,8 @@ def build_ios(*, scene: bool = False, timeout: float = 600.0) -> Path:
         ) from exc
 
     name = "QuernProbeScene.app" if scene else "QuernProbe.app"
-    bundle = IOS.source_dir / "build" / name
+    # Device bundles are kept apart from simulator ones by build.sh.
+    bundle = IOS.source_dir / "build" / ("device" if device_udid else "") / name
     if result.returncode != 0 or not bundle.exists():
         raise ProbeUnavailable(
             f"probe-app build failed (exit {result.returncode}):\n"
@@ -486,6 +496,13 @@ class ProbeDriver:
     #: testing scroll-to-find.
     NO_SCROLL = {"scroll_to_find": False}
 
+    #: Seconds a read through WDA may take. The default (10s) is just short of
+    #: what the Scroll tab's 200 rows need on a simulator (10.5s measured), and
+    #: a timed-out read is answered from a partial fallback in which every
+    #: identifier on that screen is missing. Ignored by the accessibility-tree
+    #: backends, so it costs nothing off WDA.
+    READ = {"source_timeout": 30}
+
     def __init__(
         self,
         client,
@@ -507,14 +524,14 @@ class ProbeDriver:
     def ui_tree(self, **params) -> dict:
         return self.client.json_ok(
             "GET", "/api/v1/device/ui",
-            params={"udid": self.udid, **params}, timeout=90.0,
+            params={"udid": self.udid, **self.READ, **params}, timeout=90.0,
         )
 
     def element(self, identifier: str) -> dict | None:
         """One element's state, or None when it is not on screen."""
         resp = self.client.get(
             "/api/v1/device/ui/element",
-            params={"udid": self.udid, "identifier": identifier},
+            params={"udid": self.udid, "identifier": identifier, **self.READ},
             timeout=60.0,
         )
         if resp.status_code == 404:
@@ -560,14 +577,15 @@ class ProbeDriver:
     def tap(self, identifier: str, **extra):
         return self.client.json_ok(
             "POST", "/api/v1/device/ui/tap-element",
-            json={"udid": self.udid, "identifier": identifier, **self.NO_SCROLL, **extra},
+            json={"udid": self.udid, "identifier": identifier, **self.NO_SCROLL,
+                  **self.READ, **extra},
             timeout=90.0,
         )
 
     def tap_label(self, label: str, **extra):
         return self.client.json_ok(
             "POST", "/api/v1/device/ui/tap-element",
-            json={"udid": self.udid, "label": label, **self.NO_SCROLL, **extra},
+            json={"udid": self.udid, "label": label, **self.NO_SCROLL, **self.READ, **extra},
             timeout=90.0,
         )
 
@@ -661,19 +679,22 @@ class ProbeDriver:
             time.sleep(1.2)
             return
 
-        self.tap_label("More", element_type="RadioButton", skip_stability_check=True)
+        # By position, not by type. "More" names two elements -- the tab and,
+        # once a More screen is pushed, the back button -- and the type that
+        # told them apart (RadioButton vs Button) exists on the accessibility
+        # tree only: through WDA both are `Button "More"`, and every request
+        # by type came back ambiguous. The tab is the lowest one on screen.
+        mores = self._more_elements()
+        if not mores:
+            raise AssertionError("no 'More' tab on screen")
+        self._tap_center(mores[-1])
         time.sleep(1.2)
-        if "More" in self.labels():
-            # Pop whatever the More stack was left on. Absent is fine: it means
-            # we are already looking at the list.
-            resp = self.client.post(
-                "/api/v1/device/ui/tap-element",
-                json={"udid": self.udid, "label": "More", "element_type": "Button",
-                      **self.NO_SCROLL},
-                timeout=90.0,
-            )
-            if resp.is_success:
-                time.sleep(1.0)
+        mores = self._more_elements()
+        if len(mores) >= 2:
+            # Selecting More shows whatever its stack was left on; the higher
+            # "More" is that screen's back button. Pop to the list.
+            self._tap_center(mores[0])
+            time.sleep(1.0)
         self.tap_label(tab.capitalize())
         time.sleep(1.2)
 
@@ -740,6 +761,25 @@ class ProbeDriver:
             timeout=90.0,
         )
         time.sleep(0.8)
+
+    def _more_elements(self) -> list[dict]:
+        """Every element labelled "More", top of the screen first."""
+        found = [
+            e for e in self.ui_tree().get("elements") or []
+            if e.get("label") == "More" and e.get("type") in ("RadioButton", "Button")
+            and e.get("frame")
+        ]
+        return sorted(found, key=lambda e: e["frame"]["y"])
+
+    def _tap_center(self, element: dict) -> None:
+        frame = element["frame"]
+        self.client.json_ok(
+            "POST", "/api/v1/device/ui/tap",
+            json={"udid": self.udid,
+                  "x": frame["x"] + frame["width"] / 2,
+                  "y": frame["y"] + frame["height"] / 2},
+            timeout=90.0,
+        )
 
     def relaunch(self) -> None:
         """Terminate and relaunch, returning the app to its initial state.

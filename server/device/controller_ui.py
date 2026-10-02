@@ -1615,6 +1615,7 @@ class DeviceControllerUI:
         identifier: str | None = None,
         element_type: str | None = None,
         udid: str | None = None,
+        source_timeout: float | None = None,
     ) -> tuple[dict, str]:
         """Get a single element's state without fetching the entire UI tree.
 
@@ -1638,7 +1639,7 @@ class DeviceControllerUI:
         # in-flight read or change its result -- only the label, which is the one
         # thing this change exists to get right.
         backend = self._backend_name(udid)
-        elements, resolved = await self.get_ui_elements(udid)
+        elements, resolved = await self.get_ui_elements(udid, source_timeout=source_timeout)
         matches = find_element(
             elements, label=label, label_contains=label_contains,
             label_prefix=label_prefix, identifier=identifier,

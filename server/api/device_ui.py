@@ -185,6 +185,13 @@ async def get_element(
     identifier: str | None = Query(default=None),
     element_type: str | None = Query(default=None, alias="type"),
     udid: str | None = Query(default=None),
+    source_timeout: float | None = Query(
+        default=None, ge=1, le=60,
+        description=(
+            "Override the WDA /source timeout in seconds, for reads through WDA "
+            "(a physical device, or a simulator after start_driver)."
+        ),
+    ),
 ):
     """Get a single element's state without fetching the entire UI tree.
 
@@ -195,6 +202,11 @@ async def get_element(
     - identifier: Element identifier (case-sensitive)
     - type: Element type to narrow results (optional)
     - udid: Device UDID (auto-resolves if omitted)
+    - source_timeout: WDA /source timeout. It was missing here alone among the
+      read endpoints, so on a screen whose tree takes longer than the default
+      to serialise -- a 200-row table took 10.5s through WDA on a simulator --
+      this could only ever answer from the partial fallback, and a present
+      element came back 404 (F31).
 
     Only one of label, label_contains, or label_prefix may be provided.
 
@@ -218,6 +230,7 @@ async def get_element(
             identifier=identifier,
             element_type=element_type,
             udid=udid,
+            source_timeout=source_timeout,
         )
         return {"element": element, "udid": resolved_udid}
     except DeviceError as e:

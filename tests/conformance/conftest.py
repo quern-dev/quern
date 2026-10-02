@@ -443,8 +443,13 @@ def _install_and_launch(
 
 
 @pytest.fixture(scope="session")
-def ios_probe(quern: client_mod.QuernClient, ios_simulator: Device):
-    """QuernProbe built, installed and running on an iOS simulator.
+def ios_probe(quern: client_mod.QuernClient, any_ios: Device):
+    """QuernProbe built, installed and running on an iOS simulator or iPhone.
+
+    Takes `any_ios`, which prefers a simulator, so a run reaches a physical
+    device only when it is the one on offer -- pin it with
+    QUERN_CONFORMANCE_DEVICES. The same tests then run against WDA, which is
+    how a physical device is read: the point of running them there.
 
     Session-scoped: the build is the expensive part and the app is stateless
     between tests in every way this suite depends on. Tests that need a
@@ -452,24 +457,27 @@ def ios_probe(quern: client_mod.QuernClient, ios_simulator: Device):
     one left it -- ordering assumptions between tests are how a suite becomes
     unable to run a single test on its own.
     """
-    if not ios_simulator.booted:
+    physical = any_ios.device_type == "device"
+    if not physical and not any_ios.booted:
         quern.json_ok(
             "POST", "/api/v1/device/boot",
-            json={"udid": ios_simulator.udid}, timeout=300.0,
+            json={"udid": any_ios.udid}, timeout=300.0,
         )
 
     # iOS 27 will not launch a bundle without a scene manifest, and reports the
     # launch as successful anyway (#235), so the fixture has to choose before it
     # builds rather than fail afterwards. Below 27 the app-delegate build stays
     # the one under test: it is the older shape, and it is covered nowhere else.
-    scene = probe_mod.scene_lifecycle_required(ios_simulator.os_version)
+    scene = probe_mod.scene_lifecycle_required(any_ios.os_version)
     try:
-        bundle = probe_mod.build_ios(scene=scene)
+        bundle = probe_mod.build_ios(
+            scene=scene, device_udid=any_ios.udid if physical else None,
+        )
     except probe_mod.ProbeUnavailable as exc:
         pytest.skip(f"iOS probe app unavailable: {exc}")
 
     return _install_and_launch(
-        quern, ios_simulator.udid, bundle, probe_mod.IOS,
+        quern, any_ios.udid, bundle, probe_mod.IOS,
         probe_mod.SCENE_BUNDLE_ID if scene else probe_mod.BUNDLE_ID,
     )
 

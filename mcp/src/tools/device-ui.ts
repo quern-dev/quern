@@ -101,8 +101,14 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
         .string()
         .optional()
         .describe("Target device UDID (defaults to active device)"),
+      source_timeout: z
+        .coerce.number()
+        .min(1)
+        .max(60)
+        .optional()
+        .describe("Seconds to allow a WDA read (a physical device, or a simulator after start_driver). A screen with a long list can take longer than the default to read through WDA; the response then comes from a partial fallback, and an element that is there can be reported missing."),
     }),
-  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid }) => {
+  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout }) => {
     try {
       const data = await apiRequest("GET", "/api/v1/device/ui/element", {
         label,
@@ -111,6 +117,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
         identifier,
         type: element_type,
         udid,
+        source_timeout,
       });
 
       return {
