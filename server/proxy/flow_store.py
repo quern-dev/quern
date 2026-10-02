@@ -7,6 +7,7 @@ All public methods are async with a lock to match the RingBuffer pattern.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import OrderedDict
 from collections.abc import Callable
 from datetime import datetime
@@ -14,6 +15,8 @@ from datetime import datetime
 from server.models import FlowQueryParams, FlowRecord
 from server.storage.arrival import ArrivalClock
 from server.storage.fanout import Fanout, Missed
+
+logger = logging.getLogger(__name__)
 
 #: How many devices' eviction marks are kept individually. Past this the
 #: least recently evicted fold into a floor that applies to every device.
@@ -133,6 +136,9 @@ class FlowStore:
         self._pending_evicted = 0
         self._start_fanout: Fanout[FlowRecord] = Fanout(maxsize=1000)
         self.starts = _Starts(self._start_fanout)
+        #: Told when the proxy stops with requests in flight: a recording
+        #: writes it, so what the stop cut off is not read as a hang.
+        self.pending_dropped_listeners: list[Callable[[int], None]] = []
 
     @property
     def size(self) -> int:
@@ -354,6 +360,11 @@ class FlowStore:
         many were dropped."""
         dropped = len(self._pending)
         self._pending.clear()
+        for listener in list(self.pending_dropped_listeners):
+            try:
+                listener(dropped)
+            except Exception:  # noqa: BLE001 -- one listener must not stop the others
+                logger.exception("A pending-dropped listener failed")
         return dropped
 
     def subscribe(

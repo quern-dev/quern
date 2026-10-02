@@ -308,6 +308,16 @@ class RecordingManager:
         self._ip_map_failing = False
         self._recordings: dict[str, Recording] = {}
         self._save_lock = asyncio.Lock()
+        listeners = getattr(flow_store, "pending_dropped_listeners", None)
+        if listeners is not None:
+            listeners.append(self._note_proxy_stopped)
+
+    def _note_proxy_stopped(self, in_flight: int) -> None:
+        """The proxy stopped: requests in flight then will not finish, and a
+        recording that says so does not read them back as hung."""
+        for rec in self._recordings.values():
+            if rec.state == "recording" and "flows" in rec.filters.kinds:
+                rec._pending.append(_line("proxy_stopped", in_flight=in_flight))
 
     # ── selection: the trace's own rules ────────────────────────────────────
 
@@ -752,6 +762,8 @@ def load(directory: Path, *, live: bool = False, markers_only: bool = False) -> 
     flows: dict[str, FlowRecord] = {}
     starts: dict[str, FlowRecord] = {}
     version = 1
+    # What can explain a start with no flow, other than a hang.
+    cut: list[tuple[datetime | None, datetime | None, str]] = []
     logs: list[LogEntry] = []
     holes: list[tuple] = []
     anchors: list[dict] = []
@@ -805,10 +817,22 @@ def load(directory: Path, *, live: bool = False, markers_only: bool = False) -> 
                         holes += _gap_holes(_dt(gap.get("from")), _dt(gap.get("to")),
                                             gap.get("reason") or "gap",
                                             exact_flows=version >= 2)
+                        cut.append((None, _dt(gap.get("to")),
+                                    f"{gap.get('reason') or 'a gap'} from {gap.get('from')} to "
+                                    f"{gap.get('to')}; it may have been answered then"))
                 elif kind == "dropped":
                     holes.append((_dt(event.get("first")), _dt(event.get("last")),
                                   frozenset({event.get("what")}),
                                   f"{event.get('count')} {event.get('what')} dropped"))
+                    if event.get("what") == "flow":
+                        # Spanned by the dropped flows' own timestamps -- their
+                        # starts -- so a request inside it may be among them.
+                        cut.append((_dt(event.get("first")), _dt(event.get("last")),
+                                    f"its flow may be among {event.get('count')} the "
+                                    f"recording dropped"))
+                elif kind == "proxy_stopped":
+                    cut.append((None, at, f"the proxy stopped at {event.get('at')} while it "
+                                          f"was in flight"))
                 elif kind == "warning":
                     warnings.append(str(event.get("message")))
                 elif kind == "failed":
@@ -832,29 +856,31 @@ def load(directory: Path, *, live: bool = False, markers_only: bool = False) -> 
     return Loaded(actions=actions, flows=list(flows.values()), logs=logs, udid=udid,
                   holes=holes, stopped=stopped, unreadable_lines=bad,
                   clock_anchors=anchors, monotonic_resets=resets, warnings=warnings,
-                  unfinished=[_unfinished(f, holes, stopped=stopped, live=live)
+                  unfinished=[_unfinished(f, cut, stopped=stopped, live=live)
                               for f in starts.values()])
 
 
-def _unfinished(flow: FlowRecord, holes: list[tuple], *, stopped: bool,
+def _unfinished(flow: FlowRecord, cut: list[tuple], *, stopped: bool,
                 live: bool) -> FlowRecord:
     """A request with a start and no flow, with why in its `error`.
 
-    Only "hung" when nothing else could explain it: a gap or dropped flows
-    after it started may have taken its response, and that is said instead.
+    Anything that could have taken its response is named first, live or not:
+    a gap after it started (quern not running), the proxy stopping after it
+    started, or dropped flows whose span holds its timestamp -- a dropped
+    flow is stamped with its request's start, so the test is containment,
+    not "after". Only with none of those is it unfinished, and that is said
+    as what is known: it had not finished, not that it never would.
     """
-    after = [why for start, end, what, why in holes
-             if "flow" in what and (end is None or end >= flow.timestamp)
-             and (start is None or start >= flow.timestamp - timedelta(seconds=1))]
+    t = flow.timestamp
+    for start, end, why in cut:
+        if (start is None or start <= t) and (end is None or end >= t):
+            return flow.model_copy(update={"error": f"no response recorded: {why}"})
     if live and not stopped:
         reason = "in flight: no response yet"
-    elif after:
-        reason = f"no response recorded, and the recording has a hole after it started: " \
-                 f"{after[0]}; it may have been answered then"
     elif stopped:
-        reason = "no response before the recording stopped: the request never finished"
+        reason = "no response: it had not finished when the recording stopped"
     else:
-        reason = "no response before the recording ended"
+        reason = "no response: it had not finished when the recording ended"
     return flow.model_copy(update={"error": reason})
 
 
@@ -936,7 +962,8 @@ def read_events(directory: Path, kinds, *, since: datetime | None = None,
                 continue
             data = event.get("data")
             if kind in wanted and data is not None:
-                if flow_id is not None and (kind != "flow" or data.get("id") != flow_id):
+                if flow_id is not None and (kind not in ("flow", "request_started")
+                                            or data.get("id") != flow_id):
                     continue
                 at = _dt(data.get("timestamp"))
                 if at is not None and ((since and at < since) or (until and at > until)):

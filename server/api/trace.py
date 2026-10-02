@@ -436,14 +436,14 @@ async def _trace_from_recording(request: Request, ref: str, since: datetime | No
         "actions_over_limit": actions_over_limit,
         "action_window_truncated": bool(holes("action")),
         "flows_over_limit": False,
-        "flow_window_truncated": bool(holes("flow")),
+        "flow_window_truncated": bool(holes("flow", "request_started")),
         # Not recorded: whether capture was on is a fact about the run, and
         # this server's proxy today says nothing about it.
         "proxy_running": None,
         "recording": {
             "directory": str(directory),
             "stopped": loaded.stopped,
-            "holes": holes("action", "flow", "log", "crash"),
+            "holes": holes("action", "flow", "request_started", "log", "crash"),
             "unreadable_lines": loaded.unreadable_lines,
             "clock_anchors": loaded.clock_anchors,
             # A reboot during the run: `started_monotonic` values on either

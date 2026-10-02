@@ -62,6 +62,26 @@ def output():
     cap.restore()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_process_lookups(monkeypatch):
+    """Attribution runs ps, lsof and libproc against real pids; a test must
+    never reach the machine that way, nor leave a pid cached for the next."""
+    import server.proxy.addon as addon_mod
+    monkeypatch.setattr(addon_mod, "_resolve_simulator_udid", lambda pid: None)
+    monkeypatch.setattr(addon_mod, "_emulator_serial_for_pid", lambda pid: None)
+
+
+def _wait_for(output, kind, n=1, timeout=2.0):
+    """Reports are written from a worker pool, never the event loop: wait for
+    them rather than reading the output at once."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if len(output.of_type(kind)) >= n:
+            return output.of_type(kind)
+        time.sleep(0.01)
+    return output.of_type(kind)
+
+
 def _real_flow():
     flow = _make_mock_flow()
     flow.metadata = {}                 # mitmproxy's flows carry a real dict
@@ -75,7 +95,7 @@ class TestTheAddon:
         addon._running = True
         flow = _real_flow()
         addon.request(flow)
-        [started] = output.of_type("request_started")
+        [started] = _wait_for(output, "request_started")
         assert started["id"].startswith("f_")
         assert started["request"]["method"] == "GET"
         # On the monotonic clock, back-dated to when the request started.
@@ -87,7 +107,7 @@ class TestTheAddon:
         flow = _real_flow()
         addon.request(flow)
         addon.response(flow)
-        [started] = output.of_type("request_started")
+        [started] = _wait_for(output, "request_started")
         [done] = output.of_type("flow")
         assert done["id"] == started["id"]
         assert done["started_monotonic"] == started["started_monotonic"]
@@ -97,7 +117,7 @@ class TestTheAddon:
         addon._running = True
         for flow in (_real_flow(), _real_flow()):
             addon.request(flow)
-        ids = {m["id"] for m in output.of_type("request_started")}
+        ids = {m["id"] for m in _wait_for(output, "request_started", 2)}
         assert len(ids) == 2
 
     def test_a_mocked_request_is_answered_not_started(self, output):
@@ -110,7 +130,7 @@ class TestTheAddon:
             "compiled": lambda f: f.request.pretty_host == "api.example.com",
             "response": {"status_code": 200, "headers": {}, "body": "{}"}})
         addon.request(_real_flow())
-        assert output.of_type("request_started") == []
+        assert _wait_for(output, "request_started", timeout=0.3) == []
         assert len(output.of_type("mock_hit")) == 1
 
     def test_a_held_request_is_in_flight(self, output):
@@ -120,7 +140,7 @@ class TestTheAddon:
         addon._intercept_pattern = "~d api.example.com"
         addon.request(_real_flow())
         assert len(output.of_type("intercepted")) == 1
-        assert len(output.of_type("request_started")) == 1
+        assert len(_wait_for(output, "request_started")) == 1
 
     def test_a_report_that_fails_never_breaks_the_request(self, output, monkeypatch):
         import server.proxy.addon as addon_mod
@@ -132,8 +152,8 @@ class TestTheAddon:
             raise RuntimeError("unserialisable")
         monkeypatch.setattr(addon_mod, "_serialize_request", broken)
         addon.request(_real_flow())               # does not raise
+        [err] = _wait_for(output, "error")
         monkeypatch.setattr(addon_mod, "_serialize_request", real)
-        [err] = output.of_type("error")
         assert "request_started not reported" in err["message"]
 
 
@@ -276,7 +296,8 @@ class TestRecordingStarts:
         await _settle()
         await manager.stop(rec.id)
         [hung] = rec_mod.load(tmp_path / "r").unfinished
-        assert hung.id == "hung" and "never finished" in hung.error
+        assert hung.id == "hung"
+        assert hung.error == "no response: it had not finished when the recording stopped"
         assert hung.request.body == '{"email":"a@b.c"}', "what it sent is kept"
 
     async def test_one_still_running_is_in_flight(self, tmp_path):
@@ -301,7 +322,7 @@ class TestRecordingStarts:
         await second.resume_all()
         await second.stop(rec.id)
         [cut] = rec_mod.load(tmp_path / "r").unfinished
-        assert "quern was not running" in cut.error and "never finished" not in cut.error
+        assert "quern was not running" in cut.error and "had not finished" not in cut.error
 
     def test_a_version_2_gap_is_exact_for_flows(self, tmp_path):
         """No five-minute lookback: a request in flight at the gap is in the
@@ -397,7 +418,7 @@ class TestTheTrace:
                                params={"recording": str(tmp_path / "r")}).json()
         [action] = trace["actions"]
         [flow] = action["flows"]
-        assert flow["id"] == "hung" and "never finished" in flow["error"]
+        assert flow["id"] == "hung" and "had not finished" in flow["error"]
 
 
 class TestTheReadLoop:
@@ -448,7 +469,7 @@ class TestTheRequestHookNeverWaits:
             assert time.monotonic() - started < 0.1, "the request hook waited"
             assert output.of_type("request_started") == [], "reported before its device was known"
             lookup.set_result((4242, "MyApp"))
-            [report] = output.of_type("request_started")
+            [report] = _wait_for(output, "request_started")
             assert report["source_process"] == "MyApp" and report["source_pid"] == 4242
             # Its start was taken at the hook, not when the report went out.
             assert report["started_monotonic"] <= started
@@ -468,3 +489,132 @@ class TestTheRequestHookNeverWaits:
         (tmp_path / "events.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
         loaded = rec_mod.load(tmp_path)
         assert loaded.unfinished == [] and [f.id for f in loaded.flows] == ["f1"]
+
+
+class TestTheReviewOfPhaseTwo:
+    def _file(self, tmp_path, lines):
+        (tmp_path / "events.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
+
+    def _start_line(self, t, fid="r1"):
+        return {"type": "request_started", "at": t.isoformat(), "monotonic": 2.0,
+                "data": _flow(fid, status=None, at=t).model_dump(mode="json")}
+
+    def test_a_dropped_span_holding_its_timestamp_is_named_not_a_hang(self, tmp_path):
+        """Dropped flows are stamped with their starts: the span begins before
+        this request's, and it may be among them (review: called a hang)."""
+        t = datetime(2026, 10, 1, 12, tzinfo=UTC)
+        self._file(tmp_path, [
+            {"type": "started", "at": t.isoformat(), "monotonic": 1.0, "udid": SIM,
+             "format_version": 2},
+            self._start_line(t),
+            {"type": "dropped", "at": t.isoformat(), "monotonic": 3.0, "what": "flow",
+             "count": 7, "first": (t - timedelta(seconds=5)).isoformat(),
+             "last": (t + timedelta(seconds=5)).isoformat()},
+            {"type": "stopped", "at": t.isoformat(), "monotonic": 4.0}])
+        [r1] = rec_mod.load(tmp_path).unfinished
+        assert "may be among 7 the recording dropped" in r1.error
+
+    def test_a_dropped_span_elsewhere_does_not_excuse_it(self, tmp_path):
+        t = datetime(2026, 10, 1, 12, tzinfo=UTC)
+        self._file(tmp_path, [
+            {"type": "started", "at": t.isoformat(), "monotonic": 1.0, "udid": SIM,
+             "format_version": 2},
+            self._start_line(t),
+            {"type": "dropped", "at": t.isoformat(), "monotonic": 3.0, "what": "flow",
+             "count": 2, "first": (t + timedelta(minutes=5)).isoformat(),
+             "last": (t + timedelta(minutes=6)).isoformat()},
+            {"type": "stopped", "at": t.isoformat(), "monotonic": 4.0}])
+        [r1] = rec_mod.load(tmp_path).unfinished
+        assert "had not finished when the recording stopped" in r1.error
+
+    def test_a_live_recording_names_the_gap_not_in_flight(self, tmp_path):
+        """A restart killed it: "in flight" for the rest of the run was false."""
+        t = datetime(2026, 10, 1, 12, tzinfo=UTC)
+        self._file(tmp_path, [
+            {"type": "started", "at": t.isoformat(), "monotonic": 1.0, "udid": SIM,
+             "format_version": 2},
+            self._start_line(t),
+            {"type": "resumed", "at": (t + timedelta(minutes=1)).isoformat(), "monotonic": 5.0,
+             "gap": {"from": (t + timedelta(seconds=2)).isoformat(),
+                     "to": (t + timedelta(minutes=1)).isoformat(),
+                     "reason": "quern was not running"}}])
+        [r1] = rec_mod.load(tmp_path, live=True).unfinished
+        assert "quern was not running" in r1.error and "in flight" not in r1.error
+
+    def test_a_proxy_stop_is_named(self, tmp_path):
+        t = datetime(2026, 10, 1, 12, tzinfo=UTC)
+        self._file(tmp_path, [
+            {"type": "started", "at": t.isoformat(), "monotonic": 1.0, "udid": SIM,
+             "format_version": 2},
+            self._start_line(t),
+            {"type": "proxy_stopped", "at": (t + timedelta(seconds=9)).isoformat(),
+             "monotonic": 3.0, "in_flight": 1},
+            {"type": "stopped", "at": t.isoformat(), "monotonic": 4.0}])
+        [r1] = rec_mod.load(tmp_path).unfinished
+        assert "the proxy stopped" in r1.error
+
+    async def test_a_proxy_stop_is_written_into_recordings(self, tmp_path):
+        src = Sources()
+        manager = src.manager()
+        rec = await manager.start(SIM, str(tmp_path / "r"), Filters())
+        src.flows.note_started(_flow("cut", status=None))
+        await _settle()
+        assert src.flows.drop_pending() == 1
+        await manager.stop(rec.id)
+        assert "proxy_stopped" in [e["type"] for e in _events(tmp_path / "r")]
+        [cut] = rec_mod.load(tmp_path / "r").unfinished
+        assert "the proxy stopped" in cut.error
+
+    def test_dropped_starts_are_holes_in_the_trace(self, tmp_path):
+        t = datetime(2026, 10, 1, 12, tzinfo=UTC)
+        (tmp_path / "r").mkdir()
+        self._file(tmp_path / "r", [
+            {"type": "started", "at": t.isoformat(), "monotonic": 1.0, "udid": SIM,
+             "format_version": 2},
+            {"type": "dropped", "at": t.isoformat(), "monotonic": 2.0,
+             "what": "request_started", "count": 3, "first": t.isoformat(),
+             "last": t.isoformat()},
+            {"type": "stopped", "at": t.isoformat(), "monotonic": 4.0}])
+        with TestClient(_app(FlowStore())) as client:
+            trace = client.get("/api/v1/trace", params={"recording": str(tmp_path / "r")}).json()
+        assert trace["flow_window_truncated"] is True
+        assert any("request_started dropped" in h for h in trace["recording"]["holes"])
+
+    async def test_a_start_only_request_can_be_read_in_full(self, tmp_path):
+        src = Sources()
+        manager = src.manager()
+        rec = await manager.start(SIM, str(tmp_path / "r"), Filters())
+        src.flows.note_started(_flow("hung", status=None))
+        await _settle()
+        await manager.stop(rec.id)
+        page = rec_mod.read_events(tmp_path / "r", ("flows",), flow_id="hung")
+        [event] = page["events"]
+        assert event["type"] == "request_started"
+        assert event["data"]["request"]["body"] == '{"email":"a@b.c"}'
+
+    @pytest.mark.parametrize("params, keep", [({"device_serial": "emulator-5554"}, "emu"),
+                                              ({"client_ip": "10.0.0.5"}, "phone")])
+    def test_the_pending_route_filters_each_way(self, params, keep):
+        store = FlowStore()
+        store.note_started(_flow("sim", status=None))
+        store.note_started(_flow("emu", sim=None, status=None).model_copy(
+            update={"device_serial": "emulator-5554"}))
+        store.note_started(_flow("phone", sim=None, status=None).model_copy(
+            update={"client_ip": "10.0.0.5"}))
+        with TestClient(_app(store)) as client:
+            body = client.get("/api/v1/proxy/flows/pending", params=params).json()
+        assert [p["id"] for p in body["pending"]] == [keep]
+
+    def test_the_live_trace_takes_only_pending_in_its_window(self):
+        store = FlowStore()
+        app = _app(store)
+        t = datetime.now(UTC) - timedelta(seconds=30)
+        store.note_started(_flow("old", status=None, at=t - timedelta(hours=1)))
+        store.note_started(_flow("now", status=None, at=t + timedelta(milliseconds=200)))
+        with TestClient(app) as client:
+            client.portal.call(app.state.server_buffer.append, _action(t + timedelta(seconds=1)))
+            trace = client.get("/api/v1/trace", params={
+                "since": (t - timedelta(seconds=5)).isoformat()}).json()
+        ids = [f["id"] for a in trace["actions"] for f in a["flows"]]
+        assert ids == ["now"]
+

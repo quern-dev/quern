@@ -147,6 +147,38 @@ def _lookup_process_info(client_id: str | None) -> dict | None:
     return info
 
 
+#: Where `request_started` reports are written from: never mitmproxy's event
+#: loop, whose request hook must not wait. Resolving a report's device can
+#: run `ps`, `lsof` and libproc (measured ~40ms for lsof), so it is done here,
+#: on threads of its own rather than the socket-lookup pool's, which other
+#: connections' attribution waits on.
+_START_REPORT_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="quern-start")
+
+
+def _peek_process_info(client_id: str | None, wait: float = 0.5) -> tuple[int | None, str | None]:
+    """(pid, process name) for a connection, read without changing anything.
+
+    For worker threads: `_lookup_process_info` replaces the shared per-
+    connection entry in place, which only the event loop may do -- a read
+    there racing a write here saw an empty entry and went unattributed.
+    """
+    if not client_id:
+        return None, None
+    info = _client_process_info.get(client_id)
+    if info is None:
+        with _cache_lock:
+            info = _recent_process_info.get(client_id)
+    if not info:
+        return None, None
+    future = info.get("future")
+    if future is None:
+        return info.get("pid"), info.get("process_name")
+    try:
+        return future.result(timeout=wait)
+    except Exception:  # noqa: BLE001 -- a lookup that failed is an unknown, not an error
+        return None, None
+
+
 def _lookup_in_progress(client_id: str | None):
     """The connection's process lookup if it has not finished yet, else None.
 
@@ -158,6 +190,9 @@ def _lookup_in_progress(client_id: str | None):
     if not client_id:
         return None
     info = _client_process_info.get(client_id)
+    if info is None:
+        with _cache_lock:
+            info = _recent_process_info.get(client_id)
     future = info.get("future") if info else None
     return future if future is not None and not future.done() else None
 
@@ -1135,10 +1170,16 @@ class IOSDebugAddon:
         _started_monotonic(flow)
         client_id = flow.client_conn.id if flow.client_conn else None
         lookup = _lookup_in_progress(client_id)
-        if lookup is None:
-            self._report_started(flow)
-        else:
-            lookup.add_done_callback(lambda _f: self._report_started(flow))
+        try:
+            if lookup is None:
+                _START_REPORT_POOL.submit(self._report_started, flow)
+            else:
+                # Queued once the lookup is done, still on the report pool:
+                # the lookup's own worker is not held for it.
+                lookup.add_done_callback(
+                    lambda _f: _START_REPORT_POOL.submit(self._report_started, flow))
+        except RuntimeError:
+            pass                      # the pool is shut down: mitmdump is exiting
 
     def _report_started(self, flow: http.HTTPFlow) -> None:
         """Write the `request_started` event. Never raises: a report that
@@ -1150,7 +1191,7 @@ class IOSDebugAddon:
                 "timestamp": flow.request.timestamp_start or time.time(),
                 "started_monotonic": _started_monotonic(flow),
                 "request": _serialize_request(flow.request),
-                **self._attribution(flow),
+                **self._attribution(flow, from_worker=True),
             })
         except Exception as e:  # noqa: BLE001 -- never let the report break the request
             # The addon has no logger: it tells the server, which logs it.
@@ -1211,13 +1252,18 @@ class IOSDebugAddon:
         result.update(self._attribution(flow))
         return result
 
-    def _attribution(self, flow: http.HTTPFlow) -> dict[str, Any]:
+    def _attribution(self, flow: http.HTTPFlow, *, from_worker: bool = False) -> dict[str, Any]:
         """Which process, simulator, emulator or address a flow came from:
-        the same answer for its start and its end."""
+        the same answer for its start and its end. `from_worker`: called off
+        the event loop, so the connection's entry is read, never rewritten."""
         result: dict[str, Any] = {}
         # Source process tagging (from monkey-patched connection handler)
         client_id = flow.client_conn.id if flow.client_conn else None
-        info = _lookup_process_info(client_id)
+        if from_worker:
+            pid, name = _peek_process_info(client_id)
+            info = {"pid": pid, "process_name": name} if (pid or name) else None
+        else:
+            info = _lookup_process_info(client_id)
         if info:
             pid = info.get("pid")
             result["source_process"] = info.get("process_name")
