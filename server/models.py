@@ -1191,6 +1191,10 @@ class TraceFlow(BaseModel):
     #: movie of the same quern run, or null.
     video: dict | None = None
     source_process: str | None = None
+    #: Set when a mock rule supplied this response rather than the real
+    #: server, naming the rule (#374): a trace exported for analysis must
+    #: tell synthetic responses from real ones.
+    mock_rule_id: str | None = None
     #: How this flow's device was established: "process" (exact, resolved from
     #: the client pid), "client_ip" (a recorded address, still trusted),
     #: "client_ip_expired" (recorded too long ago to vouch for), or

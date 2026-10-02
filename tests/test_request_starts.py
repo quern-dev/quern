@@ -129,9 +129,14 @@ class TestTheAddon:
             "rule_id": "m1", "pattern_str": "~d api.example.com",
             "compiled": lambda f: f.request.pretty_host == "api.example.com",
             "response": {"status_code": 200, "headers": {}, "body": "{}"}})
-        addon.request(_real_flow())
+        flow = _real_flow()
+        addon.request(flow)
         assert _wait_for(output, "request_started", timeout=0.3) == []
-        assert len(output.of_type("mock_hit")) == 1
+        # Answered: marked on the flow, which the response hook then records
+        # once (#374) -- there is no separate mock_hit record any more.
+        from server.proxy.addon import _mock_marker
+        assert _mock_marker(flow)["rule_id"] == "m1"
+        assert output.of_type("mock_hit") == []
 
     def test_a_held_request_is_in_flight(self, output):
         addon = IOSDebugAddon()

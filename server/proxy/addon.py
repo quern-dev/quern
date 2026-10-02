@@ -461,20 +461,11 @@ def _settled_process_info(client_id: str | None) -> dict | None:
 
     For the request hook, which runs on mitmproxy's event loop before the
     request goes upstream. A socket lookup still running (the system proxy's
-    `lsof` path) is not waited for: blocking the loop there stalls every
-    connection, and the attribution it would produce is only a guess until it
-    finishes. None, which a scoped rule reads as "cannot tell".
+    `lsof` path) is not waited for -- the same rule `request_started` follows,
+    through the same `_lookup_in_progress` -- and reads as None, which a
+    scoped rule takes as "cannot tell".
     """
-    if not client_id:
-        return None
-    info = _client_process_info.get(client_id)
-    if info is None:
-        with _cache_lock:
-            info = _recent_process_info.get(client_id)
-    if info is None:
-        return None
-    future = info.get("future")
-    if future is not None and not future.done():
+    if _lookup_in_progress(client_id) is not None:
         return None
     return _lookup_process_info(client_id)
 

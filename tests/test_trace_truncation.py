@@ -722,6 +722,17 @@ class TestIdentifiedByReachesTheResponse:
 
         assert action["flows"][0]["identified_by"] == "client_ip_expired"
 
+    async def test_a_mocked_flow_says_which_rule_answered_it(self, ip_map):
+        """A trace exported for analysis must tell a synthetic response from a
+        real one (#374). It picks its fields one by one, so the marker the
+        flow carries has to be among them."""
+        action = await self._trace(store=_FakeFlowStore([
+            _flow(1, simulator_udid="SIM-A", mock_rule_id="mock_1", tags=["mocked"]),
+            _flow(2, simulator_udid="SIM-A"),
+        ]))
+
+        assert [f["mock_rule_id"] for f in action["flows"]] == ["mock_1", None]
+
     async def test_a_flow_with_no_device_is_marked_unidentified(self, ip_map):
         action = await self._trace(store=_FakeFlowStore([_flow(1)]))
 
