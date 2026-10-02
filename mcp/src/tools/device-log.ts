@@ -31,7 +31,7 @@ NOTE (iOS): Does NOT capture print() — use os.Logger instead.`,
       preset: z
         .string()
         .optional()
-        .describe("Apply an ingestion filter preset at start (e.g. 'device-quiet')"),
+        .describe("Apply an ingestion filter preset at start (e.g. 'device-quiet', which drops noisy system daemons, CoreBrightness, and every com.apple.* entry below error -- Apple's errors and faults are kept)"),
     }),
   }, async ({ udid, process, match, preset }) => {
     try {

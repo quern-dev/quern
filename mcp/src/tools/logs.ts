@@ -677,7 +677,7 @@ This eliminates all framework noise (UIKitCore, CFNetwork, Security) and shows o
       subsystems: z
         .array(z.string())
         .optional()
-        .describe("Include only entries from these subsystems"),
+        .describe("Include only entries from these subsystems -- each matched against the os_log subsystem and the sending library"),
       exclude_processes: z
         .array(z.string())
         .optional()
@@ -685,7 +685,7 @@ This eliminates all framework noise (UIKitCore, CFNetwork, Security) and shows o
       exclude_subsystems: z
         .array(z.string())
         .optional()
-        .describe("Drop entries from these subsystems"),
+        .describe("Drop entries from these subsystems -- each matched against the os_log subsystem and the sending library (e.g. CoreBrightness)"),
       exclude_messages: z
         .array(z.string())
         .optional()
@@ -697,7 +697,7 @@ This eliminates all framework noise (UIKitCore, CFNetwork, Security) and shows o
       quiet_subsystems: z
         .array(z.string().min(1))
         .optional()
-        .describe("Subsystem prefixes (e.g. 'com.apple.') whose entries are kept only at quiet_below and above: their chatter dropped, their errors kept. Unlike exclude_subsystems, which drops every level. On a physical device the subsystem is the sending library's name (Network, CFNetwork), not com.apple.*."),
+        .describe("Subsystem prefixes (e.g. 'com.apple.') whose entries are kept only at quiet_below and above: their chatter dropped, their errors kept. Unlike exclude_subsystems, which drops every level. Matches the os_log subsystem, not the sending library."),
       quiet_below: z
         .enum(["debug", "info", "notice", "warning", "error", "fault"])
         .optional()
@@ -705,7 +705,7 @@ This eliminates all framework noise (UIKitCore, CFNetwork, Security) and shows o
       preset: z
         .enum(["device-quiet", "simulator-quiet"])
         .optional()
-        .describe("Load a named preset as base config (can be combined with other fields as overrides). device-quiet excludes common system daemons (bluetoothd, wifid, kernel, symptomsd, remotepairingdeviced, signpost_reporter) and noisy subsystems (CoreBrightness, CFNetwork). simulator-quiet drops HangTracer and com.apple.CoreFoundation, and every com.apple.* entry below error -- Apple's frameworks' chatter inside the app, with their errors kept."),
+        .describe("Load a named preset as base config (can be combined with other fields as overrides). device-quiet excludes common system daemons (bluetoothd, wifid, kernel, symptomsd, remotepairingdeviced, signpost_reporter) and CoreBrightness, and drops every com.apple.* entry below error. simulator-quiet drops HangTracer and com.apple.CoreFoundation, and every com.apple.* entry below error -- Apple's frameworks' chatter inside the app, with their errors kept."),
     }),
   }, async ({ source, device_id, process, processes, subsystems, exclude_processes, exclude_subsystems, exclude_messages, min_level, quiet_subsystems, quiet_below, preset }) => {
       try {

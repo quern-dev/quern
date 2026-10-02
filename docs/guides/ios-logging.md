@@ -81,7 +81,8 @@ Quern has built-in presets that drop common noise:
 
 **`device-quiet`** (for physical devices) drops:
 - System daemons: `remotepairingdeviced`, `symptomsd`, `bluetoothd`, `wifid`, `signpost_reporter`, `kernel`
-- Noisy frameworks: `CoreBrightness`, `ColourSensorFilterPlugin`, `com.apple.CFNetwork`, `com.apple.network`
+- Display frameworks: `CoreBrightness`, `ColourSensorFilterPlugin`
+- Every `com.apple.*` entry below `error`, as `simulator-quiet` does. On a 20-second capture of a whole iPhone, the preset kept 2.9% of the lines and every error and fault it had kept before.
 
 **`simulator-quiet`** (for simulators) drops:
 - `HangTracer` messages (frequent, unhelpful)
@@ -90,7 +91,7 @@ Quern has built-in presets that drop common noise:
 
 Your own `set_log_filter` can do the same for any subsystems with `quiet_subsystems` (prefixes) and `quiet_below` (the level to keep from, default `error`).
 
-Two things to know. Applied without a `source`, a preset is global, so `simulator-quiet` also quiets `com.apple.*` lines from `start_oslog_streaming`. And on a physical device the subsystem field holds the sending library's name (`Network`, `CFNetwork`), so a `com.apple.` prefix barely matches there.
+Two things to know. Applied without a `source`, a preset is global, so `simulator-quiet` also quiets `com.apple.*` lines from `start_oslog_streaming`. And each entry names both its os_log subsystem (`com.apple.CFNetwork`) and, as `sender`, the library that logged it (`CFNetwork`): a subsystem name in `subsystems` or `exclude_subsystems` matches either, so a filter written with a library name still works, and so does one for a device line with no subsystem at all. `quiet_subsystems` matches the subsystem only.
 
 Your agent applies these automatically when appropriate, but you can ask for them explicitly: **"Filter out the system noise"**
 
