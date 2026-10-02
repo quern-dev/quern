@@ -833,3 +833,19 @@ the console. `test_a_physical_android_phone_refuses_clearly` holds it.
 and an iOS simulator: neither the console nor simctl refuses it. The request
 model now bounds latitude to ±90 and longitude to ±180, a 422 before any
 device is touched.
+
+## F37 — the iOS location readback had never run: the probe never showed its own authorization → fixed here
+
+Found while answering review on #382. The iOS probe's `CLLocationManager` is
+created with its view controller, at launch, and CoreLocation reports the
+initial authorization once, at that moment, before `viewDidLoad` has set the
+delegate. A permission granted before launch therefore never produced a
+callback, and `location_auth` stayed on its placeholder, `authorization:
+unknown`, in an app that was authorized (status 4, read directly). The
+location tests skipped on that label, so on every simulator run both
+readback tests skipped and the suite reported green.
+
+Fixed in the app, which now reads the status at load. The tests now fail
+instead of skipping, because the fixture requires the grant to succeed and
+an app that still reports no permission is the defect. A skip that names the
+failure it hides is still a skip, and nobody read it.
