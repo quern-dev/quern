@@ -102,12 +102,20 @@ class FilterConfig:
 
 PRESETS: dict[str, FilterConfig] = {
     "device-quiet": FilterConfig(
+        # Sending libraries, matched by `sender` -- CoreBrightness logs some
+        # lines with no os_log subsystem at all, so the library is the only
+        # name they have.
         exclude_subsystems=frozenset([
             "CoreBrightness",
             "ColourSensorFilterPlugin",
-            "com.apple.CFNetwork",
-            "com.apple.network",
         ]),
+        # Apple's frameworks below error, as simulator-quiet. This replaces
+        # excludes of com.apple.network and com.apple.CFNetwork, which never
+        # matched a device line while device subsystems held library names
+        # (Network, CFNetwork) -- and which, matching now, would drop every
+        # level, hiding CFNetwork's TLS trust failures.
+        quiet_subsystems=("com.apple.",),
+        quiet_below=LogLevel.ERROR,
         exclude_processes=frozenset([
             "remotepairingdeviced",
             "symptomsd",
@@ -174,6 +182,16 @@ def build_config(preset: str | None = None, **overrides: Any) -> FilterConfig:
 # ---------------------------------------------------------------------------
 
 
+def _named(entry: LogEntry, names: frozenset[str]) -> bool:
+    """Whether an entry's subsystem -- or its sending library, where the
+    source reports one -- is among `names`. Both, because filters and presets
+    written before device logs carried a real subsystem name the library
+    ("CoreBrightness"), and some device lines have no subsystem at all: the
+    library is all there is to match. A reverse-DNS subsystem and a library
+    name do not collide."""
+    return entry.subsystem in names or (bool(entry.sender) and entry.sender in names)
+
+
 class IngestionFilter:
     """Configurable filter between deduplicator and ring buffer.
 
@@ -209,7 +227,7 @@ class IngestionFilter:
         # 2. Check excludes (OR — any match drops)
         if config.exclude_processes and entry.process in config.exclude_processes:
             return False
-        if config.exclude_subsystems and entry.subsystem in config.exclude_subsystems:
+        if config.exclude_subsystems and _named(entry, config.exclude_subsystems):
             return False
         if config.exclude_messages:
             msg_lower = entry.message.lower()
@@ -226,7 +244,7 @@ class IngestionFilter:
             return False
         if config.processes and entry.process not in config.processes:
             return False
-        if config.subsystems and entry.subsystem not in config.subsystems:
+        if config.subsystems and not _named(entry, config.subsystems):
             return False
 
         return True

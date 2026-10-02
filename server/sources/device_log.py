@@ -11,6 +11,15 @@ This differs from idevicesyslog format (used by SyslogAdapter):
 - Curly braces for subsystem instead of parentheses
 - Uppercase level names (NOTICE, ERROR, DEBUG, INFO, FAULT)
 
+With a pymobiledevice3 that has `--format json`, each line is a JSON object
+instead, and carries what the text form leaves out: the os_log subsystem and
+category (`label`) alongside the sending library (`image_name`). The text form
+puts the library in braces where a subsystem would go, so `subsystem` used to
+hold "CFNetwork" on a device and "com.apple.CFNetwork" on a simulator, and a
+filter written for one did nothing on the other: `device-quiet`'s
+`com.apple.network` exclude never matched a device line. JSON is used when the
+installed pymobiledevice3 offers it; the text form remains the fallback.
+
 This adapter is on-demand — agents start/stop it when they want to capture
 physical device app logs, similar to SimulatorLogAdapter for simulators.
 """
@@ -18,7 +27,9 @@ physical device app logs, similar to SimulatorLogAdapter for simulators.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import posixpath
 import re
 import uuid
 from datetime import UTC, datetime
@@ -30,6 +41,36 @@ from server.sources import BaseSourceAdapter, EntryCallback
 logger = logging.getLogger(__name__)
 
 _UNCHANGED = object()  # Sentinel for reconfigure() defaults
+
+#: A line can carry a long message; asyncio's default 64 KiB line limit ends
+#: the read loop on the first one that is longer.
+_LINE_LIMIT = 4 * 1024 * 1024
+
+#: binary path -> whether its `syslog live` takes `--format json`.
+_JSON_SUPPORT: dict[str, bool] = {}
+
+
+async def _supports_json(binary: str) -> bool:
+    """Whether this pymobiledevice3's `syslog live` has `--format json`.
+    Asked once per binary. A help text that cannot be read counts as no:
+    the text form works everywhere, only with less in it."""
+    if binary not in _JSON_SUPPORT:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                binary, "syslog", "live", "--help",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            try:
+                out, _ = await asyncio.wait_for(proc.communicate(), 30)
+            except TimeoutError:
+                proc.kill()
+                await proc.wait()
+                raise
+            _JSON_SUPPORT[binary] = b"--format" in out and b"json" in out
+        except (OSError, TimeoutError) as e:
+            logger.warning("Could not read pymobiledevice3's syslog options (%s); "
+                           "device logs will carry no os_log subsystem", e)
+            return False
+    return _JSON_SUPPORT[binary]
 
 # Regex to parse pymobiledevice3 syslog live output lines
 # Format: "2026-02-21 21:22:45.272141 LogTester{Foundation}[2915] <NOTICE>: message"
@@ -126,6 +167,8 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
             cmd.extend(["-pn", self.process_filter])
         if self.match_filter:
             cmd.extend(["-m", self.match_filter])
+        if await _supports_json(str(binary)):
+            cmd.extend(["--format", "json"])
 
         return cmd
 
@@ -158,6 +201,7 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=_LINE_LIMIT,
             )
         except FileNotFoundError:
             self._error = (
@@ -233,6 +277,10 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
 
     def _parse_line(self, line: str) -> LogEntry | None:
         """Parse a single pymobiledevice3 syslog output line into a LogEntry."""
+        if line.startswith("{"):
+            entry = self._parse_json(line)
+            if entry is not None:
+                return entry
         match = PMD3_SYSLOG_PATTERN.match(line)
         if not match:
             return LogEntry(
@@ -259,10 +307,41 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
             timestamp=ts,
             device_id=self.device_id,
             process=process,
-            subsystem=subsystem or "",
+            # The text form's braces hold the sending library, not an os_log
+            # subsystem; it goes where that belongs.
+            sender=subsystem or "",
             pid=int(pid_str) if pid_str else None,
             level=level,
             message=message,
             source=LogSource.DEVICE,
             raw=line,
         )
+
+    def _parse_json(self, line: str) -> LogEntry | None:
+        """One `--format json` line, or None if it is not one -- then it is
+        parsed as text, and kept raw at worst, never dropped."""
+        try:
+            d = json.loads(line)
+            if not isinstance(d, dict) or "message" not in d:
+                return None
+            label = d.get("label") or {}
+            try:
+                ts = host_local_to_utc(datetime.fromisoformat(d["timestamp"]))
+            except (KeyError, TypeError, ValueError):
+                ts = self._now()
+            return LogEntry(
+                id=uuid.uuid4().hex[:8],
+                timestamp=ts,
+                device_id=self.device_id,
+                process=posixpath.basename(d.get("filename") or ""),
+                subsystem=label.get("subsystem") or "",
+                category=label.get("category") or "",
+                sender=posixpath.basename(d.get("image_name") or ""),
+                pid=d.get("pid") if isinstance(d.get("pid"), int) else None,
+                level=PMD3_LEVEL_MAP.get(str(d.get("level", "")).lower(), LogLevel.INFO),
+                message=str(d.get("message") or ""),
+                source=LogSource.DEVICE,
+                raw=line,
+            )
+        except (ValueError, TypeError, AttributeError):
+            return None

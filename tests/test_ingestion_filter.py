@@ -17,6 +17,7 @@ def _make_entry(
     message: str = "test message",
     process: str = "MyApp",
     subsystem: str = "com.myapp",
+    sender: str = "",
     level: LogLevel = LogLevel.INFO,
     source: LogSource = LogSource.SYSLOG,
     device_id: str = "default",
@@ -26,6 +27,7 @@ def _make_entry(
         timestamp=datetime(2026, 3, 7, 12, 0, 0, tzinfo=UTC),
         process=process,
         subsystem=subsystem,
+        sender=sender,
         level=level,
         message=message,
         source=source,
@@ -409,8 +411,27 @@ class TestQuietSubsystems:
                                               level=LogLevel.ERROR))
         assert not f.should_admit(_make_entry(message="HangTracer: hang", level=LogLevel.ERROR))
 
-    def test_device_quiet_is_unchanged(self):
-        assert build_config(preset="device-quiet").quiet_subsystems == ()
+    def test_device_quiet_quiets_apple_and_keeps_its_errors(self):
+        """Its com.apple.network and com.apple.CFNetwork excludes never matched
+        a device line, which carried library names; matching now, they would
+        have dropped CFNetwork's TLS trust failures with the rest."""
+        f = IngestionFilter()
+        f.update_filter(build_config(preset="device-quiet"))
+        def dev(**kw):
+            return _make_entry(source=LogSource.DEVICE, **kw)
+        assert not f.should_admit(dev(subsystem="com.apple.network", sender="Network",
+                                      level=LogLevel.DEBUG))
+        assert f.should_admit(dev(subsystem="com.apple.CFNetwork", sender="CFNetwork",
+                                  level=LogLevel.ERROR,
+                                  message="TLS Trust evaluation failed(-9807)"))
+        # CoreBrightness by its library, at every level, labelled or not.
+        assert not f.should_admit(dev(subsystem="com.apple.CoreBrightness.AABC",
+                                      sender="CoreBrightness", level=LogLevel.ERROR))
+        assert not f.should_admit(dev(subsystem="", sender="CoreBrightness",
+                                      level=LogLevel.NOTICE))
+        assert not f.should_admit(dev(process="symptomsd", subsystem="com.example"))
+        assert f.should_admit(dev(process="Geocaching", subsystem="", sender="Geocaching",
+                                  level=LogLevel.DEBUG))
 
     def test_an_override_can_take_the_rule_off_a_preset(self):
         config = build_config(preset="simulator-quiet", quiet_subsystems=[])
@@ -466,3 +487,35 @@ class TestQuietSubsystems:
             assert cleared.status_code == 200
             assert "quiet_subsystems" not in cleared.json()["filter"]
             assert cleared.json()["filter"]["exclude_messages"] == ["HangTracer"]
+
+
+class TestSender:
+    """A subsystem name in a filter matches an entry's subsystem or its
+    sending library: filters written when device lines carried only the
+    library keep working, and unlabelled lines can still be named."""
+
+    def test_an_exclude_matches_the_sender(self):
+        f = IngestionFilter()
+        f.update_filter(FilterConfig(exclude_subsystems=["CoreBrightness"]))
+        assert not f.should_admit(_make_entry(subsystem="com.apple.CoreBrightness.AABC",
+                                              sender="CoreBrightness"))
+        assert f.should_admit(_make_entry(subsystem="com.myapp", sender="MyApp"))
+
+    def test_an_include_matches_the_sender(self):
+        f = IngestionFilter()
+        f.update_filter(FilterConfig(subsystems=["CFNetwork"]))
+        assert f.should_admit(_make_entry(subsystem="com.apple.CFNetwork", sender="CFNetwork"))
+        assert not f.should_admit(_make_entry(subsystem="com.apple.network", sender="Network"))
+
+    def test_an_empty_sender_matches_nothing(self):
+        f = IngestionFilter()
+        f.update_filter(FilterConfig(exclude_subsystems=["com.myapp"]))
+        assert f.should_admit(_make_entry(subsystem="com.other", sender=""))
+
+    def test_the_quiet_rule_reads_the_subsystem_only(self):
+        """A library name is never `com.apple.*`; the rule is for subsystems."""
+        f = IngestionFilter()
+        f.update_filter(FilterConfig(quiet_subsystems=["com.apple."]))
+        assert f.should_admit(_make_entry(subsystem="", sender="com.apple.lookalike",
+                                          level=LogLevel.DEBUG))
+

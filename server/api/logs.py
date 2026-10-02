@@ -158,7 +158,7 @@ async def stream_logs(
             return False
         if params.process and entry.process != params.process:
             return False
-        if params.subsystem and entry.subsystem != params.subsystem:
+        if params.subsystem and params.subsystem not in (entry.subsystem, entry.sender):
             return False
         if params.category and entry.category != params.category:
             return False

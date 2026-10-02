@@ -388,3 +388,9 @@ async def test_reconfigure_noop_when_stopped():
 
     assert adapter.process_filter == "New"
     assert not adapter.is_running
+
+
+def test_a_simulator_entry_names_its_sender(adapter: SimulatorLogAdapter, sample_lines: list[str]):
+    entry = adapter._parse_json_line(sample_lines[0])
+    assert entry.sender == "libsystem_trace.dylib" and entry.subsystem == "com.myapp.networking"
+

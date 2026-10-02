@@ -110,6 +110,14 @@ class LogEntry(BaseModel):
     )
     process: str = Field(default="", description="Process name (e.g., 'MyApp')")
     subsystem: str = Field(default="", description="OSLog subsystem (e.g., 'com.myapp.networking')")
+    sender: str = Field(
+        default="",
+        description=(
+            "The library or executable that logged it (e.g. 'CFNetwork', "
+            "'libboringssl.dylib'), where the source reports one: physical iOS "
+            "devices. Not the subsystem -- one library logs under several."
+        ),
+    )
     category: str = Field(
         default="",
         description=(

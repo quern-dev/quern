@@ -177,3 +177,20 @@ async def test_single_occurrence_no_summary_on_flush():
     # Only the original entry, no summary
     assert len(emitted) == 1
     assert emitted[0].repeat_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_summary_keeps_the_sender():
+    emitted: list[LogEntry] = []
+
+    async def capture(entry: LogEntry) -> None:
+        emitted.append(entry)
+    dedup = Deduplicator(on_entry=capture, window_seconds=5.0)
+    first = _make_entry("error A", timestamp=_ts(0)).model_copy(
+        update={"subsystem": "com.apple.CFNetwork", "sender": "CFNetwork"})
+    await dedup.process(first)
+    await dedup.process(first.model_copy(update={"timestamp": _ts(1)}))
+    await dedup.process(_make_entry("error B", timestamp=_ts(10)))
+    summary = emitted[1]
+    assert summary.repeat_count == 1 and summary.sender == "CFNetwork"
+

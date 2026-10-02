@@ -158,6 +158,7 @@ class Deduplicator:
             device_id=original.device_id,
             process=original.process,
             subsystem=original.subsystem,
+            sender=original.sender,
             category=original.category,
             pid=original.pid,
             level=original.level,
