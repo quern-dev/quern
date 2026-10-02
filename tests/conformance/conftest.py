@@ -425,14 +425,17 @@ def _install_and_launch(
     )
     # Before the first launch, because an install resets permissions and the
     # Location tab otherwise raises its prompt -- over every test that visits
-    # it, on a fresh device. Required: a refused grant would otherwise surface
-    # as the Location tests skipping on a denied `location_auth`, which reads
-    # as a device limit rather than the failure it is.
-    client.json_ok(
-        "POST", "/api/v1/device/permission",
-        json={"udid": udid, "bundle_id": bundle_id, "permission": "location"},
-        timeout=60.0,
-    )
+    # it, on a fresh device. Required wherever quern can grant one: a refused
+    # grant would otherwise surface as the Location tests failing on
+    # `location_auth`, far from the cause. A physical iPhone is the exception
+    # -- quern grants permissions on simulators only, and `goto` accepts the
+    # prompt there instead -- so it is checked to refuse, not to succeed.
+    grant = {"udid": udid, "bundle_id": bundle_id, "permission": "location"}
+    if physical and contract is probe_mod.IOS:
+        resp = client.post("/api/v1/device/permission", json=grant, timeout=60.0)
+        assert resp.status_code == 400, f"{resp.status_code}: {resp.text[:300]}"
+    else:
+        client.json_ok("POST", "/api/v1/device/permission", json=grant, timeout=60.0)
     client.json_ok(
         "POST", "/api/v1/device/app/launch",
         json={"udid": udid, "bundle_id": bundle_id}, timeout=180.0,
