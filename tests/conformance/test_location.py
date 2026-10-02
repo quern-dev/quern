@@ -60,18 +60,29 @@ def _set_and_wait(quern, probe, lat: float, lon: float, timeout_s: float = 20.0)
         "POST", "/api/v1/device/location",
         json={"udid": probe.udid, "latitude": lat, "longitude": lon}, timeout=60.0,
     )
-    want_lat, want_lon = f"latitude: {lat:.6f}", f"longitude: {lon:.6f}"
     deadline = time.monotonic() + timeout_s
     seen: dict = {}
     while time.monotonic() < deadline:
         seen = _labels(probe)
-        if seen["lat"] == want_lat and seen["lon"] == want_lon:
+        got_lat, got_lon = _number(seen["lat"]), _number(seen["lon"])
+        # Within 1e-5 degrees (about a metre), not to the printed digit: the
+        # emulator's console path rounds the last place, measured -58.464019
+        # arriving as -58.464018.
+        if (got_lat is not None and got_lon is not None
+                and abs(got_lat - lat) < 1e-5 and abs(got_lon - lon) < 1e-5):
             return seen
         time.sleep(1.0)
     raise AssertionError(
         f"set_location({lat}, {lon}) never reached the app within {timeout_s:.0f}s; "
         f"it shows {seen}"
     )
+
+
+def _number(text: str | None) -> float | None:
+    try:
+        return float((text or "").rsplit(":", 1)[-1].strip())
+    except ValueError:
+        return None
 
 
 def _point() -> tuple[float, float]:

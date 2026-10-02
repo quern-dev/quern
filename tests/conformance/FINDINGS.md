@@ -792,3 +792,44 @@ journey. `launch_app` and `open_url` already waited `settle_delay` before
 their context; `tap_element` and `type_text` now do too, and the two route
 tests that pin it are the first that drive those endpoints' context at all.
 
+## F26 — `set_location` reports `ok` on an emulator whose location never changes
+
+On the `Pixel_6_Dev` AVD (headless, `qemu-system-aarch64-headless -no-window`),
+`adb emu geo fix` and `geo nmea` both answered `OK` and changed nothing: the
+GPS provider went on delivering 39.237255,-123.150032 with `satellites=0`,
+several times a second, so `test_location.py` saw the app's update counter
+climb by thousands with the coordinate never moving. No mock-location app is
+installed. The source is unidentified; what is certain is that quern answered
+`{"status": "ok"}` for a location the device never had. Reading the provider's
+last location back (`dumpsys location`) after the fix would let quern report
+the outcome rather than the request.
+
+**Later the same evening it worked**: a full run's `geo fix` reached the app
+on the same emulator, with no change to quern or the AVD -- to within the last
+printed digit (-58.464019 arrived as -58.464018), which the test now allows.
+So the stuck feed is real but transient, cause still unknown. Open, no issue.
+
+## F27 — the Pixel 3 XL's scroll failures were mostly this suite's own
+
+`ProbeDriver.swipe_down` sized the swipe from an `Application`/`Window`
+element that Android does not report, and fell back to an iPhone's size in
+points -- so on a 1440x2960 Pixel it swiped a strip at the top of the screen.
+Fixed: it swipes the scroll container instead. What remains on the Pixel is
+#232 at a smaller depth: its rows are larger, a sweep step moves about six,
+and the ten-swipe budget reaches about row 55 rather than ~110, so the row-60
+test fails there while the emulator passes it.
+
+## F28 — `set_location` on a physical Android phone was a bare 500 → fixed here
+
+Location is simulated through the emulator console, which only an
+`emulator-NNNN` serial reaches, so on a phone it has to refuse. It did, as a
+plain `DeviceError` -- a 500 prefixed `[adb]` that reads as quern having
+broken. It is now the typed unsupported-operation refusal, a 400 that names
+the console. `test_a_physical_android_phone_refuses_clearly` holds it.
+
+## F29 — a coordinate off the globe was accepted → fixed here
+
+`set_location` answered `{"status": "ok"}` for latitude 91 on both an emulator
+and an iOS simulator: neither the console nor simctl refuses it. The request
+model now bounds latitude to ±90 and longitude to ±180, a 422 before any
+device is touched.
