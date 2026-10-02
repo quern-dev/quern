@@ -907,3 +907,18 @@ never "first of its class".
 body worth reading -- while the message it swallowed says exactly what to do.
 Seen against a fresh `QUERN_STATE_DIR`. Open.
 
+## F35 — on a physical iPhone, a long list makes every WDA read too slow to use
+
+iPhone 11, iOS 26.7, the probe's Scroll tab (200 rows): one full `/source`
+took **34.5s** and returned 1,055 elements; the targeted queries quern tries
+first are as slow on that screen, so once the app was on it even finding
+`tab_text` to leave failed, and every later test failed with it. The same
+screen took 10.5s on a simulator (F30).
+
+The depth is what costs: at `snapshot_depth=12` the same read took **3.9s**,
+247 elements, and still carried `tab_text`, `scroll_to_top` and all 200 row
+identifiers; at 8 it took 0.4s and carried none of them. So the default walk
+spends most of its time inside each cell. Open: whether quern's default depth
+for WDA should change, or whether the endpoints that read on the caller's
+behalf (`tap_element`, `get_element`) should take `snapshot_depth` too.
+
