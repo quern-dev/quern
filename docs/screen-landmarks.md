@@ -345,7 +345,7 @@ Memory does not survive a restart, and quern restarts on every update. `remember
 load_landmarks(path="/Users/dev/myapp", remember=true)
 ```
 
-The path is kept, resolved, under `knowledge_bases` in `~/.quern/config.json`, by app. `list_landmarks` shows each remembered one under `remembered`: its path, whether it is loaded, and `at_start` -- how many screens loaded at this start, or why it did not (`not a directory` for a checkout that moved or a volume not mounted, or `no screens with landmarks`). That is reported where a caller looks, not only in the server log. Only a path can be remembered, and only once it has loaded screens. `unload_landmarks(app, forget=true)` stops it.
+The path is kept as given (made absolute, symlinks not resolved) under `knowledge_bases` in `~/.quern/config.json`, by app. `list_landmarks` shows each remembered one under `remembered`: its path, whether it is loaded, and `at_start` -- how many screens loaded at this start, or why it did not (`not a directory` for a checkout that moved or a volume not mounted, or `no screens with landmarks`). That is reported where a caller looks, not only in the server log. Only a path can be remembered, and only once it has loaded screens. `unload_landmarks(app, forget=true)` stops it.
 
 Landmarks can also be loaded inline, keyed by screen name. Each value is either a list of landmarks, or an object that says more about the screen — the same fields a screen file's frontmatter carries:
 

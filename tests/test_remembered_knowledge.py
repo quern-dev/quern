@@ -89,7 +89,17 @@ class TestLoad:
                         json={"app": APP, "source": str(knowledge), "remember": True})
         assert r.status_code == 200, r.text
         assert r.json()["remembered"] is True and r.json()["screens"] == 1
-        assert config_mod.get_knowledge_bases() == {APP: str(knowledge.resolve())}
+        assert config_mod.get_knowledge_bases() == {APP: str(knowledge.absolute())}
+
+    def test_a_symlinked_path_is_kept_as_given(self, tmp_path):
+        """~/src -> /Volumes/... here: the link, not where it points today."""
+        _project(tmp_path / "real")
+        (tmp_path / "link").symlink_to(tmp_path / "real")
+        client, _ = _client()
+        client.post("/api/v1/landmarks/load", json={
+            "app": APP, "source": str(tmp_path / "link"), "remember": True})
+        assert config_mod.get_knowledge_bases()[APP] == str(
+            tmp_path / "link" / ".quern" / "knowledge")
 
     def test_without_remember_nothing_is_kept(self, tmp_path):
         knowledge = _project(tmp_path / "proj")

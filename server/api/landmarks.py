@@ -136,7 +136,9 @@ async def load_landmarks(request: Request, body: LoadLandmarksRequest):
                     detail=f"not remembered: {knowledge} has no screens with landmarks",
                 )
             try:
-                config_mod.remember_knowledge_base(app, str(knowledge.resolve()))
+                # Absolute, but with its symlinks kept: the path as given is
+                # the one meant, and a link repointed later should be followed.
+                config_mod.remember_knowledge_base(app, str(knowledge.absolute()))
             except OSError as e:
                 raise HTTPException(
                     status_code=500,
