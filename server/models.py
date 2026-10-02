@@ -709,7 +709,7 @@ class EnvironmentProblem(BaseModel):
     """
 
     kind: str = Field(description="'jdk', 'toolchain_jdk', 'android_sdk', 'sdk_packages', "
-                                  "'ndk', 'gradle_wrapper' or 'gradle_distribution'")
+                                  "'ndk', 'gradle_wrapper', 'gradle_distribution' or 'signing'")
     summary: str
     found: list[str] = Field(default_factory=list,
                              description="What was found while looking, e.g. each JDK")
