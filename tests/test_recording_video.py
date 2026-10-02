@@ -145,12 +145,89 @@ class TestTheRecorder:
         assert (seg.keyframes_requested, seg.keyframes_failed) == (2, 1)
 
 
+    async def test_a_keyframe_refused_is_counted_as_failed(self):
+        async def handle(reader, writer):
+            await reader.read(200)
+            writer.write(b"HTTP/1.1 500 Internal Server Error\r\n\r\n")
+            await writer.drain()
+            writer.close()
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        seg = Segment(path=Path("/x.mp4"), udid=SIM, process=FakeProcess(),
+                      port=server.sockets[0].getsockname()[1])
+        try:
+            assert await VideoRecorder(binary=None).keyframe(seg) is False
+        finally:
+            server.close()
+            await server.wait_closed()
+        assert (seg.keyframes_requested, seg.keyframes_failed) == (1, 1)
+
+    async def test_no_keyframe_is_asked_of_a_process_that_has_exited(self):
+        seg = Segment(path=Path("/x.mp4"), udid=SIM, process=FakeProcess(exits_at_once=1),
+                      port=1)
+        assert await VideoRecorder(binary=None).keyframe(seg) is False
+        assert seg.keyframes_requested == 0
+
+    async def test_a_start_that_times_out_stops_what_it_started(self, tmp_path, monkeypatch):
+        """Nothing is listening on its port, and it never exits: given up on,
+        and not left running to film a recording that was refused."""
+        from server import recording_video
+        monkeypatch.setattr(recording_video, "START_TIMEOUT", 0.3)
+        process = FakeProcess()
+        recorder, _ = await self._recorder(process, monkeypatch, serving=False)
+        with pytest.raises(VideoError, match="did not start recording"):
+            await recorder.start(SIM, tmp_path / "video-1.mp4")
+        assert process.signals == [signal.SIGINT]
+
+
+def test_a_listener_that_raises_never_reaches_the_action():
+    called = []
+
+    def bad(udid, action):
+        raise RuntimeError("boom")
+
+    def good(udid, action):
+        called.append(udid)
+    logging_ext.add_action_device_listener(bad)
+    logging_ext.add_action_device_listener(good)
+    try:
+        _act()
+    finally:
+        logging_ext.remove_action_device_listener(bad)
+        logging_ext.remove_action_device_listener(good)
+    assert called == [SIM]
+
+
+async def test_resolving_a_device_tells_the_listeners():
+    """The hook is only as good as its call site: `resolve_udid` is where
+    every action learns its device."""
+    from server.device.controller import DeviceController
+    controller = DeviceController()
+
+    async def resolved(udid=None, *, set_active=True):
+        return SIM
+    controller._resolve_udid = resolved
+    seen = []
+
+    def listener(udid, action):
+        seen.append(udid)
+    logging_ext.add_action_device_listener(listener)
+    scope = ActionScope("tap_element", "device.action")
+    token = logging_ext.set_current_action(scope)
+    try:
+        await controller.resolve_udid()
+    finally:
+        logging_ext.reset_current_action(token)
+        logging_ext.remove_action_device_listener(listener)
+    assert seen == [SIM]
+
+
 # ── the manager, against a fake recorder ────────────────────────────────────
 
 
 class FakeVideo:
-    def __init__(self, fail_start=False, start_host_time=1000.0):
+    def __init__(self, fail_start=False, start_host_time=1000.0, stop_error=None):
         self.fail_start = fail_start
+        self.stop_error = stop_error
         self.start_host_time = start_host_time
         self.started, self.stopped, self.keyframes = [], [], []
 
@@ -166,6 +243,8 @@ class FakeVideo:
 
     async def stop(self, seg):
         self.stopped.append(seg.path)
+        if self.stop_error:
+            return {"path": str(seg.path), "start_host_time": None, "error": self.stop_error}
         return {"path": str(seg.path), "start_host_time": self.start_host_time,
                 "duration_s": 600.0, "frames": 10, "frames_dropped": 0}
 
@@ -215,6 +294,16 @@ class TestTheManager:
         manifest = json.loads((tmp_path / "r" / "manifest.json").read_text())
         [seg] = manifest["video"]
         assert seg["start_host_time"] == 1000.0 and seg["segment"] == 1
+
+    async def test_a_segment_that_did_not_finish_cleanly_is_a_warning(self, tmp_path):
+        manager = Sources().manager(FakeVideo(stop_error="quern-media gave no recording "
+                                                         "summary: killed"))
+        rec = await manager.start(SIM, str(tmp_path / "r"), Filters(video=True))
+        await manager.stop(rec.id)
+        assert any("video segment 1" in w and "no recording summary" in w
+                   for w in manager.get(rec.id).warnings)
+        [seg] = json.loads((tmp_path / "r" / "manifest.json").read_text())["video"]
+        assert seg["start_host_time"] is None and "no recording summary" in seg["error"]
 
     async def test_no_video_asked_is_null_not_empty(self, tmp_path):
         manager = Sources().manager(FakeVideo())
@@ -319,6 +408,7 @@ class TestTheJoin:
         [action] = loaded.actions
         assert loaded.video_at(action.started_monotonic, loaded.runs[action.id]) == {
             "path": "/r/video-1.mp4", "offset_s": 12.25}
+        assert loaded.video_at(999.0, 0) is None, "before the first frame is not in it"
 
     def test_a_reboot_never_joins_the_wrong_movie(self, tmp_path):
         """After a reboot monotonic starts again: an action at 12.0 in the
@@ -353,6 +443,57 @@ class TestTheJoin:
         assert loaded.video == [{"path": "/r/video-1.mp4", "run": 0, "start_host_time": None,
                                  "recording": True}]
         assert loaded.video_at(995.0, 0) is None
+
+    def test_a_segment_quern_never_finished_is_said_not_recording(self, tmp_path):
+        """quern died with segment 1 open: no `video_stopped`, no summary, no
+        moov atom. On resume it is lost, not "still recording" -- and the
+        second run's open segment, live, still is."""
+        t = datetime(2026, 10, 1, 12, tzinfo=UTC)
+        _write(tmp_path, [
+            {"type": "started", "at": t.isoformat(), "monotonic": 990.0, "udid": SIM},
+            {"type": "video_started", "at": t.isoformat(), "monotonic": 991.0,
+             "path": "/r/video-1.mp4", "segment": 1},
+            {"type": "resumed", "at": t.isoformat(), "monotonic": 5.0},
+            {"type": "video_started", "at": t.isoformat(), "monotonic": 6.0,
+             "path": "/r/video-2.mp4", "segment": 2}])
+        first, second = rec_mod.load(tmp_path, live=True).video
+        assert first["path"] == "/r/video-1.mp4" and "recording" not in first
+        assert "quern stopped without finishing it" in first["error"]
+        assert second == {"path": "/r/video-2.mp4", "run": 1, "start_host_time": None,
+                          "recording": True}
+        [_, after] = rec_mod.load(tmp_path).video
+        assert "recording" not in after and "ended without finishing" in after["error"]
+
+    def test_a_failed_recordings_segment_is_never_recording(self, tmp_path):
+        t = datetime(2026, 10, 1, 12, tzinfo=UTC)
+        _write(tmp_path, [
+            {"type": "started", "at": t.isoformat(), "monotonic": 990.0, "udid": SIM},
+            {"type": "video_started", "at": t.isoformat(), "monotonic": 991.0,
+             "path": "/r/video-1.mp4", "segment": 1},
+            {"type": "failed", "at": t.isoformat(), "monotonic": 992.0, "error": "disk full"}])
+        [seg] = rec_mod.load(tmp_path, live=True).video
+        assert "recording" not in seg and "the recording failed (disk full)" in seg["error"]
+
+    def test_each_flow_joins_the_movie_of_its_own_run(self):
+        """A flow is joined by its own run, not its action's."""
+        from server.api import trace as trace_mod
+        loaded = rec_mod.Loaded(
+            actions=[], flows=[], logs=[], udid=SIM, holes=[], stopped=True,
+            unreadable_lines=0, clock_anchors=[], monotonic_resets=0, warnings=[],
+            video=[{"path": "/v1.mp4", "run": 0, "start_host_time": 1000.0,
+                    "ended_monotonic": 1100.0},
+                   {"path": "/v2.mp4", "run": 1, "start_host_time": 10.0,
+                    "ended_monotonic": 2000.0}],
+            runs={"a": 0, "f": 1})
+
+        class Attribution:
+            class action:
+                id = "a"
+        row = trace_mod._with_video({"started_monotonic": 1012.0,
+                                     "flows": [{"id": "f", "started_monotonic": 1013.0}]},
+                                    Attribution, loaded)
+        assert row["video"] == {"path": "/v1.mp4", "offset_s": 12.0}
+        assert row["flows"][0]["video"] == {"path": "/v2.mp4", "offset_s": 1003.0}
 
     def test_the_trace_over_a_recording_carries_the_join(self, tmp_path):
         t = datetime(2026, 10, 1, 12, tzinfo=UTC)

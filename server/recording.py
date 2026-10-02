@@ -971,6 +971,10 @@ def load(directory: Path, *, live: bool = False, markers_only: bool = False) -> 
                     if isinstance(event.get("clock_anchor"), dict):
                         anchors.append({**event["clock_anchor"], "segment": kind})
                     if kind == "resumed":
+                        # A segment the last run never stopped was never
+                        # finalised: no summary to join by, and very likely
+                        # no movie that opens.
+                        video += _unfinished_video(video_open, "quern stopped without finishing it")
                         run += 1
                         gap = event.get("gap") or {}
                         holes += _gap_holes(_dt(gap.get("from")), _dt(gap.get("to")),
@@ -1033,10 +1037,27 @@ def load(directory: Path, *, live: bool = False, markers_only: bool = False) -> 
                   clock_anchors=anchors, monotonic_resets=resets, warnings=warnings,
                   unfinished=[_unfinished(f, cut, stopped=stopped, live=live)
                               for f in starts.values()],
-                  # A segment still being written has no summary yet.
-                  video=video + [{"path": p, "run": r, "start_host_time": None,
-                                  "recording": True} for p, r in video_open.items()],
+                  # A segment still being written has no summary yet; one a
+                  # recording that is over never finished has none ever.
+                  video=video + ([{"path": p, "run": r, "start_host_time": None,
+                                   "recording": True} for p, r in video_open.items()]
+                                 if live and not stopped and not failed else
+                                 _unfinished_video(video_open,
+                                                   f"the recording failed ({failed})" if failed
+                                                   else "the recording ended without "
+                                                        "finishing it")),
                   runs=runs)
+
+
+def _unfinished_video(open_segments: dict[str, int], why: str) -> list[dict]:
+    """The segments in `open_segments` as never finished, which empties it.
+    Said, not joined: there is no `start_host_time` without the summary, and
+    an unfinished movie has no moov atom to open by."""
+    out = [{"path": p, "run": r, "start_host_time": None,
+            "error": f"{why}: the movie was not finalised and may not open"}
+           for p, r in open_segments.items()]
+    open_segments.clear()
+    return out
 
 
 def _unfinished(flow: FlowRecord, cut: list[tuple], *, stopped: bool,
