@@ -42,23 +42,24 @@ def _state_dir(tmp_path, monkeypatch):
 # ── the recorder, against a fake quern-media ─────────────────────────────────
 
 
-class FakeStderr:
-    def __init__(self, lines):
-        self._lines = [line.encode() + b"\n" for line in lines]
-
-    async def readline(self):
-        await asyncio.sleep(0)
-        return self._lines.pop(0) if self._lines else b""
-
-
 class FakeProcess:
-    def __init__(self, lines=(), exits_at_once=None):
-        self.stderr = FakeStderr(list(lines))
+    """quern-media as quern sees it: lines in its log at start, and more --
+    the summary -- when it is told to stop."""
+
+    def __init__(self, lines=(), at_stop=(), exits_at_once=None, pid=4242):
+        self.lines, self.at_stop = list(lines), list(at_stop)
         self.returncode = exits_at_once
         self.signals = []
+        self.pid = pid
+        self.log: Path | None = None
+
+    def _write(self, lines):
+        with open(self.log, "a") as f:
+            f.writelines(line + "\n" for line in lines)
 
     def send_signal(self, sig):
         self.signals.append(sig)
+        self._write(self.at_stop)
         self.returncode = 0
 
     def kill(self):
@@ -66,62 +67,145 @@ class FakeProcess:
         self.returncode = -9
 
     async def wait(self):
+        while self.returncode is None:
+            await asyncio.sleep(0.01)
         return self.returncode
 
 
 SUMMARY = "[record] 120 frames over 8.00s from host 612668.550500, 2 dropped -> /x.mp4"
+STREAMING = f"[capture] streaming simulator {SIM}"
 
 
 class TestTheRecorder:
-    async def _recorder(self, process, monkeypatch, serving=True):
+    def _recorder(self, process, command_of=None):
         seen = []
 
         async def spawn(*argv, **kw):
-            seen.append(argv)
+            seen.append((argv, kw))
+            process.log = Path(kw["stderr"].name)
+            process._write(process.lines)
             return process
 
         async def binary():
             return Path("/bin/quern-media")
-        recorder = VideoRecorder(binary=binary, spawn=spawn)
-        if serving:
-            async def ok(self, seg):
-                return None
-            monkeypatch.setattr(VideoRecorder, "_wait_serving", ok)
-        return recorder, seen
+        return VideoRecorder(binary=binary, spawn=spawn, command_of=command_of), seen
 
-    async def test_it_records_and_serves_on_loopback(self, tmp_path, monkeypatch):
-        recorder, seen = await self._recorder(FakeProcess([SUMMARY]), monkeypatch)
+    async def test_it_records_and_serves_on_loopback(self, tmp_path):
+        recorder, seen = self._recorder(FakeProcess([STREAMING]))
         seg = await recorder.start(SIM, tmp_path / "video-1.mp4")
-        [argv] = seen
+        [(argv, kw)] = seen
         assert argv[1:5] == ("--sim-udid", SIM, "--record", str(tmp_path / "video-1.mp4"))
         assert argv[5] == "--serve" and int(argv[6]) == seg.port
+        assert seg.pid == 4242
 
-    async def test_stopping_finishes_the_movie_and_reads_its_summary(self, tmp_path,
-                                                                      monkeypatch):
+    async def test_its_output_goes_to_a_file_never_a_pipe(self, tmp_path):
+        """quern-media does not ignore SIGPIPE: with a pipe, a quern that
+        died killed it at its next line, the one on the way to finalising,
+        and the movie was unopenable. A file lets it outlive quern."""
+        recorder, seen = self._recorder(FakeProcess([STREAMING]))
+        await recorder.start(SIM, tmp_path / "video-1.mp4")
+        [(_, kw)] = seen
+        assert kw["stderr"] is not asyncio.subprocess.PIPE
+        assert kw["stderr"].name == str(tmp_path / "video-1.log")
+
+    async def test_stopping_finishes_the_movie_and_reads_its_summary(self, tmp_path):
         """SIGINT, which quern-media handles by writing the moov atom: killed
         without it, a movie is unopenable rather than shorter."""
-        process = FakeProcess([SUMMARY])
-        recorder, _ = await self._recorder(process, monkeypatch)
+        process = FakeProcess([STREAMING], at_stop=[SUMMARY])
+        recorder, _ = self._recorder(process)
         seg = await recorder.start(SIM, tmp_path / "video-1.mp4")
-        await asyncio.sleep(0.01)
         result = await recorder.stop(seg)
         assert process.signals == [signal.SIGINT]
         assert result["start_host_time"] == 612668.5505 and result["frames"] == 120
         assert result["duration_s"] == 8.0 and result["frames_dropped"] == 2
+        assert "error" not in result and "exited_before_stop" not in result
 
-    async def test_no_summary_is_said_not_joined(self, tmp_path, monkeypatch):
-        recorder, _ = await self._recorder(FakeProcess(["something else"]), monkeypatch)
+    async def test_no_summary_is_said_not_joined(self, tmp_path):
+        recorder, _ = self._recorder(FakeProcess([STREAMING], at_stop=["something else"]))
         seg = await recorder.start(SIM, tmp_path / "video-1.mp4")
         result = await recorder.stop(seg)
         assert result["start_host_time"] is None
         assert "gave no recording summary" in result["error"]
         assert "something else" in result["error"]
 
-    async def test_a_process_that_exits_at_once_is_a_start_failure(self, tmp_path, monkeypatch):
+    async def test_a_summary_from_an_earlier_run_is_never_read(self, tmp_path):
+        """The log is truncated at start: a stale summary would join this
+        run's actions to another movie's clock."""
+        (tmp_path / "video-1.log").write_text(SUMMARY + "\n")
+        recorder, _ = self._recorder(FakeProcess([STREAMING]))
+        seg = await recorder.start(SIM, tmp_path / "video-1.mp4")
+        assert (await recorder.stop(seg))["start_host_time"] is None
+
+    async def test_a_process_that_exits_at_once_is_a_start_failure(self, tmp_path):
         process = FakeProcess(["error: no booted simulator SIM-V"], exits_at_once=2)
-        recorder, _ = await self._recorder(process, monkeypatch, serving=False)
+        recorder, _ = self._recorder(process)
         with pytest.raises(VideoError, match="exited \\(2\\).*no booted simulator"):
             await recorder.start(SIM, tmp_path / "video-1.mp4")
+
+    async def test_a_simulator_not_booted_is_a_start_failure(self, tmp_path):
+        """quern-media binds its port before it finds the simulator is not
+        booted, then exits: readiness is the capture, not the port (review).
+        Here it is serving and has not exited yet when first looked at."""
+        process = FakeProcess(["[http] serving on 127.0.0.1:1234"])
+        recorder, _ = self._recorder(process)
+
+        async def exits_later():
+            await asyncio.sleep(0.25)
+            process._write(["error: device is not booted"])
+            process.returncode = 2
+        task = asyncio.create_task(exits_later())
+        with pytest.raises(VideoError, match="exited \\(2\\).*not booted"):
+            await recorder.start(SIM, tmp_path / "video-1.mp4")
+        await task
+
+    async def test_a_start_that_times_out_stops_what_it_started(self, tmp_path, monkeypatch):
+        """Never capturing and never exiting: given up on, and not left
+        running to film a recording that was refused."""
+        from server import recording_video
+        monkeypatch.setattr(recording_video, "START_TIMEOUT", 0.3)
+        process = FakeProcess()
+        recorder, _ = self._recorder(process)
+        with pytest.raises(VideoError, match="did not start recording"):
+            await recorder.start(SIM, tmp_path / "video-1.mp4")
+        assert process.signals == [signal.SIGINT]
+
+    async def test_a_finish_that_hangs_is_killed_and_said(self, tmp_path, monkeypatch):
+        from server import recording_video
+        monkeypatch.setattr(recording_video, "STOP_TIMEOUT", 0.2)
+        process = FakeProcess([STREAMING])
+        recorder, _ = self._recorder(process)
+        seg = await recorder.start(SIM, tmp_path / "video-1.mp4")
+        process.send_signal = lambda sig: process.signals.append(sig)    # ignores it
+        result = await recorder.stop(seg)
+        assert process.signals == [signal.SIGINT, "kill"]
+        assert result["start_host_time"] is None and "was killed" in result["error"]
+
+    async def test_one_that_exited_by_itself_ends_at_its_last_frame(self, tmp_path):
+        """Stopped by something else, with a summary: its movie ends when it
+        did, and nothing says when -- so the stop must not stand for it."""
+        process = FakeProcess([STREAMING])
+        recorder, _ = self._recorder(process)
+        seg = await recorder.start(SIM, tmp_path / "video-1.mp4")
+        process._write([SUMMARY])
+        process.returncode = 0
+        result = await recorder.stop(seg)
+        assert process.signals == []
+        assert result["exited_before_stop"] is True and result["start_host_time"] == 612668.5505
+        assert "exited (0) before the recording stopped" in result["error"]
+
+    def test_the_stop_time_is_not_the_end_of_a_movie_that_exited_early(self, tmp_path):
+        t = datetime(2026, 10, 1, 12, tzinfo=UTC)
+        _write(tmp_path, [
+            {"type": "started", "at": t.isoformat(), "monotonic": 990.0, "udid": SIM},
+            {"type": "video_started", "at": t.isoformat(), "monotonic": 991.0,
+             "path": "/r/video-1.mp4", "segment": 1},
+            {"type": "video_stopped", "at": t.isoformat(), "monotonic": 2000.0,
+             "path": "/r/video-1.mp4", "start_host_time": 1000.0, "duration_s": 10.0,
+             "exited_before_stop": True, "error": "exited"},
+            {"type": "stopped", "at": t.isoformat(), "monotonic": 2001.0}])
+        loaded = rec_mod.load(tmp_path)
+        assert loaded.video_at(1005.0, 0) == {"path": "/r/video-1.mp4", "offset_s": 5.0}
+        assert loaded.video_at(1500.0, 0) is None
 
     async def test_a_keyframe_is_a_post_to_its_server(self):
         """A real loopback listener standing in for quern-media's /keyframe."""
@@ -143,7 +227,6 @@ class TestTheRecorder:
         await server.wait_closed()
         assert await recorder.keyframe(seg) is False
         assert (seg.keyframes_requested, seg.keyframes_failed) == (2, 1)
-
 
     async def test_a_keyframe_refused_is_counted_as_failed(self):
         async def handle(reader, writer):
@@ -167,16 +250,40 @@ class TestTheRecorder:
         assert await VideoRecorder(binary=None).keyframe(seg) is False
         assert seg.keyframes_requested == 0
 
-    async def test_a_start_that_times_out_stops_what_it_started(self, tmp_path, monkeypatch):
-        """Nothing is listening on its port, and it never exits: given up on,
-        and not left running to film a recording that was refused."""
-        from server import recording_video
-        monkeypatch.setattr(recording_video, "START_TIMEOUT", 0.3)
-        process = FakeProcess()
-        recorder, _ = await self._recorder(process, monkeypatch, serving=False)
-        with pytest.raises(VideoError, match="did not start recording"):
-            await recorder.start(SIM, tmp_path / "video-1.mp4")
-        assert process.signals == [signal.SIGINT]
+
+class TestReaping:
+    """A quern-media an earlier quern left running: finished, and read."""
+
+    async def test_one_still_recording_is_stopped_and_its_summary_read(self, tmp_path,
+                                                                        monkeypatch):
+        movie = tmp_path / "video-1.mp4"
+        (tmp_path / "video-1.log").write_text(STREAMING + "\n")
+        alive = {"v": True}
+        killed = []
+
+        def fake_kill(pid, sig):
+            killed.append((pid, sig))
+            (tmp_path / "video-1.log").write_text(STREAMING + "\n" + SUMMARY + "\n")
+            alive["v"] = False
+        monkeypatch.setattr("server.recording_video.os.kill", fake_kill)
+        recorder = VideoRecorder(binary=None, command_of=lambda pid: (
+            f"/q/quern-media --sim-udid {SIM} --record {movie}" if alive["v"] else ""))
+        result = await recorder.reap(77, movie)
+        assert killed == [(77, signal.SIGINT)]
+        assert result["start_host_time"] == 612668.5505
+
+    async def test_a_pid_now_some_other_process_is_left_alone(self, tmp_path, monkeypatch):
+        killed = []
+        monkeypatch.setattr("server.recording_video.os.kill", lambda *a: killed.append(a))
+        recorder = VideoRecorder(binary=None, command_of=lambda pid: "/usr/bin/vim notes")
+        assert await recorder.reap(77, tmp_path / "video-1.mp4") is None
+        assert killed == []
+
+    async def test_could_not_tell_is_raised_not_read_as_gone(self, tmp_path):
+        def broken(pid):
+            raise OSError("ps timed out")
+        with pytest.raises(OSError):
+            await VideoRecorder(binary=None, command_of=broken).reap(77, tmp_path / "v.mp4")
 
 
 def test_a_listener_that_raises_never_reaches_the_action():
@@ -225,9 +332,12 @@ async def test_resolving_a_device_tells_the_listeners():
 
 
 class FakeVideo:
-    def __init__(self, fail_start=False, start_host_time=1000.0, stop_error=None):
+    def __init__(self, fail_start=False, start_host_time=1000.0, stop_error=None,
+                 stop_takes=0.0, reaped=None):
         self.fail_start = fail_start
         self.stop_error = stop_error
+        self.stop_takes = stop_takes
+        self.reaped, self.reap_calls = reaped, []
         self.start_host_time = start_host_time
         self.started, self.stopped, self.keyframes = [], [], []
 
@@ -235,7 +345,12 @@ class FakeVideo:
         if self.fail_start:
             raise VideoError("no booted simulator")
         self.started.append(path)
-        return Segment(path=path, udid=udid)
+        await asyncio.sleep(0)
+        return Segment(path=path, udid=udid, process=FakeProcess(pid=1000 + len(self.started)))
+
+    async def reap(self, pid, movie):
+        self.reap_calls.append((pid, str(movie)))
+        return self.reaped
 
     async def keyframe(self, seg):
         self.keyframes.append(seg.path)
@@ -243,6 +358,7 @@ class FakeVideo:
 
     async def stop(self, seg):
         self.stopped.append(seg.path)
+        await asyncio.sleep(self.stop_takes)
         if self.stop_error:
             return {"path": str(seg.path), "start_host_time": None, "error": self.stop_error}
         return {"path": str(seg.path), "start_host_time": self.start_host_time,
@@ -302,6 +418,7 @@ class TestTheManager:
         await manager.stop(rec.id)
         assert any("video segment 1" in w and "no recording summary" in w
                    for w in manager.get(rec.id).warnings)
+        assert manager.get(rec.id).complete is False, "lost video is not complete"
         [seg] = json.loads((tmp_path / "r" / "manifest.json").read_text())["video"]
         assert seg["start_host_time"] is None and "no recording summary" in seg["error"]
 
@@ -367,11 +484,155 @@ class TestTheManager:
         await first.shutdown()
         second = Sources().manager(FakeVideo(fail_start=True))
         assert await second.resume_all() == [rec.id]
-        assert any("video segment 2 could not be started" in w
+        await second.get(rec.id)._resuming
+        assert any("video segment 2: could not be started" in w
                    for w in second.get(rec.id).warnings)
+        done = await second.stop(rec.id)
+        assert done.complete is False, "a run missing part of its movie is not complete"
+        [failed] = [e for e in _events(tmp_path / "r")
+                    if e["type"] == "video_stopped" and e["segment"] == 2]
+        assert failed["start_host_time"] is None and "could not be started" in failed["error"]
+
+    async def test_every_action_gets_a_keyframe_though_ids_are_reused(self, tmp_path):
+        """Each scope freed before the next is made, as in production: CPython
+        hands the next one the same address. Keyed on id(), 1 of 50 got a
+        keyframe (review)."""
+        video = FakeVideo()
+        manager = Sources().manager(video)
+        rec = await manager.start(SIM, str(tmp_path / "r"), Filters(video=True))
+        for _ in range(50):
+            _act()
+            await _settle()
+        assert len(video.keyframes) == 50
+        await manager.stop(rec.id)
+
+    async def test_a_second_stop_waits_for_the_first(self, tmp_path):
+        """A client retrying while the movie finalises must not get `stopped`
+        written ahead of `video_stopped` and a complete it does not have."""
+        manager = Sources().manager(FakeVideo(stop_takes=0.2))
+        rec = await manager.start(SIM, str(tmp_path / "r"), Filters(video=True))
+        await asyncio.gather(manager.stop(rec.id), manager.stop(rec.id))
+        kinds = [e["type"] for e in _events(tmp_path / "r")]
+        assert kinds.count("stopped") == 1
+        assert kinds.index("video_stopped") < kinds.index("stopped")
+
+    async def test_two_starts_into_one_directory_film_once(self, tmp_path):
+        """The loser must not start quern-media on the winner's movie, which
+        it would replace (review)."""
+        video = FakeVideo()
+        manager = Sources().manager(video)
+        results = await asyncio.gather(
+            manager.start(SIM, str(tmp_path / "r"), Filters(video=True)),
+            manager.start(SIM, str(tmp_path / "r"), Filters(video=True)),
+            return_exceptions=True)
+        assert sum(isinstance(r, RecordingError) for r in results) == 1
+        assert video.started == [tmp_path / "r" / "video-1.mp4"]
+
+    async def test_one_simulator_is_filmed_by_one_recording(self, tmp_path):
+        manager = Sources().manager(FakeVideo())
+        first = await manager.start(SIM, str(tmp_path / "a"), Filters(video=True))
+        with pytest.raises(RecordingError, match="already being filmed"):
+            await manager.start(SIM, str(tmp_path / "b"), Filters(video=True))
+        await manager.stop(first.id)
+        second = await manager.start(SIM, str(tmp_path / "c"), Filters(video=True))
+        await manager.stop(second.id)
+
+    async def test_a_refused_start_leaves_no_recording_behind(self, tmp_path):
+        manager = Sources().manager(FakeVideo(fail_start=True))
+        with pytest.raises(RecordingError):
+            await manager.start(SIM, str(tmp_path / "r"), Filters(video=True))
+        assert list((tmp_path / "r").iterdir()) == []
+        manager._video = FakeVideo()
+        rec = await manager.start(SIM, str(tmp_path / "r"), Filters(video=True))
+        await manager.stop(rec.id)
+
+    async def test_stopping_an_interrupted_recording_keeps_its_video(self, tmp_path):
+        first = Sources().manager(FakeVideo())
+        rec = await first.start(SIM, str(tmp_path / "r"), Filters(video=True))
+        await first.shutdown()
+        second = Sources().manager(FakeVideo())
+        moved = tmp_path / "moved"
+        (tmp_path / "r").rename(moved)
+        await second.resume_all()                      # its directory is gone
+        moved.rename(tmp_path / "r")
+        done = await second.stop(rec.id)
+        assert done.complete is False
+        [seg] = json.loads((tmp_path / "r" / "manifest.json").read_text())["video"]
+        assert seg["start_host_time"] == 1000.0
+
+    async def test_a_movie_left_recording_is_finished_by_the_next_quern(self, tmp_path):
+        """quern killed before it could stop quern-media: the next one stops
+        it, reads its summary, and the movie joins the run it was made in."""
+        first = Sources().manager(FakeVideo())
+        rec = await first.start(SIM, str(tmp_path / "r"), Filters(video=True))
+        await first._flush(rec)                        # and then quern is killed
+        reaped = {"path": str(tmp_path / "r" / "video-1.mp4"), "start_host_time": 1000.0,
+                  "duration_s": 30.0, "frames": 9}
+        video = FakeVideo(reaped=reaped)
+        second = Sources().manager(video)
+        await second.resume_all()
+        await second.get(rec.id)._resuming
+        assert video.reap_calls == [(1001, str(tmp_path / "r" / "video-1.mp4"))]
         await second.stop(rec.id)
-        assert any(e["type"] == "warning" and "video segment 2" in e["message"]
-                   for e in _events(tmp_path / "r"))
+        loaded = rec_mod.load(tmp_path / "r")
+        first_seg = next(v for v in loaded.video if v["segment"] == 1)
+        assert first_seg["run"] == 0 and first_seg["start_host_time"] == 1000.0
+        assert [v["segment"] for v in loaded.video] == [1, 2]
+
+    async def test_a_movie_left_unfinished_and_not_running_is_lost(self, tmp_path):
+        first = Sources().manager(FakeVideo())
+        rec = await first.start(SIM, str(tmp_path / "r"), Filters(video=True))
+        await first._flush(rec)
+        second = Sources().manager(FakeVideo(reaped=None))
+        await second.resume_all()
+        await second.get(rec.id)._resuming
+        done = await second.stop(rec.id)
+        assert done.complete is False
+        lost = next(v for v in rec_mod.load(tmp_path / "r").video if v["segment"] == 1)
+        assert "without finishing it" in lost["error"]
+
+    async def test_resuming_does_not_wait_for_video(self, tmp_path):
+        """Starting quern-media can mean building it; server startup must not
+        wait on that (review)."""
+        first = Sources().manager(FakeVideo())
+        rec = await first.start(SIM, str(tmp_path / "r"), Filters(video=True))
+        await first.shutdown()
+        gate = asyncio.Event()
+        video = FakeVideo()
+        real_start = video.start
+
+        async def slow_start(udid, path):
+            await gate.wait()
+            return await real_start(udid, path)
+        video.start = slow_start
+        second = Sources().manager(video)
+        assert await second.resume_all() == [rec.id]
+        assert video.started == []
+        stopping = asyncio.create_task(second.stop(rec.id))
+        await _settle()
+        assert not stopping.done(), "a stop waits for the segment starting"
+        gate.set()
+        await stopping
+        kinds = [e["type"] for e in _events(tmp_path / "r")]
+        assert kinds[-1] == "stopped"
+
+    async def test_shutdown_finishes_every_movie_at_once(self, tmp_path):
+        manager = Sources().manager(FakeVideo(stop_takes=0.4))
+        await manager.start(SIM, str(tmp_path / "a"), Filters(video=True))
+        await manager.start("SIM-W", str(tmp_path / "b"), Filters(video=True))
+        began = asyncio.get_running_loop().time()
+        await manager.shutdown()
+        assert asyncio.get_running_loop().time() - began < 0.7
+
+    async def test_a_failed_recordings_movie_is_finished_and_kept(self, tmp_path):
+        video = FakeVideo(stop_takes=0.05)
+        manager = Sources().manager(video)
+        rec = await manager.start(SIM, str(tmp_path / "r"), Filters(video=True))
+        await manager._fail(rec, "disk full")
+        await asyncio.wait(list(manager._background))
+        assert video.stopped == [tmp_path / "r" / "video-1.mp4"]
+        [seg] = json.loads((tmp_path / "r" / "manifest.json").read_text())["video"]
+        assert seg["start_host_time"] == 1000.0
 
 
 # ── the join ─────────────────────────────────────────────────────────────────
@@ -533,6 +794,23 @@ class TestTheRoute:
             r = client.post("/api/v1/recordings", json={
                 "udid": "emulator-5554", "output_dir": str(tmp_path / "r"), "video": True})
         assert r.status_code == 400 and "video records simulators" in r.json()["detail"]
+
+    def test_video_on_a_device_quern_does_not_know_is_refused(self, tmp_path):
+        class Controller:
+            async def _ensure_device_type_cached(self, udid):
+                return None
+
+            def _device_type(self, udid):
+                return None
+
+        app = FastAPI()
+        app.include_router(recordings_router)
+        app.state.recordings = Sources().manager(FakeVideo())
+        app.state.device_controller = Controller()
+        with TestClient(app) as client:
+            r = client.post("/api/v1/recordings", json={
+                "udid": "NOPE", "output_dir": str(tmp_path / "r"), "video": True})
+        assert r.status_code == 400 and "not a device quern knows" in r.json()["detail"]
 
 
 def test_an_action_after_the_last_frame_is_still_in_the_movie(tmp_path):
