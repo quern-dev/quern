@@ -934,6 +934,11 @@ So reads made for the caller default to 12, a miss says the depth it used and
 how to go deeper, and the suite's `goto` asks for 13 on the More list where it
 knows it needs it. Recording that per screen is #375.
 
+`scroll_to_element` was missed at first: it took no depth, so its sweep
+read at whatever depth WDA was last left at, which was 25 after any full
+read. The scroll tests, which had passed on the iPhone before, then timed
+out. It now takes `snapshot_depth` like the others, with the same default.
+
 ## F36 — through WDA, a value-aware tap toggled a switch that was already set → fixed here
 
 WDA's element query returns no values (measured: a switch came back with type,
