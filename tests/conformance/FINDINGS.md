@@ -880,10 +880,30 @@ means `get_element` finding an element no longer implies it is visible. Open,
 no issue yet; it wants a decision between scrolling the element into view and
 refusing.
 
-## F33 — through WDA, clearing one field also clears another
+**It is wider than off-screen: an element under the keyboard too** (iPhone 11,
+iOS 26.7, physical). With the keyboard up (y 595-838), `tab_controls` sits at
+y=817 beneath it; `tap_element` tapped y=844, answered `ok`, and Controls never
+opened. Worse, the keyboard's Dictate key (x 332-405, y 824) lies where the More
+tab is, so a `goto` to a More screen with the keyboard up tapped it and raised
+the system "Enable Dictation?" prompt -- which then sat over the app for the
+rest of the run, failing two dozen later tests. bajutsu (PR #2119) refuses a
+tap unless the centre is on screen *and* XCUITest reports the element
+hittable; that rule covers both cases.
 
-`test_clearing_names_the_field_it_was_told_to[ios]`: after typing into
-`field_default` and clearing `field_email`, `field_default` held its own
-placeholder text rather than `keep-me`. Passes on the accessibility tree.
-Seen in two WDA runs; not yet investigated.
+## F33 — through WDA, clearing one field clears the first field instead
+
+`WdaClient.select_all_and_delete` is given the target's coordinates and does not
+use them: it asks WDA for the first element of class `XCUIElementTypeTextField`
+and clears that. So clearing `field_email` emptied `field_default` and left the
+email untouched -- reproduced on a simulator under WDA and on a physical
+iPhone 11. The coordinates are only used by the triple-tap fallback. Open; the
+fix is to find the field by identifier (or by the element at the given point),
+never "first of its class".
+
+## F34 — `launch_app` on a physical iPhone without WDA set up is a bare 500
+
+`RuntimeError: No .xctestrun file found. Run setup_wda() first` escapes
+`launch_app` uncaught, so the caller gets `500 Internal Server Error` with no
+body worth reading -- while the message it swallowed says exactly what to do.
+Seen against a fresh `QUERN_STATE_DIR`. Open.
 
