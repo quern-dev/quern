@@ -67,6 +67,10 @@ def _device_keys(
 #: In-flight requests kept at once. An app has tens in flight; thousands
 #: means requests that will never finish, and the oldest go first.
 PENDING_MAX = 2000
+#: Ids of finished requests remembered after their flows may be evicted, so
+#: a start reported late is still known to be over. Ids only, so cheap; well
+#: past how far a start report can lag its finish.
+FINISHED_MAX = 10_000
 
 
 class _Starts:
@@ -134,6 +138,10 @@ class FlowStore:
         self._pending: OrderedDict[str, FlowRecord] = OrderedDict()
         self._pending_max = PENDING_MAX
         self._pending_evicted = 0
+        #: Finished ids, kept apart from `_flows`, whose bound can evict a
+        #: flow before its late start report arrives -- which then put a
+        #: finished request back in flight for good (CodeRabbit).
+        self._finished: OrderedDict[str, None] = OrderedDict()
         self._start_fanout: Fanout[FlowRecord] = Fanout(maxsize=1000)
         self.starts = _Starts(self._start_fanout)
         #: Told when the proxy stops with requests in flight: a recording
@@ -151,8 +159,12 @@ class FlowStore:
     async def add(self, flow: FlowRecord) -> None:
         """Insert or update a flow record, evicting oldest if at capacity."""
         async with self._lock:
-            # It finished (or failed): no longer in flight.
+            # It finished (or failed): no longer in flight, and never again.
             self._pending.pop(flow.id, None)
+            self._finished[flow.id] = None
+            self._finished.move_to_end(flow.id)
+            while len(self._finished) > FINISHED_MAX:
+                self._finished.popitem(last=False)
             if flow.id in self._flows:
                 # Update existing — move to end
                 del self._flows[flow.id]
@@ -336,7 +348,7 @@ class FlowStore:
         Published to `starts` subscribers, which is how a recording learns
         of a request that may never finish.
         """
-        if flow.id in self._flows:
+        if flow.id in self._flows or flow.id in self._finished:
             return                  # already finished: a late start says nothing new
         self._pending.pop(flow.id, None)
         self._pending[flow.id] = flow

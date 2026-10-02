@@ -175,6 +175,17 @@ class TestPending:
         store.note_started(_flow("f1", status=None))
         assert store.pending() == []
 
+    async def test_a_late_start_after_its_flow_was_evicted_says_nothing_new(self):
+        """The start is reported once the connection's lookup finishes, which
+        can be after the response -- and after the flow has been pushed out
+        of the store. It must not come back as in flight (CodeRabbit)."""
+        store = FlowStore(max_size=1)
+        await store.add(_flow("f1"))
+        await store.add(_flow("f2"))                    # evicts f1
+        assert store.size == 1
+        store.note_started(_flow("f1", status=None))
+        assert store.pending() == []
+
     def test_the_bound_counts_what_it_pushes_out(self, monkeypatch):
         store = FlowStore()
         store._pending_max = 3
