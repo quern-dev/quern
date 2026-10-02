@@ -52,6 +52,23 @@ final class TextInputViewController: UIViewController {
         eventLabel.accessibilityIdentifier = "text_event_log"
         eventLabel.text = "no input events yet"
         view.addSubview(eventLabel)
+
+        // A physical device has no hardware keyboard, so the software one
+        // stays up after typing and covers the tab bar. Its Dictate key sits
+        // where the More tab is; a tap meant for the tab once landed on it and
+        // raised a system prompt over the app (F32). The suite dismisses the
+        // keyboard with this before it navigates.
+        let dismiss = UIButton(type: .system)
+        dismiss.setTitle("Dismiss keyboard", for: .normal)
+        dismiss.frame = CGRect(x: 20, y: y + 100, width: 200, height: 36)
+        dismiss.contentHorizontalAlignment = .left
+        dismiss.accessibilityIdentifier = "text_dismiss_keyboard"
+        dismiss.addTarget(self, action: #selector(dismissKeyboard), for: .touchUpInside)
+        view.addSubview(dismiss)
+    }
+
+    @objc private func dismissKeyboard() {
+        view.endEditing(true)
     }
 }
 
@@ -63,6 +80,11 @@ extension TextInputViewController: UITextFieldDelegate {
         let event = "\(identifier) loc=\(range.location) len=\(range.length) repl=\(string.debugDescription)"
         log.info("\(event, privacy: .public)")
         eventLabel.text = event
+        return true
+    }
+
+    func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+        textField.resignFirstResponder()
         return true
     }
 }

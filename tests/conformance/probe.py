@@ -703,8 +703,28 @@ class ProbeDriver:
         screen lags the tap -- 1.2s after selecting Scroll it still served 79
         elements of the previous screen, and the next tap found nothing.
         """
+        self._dismiss_keyboard()
         self._navigate(tab)
         self._wait_for_screen(tab.lower())
+
+    def _dismiss_keyboard(self) -> None:
+        """Put away a software keyboard before tapping the tab bar.
+
+        On a physical iPhone it stays up after typing and covers the tab bar
+        (no hardware keyboard to suppress it, as a simulator has). Only the
+        Text tab has fields, so its dismiss button is on screen whenever the
+        keyboard is.
+        """
+        import time
+
+        if self.contract.platform != "ios":
+            return
+        elements = self.ui_tree().get("elements") or []
+        if not any(e.get("type") == "Keyboard" for e in elements):
+            return
+        if any(e.get("identifier") == "text_dismiss_keyboard" for e in elements):
+            self.tap("text_dismiss_keyboard")
+            time.sleep(0.8)
 
     def _wait_for_screen(self, name: str, timeout_s: float = 30.0) -> None:
         """Poll for an identifier only that screen's content carries."""
