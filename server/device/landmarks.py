@@ -1134,3 +1134,36 @@ class LandmarkRegistry:
     def is_empty(self) -> bool:
         """True if no landmarks are loaded."""
         return not self._sets
+
+
+def load_remembered(
+    registry: LandmarkRegistry, knowledge_bases: Mapping[str, str],
+) -> dict[str, dict]:
+    """Load each remembered knowledge base, and say how each one went: the
+    answer is what `list_landmarks` shows, because a knowledge base that did
+    not load -- a checkout moved, a volume not mounted -- reported only in the
+    server log is one nobody driving quern will see.
+
+    Never raises: a knowledge base that will not load must not stop the
+    server starting.
+    """
+    outcomes: dict[str, dict] = {}
+    for app, path in knowledge_bases.items():
+        outcome: dict = {"path": path}
+        try:
+            if not Path(path).is_dir():
+                outcome["error"] = f"{path} is not a directory: moved, deleted, or not mounted"
+            else:
+                count, skipped = registry.load_from_path(app, path)
+                outcome["screens"] = count
+                outcome["skipped"] = len(skipped)
+                if count == 0:
+                    outcome["error"] = f"{path} has no screens with landmarks"
+        except Exception as e:  # noqa: BLE001 -- said, never fatal to start
+            outcome["error"] = f"could not be loaded: {e}"
+            logger.exception("Remembered knowledge base for %s at %s did not load", app, path)
+        if outcome.get("error"):
+            logger.warning("Remembered knowledge base for %s: %s", app, outcome["error"])
+        outcomes[app] = outcome
+    return outcomes
+

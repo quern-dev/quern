@@ -2109,8 +2109,13 @@ class ScreenLandmarks(BaseModel):
 class LoadLandmarksRequest(BaseModel):
     """Request body for POST /landmarks/load."""
 
-    app: str  # app identifier (e.g. bundle ID)
+    #: App identifier (e.g. bundle ID). May be omitted with a `source` inside
+    #: a project's `.quern/`: its config.json names the app.
+    app: str | None = None
     source: str | None = None  # path to knowledge base directory
+    #: Load this knowledge base again at every server start (~/.quern/config.json
+    #: `knowledge_bases`). Only for a `source` path, and only once it loaded.
+    remember: bool = False
     #: Inline knowledge: screen_name -> landmarks.
     #:
     #: Either a bare list of landmarks, or a mapping carrying the screen's own

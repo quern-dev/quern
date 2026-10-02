@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import asdict
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import ValidationError
 
+from server import config as config_mod
 from server.api.actions import logged_action
 from server.device.landmarks import (
     FileConventions,
@@ -82,6 +85,31 @@ def _get_controller(request: Request):
 # ---------------------------------------------------------------------------
 
 
+def _knowledge_dir(source: str) -> Path:
+    """The directory to load: `source`, or the `.quern/knowledge` inside it
+    when `source` is a project root. A path that is not a directory is a
+    400: it used to load zero screens and say nothing, which is how a
+    moved checkout would look loaded-but-empty at every start."""
+    path = Path(source).expanduser()
+    if (path / ".quern" / "knowledge").is_dir():
+        path = path / ".quern" / "knowledge"
+    if not path.is_dir():
+        raise HTTPException(status_code=400, detail=f"{source} is not a directory")
+    return path
+
+
+def _app_from_project(knowledge: Path) -> str | None:
+    """The bundle id a project's `.quern/config.json` names, beside its
+    `knowledge/` -- the file `init_app_knowledge` writes."""
+    if knowledge.name != "knowledge" or knowledge.parent.name != ".quern":
+        return None
+    try:
+        bundle = json.loads((knowledge.parent / "config.json").read_text()).get("bundle_id")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return bundle if isinstance(bundle, str) and bundle else None
+
+
 @router.post("/load")
 @logged_action("load_landmarks", category="knowledge")
 async def load_landmarks(request: Request, body: LoadLandmarksRequest):
@@ -89,14 +117,48 @@ async def load_landmarks(request: Request, body: LoadLandmarksRequest):
     registry = _get_registry(request)
 
     if body.source:
-        count, skipped = registry.load_from_path(body.app, body.source)
+        knowledge = _knowledge_dir(body.source)
+        app = body.app or _app_from_project(knowledge)
+        if not app:
+            raise HTTPException(
+                status_code=400,
+                detail=f"app is required: no .quern/config.json with a bundle_id "
+                       f"beside {knowledge}",
+            )
+        count, skipped = registry.load_from_path(app, str(knowledge))
+        remembered = False
+        if body.remember:
+            if count == 0:
+                # Loaded or not, an empty one is not worth loading at every
+                # start: it is far likelier a wrong path than a choice.
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"not remembered: {knowledge} has no screens with landmarks",
+                )
+            try:
+                config_mod.remember_knowledge_base(app, str(knowledge.resolve()))
+            except OSError as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"loaded {count} screens, but could not remember them: {e}",
+                ) from e
+            remembered = True
         return {
-            "loaded": body.app,
-            "source": body.source,
+            "loaded": app,
+            "source": str(knowledge),
             "screens": count,
             "skipped": _serialize_skipped(skipped),
-            "conventions": conventions_report(registry.conventions(body.app)),
+            "remembered": remembered,
+            "conventions": conventions_report(registry.conventions(app)),
         }
+
+    if body.remember:
+        raise HTTPException(
+            status_code=400,
+            detail="remember needs a source path: inline landmarks have nothing to load again",
+        )
+    if not body.app:
+        raise HTTPException(status_code=400, detail="app is required for inline landmarks")
 
     if body.landmarks:
         screens: list[ScreenLandmarks] = []
@@ -184,7 +246,15 @@ async def list_landmarks(request: Request):
     registry = _get_registry(request)
     sets = registry.list_sets()
     total = sum(sets.values())
-    return {"sets": sets, "total_screens": total}
+    # What loads at every start, and how it went at this one: a remembered
+    # knowledge base that did not load is said here, not only in the log.
+    at_start = getattr(request.app.state, "landmark_startup", {}) or {}
+    remembered = [
+        {"app": app, "path": path, "loaded": app in sets, "screens": sets.get(app),
+         "at_start": at_start.get(app)}
+        for app, path in sorted(config_mod.get_knowledge_bases().items())
+    ]
+    return {"sets": sets, "total_screens": total, "remembered": remembered}
 
 
 # ---------------------------------------------------------------------------
@@ -197,11 +267,20 @@ async def list_landmarks(request: Request):
 async def unload_landmarks(
     request: Request,
     app: str | None = Query(default=None, description="App to unload (omit = all)"),
+    forget: bool = Query(default=False, description="Also stop loading it at every start"),
 ):
     """Unload landmarks for a specific app or all apps."""
     registry = _get_registry(request)
     unloaded = registry.unload(app)
-    return {"unloaded": unloaded}
+    if not forget:
+        return {"unloaded": unloaded}
+    try:
+        forgotten = config_mod.forget_knowledge_base(app)
+    except OSError as e:
+        raise HTTPException(
+            status_code=500, detail=f"unloaded, but could not forget it: {e}",
+        ) from e
+    return {"unloaded": unloaded, "forgotten": forgotten}
 
 
 # ---------------------------------------------------------------------------

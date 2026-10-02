@@ -299,6 +299,48 @@ def update_user_config(change: Callable[[dict], None]) -> None:
             raise
 
 
+def get_knowledge_bases() -> dict[str, str]:
+    """Remembered knowledge bases, app -> path: loaded at every start.
+
+    An entry that is not a non-empty string under a string key is left out;
+    the reload names what it could not use rather than this guessing at it.
+    """
+    raw = read_user_config().get("knowledge_bases")
+    if not isinstance(raw, dict):
+        return {}
+    return {app: path for app, path in raw.items()
+            if isinstance(app, str) and isinstance(path, str) and path}
+
+
+def remember_knowledge_base(app: str, path: str) -> None:
+    """Load `path` for `app` at every start from now on."""
+    def change(config: dict) -> None:
+        kbs = config.get("knowledge_bases")
+        if not isinstance(kbs, dict):
+            kbs = {}
+        kbs[app] = path
+        config["knowledge_bases"] = kbs
+    update_user_config(change)
+
+
+def forget_knowledge_base(app: str | None) -> list[str]:
+    """Stop loading `app`'s knowledge base at start -- every one, for None.
+    Returns the apps forgotten."""
+    forgotten: list[str] = []
+
+    def change(config: dict) -> None:
+        kbs = config.get("knowledge_bases")
+        if not isinstance(kbs, dict):
+            return
+        for name in ([app] if app is not None else list(kbs)):
+            if name in kbs:
+                del kbs[name]
+                forgotten.append(name)
+        config["knowledge_bases"] = kbs
+    update_user_config(change)
+    return forgotten
+
+
 def set_auto_install_cert(enabled: bool) -> None:
     """Persist the auto-install policy.
 

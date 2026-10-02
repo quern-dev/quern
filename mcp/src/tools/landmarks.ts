@@ -21,20 +21,27 @@ Element types are matched across backends: a landmark on the accessibility tree'
     inputSchema: strictParams({
       app: z
         .string()
-        .describe("App identifier (e.g. bundle ID like 'com.example.app')"),
+        .optional()
+        .describe("App identifier (e.g. bundle ID like 'com.example.app'). Optional with a path inside a project's .quern/ -- its config.json names the app."),
       path: z
         .string()
         .optional()
         .describe(
-          "Path to the knowledge base directory containing screens/ with landmark-annotated markdown files"
+          "Path to the knowledge base directory containing screens/ with landmark-annotated markdown files, or the project root holding .quern/knowledge"
         ),
       landmarks: inlineLandmarks.optional(),
+      remember: z
+        .boolean()
+        .optional()
+        .describe("Load this knowledge base again at every quern start (kept in ~/.quern/config.json). list_landmarks shows what is remembered and how it loaded; unload_landmarks(forget=true) stops it."),
     }),
-  }, async ({ app, path, landmarks }) => {
+  }, async ({ app, path, landmarks, remember }) => {
     try {
-      const body: Record<string, unknown> = { app };
+      const body: Record<string, unknown> = {};
+      if (app) body.app = app;
       if (path) body.source = path;
       if (landmarks) body.landmarks = landmarks;
+      if (remember !== undefined) body.remember = remember;
       const data = await apiRequest("POST", "/api/v1/landmarks/load", undefined, body);
 
       return {
@@ -127,11 +134,16 @@ A landmark that matched only because its element type is named differently on th
         .string()
         .optional()
         .describe("App to unload (omit to unload all)"),
+      forget: z
+        .boolean()
+        .optional()
+        .describe("Also stop loading it at every start, if it was remembered"),
     }),
-  }, async ({ app }) => {
+  }, async ({ app, forget }) => {
     try {
       const params: Record<string, string> = {};
       if (app) params.app = app;
+      if (forget) params.forget = "true";
       const data = await apiRequest("DELETE", "/api/v1/landmarks", params);
       return {
         content: [

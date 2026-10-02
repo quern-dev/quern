@@ -335,6 +335,18 @@ load_landmarks(path="/Users/dev/myapp/.quern/knowledge/")
 
 Quern scans screen documents, extracts `landmarks` from frontmatter, and holds them in memory for identification queries.
 
+`app` can be left out when the path is inside a project's `.quern/`: the `config.json` beside `knowledge/` (the one `init_app_knowledge` writes) names the `bundle_id`. The path can also be the project root, and its `.quern/knowledge` is used. A path that is not a directory is a 400 rather than an empty load.
+
+### Remembering a knowledge base
+
+Memory does not survive a restart, and quern restarts on every update. `remember=true` loads the knowledge base again at every start:
+
+```
+load_landmarks(path="/Users/dev/myapp", remember=true)
+```
+
+The path is kept, resolved, under `knowledge_bases` in `~/.quern/config.json`, by app. `list_landmarks` shows each remembered one under `remembered`: its path, whether it is loaded, and `at_start` -- how many screens loaded at this start, or why it did not (`not a directory` for a checkout that moved or a volume not mounted, or `no screens with landmarks`). That is reported where a caller looks, not only in the server log. Only a path can be remembered, and only once it has loaded screens. `unload_landmarks(app, forget=true)` stops it.
+
 Landmarks can also be loaded inline, keyed by screen name. Each value is either a list of landmarks, or an object that says more about the screen — the same fields a screen file's frontmatter carries:
 
 ```
