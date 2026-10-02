@@ -1778,6 +1778,12 @@ step "A channel offering an older release is refused"
 #
 # Driven against the *candidate's* updater, unlike the cases above: this is a
 # question about the code that is going out, not the code users are leaving.
+#
+# A prerelease candidate is put on the beta channel, where a beta install
+# actually lives. On stable, a beta install being offered the stable release is
+# the one backwards move the updater allows on purpose -- how someone leaves a
+# beta -- so asking there tested a refusal that is correctly not made. Found by
+# the 0.24.0-beta.1 cut, whose four runs each failed this case for that reason.
 case_downgrade_refused() {
   failures=0   # a subshell copy: a case reports only its own
   local installed="$WORK/tarball-update/home/.local/share/quern"
@@ -1807,11 +1813,19 @@ case_downgrade_refused() {
 import socket
 s = socket.socket(); s.bind(('127.0.0.1', 0))
 print(s.getsockname()[1]); s.close()" 2>/dev/null || echo 8908)"
-  cat > "$sb/srv/releases/latest" <<EOF
-{"tag_name": "$PREV", "prerelease": false,
- "assets": [{"name": "quern-$prev_version.tar.gz",
-             "browser_download_url": "http://127.0.0.1:$port/releases/download/$PREV/quern-$prev_version.tar.gz"}]}
-EOF
+  local release_json
+  release_json="{\"tag_name\": \"$PREV\", \"prerelease\": false,
+ \"assets\": [{\"name\": \"quern-$prev_version.tar.gz\",
+             \"browser_download_url\": \"http://127.0.0.1:$port/releases/download/$PREV/quern-$prev_version.tar.gz\"}]}"
+  # /releases/latest for the stable channel; /releases (a list) for beta,
+  # served as the directory's index so one static server answers both.
+  printf '%s\n' "$release_json" > "$sb/srv/releases/latest"
+  printf '[%s]\n' "$release_json" > "$sb/srv/releases/index.html"
+  local channel=stable
+  if [[ "$candidate_version" == *-* ]]; then
+    channel=beta
+    printf '{"update_channel": "beta"}\n' > "$sb/state/config.json"
+  fi
   python3 -m http.server "$port" --directory "$sb/srv" >"$sb/srv.log" 2>&1 &
   local srv_pid=$!
   local waited=0
@@ -1837,9 +1851,9 @@ EOF
   { kill "$srv_pid" && wait "$srv_pid"; } 2>/dev/null || true
 
   if grep -q "Not downgrading" "$sb/update.log"; then
-    ok "it refuses the older release, and says why"
+    ok "it refuses the older release on the $channel channel, and says why"
   else
-    bad "nothing refused $prev_version being offered to $candidate_version"
+    bad "nothing refused $prev_version being offered to $candidate_version on the $channel channel"
     tail -n 15 "$sb/update.log" | sed 's/^/      /'
   fi
 
