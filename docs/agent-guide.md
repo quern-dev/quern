@@ -399,7 +399,7 @@ Open real-time video windows to see what's happening on USB-connected physical d
 - Errors only: `get_errors`
 - Reduce noise at start: `start_device_logging(process: "MyApp", preset: "device-quiet")` — applies subprocess-level process filter and ingestion preset in one call
 - Reduce noise mid-session: `set_log_filter(source: "device", process: "MyApp")` — automatically restarts the adapter with subprocess-level filtering and purges old entries
-- **App-only mode** (zero noise): First `tail_logs` with the process filter to discover your app's subsystem name, then lock it down with `set_log_filter(source: "device", process: "MyApp", subsystems: ["MyApp.debug.dylib"])`. This eliminates all framework noise (UIKitCore, CFNetwork, Security) and shows only your code's os_log output.
+- **App-only mode** (zero noise): First `tail_logs` with the process filter to see your app's own entries, then lock it down with `set_log_filter(source: "device", process: "MyApp", subsystems: ["com.myapp"])` -- your os_log subsystem -- or the library your code lives in, which entries carry as `sender` (`"MyApp.debug.dylib"` in a debug build); a subsystem filter matches either. This eliminates all framework noise (UIKitCore, CFNetwork, Security) and shows only your code's output.
 
 **"Which request did my action cause?" / "What was quern doing when this happened?"**
 - `get_trace` — one timeline of quern's own actions, the flows each caused, and the app log lines that arrived while it ran. This is the tool for "I tapped Checkout, what did the app send?" and it replaces reconstructing the answer by hand from `query_flows` and `query_logs` timestamps.

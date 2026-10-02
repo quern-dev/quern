@@ -654,9 +654,9 @@ export function registerLogTools(server: McpServer): void {
 
 When a process include filter is set, running log adapters are automatically restarted with subprocess-level filtering (e.g. pymobiledevice3 -pn flag or simctl --predicate). This cuts noise at the source instead of just filtering in Python. The response includes "adapter_restarted": true when this happens.
 
-For app-only filtering (zero noise), combine process + subsystems include. First find your app's subsystem by calling tail_logs with the process filter, then lock it down:
-  set_log_filter(source: "device", process: "MyApp", subsystems: ["MyApp.debug.dylib"])
-This eliminates all framework noise (UIKitCore, CFNetwork, Security) and shows only your code's os_log output.`,
+For app-only filtering (zero noise), combine process + subsystems include. First see your app's own entries by calling tail_logs with the process filter, then lock it down with its os_log subsystem or the library its code lives in (each entry's sender, e.g. "MyApp.debug.dylib" in a debug build) -- a subsystem filter matches either:
+  set_log_filter(source: "device", process: "MyApp", subsystems: ["com.myapp", "MyApp.debug.dylib"])
+This eliminates all framework noise (UIKitCore, CFNetwork, Security) and shows only your code's output.`,
     inputSchema: strictParams({
       source: z
         .enum(["syslog", "oslog", "crash", "build", "proxy", "app_drain", "simulator", "device", "logcat", "plist_watcher", "server"])

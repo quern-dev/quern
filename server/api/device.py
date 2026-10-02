@@ -1102,7 +1102,7 @@ async def start_device_logging(request: Request, body: StartDeviceLogRequest):
 async def _start_device_logging(
     request: Request, body: StartDeviceLogRequest, udid: str, controller: DeviceController,
 ) -> dict[str, Any]:
-    from server.sources.device_log import PhysicalDeviceLogAdapter
+    from server.sources.device_log import TEXT_MODE_WARNING, PhysicalDeviceLogAdapter
     from server.sources.logcat import LogcatAdapter
 
     # Verify it's a physical or Android device (not a simulator)
@@ -1175,12 +1175,18 @@ async def _start_device_logging(
         purged = await buffer.purge(lambda e: ingestion_filter.should_admit(e))
         preset_applied = body.preset
 
-    return {
+    result = {
         "status": "started", "udid": udid,
         "adapter_id": adapter.adapter_id,
         "preset_applied": preset_applied,
         "purged": purged,
+        # json: lines carry the os_log subsystem. text: only the library, and
+        # subsystem rules -- device-quiet's com.apple.* -- match nothing.
+        "format": adapter.output_format,
     }
+    if adapter.output_format == "text":
+        result["warnings"] = [TEXT_MODE_WARNING]
+    return result
 
 
 @router.post("/logging/device/stop")

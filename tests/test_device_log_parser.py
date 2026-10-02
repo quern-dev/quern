@@ -12,12 +12,19 @@ comparable, and the probe can regenerate the fixture when the format moves.
 
 from __future__ import annotations
 
+import asyncio
+import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 from server.models import LogLevel, LogSource
-from server.sources.device_log import PMD3_SYSLOG_PATTERN, PhysicalDeviceLogAdapter
+from server.sources.device_log import (
+    PMD3_SYSLOG_PATTERN,
+    PhysicalDeviceLogAdapter,
+    host_local_to_utc,
+)
 
 FIXTURE = Path(__file__).parent / "fixtures" / "pmd3_syslog_quernprobe.txt"
 
@@ -138,73 +145,190 @@ JSON_LINE = (
 )
 
 
-def test_a_json_line_carries_subsystem_category_and_sender(adapter):
-    entry = adapter._parse_line(JSON_LINE)
+@pytest.fixture
+def json_adapter() -> PhysicalDeviceLogAdapter:
+    a = PhysicalDeviceLogAdapter(udid="TESTUDID0000", device_id="test-device")
+    a.output_format = "json"
+    return a
+
+
+def _with(**changes) -> str:
+    d = json.loads(JSON_LINE)
+    d.update(changes)
+    return json.dumps(d)
+
+
+def test_a_json_line_carries_subsystem_category_and_sender(json_adapter):
+    entry = json_adapter._parse_line(JSON_LINE)
     assert entry.subsystem == "com.apple.CFNetwork" and entry.category == "Default"
     assert entry.sender == "CFNetwork"
     assert entry.process == "Geocaching" and entry.pid == 7556
     assert entry.level == LogLevel.ERROR
     assert entry.message.startswith("Connection 13: default TLS Trust")
-    assert entry.source == LogSource.DEVICE and entry.raw == JSON_LINE
+    assert entry.source == LogSource.DEVICE
 
 
-def test_a_json_timestamp_is_host_local_like_the_text_one(adapter):
+def test_raw_is_the_text_form_not_the_json_object(json_adapter):
+    """The object's UUIDs, offsets and paths doubled every log query's size."""
+    entry = json_adapter._parse_line(JSON_LINE)
+    assert entry.raw == ("2026-10-02T16:15:07.210223 Geocaching{CFNetwork}[7556] <ERROR>: "
+                         "Connection 13: default TLS Trust evaluation failed(-9807) "
+                         "[com.apple.CFNetwork][Default]")
+    assert len(entry.raw) < len(JSON_LINE) / 2
+
+
+def test_a_json_timestamp_is_host_local_like_the_text_one(json_adapter):
     """Both forms come from `datetime.fromtimestamp()`, naive local time."""
-    from datetime import datetime
-
-    from server.sources.device_log import host_local_to_utc
-    entry = adapter._parse_line(JSON_LINE)
+    entry = json_adapter._parse_line(JSON_LINE)
     assert entry.timestamp == host_local_to_utc(datetime(2026, 10, 2, 16, 15, 7, 210223))
 
 
-def test_a_json_line_without_a_label_has_no_subsystem(adapter):
+def test_a_json_line_without_a_label_has_no_subsystem(json_adapter):
     """About 3% of device lines carry none; the library is all they have."""
-    import json
-    d = json.loads(JSON_LINE)
-    d["label"] = None
-    entry = adapter._parse_line(json.dumps(d))
+    entry = json_adapter._parse_line(_with(label=None))
     assert entry.subsystem == "" and entry.category == "" and entry.sender == "CFNetwork"
+    assert entry.raw.endswith("evaluation failed(-9807)"), "no empty label in raw"
 
 
-@pytest.mark.parametrize("line", ['{"not": "a log line"}', '{"message": ', "[1, 2]", "{}"])
-def test_a_line_that_is_not_json_log_is_never_dropped(adapter, line):
-    entry = adapter._parse_line(line)
-    assert entry is not None and entry.raw == line
+@pytest.mark.parametrize("changes, check", [
+    ({"pid": "7556"}, lambda e: e.pid is None),
+    ({"level": "USER_ACTION"}, lambda e: e.level == LogLevel.INFO),
+    ({"level": None}, lambda e: e.level == LogLevel.INFO),
+    ({"message": 404}, lambda e: e.message == "404"),
+    ({"timestamp": "not a time"}, lambda e: e.subsystem == "com.apple.CFNetwork"),
+    ({"filename": ""}, lambda e: e.process == ""),
+])
+def test_odd_values_are_read_not_trusted(json_adapter, changes, check):
+    entry = json_adapter._parse_line(_with(**changes))
+    assert check(entry), entry
+
+
+@pytest.mark.parametrize("line", [
+    '{"not": "a log line"}',
+    '{"message": "Invalid token", "code": 401}',
+    '{"message": ',
+    "[1, 2]",
+    "{}",
+    _with(label="not a dict"),
+])
+def test_a_line_that_is_not_a_json_log_line_is_kept_whole(json_adapter, line):
+    entry = json_adapter._parse_line(line)
+    assert entry is not None and entry.message == line and entry.raw == line
+
+
+def test_a_text_capture_never_reads_a_line_as_json(adapter):
+    """A multi-line message's later lines come on their own, and one can be
+    an API error body: it is a line of text, kept whole (review)."""
+    assert adapter.output_format is None
+    entry = adapter._parse_line(JSON_LINE)
+    assert entry.message == JSON_LINE and entry.subsystem == ""
+
+
+class _Proc:
+    def __init__(self, out=b"", code=0, hang=False):
+        self.out, self.returncode, self.hang = out, code, hang
+        self.killed = False
+
+    async def communicate(self):
+        if self.hang:
+            await asyncio.sleep(3600)
+        return self.out, b""
+
+    def kill(self):
+        self.killed = True
+
+    async def wait(self):
+        return self.returncode
+
+
+def _spawner(monkeypatch, outcomes):
+    from server.sources import device_log
+    calls = []
+
+    async def spawn(binary, *args, **kw):
+        calls.append(kw.get("env") or {})
+        return outcomes[binary] if not callable(outcomes[binary]) else outcomes[binary]()
+    monkeypatch.setattr(device_log.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(device_log, "_JSON_SUPPORT", {})
+    return calls
+
+
+HELP_NEW = b"  --format   Output format. 'json' emits one JSON object per line"
 
 
 async def test_json_is_asked_for_only_when_offered(monkeypatch, adapter):
     from server.sources import device_log
-    helps = {"new": b"  --format   Output format. 'json' emits one JSON object",
-             "old": b"  --match  filter only logs matching"}
-
-    class Proc:
-        def __init__(self, out): self.out = out
-        async def communicate(self): return self.out, b""
-
-    async def spawn(binary, *args, **kw):
-        return Proc(helps[binary])
-    monkeypatch.setattr(device_log.asyncio, "create_subprocess_exec", spawn)
-    monkeypatch.setattr(device_log, "_JSON_SUPPORT", {})
+    _spawner(monkeypatch, {"new": _Proc(HELP_NEW),
+                           "old": _Proc(b"  --match  filter only logs matching"),
+                           "fmt-only": _Proc(b"  --format   text output"),
+                           "json-only": _Proc(b"  --json-out   write json")})
     assert await device_log._supports_json("new") is True
-    assert await device_log._supports_json("old") is False
+    for binary in ("old", "fmt-only", "json-only"):
+        assert await device_log._supports_json(binary) is False, binary
 
     async def no_tunnel(udid): return None
     monkeypatch.setattr(device_log, "resolve_tunnel_udid", no_tunnel)
     monkeypatch.setattr(device_log, "find_pymobiledevice3_binary", lambda: "new")
     assert (await adapter._build_command())[-2:] == ["--format", "json"]
+    assert adapter.output_format == "json" and adapter.status().note is None
     monkeypatch.setattr(device_log, "find_pymobiledevice3_binary", lambda: "old")
     assert "--format" not in await adapter._build_command()
+    assert adapter.output_format == "text"
+    assert "device-quiet" in adapter.status().note, "said where a caller looks"
 
 
-async def test_help_that_cannot_be_read_falls_back_and_is_asked_again(monkeypatch):
+async def test_the_help_is_read_plainly(monkeypatch):
+    """FORCE_COLOR made rich split `--format` with colour codes, and the
+    probe read a JSON-capable pymobiledevice3 as text-only (review)."""
     from server.sources import device_log
-    monkeypatch.setattr(device_log, "_JSON_SUPPORT", {})
+    coloured = b"\x1b[1;36m-\x1b[0m\x1b[1;36m-format\x1b[0m  Output format. 'json'"
+    calls = _spawner(monkeypatch, {"pmd3": _Proc(coloured)})
+    assert await device_log._supports_json("pmd3") is True
+    assert calls[0]["NO_COLOR"] == "1" and calls[0]["COLUMNS"] == "200"
 
-    async def broken(*a, **kw):
-        raise OSError("no such file")
-    monkeypatch.setattr(device_log.asyncio, "create_subprocess_exec", broken)
+
+async def test_asked_once_until_the_binary_changes(monkeypatch, tmp_path):
+    from server.sources import device_log
+    binary = tmp_path / "pmd3"
+    binary.write_text("#!/bin/sh\n")
+    spawned = []
+
+    def proc():
+        spawned.append(1)
+        return _Proc(HELP_NEW)
+    _spawner(monkeypatch, {str(binary): proc})
+    assert await device_log._supports_json(str(binary)) is True
+    assert await device_log._supports_json(str(binary)) is True
+    assert len(spawned) == 1, "asked once"
+    import os
+    st = binary.stat()
+    os.utime(binary, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))      # upgraded
+    await device_log._supports_json(str(binary))
+    assert len(spawned) == 2, "an upgrade is asked again"
+
+
+@pytest.mark.parametrize("outcome", [
+    _Proc(b"Traceback (most recent call last): ...", code=1),
+    "oserror",
+    "timeout",
+])
+async def test_a_help_that_cannot_be_read_is_no_for_now_and_not_kept(monkeypatch, outcome):
+    from server.sources import device_log
+    hung = _Proc(hang=True)
+    if outcome == "oserror":
+        def raise_oserror():
+            raise OSError("no such file")
+        target = raise_oserror
+    elif outcome == "timeout":
+        monkeypatch.setattr(device_log, "PROBE_TIMEOUT", 0.05)
+        target = hung
+    else:
+        target = outcome
+    _spawner(monkeypatch, {"pmd3": target})
     assert await device_log._supports_json("pmd3") is False
-    assert "pmd3" not in device_log._JSON_SUPPORT, "a failure to ask is not an answer"
+    assert device_log._JSON_SUPPORT == {}, "a failure to ask is not an answer"
+    if outcome == "timeout":
+        assert hung.killed
 
 
 async def test_a_long_line_does_not_end_the_capture(monkeypatch, adapter):
@@ -221,5 +345,25 @@ async def test_a_long_line_does_not_end_the_capture(monkeypatch, adapter):
         return ["pmd3", "syslog", "live"]
     monkeypatch.setattr(adapter, "_build_command", cmd)
     await adapter.start()
-    assert seen["limit"] >= 1024 * 1024
+    assert seen["limit"] == device_log._LINE_LIMIT == 4 * 1024 * 1024
 
+
+async def test_a_capture_that_exits_by_itself_says_why(adapter):
+    """A downgraded pymobiledevice3 rejects `--format` at once; the capture
+    must not just stop (review)."""
+    class Stream:
+        def __init__(self, data): self.data = data
+        def __aiter__(self): return self
+        async def __anext__(self): raise StopAsyncIteration
+        async def read(self, n): return self.data
+
+    class Proc:
+        returncode = 2
+        stdout = Stream(b"")
+        stderr = Stream(b"Error: No such option: --format")
+        async def wait(self): return 2
+    adapter._process = Proc()
+    adapter._running = True
+    await adapter._read_loop()
+    assert adapter.status().status == "error"
+    assert "exited (2)" in adapter._error and "No such option: --format" in adapter._error

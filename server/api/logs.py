@@ -99,6 +99,29 @@ class SourcesResponse(BaseModel):
     buffers: dict[str, dict[str, Any]] = {}
 
 
+def stream_matches(params: LogStreamParams, min_levels: set[LogLevel] | None,
+                   entry: LogEntry) -> bool:
+    """Whether a streamed entry is one the client asked for. A subsystem
+    names the os_log subsystem or the sending library, as filters do."""
+    if params.device_id and entry.device_id != params.device_id:
+        return False
+    if min_levels and entry.level not in min_levels:
+        return False
+    if params.process and entry.process != params.process:
+        return False
+    if params.subsystem and params.subsystem not in (entry.subsystem, entry.sender):
+        return False
+    if params.category and entry.category != params.category:
+        return False
+    if params.source and entry.source != params.source:
+        return False
+    if params.match and params.match.lower() not in entry.message.lower():
+        return False
+    if params.exclude and params.exclude.lower() in entry.message.lower():
+        return False
+    return True
+
+
 class FilterRequest(BaseModel):
     source: str | None = None
     device_id: str | None = None
@@ -152,23 +175,7 @@ async def stream_logs(
         min_levels = set(LogLevel.at_least(params.level))
 
     def matches_filter(entry: LogEntry) -> bool:
-        if params.device_id and entry.device_id != params.device_id:
-            return False
-        if min_levels and entry.level not in min_levels:
-            return False
-        if params.process and entry.process != params.process:
-            return False
-        if params.subsystem and params.subsystem not in (entry.subsystem, entry.sender):
-            return False
-        if params.category and entry.category != params.category:
-            return False
-        if params.source and entry.source != params.source:
-            return False
-        if params.match and params.match.lower() not in entry.message.lower():
-            return False
-        if params.exclude and params.exclude.lower() in entry.message.lower():
-            return False
-        return True
+        return stream_matches(params, min_levels, entry)
 
     async def event_generator():
         # Subscribe to all relevant buffers and merge into one queue

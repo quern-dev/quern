@@ -419,8 +419,11 @@ class TestQuietSubsystems:
         f.update_filter(build_config(preset="device-quiet"))
         def dev(**kw):
             return _make_entry(source=LogSource.DEVICE, **kw)
-        assert not f.should_admit(dev(subsystem="com.apple.network", sender="Network",
-                                      level=LogLevel.DEBUG))
+        for level in (LogLevel.DEBUG, LogLevel.INFO, LogLevel.NOTICE, LogLevel.WARNING):
+            assert not f.should_admit(dev(subsystem="com.apple.network", sender="Network",
+                                          level=level))
+        assert not f.should_admit(dev(subsystem="", sender="ColourSensorFilterPlugin",
+                                      level=LogLevel.ERROR))
         assert f.should_admit(dev(subsystem="com.apple.CFNetwork", sender="CFNetwork",
                                   level=LogLevel.ERROR,
                                   message="TLS Trust evaluation failed(-9807)"))
@@ -508,9 +511,12 @@ class TestSender:
         assert not f.should_admit(_make_entry(subsystem="com.apple.network", sender="Network"))
 
     def test_an_empty_sender_matches_nothing(self):
+        """Even a filter that names "" -- which matches an entry with no
+        subsystem -- must not catch every entry that has no sender."""
         f = IngestionFilter()
-        f.update_filter(FilterConfig(exclude_subsystems=["com.myapp"]))
+        f.update_filter(FilterConfig(exclude_subsystems=["com.myapp", ""]))
         assert f.should_admit(_make_entry(subsystem="com.other", sender=""))
+        assert not f.should_admit(_make_entry(subsystem="", sender=""))
 
     def test_the_quiet_rule_reads_the_subsystem_only(self):
         """A library name is never `com.apple.*`; the rule is for subsystems."""
@@ -518,4 +524,16 @@ class TestSender:
         f.update_filter(FilterConfig(quiet_subsystems=["com.apple."]))
         assert f.should_admit(_make_entry(subsystem="", sender="com.apple.lookalike",
                                           level=LogLevel.DEBUG))
+
+
+def test_the_stream_names_a_subsystem_or_a_sender():
+    from server.api.logs import stream_matches
+    from server.models import LogStreamParams
+    params = LogStreamParams(subsystem="CFNetwork")
+    assert stream_matches(params, None, _make_entry(subsystem="com.apple.CFNetwork",
+                                                    sender="CFNetwork"))
+    assert not stream_matches(params, None, _make_entry(subsystem="com.apple.network",
+                                                        sender="Network"))
+    params = LogStreamParams(subsystem="com.apple.CFNetwork")
+    assert stream_matches(params, None, _make_entry(subsystem="com.apple.CFNetwork"))
 

@@ -114,8 +114,8 @@ class LogEntry(BaseModel):
         default="",
         description=(
             "The library or executable that logged it (e.g. 'CFNetwork', "
-            "'libboringssl.dylib'), where the source reports one: physical iOS "
-            "devices. Not the subsystem -- one library logs under several."
+            "'libboringssl.dylib'): filled for physical iOS devices, simulators "
+            "and macOS os_log. Not the subsystem -- one library logs under several."
         ),
     )
     category: str = Field(
@@ -228,6 +228,9 @@ class SourceStatus(BaseModel):
     entries_captured: int = 0
     started_at: datetime | None = None
     error: str | None = None
+    #: What changes how this source's entries read, said where a caller looks:
+    #: a device capture without os_log subsystems, for one.
+    note: str | None = None
 
 
 # ---------------------------------------------------------------------------

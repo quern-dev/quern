@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import posixpath
 import re
 import uuid
@@ -46,31 +47,65 @@ _UNCHANGED = object()  # Sentinel for reconfigure() defaults
 #: the read loop on the first one that is longer.
 _LINE_LIMIT = 4 * 1024 * 1024
 
-#: binary path -> whether its `syslog live` takes `--format json`.
-_JSON_SUPPORT: dict[str, bool] = {}
+#: (binary, its modification time) -> whether its `syslog live` takes
+#: `--format json`. The time is in the key so an upgrade or a downgrade of
+#: pymobiledevice3 -- which quern offers -- is asked again, not answered from
+#: before it.
+_JSON_SUPPORT: dict[tuple[str, int], bool] = {}
+
+#: The help text, plainly: rich colours it under FORCE_COLOR and wraps it to
+#: COLUMNS, and either split `--format` so the probe missed it (review).
+#: How long the help text may take before JSON is given up on for this start.
+PROBE_TIMEOUT = 30.0  # s
+
+_PLAIN_ENV = {"NO_COLOR": "1", "TERM": "dumb", "COLUMNS": "200"}
+_ANSI = re.compile(rb"\x1b\[[0-9;]*m")
+
+TEXT_MODE_WARNING = (
+    "this pymobiledevice3 has no `syslog live --format json`, so device lines "
+    "carry the sending library and no os_log subsystem: subsystem filters on "
+    "com.apple.* -- device-quiet's included -- match nothing. "
+    "`pipx upgrade pymobiledevice3` fixes it."
+)
+
+
+def _probe_key(binary: str) -> tuple[str, int]:
+    try:
+        return binary, os.stat(binary).st_mtime_ns
+    except OSError:
+        return binary, 0
 
 
 async def _supports_json(binary: str) -> bool:
     """Whether this pymobiledevice3's `syslog live` has `--format json`.
-    Asked once per binary. A help text that cannot be read counts as no:
-    the text form works everywhere, only with less in it."""
-    if binary not in _JSON_SUPPORT:
+
+    Asked once per binary until it changes. A help text that cannot be read
+    -- no binary, a timeout, a non-zero exit -- counts as no for this start
+    and is not kept: the text form works everywhere, only with less in it,
+    and the next start asks again."""
+    key = _probe_key(binary)
+    if key not in _JSON_SUPPORT:
         try:
             proc = await asyncio.create_subprocess_exec(
                 binary, "syslog", "live", "--help",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                env={**os.environ, **_PLAIN_ENV})
             try:
-                out, _ = await asyncio.wait_for(proc.communicate(), 30)
+                out, _ = await asyncio.wait_for(proc.communicate(), PROBE_TIMEOUT)
             except TimeoutError:
                 proc.kill()
                 await proc.wait()
                 raise
-            _JSON_SUPPORT[binary] = b"--format" in out and b"json" in out
+            if proc.returncode != 0:
+                raise OSError(f"`syslog live --help` exited {proc.returncode}: "
+                              f"{out.decode(errors='replace').strip()[-200:]}")
+            out = _ANSI.sub(b"", out)
+            _JSON_SUPPORT[key] = b"--format" in out and b"json" in out
         except (OSError, TimeoutError) as e:
             logger.warning("Could not read pymobiledevice3's syslog options (%s); "
                            "device logs will carry no os_log subsystem", e)
             return False
-    return _JSON_SUPPORT[binary]
+    return _JSON_SUPPORT[key]
 
 # Regex to parse pymobiledevice3 syslog live output lines
 # Format: "2026-02-21 21:22:45.272141 LogTester{Foundation}[2915] <NOTICE>: message"
@@ -137,6 +172,10 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
         self.process_filter = process_filter
         self.match_filter = match_filter
         self._tunnel_udid: str | None = None
+        #: "json" or "text": what this capture asked pymobiledevice3 for. Only
+        #: a JSON capture's lines are read as JSON -- a text capture's
+        #: continuation line can be a JSON body of its own (review).
+        self.output_format: str | None = None
         self._process: asyncio.subprocess.Process | None = None
         self._read_task: asyncio.Task | None = None
 
@@ -169,6 +208,11 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
             cmd.extend(["-m", self.match_filter])
         if await _supports_json(str(binary)):
             cmd.extend(["--format", "json"])
+            self.output_format = "json"
+            self._note = None
+        else:
+            self.output_format = "text"
+            self._note = TEXT_MODE_WARNING
 
         return cmd
 
@@ -266,6 +310,11 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
                 entry = self._parse_line(line)
                 if entry is not None:
                     await self.emit(entry)
+            if self._running:
+                # The output ended while nobody asked it to: pymobiledevice3
+                # exited. Say why -- a downgraded one rejects `--format` at
+                # once, and the capture would otherwise just stop (review).
+                self._error = await self._exit_reason()
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -277,7 +326,7 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
 
     def _parse_line(self, line: str) -> LogEntry | None:
         """Parse a single pymobiledevice3 syslog output line into a LogEntry."""
-        if line.startswith("{"):
+        if self.output_format == "json" and line.startswith("{"):
             entry = self._parse_json(line)
             if entry is not None:
                 return entry
@@ -322,26 +371,54 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
         parsed as text, and kept raw at worst, never dropped."""
         try:
             d = json.loads(line)
-            if not isinstance(d, dict) or "message" not in d:
+            # pymobiledevice3's own keys, not just any object with a message.
+            if not isinstance(d, dict) or not {"pid", "timestamp", "level", "message"} <= d.keys():
                 return None
             label = d.get("label") or {}
             try:
                 ts = host_local_to_utc(datetime.fromisoformat(d["timestamp"]))
             except (KeyError, TypeError, ValueError):
                 ts = self._now()
+            process = posixpath.basename(d.get("filename") or "")
+            subsystem = label.get("subsystem") or ""
+            category = label.get("category") or ""
+            sender = posixpath.basename(d.get("image_name") or "")
+            pid = d.get("pid") if isinstance(d.get("pid"), int) else None
+            level_name = str(d.get("level") or "")
+            message = str(d.get("message") or "")
             return LogEntry(
                 id=uuid.uuid4().hex[:8],
                 timestamp=ts,
                 device_id=self.device_id,
-                process=posixpath.basename(d.get("filename") or ""),
-                subsystem=label.get("subsystem") or "",
-                category=label.get("category") or "",
-                sender=posixpath.basename(d.get("image_name") or ""),
-                pid=d.get("pid") if isinstance(d.get("pid"), int) else None,
-                level=PMD3_LEVEL_MAP.get(str(d.get("level", "")).lower(), LogLevel.INFO),
-                message=str(d.get("message") or ""),
+                process=process,
+                subsystem=subsystem,
+                category=category,
+                sender=sender,
+                pid=pid,
+                level=PMD3_LEVEL_MAP.get(level_name.lower(), LogLevel.INFO),
+                message=message,
                 source=LogSource.DEVICE,
-                raw=line,
+                # The text form, label included -- not the JSON object, whose
+                # UUIDs, offsets and container paths doubled what every log
+                # query returned per entry (review).
+                raw=(f"{d.get('timestamp')} {process}{{{sender}}}[{pid}] <{level_name}>: "
+                     f"{message}" + (f" [{subsystem}][{category}]" if subsystem else "")),
             )
         except (ValueError, TypeError, AttributeError):
             return None
+
+    async def _exit_reason(self) -> str:
+        """What pymobiledevice3 said as it exited on its own."""
+        proc = self._process
+        code = None
+        detail = b""
+        if proc is not None:
+            try:
+                code = await asyncio.wait_for(proc.wait(), 5)
+                if proc.stderr is not None:
+                    detail = await asyncio.wait_for(proc.stderr.read(4096), 2)
+            except (TimeoutError, OSError, ValueError):
+                pass
+        text = detail.decode(errors="replace").strip()[-300:]
+        return f"pymobiledevice3 syslog exited ({code})" + (f": {text}" if text else "")
+
