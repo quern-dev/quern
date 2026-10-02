@@ -280,7 +280,7 @@ def _controller_with_fields(*fields):
     cleared: list = []
 
     class Backend:
-        async def select_all_and_delete(self, udid, x, y, element_type):
+        async def select_all_and_delete(self, udid, x, y, element_type, identifier=None):
             cleared.append((x, y, element_type))
 
     ctrl._ui_backend = lambda _u: Backend()
@@ -652,7 +652,7 @@ class _ClearBackend:
     def __init__(self):
         self.select_calls, self.taps, self.deleted = [], [], []
 
-    async def select_all_and_delete(self, udid, x, y, element_type):
+    async def select_all_and_delete(self, udid, x, y, element_type, identifier=None):
         self.select_calls.append((x, y, element_type))
 
     async def tap(self, udid, x, y):

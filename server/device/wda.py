@@ -701,8 +701,13 @@ def _find_xctestrun() -> Path:
         for f in products_dir.glob("*.xctestrun"):
             return f
 
-    raise RuntimeError(
-        "No .xctestrun file found. Run setup_wda() first to build WDA."
+    from server.models import WdaNotSetUpError
+
+    raise WdaNotSetUpError(
+        "WebDriverAgent is not set up for physical devices on this Mac: no "
+        ".xctestrun was found. Run the setup_wda tool (POST "
+        "/api/v1/device/wda/setup) once with the device connected, then retry.",
+        tool="wda",
     )
 
 

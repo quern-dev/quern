@@ -644,6 +644,68 @@ class DeviceControllerUI:
             return None, None, "lookup_failed", None
         return hint.scrollable, hint.screen, hint.reason, hint.candidates
 
+    async def _wda_reachable_only(
+        self, resolved: str, matches: list[UIElement],
+    ) -> tuple[list[UIElement], list[dict]]:
+        """Split WDA matches into those a tap can reach and those it cannot.
+
+        Reachable means the tap point is inside the app's frame *and* XCUITest
+        calls the element hittable -- the rule bajutsu adopted after measuring
+        XCUITest's own auto-scroll tap succeed 2 times in 3 near a screen edge
+        (bajutsu PR #2119). Off-screen alone misses an element under the
+        keyboard: measured on an iPhone 11, a tab item at y=817 under a
+        keyboard spanning 595-838 was "tapped" with an `ok`, and the tap landed
+        on the keyboard -- once on its Dictate key, which raised a system
+        prompt over the app.
+
+        A hittability answer that could not be had (None) does not drop the
+        match: the on-screen check still applies, and refusing every tap
+        because a second WDA query failed would make WDA unusable.
+        """
+        app_els, _ = await self.get_ui_elements(
+            resolved, use_cache=False, filter_type="Application",
+            probe_containers=False,
+        )
+        viewport = next((e.frame for e in app_els if e.frame), None)
+        kept: list[UIElement] = []
+        dropped: list[dict] = []
+        for m in matches:
+            if m.frame is None:
+                kept.append(m)
+                continue
+            cx, cy = get_tap_point(m)
+            why = None
+            if viewport and not (
+                viewport["x"] <= cx < viewport["x"] + viewport["width"]
+                and viewport["y"] <= cy < viewport["y"] + viewport["height"]
+            ):
+                why = (
+                    f"{m.label or m.identifier!r} is off screen at "
+                    f"({cx:.0f}, {cy:.0f}); the screen is "
+                    f"{viewport['width']:.0f}x{viewport['height']:.0f}"
+                )
+                reason = "off_screen"
+            else:
+                hittable = await self.wda_client.is_hittable(
+                    resolved, identifier=m.identifier, label=m.label or None,
+                    center=(cx, cy),
+                )
+                if hittable is False:
+                    why = (
+                        f"{m.label or m.identifier!r} is covered at "
+                        f"({cx:.0f}, {cy:.0f}) -- XCUITest reports it not "
+                        "hittable; the keyboard or an alert may be over it"
+                    )
+                    reason = "not_hittable"
+            if why is None:
+                kept.append(m)
+            else:
+                dropped.append({
+                    "label": m.label, "identifier": m.identifier,
+                    "x": cx, "y": cy, "reason": reason, "why": why,
+                })
+        return kept, dropped
+
     async def _ios_scroll_to_element(
         self,
         resolved: str,
@@ -2110,6 +2172,15 @@ class DeviceControllerUI:
             label_prefix=label_prefix, identifier=identifier,
             element_type=element_type,
         )
+        # Through WDA, a match is not yet a tap target: WDA reports every cell
+        # of a table, on screen or not, and elements under the keyboard. Only
+        # one whose centre is on screen and that XCUITest calls hittable is
+        # tapped; the rest are treated as not found, so the sweep below (or the
+        # not-found answer) handles them as it does on the accessibility tree,
+        # where they are simply absent (F32).
+        unreachable: list[dict] = []
+        if matches and self._served_by_wda(resolved):
+            matches, unreachable = await self._wda_reachable_only(resolved, matches)
 
         # iOS off-screen retry: on a tree-path miss, scroll the target into view
         # and retry. Android selector-misses are handled by the fast path above,
@@ -2189,6 +2260,13 @@ class DeviceControllerUI:
                         label_prefix=label_prefix, identifier=identifier,
                         element_type=element_type,
                     )
+                    if matches and self._served_by_wda(resolved):
+                        # On screen after the sweep is not the same as
+                        # reachable: the keyboard or a sheet can still be
+                        # over it.
+                        matches, unreachable = await self._wda_reachable_only(
+                            resolved, matches,
+                        )
                 # The tree moved, so context gathered before the sweep is stale.
                 all_elements = None
 
@@ -2224,7 +2302,7 @@ class DeviceControllerUI:
             )
             if screenshot:
                 screen_context["screenshot"] = screenshot
-            return {
+            result = {
                 "status": "not_found",
                 "detail": f"No element found matching {search_desc}",
                 "screen_context": screen_context,
@@ -2237,6 +2315,15 @@ class DeviceControllerUI:
                 # an unknown screen and worthless on one recorded as fixed.
                 "scroll": _scroll_report(sweep, scroll_to_find),
             }
+            if unreachable:
+                # Found, but not tappable -- a different fact from "not there",
+                # and the one that decides what the caller does next.
+                result["unreachable"] = unreachable
+                result["detail"] = (
+                    f"Found {search_desc}, but not where a tap can reach it: "
+                    + "; ".join(u["why"] for u in unreachable)
+                )
+            return result
 
         if len(matches) == 1:
             el = matches[0]
@@ -3098,6 +3185,7 @@ class DeviceControllerUI:
         if (target.extra_attrs or {}).get("source") not in ("web-inspector", "web-probe"):
             await backend.select_all_and_delete(
                 resolved, x=cx, y=cy, element_type=target.type,
+                identifier=target.identifier,
             )
             self._invalidate_ui_cache(resolved)
             return resolved

@@ -1752,6 +1752,16 @@ class DeviceOperationUnsupportedError(DeviceError):
     """
 
 
+class WdaNotSetUpError(DeviceOperationUnsupportedError):
+    """WDA has not been built for physical devices on this Mac yet.
+
+    A refusal with a remedy, so it carries the remedy. It was a RuntimeError
+    that escaped `launch_app` and every other WDA-backed route as a bare
+    `500 Internal Server Error`, swallowing the one sentence that said what to
+    do (F34).
+    """
+
+
 class AppStateNotFoundError(DeviceError):
     """A checkpoint, container, plist or key that the request named is not there.
 

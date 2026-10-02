@@ -580,6 +580,7 @@ class U2Backend:
         x: float,
         y: float,
         element_type: str | None = None,
+        identifier: str | None = None,  # unused: this backend clears at (x, y)
     ) -> None:
         """Empty the text field at (x, y), and confirm that it emptied.
 
