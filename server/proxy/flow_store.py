@@ -61,6 +61,28 @@ def _device_keys(
     return keys
 
 
+#: In-flight requests kept at once. An app has tens in flight; thousands
+#: means requests that will never finish, and the oldest go first.
+PENDING_MAX = 2000
+
+
+class _Starts:
+    """The started-requests feed, shaped like a buffer's subscription API so a
+    recording subscribes to it the way it subscribes to everything else."""
+
+    def __init__(self, fanout: Fanout[FlowRecord]) -> None:
+        self._fanout = fanout
+
+    def subscribe(self, accept=None):
+        return self._fanout.subscribe(accept)
+
+    def unsubscribe(self, queue) -> None:
+        self._fanout.unsubscribe(queue)
+
+    def missed(self, queue) -> Missed:
+        return self._fanout.missed(queue)
+
+
 class FlowStore:
     """Thread-safe in-memory store for HTTP flow records."""
 
@@ -102,6 +124,15 @@ class FlowStore:
         # New flows taken in, as opposed to updates of ones already held.
         # `size` is what survived; this is what arrived.
         self._added = 0
+        # Requests that have started and not yet finished (#364): kept apart
+        # from the flows, so nothing that queries or waits on flows matches
+        # a request with no response yet. Bounded, since a request may never
+        # end; what the bound pushes out is counted, never silent.
+        self._pending: OrderedDict[str, FlowRecord] = OrderedDict()
+        self._pending_max = PENDING_MAX
+        self._pending_evicted = 0
+        self._start_fanout: Fanout[FlowRecord] = Fanout(maxsize=1000)
+        self.starts = _Starts(self._start_fanout)
 
     @property
     def size(self) -> int:
@@ -114,6 +145,8 @@ class FlowStore:
     async def add(self, flow: FlowRecord) -> None:
         """Insert or update a flow record, evicting oldest if at capacity."""
         async with self._lock:
+            # It finished (or failed): no longer in flight.
+            self._pending.pop(flow.id, None)
             if flow.id in self._flows:
                 # Update existing — move to end
                 del self._flows[flow.id]
@@ -289,6 +322,39 @@ class FlowStore:
         """Return all flows (snapshot under lock)."""
         async with self._lock:
             return list(self._flows.values())
+
+    def note_started(self, flow: FlowRecord) -> None:
+        """A request has started and has no response yet.
+
+        Kept until `add` sees the same id complete, or the proxy stops.
+        Published to `starts` subscribers, which is how a recording learns
+        of a request that may never finish.
+        """
+        if flow.id in self._flows:
+            return                  # already finished: a late start says nothing new
+        self._pending.pop(flow.id, None)
+        self._pending[flow.id] = flow
+        while len(self._pending) > self._pending_max:
+            self._pending.popitem(last=False)
+            self._pending_evicted += 1
+        self._start_fanout.publish(flow)
+
+    def pending(self) -> list[FlowRecord]:
+        """Requests in flight now, oldest first."""
+        return list(self._pending.values())
+
+    @property
+    def pending_evicted(self) -> int:
+        """In-flight requests pushed out by the bound: there were more than
+        `PENDING_MAX` at once, so `pending()` is not all of them."""
+        return self._pending_evicted
+
+    def drop_pending(self) -> int:
+        """The proxy stopped: nothing it was carrying will finish. Returns how
+        many were dropped."""
+        dropped = len(self._pending)
+        self._pending.clear()
+        return dropped
 
     def subscribe(
         self, accept: Callable[[FlowRecord], bool] | None = None,

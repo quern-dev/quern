@@ -50,7 +50,10 @@ from server.trace import APP_LOG_SOURCES, Ownership, device_of, owns
 
 logger = logging.getLogger(__name__)
 
-FORMAT_VERSION = 1
+#: 2 adds `request_started` lines (#364, phase 2), and with them an exact
+#: answer for flows across a gap: a request that started before it is in the
+#: file, finished or not.
+FORMAT_VERSION = 2
 EVENTS = "events.jsonl"
 MANIFEST = "manifest.json"
 #: How often what has arrived is written. A crash loses at most this much.
@@ -89,7 +92,8 @@ def host_matches(host: str, patterns: list[str]) -> bool:
 #: reports together, as the trace takes them.
 KINDS = ("actions", "flows", "logs")
 #: The event types each kind writes.
-_EVENT_TYPES = {"actions": ("action",), "flows": ("flow",), "logs": ("log", "crash")}
+_EVENT_TYPES = {"actions": ("action",), "flows": ("flow", "request_started"),
+                "logs": ("log", "crash")}
 
 
 def event_types(kinds) -> set[str]:
@@ -154,7 +158,7 @@ class Recording:
     error: str | None = None
     stopped_at: datetime | None = None
     counts: dict[str, int] = field(default_factory=lambda: {
-        "action": 0, "flow": 0, "log": 0, "crash": 0})
+        "action": 0, "flow": 0, "request_started": 0, "log": 0, "crash": 0})
     dropped: dict[str, int] = field(default_factory=dict)
     gaps: list[dict] = field(default_factory=list)
     #: Said on the start response: things that do not stop the recording but
@@ -264,7 +268,7 @@ def _tally(events: Path) -> _Tally:
     """Counts, drops and gaps from the file itself: the record, where the
     state file is only a pointer. Saved counts went stale on a crash and a
     resumed recording then reported 0 flows of 1,000 written (review)."""
-    counts = {"action": 0, "flow": 0, "log": 0, "crash": 0}
+    counts = {"action": 0, "flow": 0, "request_started": 0, "log": 0, "crash": 0}
     dropped: dict[str, int] = {}
     gaps: list[dict] = []
     last_at = None
@@ -422,6 +426,10 @@ class RecordingManager:
                         ("crash", self._crash_buffer, lambda e: self._wants_crash(rec, e))]
         if "flows" in rec.filters.kinds and self._flow_store is not None:
             sources.append(("flow", self._flow_store, lambda f: self._wants_flow(rec, f)))
+            # Each request as it starts, by the same rule: one that never
+            # finishes is then in the file as started and never answered.
+            sources.append(("request_started", self._flow_store.starts,
+                            lambda f: self._wants_flow(rec, f)))
         rec._closing = False
         rec._wake = asyncio.Event()
         for kind, source, accept in sources:
@@ -698,15 +706,25 @@ class Loaded:
     #: How many times `monotonic` went backwards: a reboot during the run.
     monotonic_resets: int = 0
     warnings: list[str] = field(default_factory=list)
+    #: Requests the file has a start for and no flow: hung, cut off by a gap
+    #: or the end, or lost with dropped flows. Each carries why in `error`.
+    unfinished: list[FlowRecord] = field(default_factory=list)
 
 
 _EVERYTHING = frozenset({"action", "flow", "log", "crash"})
 _NOT_FLOWS = frozenset({"action", "log", "crash"})
 
 
-def _gap_holes(start, end, why) -> list[tuple]:
+def _gap_holes(start, end, why, *, exact_flows: bool = False) -> list[tuple]:
     """A gap is a hole for everything, reaching back further for flows: one
-    in flight when quern stopped is stamped with when it started."""
+    in flight when quern stopped is stamped with when it started.
+
+    `exact_flows`: the file records request starts (format 2), so a request
+    in flight at the gap is in it as started -- reported as unfinished -- and
+    the flow hole is the gap itself.
+    """
+    if exact_flows:
+        return [(start, end, _EVERYTHING, why)]
     flow_start = start - FLOW_LOOKBACK if start is not None else None
     return [(start, end, _NOT_FLOWS, why),
             (flow_start, end, frozenset({"flow"}),
@@ -732,6 +750,8 @@ def load(directory: Path, *, live: bool = False, markers_only: bool = False) -> 
     """
     actions: list[LogEntry] = []
     flows: dict[str, FlowRecord] = {}
+    starts: dict[str, FlowRecord] = {}
+    version = 1
     logs: list[LogEntry] = []
     holes: list[tuple] = []
     anchors: list[dict] = []
@@ -766,17 +786,25 @@ def load(directory: Path, *, live: bool = False, markers_only: bool = False) -> 
                     flow = FlowRecord.model_validate(event["data"])
                     flows.pop(flow.id, None)
                     flows[flow.id] = flow
+                    starts.pop(flow.id, None)
+                elif kind == "request_started":
+                    flow = FlowRecord.model_validate(event["data"])
+                    if flow.id not in flows:
+                        starts[flow.id] = flow
                 elif kind in ("log", "crash"):
                     logs.append(LogEntry.model_validate(event["data"]))
                 elif kind in ("started", "resumed"):
                     if kind == "started":
                         udid = udid or event.get("udid")
+                        if isinstance(event.get("format_version"), int):
+                            version = event["format_version"]
                     if isinstance(event.get("clock_anchor"), dict):
                         anchors.append({**event["clock_anchor"], "segment": kind})
                     if kind == "resumed":
                         gap = event.get("gap") or {}
                         holes += _gap_holes(_dt(gap.get("from")), _dt(gap.get("to")),
-                                            gap.get("reason") or "gap")
+                                            gap.get("reason") or "gap",
+                                            exact_flows=version >= 2)
                 elif kind == "dropped":
                     holes.append((_dt(event.get("first")), _dt(event.get("last")),
                                   frozenset({event.get("what")}),
@@ -800,10 +828,34 @@ def load(directory: Path, *, live: bool = False, markers_only: bool = False) -> 
                if live else
                f"the recording failed ({failed})" if failed else
                "the recording did not stop cleanly: nothing after its last line is in it")
-        holes += _gap_holes(last_at, None, why)
+        holes += _gap_holes(last_at, None, why, exact_flows=version >= 2)
     return Loaded(actions=actions, flows=list(flows.values()), logs=logs, udid=udid,
                   holes=holes, stopped=stopped, unreadable_lines=bad,
-                  clock_anchors=anchors, monotonic_resets=resets, warnings=warnings)
+                  clock_anchors=anchors, monotonic_resets=resets, warnings=warnings,
+                  unfinished=[_unfinished(f, holes, stopped=stopped, live=live)
+                              for f in starts.values()])
+
+
+def _unfinished(flow: FlowRecord, holes: list[tuple], *, stopped: bool,
+                live: bool) -> FlowRecord:
+    """A request with a start and no flow, with why in its `error`.
+
+    Only "hung" when nothing else could explain it: a gap or dropped flows
+    after it started may have taken its response, and that is said instead.
+    """
+    after = [why for start, end, what, why in holes
+             if "flow" in what and (end is None or end >= flow.timestamp)
+             and (start is None or start >= flow.timestamp - timedelta(seconds=1))]
+    if live and not stopped:
+        reason = "in flight: no response yet"
+    elif after:
+        reason = f"no response recorded, and the recording has a hole after it started: " \
+                 f"{after[0]}; it may have been answered then"
+    elif stopped:
+        reason = "no response before the recording stopped: the request never finished"
+    else:
+        reason = "no response before the recording ended"
+    return flow.model_copy(update={"error": reason})
 
 
 def _dt(value) -> datetime | None:
@@ -840,7 +892,7 @@ MAX_PAGE = 2000
 
 def _summary(kind: str, data: dict) -> dict:
     """An event without its bulk: enough to choose which to read in full."""
-    if kind == "flow":
+    if kind in ("flow", "request_started"):
         req, resp = data.get("request") or {}, data.get("response") or {}
         return {"id": data.get("id"), "timestamp": data.get("timestamp"),
                 "method": req.get("method"), "url": req.get("url"),

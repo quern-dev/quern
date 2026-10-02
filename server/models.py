@@ -835,6 +835,15 @@ class FlowRecord(BaseModel):
         default=None,
         description="Simulator UDID if traffic came from a simulator",
     )
+    started_monotonic: float | None = Field(
+        default=None,
+        description=(
+            "When the request started, on the host's monotonic clock (Python's "
+            "time.monotonic(), mach absolute time): the clock recorded video "
+            "frames are stamped with, so a flow is placed against a frame with "
+            "no conversion (#290, #364)."
+        ),
+    )
     device_serial: str | None = Field(
         default=None,
         description=(
@@ -1160,6 +1169,11 @@ class TraceFlow(BaseModel):
     method: str
     url: str
     status: int | None = None
+    #: Why there is no `status`: a request still in flight, or one a
+    #: recording has a start for and no end (#364).
+    error: str | None = None
+    #: When it started, on the clock video frames are stamped with (#290).
+    started_monotonic: float | None = None
     source_process: str | None = None
     #: How this flow's device was established: "process" (exact, resolved from
     #: the client pid), "client_ip" (a recorded address, still trusted),

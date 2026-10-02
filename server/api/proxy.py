@@ -852,6 +852,47 @@ async def flow_summary(
     return _with_tls_note(request, simulator_udid, summary)
 
 
+@router.get("/flows/pending")
+async def pending_flows(
+    request: Request,
+    simulator_udid: str | None = None,
+    device_serial: str | None = None,
+    client_ip: str | None = None,
+) -> dict:
+    """Requests that have started and have no response yet, oldest first (#364).
+
+    A flow is stored only when its response arrives or it fails, so a request
+    the server never answers appears nowhere else while it hangs. Each comes
+    with its age; `evicted` counts any pushed out by the bound, so a list
+    that is not all of them says so.
+    """
+    from server.api.trace import _proxy_is_running
+
+    flow_store = request.app.state.flow_store
+    if flow_store is None:
+        return {"pending": [], "evicted": 0, "proxy_running": False}
+    now = datetime.now(UTC)
+    rows = []
+    for flow in flow_store.pending():
+        if simulator_udid and flow.simulator_udid != simulator_udid:
+            continue
+        if device_serial and flow.device_serial != device_serial:
+            continue
+        if client_ip and flow.client_ip != client_ip:
+            continue
+        rows.append({
+            "id": flow.id, "started_at": flow.timestamp.isoformat(),
+            "age_s": round((now - flow.timestamp).total_seconds(), 1),
+            "started_monotonic": flow.started_monotonic,
+            "method": flow.request.method, "url": flow.request.url,
+            "host": flow.request.host, "source_process": flow.source_process,
+            "simulator_udid": flow.simulator_udid, "device_serial": flow.device_serial,
+            "client_ip": flow.client_ip,
+        })
+    return {"pending": rows, "evicted": flow_store.pending_evicted,
+            "proxy_running": _proxy_is_running(request)}
+
+
 @router.get("/flows/stream")
 async def stream_flows(
     request: Request,

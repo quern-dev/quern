@@ -315,6 +315,9 @@ class _FakeFlowStore:
     async def get_since(self, since):
         return [f for f in self._flows if f.timestamp >= since]
 
+    def pending(self):
+        return []
+
     def is_complete_since(self, since):
         return True  # this fake never evicts
 

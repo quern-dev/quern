@@ -118,7 +118,8 @@ class TestWhatIsRecorded:
         kinds = [e["type"] for e in _events(tmp_path / "r")]
         assert kinds.count("action") == 1 and kinds.count("flow") == 1
         assert kinds.count("log") == 1 and kinds.count("crash") == 1
-        assert rec.counts == {"action": 1, "flow": 1, "log": 1, "crash": 1}
+        assert rec.counts == {"action": 1, "flow": 1, "request_started": 0, "log": 1,
+                              "crash": 1}
 
     async def test_a_flow_is_recorded_in_full(self, tmp_path):
         src = Sources()
@@ -594,7 +595,7 @@ class TestKinds:
         src = Sources()
         manager = src.manager()
         rec = await manager.start(SIM, str(tmp_path / "r"), Filters(kinds=("flows",)))
-        assert [kind for kind, _, _ in rec._subs] == ["flow"]
+        assert [kind for kind, _, _ in rec._subs] == ["flow", "request_started"]
         await manager.stop(rec.id)
 
     async def test_actions_only(self, tmp_path):
@@ -606,7 +607,8 @@ class TestKinds:
             await src.ring.append(_log())
 
         _, rec = await _record(src, tmp_path / "r", feed, Filters(kinds=("actions",)))
-        assert rec.counts == {"action": 1, "flow": 0, "log": 0, "crash": 0}
+        assert rec.counts == {"action": 1, "flow": 0, "request_started": 0, "log": 0,
+                              "crash": 0}
 
     async def test_the_kinds_survive_a_restart(self, tmp_path):
         first = Sources().manager()

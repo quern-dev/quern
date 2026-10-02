@@ -5,6 +5,26 @@ import { apiRequest } from "../http.js";
 import { strictParams } from "./helpers.js";
 
 export function registerProxyTools(server: McpServer): void {
+  server.registerTool("list_pending_requests", {
+    description: `Requests that have started and have no response yet, oldest first, each with its age. A flow appears in query_flows only once its response arrives or it fails, so a request the server never answers -- a hung sign-up, a stalled upload -- is visible here and nowhere else while it hangs. Filter by simulator_udid, device_serial or client_ip. "evicted" counts in-flight requests pushed out by the bound (2,000 at once), so a list that is not all of them says so.`,
+    inputSchema: strictParams({
+      simulator_udid: z.string().optional().describe("Only this simulator's requests"),
+      device_serial: z.string().optional().describe("Only this Android emulator's requests"),
+      client_ip: z.string().optional().describe("Only this physical device's requests, by address"),
+    }),
+  }, async ({ simulator_udid, device_serial, client_ip }) => {
+    try {
+      const data = await apiRequest("GET", "/api/v1/proxy/flows/pending",
+                                    { simulator_udid, device_serial, client_ip });
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      };
+    }
+  });
+
   server.registerTool("query_flows", {
     description: `Query captured HTTP flows from the network proxy. Filter by host, method, status code, and more.
 

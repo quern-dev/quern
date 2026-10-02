@@ -32,6 +32,7 @@ _NOT_ACTIONS: frozenset[str] = frozenset({
     "app_state.py:get_plist_watch_config_endpoint",
     "build_app.py:build_progress",  # a read, polled every 10s during a build
     "recordings.py:list_recordings",
+    "proxy.py:pending_flows",
     "recordings.py:recording_events",
     "builds.py:get_latest_build",
     "device.py:tool_sites",

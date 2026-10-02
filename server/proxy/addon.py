@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import base64
+import contextlib
 import ctypes
 import ctypes.util
 import fnmatch
@@ -658,6 +659,40 @@ def _bind_to_running_instances(udids: frozenset[str]) -> dict[str, int]:
     return {u: running[u] for u in udids if u in running}
 
 
+def _quern_id(flow: http.HTTPFlow) -> str:
+    """The id this flow goes by, the same when it starts and when it ends.
+
+    Kept in mitmproxy's per-flow metadata, so the `request_started` event and
+    the completed flow name one request -- which is how a request that
+    started and never finished is told apart from one that never started.
+    """
+    metadata = getattr(flow, "metadata", None)
+    if isinstance(metadata, dict) and isinstance(metadata.get("quern_id"), str):
+        return metadata["quern_id"]
+    flow_id = f"f_{uuid.uuid4().hex[:12]}"
+    if isinstance(metadata, dict):
+        metadata["quern_id"] = flow_id
+    return flow_id
+
+
+def _started_monotonic(flow: http.HTTPFlow) -> float | None:
+    """When the request started, on `time.monotonic()`: the clock video frames
+    are stamped with (#290), so a flow can be placed against a frame with no
+    conversion. Read once, at the `request` hook, and kept with the flow."""
+    metadata = getattr(flow, "metadata", None)
+    if isinstance(metadata, dict) and isinstance(
+            metadata.get("quern_started_monotonic"), float):
+        return metadata["quern_started_monotonic"]
+    started = getattr(flow.request, "timestamp_start", None)
+    now_wall, now_mono = time.time(), time.monotonic()
+    # The hook runs once the request has been read; its start is earlier by
+    # however long that took, on the wall clock.
+    value = now_mono - max(0.0, now_wall - started) if isinstance(started, float) else now_mono
+    if isinstance(metadata, dict):
+        metadata["quern_started_monotonic"] = value
+    return value
+
+
 def _write_json(obj: dict[str, Any]) -> None:
     """Write a JSON object as a single line to stdout."""
     data = json.dumps(obj, separators=(",", ":"), default=str)
@@ -1073,6 +1108,23 @@ class IOSDebugAddon:
                     "request": _serialize_request(flow.request),
                 })
 
+        # 3. Say it started (#364). A flow is otherwise reported only when its
+        # response arrives or it errors, so a request the server never
+        # answers is invisible while it hangs -- the one a run most needs.
+        try:
+            _write_json({
+                "type": "request_started",
+                "id": _quern_id(flow),
+                "timestamp": flow.request.timestamp_start or time.time(),
+                "started_monotonic": _started_monotonic(flow),
+                "request": _serialize_request(flow.request),
+                **self._attribution(flow),
+            })
+        except Exception as e:  # noqa: BLE001 -- never let the report break the request
+            # The addon has no logger: it tells the server, which logs it.
+            with contextlib.suppress(Exception):
+                _write_json({"type": "error", "message": f"request_started not reported: {e}"})
+
     def response(self, flow: http.HTTPFlow) -> None:
         """Called when a complete response has been received."""
         if self._host_filter and flow.request.pretty_host != self._host_filter:
@@ -1107,12 +1159,12 @@ class IOSDebugAddon:
 
     def _serialize_flow(self, flow: http.HTTPFlow) -> dict[str, Any]:
         """Convert an mitmproxy flow to our JSON format."""
-        flow_id = f"f_{uuid.uuid4().hex[:12]}"
-
         result: dict[str, Any] = {
             "type": "flow",
-            "id": flow_id,
+            # The id `request_started` gave it, so the two pair up.
+            "id": _quern_id(flow),
             "timestamp": flow.request.timestamp_start or time.time(),
+            "started_monotonic": _started_monotonic(flow),
             "request": _serialize_request(flow.request),
         }
 
@@ -1124,7 +1176,13 @@ class IOSDebugAddon:
         result["timing"] = _compute_timing(flow)
         result["tls"] = _get_tls_info(flow)
         result["error"] = str(flow.error) if flow.error else None
+        result.update(self._attribution(flow))
+        return result
 
+    def _attribution(self, flow: http.HTTPFlow) -> dict[str, Any]:
+        """Which process, simulator, emulator or address a flow came from:
+        the same answer for its start and its end."""
+        result: dict[str, Any] = {}
         # Source process tagging (from monkey-patched connection handler)
         client_id = flow.client_conn.id if flow.client_conn else None
         info = _lookup_process_info(client_id)
