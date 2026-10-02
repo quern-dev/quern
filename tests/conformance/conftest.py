@@ -416,7 +416,7 @@ def bypass_sandbox(quern: client_mod.QuernClient, proxy_running: dict):
 
 def _install_and_launch(
     client: client_mod.QuernClient, udid: str, artifact, contract,
-    bundle_id: str = probe_mod.BUNDLE_ID,
+    bundle_id: str = probe_mod.BUNDLE_ID, physical: bool = False,
 ):
     """Install the built artifact and bring the app to the foreground."""
     client.json_ok(
@@ -438,6 +438,7 @@ def _install_and_launch(
         json={"udid": udid, "bundle_id": bundle_id}, timeout=180.0,
     )
     driver = probe_mod.ProbeDriver(client, udid, contract, bundle_id)
+    driver.physical = physical
     driver.wait_until_ready()
     return driver
 
@@ -471,7 +472,8 @@ def ios_probe(quern: client_mod.QuernClient, any_ios: Device):
     scene = probe_mod.scene_lifecycle_required(any_ios.os_version)
     try:
         bundle = probe_mod.build_ios(
-            scene=scene, device_udid=any_ios.udid if physical else None,
+            scene=scene,
+            device_udid=probe_mod.hardware_udid(any_ios.udid) if physical else None,
         )
     except probe_mod.ProbeUnavailable as exc:
         pytest.skip(f"iOS probe app unavailable: {exc}")
@@ -479,6 +481,7 @@ def ios_probe(quern: client_mod.QuernClient, any_ios: Device):
     return _install_and_launch(
         quern, any_ios.udid, bundle, probe_mod.IOS,
         probe_mod.SCENE_BUNDLE_ID if scene else probe_mod.BUNDLE_ID,
+        physical=physical,
     )
 
 
@@ -496,7 +499,10 @@ def android_probe(quern: client_mod.QuernClient, any_android: Device):
     except probe_mod.ProbeUnavailable as exc:
         pytest.skip(f"Android probe app unavailable: {exc}")
 
-    return _install_and_launch(quern, any_android.udid, apk, probe_mod.ANDROID)
+    return _install_and_launch(
+        quern, any_android.udid, apk, probe_mod.ANDROID,
+        physical=any_android.device_type == "android_device",
+    )
 
 
 @pytest.fixture

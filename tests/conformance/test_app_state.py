@@ -144,12 +144,18 @@ class StateHarness:
 def ios_state(quern, ios_probe):
     """The State tab with a known starting point: only `probe.counter = 1`.
 
+    Simulator only: a physical iPhone's containers are not on this Mac, and
+    the tools refuse there -- `test_a_physical_iphone_refuses_clearly` checks
+    how.
+
     Set up through the app rather than the API under test, for the reason
     `ProbeDriver.relaunch` gives: a setup step that uses the tool being tested
     turns one defect into a failure in every test. The increment is what makes
     the preferences file exist at all -- a fresh install has none, and every
     plist tool answers 404 for a file that is not there.
     """
+    if ios_probe.physical:
+        pytest.skip("app-state tools work on simulators only")
     harness = StateHarness(quern, ios_probe)
     ios_probe.relaunch()
     ios_probe.goto("state")
@@ -554,3 +560,25 @@ def test_android_refuses_with_a_400_naming_the_issue(
         resp = quern.request(method, f"{STATE}{path}", json=payload, timeout=60.0)
     assert resp.status_code == 400, f"{resp.status_code}: {resp.text[:300]}"
     assert "#314" in resp.text, f"the refusal does not name #314: {resp.text[:300]}"
+
+
+@pytest.mark.parametrize("method, path, where", _ANDROID_REFUSALS,
+                         ids=[f"{m} {p}" for m, p, _ in _ANDROID_REFUSALS])
+def test_a_physical_iphone_refuses_clearly(quern, ios_probe, method, path, where) -> None:
+    """A 400 that says simulators only, not a 500."""
+    if not ios_probe.physical:
+        pytest.skip("only a physical iPhone refuses these")
+    payload = {
+        "udid": ios_probe.udid, "bundle_id": ios_probe.bundle_id,
+        "container": "data", "plist_path": "Library/Preferences/x.plist",
+        "key": "k", "value": 1, "values": {"k": 1},
+        "label": "conformance-device", "checkpoint_label": "conformance-device",
+    }
+    if where == "params":
+        flat = {k: v for k, v in payload.items() if isinstance(v, str)}
+        resp = quern.request(method, f"{STATE}{path}", params=flat, timeout=60.0)
+    else:
+        resp = quern.request(method, f"{STATE}{path}", json=payload, timeout=60.0)
+    assert resp.status_code == 400, f"{resp.status_code}: {resp.text[:300]}"
+    assert "simulator" in resp.text.lower(), resp.text[:300]
+

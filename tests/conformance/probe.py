@@ -456,6 +456,31 @@ def build_ios(
     return bundle
 
 
+def hardware_udid(device_id: str) -> str:
+    """The hardware UDID for a device quern names by its CoreDevice identifier.
+
+    Quern lists a physical iPhone by CoreDevice id (`B34C4EE9-…`); a
+    provisioning profile lists hardware UDIDs (`00008030-…`), so signing for
+    the device needs the second. `devicectl` reports both.
+    """
+    import json
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".json") as out:
+        result = subprocess.run(  # noqa: S603 - fixed tool
+            ["xcrun", "devicectl", "list", "devices", "--json-output", out.name],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        if result.returncode != 0:
+            raise ProbeUnavailable(f"devicectl could not list devices: {result.stderr[-500:]}")
+        devices = json.loads(Path(out.name).read_text()).get("result", {}).get("devices", [])
+    for device in devices:
+        hardware = (device.get("hardwareProperties") or {}).get("udid")
+        if device_id in (device.get("identifier"), hardware) and hardware:
+            return hardware
+    raise ProbeUnavailable(f"devicectl does not know device {device_id}")
+
+
 def build_android(*, timeout: float = 900.0) -> Path:
     """Build the Android probe app and return the APK path."""
     script = ANDROID.source_dir / "build.sh"
@@ -530,6 +555,10 @@ class ProbeDriver:
         #: *not* running succeeds and leaves the app up, so the reset silently
         #: does nothing and the next test inherits the last one's state.
         self.bundle_id = bundle_id
+        #: A physical device rather than a simulator or emulator. Set by the
+        #: fixture, which knows; tests use it to expect a refusal where a
+        #: feature exists only on simulated hardware.
+        self.physical = False
 
     # -- reading -----------------------------------------------------------
 

@@ -811,6 +811,7 @@ So the stuck feed is real but transient, cause still unknown. Open, no issue.
 
 the outcome rather than the request. Open, no issue yet.
 
+
 ## F27 — the Pixel 3 XL's scroll failures were mostly this suite's own
 
 `ProbeDriver.swipe_down` sized the swipe from an `Application`/`Window`
