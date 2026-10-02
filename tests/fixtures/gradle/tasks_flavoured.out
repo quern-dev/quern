@@ -1,0 +1,550 @@
+Starting a Gradle Daemon, 1 incompatible and 4 stopped Daemons could not be reused, use --status for details
+
+> Task :app:tasks
+
+------------------------------------------------------------
+Tasks runnable from project ':app'
+------------------------------------------------------------
+
+Android tasks
+-------------
+signingReport - Displays the signing info for the base and test modules
+
+Build tasks
+-----------
+assemble - Assemble main outputs for all the variants.
+assembleAndroidTest - Assembles all the Test applications.
+assembleDebug - Assembles main outputs for all Debug variants.
+assembleProduction - Assembles main outputs for all Production variants.
+assembleRelease - Assembles main outputs for all Release variants.
+assembleStaging - Assembles main outputs for all Staging variants.
+assembleUnitTest - Assembles all the unit test applications.
+build - Assembles and tests this project.
+buildDependents - Assembles and tests this project and all projects that depend on it.
+buildNeeded - Assembles and tests this project and all projects it depends on.
+bundle - Assemble bundles for all the variants.
+bundleDebug - Assembles bundles for all Debug variants.
+bundleProduction - Assembles bundles for all Production variants.
+bundleRelease - Assembles bundles for all Release variants.
+bundleStaging - Assembles bundles for all Staging variants.
+clean - Deletes the build directory.
+compileProductionDebugAndroidTestSources
+compileProductionDebugSources
+compileProductionDebugUnitTestSources
+compileProductionReleaseSources
+compileStagingDebugAndroidTestSources
+compileStagingDebugSources
+compileStagingDebugUnitTestSources
+compileStagingReleaseSources
+
+Help tasks
+----------
+artifactTransforms - Displays the Artifact Transforms that can be executed in project ':app'.
+buildEnvironment - Displays all buildscript dependencies declared in project ':app'.
+dependencies - Displays all dependencies declared in project ':app'.
+dependencyInsight - Displays the insight into a specific dependency in project ':app'.
+help - Displays a help message.
+javaToolchains - Displays the detected java toolchains.
+kotlinDslAccessorsReport - Prints the Kotlin code for accessing the currently available project extensions.
+outgoingVariants - Displays the outgoing variants of project ':app'.
+projects - Displays the sub-projects of project ':app'.
+properties - Displays the properties of project ':app'.
+resolvableConfigurations - Displays the configurations that can be resolved in project ':app'.
+tasks - Displays the tasks runnable from project ':app'.
+
+Install tasks
+-------------
+installProductionDebug - Installs the Debug build for flavor Production.
+installProductionDebugAndroidTest - Installs the android (on device) tests for the ProductionDebug build.
+installStagingDebug - Installs the Debug build for flavor Staging.
+installStagingDebugAndroidTest - Installs the android (on device) tests for the StagingDebug build.
+uninstallAll - Uninstall all applications.
+uninstallProductionDebug - Uninstalls the Debug build for flavor Production.
+uninstallProductionDebugAndroidTest - Uninstalls the android (on device) tests for the ProductionDebug build.
+uninstallProductionRelease - Uninstalls the Release build for flavor Production.
+uninstallStagingDebug - Uninstalls the Debug build for flavor Staging.
+uninstallStagingDebugAndroidTest - Uninstalls the android (on device) tests for the StagingDebug build.
+uninstallStagingRelease - Uninstalls the Release build for flavor Staging.
+
+Verification tasks
+------------------
+check - Runs all checks.
+checkJetifier - Checks whether Jetifier is needed for the current project
+connectedAndroidTest - Installs and runs instrumentation tests for all flavors on connected devices.
+connectedCheck - Runs all device checks on currently connected devices.
+connectedProductionDebugAndroidTest - Installs and runs the tests for productionDebug on connected devices.
+connectedStagingDebugAndroidTest - Installs and runs the tests for stagingDebug on connected devices.
+deviceAndroidTest - Installs and runs instrumentation tests using all Device Providers.
+deviceCheck - Runs all device checks using Device Providers and Test Servers.
+lint - Runs lint on the default variant.
+lintFix - Runs lint on the default variant and applies any safe suggestions to the source code.
+lintProductionDebug - Print text output from the corresponding lint report task
+lintProductionRelease - Print text output from the corresponding lint report task
+lintStagingDebug - Print text output from the corresponding lint report task
+lintStagingRelease - Print text output from the corresponding lint report task
+lintVitalProductionRelease - Print text output from the corresponding lint report task
+lintVitalStagingRelease - Print text output from the corresponding lint report task
+test - Run unit tests for all variants.
+testProductionDebugUnitTest - Run unit tests for the productionDebug build.
+testStagingDebugUnitTest - Run unit tests for the stagingDebug build.
+updateLintBaseline - Updates the lint baseline using the default variant.
+
+Other tasks
+-----------
+analyzeProductionDebugAndroidTestDependencies
+analyzeProductionDebugDependencies
+analyzeProductionDebugUnitTestDependencies
+analyzeProductionReleaseDependencies
+analyzeStagingDebugAndroidTestDependencies
+analyzeStagingDebugDependencies
+analyzeStagingDebugUnitTestDependencies
+analyzeStagingReleaseDependencies
+assembleProductionDebug - Assembles main output for variant productionDebug
+assembleProductionDebugAndroidTest - Assembles main output for variant productionDebugAndroidTest
+assembleProductionDebugUnitTest - Assembles main output for variant productionDebugUnitTest
+assembleProductionRelease - Assembles main output for variant productionRelease
+assembleStagingDebug - Assembles main output for variant stagingDebug
+assembleStagingDebugAndroidTest - Assembles main output for variant stagingDebugAndroidTest
+assembleStagingDebugUnitTest - Assembles main output for variant stagingDebugUnitTest
+assembleStagingRelease - Assembles main output for variant stagingRelease
+buildProductionDebugPreBundle
+buildProductionReleasePreBundle
+buildStagingDebugPreBundle
+buildStagingReleasePreBundle
+bundleProductionDebug - Assembles bundle for variant productionDebug
+bundleProductionDebugClassesToCompileJar
+bundleProductionDebugClassesToRuntimeJar
+bundleProductionDebugResources
+bundleProductionRelease - Assembles bundle for variant productionRelease
+bundleProductionReleaseClassesToCompileJar
+bundleProductionReleaseClassesToRuntimeJar
+bundleProductionReleaseResources
+bundleStagingDebug - Assembles bundle for variant stagingDebug
+bundleStagingDebugClassesToCompileJar
+bundleStagingDebugClassesToRuntimeJar
+bundleStagingDebugResources
+bundleStagingRelease - Assembles bundle for variant stagingRelease
+bundleStagingReleaseClassesToCompileJar
+bundleStagingReleaseClassesToRuntimeJar
+bundleStagingReleaseResources
+checkProductionDebugAarMetadata
+checkProductionDebugAndroidTestAarMetadata
+checkProductionDebugAndroidTestDuplicateClasses
+checkProductionDebugDuplicateClasses
+checkProductionDebugManifest
+checkProductionReleaseAarMetadata
+checkProductionReleaseDuplicateClasses
+checkProductionReleaseManifest
+checkStagingDebugAarMetadata
+checkStagingDebugAndroidTestAarMetadata
+checkStagingDebugAndroidTestDuplicateClasses
+checkStagingDebugDuplicateClasses
+checkStagingDebugManifest
+checkStagingReleaseAarMetadata
+checkStagingReleaseDuplicateClasses
+checkStagingReleaseManifest
+collectProductionReleaseDependencies
+collectStagingReleaseDependencies
+compileLint
+compileLintChecks
+compileProductionDebugAndroidTestJavaWithJavac
+compileProductionDebugAndroidTestKotlin
+compileProductionDebugAndroidTestNavigationResources
+compileProductionDebugArtProfile
+compileProductionDebugJavaWithJavac
+compileProductionDebugKotlin
+compileProductionDebugNavigationResources
+compileProductionDebugUnitTestJavaWithJavac
+compileProductionDebugUnitTestKotlin
+compileProductionReleaseArtProfile
+compileProductionReleaseJavaWithJavac
+compileProductionReleaseKotlin
+compileProductionReleaseNavigationResources
+compileStagingDebugAndroidTestJavaWithJavac
+compileStagingDebugAndroidTestKotlin
+compileStagingDebugAndroidTestNavigationResources
+compileStagingDebugArtProfile
+compileStagingDebugJavaWithJavac
+compileStagingDebugKotlin
+compileStagingDebugNavigationResources
+compileStagingDebugUnitTestJavaWithJavac
+compileStagingDebugUnitTestKotlin
+compileStagingReleaseArtProfile
+compileStagingReleaseJavaWithJavac
+compileStagingReleaseKotlin
+compileStagingReleaseNavigationResources
+compressProductionDebugAndroidTestAssets
+compressProductionDebugAssets
+compressProductionReleaseAssets
+compressStagingDebugAndroidTestAssets
+compressStagingDebugAssets
+compressStagingReleaseAssets
+configureProductionReleaseDependencies
+configureStagingReleaseDependencies
+consumeConfigAttr
+createMockableJar
+createProductionDebugAndroidTestApkListingFileRedirect
+createProductionDebugApkListingFileRedirect
+createProductionDebugApksFromBundleListingFileRedirect
+createProductionDebugBundleListingFileRedirect
+createProductionDebugCompatibleScreenManifests
+createProductionReleaseApkListingFileRedirect
+createProductionReleaseApksFromBundleListingFileRedirect
+createProductionReleaseBundleListingFileRedirect
+createProductionReleaseCompatibleScreenManifests
+createStagingDebugAndroidTestApkListingFileRedirect
+createStagingDebugApkListingFileRedirect
+createStagingDebugApksFromBundleListingFileRedirect
+createStagingDebugBundleListingFileRedirect
+createStagingDebugCompatibleScreenManifests
+createStagingReleaseApkListingFileRedirect
+createStagingReleaseApksFromBundleListingFileRedirect
+createStagingReleaseBundleListingFileRedirect
+createStagingReleaseCompatibleScreenManifests
+desugarProductionDebugAndroidTestFileDependencies
+desugarProductionDebugFileDependencies
+desugarProductionReleaseFileDependencies
+desugarStagingDebugAndroidTestFileDependencies
+desugarStagingDebugFileDependencies
+desugarStagingReleaseFileDependencies
+dexBuilderProductionDebug
+dexBuilderProductionDebugAndroidTest
+dexBuilderProductionRelease
+dexBuilderStagingDebug
+dexBuilderStagingDebugAndroidTest
+dexBuilderStagingRelease
+extractApksForProductionDebug
+extractApksForProductionRelease
+extractApksForStagingDebug
+extractApksForStagingRelease
+extractApksFromBundleForProductionDebug
+extractApksFromBundleForProductionRelease
+extractApksFromBundleForStagingDebug
+extractApksFromBundleForStagingRelease
+extractDeepLinksProductionDebug
+extractDeepLinksProductionRelease
+extractDeepLinksStagingDebug
+extractDeepLinksStagingRelease
+extractProductionDebugNativeDebugMetadata
+extractProductionDebugNativeSymbolTables
+extractProductionReleaseNativeDebugMetadata
+extractProductionReleaseNativeSymbolTables
+extractProductionReleaseVersionControlInfo
+extractProguardFiles
+extractStagingDebugNativeDebugMetadata
+extractStagingDebugNativeSymbolTables
+extractStagingReleaseNativeDebugMetadata
+extractStagingReleaseNativeSymbolTables
+extractStagingReleaseVersionControlInfo
+generateProductionDebugAndroidTestAssets
+generateProductionDebugAndroidTestGlobalSynthetics
+generateProductionDebugAndroidTestLintModel
+generateProductionDebugAndroidTestResources
+generateProductionDebugAndroidTestRFile
+generateProductionDebugAndroidTestSources
+generateProductionDebugAssets
+generateProductionDebugFeatureMetadata
+generateProductionDebugFeatureTransitiveDeps
+generateProductionDebugGlobalSynthetics
+generateProductionDebugLintModel
+generateProductionDebugLintReportModel
+generateProductionDebugManifestClass
+generateProductionDebugResources
+generateProductionDebugRFile
+generateProductionDebugSources
+generateProductionDebugUnitTestAssets
+generateProductionDebugUnitTestLintModel
+generateProductionDebugUnitTestResources
+generateProductionDebugUnitTestSources
+generateProductionReleaseAssets
+generateProductionReleaseFeatureMetadata
+generateProductionReleaseFeatureTransitiveDeps
+generateProductionReleaseLintModel
+generateProductionReleaseLintReportModel
+generateProductionReleaseLintVitalReportModel
+generateProductionReleaseManifestClass
+generateProductionReleaseResources
+generateProductionReleaseRFile
+generateProductionReleaseSources
+generateStagingDebugAndroidTestAssets
+generateStagingDebugAndroidTestGlobalSynthetics
+generateStagingDebugAndroidTestLintModel
+generateStagingDebugAndroidTestResources
+generateStagingDebugAndroidTestRFile
+generateStagingDebugAndroidTestSources
+generateStagingDebugAssets
+generateStagingDebugFeatureMetadata
+generateStagingDebugFeatureTransitiveDeps
+generateStagingDebugGlobalSynthetics
+generateStagingDebugLintModel
+generateStagingDebugLintReportModel
+generateStagingDebugManifestClass
+generateStagingDebugResources
+generateStagingDebugRFile
+generateStagingDebugSources
+generateStagingDebugUnitTestAssets
+generateStagingDebugUnitTestLintModel
+generateStagingDebugUnitTestResources
+generateStagingDebugUnitTestSources
+generateStagingReleaseAssets
+generateStagingReleaseFeatureMetadata
+generateStagingReleaseFeatureTransitiveDeps
+generateStagingReleaseLintModel
+generateStagingReleaseLintReportModel
+generateStagingReleaseLintVitalReportModel
+generateStagingReleaseManifestClass
+generateStagingReleaseResources
+generateStagingReleaseRFile
+generateStagingReleaseSources
+javaPreCompileProductionDebug
+javaPreCompileProductionDebugAndroidTest
+javaPreCompileProductionDebugUnitTest
+javaPreCompileProductionRelease
+javaPreCompileStagingDebug
+javaPreCompileStagingDebugAndroidTest
+javaPreCompileStagingDebugUnitTest
+javaPreCompileStagingRelease
+lintAnalyzeProductionDebug - Run lint analysis on the productionDebug component
+lintAnalyzeProductionDebugAndroidTest - Run lint analysis on the productionDebugAndroidTest component
+lintAnalyzeProductionDebugUnitTest - Run lint analysis on the productionDebugUnitTest component
+lintAnalyzeProductionRelease - Run lint analysis on the productionRelease component
+lintAnalyzeStagingDebug - Run lint analysis on the stagingDebug component
+lintAnalyzeStagingDebugAndroidTest - Run lint analysis on the stagingDebugAndroidTest component
+lintAnalyzeStagingDebugUnitTest - Run lint analysis on the stagingDebugUnitTest component
+lintAnalyzeStagingRelease - Run lint analysis on the stagingRelease component
+lintFixProductionDebug - Fix lint on the productionDebug variant
+lintFixProductionRelease - Fix lint on the productionRelease variant
+lintFixStagingDebug - Fix lint on the stagingDebug variant
+lintFixStagingRelease - Fix lint on the stagingRelease variant
+lintReportProductionDebug - Run lint on the productionDebug variant
+lintReportProductionRelease - Run lint on the productionRelease variant
+lintReportStagingDebug - Run lint on the stagingDebug variant
+lintReportStagingRelease - Run lint on the stagingRelease variant
+lintVitalAnalyzeProductionRelease - Run lint analysis with only the fatal issues enabled 
+lintVitalAnalyzeStagingRelease - Run lint analysis with only the fatal issues enabled 
+lintVitalReportProductionRelease - Run lint with only the fatal issues enabled on the productionRelease variant
+lintVitalReportStagingRelease - Run lint with only the fatal issues enabled on the stagingRelease variant
+makeApkFromBundleForProductionDebug
+makeApkFromBundleForProductionRelease
+makeApkFromBundleForStagingDebug
+makeApkFromBundleForStagingRelease
+mapProductionDebugAndroidTestSourceSetPaths
+mapProductionDebugSourceSetPaths
+mapProductionReleaseSourceSetPaths
+mapStagingDebugAndroidTestSourceSetPaths
+mapStagingDebugSourceSetPaths
+mapStagingReleaseSourceSetPaths
+mergeDexProductionRelease
+mergeDexStagingRelease
+mergeExtDexProductionDebug
+mergeExtDexProductionDebugAndroidTest
+mergeExtDexProductionRelease
+mergeExtDexStagingDebug
+mergeExtDexStagingDebugAndroidTest
+mergeExtDexStagingRelease
+mergeLibDexProductionDebug
+mergeLibDexProductionDebugAndroidTest
+mergeLibDexStagingDebug
+mergeLibDexStagingDebugAndroidTest
+mergeProductionDebugAndroidTestAssets
+mergeProductionDebugAndroidTestGeneratedProguardFiles
+mergeProductionDebugAndroidTestJavaResource
+mergeProductionDebugAndroidTestJniLibFolders
+mergeProductionDebugAndroidTestManifest
+mergeProductionDebugAndroidTestNativeLibs
+mergeProductionDebugAndroidTestResources
+mergeProductionDebugArtProfile
+mergeProductionDebugAssets
+mergeProductionDebugGeneratedProguardFiles
+mergeProductionDebugJavaResource
+mergeProductionDebugJniLibFolders
+mergeProductionDebugNativeDebugMetadata
+mergeProductionDebugNativeLibs
+mergeProductionDebugResources
+mergeProductionDebugStartupProfile
+mergeProductionReleaseArtProfile
+mergeProductionReleaseAssets
+mergeProductionReleaseGeneratedProguardFiles
+mergeProductionReleaseGlobalSynthetics
+mergeProductionReleaseJavaResource
+mergeProductionReleaseJniLibFolders
+mergeProductionReleaseNativeDebugMetadata
+mergeProductionReleaseNativeLibs
+mergeProductionReleaseResources
+mergeProductionReleaseStartupProfile
+mergeProjectDexProductionDebug
+mergeProjectDexProductionDebugAndroidTest
+mergeProjectDexStagingDebug
+mergeProjectDexStagingDebugAndroidTest
+mergeStagingDebugAndroidTestAssets
+mergeStagingDebugAndroidTestGeneratedProguardFiles
+mergeStagingDebugAndroidTestJavaResource
+mergeStagingDebugAndroidTestJniLibFolders
+mergeStagingDebugAndroidTestManifest
+mergeStagingDebugAndroidTestNativeLibs
+mergeStagingDebugAndroidTestResources
+mergeStagingDebugArtProfile
+mergeStagingDebugAssets
+mergeStagingDebugGeneratedProguardFiles
+mergeStagingDebugJavaResource
+mergeStagingDebugJniLibFolders
+mergeStagingDebugNativeDebugMetadata
+mergeStagingDebugNativeLibs
+mergeStagingDebugResources
+mergeStagingDebugStartupProfile
+mergeStagingReleaseArtProfile
+mergeStagingReleaseAssets
+mergeStagingReleaseGeneratedProguardFiles
+mergeStagingReleaseGlobalSynthetics
+mergeStagingReleaseJavaResource
+mergeStagingReleaseJniLibFolders
+mergeStagingReleaseNativeDebugMetadata
+mergeStagingReleaseNativeLibs
+mergeStagingReleaseResources
+mergeStagingReleaseStartupProfile
+optimizeProductionReleaseResources
+optimizeStagingReleaseResources
+packageProductionDebug
+packageProductionDebugAndroidTest
+packageProductionDebugAndroidTestResources
+packageProductionDebugBundle
+packageProductionDebugResources
+packageProductionDebugUniversalApk
+packageProductionRelease
+packageProductionReleaseBundle
+packageProductionReleaseResources
+packageProductionReleaseUniversalApk
+packageStagingDebug
+packageStagingDebugAndroidTest
+packageStagingDebugAndroidTestResources
+packageStagingDebugBundle
+packageStagingDebugResources
+packageStagingDebugUniversalApk
+packageStagingRelease
+packageStagingReleaseBundle
+packageStagingReleaseResources
+packageStagingReleaseUniversalApk
+parseProductionDebugAndroidTestLocalResources
+parseProductionDebugIntegrityConfig
+parseProductionDebugLocalResources
+parseProductionReleaseIntegrityConfig
+parseProductionReleaseLocalResources
+parseStagingDebugAndroidTestLocalResources
+parseStagingDebugIntegrityConfig
+parseStagingDebugLocalResources
+parseStagingReleaseIntegrityConfig
+parseStagingReleaseLocalResources
+preBuild
+prepareLintJarForPublish
+preProductionDebugAndroidTestBuild
+preProductionDebugBuild
+preProductionDebugUnitTestBuild
+preProductionReleaseBuild
+preStagingDebugAndroidTestBuild
+preStagingDebugBuild
+preStagingDebugUnitTestBuild
+preStagingReleaseBuild
+processApplicationManifestProductionDebugForBundle
+processApplicationManifestProductionReleaseForBundle
+processApplicationManifestStagingDebugForBundle
+processApplicationManifestStagingReleaseForBundle
+processManifestProductionDebugForFeature
+processManifestProductionReleaseForFeature
+processManifestStagingDebugForFeature
+processManifestStagingReleaseForFeature
+processProductionDebugAndroidTestJavaRes
+processProductionDebugAndroidTestManifest
+processProductionDebugAndroidTestNavigationResources
+processProductionDebugAndroidTestResources
+processProductionDebugJavaRes
+processProductionDebugMainManifest
+processProductionDebugManifest
+processProductionDebugManifestForPackage
+processProductionDebugNavigationResources
+processProductionDebugResources
+processProductionDebugUnitTestJavaRes
+processProductionReleaseJavaRes
+processProductionReleaseMainManifest
+processProductionReleaseManifest
+processProductionReleaseManifestForPackage
+processProductionReleaseNavigationResources
+processProductionReleaseResources
+processStagingDebugAndroidTestJavaRes
+processStagingDebugAndroidTestManifest
+processStagingDebugAndroidTestNavigationResources
+processStagingDebugAndroidTestResources
+processStagingDebugJavaRes
+processStagingDebugMainManifest
+processStagingDebugManifest
+processStagingDebugManifestForPackage
+processStagingDebugNavigationResources
+processStagingDebugResources
+processStagingDebugUnitTestJavaRes
+processStagingReleaseJavaRes
+processStagingReleaseMainManifest
+processStagingReleaseManifest
+processStagingReleaseManifestForPackage
+processStagingReleaseNavigationResources
+processStagingReleaseResources
+produceProductionDebugBundleIdeListingFile
+produceProductionReleaseBundleIdeListingFile
+produceStagingDebugBundleIdeListingFile
+produceStagingReleaseBundleIdeListingFile
+resolveConfigAttr
+sdkProductionReleaseDependencyData
+sdkStagingReleaseDependencyData
+signingConfigWriterProductionDebug
+signingConfigWriterProductionDebugAndroidTest
+signingConfigWriterProductionRelease
+signingConfigWriterStagingDebug
+signingConfigWriterStagingDebugAndroidTest
+signingConfigWriterStagingRelease
+signProductionDebugBundle
+signProductionReleaseBundle
+signStagingDebugBundle
+signStagingReleaseBundle
+stripProductionDebugAndroidTestDebugSymbols
+stripProductionDebugDebugSymbols
+stripProductionReleaseDebugSymbols
+stripStagingDebugAndroidTestDebugSymbols
+stripStagingDebugDebugSymbols
+stripStagingReleaseDebugSymbols
+updateLintBaselineProductionDebug - Update the lint baseline using the productionDebug variant
+updateLintBaselineProductionRelease - Update the lint baseline using the productionRelease variant
+updateLintBaselineStagingDebug - Update the lint baseline using the stagingDebug variant
+updateLintBaselineStagingRelease - Update the lint baseline using the stagingRelease variant
+validateSigningProductionDebug
+validateSigningProductionDebugAndroidTest
+validateSigningStagingDebug
+validateSigningStagingDebugAndroidTest
+writeProductionDebugAndroidTestSigningConfigVersions
+writeProductionDebugApplicationId
+writeProductionDebugAppMetadata
+writeProductionDebugModuleMetadata
+writeProductionDebugSigningConfigVersions
+writeProductionReleaseApplicationId
+writeProductionReleaseAppMetadata
+writeProductionReleaseModuleMetadata
+writeProductionReleaseSigningConfigVersions
+writeStagingDebugAndroidTestSigningConfigVersions
+writeStagingDebugApplicationId
+writeStagingDebugAppMetadata
+writeStagingDebugModuleMetadata
+writeStagingDebugSigningConfigVersions
+writeStagingReleaseApplicationId
+writeStagingReleaseAppMetadata
+writeStagingReleaseModuleMetadata
+writeStagingReleaseSigningConfigVersions
+zipApksForProductionDebug
+zipApksForProductionRelease
+zipApksForStagingDebug
+zipApksForStagingRelease
+
+Rules
+-----
+Pattern: clean<TaskName>: Cleans the output files of a task.
+Pattern: build<ConfigurationName>: Assembles the artifacts of a configuration.
+
+BUILD SUCCESSFUL in 9s
+1 actionable task: 1 executed
+Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.5.1/userguide/configuration_cache_enabling.html

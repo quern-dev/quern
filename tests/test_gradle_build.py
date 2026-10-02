@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -35,6 +36,7 @@ def _no_real_gradle_home(tmp_path, monkeypatch):
     for var in ("JAVA_HOME", "ANDROID_HOME", "ANDROID_SDK_ROOT"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(jdk_mod, "ANDROID_STUDIO_JBR", (str(tmp_path / "no-android-studio"),))
+    monkeypatch.setattr(gradle, "_VARIANT_CACHE", {})
 
 
 def _jdk_dir(root: Path, name: str, version: str) -> str:
@@ -427,10 +429,22 @@ def built(tmp_path, monkeypatch):
     monkeypatch.setattr(gradle, "android_sdk", lambda *a: ("/sdk", "test"))
     ran = []
 
-    async def run(project, task, env, args, timeout=0):
+    envs = []
+
+    async def run(project, task, env, args, timeout=0, progress=None):
         ran.append((task, env["JAVA_HOME"], args))
+        envs.append(dict(env))
         return 0, "BUILD SUCCESSFUL in 9s\n"
     monkeypatch.setattr(gradle, "run", run)
+    listed = []
+    listing_envs = []
+
+    async def list_variants(project, env, args):
+        listing_envs.append(dict(env))
+        # Real `tasks --all` output of an unflavoured AGP 9.3.2 app: debug, release.
+        listed.append(project.module)
+        return gradle.parse_variants((FIXTURES / "tasks_plain.out").read_text()), ""
+    monkeypatch.setattr(gradle, "list_variants", list_variants)
     recorded = []
 
     async def record(module_dir, variant, **kw):
@@ -444,7 +458,8 @@ def built(tmp_path, monkeypatch):
     monkeypatch.setattr(build_android.build_records, "record_android_build", record)
     monkeypatch.setattr(build_android.build_records, "save", lambda r: None)
     monkeypatch.setattr(build_android.build_records, "prune", lambda: [])
-    return SimpleNamespace(root=root, ran=ran, recorded=recorded)
+    return SimpleNamespace(root=root, ran=ran, recorded=recorded, listed=listed, envs=envs,
+                           listing_envs=listing_envs)
 
 
 NO_SDK_DOWNLOAD = "-Pandroid.builder.sdkDownload=false"
@@ -712,7 +727,22 @@ class TestVariants:
                 _body(project_path=str(built.root), variant="Debug"))
         assert r["all_installed"]
 
-    def test_a_flavour_wide_build_type_names_the_variants(self, built):
+    def test_a_flavour_wide_build_type_is_refused_before_building(self, built, monkeypatch):
+        """Measured: `debug` on a flavoured app took two minutes to build every
+        flavour's debug before anything could say which to pass."""
+        async def list_variants(project, env, args):
+            return gradle.parse_variants((FIXTURES / "tasks_flavoured.out").read_text()), ""
+        monkeypatch.setattr(gradle, "list_variants", list_variants)
+        with pytest.raises(HTTPException, match="not one variant of :app but several: pass one "
+                                                "of productionDebug, stagingDebug"):
+            _go(FakeController(FakeAdb([])), _body(project_path=str(built.root)))
+        assert built.ran == []
+
+    def test_a_flavour_wide_build_type_names_the_variants(self, built, monkeypatch):
+        """And when the listing could not run, the outputs still say it."""
+        async def list_variants(project, env, args):
+            return None, "it timed out"
+        monkeypatch.setattr(gradle, "list_variants", list_variants)
         out = built.root / "app" / "build" / "outputs" / "apk"
         for flavour in ("staging", "prod"):
             d = out / flavour / "debug"
@@ -839,11 +869,13 @@ class TestTheBuildRun:
     def test_a_timed_out_build_is_killed(self, tmp_path, monkeypatch):
         killed = []
 
+        class Stdout:
+            async def read(self, n):
+                await asyncio.sleep(60)
+
         class Proc:
             returncode = None
-
-            async def communicate(self):
-                await asyncio.sleep(60)
+            stdout = Stdout()
 
             def kill(self):
                 killed.append(True)
@@ -1226,4 +1258,549 @@ def test_every_environment_kind_the_code_reports_is_described():
     described = set(_re.findall(r"'([a-z_]+)'",
                                 EnvironmentProblem.model_fields["kind"].description))
     assert produced and produced <= described, sorted(produced - described)
+
+
+# ── variants, signing and progress (#347, part 2) ────────────────────────────
+
+
+class TestListingVariants:
+    def test_a_flavoured_app_and_its_groups(self):
+        """Real `tasks --all`, AGP 9.3.2, flavours staging and production."""
+        v = gradle.parse_variants((FIXTURES / "tasks_flavoured.out").read_text())
+        assert v.names == ("productionDebug", "productionRelease", "stagingDebug",
+                           "stagingRelease")
+        assert v.group("debug") == ("productionDebug", "stagingDebug")
+        assert v.group("Staging") == ("stagingDebug", "stagingRelease")
+        assert v.find("STAGINGDEBUG") == "stagingDebug" and v.find("stagingDeb") is None
+
+    def test_an_unflavoured_app_has_no_groups(self):
+        v = gradle.parse_variants((FIXTURES / "tasks_plain.out").read_text())
+        assert v.names == ("debug", "release") and v.groups == {}
+        assert v.group("debug") == ()
+
+    def test_test_apks_are_not_variants_to_install(self):
+        v = gradle.parse_variants((FIXTURES / "tasks_flavoured.out").read_text())
+        assert not any(n.endswith(("AndroidTest", "UnitTest")) for n in v.names)
+
+    def test_no_variant_lines_is_none_not_empty(self):
+        """"Listed nothing" is not "has no variants": a library module, or
+        output this does not read."""
+        assert gradle.parse_variants("BUILD SUCCESSFUL in 1s\n") is None
+
+    def _listing(self, tmp_path, monkeypatch, result):
+        seen = []
+
+        async def run(project, task, env, args, timeout=0, progress=None):
+            seen.append((task, args, timeout))
+            if isinstance(result, BaseException):
+                raise result
+            return result
+        monkeypatch.setattr(gradle, "run", run)
+        p = gradle.find_project(str(_project(tmp_path)))
+        return p, seen, asyncio.run(gradle.list_variants(
+            p, {}, ["-Pflavour=x", "-Dk=v", "--offline", ":app:somethingElse", "--info"]))
+
+    def test_it_runs_tasks_all_with_the_builds_options_and_no_task(self, tmp_path,
+                                                                    monkeypatch):
+        out = (FIXTURES / "tasks_plain.out").read_text()
+        p, seen, (v, why) = self._listing(tmp_path, monkeypatch, (0, out))
+        assert why == "" and v.names == ("debug", "release")
+        [(task, args, timeout)] = seen
+        assert task == ":app:tasks" and timeout == gradle.LIST_TIMEOUT
+        assert args == ["--all", "-q", "-Pflavour=x", "-Dk=v", "--offline", "--info"]
+
+    @pytest.mark.parametrize("given, kept", [
+        # A value given as its own argument stays beside its option: split
+        # off, -g's value would become the next argument -- a user home
+        # named "-Pa=b" inside the user's project.
+        (["-g", "/custom/gh", "-Pa=b"], ["-g", "/custom/gh", "-Pa=b"]),
+        (["-P", "beta=true", "-Pother=1"], ["-P", "beta=true", "-Pother=1"]),
+        (["--init-script", "ci.gradle"], ["--init-script", "ci.gradle"]),
+        (["-I", "init.gradle", "-Dx=1"], ["-I", "init.gradle", "-Dx=1"]),
+        (["--project-prop=beta=true", "--system-prop=k=v"],
+         ["--project-prop=beta=true", "--system-prop=k=v"]),
+        (["-c", "other.gradle", ":app:lint"], ["-c", "other.gradle"]),
+        (["--scan", "-t", "--continuous", "--offline"], ["--offline"]),
+    ])
+    def test_listing_arguments(self, given, kept):
+        assert gradle.listing_args(given) == kept
+
+    def test_a_failed_listing_says_why(self, tmp_path, monkeypatch):
+        out = (FIXTURES / "signing_missing_keystore.out").read_text()
+        _, _, (v, why) = self._listing(tmp_path, monkeypatch, (1, out))
+        assert v is None and "Keystore file" in why
+
+    def test_a_listing_that_fails_part_way_is_not_trusted(self, tmp_path, monkeypatch):
+        """Variants printed and then a non-zero exit: the list may be partial,
+        and a partial list would refuse a variant that exists."""
+        out = (FIXTURES / "tasks_plain.out").read_text() + "\nBUILD FAILED in 2s\n"
+        _, _, (v, why) = self._listing(tmp_path, monkeypatch, (1, out))
+        assert v is None and why
+
+    def test_a_module_with_no_variants_says_so(self, tmp_path, monkeypatch):
+        _, _, (v, why) = self._listing(tmp_path, monkeypatch, (0, "BUILD SUCCESSFUL\n"))
+        assert v is None and "listed no variants for :app" in why
+
+    @pytest.mark.parametrize("raised, says", [(TimeoutError(), "did not finish"),
+                                              (PermissionError(13, "denied"), "could not be run")])
+    def test_a_listing_that_cannot_run(self, tmp_path, monkeypatch, raised, says):
+        _, _, (v, why) = self._listing(tmp_path, monkeypatch, raised)
+        assert v is None and says in why
+
+    @pytest.mark.parametrize("change", [
+        lambda p, h: (p.module_dir / "build.gradle.kts").write_text("// flavours added\n"),
+        lambda p, h: (p.root / "local.properties").write_text("flavours=all\n"),
+        lambda p, h: (h / "gradle.properties").write_text("flavours=all\n"),
+        lambda p, h: ((p.root / "build-logic" / "src").mkdir(parents=True),
+                      (p.root / "build-logic" / "src" / "Flavours.kt").write_text("")),
+    ])
+    def test_what_a_listing_depends_on_drops_the_cache(self, tmp_path, change):
+        p = gradle.find_project(str(_project(tmp_path)))
+        home = tmp_path / "guh"
+        home.mkdir()
+        v = gradle.parse_variants((FIXTURES / "tasks_plain.out").read_text())
+        gradle.remember_listing(p, gradle.variants_key(p, [], home), v, "")
+        assert gradle.cached_listing(p, gradle.variants_key(p, [], home)) == (v, "")
+        change(p, home)
+        for f in [p.module_dir / "build.gradle.kts", p.root / "local.properties",
+                  home / "gradle.properties"]:
+            if f.exists():
+                os.utime(f, ns=(1, 1))
+        assert gradle.cached_listing(p, gradle.variants_key(p, [], home)) is None
+
+    def test_an_included_build_counts_as_build_logic(self, tmp_path):
+        p = gradle.find_project(str(_project(tmp_path)))
+        (p.root / "settings.gradle.kts").write_text(
+            'pluginManagement { includeBuild("conventions") }\ninclude(":app")\n')
+        (p.root / "conventions").mkdir()
+        before = gradle.variants_key(p, [], tmp_path)
+        (p.root / "conventions" / "Flavours.kt").write_text("")
+        assert gradle.variants_key(p, [], tmp_path) != before
+
+    def test_different_arguments_are_a_different_listing(self, tmp_path):
+        p = gradle.find_project(str(_project(tmp_path)))
+        assert (gradle.variants_key(p, ["-Pbeta=true"], tmp_path)
+                != gradle.variants_key(p, [], tmp_path))
+
+    def test_a_failed_listing_is_remembered_for_a_while(self, tmp_path, monkeypatch):
+        p = gradle.find_project(str(_project(tmp_path)))
+        key = gradle.variants_key(p, [], tmp_path)
+        gradle.remember_listing(p, key, None, "not an application module")
+        assert gradle.cached_listing(p, key) == (None, "not an application module")
+        now = gradle.time.monotonic()
+        monkeypatch.setattr(gradle.time, "monotonic", lambda: now + gradle.FAILED_LISTING_TTL + 1)
+        assert gradle.cached_listing(p, key) is None
+
+
+class TestCheckingTheVariant:
+    def test_no_variant_lists_them(self, built):
+        with pytest.raises(HTTPException, match="variant is required for a Gradle project. "
+                                                "Variants of :app: debug, release"):
+            _go(FakeController(FakeAdb([])), _body(project_path=str(built.root), variant=None))
+        assert built.ran == []
+
+    def test_no_variant_and_no_listing_says_why(self, built, monkeypatch):
+        async def list_variants(project, env, args):
+            return None, "it timed out"
+        monkeypatch.setattr(gradle, "list_variants", list_variants)
+        with pytest.raises(HTTPException, match="could not be listed: it timed out"):
+            _go(FakeController(FakeAdb([])), _body(project_path=str(built.root), variant=None))
+
+    def test_an_unknown_variant_lists_them_without_building(self, built):
+        with pytest.raises(HTTPException, match=r":app has no variant 'debg'. Variants: debug"):
+            _go(FakeController(FakeAdb([])), _body(project_path=str(built.root), variant="debg"))
+        assert built.ran == []
+
+    def test_an_abbreviation_is_refused(self, built):
+        """Gradle would build `debug` for `deb`, then the outputs would be
+        looked for under `deb`."""
+        with pytest.raises(HTTPException, match="has no variant 'deb'"):
+            _go(FakeController(FakeAdb([])), _body(project_path=str(built.root), variant="deb"))
+
+    def test_the_variants_own_spelling_is_built(self, built):
+        _go(FakeController(FakeAdb([(0, "Success\n", "")])),
+            _body(project_path=str(built.root), variant="DEBUG"))
+        assert built.ran[0][0] == ":app:assembleDebug"
+
+    def test_a_cached_answer_skips_the_listing(self, built):
+        for _ in range(2):
+            _go(FakeController(FakeAdb([(0, "Success\n", "")])),
+                _body(project_path=str(built.root)))
+        assert built.listed == ["app"], "the second build should not list again"
+
+    def test_a_variant_missing_from_the_cache_is_asked_about_again(self, built):
+        """A flavour added in a convention plugin changes no file the cache
+        keys on: a cached "no" must not refuse it."""
+        _go(FakeController(FakeAdb([(0, "Success\n", "")])), _body(project_path=str(built.root)))
+        with pytest.raises(HTTPException):
+            _go(FakeController(FakeAdb([])), _body(project_path=str(built.root), variant="beta"))
+        assert built.listed == ["app", "app"]
+
+    def test_a_failed_listing_lets_the_build_decide(self, built, monkeypatch):
+        async def list_variants(project, env, args):
+            return None, "it timed out"
+        monkeypatch.setattr(gradle, "list_variants", list_variants)
+        r = _go(FakeController(FakeAdb([(0, "Success\n", "")])),
+                _body(project_path=str(built.root)))
+        assert r["all_installed"]
+
+    def test_gradles_own_typo_answer_reaches_the_errors(self, tmp_path):
+        """Real Gradle 9.5.1 output for assembleStagingDebg."""
+        p = gradle.find_project(str(_project(tmp_path)))
+        result, _ = gradle.parse(1, (FIXTURES / "task_not_found.out").read_text(), p)
+        assert "Some candidates are: 'assembleStagingDebug'" in result.errors[0].message
+
+
+class TestSigning:
+    def test_an_unsigned_release_is_not_installed(self, built):
+        d = built.root / "app" / "build" / "outputs" / "apk" / "debug"
+        meta = json.loads((FIXTURES / "unsigned_release_metadata.json").read_text())
+        meta["variantName"] = "debug"
+        (d / "output-metadata.json").write_text(json.dumps(meta))
+        (d / meta["elements"][0]["outputFile"]).write_bytes(b"PK")
+        adb = FakeAdb([])
+        r = _go(FakeController(adb), _body(project_path=str(built.root)))
+        error = r["devices"][0].error
+        assert "app-staging-release-unsigned.apk) is unsigned" in error
+        assert adb.calls == [] and built.recorded == []
+
+    @staticmethod
+    def _apk(path, *, v2=False, v1=False):
+        """A zip shaped like an APK: with an APK Signing Block before its
+        central directory (v2+), or v1's META-INF signature, or neither."""
+        import io
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("AndroidManifest.xml", "x")
+            if v1:
+                z.writestr("META-INF/CERT.RSA", "sig")
+        data = buf.getvalue()
+        if v2:
+            eocd = data.rfind(b"PK\x05\x06")
+            cd = int.from_bytes(data[eocd + 16:eocd + 20], "little")
+            block = b"\0" * 24 + b"APK Sig Block 42"
+            data = (data[:cd] + block + data[cd:eocd + 16]
+                    + (cd + len(block)).to_bytes(4, "little") + data[eocd + 20:])
+        path.write_bytes(data)
+
+    @pytest.mark.parametrize("v2, v1, name, unsigned", [
+        (True, False, "app-unsigned.apk", False),   # a signed build type called `unsigned`
+        (False, True, "app-release.apk", False),
+        (False, False, "app-release.apk", True),    # renamed, still unsigned
+        (False, False, "app-release-unsigned.apk", True),
+    ])
+    def test_the_signature_decides_not_the_name(self, tmp_path, v2, v1, name, unsigned):
+        self._apk(tmp_path / name, v2=v2, v1=v1)
+        meta = {"_dir": str(tmp_path), "elements": [{"outputFile": name}]}
+        assert gradle.unsigned_apks(meta) == ([name] if unsigned else [])
+
+    def test_an_unreadable_apk_falls_back_to_the_name(self, tmp_path):
+        (tmp_path / "a-unsigned.apk").write_bytes(b"not a zip")
+        (tmp_path / "b.apk").write_bytes(b"not a zip")
+        meta = {"_dir": str(tmp_path), "elements": [{"outputFile": "a-unsigned.apk"},
+                                                    {"outputFile": "b.apk"}, "junk", {}]}
+        assert gradle.unsigned_apks(meta) == ["a-unsigned.apk"]
+
+    def test_one_unsigned_split_among_signed_ones_is_said(self, tmp_path):
+        self._apk(tmp_path / "arm.apk", v2=True)
+        self._apk(tmp_path / "x86.apk")
+        meta = {"_dir": str(tmp_path), "elements": [{"outputFile": "arm.apk"},
+                                                    {"outputFile": "x86.apk"}]}
+        assert gradle.unsigned_apks(meta) == ["x86.apk"]
+
+    @pytest.mark.parametrize("fixture, says", [
+        ("signing_missing_keystore.out", "/Users/someone/keys/missing.jks, is not on this machine"),
+        ("signing_wrong_password.out", "keystore password was incorrect"),
+        ("signing_no_alias.out", "No key with alias 'nokey'"),
+    ])
+    def test_real_signing_failures_are_environment_problems(self, tmp_path, fixture, says):
+        p = gradle.find_project(str(_project(tmp_path)))
+        _, [env] = gradle.parse(1, (FIXTURES / fixture).read_text(), p)
+        assert env.kind == "signing" and says in env.summary
+        assert env.options[0].startswith("build a debug variant")
+
+    def test_a_password_problem_mentions_the_daemons_environment(self, tmp_path):
+        p = gradle.find_project(str(_project(tmp_path)))
+        _, [env] = gradle.parse(1, (FIXTURES / "signing_wrong_password.out").read_text(), p)
+        assert any("shell's exports" in o for o in env.options)
+
+
+class TestProgress:
+    def test_the_current_task_is_tracked_across_chunks(self, tmp_path, monkeypatch):
+        """A task line split between two reads is still read whole."""
+        parts = [b"Starting a Gradle Daemon\n> Task :app:preBuild UP-TO-DATE\n> Task :app:comp",
+                 b"ileDebugKotlin\n", b"BUILD SUCCESSFUL in 3s\n", b""]
+
+        class Stdout:
+            async def read(self, n):
+                return parts.pop(0)
+
+        class Proc:
+            returncode = 0
+            stdout = Stdout()
+
+            async def wait(self):
+                return 0
+
+        async def spawn(*a, **k):
+            return Proc()
+        monkeypatch.setattr(gradle.asyncio, "create_subprocess_exec", spawn)
+        p = gradle.find_project(str(_project(tmp_path)))
+        progress = gradle.BuildProgress(project="p", task=":app:assembleDebug")
+        code, out = asyncio.run(gradle.run(p, ":app:assembleDebug", {}, [], progress=progress))
+        assert code == 0 and out.endswith("BUILD SUCCESSFUL in 3s\n")
+        assert progress.current == "> Task :app:compileDebugKotlin" and progress.tasks_run == 2
+
+    def test_a_build_is_listed_while_it_runs_and_gone_after(self, built, monkeypatch):
+        seen = []
+
+        async def run(project, task, env, args, timeout=0, progress=None):
+            progress.current = "> Task :app:compileDebugKotlin"
+            seen.append(await build_app.build_progress())
+            return 0, "BUILD SUCCESSFUL in 9s\n"
+        monkeypatch.setattr(gradle, "run", run)
+        _go(FakeController(FakeAdb([(0, "Success\n", "")])), _body(project_path=str(built.root)))
+        [during] = seen
+        [b] = during["builds"]
+        assert b["task"] == ":app:assembleDebug" and b["current"].endswith("compileDebugKotlin")
+        assert asyncio.run(build_app.build_progress()) == {"builds": []}
+
+    def test_a_build_that_raises_is_not_left_listed(self, built, monkeypatch):
+        async def run(*a, **k):
+            raise TimeoutError
+        monkeypatch.setattr(gradle, "run", run)
+        _go(FakeController(FakeAdb([])), _body(project_path=str(built.root)))
+        assert gradle.ACTIVE == {}
+
+    def test_the_build_stays_listed_through_each_stage(self, built, monkeypatch):
+        """Through the variant check and the installs, not only Gradle: a gap
+        reads as a hung build to whoever is waiting."""
+        stages = []
+
+        async def list_variants(project, env, args):
+            stages.append([b["stage"] for b in (await build_app.build_progress())["builds"]])
+            return gradle.parse_variants((FIXTURES / "tasks_plain.out").read_text()), ""
+        monkeypatch.setattr(gradle, "list_variants", list_variants)
+
+        async def run(project, task, env, args, timeout=0, progress=None):
+            stages.append([b["stage"] for b in (await build_app.build_progress())["builds"]])
+            return 0, "BUILD SUCCESSFUL in 9s\n"
+        monkeypatch.setattr(gradle, "run", run)
+
+        class Adb(FakeAdb):
+            async def install_apk_result(self, serial, apk, allow_downgrade=False):
+                stages.append([b["stage"] for b in (await build_app.build_progress())["builds"]])
+                return await super().install_apk_result(serial, apk, allow_downgrade)
+
+        _go(FakeController(Adb([(0, "Success\n", "")])), _body(project_path=str(built.root)))
+        assert stages == [["checking the variant"], ["building"], ["installing on 1 device(s)"]]
+        assert gradle.ACTIVE == {}
+
+
+class TestTheReviewOfPartTwo:
+    def test_the_real_listing_through_the_route(self, built, monkeypatch):
+        """Every other route test fakes list_variants: here only Gradle is
+        faked, answering `tasks --all` with real output and then building."""
+        monkeypatch.setattr(gradle, "list_variants", TestTheReviewOfPartTwo._real)
+        ran = []
+
+        async def run(project, task, env, args, timeout=0, progress=None):
+            ran.append((task, args))
+            if task == ":app:tasks":
+                return 0, (FIXTURES / "tasks_flavoured_quiet.out").read_text()
+            return 0, "BUILD SUCCESSFUL in 9s\n"
+        monkeypatch.setattr(gradle, "run", run)
+        with pytest.raises(HTTPException, match="pass one of productionDebug, stagingDebug"):
+            _go(FakeController(FakeAdb([])), _body(project_path=str(built.root),
+                                                   gradle_args=["-P", "beta=true"]))
+        [(task, args)] = ran
+        assert task == ":app:tasks" and args[:2] == ["--all", "-q"]
+        assert args[2:4] == ["-P", "beta=true"], "a value given apart stays with its option"
+
+    _real = staticmethod(gradle.list_variants)
+
+    def test_two_flavour_dimensions_group_by_gradles_names(self):
+        """Real AGP 9.3.2 output, flavours free/freeTrial x staging/production:
+        `free` is not freeTrial's prefix."""
+        v = gradle.parse_variants((FIXTURES / "tasks_two_dimensions_quiet.out").read_text())
+        assert v.group("free") == ("freeProductionDebug", "freeProductionRelease",
+                                   "freeStagingDebug", "freeStagingRelease")
+        assert v.group("freeTrialStaging") == ("freeTrialStagingDebug", "freeTrialStagingRelease")
+        assert len(v.group("debug")) == 4
+
+    def test_a_flavour_with_one_variant_left_says_so(self, built, monkeypatch):
+        out = (FIXTURES / "tasks_two_dimensions_quiet.out").read_text().replace(
+            "assembleFreeStagingRelease - Assembles main output for variant freeStagingRelease\n",
+            "")
+
+        async def list_variants(project, env, args):
+            return gradle.parse_variants(out), ""
+        monkeypatch.setattr(gradle, "list_variants", list_variants)
+        with pytest.raises(HTTPException, match="names a flavour of :app, not a variant: its "
+                                                "only variant is freeStagingDebug"):
+            _go(FakeController(FakeAdb([])), _body(project_path=str(built.root),
+                                                   variant="freeStaging"))
+
+    def test_a_cached_name_that_is_also_a_group_is_asked_again(self, built, monkeypatch):
+        """A plain project's `debug`, cached; then flavours: the cache must
+        not send the build off to assemble every flavour."""
+        _go(FakeController(FakeAdb([(0, "Success\n", "")])), _body(project_path=str(built.root)))
+        p = gradle.find_project(str(built.root))
+        key = next(iter(gradle._VARIANT_CACHE.values()))[0]
+        flavoured = gradle.parse_variants((FIXTURES / "tasks_flavoured.out").read_text())
+        flavoured = gradle.Variants(names=(*flavoured.names, "debug"), groups=flavoured.groups)
+        gradle.remember_listing(p, key, flavoured, "")
+        _go(FakeController(FakeAdb([(0, "Success\n", "")])), _body(project_path=str(built.root)))
+        assert built.listed == ["app", "app"], "a cached name that is also a group was trusted"
+
+    def test_a_remembered_failure_is_not_listed_again(self, built, monkeypatch):
+        calls = []
+
+        async def list_variants(project, env, args):
+            calls.append(1)
+            return None, "not an application module"
+        monkeypatch.setattr(gradle, "list_variants", list_variants)
+        for _ in range(2):
+            _go(FakeController(FakeAdb([(0, "Success\n", "")])),
+                _body(project_path=str(built.root)))
+        assert calls == [1]
+
+    def test_the_callers_progress_id_is_echoed(self, built, monkeypatch):
+        seen = []
+
+        async def run(project, task, env, args, timeout=0, progress=None):
+            seen.append(await build_app.build_progress())
+            return 0, "BUILD SUCCESSFUL in 9s\n"
+        monkeypatch.setattr(gradle, "run", run)
+        _go(FakeController(FakeAdb([(0, "Success\n", "")])),
+            _body(project_path=str(built.root), progress_id="call-7"))
+        assert seen[0]["builds"][0]["progress_id"] == "call-7"
+
+    def test_a_password_from_an_unset_variable(self, tmp_path):
+        """Real AGP 9.3.2: storePassword = System.getenv(...), unset."""
+        p = gradle.find_project(str(_project(tmp_path)))
+        _, [env] = gradle.parse(1, (FIXTURES / "signing_missing_password.out").read_text(), p)
+        assert env.kind == "signing"
+        assert env.summary == "signing config 'release' has no storePassword"
+        assert any("shell's exports" in o for o in env.options)
+
+    def test_a_key_alias_with_a_space(self, tmp_path):
+        p = gradle.find_project(str(_project(tmp_path)))
+        out = ('   > com.android.ide.common.signing.KeytoolException: Failed to read key my key '
+               'from store "/k.jks": keystore password was incorrect\n')
+        _, [env] = gradle.parse(1, out, p)
+        assert env.summary.startswith("key my key could not be read from /k.jks")
+
+
+# ── environment variables the build reads (#347) ────────────────────────────
+
+
+class TestEnvironmentVariables:
+    def _scripts(self, root, files):
+        for rel, text in files.items():
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+
+    def test_every_way_a_script_reads_one(self, tmp_path):
+        root = _project(tmp_path)
+        self._scripts(root, {
+            "app/build.gradle.kts": 'versionNameSuffix = "-" + (System.getenv("JOB_NAME") ?: "x")\n'
+                                    'val n = providers.environmentVariable("BUILD_NUMBER")\n',
+            "lib/build.gradle": "def a = System.getenv('GROOVY_ONE')\n"
+                                "def b = System.env.GROOVY_TWO\n"
+                                "def c = System.env['GROOVY_THREE']\n"
+                                "def d = System.getenv()['MAP_STYLE']\n",
+        })
+        p = gradle.find_project(str(root))
+        assert gradle.env_reads(p) == (["BUILD_NUMBER", "GROOVY_ONE", "GROOVY_THREE",
+                                        "GROOVY_TWO", "JOB_NAME", "MAP_STYLE"], 0)
+
+    def test_convention_plugins_count_and_the_apps_own_code_does_not(self, tmp_path):
+        """`System.getenv` in app/src runs on the device, not in the build."""
+        root = _project(tmp_path)
+        self._scripts(root, {
+            "app/src/main/kotlin/A.kt": 'val x = System.getenv("APP_RUNTIME")\n',
+            # A build script under src is a fixture (a plugin's test
+            # resources), not part of this build.
+            "app/src/test/resources/sample.gradle.kts": 'System.getenv("FIXTURE_ONLY")\n',
+            "buildSrc/src/main/kotlin/Signing.kt": 'val p = System.getenv("KEYSTORE_PASSWORD")\n',
+            "conventions/src/main/kotlin/Ci.kt": 'val c = System.getenv("CI")\n',
+            "app/build/generated/X.kt": 'System.getenv("GENERATED")\n',
+        })
+        (root / "settings.gradle.kts").write_text(
+            'pluginManagement { includeBuild("conventions") }\ninclude(":app")\n')
+        names, _ = gradle.env_reads(gradle.find_project(str(root)))
+        assert names == ["CI", "KEYSTORE_PASSWORD"]
+
+    def test_a_computed_name_is_counted(self, tmp_path):
+        root = _project(tmp_path)
+        self._scripts(root, {"app/build.gradle.kts": 'val k = "X"\nSystem.getenv(k)\n'})
+        assert gradle.env_reads(gradle.find_project(str(root))) == ([], 1)
+
+    def test_the_response_names_what_is_read_and_unset_and_never_a_value(self, built,
+                                                                        monkeypatch):
+        (built.root / "app" / "build.gradle.kts").write_text(
+            'val a = System.getenv("JOB_NAME")\nval b = System.getenv("KEYSTORE_PASSWORD")\n')
+        r = _go(FakeController(FakeAdb([(0, "Success\n", "")])),
+                _body(project_path=str(built.root), env={"KEYSTORE_PASSWORD": "hunter2"}))
+        assert r["env_vars"] == {"read_by_build": ["JOB_NAME", "KEYSTORE_PASSWORD"],
+                                 "unset": ["JOB_NAME"], "passed": ["KEYSTORE_PASSWORD"],
+                                 "unnamed_reads": 0}
+        response = build_app.BuildAndInstallResponse(**r)
+        response.summary = build_app._android_summary(response)
+        assert "hunter2" not in response.model_dump_json()
+        assert "The build reads JOB_NAME, not set where quern ran Gradle" in response.summary
+
+    def test_passed_values_reach_gradle_and_the_listing(self, built):
+        _go(FakeController(FakeAdb([(0, "Success\n", "")])),
+            _body(project_path=str(built.root), env={"JOB_NAME": "ci", "BUILD_NUMBER": "42"}))
+        assert built.envs[0]["JOB_NAME"] == "ci" and built.envs[0]["BUILD_NUMBER"] == "42"
+        assert built.listing_envs[0]["JOB_NAME"] == "ci"
+
+    def test_a_passed_variable_is_seen_by_the_jdk_search(self, built, tmp_path):
+        """GRADLE_USER_HOME passed in env decides whose gradle.properties
+        forces the JDK, as it does for Gradle."""
+        j17 = _jdk_dir(tmp_path, "j17", "17.0.2")
+        guh = tmp_path / "passed-guh"
+        guh.mkdir()
+        (guh / "gradle.properties").write_text(f"org.gradle.java.home={j17}\n")
+        r = _go(FakeController(FakeAdb([(0, "Success\n", "")])),
+                _body(project_path=str(built.root), env={"GRADLE_USER_HOME": str(guh)}))
+        assert built.envs[0]["JAVA_HOME"] == j17 and str(guh) in r["java"]
+
+    def test_changed_variables_list_the_variants_again(self, built):
+        """A variable can switch a flavour on: the listing cached for one set
+        is not the answer for another."""
+        for job in ("one", "two", "two"):
+            _go(FakeController(FakeAdb([(0, "Success\n", "")])),
+                _body(project_path=str(built.root), env={"FLAVOURS": job}))
+        assert built.listed == ["app", "app"], "listed once per set of variables"
+
+    def test_different_variables_are_a_different_listing(self, tmp_path):
+        p = gradle.find_project(str(_project(tmp_path)))
+        assert (gradle.variants_key(p, [], tmp_path, {"FLAVOURS": "all"})
+                != gradle.variants_key(p, [], tmp_path, None))
+
+    def test_the_key_holds_no_value(self, tmp_path):
+        p = gradle.find_project(str(_project(tmp_path)))
+        assert "hunter2" not in repr(gradle.variants_key(p, [], tmp_path, {"P": "hunter2"}))
+
+    def test_a_bad_name_is_refused(self):
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError, match="not environment variable names"):
+            _body(project_path="/x", env={"BAD NAME": "1"})
+
+    def test_env_on_an_xcode_project_is_refused_not_ignored(self, tmp_path):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        (tmp_path / "App.xcodeproj").mkdir()
+        app = FastAPI()
+        app.include_router(build_app.router)
+        app.state.device_controller = object()
+        with TestClient(app) as client:
+            r = client.post("/api/v1/device/build-and-install", json={
+                "project_path": str(tmp_path), "scheme": "App", "env": {"A": "1"}})
+        assert r.status_code == 400 and "Gradle builds" in r.json()["detail"]
 

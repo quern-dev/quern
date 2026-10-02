@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from server.api.actions import logged_action
 from server.config import CONFIG_DIR
@@ -43,6 +44,9 @@ class BuildAndInstallRequest(BaseModel):
     # Gradle projects (#347). `variant` is what Xcode calls a scheme and
     # configuration together: a build type with any flavour before it.
     variant: str | None = None
+    # The caller's id for this build, echoed in /build-progress, so a client
+    # reads its own build's progress when several run at once.
+    progress_id: str | None = None
     # The module to build, for a project root: `app` unless named.
     module: str | None = None
     # A JDK to run Gradle with, from an environment problem's options.
@@ -55,6 +59,20 @@ class BuildAndInstallRequest(BaseModel):
     # `adb install -d`: install over a higher versionCode. Android allows it
     # for a debuggable build only, and keeps the app's data.
     allow_downgrade: bool = False
+    # Gradle only: variables set in the environment Gradle runs with, for
+    # this build. A daemon started from the menu bar does not see the
+    # shell's exports, and a build reading one (a version suffix from
+    # JOB_NAME, a signing password) gets something else. Names are reported
+    # back; values never are.
+    env: dict[str, str] | None = None
+
+    @field_validator("env")
+    @classmethod
+    def _env_names(cls, value: dict[str, str] | None) -> dict[str, str] | None:
+        bad = [k for k in value or {} if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k)]
+        if bad:
+            raise ValueError(f"not environment variable names: {bad}")
+        return value
 
 
 class DeviceInstallResult(BaseModel):
@@ -83,6 +101,9 @@ class BuildAndInstallResponse(BaseModel):
     environment: list[EnvironmentProblem] = []
     java: str | None = None
     android_sdk: str | None = None
+    # Gradle: the variables the build scripts read, which of them are unset
+    # where Gradle ran, and which were passed in `env`. Names only.
+    env_vars: dict | None = None
     summary: str = ""
 
 
@@ -225,6 +246,14 @@ def _check_minimum_os(app_path: Path, device_os_version: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+@router.get("/build-progress")
+async def build_progress() -> dict:
+    """Gradle builds running now: the task asked for, how long it has run, and
+    the task Gradle is on. For a caller waiting on build-and-install, which
+    answers only when the build ends, to see the build is moving."""
+    return {"builds": [p.as_dict() for p in list(gradle.ACTIVE.values())]}
+
+
 @router.post("/build-and-install", response_model=BuildAndInstallResponse)
 @logged_action("build_and_install", category="build")
 async def build_and_install(request: Request, body: BuildAndInstallRequest):
@@ -243,6 +272,11 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
     if controller is None:
         raise HTTPException(status_code=503, detail="Device controller not initialized")
 
+    if body.env and not _is_gradle(body.project_path):
+        # Refused rather than ignored: an Xcode build would run without them
+        # and say nothing.
+        raise HTTPException(status_code=400,
+                            detail="env applies to Gradle builds; it is not passed to xcodebuild")
     if _is_gradle(body.project_path):
         from server.api import build_android
 
@@ -469,9 +503,15 @@ def _android_summary(resp: BuildAndInstallResponse) -> str:
                       for e in errors[:5]]
         return "\n".join(parts)
     build = resp.build_android
+    unset = (resp.env_vars or {}).get("unset") or []
+    # Said on success too: a build that read an unset JOB_NAME succeeds, with
+    # a version name nobody asked for.
+    env_note = (f"The build reads {', '.join(unset)}, not set where quern ran Gradle: pass "
+                f"them in env if it should see them." if unset else "")
     if build is None or not build.succeeded:
         why = resp.devices[0].error if resp.devices else ""
-        return build.summary if build else f"Not built: {why}"
+        said = build.summary if build else f"Not built: {why}"
+        return f"{said} {env_note}".strip()
     parts.append(f"Build succeeded ({resp.java}).")
     if build.warning_count:
         parts.append(f"{build.warning_count} warning(s).")
@@ -482,6 +522,8 @@ def _android_summary(resp: BuildAndInstallResponse) -> str:
     parts += [f"Install failed ({d.udid}): {d.error.rstrip('.')}." for d in resp.devices
               if not d.installed]
     parts += [build_records.summary_line(r) for r in resp.build_records]
+    if env_note:
+        parts.append(env_note)
     return " ".join(parts)
 
 
