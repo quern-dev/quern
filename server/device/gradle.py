@@ -110,9 +110,11 @@ def gradle_version(project: GradleProject) -> tuple[int, ...] | None:
 
 #: The newest Java each Gradle runs on, from Gradle's compatibility matrix:
 #: (first Gradle supporting it, Java). Newer than the last row is not known.
-_GRADLE_MAX_JAVA = ((5, 4), 12), ((6, 0), 13), ((6, 3), 14), ((6, 7), 15), ((7, 0), 16), \
-    ((7, 3), 17), ((7, 5), 18), ((7, 6), 19), ((8, 3), 20), ((8, 5), 21), ((8, 8), 22), \
-    ((8, 10), 23), ((8, 14), 24), ((9, 1), 25)
+_GRADLE_MAX_JAVA = (
+    ((4, 3), 9), ((4, 7), 10), ((5, 0), 11), ((5, 4), 12), ((6, 0), 13), ((6, 3), 14),
+    ((6, 7), 15), ((7, 0), 16), ((7, 3), 17), ((7, 5), 18), ((7, 6), 19), ((8, 3), 20),
+    ((8, 5), 21), ((8, 8), 22), ((8, 10), 23), ((8, 14), 24), ((9, 1), 25),
+)
 
 
 def java_range(project: GradleProject) -> tuple[int, int | None, str]:
@@ -136,7 +138,7 @@ def java_range(project: GradleProject) -> tuple[int, int | None, str]:
     # AGP 4 and older run on 8 (Gradle 6 and older) -- the review: refusing
     # a Gradle 6 project the Java 8 it builds on would refuse a working build.
     minimum = 17 if version >= (8,) else 11 if version >= (7,) else 8
-    maximum = 11
+    maximum = 8
     for first, java in _GRADLE_MAX_JAVA:
         if version >= first:
             maximum = java

@@ -201,7 +201,8 @@ class TestTheProject:
         (None, "9.1.0", 17, 25),    # a patch number does not lift it past the table
         (None, "8.7", 17, 21), (None, "7.6.4", 11, 19), (None, "7.2", 11, 16),
         # Gradle 6 runs on Java 8 with AGP 4 and older, and 6.7 up to 15.
-        (None, "6.7.1", 8, 15), (None, "5.6.4", 8, 12), (None, "4.10", 8, 11),
+        (None, "6.7.1", 8, 15), (None, "5.6.4", 8, 12), (None, "5.0", 8, 11),
+        (None, "4.10", 8, 10), (None, "4.6", 8, 9), (None, "4.2", 8, 8),
     ])
     def test_the_java_range_follows_the_project(self, tmp_path, daemon_jvm, gradle_v,
                                                 minimum, maximum):
