@@ -176,6 +176,7 @@ class TestTheRecorder:
         recorder, _ = self._recorder(process)
         seg = await recorder.start(SIM, tmp_path / "video-1.mp4")
         process.send_signal = lambda sig: process.signals.append(sig)    # ignores it
+        process._write([SUMMARY])          # said, but the moov atom never written
         result = await recorder.stop(seg)
         assert process.signals == [signal.SIGINT, "kill"]
         assert result["start_host_time"] is None and "was killed" in result["error"]
@@ -615,6 +616,39 @@ class TestTheManager:
         await stopping
         kinds = [e["type"] for e in _events(tmp_path / "r")]
         assert kinds[-1] == "stopped"
+
+    async def test_a_stop_waits_for_the_last_runs_movie_to_be_finished(self, tmp_path):
+        """Stopped while the next quern is still finishing the movie the last
+        one left running: what that finish says must be in the file, before
+        `stopped`, not queued after the writer has gone."""
+        first = Sources().manager(FakeVideo())
+        rec = await first.start(SIM, str(tmp_path / "r"), Filters(video=True))
+        await first._flush(rec)                        # and then quern is killed
+        gate = asyncio.Event()
+        video = FakeVideo(reaped={"path": str(tmp_path / "r" / "video-1.mp4"),
+                                  "start_host_time": 1000.0})
+        real_reap = video.reap
+
+        async def slow_reap(pid, movie):
+            await gate.wait()
+            return await real_reap(pid, movie)
+        video.reap = slow_reap
+        second = Sources().manager(video)
+        await second.resume_all()
+        stopping = asyncio.create_task(second.stop(rec.id))
+        await _settle()
+        gate.set()
+        await stopping
+        kinds = [(e["type"], e.get("segment")) for e in _events(tmp_path / "r")]
+        assert ("video_stopped", 1) in kinds
+        assert kinds.index(("video_stopped", 1)) < kinds.index(("stopped", None))
+
+    def test_video_asked_for_and_none_recorded_is_not_complete(self, tmp_path):
+        rec = rec_mod.Recording(id="r", udid=SIM, dir=tmp_path, filters=Filters(video=True),
+                                started_at=datetime(2026, 10, 1, tzinfo=UTC), state="stopped")
+        assert rec.complete is False
+        rec.video_segments = [{"segment": 1, "start_host_time": 1000.0}]
+        assert rec.complete is True
 
     async def test_shutdown_finishes_every_movie_at_once(self, tmp_path):
         manager = Sources().manager(FakeVideo(stop_takes=0.4))
