@@ -136,6 +136,7 @@ _MAP_ID = re.compile(r"^# pg_map_id: ([0-9a-f]+)\s*$")
 
 async def record_android_build(
     module_dir: Path, variant: str, *, root: Path | None = None, now: datetime | None = None,
+    just_built: bool = False,
 ) -> BuildRecord:
     """Record a Gradle build of `variant` in `module_dir` (the app module).
 
@@ -162,7 +163,10 @@ async def record_android_build(
         build_number=str(element.get("versionCode") or ""),
         version_codes=sorted({str(e["versionCode"]) for e in elements if e.get("versionCode")}),
     )
-    stale = _stale_outputs(Path(record.app_path), created)
+    # `just_built`: `build_and_install` ran Gradle a moment ago, which rebuilt
+    # what the source changed and left the rest up to date -- so an APK from
+    # last week is this source's APK, not a stale one.
+    stale = None if just_built else _stale_outputs(Path(record.app_path), created)
     if stale:
         record.notes.append(stale)
     partial, final = root / (build_id + _PARTIAL), root / build_id
@@ -206,7 +210,12 @@ def _stale_outputs(apk: Path, now: datetime) -> str:
             f"or its lines will not match the source")
 
 
-def _android_metadata(module_dir: Path, variant: str) -> dict:
+def _android_metadata(module_dir: Path, variant: str, *, after_build: bool = False) -> dict:
+    """The variant's output-metadata.json, with `_dir` set to its directory.
+
+    `after_build`: quern has just run the build, so "build the variant first"
+    is the wrong advice and the module is the likelier mistake.
+    """
     outputs = module_dir / "build" / "outputs" / "apk"
     seen = []
     for path in sorted(outputs.rglob("output-metadata.json")):
@@ -218,7 +227,9 @@ def _android_metadata(module_dir: Path, variant: str) -> dict:
             continue
         name = str(data.get("variantName") or "")
         seen.append(name)
-        if name == variant:
+        # Gradle matches task names case-insensitively, so `stagingdebug`
+        # builds stagingDebug; the outputs must be found the same way.
+        if name.lower() == variant.lower():
             elements = data.get("elements")
             if (not isinstance(elements, list) or not elements
                     or not all(isinstance(e, dict) for e in elements)):
@@ -228,9 +239,21 @@ def _android_metadata(module_dir: Path, variant: str) -> dict:
             data["_dir"] = path.parent
             return data
     if not outputs.is_dir():
+        if after_build:
+            raise AndroidBuildNotFound(
+                f"Gradle reported success and wrote no APK outputs under {outputs}: is "
+                f"{module_dir.name} the application module? Pass module= naming the one "
+                f"that applies com.android.application")
         raise AndroidBuildNotFound(
             f"no APK outputs under {outputs}: build the variant first, and pass the app "
             f"module's directory (the one with build.gradle), not the project root")
+    # `debug` on a flavoured project assembles every flavour's debug variant,
+    # none of which is called `debug`: name the ones it did build.
+    matches = sorted({n for n in seen if n.lower().endswith(variant.lower())})
+    if matches:
+        raise AndroidBuildNotFound(
+            f"{variant!r} is not one variant here but every flavour's: pass one of "
+            f"{', '.join(matches)}")
     raise AndroidBuildNotFound(
         f"no APK output for variant {variant!r} under {outputs}; built variants: "
         f"{', '.join(sorted(set(seen))) or 'none'}")

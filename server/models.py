@@ -700,6 +700,23 @@ class BuildRecord(BaseModel):
         return value if value.tzinfo else value.replace(tzinfo=UTC)
 
 
+class EnvironmentProblem(BaseModel):
+    """Something about the machine, not the code, that stops a build (#347).
+
+    Reported rather than fixed: an agent can act on an option itself (pass a
+    JDK it was shown, add a Gradle argument) or put the choice to the user --
+    installing a JDK or editing their settings is theirs to decide.
+    """
+
+    kind: str = Field(description="'jdk', 'toolchain_jdk', 'android_sdk', 'sdk_packages', "
+                                  "'ndk', 'gradle_wrapper' or 'gradle_distribution'")
+    summary: str
+    found: list[str] = Field(default_factory=list,
+                             description="What was found while looking, e.g. each JDK")
+    options: list[str] = Field(default_factory=list,
+                               description="Ways to fix it, most direct first")
+
+
 class BuildResult(BaseModel):
     """Parsed result from an xcodebuild invocation."""
 

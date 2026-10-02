@@ -171,6 +171,12 @@ class TestRecordAndroidBuild:
         assert "built 2026-07-09 12:00 UTC, 82 days before" in note
         assert "build again" in build_records.summary_line(record)
 
+    def test_a_build_just_made_is_not_called_stale(self, tmp_path):
+        module = _gradle_module(tmp_path, built=NOW - timedelta(days=7))
+        record = asyncio.run(build_records.record_android_build(
+            module, "stagingRelease", root=tmp_path / "records", now=NOW, just_built=True))
+        assert record.notes == []
+
     def test_the_hour_is_the_line(self, tmp_path):
         old = _record_android(_gradle_module(tmp_path / "a", built=NOW - timedelta(minutes=61)),
                               tmp_path / "records")

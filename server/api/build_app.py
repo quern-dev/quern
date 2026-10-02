@@ -1,4 +1,5 @@
-"""API route for building an Xcode project and installing the app on devices."""
+"""API route for building an app and installing it on devices: an Xcode
+project for iOS, or a Gradle project for Android (`build_android.py`, #347)."""
 
 from __future__ import annotations
 
@@ -12,8 +13,8 @@ from pydantic import BaseModel
 
 from server.api.actions import logged_action
 from server.config import CONFIG_DIR
-from server.device import build_records
-from server.models import BuildRecord, BuildResult, DeviceError, DeviceType
+from server.device import build_records, gradle
+from server.models import BuildRecord, BuildResult, DeviceError, DeviceType, EnvironmentProblem
 
 router = APIRouter(prefix="/api/v1/device", tags=["device"])
 logger = logging.getLogger(__name__)
@@ -39,6 +40,21 @@ class BuildAndInstallRequest(BaseModel):
     # non-interactive build cannot ask. Adds -skipPackagePluginValidation and
     # -skipMacroValidation to this build only.
     skip_plugin_validation: bool = False
+    # Gradle projects (#347). `variant` is what Xcode calls a scheme and
+    # configuration together: a build type with any flavour before it.
+    variant: str | None = None
+    # The module to build, for a project root: `app` unless named.
+    module: str | None = None
+    # A JDK to run Gradle with, from an environment problem's options.
+    java_home: str | None = None
+    # Extra arguments for gradlew, e.g. a toolchain path an option suggested.
+    gradle_args: list[str] | None = None
+    # Opt-in, because uninstalling erases the app's data on that device:
+    # an install refused for a different signing key is retried after it.
+    uninstall_on_signature_mismatch: bool = False
+    # `adb install -d`: install over a higher versionCode. Android allows it
+    # for a debuggable build only, and keeps the app's data.
+    allow_downgrade: bool = False
 
 
 class DeviceInstallResult(BaseModel):
@@ -46,6 +62,7 @@ class DeviceInstallResult(BaseModel):
     installed: bool
     app_path: str | None = None
     error: str | None = None
+    note: str | None = None
 
 
 class BuildAndInstallResponse(BaseModel):
@@ -59,6 +76,13 @@ class BuildAndInstallResponse(BaseModel):
     # after the next build overwrites DerivedData; for a device build, dSYMs of
     # the app's own code (#326).
     build_records: list[BuildRecord] = []
+    # Gradle projects: the build, what about the machine stopped it, and the
+    # JDK and SDK it was given -- named, since a daemon without a shell finds
+    # them itself.
+    build_android: BuildResult | None = None
+    environment: list[EnvironmentProblem] = []
+    java: str | None = None
+    android_sdk: str | None = None
     summary: str = ""
 
 
@@ -218,6 +242,14 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
     controller = request.app.state.device_controller
     if controller is None:
         raise HTTPException(status_code=503, detail="Device controller not initialized")
+
+    if _is_gradle(body.project_path):
+        from server.api import build_android
+
+        response = BuildAndInstallResponse(
+            **await build_android.build_and_install(controller, body))
+        response.summary = _android_summary(response)
+        return response
 
     build_adapter = request.app.state.build_adapter
     if build_adapter is None:
@@ -404,6 +436,53 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
     )
     response.summary = _build_install_summary(response)
     return response
+
+
+def _is_gradle(path: str) -> bool:
+    """A Gradle project, and not an Xcode one: an iOS app can sit inside a
+    repository whose root has a settings.gradle, and Xcode wins there."""
+    p = Path(path).expanduser()
+    if p.suffix in (".xcodeproj", ".xcworkspace"):
+        return False
+    if p.is_dir() and (any(p.glob("*.xcworkspace")) or any(p.glob("*.xcodeproj"))):
+        return False
+    return gradle.is_gradle_project(path)
+
+
+def _android_summary(resp: BuildAndInstallResponse) -> str:
+    """The Android build's summary, which is all the MCP tool returns on success."""
+    parts: list[str] = []
+    if resp.environment:
+        # Whether Gradle ran decides the sentence: "not built" about a build
+        # that ran and failed sends the reader to look for why it never started.
+        parts.append("Build failed: the machine, not the code, stopped it."
+                     if resp.build_android else "Not built: the environment is not ready.")
+        for p in resp.environment:
+            parts.append(f"[{p.kind}] {p.summary}.")
+            parts += [f"  - {o}" for o in p.options]
+        # The errors Gradle printed too: an environment reading can be wrong,
+        # and hiding the compiler's own words behind it would compound that.
+        errors = resp.build_android.errors if resp.build_android else []
+        if any(e.file for e in errors):
+            parts.append("Errors Gradle reported:")
+            parts += [f"  {e.file}:{e.line}: {e.message}" if e.file else f"  {e.message}"
+                      for e in errors[:5]]
+        return "\n".join(parts)
+    build = resp.build_android
+    if build is None or not build.succeeded:
+        why = resp.devices[0].error if resp.devices else ""
+        return build.summary if build else f"Not built: {why}"
+    parts.append(f"Build succeeded ({resp.java}).")
+    if build.warning_count:
+        parts.append(f"{build.warning_count} warning(s).")
+    installed = [d for d in resp.devices if d.installed]
+    if installed:
+        parts.append(f"Installed on: {', '.join(d.udid for d in installed)}.")
+    parts += [f"Note ({d.udid}): {d.note}." for d in installed if d.note]
+    parts += [f"Install failed ({d.udid}): {d.error.rstrip('.')}." for d in resp.devices
+              if not d.installed]
+    parts += [build_records.summary_line(r) for r in resp.build_records]
+    return " ".join(parts)
 
 
 async def _record(

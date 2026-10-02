@@ -1,0 +1,30 @@
+Starting a Gradle Daemon, 1 incompatible Daemon could not be reused, use --status for details
+
+> Task :app:compileJava FAILED
+/Users/someone/Dev/quern-scratch/quernc6-gradle/probe/app/src/main/java/probe/Foo.java:3: error: cannot find symbol
+  int x() { return missingSymbol; }
+                   ^
+  symbol:   variable missingSymbol
+  location: class Foo
+1 error
+
+[Incubating] Problems report is available at: file:///Users/someone/Dev/quern-scratch/quernc6-gradle/probe/build/reports/problems/problems-report.html
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':app:compileJava' (registered by plugin class 'org.gradle.api.plugins.JavaBasePlugin').
+> Compilation failed; see the compiler output below.
+  /Users/someone/Dev/quern-scratch/quernc6-gradle/probe/app/src/main/java/probe/Foo.java:3: error: cannot find symbol
+    int x() { return missingSymbol; }
+                     ^
+    symbol:   variable missingSymbol
+    location: class Foo
+  1 error
+
+* Try:
+> Check your code and dependencies to fix the compilation error(s)
+> Run with --scan to get full insights from a Build Scan (powered by Develocity).
+
+BUILD FAILED in 5s
+1 actionable task: 1 executed
