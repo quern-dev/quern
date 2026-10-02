@@ -710,3 +710,41 @@ class TestCausesInTime:
             trace = client.get("/api/v1/trace", params={
                 "since": (t - timedelta(seconds=5)).isoformat(), "limit": 1}).json()
         assert trace["flows_over_limit"] is False
+
+
+class TestWithTheRecordingsReview:
+    def test_a_markers_only_read_skips_request_starts_too(self, tmp_path, monkeypatch):
+        t = datetime(2026, 10, 1, 12, tzinfo=UTC)
+        start = _flow("r1", status=None, at=t).model_dump(mode="json")
+        lines = [{"type": "started", "at": t.isoformat(), "monotonic": 1.0, "udid": SIM,
+                  "format_version": 2},
+                 {"type": "request_started", "at": t.isoformat(), "monotonic": 2.0,
+                  "data": start},
+                 {"type": "stopped", "at": t.isoformat(), "monotonic": 3.0}]
+        (tmp_path / "events.jsonl").write_text(
+            "".join(json.dumps(x, separators=(",", ":")) + "\n" for x in lines))
+
+        def no_records(*a, **k):
+            raise AssertionError("a request start was rebuilt for a markers-only read")
+        monkeypatch.setattr(rec_mod.FlowRecord, "model_validate", no_records)
+        assert rec_mod.load(tmp_path, markers_only=True).stopped
+
+    def test_an_interrupted_stops_gap_explains_an_unfinished_request(self, tmp_path):
+        t = datetime(2026, 10, 1, 12, tzinfo=UTC)
+        start = _flow("r1", status=None, at=t).model_dump(mode="json")
+        lines = [{"type": "started", "at": t.isoformat(), "monotonic": 1.0, "udid": SIM,
+                  "format_version": 2},
+                 {"type": "request_started", "at": t.isoformat(), "monotonic": 2.0,
+                  "data": start},
+                 {"type": "stopped", "at": (t + timedelta(hours=1)).isoformat(),
+                  "monotonic": 3.0,
+                  "gap": {"from": (t + timedelta(seconds=1)).isoformat(),
+                          "to": (t + timedelta(hours=1)).isoformat(),
+                          "reason": "not recording: its directory was gone"}}]
+        (tmp_path / "events.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
+        loaded = rec_mod.load(tmp_path)
+        [r1] = loaded.unfinished
+        assert "not recording" in r1.error
+        # Exact for flows in a format-2 file: nothing reaches back before it.
+        assert not rec_mod.holes_in(loaded, {"flow"}, t - timedelta(minutes=3),
+                                    t - timedelta(seconds=5))

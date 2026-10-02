@@ -743,7 +743,8 @@ def _gap_holes(start, end, why, *, exact_flows: bool = False) -> list[tuple]:
 
 
 #: How a record line begins, as `_line` writes it: type first, compact.
-_RECORD_PREFIXES = tuple(f'{{"type":"{k}",' for k in ("action", "flow", "log", "crash"))
+_RECORD_PREFIXES = tuple(f'{{"type":"{k}",'
+                         for k in ("action", "flow", "request_started", "log", "crash"))
 _AT = re.compile(r'"at":"([^"]+)"')
 
 
@@ -844,7 +845,11 @@ def load(directory: Path, *, live: bool = False, markers_only: bool = False) -> 
                     if isinstance(event.get("gap"), dict):
                         gap = event["gap"]
                         holes += _gap_holes(_dt(gap.get("from")), _dt(gap.get("to")),
-                                            gap.get("reason") or "gap")
+                                            gap.get("reason") or "gap",
+                                            exact_flows=version >= 2)
+                        cut.append((None, _dt(gap.get("to")),
+                                    f"{gap.get('reason') or 'a gap'} from {gap.get('from')}; "
+                                    f"it may have been answered then"))
             except (ValueError, KeyError, TypeError):
                 bad += 1
     if not stopped:
