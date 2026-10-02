@@ -246,3 +246,61 @@ async def test_clear_text_hands_the_backend_the_fields_identifier():
     kwargs = backend.select_all_and_delete.call_args.kwargs
     assert kwargs["identifier"] == "field_email"
     assert (kwargs["x"], kwargs["y"]) == (50, 220)
+
+
+class TestReadsMadeForTheCallerAreShallowThroughWda:
+    """F35: the full WDA walk of a 200-row table took 34.5s on an iPhone 11;
+    at depth 12 it took 3.9s and still held everything a tap needs."""
+
+    def test_default_through_wda_is_the_action_depth(self):
+        from server.device.wda_client import ACTION_SNAPSHOT_DEPTH
+
+        ctrl = DeviceController()
+        ctrl._served_by_wda = lambda udid: True
+        assert ctrl._read_depth("PHONE", None) == ACTION_SNAPSHOT_DEPTH == 12
+
+    def test_the_callers_depth_wins(self):
+        ctrl = DeviceController()
+        ctrl._served_by_wda = lambda udid: True
+        assert ctrl._read_depth("PHONE", 30) == 30
+
+    def test_off_wda_there_is_no_depth(self):
+        ctrl = DeviceController()
+        ctrl._served_by_wda = lambda udid: False
+        assert ctrl._read_depth("SIM", None) is None
+
+    async def test_tap_element_reads_at_it_and_a_miss_says_so(self):
+        ctrl, backend = _controller([])
+        await_result = await ctrl.tap_element(
+            identifier="deep_thing", udid="PHONE", scroll_to_find=False,
+            skip_stability_check=True,
+        )
+        depths = [c.kwargs.get("snapshot_depth") for c in ctrl.get_ui_elements.await_args_list
+                  if c.kwargs.get("filter_type") != "Application"]
+        assert depths and all(d == 12 for d in depths), depths
+        assert await_result["snapshot_depth"] == 12
+        assert "retry with a larger snapshot_depth" in await_result["detail"]
+
+    async def test_the_route_passes_the_callers_depth(self):
+        from httpx import ASGITransport, AsyncClient
+
+        from server.config import ServerConfig
+        from server.main import create_app
+
+        app = create_app(
+            config=ServerConfig(api_key="k"),
+            enable_oslog=False, enable_crash=False, enable_proxy=False,
+        )
+        ctrl = MagicMock(spec=DeviceController)
+        ctrl.resolve_udid = AsyncMock(return_value="PHONE")
+        ctrl.tap_element = AsyncMock(return_value={"status": "ok", "tapped": {}})
+        ctrl.backend_that_served = MagicMock(return_value="wda")
+        app.state.device_controller = ctrl
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post(
+                "/api/v1/device/ui/tap-element",
+                json={"identifier": "x", "udid": "PHONE", "snapshot_depth": 30},
+                headers={"Authorization": "Bearer k"},
+            )
+        assert r.status_code == 200, r.text
+        assert ctrl.tap_element.call_args.kwargs["snapshot_depth"] == 30

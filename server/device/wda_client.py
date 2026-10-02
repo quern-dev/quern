@@ -125,6 +125,14 @@ _LAST_SOURCE_READ: contextvars.ContextVar[tuple[str, float] | None] = (
 # WDA default is 50 — 25 resolves most screens;
 # skeleton fallback handles dense maps
 SNAPSHOT_MAX_DEPTH = 25
+
+#: The depth reads made on a caller's behalf use -- tap_element, get_element,
+#: wait_for_element -- unless they ask for more. Measured on an iPhone 11 on a
+#: 200-row table: 12 reads in 3.9s and holds the tab bar, the controls and
+#: every row's identifier; past it the read walks each cell's insides, 1,055
+#: elements in 34.5s, and the next tap times out (F35). 11 loses the rows and
+#: 10 the tab bar. Deeper nesting is the caller's to ask for.
+ACTION_SNAPSHOT_DEPTH = 12
 FORWARD_START_PORT = 18100  # base port for usbmux forwards
 FORWARD_KILL_GRACE = 3  # seconds to wait for SIGTERM before SIGKILL
 IDLE_TIMEOUT = 15 * 60  # 15 minutes

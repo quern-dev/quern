@@ -1950,6 +1950,8 @@ class TestTapElementIosScroll:
             # ran and whether anything moved, so not_found can tell the caller
             # the screen was touched (#274).
             report=ANY,
+            # Off WDA there is no depth to set (F35).
+            snapshot_depth=None,
         )
         backend.tap.assert_awaited_once()
 

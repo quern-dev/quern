@@ -2143,6 +2143,15 @@ class TapElementRequest(BaseModel):
     #: `scrollable: true`. Previously defaulted to `True`, which swiped screens
     #: that cannot scroll -- see #274 and `ScreenLandmarks.scrollable`.
     scroll_to_find: bool | None = None
+    snapshot_depth: int | None = Field(
+        default=None, ge=1, le=50,
+        description=(
+            "WDA snapshot depth for this read (a physical device, or a simulator "
+            "after start_driver). Default 12: deep enough for tab bars, controls "
+            "and list rows, and nine times faster than the full walk on a long "
+            "list. Pass more if the element is nested deeper."
+        ),
+    )
     include_screen_context: bool = False
     capture_screenshots: bool = False
     settle_delay: float = Field(default=1.0, ge=0, le=10)
@@ -2358,6 +2367,15 @@ class WaitForElementRequest(BaseModel):
     interval: float = Field(default=0.5, ge=0.1, le=5)
     udid: str | None = None
     mode: str | None = None  # "flat" for custom companion flat mode
+    snapshot_depth: int | None = Field(
+        default=None, ge=1, le=50,
+        description=(
+            "WDA snapshot depth for this read (a physical device, or a simulator "
+            "after start_driver). Default 12: deep enough for tab bars, controls "
+            "and list rows, and nine times faster than the full walk on a long "
+            "list. Pass more if the element is nested deeper."
+        ),
+    )
 
     @model_validator(mode="after")
     def check_label_exclusivity(self):

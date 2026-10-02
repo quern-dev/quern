@@ -548,6 +548,7 @@ class DeviceControllerUI:
         filter_label: str | None,
         identifier: str | None,
         element_type: str | None,
+        snapshot_depth: int | None = None,
     ) -> tuple[list[UIElement], bool]:
         """The whole screen, for identification and for not-found context.
 
@@ -567,7 +568,7 @@ class DeviceControllerUI:
         if not (filter_label or identifier or element_type):
             return elements, True
         try:
-            full, _ = await self.get_ui_elements(resolved)
+            full, _ = await self.get_ui_elements(resolved, snapshot_depth=snapshot_depth)
         except Exception:
             logger.debug("full-tree read for screen context failed", exc_info=True)
             return elements, False
@@ -644,6 +645,21 @@ class DeviceControllerUI:
             return None, None, "lookup_failed", None
         return hint.scrollable, hint.screen, hint.reason, hint.candidates
 
+    def _read_depth(self, resolved: str, requested: int | None) -> int | None:
+        """The WDA snapshot depth for a read made on a caller's behalf.
+
+        The caller's own number wins. Otherwise, through WDA, the shallow
+        action depth: the global default walks every cell of a long list and
+        took 34.5s on an iPhone 11 (F35). Off WDA there is no depth to set.
+        """
+        if requested is not None:
+            return requested
+        if self._served_by_wda(resolved):
+            from server.device.wda_client import ACTION_SNAPSHOT_DEPTH
+
+            return ACTION_SNAPSHOT_DEPTH
+        return None
+
     async def _wda_reachable_only(
         self, resolved: str, matches: list[UIElement],
     ) -> tuple[list[UIElement], list[dict]]:
@@ -715,6 +731,7 @@ class DeviceControllerUI:
         target_known_absent: bool = False,
         deadline_s: float | None = None,
         report: dict | None = None,
+        snapshot_depth: int | None = None,
     ) -> UIElement | None:
         """Scroll an iOS scroll container until the target element is on-screen.
 
@@ -850,7 +867,7 @@ class DeviceControllerUI:
             els, _ = await self.get_ui_elements(
                 resolved, use_cache=False,
                 filter_label=label, filter_identifier=identifier,
-                probe_containers=probe,
+                probe_containers=probe, snapshot_depth=snapshot_depth,
             )
             return _pick(find_element(els, label=label, identifier=identifier))
 
@@ -919,6 +936,7 @@ class DeviceControllerUI:
             """
             els, _ = await self.get_ui_elements(
                 resolved, use_cache=False, probe_containers=probe,
+                snapshot_depth=snapshot_depth,
             )
             matches = find_element(els, label=label, identifier=identifier)
             return _pick(matches), _fingerprint(els)
@@ -1552,6 +1570,10 @@ class DeviceControllerUI:
             # below, so `backend` went on naming whatever served the last full
             # read -- `sim-bridge` on a simulator just put in WDA mode (#336).
             self._last_read_backend[resolved] = self.wda_client.TOOL_NAME
+            if snapshot_depth is not None:
+                # WDA's depth is a session setting: queries honour it too, and
+                # a deep one makes a query on a long list as slow as /source.
+                await self.wda_client._set_snapshot_depth(resolved, snapshot_depth)
             elements, query_elapsed = await self._wda_direct_query(
                 resolved, label=filter_label,
                 identifier=filter_identifier, element_type=filter_type,
@@ -1678,6 +1700,7 @@ class DeviceControllerUI:
         element_type: str | None = None,
         udid: str | None = None,
         source_timeout: float | None = None,
+        snapshot_depth: int | None = None,
     ) -> tuple[dict, str]:
         """Get a single element's state without fetching the entire UI tree.
 
@@ -1701,7 +1724,11 @@ class DeviceControllerUI:
         # in-flight read or change its result -- only the label, which is the one
         # thing this change exists to get right.
         backend = self._backend_name(udid)
-        elements, resolved = await self.get_ui_elements(udid, source_timeout=source_timeout)
+        resolved = await self.resolve_udid(udid)
+        elements, resolved = await self.get_ui_elements(
+            resolved, source_timeout=source_timeout,
+            snapshot_depth=self._read_depth(resolved, snapshot_depth),
+        )
         matches = find_element(
             elements, label=label, label_contains=label_contains,
             label_prefix=label_prefix, identifier=identifier,
@@ -1744,6 +1771,7 @@ class DeviceControllerUI:
         interval: float = 0.5,
         udid: str | None = None,
         mode: str | None = None,
+        snapshot_depth: int | None = None,
     ) -> tuple[dict, str]:
         """Wait for an element to satisfy a condition (server-side polling).
 
@@ -1844,6 +1872,7 @@ class DeviceControllerUI:
                 filter_identifier=identifier,
                 filter_type=element_type,
                 mode=mode,
+                snapshot_depth=self._read_depth(resolved, snapshot_depth),
             )
 
             matches = find_element(
@@ -2048,6 +2077,7 @@ class DeviceControllerUI:
         source_timeout: float | None = None,
         value: str | None = None,
         scroll_to_find: bool | None = None,
+        snapshot_depth: int | None = None,
     ) -> dict:
         """Find an element by label/identifier and tap its center.
 
@@ -2157,12 +2187,15 @@ class DeviceControllerUI:
         # Traditional path: fetch full UI tree
         filter_label = _effective_filter_label(label, label_contains, label_prefix)
         cache_hits_before = self._cache_hits
+        depth_for = await self.resolve_udid(udid)
+        read_depth = self._read_depth(depth_for, snapshot_depth)
         elements, resolved = await self.get_ui_elements(
-            udid,
+            depth_for,
             filter_label=filter_label,
             filter_identifier=identifier,
             filter_type=element_type,
             source_timeout=source_timeout,
+            snapshot_depth=read_depth,
         )
         served_from_cache = self._cache_hits > cache_hits_before
 
@@ -2219,6 +2252,7 @@ class DeviceControllerUI:
                 # at once, and `identify_screen` needs no device read of its own.
                 all_elements, complete = await self._all_elements_for_context(
                     resolved, elements, filter_label, identifier, element_type,
+                    snapshot_depth=read_depth,
                 )
                 all_elements_complete = complete
                 if not complete:
@@ -2247,7 +2281,7 @@ class DeviceControllerUI:
                 scrolled = await self._ios_scroll_to_element(
                     resolved, label=label, identifier=identifier, max_swipes=10,
                     target_known_absent=not served_from_cache,
-                    report=sweep,
+                    report=sweep, snapshot_depth=read_depth,
                 )
                 if scrolled is not None:
                     # The sweep finds by label or identifier alone, so the
@@ -2283,7 +2317,7 @@ class DeviceControllerUI:
                 all_elements, all_elements_complete = (
                     await self._all_elements_for_context(
                         resolved, elements, filter_label, identifier,
-                        element_type,
+                        element_type, snapshot_depth=read_depth,
                     )
                 )
             screen_context = _build_screen_context(all_elements)
@@ -2315,6 +2349,15 @@ class DeviceControllerUI:
                 # an unknown screen and worthless on one recorded as fixed.
                 "scroll": _scroll_report(sweep, scroll_to_find),
             }
+            if read_depth is not None and self._served_by_wda(resolved):
+                # A shallow read is a reason something can be missing, so the
+                # answer says how deep it looked and how to look deeper --
+                # otherwise "not found" reads as "not there".
+                result["snapshot_depth"] = read_depth
+                result["detail"] += (
+                    f" (read through WDA at snapshot_depth={read_depth}; if the "
+                    "element is nested deeper, retry with a larger snapshot_depth)"
+                )
             if unreachable:
                 # Found, but not tappable -- a different fact from "not there",
                 # and the one that decides what the caller does next.
@@ -2423,6 +2466,7 @@ class DeviceControllerUI:
                     filter_label=filter_label,
                     filter_identifier=identifier,
                     filter_type=element_type,
+                    snapshot_depth=read_depth,
                 )
 
                 matches_check = find_element(
@@ -2463,6 +2507,7 @@ class DeviceControllerUI:
                             filter_label=filter_label,
                             filter_identifier=identifier,
                             filter_type=element_type,
+                            snapshot_depth=read_depth,
                         )
 
                         matches_final = find_element(
