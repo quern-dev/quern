@@ -162,7 +162,10 @@ class VideoRecorder:
             seg.process = await self._spawn(
                 str(binary), "--sim-udid", udid, "--record", str(path), "--serve",
                 str(seg.port), stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.DEVNULL, stderr=out)
+                stdout=asyncio.subprocess.DEVNULL, stderr=out,
+                # Its own session: a terminal's ^C or hang-up goes to quern,
+                # which stops it properly, not straight to it (review).
+                start_new_session=True)
         try:
             await self._wait_streaming(seg)
         except BaseException:
@@ -245,30 +248,49 @@ class VideoRecorder:
                                        f"recording stopped: the movie ends at its last frame")
         return result
 
+    async def _finished_alone(self, movie: Path) -> dict | None:
+        """Not running: if it finished by itself -- given its SIGINT by a
+        quern killed before it could wait -- its summary is in its log, and
+        the movie is good. Ended when it exited, which nothing records, so
+        joined only as far as its frames reach (review)."""
+        result = await asyncio.to_thread(summary, movie)
+        if result.get("start_host_time") is None:
+            return None
+        return {"path": str(movie), "exited_before_stop": True, **result}
+
     async def reap(self, pid: int, movie: Path) -> dict | None:
         """Finish a quern-media an earlier quern left recording `movie`, and
         return its summary; None if it is not running (or `pid` is now some
         other process -- matched on the movie's path, never the pid alone).
+        One that finished by itself is read from its log all the same.
         Raises OSError if that cannot be told."""
-        command = await asyncio.to_thread(self._command_of, pid)
-        if not command or "quern-media" not in command or str(movie) not in command:
-            return None
+        if not _records(await asyncio.to_thread(self._command_of, pid), movie):
+            return await self._finished_alone(movie)
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.kill(pid, signal.SIGINT)
         deadline = time.monotonic() + STOP_TIMEOUT
         while time.monotonic() < deadline:
-            with contextlib.suppress(OSError):        # asked again, not read as gone
-                if not await asyncio.to_thread(self._command_of, pid):
-                    # Stopped now, so the movie runs to now: the stop line
-                    # this becomes is its end, as for any other stop.
-                    return {"path": str(movie), "reaped": True,
-                            **await asyncio.to_thread(summary, movie)}
+            try:
+                command = await asyncio.to_thread(self._command_of, pid)
+            except OSError:
+                command = None                       # asked again, not read as gone
+            if command is not None and not _records(command, movie):
+                # Stopped now, so the movie runs to now: the stop line
+                # this becomes is its end, as for any other stop.
+                return {"path": str(movie), "reaped": True,
+                        **await asyncio.to_thread(summary, movie)}
             await asyncio.sleep(0.2)
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.kill(pid, signal.SIGKILL)
         return {"path": str(movie), "start_host_time": None,
                 "error": f"quern-media left running by an earlier quern did not finish within "
                          f"{STOP_TIMEOUT:g}s and was killed: the movie may not open"}
+
+
+def _records(command: str, movie: Path) -> bool:
+    """Whether `command` is a quern-media recording `movie` -- the argument
+    exactly, so another movie whose path merely contains it does not match."""
+    return "quern-media" in command and f" --record {movie} " in f" {command} "
 
 
 def _command_of(pid: int) -> str:

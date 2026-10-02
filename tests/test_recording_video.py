@@ -300,6 +300,53 @@ class TestReaping:
         assert killed == [(77, signal.SIGINT)]
         assert result["start_host_time"] == 612668.5505
 
+    async def test_one_that_finished_by_itself_is_read_not_lost(self, tmp_path):
+        """quern was killed after its SIGINT and before it could wait: the
+        movie was finalised and the summary is in the log (review)."""
+        (tmp_path / "video-1.log").write_text(STREAMING + "\n" + SUMMARY + "\n")
+        recorder = VideoRecorder(binary=None, command_of=lambda pid: "")
+        result = await recorder.reap(77, tmp_path / "video-1.mp4")
+        assert result["start_host_time"] == 612668.5505
+        assert result["exited_before_stop"] is True, "ended when it exited, not now"
+
+    async def test_one_gone_with_no_summary_is_lost(self, tmp_path):
+        (tmp_path / "video-1.log").write_text(STREAMING + "\n")
+        recorder = VideoRecorder(binary=None, command_of=lambda pid: "")
+        assert await recorder.reap(77, tmp_path / "video-1.mp4") is None
+
+    async def test_a_quern_media_recording_another_movie_is_left_alone(self, tmp_path,
+                                                                        monkeypatch):
+        """pid reused by quern's own preview, or another recording -- even one
+        whose movie's path contains this one's."""
+        killed = []
+        monkeypatch.setattr("server.recording_video.os.kill", lambda *a: killed.append(a))
+        movie = tmp_path / "a" / "video-1.mp4"
+        for other in (f"/q/quern-media --sim-udid {SIM} --serve 8422",
+                      f"/q/quern-media --sim-udid {SIM} --record /x{movie} --serve 1"):
+            recorder = VideoRecorder(binary=None, command_of=lambda pid, c=other: c)
+            assert await recorder.reap(77, movie) is None
+        assert killed == []
+
+    async def test_could_not_tell_while_waiting_is_not_read_as_gone(self, tmp_path,
+                                                                     monkeypatch):
+        movie = tmp_path / "video-1.mp4"
+        log = tmp_path / "video-1.log"
+        log.write_text(STREAMING + "\n")
+        monkeypatch.setattr("server.recording_video.os.kill", lambda *a: None)
+        mine = f"/q/quern-media --sim-udid {SIM} --record {movie} --serve 1"
+        answers = iter(["mine", "error", "mine", "gone"])
+
+        def command_of(pid):
+            answer = next(answers)
+            if answer == "error":
+                raise OSError("ps timed out")
+            if answer == "gone":
+                log.write_text(STREAMING + "\n" + SUMMARY + "\n")
+                return ""
+            return mine
+        result = await VideoRecorder(binary=None, command_of=command_of).reap(77, movie)
+        assert result["start_host_time"] == 612668.5505
+
     async def test_a_pid_now_some_other_process_is_left_alone(self, tmp_path, monkeypatch):
         killed = []
         monkeypatch.setattr("server.recording_video.os.kill", lambda *a: killed.append(a))
@@ -665,11 +712,12 @@ class TestTheManager:
         assert video.started == []
         stopping = asyncio.create_task(second.stop(rec.id))
         await _settle()
-        assert not stopping.done(), "a stop waits for the segment starting"
         gate.set()
         await stopping
-        kinds = [e["type"] for e in _events(tmp_path / "r")]
-        assert kinds[-1] == "stopped"
+        kinds = [(e["type"], e.get("segment")) for e in _events(tmp_path / "r")]
+        assert kinds.index(("video_started", 2)) < kinds.index(("stopped", None)), \
+            "the stop waited for the movie starting, and then finished it"
+        assert ("video_stopped", 2) in kinds
 
     async def test_a_stop_waits_for_the_last_runs_movie_to_be_finished(self, tmp_path):
         """Stopped while the next quern is still finishing the movie the last
@@ -703,6 +751,138 @@ class TestTheManager:
         assert rec.complete is False
         rec.video_segments = [{"segment": 1, "start_host_time": 1000.0}]
         assert rec.complete is True
+
+    async def test_the_pid_is_on_disk_before_start_returns(self, tmp_path):
+        """Held for the next flush, a kill in that second left quern-media
+        filming with nothing anywhere naming it (review)."""
+        manager = Sources().manager(FakeVideo())
+        rec = await manager.start(SIM, str(tmp_path / "r"), Filters(video=True))
+        [line] = [e for e in _events(tmp_path / "r") if e["type"] == "video_started"]
+        assert line["pid"] == 1001
+        await manager.stop(rec.id)
+
+    async def test_a_resumed_segments_pid_is_on_disk_at_once(self, tmp_path):
+        first = Sources().manager(FakeVideo())
+        rec = await first.start(SIM, str(tmp_path / "r"), Filters(video=True))
+        await first.shutdown()
+        second = Sources().manager(FakeVideo())
+        await second.resume_all()
+        await second.get(rec.id)._resuming
+        assert any(e["type"] == "video_started" and e["segment"] == 2
+                   for e in _events(tmp_path / "r"))
+        await second.stop(rec.id)
+
+    async def test_shutdown_is_bounded_while_a_resume_reaps(self, tmp_path, monkeypatch):
+        """`quern stop` kills the server after 5s; a reap can take a minute.
+        Shutdown gives up on it, and starts no new movie after (review)."""
+        monkeypatch.setattr(rec_mod, "PAUSE_WAIT", 0.2)
+        monkeypatch.setattr(rec_mod, "CANCEL_WAIT", 0.1)
+        first = Sources().manager(FakeVideo())
+        rec = await first.start(SIM, str(tmp_path / "r"), Filters(video=True))
+        await first._flush(rec)                        # and then quern is killed
+        video = FakeVideo()
+
+        async def forever(pid, movie):
+            await asyncio.Event().wait()
+        video.reap = forever
+        second = Sources().manager(video)
+        await second.resume_all()
+        await asyncio.wait_for(second.shutdown(), 2.0)
+        await _settle()
+        assert video.started == [], "no new movie once quern is stopping"
+        assert any(e["type"] == "paused" for e in _events(tmp_path / "r"))
+
+    async def test_a_start_after_pausing_begins_is_never_made(self, tmp_path):
+        first = Sources().manager(FakeVideo())
+        rec = await first.start(SIM, str(tmp_path / "r"), Filters(video=True))
+        await first._flush(rec)                        # and then quern is killed
+        gate = asyncio.Event()
+        video = FakeVideo()
+
+        async def slow_reap(pid, movie):
+            await gate.wait()
+        video.reap = slow_reap
+        second = Sources().manager(video)
+        await second.resume_all()
+        second.get(rec.id)._pausing = True
+        gate.set()
+        await second.get(rec.id)._resuming
+        assert video.started == []
+
+    async def test_a_line_of_the_wrong_shape_stops_no_resume(self, tmp_path):
+        """It raised out of the tally, and every recording after it went
+        unresumed -- and the next save forgot them (review)."""
+        first = Sources().manager()
+        a = await first.start(SIM, str(tmp_path / "a"), Filters())
+        b = await first.start("SIM-W", str(tmp_path / "b"), Filters())
+        await first.shutdown()
+        with open(tmp_path / "a" / "events.jsonl", "a") as f:
+            f.write('{"type":"dropped","at":"2026-10-01T12:00:00+00:00","what":"flow",'
+                    '"count":"many"}\n{"type":["x"],"at":"2026-10-01T12:00:00+00:00"}\n')
+        second = Sources().manager()
+        assert sorted(await second.resume_all()) == sorted([a.id, b.id])
+        await second.shutdown()
+
+    async def test_a_reap_that_ends_after_the_recording_failed_is_kept(self, tmp_path):
+        first = Sources().manager(FakeVideo())
+        rec = await first.start(SIM, str(tmp_path / "r"), Filters(video=True))
+        await first._flush(rec)
+        gate = asyncio.Event()
+        video = FakeVideo()
+
+        async def slow_reap(pid, movie):
+            await gate.wait()
+            return {"path": str(movie), "start_host_time": 1000.0, "duration_s": 5.0}
+        video.reap = slow_reap
+        second = Sources().manager(video)
+        await second.resume_all()
+        resumed = second.get(rec.id)
+        await second._fail(resumed, "disk full")
+        gate.set()
+        await resumed._resuming
+        manifest = json.loads((tmp_path / "r" / "manifest.json").read_text())
+        assert any(s.get("start_host_time") == 1000.0 for s in manifest["video"])
+        assert video.started == [], "nothing filmed for a failed recording"
+
+    async def test_a_failure_while_the_next_movie_starts_finishes_it(self, tmp_path):
+        first = Sources().manager(FakeVideo())
+        rec = await first.start(SIM, str(tmp_path / "r"), Filters(video=True))
+        await first.shutdown()
+        gate = asyncio.Event()
+        video = FakeVideo()
+        real_start = video.start
+
+        async def slow_start(udid, path):
+            await gate.wait()
+            return await real_start(udid, path)
+        video.start = slow_start
+        second = Sources().manager(video)
+        await second.resume_all()
+        await _settle()
+        await second._fail(second.get(rec.id), "disk full")
+        gate.set()
+        await second.get(rec.id)._resuming
+        assert video.stopped == [tmp_path / "r" / "video-2.mp4"]
+        assert second._filming == {}, "the screen is free again"
+
+    async def test_a_resumed_recording_holds_its_screen(self, tmp_path):
+        first = Sources().manager(FakeVideo())
+        rec = await first.start(SIM, str(tmp_path / "r"), Filters(video=True))
+        await first.shutdown()
+        second = Sources().manager(FakeVideo())
+        await second.resume_all()
+        await second.get(rec.id)._resuming
+        with pytest.raises(RecordingError, match="already being filmed"):
+            await second.start(SIM, str(tmp_path / "other"), Filters(video=True))
+        await second.stop(rec.id)
+
+    async def test_shutdown_waits_for_a_failed_recordings_movie(self, tmp_path):
+        video = FakeVideo(stop_takes=0.2)
+        manager = Sources().manager(video)
+        rec = await manager.start(SIM, str(tmp_path / "r"), Filters(video=True))
+        await manager._fail(rec, "disk full")
+        await manager.shutdown()
+        assert video.stopped == [tmp_path / "r" / "video-1.mp4"]
 
     async def test_shutdown_finishes_every_movie_at_once(self, tmp_path):
         manager = Sources().manager(FakeVideo(stop_takes=0.4))

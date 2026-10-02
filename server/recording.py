@@ -151,7 +151,12 @@ def _anchor() -> dict:
 FLOW_LOOKBACK = timedelta(minutes=5)
 #: How long shutdown waits on background work -- finishing a failed
 #: recording's movie, say -- before saving and going.
-SHUTDOWN_WAIT = 10.0  # s
+SHUTDOWN_WAIT = 2.0  # s
+#: How long a pause waits for a resumed recording's video to settle --
+#: reaping the last run's movie, starting a new one -- before cancelling it.
+#: `quern stop` kills the server after 5s, so these must fit well inside it.
+PAUSE_WAIT = 1.5  # s
+CANCEL_WAIT = 0.5  # s
 
 
 @dataclass
@@ -188,6 +193,8 @@ class Recording:
     #: A resumed recording's video starting in the background; a stop waits
     #: for it, so nothing it writes lands after `stopped`.
     _resuming: asyncio.Task | None = field(default=None, repr=False)
+    #: Set as quern stops: a resume in flight must start no new movie.
+    _pausing: bool = field(default=False, repr=False)
     _subs: list = field(default_factory=list, repr=False)
     _pumps: list[asyncio.Task] = field(default_factory=list, repr=False)
     _flusher_task: asyncio.Task | None = field(default=None, repr=False)
@@ -258,11 +265,15 @@ class Recording:
         return [*self.video_segments, *current]
 
 
-async def _settled(task: asyncio.Task | None) -> None:
-    """Wait for `task` to end, whatever it ends in."""
-    if task is not None and not task.done():
-        with contextlib.suppress(Exception, asyncio.CancelledError):
-            await asyncio.shield(task)
+async def _settled(task: asyncio.Task | None, timeout: float | None = None) -> None:
+    """Wait for `task` to end, whatever it ends in; with `timeout`, cancel it
+    if it has not by then, and wait a little more for the cancellation."""
+    if task is None or task.done():
+        return
+    done, _ = await asyncio.wait({task}, timeout=timeout)
+    if not done:
+        task.cancel()
+        await asyncio.wait({task}, timeout=CANCEL_WAIT)
 
 
 def _unbegin(rec: Recording) -> None:
@@ -351,24 +362,30 @@ def _tally(events: Path) -> _Tally:
             except (ValueError, KeyError, TypeError):
                 continue          # a torn line from a crash mid-write
             last_at = at
-            if kind == "started" and recording_id is None:
-                recording_id = event.get("recording")
-            if kind in counts:
-                counts[kind] += 1
-            elif kind == "dropped" and event.get("what"):
-                what = event["what"]
-                dropped[what] = dropped.get(what, 0) + int(event.get("count") or 0)
-            elif kind == "resumed" and isinstance(event.get("gap"), dict):
-                gaps.append(event["gap"])
-            elif kind in ("video_started", "video_stopped"):
-                if isinstance(event.get("segment"), int):
-                    last_segment = max(last_segment, event["segment"])
-                if kind == "video_started":
-                    open_video[str(event.get("path"))] = event
-                else:
-                    open_video.pop(str(event.get("path")), None)
-                    video.append({k: v for k, v in event.items()
-                                  if k not in ("type", "at", "monotonic")})
+            try:
+                # Per line, at the base classes: a line of the wrong shape
+                # raised out of here, and resume stopped for every recording
+                # after this one, which the next save then forgot (review).
+                if kind == "started" and recording_id is None:
+                    recording_id = event.get("recording")
+                if kind in counts:
+                    counts[kind] += 1
+                elif kind == "dropped" and event.get("what"):
+                    what = event["what"]
+                    dropped[what] = dropped.get(what, 0) + int(event.get("count") or 0)
+                elif kind == "resumed" and isinstance(event.get("gap"), dict):
+                    gaps.append(event["gap"])
+                elif kind in ("video_started", "video_stopped"):
+                    if isinstance(event.get("segment"), int):
+                        last_segment = max(last_segment, event["segment"])
+                    if kind == "video_started":
+                        open_video[str(event.get("path"))] = event
+                    else:
+                        open_video.pop(str(event.get("path")), None)
+                        video.append({k: v for k, v in event.items()
+                                      if k not in ("type", "at", "monotonic")})
+            except (ValueError, KeyError, TypeError, AttributeError):
+                continue
     return _Tally(counts=counts, dropped=dropped, gaps=gaps, last_at=last_at, video=video,
                   last_segment=last_segment, open_video=open_video,
                   recording_id=recording_id)
@@ -514,13 +531,22 @@ class RecordingManager:
         if filters.video:
             try:
                 rec._segment = await self._video.start(udid, out / "video-1.mp4")
-            except Exception as e:  # noqa: BLE001 -- said to the caller, whatever it was
+                rec._segment_number = 1
+                # On disk before anything else: the pid is how the next quern
+                # finds this quern-media if this one is killed. Held for the
+                # next flush, a kill in that second left it filming for good,
+                # with nothing anywhere naming it (review).
+                await asyncio.to_thread(_append, rec.events, [_line(
+                    "video_started", path=str(rec._segment.path), segment=1,
+                    pid=rec._segment.pid)], True)
+            except BaseException as e:
+                await _settled(asyncio.ensure_future(self._finish_video(rec, write=False)),
+                               CANCEL_WAIT * 4)
                 self._release_screen(rec)
                 await asyncio.to_thread(_unbegin, rec)
+                if not isinstance(e, Exception):
+                    raise
                 raise RecordingError(f"video could not be started for {udid}: {e}") from e
-            rec._segment_number = 1
-            rec._pending.append(_line("video_started", path=str(rec._segment.path),
-                                      segment=1, pid=rec._segment.pid))
         self._attach(rec)
         self._recordings[rec.id] = rec
         if not await self._save():
@@ -769,11 +795,16 @@ class RecordingManager:
             rec.gaps.append(gap)
             rec.state, rec.stopped_at = "stopped", _now()
             try:
-                await asyncio.to_thread(_append, rec.events, [_line(
-                    "stopped", counts=dict(rec.counts), dropped=dict(rec.dropped),
-                    gaps=len(rec.gaps), complete=rec.complete, after=rec.error,
-                    gap=gap)], True)
-                await asyncio.to_thread(_write_json_atomic, rec.manifest, rec.manifest_body())
+                # Into its own file, never a stub of one: a directory that
+                # came back without it gets nothing (review). One that is
+                # still gone fails to take the line, which is said.
+                if rec.events.is_file() or not rec.dir.exists():
+                    await asyncio.to_thread(_append, rec.events, [_line(
+                        "stopped", counts=dict(rec.counts), dropped=dict(rec.dropped),
+                        gaps=len(rec.gaps), complete=rec.complete, after=rec.error,
+                        gap=gap)], True)
+                    await asyncio.to_thread(_write_json_atomic, rec.manifest,
+                                            rec.manifest_body())
             except OSError as e:
                 rec.state, rec.error = "failed", f"{rec.error}; stopping it failed too: {e}"
             await self._save()
@@ -837,7 +868,23 @@ class RecordingManager:
         finalised and joinable; one not running is lost and said so. Then a
         new segment. One that will not start is said, in the file and on
         the recording, and the run carries on without video rather than not
-        at all."""
+        at all.
+
+        The screen is taken first, so nothing else starts filming it while
+        the last run's movie is being finished (review)."""
+        held = None
+        try:
+            self._reserve_screen(rec)
+        except RecordingError as e:
+            held = e
+        try:
+            await self._resume_segments(rec, left_open, held)
+        finally:
+            if rec._segment is None:
+                self._release_screen(rec)
+
+    async def _resume_segments(self, rec: Recording, left_open: dict[str, dict],
+                               held: RecordingError | None) -> None:
         for path, started in left_open.items():
             number = started.get("segment")
             result = None
@@ -853,7 +900,7 @@ class RecordingManager:
                           "error": f"quern stopped without finishing it, and whether its "
                                    f"quern-media is still running could not be told: {e}"}
             self._note_segment(rec, {**result, "segment": number}, write=True)
-        if rec.state != "recording":
+        if not await self._settle_lines(rec) or rec._pausing:
             return
         number = rec._segment_number + 1
         rec._segment_number = number
@@ -861,23 +908,36 @@ class RecordingManager:
         try:
             if self._video is None:
                 raise RecordingError("video cannot be recorded on this server")
-            self._reserve_screen(rec)
-            try:
-                seg = await self._video.start(rec.udid, path)
-            except BaseException:
-                self._release_screen(rec)
-                raise
+            if held is not None:
+                raise held
+            seg = await self._video.start(rec.udid, path)
         except Exception as e:  # noqa: BLE001 -- said, never fatal to the recording
             self._note_segment(rec, {"path": str(path), "segment": number,
                                      "start_host_time": None,
                                      "error": f"could not be started: {e}"}, write=True)
+            await self._settle_lines(rec)
             return
-        if rec.state != "recording":            # stopped while it started
-            await self._finish_segment(rec, seg, number, write=False)
-            return
+        # Held at once, so whatever happens next -- a pause, a failure -- the
+        # path that ends the recording finishes this movie too.
         rec._segment = seg
+        if rec.state != "recording":            # failed while it started
+            await self._finish_video(rec, write=False)
+            await self._settle_lines(rec)
+            return
         rec._pending.append(_line("video_started", path=str(path), segment=number,
                                   pid=seg.pid))
+        await self._settle_lines(rec)
+
+    async def _settle_lines(self, rec: Recording) -> bool:
+        """Put what is queued on disk now -- a pid the next quern needs, or
+        what a reaped movie said. True if the recording is still going.
+        One that failed meanwhile has no writer, so its manifest takes what
+        the file can no longer (review)."""
+        if rec.state == "recording":
+            return await self._flush(rec, sync=True) and rec.state == "recording"
+        with contextlib.suppress(OSError):
+            await asyncio.to_thread(_write_json_atomic, rec.manifest, rec.manifest_body())
+        return False
 
     async def shutdown(self) -> None:
         """Quern is stopping: say so in each recording, and keep it to resume.
@@ -885,15 +945,24 @@ class RecordingManager:
         seconds, and finalising movies one after another spent that on the
         first (review). A quern-media still running when that happens is
         finished by the next quern -- see `reap`."""
-        await asyncio.gather(*(self._pause(rec) for rec in list(self._recordings.values())),
-                             return_exceptions=True)
+        recs = list(self._recordings.values())
+        for rec in recs:
+            rec._pausing = True
+        results = await asyncio.gather(*(self._pause(rec) for rec in recs),
+                                       return_exceptions=True)
+        for rec, result in zip(recs, results, strict=True):
+            if isinstance(result, BaseException):
+                logger.error("Could not pause recording %s: %r", rec.id, result)
         if self._background:
             await asyncio.wait(list(self._background), timeout=SHUTDOWN_WAIT)
         await self._save()
 
     async def _pause(self, rec: Recording) -> None:
+        rec._pausing = True
         async with rec._stop_lock:
-            await _settled(rec._resuming)
+            # Bounded: reaping or starting can take a minute, and `quern
+            # stop` kills the server after five seconds (review).
+            await _settled(rec._resuming, PAUSE_WAIT)
             if rec.state != "recording":
                 return
             await self._close_writer(rec)
