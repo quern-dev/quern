@@ -695,9 +695,9 @@ This eliminates all framework noise (UIKitCore, CFNetwork, Security) and shows o
         .optional()
         .describe("Drop entries below this severity level"),
       quiet_subsystems: z
-        .array(z.string())
+        .array(z.string().min(1))
         .optional()
-        .describe("Subsystem prefixes (e.g. 'com.apple.') whose entries are kept only at quiet_below and above: their chatter dropped, their errors kept. Unlike exclude_subsystems, which drops every level."),
+        .describe("Subsystem prefixes (e.g. 'com.apple.') whose entries are kept only at quiet_below and above: their chatter dropped, their errors kept. Unlike exclude_subsystems, which drops every level. On a physical device the subsystem is the sending library's name (Network, CFNetwork), not com.apple.*."),
       quiet_below: z
         .enum(["debug", "info", "notice", "warning", "error", "fault"])
         .optional()

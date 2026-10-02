@@ -52,8 +52,22 @@ class FilterConfig:
             object.__setattr__(self, "exclude_subsystems", frozenset(self.exclude_subsystems))
         if isinstance(self.exclude_messages, list):
             object.__setattr__(self, "exclude_messages", tuple(self.exclude_messages))
-        if isinstance(self.quiet_subsystems, (list, set, frozenset)):
-            object.__setattr__(self, "quiet_subsystems", tuple(sorted(self.quiet_subsystems)))
+        # One canonical form -- a sorted tuple -- so two configs naming the
+        # same prefixes compare equal however they were given. A bare string
+        # is one prefix, never its characters.
+        quiet = self.quiet_subsystems
+        quiet = (quiet,) if isinstance(quiet, str) else tuple(quiet)
+        if any(not p.strip() for p in quiet):
+            # Every subsystem starts with "", so an empty prefix would quiet
+            # the app's own lines too -- the opposite of what an exact-match
+            # field like exclude_subsystems does with "" (review).
+            raise ValueError("quiet_subsystems cannot contain an empty prefix: it would "
+                             "match every subsystem, the app's own included")
+        object.__setattr__(self, "quiet_subsystems", tuple(sorted(quiet)))
+        if self.quiet_below is not None and not self.quiet_subsystems:
+            # Accepted and doing nothing is the reading a caller cannot tell
+            # from success (review).
+            raise ValueError("quiet_below needs quiet_subsystems: on its own it quiets nothing")
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -146,6 +160,12 @@ def build_config(preset: str | None = None, **overrides: Any) -> FilterConfig:
         if value is not None:
             base_kwargs[key] = value
 
+    # Clearing a preset's rule (`quiet_subsystems=[]`) clears its level with
+    # it, unless the caller named one: a level with nothing to apply to is
+    # refused, and the preset's own should not make a clear fail.
+    if not base_kwargs.get("quiet_subsystems") and overrides.get("quiet_below") is None:
+        base_kwargs["quiet_below"] = None
+
     return FilterConfig(**base_kwargs)
 
 
@@ -196,7 +216,7 @@ class IngestionFilter:
             for pattern in config.exclude_messages:
                 if pattern.lower() in msg_lower:
                     return False
-        if (config.quiet_subsystems and entry.subsystem
+        if (config.quiet_subsystems
                 and entry.subsystem.startswith(config.quiet_subsystems)
                 and _LEVEL_ORDER[entry.level] < _LEVEL_ORDER[config.quiet_level]):
             return False

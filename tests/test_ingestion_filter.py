@@ -373,24 +373,36 @@ class TestQuietSubsystems:
         for other in ("com.appsflyer.lib", "com.myapp", "notcom.apple.x", "com.applesauce"):
             assert f.should_admit(_make_entry(subsystem=other, level=LogLevel.DEBUG)), other
 
-    def test_an_entry_with_no_subsystem_is_never_quieted(self):
-        f = self._filter(quiet_subsystems=("com.apple.",))
-        assert f.should_admit(_make_entry(subsystem="", level=LogLevel.DEBUG))
+    def test_an_empty_prefix_is_refused(self):
+        """Every subsystem starts with "", so it would quiet the app's own
+        lines -- where exclude_subsystems' "" drops only blank ones (review)."""
+        for bad in ([""], ["com.apple.", "  "], ""):
+            with pytest.raises(ValueError, match="empty prefix"):
+                FilterConfig(quiet_subsystems=bad)
+
+    def test_a_bare_string_is_one_prefix_and_order_does_not_matter(self):
+        assert FilterConfig(quiet_subsystems="com.apple.").quiet_subsystems == ("com.apple.",)
+        assert (FilterConfig(quiet_subsystems=("b.", "a."))
+                == FilterConfig(quiet_subsystems=["a.", "b."]))
 
     def test_the_level_can_be_set(self):
         f = self._filter(quiet_subsystems=("com.apple.",), quiet_below=LogLevel.INFO)
         assert not f.should_admit(_make_entry(subsystem="com.apple.UIKit", level=LogLevel.DEBUG))
         assert f.should_admit(_make_entry(subsystem="com.apple.UIKit", level=LogLevel.INFO))
 
-    def test_the_level_alone_quiets_nothing(self):
-        f = self._filter(quiet_below=LogLevel.FAULT)
-        assert f.should_admit(_make_entry(subsystem="com.apple.network", level=LogLevel.DEBUG))
+    def test_a_level_with_nothing_to_apply_to_is_refused(self):
+        """Accepted and doing nothing reads exactly like success (review)."""
+        with pytest.raises(ValueError, match="quiet_below needs quiet_subsystems"):
+            FilterConfig(quiet_below=LogLevel.FAULT)
 
     def test_simulator_quiet_carries_the_rule(self):
         f = IngestionFilter()
         f.update_filter(build_config(preset="simulator-quiet"))
-        assert not f.should_admit(_make_entry(subsystem="com.apple.network", level=LogLevel.INFO))
+        # Pinned at the boundary: everything below error goes, error stays.
+        for level in (LogLevel.DEBUG, LogLevel.INFO, LogLevel.NOTICE, LogLevel.WARNING):
+            assert not f.should_admit(_make_entry(subsystem="com.apple.network", level=level))
         assert f.should_admit(_make_entry(subsystem="com.apple.CFNetwork", level=LogLevel.ERROR))
+        assert PRESETS["simulator-quiet"].quiet_below == LogLevel.ERROR
         assert f.should_admit(_make_entry(subsystem="com.groundspeak.app", level=LogLevel.DEBUG))
         # And what it dropped before, it still drops, at every level.
         assert not f.should_admit(_make_entry(subsystem="com.apple.CoreFoundation",
@@ -402,7 +414,14 @@ class TestQuietSubsystems:
 
     def test_an_override_can_take_the_rule_off_a_preset(self):
         config = build_config(preset="simulator-quiet", quiet_subsystems=[])
-        assert config.quiet_subsystems == ()
+        assert config.quiet_subsystems == () and config.quiet_below is None
+
+    def test_a_presets_level_is_carried(self, monkeypatch):
+        """No preset uses a level but the default today; one that does must
+        not fall back to error (review)."""
+        monkeypatch.setitem(PRESETS, "warn-quiet", FilterConfig(
+            quiet_subsystems=("com.vendor.",), quiet_below=LogLevel.WARNING))
+        assert build_config(preset="warn-quiet").quiet_level == LogLevel.WARNING
 
     def test_it_serialises_with_its_effective_level(self):
         assert FilterConfig(quiet_subsystems=["com.apple."]).to_dict() == {
@@ -431,3 +450,19 @@ class TestQuietSubsystems:
             bad = client.post("/api/v1/logs/filter", json={"quiet_subsystems": ["com.apple."],
                                                            "quiet_below": "loud"})
             assert bad.status_code == 422 and "Unknown level" in bad.json()["detail"]
+            bad = client.post("/api/v1/logs/filter", json={"min_level": "loud"})
+            assert bad.status_code == 422 and "Unknown level" in bad.json()["detail"]
+            empty = client.post("/api/v1/logs/filter", json={"quiet_subsystems": [""]})
+            assert empty.status_code == 422 and "empty prefix" in empty.json()["detail"]
+            alone = client.post("/api/v1/logs/filter", json={"quiet_below": "warning"})
+            assert alone.status_code == 422 and "needs quiet_subsystems" in alone.json()["detail"]
+            # A preset's level, overridden alone, is a level with something to apply to.
+            ok = client.post("/api/v1/logs/filter", json={"preset": "simulator-quiet",
+                                                          "quiet_below": "warning"})
+            assert ok.status_code == 200 and ok.json()["filter"]["quiet_below"] == "warning"
+            # And [] clears the preset's rule over HTTP, not only in build_config.
+            cleared = client.post("/api/v1/logs/filter", json={"preset": "simulator-quiet",
+                                                               "quiet_subsystems": []})
+            assert cleared.status_code == 200
+            assert "quiet_subsystems" not in cleared.json()["filter"]
+            assert cleared.json()["filter"]["exclude_messages"] == ["HangTracer"]

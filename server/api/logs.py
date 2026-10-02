@@ -539,7 +539,10 @@ async def set_filter(request: Request, filter_req: FilterRequest) -> dict:
     if quiet_below is not None:
         overrides["quiet_below"] = quiet_below
 
-    config = build_config(preset=filter_req.preset, **overrides)
+    try:
+        config = build_config(preset=filter_req.preset, **overrides)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     ingestion_filter.update_filter(config, source=source, device_id=filter_req.device_id)
 
     # Purge pre-filter entries from the buffer so tail_logs sees clean results
