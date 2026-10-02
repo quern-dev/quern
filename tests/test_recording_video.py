@@ -563,6 +563,7 @@ class TestTheManager:
         await second.get(rec.id)._resuming
         assert any("video segment 2: could not be started" in w
                    for w in second.get(rec.id).warnings)
+        assert second._filming == {}, "a movie that never started holds no screen"
         done = await second.stop(rec.id)
         assert done.complete is False, "a run missing part of its movie is not complete"
         [failed] = [e for e in _events(tmp_path / "r")
@@ -882,7 +883,10 @@ class TestTheManager:
         rec = await manager.start(SIM, str(tmp_path / "r"), Filters(video=True))
         await manager._fail(rec, "disk full")
         await manager.shutdown()
-        assert video.stopped == [tmp_path / "r" / "video-1.mp4"]
+        # Read from the manifest, written only once the movie has finished:
+        # `stopped` is noted as stopping begins, so it would pass regardless.
+        [seg] = json.loads((tmp_path / "r" / "manifest.json").read_text())["video"]
+        assert seg["start_host_time"] == 1000.0
 
     async def test_shutdown_finishes_every_movie_at_once(self, tmp_path):
         manager = Sources().manager(FakeVideo(stop_takes=0.4))
