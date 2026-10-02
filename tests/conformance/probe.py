@@ -537,8 +537,10 @@ class ProbeDriver:
     #: what the Scroll tab's 200 rows need on a simulator (10.5s measured), and
     #: a timed-out read is answered from a partial fallback in which every
     #: identifier on that screen is missing. Ignored by the accessibility-tree
-    #: backends, so it costs nothing off WDA.
-    READ = {"source_timeout": 30}
+    #: backends, so it costs nothing off WDA. The depth matches quern's own
+    #: default for reads made on a caller's behalf: the full tree at 25 took
+    #: 34s on an iPhone 11's Scroll tab, past even this timeout (F35).
+    READ = {"source_timeout": 30, "snapshot_depth": 12}
 
     def __init__(
         self,
@@ -712,7 +714,31 @@ class ProbeDriver:
         """
         self._dismiss_keyboard()
         self._navigate(tab)
+        self._accept_permission_prompt()
         self._wait_for_screen(tab.lower())
+
+    #: The system location prompt's accepting button, in the order tried.
+    _ACCEPT = ("Allow While Using App", "Allow Once")
+
+    def _accept_permission_prompt(self) -> None:
+        """Accept the location prompt if the Location tab raised one.
+
+        On a simulator the fixture grants the permission before launch, so it
+        never appears. A physical iPhone cannot be granted one, and the prompt
+        then sat over the app -- every later test failed to find the tab bar
+        behind it, the same cascade the Dictation prompt caused.
+        """
+        import time
+
+        if self.contract.platform != "ios" or not self.physical:
+            return
+        time.sleep(1.0)  # the prompt arrives a moment after the tab
+        labels = {e.get("label") for e in self.ui_tree().get("elements") or []}
+        for label in self._ACCEPT:
+            if label in labels:
+                self.tap_label(label)
+                time.sleep(1.0)
+                return
 
     def _dismiss_keyboard(self) -> None:
         """Put away a software keyboard before tapping the tab bar.
