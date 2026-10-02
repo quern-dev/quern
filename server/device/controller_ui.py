@@ -652,15 +652,20 @@ class DeviceControllerUI:
     async def _wda_viewport(
         self, resolved: str, elements: list[UIElement] | None = None,
     ) -> dict | None:
-        """The app's frame on a WDA-served device, cached briefly."""
+        """The app's frame on a WDA-served device, cached briefly.
+
+        A frame in the read being marked wins over the cache: it is current,
+        and the cache can be up to a TTL old -- across a rotation, long enough
+        to judge every element against the wrong bounds.
+        """
         cache = self.__dict__.setdefault("_viewport_cache", {})
-        hit = cache.get(resolved)
-        if hit and time.time() - hit[1] < self._VIEWPORT_TTL:
-            return hit[0]
         frame = next(
             (e.frame for e in elements or [] if e.type == "Application" and e.frame), None,
         )
         if frame is None:
+            hit = cache.get(resolved)
+            if hit and time.time() - hit[1] < self._VIEWPORT_TTL:
+                return hit[0]
             # The native read, not get_ui_elements: that one marks its result
             # and would ask for the viewport again.
             app_els, _ = await self._native_ui_elements(

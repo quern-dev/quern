@@ -467,14 +467,26 @@ def hardware_udid(device_id: str) -> str:
     import tempfile
 
     with tempfile.NamedTemporaryFile(suffix=".json") as out:
-        result = subprocess.run(  # noqa: S603 - fixed tool
-            ["xcrun", "devicectl", "list", "devices", "--json-output", out.name],
-            capture_output=True, text=True, timeout=60, check=False,
-        )
+        try:
+            result = subprocess.run(  # noqa: S603 - fixed tool
+                ["xcrun", "devicectl", "list", "devices", "--json-output", out.name],
+                capture_output=True, text=True, timeout=60, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ProbeUnavailable(f"devicectl could not run: {exc}") from exc
         if result.returncode != 0:
             raise ProbeUnavailable(f"devicectl could not list devices: {result.stderr[-500:]}")
-        devices = json.loads(Path(out.name).read_text()).get("result", {}).get("devices", [])
+        # Exit 0 is not a usable answer on its own: an empty or reshaped file
+        # would otherwise escape as a traceback rather than the fixture's skip.
+        try:
+            devices = json.loads(Path(out.name).read_text())["result"]["devices"]
+            if not isinstance(devices, list):
+                raise TypeError(f"devices is {type(devices).__name__}")
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ProbeUnavailable(f"devicectl's device list was unreadable: {exc!r}") from exc
     for device in devices:
+        if not isinstance(device, dict):
+            continue
         hardware = (device.get("hardwareProperties") or {}).get("udid")
         if device_id in (device.get("identifier"), hardware) and hardware:
             return hardware

@@ -809,9 +809,6 @@ on the same emulator, with no change to quern or the AVD -- to within the last
 printed digit (-58.464019 arrived as -58.464018), which the test now allows.
 So the stuck feed is real but transient, cause still unknown. Open, no issue.
 
-the outcome rather than the request. Open, no issue yet.
-
-
 ## F27 — the Pixel 3 XL's scroll failures were mostly this suite's own
 
 `ProbeDriver.swipe_down` sized the swipe from an `Application`/`Window`
@@ -851,7 +848,7 @@ The one read endpoint without it, so on a screen like the above it could only
 answer from the fallback, and a present element came back 404. Added to the
 route, the controller and the MCP tool.
 
-## F32 — through WDA, `tap_element` taps an element that is off screen and reports success
+## F32 — through WDA, `tap_element` taps an element that is off screen and reports success → fixed here
 
 WDA reports every cell of a table, not only the visible ones: with the list at
 the top, `row_199` comes back at y=8856 on an 874-point screen. `tap_element`
@@ -860,9 +857,8 @@ with a tap point of y=1882.5, and the list did not move -- `rows 0-17` before
 and after. On the accessibility tree the same request is a 404, because
 off-screen rows are not in it. Through WDA -- that is, on every physical
 iPhone -- a tap that landed on nothing reads as a tap that worked. It also
-means `get_element` finding an element no longer implies it is visible. Open,
-no issue yet; it wants a decision between scrolling the element into view and
-refusing.
+means `get_element` finding an element no longer implies it is visible. It
+wanted a decision between scrolling the element into view and refusing.
 
 **It is wider than off-screen: an element under the keyboard too** (iPhone 11,
 iOS 26.7, physical). With the keyboard up (y 595-838), `tab_controls` sits at
@@ -874,22 +870,27 @@ rest of the run, failing two dozen later tests. bajutsu (PR #2119) refuses a
 tap unless the centre is on screen *and* XCUITest reports the element
 hittable; that rule covers both cases.
 
-## F33 — through WDA, clearing one field clears the first field instead
+**Fixed here with that rule.** A match that fails it is not tapped; when no
+match passes, the 404 lists the ones that failed and why. Elements read
+through WDA also carry `on_screen`, so a read says what is visible.
+
+## F33 — through WDA, clearing one field clears the first field instead → fixed here
 
 `WdaClient.select_all_and_delete` is given the target's coordinates and does not
 use them: it asks WDA for the first element of class `XCUIElementTypeTextField`
 and clears that. So clearing `field_email` emptied `field_default` and left the
 email untouched -- reproduced on a simulator under WDA and on a physical
-iPhone 11. The coordinates are only used by the triple-tap fallback. Open; the
-fix is to find the field by identifier (or by the element at the given point),
-never "first of its class".
+iPhone 11. The coordinates are only used by the triple-tap fallback. Fixed
+here: the field is found by identifier, or by the element of its class at the
+given point, and never as "first of its class".
 
-## F34 — `launch_app` on a physical iPhone without WDA set up is a bare 500
+## F34 — `launch_app` on a physical iPhone without WDA set up is a bare 500 → fixed here
 
 `RuntimeError: No .xctestrun file found. Run setup_wda() first` escapes
 `launch_app` uncaught, so the caller gets `500 Internal Server Error` with no
 body worth reading -- while the message it swallowed says exactly what to do.
-Seen against a fresh `QUERN_STATE_DIR`. Open.
+Seen against a fresh `QUERN_STATE_DIR`. Fixed here: it is now `WdaNotSetUpError`,
+a 400 naming `setup_wda` and `POST /api/v1/device/wda/setup`.
 
 ## F35 — on a physical iPhone, a long list makes every WDA read too slow to use
 

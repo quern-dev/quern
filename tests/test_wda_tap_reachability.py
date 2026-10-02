@@ -345,6 +345,22 @@ class TestOnScreen:
         assert await ctrl._wda_viewport("PHONE") == SCREEN
         assert ctrl._native_ui_elements.await_count == 1
 
+    async def test_a_frame_in_the_read_beats_the_cache(self):
+        """Rotated since the cache was filled: the read's own Application
+        frame is current, and judging against the cached one would mark a
+        visible row off screen."""
+        ctrl = DeviceController()
+        landscape = {"x": 0.0, "y": 0.0, "width": 896.0, "height": 414.0}
+        ctrl._native_ui_elements = AsyncMock(
+            return_value=([UIElement(type="Application", frame=SCREEN)], "PHONE"),
+        )
+        assert await ctrl._wda_viewport("PHONE") == SCREEN
+        rotated = [UIElement(type="Application", frame=landscape)]
+        assert await ctrl._wda_viewport("PHONE", rotated) == landscape
+        # And the cache follows it, for the next read that carries no frame.
+        assert await ctrl._wda_viewport("PHONE") == landscape
+        assert ctrl._native_ui_elements.await_count == 1
+
     async def test_a_failed_viewport_lookup_does_not_fail_the_read(self):
         ctrl = DeviceController()
         ctrl._served_by_wda = lambda udid: True
