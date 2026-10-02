@@ -15,9 +15,11 @@ import asyncio
 import logging
 import time
 from datetime import UTC, datetime, timedelta
+from typing import Annotated
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
+from server import recording as recording_mod
 from server.device.devicectl import canonical_device_id
 from server.models import LogQueryParams, LogSource, TraceResponse, UtcDatetime
 from server.trace import (
@@ -114,8 +116,25 @@ async def get_trace(
         ),
     ),
     limit: int = Query(default=100, ge=1, le=1000),
+    # Annotated, so a direct call -- as the tests make -- gets None rather
+    # than a truthy `Query` object that would send every call down the
+    # recording path.
+    recording: Annotated[str | None, Query(
+        description=(
+            "Build the trace from a recording instead of the live buffers: its id, or "
+            "the directory it was written to. The same attribution, over a window the "
+            "buffers no longer hold (#364)."
+        ),
+    )] = None,
+    until: Annotated[UtcDatetime | None, Query(
+        description="End of the window; with `recording`, default its end.",
+    )] = None,
 ) -> dict:
     """Actions in a window, each with the flows and log lines it caused."""
+    if recording:
+        return await _trace_from_recording(request, recording, since, until, udid, limit)
+    if until is not None and since is not None and until < since:
+        raise HTTPException(status_code=400, detail="until is before since")
     # Canonicalised, because the caller may name a physical device by either
     # of its two identifiers while the action log stores only one. Comparing
     # the raw parameter returned an empty trace for a device that had just
@@ -150,6 +169,7 @@ async def get_trace(
         e for e in entries
         if e.action and e.outcome != "started"
         and (not udid or e.udid == udid)
+        and (until is None or e.timestamp <= until)
     ]
     # `limit` bounds what the caller gets back.
     #
@@ -203,7 +223,8 @@ async def get_trace(
     # APP_LOG_SOURCES, so slicing first let newer build, proxy and server
     # entries push out older app logs and crash reports -- and the trace then
     # looked empty for a reason that had nothing to do with the app.
-    device_logs = [e for e in device_logs if e.source in APP_LOG_SOURCES]
+    device_logs = [e for e in device_logs if e.source in APP_LOG_SOURCES
+                   and (until is None or e.timestamp <= until)]
     # And the caller's device, for the same reason. With `udid` set, bounding
     # first spends the budget on other devices' lines -- which attribution
     # then discards -- so a busy neighbour could empty this caller's trace.
@@ -216,7 +237,7 @@ async def get_trace(
     # Crashes join after the bound, not before it. They come a handful per
     # session from a buffer of their own, and letting a burst of newer app
     # lines slice them off would undo the reason that buffer exists.
-    crashes = await crash_buffer.filter_entries(LogQueryParams(since=window_start))
+    crashes = await crash_buffer.filter_entries(LogQueryParams(since=window_start, until=until))
     if udid:
         crashes = [e for e in crashes if not e.device_id or e.device_id == udid]
     device_logs = sorted(device_logs + crashes, key=lambda e: e.timestamp)
@@ -252,6 +273,8 @@ async def get_trace(
     flow_window_truncated = False
     if flow_store is not None:
         flows = await flow_store.get_since(window_start)
+        if until is not None:
+            flows = [f for f in flows if f.timestamp <= until]
         # Sorted, because the store is not. It is an OrderedDict in insertion
         # order, and a flow is inserted when it *completes* while its
         # `timestamp` is when the request *started* -- so any overlapping
@@ -347,6 +370,87 @@ async def get_trace(
     }
 
 
+async def _trace_from_recording(request: Request, ref: str, since: datetime | None,
+                                until: datetime | None, udid: str | None, limit: int) -> dict:
+    """The trace over a recording: `build_trace`, unchanged, on what it wrote.
+
+    The truncation fields mean what they mean live, answered from the file:
+    a `dropped` or gap span overlapping the window sets the flag for what it
+    lost, and `recording.holes` says where. Nothing in the file is inferred
+    to be complete.
+    """
+    from server.api.recordings import recording_dir
+
+    directory = recording_dir(request, ref)
+    manager = getattr(request.app.state, "recordings", None)
+    live = bool(manager and manager.is_live(directory))
+    try:
+        loaded = await asyncio.to_thread(recording_mod.load, directory, live=live)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"{directory} could not be read: {e}") from e
+    udid = canonical_device_id(udid) if udid else loaded.udid
+
+    def inside(at: datetime) -> bool:
+        return (since is None or at >= since) and (until is None or at <= until)
+
+    actions = sorted((a for a in loaded.actions
+                      if a.outcome != "started" and inside(a.timestamp)
+                      and (not udid or a.udid == udid)), key=lambda a: a.timestamp)
+    actions_over_limit = len(actions) > limit
+    if actions_over_limit:
+        actions = actions[-limit:]
+    flows = sorted((f for f in loaded.flows if inside(f.timestamp)), key=lambda f: f.timestamp)
+    logs = sorted((e for e in loaded.logs if inside(e.timestamp)), key=lambda e: e.timestamp)
+    ip_map = await asyncio.to_thread(_ip_map)
+    attributions = await asyncio.to_thread(build_trace, actions, flows, logs, ip_map=ip_map)
+
+    def holes(*kinds: str) -> list[str]:
+        return recording_mod.holes_in(loaded, set(kinds), since, until)
+
+    return {
+        "since": (since or (min((a.timestamp for a in actions), default=None))
+                  or datetime.now(UTC)).isoformat(),
+        "udid": udid,
+        # The recording's own anchor, not this server's now: a recording read
+        # after a reboot, or on another machine, is on another monotonic base.
+        # Each stretch's anchor is in `recording.clock_anchors`.
+        "clock_anchor": ({k: v for k, v in loaded.clock_anchors[0].items() if k != "segment"}
+                         if loaded.clock_anchors else
+                         {"wall": datetime.now(UTC).isoformat(), "monotonic": time.monotonic()}),
+        "actions": [_serialise(a, ip_map) for a in attributions],
+        "log_window_truncated": bool(holes("log", "crash")),
+        "logs_over_limit": False,
+        "actions_over_limit": actions_over_limit,
+        "action_window_truncated": bool(holes("action")),
+        "flows_over_limit": False,
+        "flow_window_truncated": bool(holes("flow")),
+        # Not recorded: whether capture was on is a fact about the run, and
+        # this server's proxy today says nothing about it.
+        "proxy_running": None,
+        "recording": {
+            "directory": str(directory),
+            "stopped": loaded.stopped,
+            "holes": holes("action", "flow", "log", "crash"),
+            "unreadable_lines": loaded.unreadable_lines,
+            "clock_anchors": loaded.clock_anchors,
+            # A reboot during the run: `started_monotonic` values on either
+            # side of it are on different bases, so join each stretch with
+            # its own anchor.
+            "monotonic_resets": loaded.monotonic_resets,
+            "warnings": loaded.warnings,
+        },
+    }
+
+
+def read_ip_map() -> dict[str, tuple[str, bool]]:
+    """Physical devices by the address they came from. Raises when the cert
+    state cannot be read: a recording takes it from here and says so in the
+    file, since it cannot be asked again later."""
+    from server.proxy.cert_state import read_cert_state
+
+    return ip_to_udid(read_cert_state())
+
+
 def _ip_map() -> dict[str, tuple[str, bool]]:
     """Physical devices are identified by the address they came from.
 
@@ -354,9 +458,7 @@ def _ip_map() -> dict[str, tuple[str, bool]]:
     physical-device attribution, which is worth less than failing the call.
     """
     try:
-        from server.proxy.cert_state import read_cert_state
-
-        return ip_to_udid(read_cert_state())
+        return read_ip_map()
     except Exception:
         logger.debug("Could not read cert state for ip attribution", exc_info=True)
         return {}

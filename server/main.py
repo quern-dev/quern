@@ -44,6 +44,7 @@ from server.api.logs import router as logs_router
 from server.api.proxy import router as proxy_router
 from server.api.proxy_certs import router as proxy_certs_router
 from server.api.proxy_intercept import router as proxy_intercept_router
+from server.api.recordings import router as recordings_router
 from server.api.system import router as system_router
 from server.api.trace import router as trace_router
 from server.api.wda import router as wda_router
@@ -265,6 +266,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     flow_store = FlowStore()
     app.state.flow_store = flow_store
     app.state.capture_sessions = CaptureSessionManager()
+    # After every buffer it reads from exists, and before anything can add
+    # to them: a recording resumed late would miss what arrived meanwhile.
+    from server.api.trace import read_ip_map
+    from server.recording import RecordingManager
+    app.state.recordings = RecordingManager(
+        server_buffer=server_buffer, ring_buffer=buffer, crash_buffer=crash_buffer,
+        flow_store=flow_store, ip_map=read_ip_map)
+    try:
+        resumed = await app.state.recordings.resume_all()
+    except Exception:  # noqa: BLE001 -- a recording must never stop the server starting
+        logger.exception("Could not resume the recordings that were running")
+        resumed = []
+    if resumed:
+        logger.info("Resumed recordings: %s", ", ".join(resumed))
     proxy = ProxyAdapter(
         device_id=config.default_device_id,
         on_entry=dedup.process,
@@ -546,6 +561,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     yield
 
+    # Recordings first, while the buffers still exist: each gets a `paused`
+    # line and is kept to resume, so a restart costs a gap, not the run.
+    recordings = getattr(app.state, "recordings", None)
+    if recordings is not None:
+        try:
+            await recordings.shutdown()
+        except Exception:  # noqa: BLE001 -- shutdown must carry on regardless
+            logger.exception("Could not pause the running recordings")
+
     # Shutdown: cancel background tasks, stop adapters, flush deduplicator
     for task in (
         watchdog_task, update_check_task, network_monitor_task,
@@ -686,6 +710,7 @@ def create_app(
     # Routes
     app.include_router(logs_router)
     app.include_router(trace_router)
+    app.include_router(recordings_router)
     app.include_router(crashes_router)
     app.include_router(builds_router)
     app.include_router(proxy_router)
@@ -1997,6 +2022,7 @@ def cli() -> None:
             "  version, --version, -V        Print the installed version\n"
             "  update [--tools]              Update to the latest release on your channel\n"
             "  set-channel [name]            Show or set the update channel (stable / beta)\n"
+            "  record start|stop|list        Record a device's actions, flows and logs to disk\n"
             "  set-auto-install-cert [on|off]\n"
             "                                Show or set automatic capture-certificate install\n"
             "  set-update-check [on|off]     Show or set the automatic update check\n"
@@ -2063,6 +2089,20 @@ def cli() -> None:
     # Dispatched early in `server.__main__`, like setup. Declared here so
     # `quern --help` lists them and the two entry points agree about what
     # exists.
+    record_parser = subparsers.add_parser(
+        "record", help="Record a device's actions, flows and logs to disk")
+    record_sub = record_parser.add_subparsers(dest="record_command")
+    record_start = record_sub.add_parser("start")
+    record_start.add_argument("--udid", required=True)
+    record_start.add_argument("--out")
+    record_start.add_argument("--host", action="append")
+    record_start.add_argument("--exclude-host", action="append")
+    record_start.add_argument("--kinds")
+    record_start.add_argument("--include-unattributed", action="store_true")
+    record_stop = record_sub.add_parser("stop")
+    record_stop.add_argument("recording_id")
+    record_stop.add_argument("--require-complete", action="store_true")
+    record_sub.add_parser("list")
     subparsers.add_parser(
         "url", help="Print the running server's base URL")
     subparsers.add_parser(
@@ -2177,6 +2217,10 @@ def cli() -> None:
         sys.exit(run(getattr(args, "output", None)))
     elif args.command == "check-updates":
         sys.exit(_cmd_check_updates())
+    elif args.command == "record":
+        from server.record_cli import main as record_main
+
+        sys.exit(record_main(sys.argv[sys.argv.index("record") + 1:]))
     elif args.command == "url":
         from server.__main__ import _cmd_url
         sys.exit(_cmd_url())

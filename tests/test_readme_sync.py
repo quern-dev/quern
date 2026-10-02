@@ -267,7 +267,8 @@ def cli_commands() -> set[str]:
     names: set[str] = set()
     for source in CLI_SOURCES:
         text = source.read_text()
-        names.update(re.findall(r'add_parser\(\s*"([a-z0-9-]+)"', text))
+        # The top-level parser only: `quern record list` is not a `quern list`.
+        names.update(re.findall(r'\bsubparsers\.add_parser\(\s*"([a-z0-9-]+)"', text))
         for match in re.finditer(
             r'sys\.argv\[1\]\s*(?:==|in)\s*(\([^)]*\)|"[a-z0-9_-]+")', text
         ):
