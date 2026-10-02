@@ -1088,7 +1088,7 @@ class TestScrollToElement:
         assert resp.status_code == 200
         assert resp.json()["status"] == "ok"
         mock_controller.scroll_to_element.assert_called_once_with(
-            label=None, identifier="button_log", udid=None, max_swipes=10,
+            label=None, identifier="button_log", udid=None, max_swipes=10, snapshot_depth=None,
         )
 
     async def test_scroll_to_element_by_label_and_max_swipes(
@@ -1106,7 +1106,7 @@ class TestScrollToElement:
             )
         assert resp.status_code == 200
         mock_controller.scroll_to_element.assert_called_once_with(
-            label="Log cache", identifier=None, udid=None, max_swipes=5,
+            label="Log cache", identifier=None, udid=None, max_swipes=5, snapshot_depth=None,
         )
 
     async def test_scroll_to_element_not_found(self, app, auth_headers, mock_controller):
