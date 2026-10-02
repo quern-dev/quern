@@ -6,8 +6,8 @@ latitude and longitude labels, and an update counter that shows a new fix
 arrived rather than an old one being displayed.
 
 The app needs location permission. The probe fixtures grant it before the
-first launch; on a device where that is impossible (a physical iPhone) the
-`location_auth` label says so and these tests skip with that reason.
+first launch and fail setup if the grant is refused, and these tests then
+require the app's `location_auth` label to show it.
 """
 
 from __future__ import annotations
@@ -50,8 +50,13 @@ def location_tab(probe):
         pytest.skip("a physical Android phone has no emulator console to simulate location")
     probe.goto("location")
     auth = _labels(probe)["auth"] or ""
-    if not any(word in auth for word in ("granted", "whenInUse", "always")):
-        pytest.skip(f"the probe app has no location permission here: {auth!r}")
+    # A failure, not a skip: the fixture granted the permission and required
+    # the grant to succeed, so an app that still reports none is the defect.
+    # As a skip it hid exactly that -- the iOS probe never read its own
+    # authorization, and these tests skipped on every simulator run.
+    assert any(word in auth for word in ("granted", "whenInUse", "always")), (
+        f"the probe app reports no location permission after it was granted: {auth!r}"
+    )
     return probe
 
 
@@ -111,7 +116,9 @@ def test_a_coordinate_off_the_globe_is_refused(quern, probe, lat, lon) -> None:
         "/api/v1/device/location",
         json={"udid": probe.udid, "latitude": lat, "longitude": lon}, timeout=60.0,
     )
-    assert resp.status_code in (400, 422), f"{resp.status_code}: {resp.text[:300]}"
+    # 422 and nothing else: a physical Android phone refuses any location with
+    # a 400 (F28), so accepting 400 here would pass there with validation gone.
+    assert resp.status_code == 422, f"{resp.status_code}: {resp.text[:300]}"
 
 
 def test_a_physical_android_phone_refuses_clearly(quern, probe) -> None:

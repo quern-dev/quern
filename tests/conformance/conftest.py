@@ -425,10 +425,11 @@ def _install_and_launch(
     )
     # Before the first launch, because an install resets permissions and the
     # Location tab otherwise raises its prompt -- over every test that visits
-    # it, on a fresh device. Not required: a physical iPhone cannot be granted
-    # one, and the Location tests read `location_auth` and say so themselves.
-    client.post(
-        "/api/v1/device/permission",
+    # it, on a fresh device. Required: a refused grant would otherwise surface
+    # as the Location tests skipping on a denied `location_auth`, which reads
+    # as a device limit rather than the failure it is.
+    client.json_ok(
+        "POST", "/api/v1/device/permission",
         json={"udid": udid, "bundle_id": bundle_id, "permission": "location"},
         timeout=60.0,
     )
