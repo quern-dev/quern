@@ -352,3 +352,53 @@ class TestOnScreen:
         ctrl._wda_viewport = AsyncMock(side_effect=RuntimeError("wda down"))
         elements, _ = await ctrl.get_ui_elements("PHONE")
         assert elements[0].on_screen is None
+
+
+class TestValueAwareTapReadsTheValueThroughWda:
+    """F36: WDA's element query returns no value, so the tap saw "unknown",
+    tapped a switch that was already on, and turned it off."""
+
+    def _switch_controller(self, read):
+        sw = UIElement(type="Switch", identifier="control_switch",
+                       frame={"x": 20.0, "y": 120.0, "width": 63.0, "height": 28.0})
+        ctrl, backend = _controller([sw])
+        ctrl.wda_client.element_value = AsyncMock(return_value=read)
+        return ctrl, backend
+
+    async def test_already_on_is_left_alone(self):
+        ctrl, backend = self._switch_controller("1")
+        result = await ctrl.tap_element(
+            identifier="control_switch", value="1", udid="PHONE",
+            scroll_to_find=False, skip_stability_check=True,
+        )
+        assert result["status"] == "already_set", result
+        backend.tap.assert_not_awaited()
+
+    async def test_off_is_tapped_and_reported_as_it_was(self):
+        ctrl, backend = self._switch_controller("0")
+        result = await ctrl.tap_element(
+            identifier="control_switch", value="1", udid="PHONE",
+            scroll_to_find=False, skip_stability_check=True,
+        )
+        assert result["status"] == "ok" and result["previous_value"] == "0", result
+        backend.tap.assert_awaited_once()
+
+    async def test_an_unreadable_value_refuses_without_tapping(self):
+        from server.models import DeviceError
+
+        ctrl, backend = self._switch_controller(None)
+        with pytest.raises(DeviceError, match="Tap without value= to toggle"):
+            await ctrl.tap_element(
+                identifier="control_switch", value="1", udid="PHONE",
+                scroll_to_find=False, skip_stability_check=True,
+            )
+        backend.tap.assert_not_awaited()
+
+    @pytest.mark.parametrize("raw, expected", [("1", "1"), (0, "0"), (True, "1"), (None, None)])
+    async def test_element_value_normalises(self, raw, expected):
+        from server.device.wda_client import WdaBackend
+
+        client = WdaBackend.__new__(WdaBackend)
+        client.element_attribute = AsyncMock(return_value=raw)
+        got = await client.element_value("U", identifier="x", label=None, center=(1, 1))
+        assert got == expected

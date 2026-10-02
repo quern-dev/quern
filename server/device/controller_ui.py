@@ -2448,6 +2448,25 @@ class DeviceControllerUI:
                 return result
 
             # Value check for switches/toggles: skip tap if already in desired state
+            if value is not None and not el.value and self._served_by_wda(resolved):
+                # WDA's element query carries no values, so the match read
+                # here has none -- and treating that as "not set" taps a switch
+                # that may already be on, toggling it off (F36). Ask for the
+                # attribute itself; if even that cannot be read, refuse rather
+                # than guess, since a guess flips real state.
+                read = await self.wda_client.element_value(
+                    resolved, identifier=el.identifier, label=el.label or None,
+                    center=get_tap_point(el),
+                )
+                if read is None:
+                    raise DeviceError(
+                        f"Could not read the current value of "
+                        f"{el.label or el.identifier!r} through WDA, so a "
+                        f"value-aware tap cannot tell whether it is already "
+                        f"{value!r}. Tap without value= to toggle it.",
+                        tool=self._backend_name(resolved),
+                    )
+                el = el.model_copy(update={"value": read})
             if value is not None:
                 current_value = el.value or ""
                 if current_value == value:

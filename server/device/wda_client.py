@@ -1487,17 +1487,17 @@ class WdaBackend:
             predicate=predicate, class_chain=class_chain,
         )
 
-    async def is_hittable(
-        self, udid: str, *, identifier: str | None, label: str | None,
+    async def element_attribute(
+        self, udid: str, name: str, *, identifier: str | None, label: str | None,
         center: tuple[float, float],
-    ) -> bool | None:
-        """XCUITest's `isHittable` for the element at `center`, or None if unknown.
+    ):
+        """One XCUITest attribute of the element at `center`, or None if unknown.
 
-        The element is found again by identifier (or label) and the candidate
+        The element is found again by identifier (or label), and the candidate
         whose frame is centred at `center` is the one asked about, because a
         query can return several -- a label is often repeated. None means the
         question could not be put (no selector, no candidate there, WDA error);
-        the caller must not read that as "hittable".
+        the caller must not read that as any particular answer.
         """
         if identifier:
             using, value = "accessibility id", identifier
@@ -1520,15 +1520,44 @@ class WdaBackend:
             return None
         try:
             resp = await self._request(
-                "get", udid, f"/element/{best['_wda_element_id']}/attribute/hittable",
+                "get", udid, f"/element/{best['_wda_element_id']}/attribute/{name}",
                 use_session=True, timeout=SKELETON_QUERY_TIMEOUT,
             )
         except (DeviceError, WdaError):
             return None
-        value = resp.json().get("value")
+        return resp.json().get("value")
+
+    async def is_hittable(
+        self, udid: str, *, identifier: str | None, label: str | None,
+        center: tuple[float, float],
+    ) -> bool | None:
+        """XCUITest's `isHittable` for the element at `center`, or None if unknown."""
+        value = await self.element_attribute(
+            udid, "hittable", identifier=identifier, label=label, center=center,
+        )
         if isinstance(value, str):
             value = value.strip().lower() in ("true", "1")
         return value if isinstance(value, bool) else None
+
+    async def element_value(
+        self, udid: str, *, identifier: str | None, label: str | None,
+        center: tuple[float, float],
+    ) -> str | None:
+        """The element's `value` as a string, or None if it could not be read.
+
+        Needed because WDA's element query does not return values -- measured:
+        a switch came back with type, rect, label and enabled, and no value --
+        so a value-aware tap that trusted the query always saw "unknown" and
+        toggled (F36).
+        """
+        value = await self.element_attribute(
+            udid, "value", identifier=identifier, label=label, center=center,
+        )
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return "1" if value else "0"
+        return str(value)
 
     async def select_all_and_delete(
         self, udid: str, x: float, y: float,
