@@ -28,6 +28,7 @@ By default only work positively identified as this device's is recorded; include
       exclude_hosts: z.array(z.string()).optional().describe("Drop flows to these hosts and their subdomains, e.g. analytics"),
       kinds: z.array(z.enum(["actions", "flows", "logs"])).optional().describe("What to collect: any of actions (quern's own), flows (full detail), logs (app logs and crash reports). Default all; [\"flows\"] for network calls only"),
       include_unattributed: z.boolean().optional().describe("Also record flows and log lines tied to no device (default false)"),
+      video: z.boolean().optional().describe("Simulators only: also record the screen to <output_dir>/video-<n>.mp4 (one movie per quern run), with a keyframe at each action's start; get_trace(recording=...) then gives each action and flow its {path, offset_s} in the movie"),
     }),
   }, async (args) => {
     try {

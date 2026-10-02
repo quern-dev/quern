@@ -20,6 +20,7 @@ import urllib.request
 USAGE = """\
 Usage: quern record start --udid UDID [--out DIR] [--kinds actions,flows,logs]
                           [--host H]... [--exclude-host H]... [--include-unattributed]
+                          [--video]
        quern record stop RECORDING_ID [--require-complete]
        quern record list
 
@@ -77,6 +78,7 @@ def main(argv: list[str]) -> int:
     start.add_argument("--exclude-host", action="append")
     start.add_argument("--kinds")
     start.add_argument("--include-unattributed", action="store_true")
+    start.add_argument("--video", action="store_true")
     stop = sub.add_parser("stop", add_help=False)
     stop.add_argument("recording_id")
     stop.add_argument("--require-complete", action="store_true")
@@ -92,7 +94,7 @@ def main(argv: list[str]) -> int:
                 else None
             body = {"udid": args.udid, "output_dir": args.out, "kinds": kinds,
                     "hosts": args.host, "exclude_hosts": args.exclude_host,
-                    "include_unattributed": args.include_unattributed}
+                    "include_unattributed": args.include_unattributed, "video": args.video}
             status, answer = _call("POST", "/api/v1/recordings", body)
         elif args.what == "stop":
             status, answer = _call("POST", f"/api/v1/recordings/{args.recording_id}/stop")

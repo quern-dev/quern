@@ -931,6 +931,10 @@ class RecordingStartRequest(BaseModel):
         "Also record flows and log lines quern cannot tie to any device, as the live "
         "trace does. Off by default: on a shared machine that is other processes' "
         "traffic, and it would land in every device's recording."))
+    video: bool = Field(default=False, description=(
+        "Also record the simulator's screen to <output_dir>/video-<n>.mp4, one movie per "
+        "quern run, with a keyframe at each action's start. Simulators only. Refused, "
+        "rather than recorded without video, if video cannot start."))
 
 
 class CaptureStartRequest(BaseModel):
@@ -1174,6 +1178,9 @@ class TraceFlow(BaseModel):
     error: str | None = None
     #: When it started, on the clock video frames are stamped with (#290).
     started_monotonic: float | None = None
+    #: In a trace over a recording with video: `{path, offset_s}` in the
+    #: movie of the same quern run, or null.
+    video: dict | None = None
     source_process: str | None = None
     #: How this flow's device was established: "process" (exact, resolved from
     #: the client pid), "client_ip" (a recorded address, still trusted),
@@ -1210,6 +1217,9 @@ class TracedAction(BaseModel):
     finished_at: str
     started_monotonic: float | None = None
     detail: str
+    #: In a trace over a recording with video: `{path, offset_s}` -- the
+    #: movie, and the offset to seek to for this action's start -- or null.
+    video: dict | None = None
     flows: list[TraceFlow] = []
     logs: list[TraceLogLine] = []
     overlaps: list[str] = []

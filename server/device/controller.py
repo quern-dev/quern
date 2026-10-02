@@ -586,6 +586,7 @@ class DeviceController(DeviceControllerUI):
         """
         resolved = await self._resolve_udid(udid, set_active=set_active)
         current_action().udid = resolved
+        logging_ext.note_action_device(resolved)
         return resolved
 
     async def _resolve_udid(

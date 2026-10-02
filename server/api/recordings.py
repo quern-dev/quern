@@ -16,7 +16,7 @@ from server import recording as recording_mod
 from server.api.actions import logged_action
 from server.api.trace import _proxy_is_running
 from server.device.devicectl import canonical_device_id
-from server.models import RecordingStartRequest, UtcDatetime
+from server.models import DeviceType, RecordingStartRequest, UtcDatetime
 from server.recording import KINDS, Filters, RecordingError, RecordingManager
 
 router = APIRouter(prefix="/api/v1/recordings", tags=["recordings"])
@@ -52,10 +52,19 @@ async def start_recording(request: Request, body: RecordingStartRequest) -> dict
             # nothing for 90 minutes and look like a quiet run.
             warnings.append(f"{udid} is not a device quern knows right now; recording "
                             f"anyway, in case it appears")
+    if body.video:
+        # quern-media captures a simulator's framebuffer; a phone or an
+        # emulator would be accepted and give no movie.
+        kind = controller._device_type(udid) if controller is not None else None
+        if kind != DeviceType.SIMULATOR:
+            raise HTTPException(status_code=400,
+                                detail=f"video records simulators; {udid} is "
+                                       f"{kind.value if kind else 'not a device quern knows'}")
     try:
         rec = await manager.start(udid, body.output_dir, Filters(
             kinds=tuple(body.kinds or KINDS), hosts=body.hosts,
-            exclude_hosts=body.exclude_hosts, include_unattributed=body.include_unattributed))
+            exclude_hosts=body.exclude_hosts, include_unattributed=body.include_unattributed,
+            video=body.video))
     except RecordingError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     if "flows" in rec.filters.kinds and not _proxy_is_running(request):

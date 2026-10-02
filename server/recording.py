@@ -43,8 +43,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from server import config as config_mod
+from server import logging_ext
 from server.models import FlowRecord, LogEntry, LogSource
 from server.trace import APP_LOG_SOURCES, Ownership, device_of, owns
 
@@ -112,6 +114,8 @@ class Filters:
     #: because on a shared machine it is other processes' traffic, and it
     #: would land in every device's recording.
     include_unattributed: bool = False
+    #: A simulator's screen as video, one movie per quern run (phase 3).
+    video: bool = False
 
     def __post_init__(self) -> None:
         unknown = [k for k in self.kinds if k not in KINDS]
@@ -123,13 +127,14 @@ class Filters:
     def as_dict(self) -> dict:
         return {"kinds": list(self.kinds), "hosts": self.hosts,
                 "exclude_hosts": self.exclude_hosts,
-                "include_unattributed": self.include_unattributed}
+                "include_unattributed": self.include_unattributed, "video": self.video}
 
     @classmethod
     def from_dict(cls, d: dict) -> Filters:
         return cls(kinds=tuple(d.get("kinds") or KINDS), hosts=d.get("hosts"),
                    exclude_hosts=d.get("exclude_hosts"),
-                   include_unattributed=bool(d.get("include_unattributed", False)))
+                   include_unattributed=bool(d.get("include_unattributed", False)),
+                   video=bool(d.get("video", False)))
 
 
 def _anchor() -> dict:
@@ -164,7 +169,13 @@ class Recording:
     #: Said on the start response: things that do not stop the recording but
     #: change what it can be trusted for.
     warnings: list[str] = field(default_factory=list)
+    #: Finished video segments: path, start_host_time, duration, frames.
+    video_segments: list[dict] = field(default_factory=list)
     # Runtime only.
+    _segment: Any = field(default=None, repr=False)
+    _segment_number: int = field(default=0, repr=False)
+    #: Actions already given a keyframe, so one action asking twice gets one.
+    _keyframed: set = field(default_factory=set, repr=False)
     _subs: list = field(default_factory=list, repr=False)
     _pumps: list[asyncio.Task] = field(default_factory=list, repr=False)
     _flusher_task: asyncio.Task | None = field(default=None, repr=False)
@@ -212,7 +223,16 @@ class Recording:
         return {"format_version": FORMAT_VERSION, **self.summary(),
                 # Phase 3 (#364) fills this in; null says "no video", not
                 # "video not yet recorded".
-                "video": None}
+                "video": self.video_body()}
+
+    def video_body(self) -> list[dict] | None:
+        """The segments, finished and current; None when video was not asked
+        for -- "no video" is not "no segments yet"."""
+        if not self.filters.video:
+            return None
+        current = ([{"path": str(self._segment.path), "segment": self._segment_number,
+                     "recording": True}] if self._segment is not None else [])
+        return [*self.video_segments, *current]
 
 
 def _line(kind: str, data: dict | None = None, **extra) -> str:
@@ -262,6 +282,8 @@ class _Tally:
     dropped: dict[str, int]
     gaps: list[dict]
     last_at: datetime | None
+    video: list[dict] = field(default_factory=list)
+    video_started: int = 0
 
 
 def _tally(events: Path) -> _Tally:
@@ -271,6 +293,8 @@ def _tally(events: Path) -> _Tally:
     counts = {"action": 0, "flow": 0, "request_started": 0, "log": 0, "crash": 0}
     dropped: dict[str, int] = {}
     gaps: list[dict] = []
+    video: list[dict] = []
+    video_started = 0
     last_at = None
     with open(events, "rb") as f:
         for raw in f:
@@ -288,14 +312,25 @@ def _tally(events: Path) -> _Tally:
                 dropped[what] = dropped.get(what, 0) + int(event.get("count") or 0)
             elif kind == "resumed" and isinstance(event.get("gap"), dict):
                 gaps.append(event["gap"])
-    return _Tally(counts=counts, dropped=dropped, gaps=gaps, last_at=last_at)
+            elif kind == "video_started":
+                video_started += 1
+            elif kind == "video_stopped":
+                video.append({k: v for k, v in event.items()
+                              if k not in ("type", "at", "monotonic")})
+    return _Tally(counts=counts, dropped=dropped, gaps=gaps, last_at=last_at, video=video,
+                  video_started=video_started)
 
 
 class RecordingManager:
     """Every recording this server is making, and the subscriptions feeding them."""
 
     def __init__(self, *, server_buffer, ring_buffer, crash_buffer, flow_store,
-                 ip_map: Callable[[], dict[str, tuple[str, bool]]] | None = None) -> None:
+                 ip_map: Callable[[], dict[str, tuple[str, bool]]] | None = None,
+                 video: Any = None) -> None:
+        #: Starts and stops quern-media (`recording_video.VideoRecorder`);
+        #: None where this server cannot record video.
+        self._video = video
+        logging_ext.add_action_device_listener(self._on_action_device)
         self._server_buffer = server_buffer
         self._ring_buffer = ring_buffer
         self._crash_buffer = crash_buffer
@@ -308,6 +343,8 @@ class RecordingManager:
         self._ip_map_failing = False
         self._recordings: dict[str, Recording] = {}
         self._save_lock = asyncio.Lock()
+        #: Keyframe requests in flight, held so none is collected mid-request.
+        self._background: set[asyncio.Task] = set()
         listeners = getattr(flow_store, "pending_dropped_listeners", None)
         if listeners is not None:
             listeners.append(self._note_proxy_stopped)
@@ -397,15 +434,33 @@ class RecordingManager:
         except OSError as e:
             raise RecordingError(f"{out} could not be created: {e}") from e
         rec = Recording(id=rec_id, udid=udid, dir=out, filters=filters, started_at=_now())
+        if filters.video:
+            # Before the files: asked for and impossible is a refusal, not a
+            # recording that quietly has no video.
+            if self._video is None:
+                raise RecordingError("video cannot be recorded on this server")
+            if (out / EVENTS).exists():
+                raise RecordingError(f"{out / EVENTS} already exists: pass a new output_dir, "
+                                     f"so one recording never appends to another's")
+            try:
+                rec._segment = await self._video.start(udid, out / "video-1.mp4")
+            except Exception as e:  # noqa: BLE001 -- said to the caller, whatever it was
+                raise RecordingError(f"video could not be started for {udid}: {e}") from e
+            rec._segment_number = 1
         try:
             await asyncio.to_thread(self._begin_files, rec)
         except FileExistsError as e:
+            await self._finish_video(rec, write=False)
             # Created exclusively, which is what decides two starts racing
             # into one directory: a check before it would let both through.
             raise RecordingError(f"{rec.events} already exists: pass a new output_dir, so "
                                  f"one recording never appends to another's") from e
         except OSError as e:
+            await self._finish_video(rec, write=False)
             raise RecordingError(f"{out} could not be written: {e}") from e
+        if rec._segment is not None:
+            rec._pending.append(_line("video_started", path=str(rec._segment.path),
+                                      segment=rec._segment_number))
         self._attach(rec)
         self._recordings[rec.id] = rec
         if not await self._save():
@@ -447,6 +502,41 @@ class RecordingManager:
             rec._subs.append((kind, source, queue))
             rec._pumps.append(asyncio.create_task(self._pump(rec, kind, queue)))
         rec._flusher_task = asyncio.create_task(self._flusher(rec))
+
+    def _on_action_device(self, udid: str, action: object) -> None:
+        """An action has its device: if a recording is filming that device,
+        ask for a keyframe, so the action is a seek point in the movie. Once
+        per action, and never awaited -- the action must not wait on video."""
+        for rec in self._recordings.values():
+            if rec.state != "recording" or rec._segment is None or rec.udid != udid:
+                continue
+            key = id(action)
+            if key in rec._keyframed:
+                continue
+            if len(rec._keyframed) > 10_000:
+                rec._keyframed.clear()          # ids of long-finished actions
+            rec._keyframed.add(key)
+            task = asyncio.get_running_loop().create_task(self._video.keyframe(rec._segment))
+            self._background.add(task)
+            task.add_done_callback(self._background.discard)
+
+    async def _finish_video(self, rec: Recording, *, write: bool = True) -> None:
+        """Finish the current segment and keep what quern-media said about
+        it; `write` puts that in the file as a `video_stopped` line."""
+        seg, rec._segment = rec._segment, None
+        if seg is None or self._video is None:
+            return
+        try:
+            result = await self._video.stop(seg)
+        except Exception as e:  # noqa: BLE001 -- a video that will not stop must not stop the recording
+            result = {"path": str(seg.path), "start_host_time": None,
+                      "error": f"stopping quern-media failed: {e}"}
+        result["segment"] = rec._segment_number
+        rec.video_segments.append(result)
+        if result.get("error"):
+            rec.warnings.append(f"video segment {rec._segment_number}: {result['error']}")
+        if write:
+            rec._pending.append(_line("video_stopped", **result))
 
     async def _pump(self, rec: Recording, kind: str, queue: asyncio.Queue) -> None:
         while True:
@@ -539,6 +629,14 @@ class RecordingManager:
         for _, source, queue in rec._subs:
             source.unsubscribe(queue)
         rec._subs = []
+        if rec._segment is not None:
+            # Not awaited: this runs inside a flush, holding the lock, and
+            # finishing a movie can take seconds. The movie is still worth
+            # finishing -- unfinished, it is unopenable.
+            task = asyncio.get_running_loop().create_task(
+                self._finish_video(rec, write=False))
+            self._background.add(task)
+            task.add_done_callback(self._background.discard)
         # Said in the file too, if the file will still take a line.
         with contextlib.suppress(OSError):
             await asyncio.to_thread(_append, rec.events, [_line("failed", error=why)], True)
@@ -580,7 +678,9 @@ class RecordingManager:
             return rec
         await self._close_writer(rec)
         if rec.state != "recording":          # the last write failed
+            await self._finish_video(rec, write=False)
             return rec
+        await self._finish_video(rec)
         rec.state, rec.stopped_at = "stopped", _now()
         rec._pending.append(_line("stopped", counts=dict(rec.counts), dropped=dict(rec.dropped),
                                   gaps=len(rec.gaps), complete=rec.complete))
@@ -622,6 +722,24 @@ class RecordingManager:
                                  "will not resume them", path)
                 return False
 
+    async def _resume_video(self, rec: Recording) -> None:
+        """A new segment for a resumed recording. One that will not start is
+        said, in the file and on the recording, and the run carries on
+        without video rather than not at all."""
+        number = rec._segment_number + 1
+        path = rec.dir / f"video-{number}.mp4"
+        try:
+            if self._video is None:
+                raise RecordingError("video cannot be recorded on this server")
+            rec._segment = await self._video.start(rec.udid, path)
+        except Exception as e:  # noqa: BLE001 -- said, never fatal to the recording
+            why = f"video segment {number} could not be started: {e}"
+            rec.warnings.append(why)
+            rec._pending.append(_line("warning", message=why))
+            return
+        rec._segment_number = number
+        rec._pending.append(_line("video_started", path=str(path), segment=number))
+
     async def shutdown(self) -> None:
         """Quern is stopping: say so in each recording, and keep it to resume."""
         for rec in list(self._recordings.values()):
@@ -629,7 +747,9 @@ class RecordingManager:
                 continue
             await self._close_writer(rec)
             if rec.state != "recording":
+                await self._finish_video(rec, write=False)
                 continue
+            await self._finish_video(rec)
             rec._pending.append(_line("paused", reason="quern stopped"))
             await self._flush(rec, sync=True)
         await self._save()
@@ -671,6 +791,8 @@ class RecordingManager:
             try:
                 tally = await asyncio.to_thread(_tally, rec.events)
                 rec.counts, rec.dropped, rec.gaps = tally.counts, tally.dropped, tally.gaps
+                rec.video_segments = tally.video
+                rec._segment_number = tally.video_started
                 gap = {"from": tally.last_at.isoformat() if tally.last_at else None,
                        "to": _now().isoformat(), "reason": "quern was not running"}
                 await asyncio.to_thread(_append, rec.events, [
@@ -688,6 +810,8 @@ class RecordingManager:
                 # manifest is rewritten at stop. Said, not fatal.
                 rec.warnings.append(f"{rec.manifest} could not be updated: {e}")
             self._attach(rec)
+            if rec.filters.video:
+                await self._resume_video(rec)
             resumed.append(rec.id)
             logger.info("Recording %s resumed after a gap from %s", rec.id, gap["from"])
         await self._save()
@@ -719,6 +843,29 @@ class Loaded:
     #: Requests the file has a start for and no flow: hung, cut off by a gap
     #: or the end, or lost with dropped flows. Each carries why in `error`.
     unfinished: list[FlowRecord] = field(default_factory=list)
+    #: Video segments, each with the quern run it was recorded in, and
+    #: `start_host_time` from quern-media's summary (None if it gave none).
+    video: list[dict] = field(default_factory=list)
+    #: Which quern run each action and flow was written in, by id: 0 from
+    #: the start, one more at each resume. Monotonic times compare only
+    #: within a run -- a resume after a reboot starts a new base -- so a
+    #: record joins only the segment from its own run.
+    runs: dict[str, int] = field(default_factory=dict)
+
+    def video_at(self, monotonic: float | None, run: int) -> dict | None:
+        """Where `monotonic` falls in this run's movie: its path and the
+        offset to seek to, or None if no segment of that run covers it."""
+        if monotonic is None:
+            return None
+        for seg in self.video:
+            start = seg.get("start_host_time")
+            if seg.get("run") != run or not isinstance(start, (int, float)):
+                continue
+            duration = seg.get("duration_s")
+            if start <= monotonic and (not isinstance(duration, (int, float))
+                                       or monotonic <= start + duration):
+                return {"path": seg["path"], "offset_s": round(monotonic - start, 3)}
+        return None
 
 
 _EVERYTHING = frozenset({"action", "flow", "log", "crash"})
@@ -763,6 +910,10 @@ def load(directory: Path, *, live: bool = False, markers_only: bool = False) -> 
     flows: dict[str, FlowRecord] = {}
     starts: dict[str, FlowRecord] = {}
     version = 1
+    run = 0
+    runs: dict[str, int] = {}
+    video: list[dict] = []
+    video_open: dict[str, int] = {}          # path -> the run it started in
     # What can explain a start with no flow, other than a hang.
     cut: list[tuple[datetime | None, datetime | None, str]] = []
     logs: list[LogEntry] = []
@@ -794,16 +945,20 @@ def load(directory: Path, *, live: bool = False, markers_only: bool = False) -> 
                     last_mono = mono
                 last_at = at or last_at
                 if kind == "action":
-                    actions.append(LogEntry.model_validate(event["data"]))
+                    entry = LogEntry.model_validate(event["data"])
+                    actions.append(entry)
+                    runs[entry.id] = run
                 elif kind == "flow":
                     flow = FlowRecord.model_validate(event["data"])
                     flows.pop(flow.id, None)
                     flows[flow.id] = flow
                     starts.pop(flow.id, None)
+                    runs.setdefault(flow.id, run)
                 elif kind == "request_started":
                     flow = FlowRecord.model_validate(event["data"])
                     if flow.id not in flows:
                         starts[flow.id] = flow
+                    runs.setdefault(flow.id, run)
                 elif kind in ("log", "crash"):
                     logs.append(LogEntry.model_validate(event["data"]))
                 elif kind in ("started", "resumed"):
@@ -814,6 +969,7 @@ def load(directory: Path, *, live: bool = False, markers_only: bool = False) -> 
                     if isinstance(event.get("clock_anchor"), dict):
                         anchors.append({**event["clock_anchor"], "segment": kind})
                     if kind == "resumed":
+                        run += 1
                         gap = event.get("gap") or {}
                         holes += _gap_holes(_dt(gap.get("from")), _dt(gap.get("to")),
                                             gap.get("reason") or "gap",
@@ -836,6 +992,13 @@ def load(directory: Path, *, live: bool = False, markers_only: bool = False) -> 
                                           f"was in flight"))
                 elif kind == "warning":
                     warnings.append(str(event.get("message")))
+                elif kind == "video_started":
+                    video_open[str(event.get("path"))] = run
+                elif kind == "video_stopped":
+                    path = str(event.get("path"))
+                    seg = {k: v for k, v in event.items() if k not in ("type", "at", "monotonic")}
+                    seg["run"] = video_open.pop(path, run)
+                    video.append(seg)
                 elif kind == "failed":
                     failed = str(event.get("error"))
                 elif kind == "stopped":
@@ -862,7 +1025,11 @@ def load(directory: Path, *, live: bool = False, markers_only: bool = False) -> 
                   holes=holes, stopped=stopped, unreadable_lines=bad,
                   clock_anchors=anchors, monotonic_resets=resets, warnings=warnings,
                   unfinished=[_unfinished(f, cut, stopped=stopped, live=live)
-                              for f in starts.values()])
+                              for f in starts.values()],
+                  # A segment still being written has no summary yet.
+                  video=video + [{"path": p, "run": r, "start_host_time": None,
+                                  "recording": True} for p, r in video_open.items()],
+                  runs=runs)
 
 
 def _unfinished(flow: FlowRecord, cut: list[tuple], *, stopped: bool,
