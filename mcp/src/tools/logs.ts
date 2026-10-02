@@ -694,12 +694,20 @@ This eliminates all framework noise (UIKitCore, CFNetwork, Security) and shows o
         .enum(["debug", "info", "notice", "warning", "error", "fault"])
         .optional()
         .describe("Drop entries below this severity level"),
+      quiet_subsystems: z
+        .array(z.string().min(1))
+        .optional()
+        .describe("Subsystem prefixes (e.g. 'com.apple.') whose entries are kept only at quiet_below and above: their chatter dropped, their errors kept. Unlike exclude_subsystems, which drops every level. On a physical device the subsystem is the sending library's name (Network, CFNetwork), not com.apple.*."),
+      quiet_below: z
+        .enum(["debug", "info", "notice", "warning", "error", "fault"])
+        .optional()
+        .describe("The level a quiet_subsystems entry must reach to be kept (default error)"),
       preset: z
         .enum(["device-quiet", "simulator-quiet"])
         .optional()
-        .describe("Load a named preset as base config (can be combined with other fields as overrides). device-quiet excludes common system daemons (bluetoothd, wifid, kernel, symptomsd, remotepairingdeviced, signpost_reporter) and noisy subsystems (CoreBrightness, CFNetwork)."),
+        .describe("Load a named preset as base config (can be combined with other fields as overrides). device-quiet excludes common system daemons (bluetoothd, wifid, kernel, symptomsd, remotepairingdeviced, signpost_reporter) and noisy subsystems (CoreBrightness, CFNetwork). simulator-quiet drops HangTracer and com.apple.CoreFoundation, and every com.apple.* entry below error -- Apple's frameworks' chatter inside the app, with their errors kept."),
     }),
-  }, async ({ source, device_id, process, processes, subsystems, exclude_processes, exclude_subsystems, exclude_messages, min_level, preset }) => {
+  }, async ({ source, device_id, process, processes, subsystems, exclude_processes, exclude_subsystems, exclude_messages, min_level, quiet_subsystems, quiet_below, preset }) => {
       try {
         const body: Record<string, unknown> = {};
         if (source !== undefined) body.source = source;
@@ -711,6 +719,8 @@ This eliminates all framework noise (UIKitCore, CFNetwork, Security) and shows o
         if (exclude_subsystems !== undefined) body.exclude_subsystems = exclude_subsystems;
         if (exclude_messages !== undefined) body.exclude_messages = exclude_messages;
         if (min_level !== undefined) body.min_level = min_level;
+        if (quiet_subsystems !== undefined) body.quiet_subsystems = quiet_subsystems;
+        if (quiet_below !== undefined) body.quiet_below = quiet_below;
         if (preset !== undefined) body.preset = preset;
 
         const data = await apiRequest("POST", "/api/v1/logs/filter", undefined, body);

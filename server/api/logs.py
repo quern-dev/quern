@@ -109,6 +109,10 @@ class FilterRequest(BaseModel):
     exclude_subsystems: list[str] | None = None
     exclude_messages: list[str] | None = None
     min_level: str | None = None
+    #: Subsystem prefixes kept only at `quiet_below` and above (default
+    #: error): their chatter dropped, their problems kept.
+    quiet_subsystems: list[str] | None = None
+    quiet_below: str | None = None
     preset: str | None = None
     flush: bool = True
 
@@ -500,19 +504,19 @@ async def set_filter(request: Request, filter_req: FilterRequest) -> dict:
                 ),
             )
 
-    # Validate min_level
-    min_level = None
-    if filter_req.min_level:
+    # Validate the levels
+    def level(name: str | None) -> LogLevel | None:
+        if not name:
+            return None
         try:
-            min_level = LogLevel(filter_req.min_level)
+            return LogLevel(name)
         except ValueError:
             raise HTTPException(
                 status_code=422,
-                detail=(
-                    f"Unknown level: {filter_req.min_level!r}. "
-                    f"Available: {[lv.value for lv in LogLevel]}"
-                ),
-            )
+                detail=f"Unknown level: {name!r}. Available: {[lv.value for lv in LogLevel]}",
+            ) from None
+    min_level = level(filter_req.min_level)
+    quiet_below = level(filter_req.quiet_below)
 
     # Build config from preset + overrides
     overrides = {}
@@ -530,8 +534,15 @@ async def set_filter(request: Request, filter_req: FilterRequest) -> dict:
         overrides["exclude_messages"] = filter_req.exclude_messages
     if min_level is not None:
         overrides["min_level"] = min_level
+    if filter_req.quiet_subsystems is not None:
+        overrides["quiet_subsystems"] = filter_req.quiet_subsystems
+    if quiet_below is not None:
+        overrides["quiet_below"] = quiet_below
 
-    config = build_config(preset=filter_req.preset, **overrides)
+    try:
+        config = build_config(preset=filter_req.preset, **overrides)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     ingestion_filter.update_filter(config, source=source, device_id=filter_req.device_id)
 
     # Purge pre-filter entries from the buffer so tail_logs sees clean results

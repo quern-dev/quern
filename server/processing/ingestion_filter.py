@@ -30,6 +30,15 @@ class FilterConfig:
     exclude_subsystems: frozenset[str] = field(default_factory=frozenset)
     exclude_messages: tuple[str, ...] = ()
     min_level: LogLevel | None = None
+    #: Subsystem prefixes whose chatter is dropped and whose problems are
+    #: kept: an entry from one of these below `quiet_below` is dropped. Not
+    #: `exclude_subsystems`, which drops at every level -- Apple's network
+    #: subsystems are most of a simulator's log volume, and also where a TLS
+    #: trust failure is reported, which is what a proxy user most needs.
+    quiet_subsystems: tuple[str, ...] = ()
+    #: The level a quiet subsystem's entry must reach to be kept; `error`
+    #: when unset.
+    quiet_below: LogLevel | None = None
 
     def __post_init__(self) -> None:
         # Convert mutable inputs to frozen types
@@ -43,6 +52,22 @@ class FilterConfig:
             object.__setattr__(self, "exclude_subsystems", frozenset(self.exclude_subsystems))
         if isinstance(self.exclude_messages, list):
             object.__setattr__(self, "exclude_messages", tuple(self.exclude_messages))
+        # One canonical form -- a sorted tuple -- so two configs naming the
+        # same prefixes compare equal however they were given. A bare string
+        # is one prefix, never its characters.
+        quiet = self.quiet_subsystems
+        quiet = (quiet,) if isinstance(quiet, str) else tuple(quiet)
+        if any(not p.strip() for p in quiet):
+            # Every subsystem starts with "", so an empty prefix would quiet
+            # the app's own lines too -- the opposite of what an exact-match
+            # field like exclude_subsystems does with "" (review).
+            raise ValueError("quiet_subsystems cannot contain an empty prefix: it would "
+                             "match every subsystem, the app's own included")
+        object.__setattr__(self, "quiet_subsystems", tuple(sorted(quiet)))
+        if self.quiet_below is not None and not self.quiet_subsystems:
+            # Accepted and doing nothing is the reading a caller cannot tell
+            # from success (review).
+            raise ValueError("quiet_below needs quiet_subsystems: on its own it quiets nothing")
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -58,9 +83,17 @@ class FilterConfig:
             result["exclude_subsystems"] = sorted(self.exclude_subsystems)
         if self.exclude_messages:
             result["exclude_messages"] = list(self.exclude_messages)
+        if self.quiet_subsystems:
+            result["quiet_subsystems"] = list(self.quiet_subsystems)
+            result["quiet_below"] = self.quiet_level.value
         if self.min_level is not None:
             result["min_level"] = self.min_level.value
         return result
+
+    @property
+    def quiet_level(self) -> LogLevel:
+        """The level a quiet subsystem's entry must reach to be kept."""
+        return self.quiet_below or LogLevel.ERROR
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +121,15 @@ PRESETS: dict[str, FilterConfig] = {
     "simulator-quiet": FilterConfig(
         exclude_messages=("HangTracer",),
         exclude_subsystems=frozenset(["com.apple.CoreFoundation"]),
+        # Apple's frameworks inside the app's own process, below error.
+        # Measured on a 2.5-minute deep-link run of a real app: 85,570 lines,
+        # 99.5% from com.apple.* -- network, defaults, CFBundle, CFNetwork --
+        # at about 800 a second, peaking past 7,000, enough to overflow a
+        # recording. Below error that is all chatter; at error it is the
+        # TLS trust failure and the connection reset worth seeing, so those
+        # stay. The app's own lines and third-party SDKs' are untouched.
+        quiet_subsystems=("com.apple.",),
+        quiet_below=LogLevel.ERROR,
     ),
 }
 
@@ -109,12 +151,20 @@ def build_config(preset: str | None = None, **overrides: Any) -> FilterConfig:
             "exclude_subsystems": base.exclude_subsystems,
             "exclude_messages": base.exclude_messages,
             "min_level": base.min_level,
+            "quiet_subsystems": base.quiet_subsystems,
+            "quiet_below": base.quiet_below,
         }
 
     # Overlay explicit overrides (skip None values — they mean "not specified")
     for key, value in overrides.items():
         if value is not None:
             base_kwargs[key] = value
+
+    # Clearing a preset's rule (`quiet_subsystems=[]`) clears its level with
+    # it, unless the caller named one: a level with nothing to apply to is
+    # refused, and the preset's own should not make a clear fail.
+    if not base_kwargs.get("quiet_subsystems") and overrides.get("quiet_below") is None:
+        base_kwargs["quiet_below"] = None
 
     return FilterConfig(**base_kwargs)
 
@@ -166,6 +216,10 @@ class IngestionFilter:
             for pattern in config.exclude_messages:
                 if pattern.lower() in msg_lower:
                     return False
+        if (config.quiet_subsystems
+                and entry.subsystem.startswith(config.quiet_subsystems)
+                and _LEVEL_ORDER[entry.level] < _LEVEL_ORDER[config.quiet_level]):
+            return False
 
         # 3. Check includes (AND — must match all specified includes)
         if config.process is not None and entry.process != config.process:

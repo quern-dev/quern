@@ -86,6 +86,11 @@ Quern has built-in presets that drop common noise:
 **`simulator-quiet`** (for simulators) drops:
 - `HangTracer` messages (frequent, unhelpful)
 - `com.apple.CoreFoundation` subsystem noise
+- Every `com.apple.*` entry below `error`: Apple's frameworks talking inside your app (network connections, user defaults lookups, bundle resources). On the app it was measured on, that was over 99% of the volume. Their errors and faults are kept -- a TLS trust failure is logged by `com.apple.CFNetwork`, and you want that one.
+
+Your own `set_log_filter` can do the same for any subsystems with `quiet_subsystems` (prefixes) and `quiet_below` (the level to keep from, default `error`).
+
+Two things to know. Applied without a `source`, a preset is global, so `simulator-quiet` also quiets `com.apple.*` lines from `start_oslog_streaming`. And on a physical device the subsystem field holds the sending library's name (`Network`, `CFNetwork`), so a `com.apple.` prefix barely matches there.
 
 Your agent applies these automatically when appropriate, but you can ask for them explicitly: **"Filter out the system noise"**
 

@@ -39,7 +39,7 @@ If plist watch is configured (via configure_plist_watch), watchers auto-start al
       preset: z
         .string()
         .optional()
-        .describe("Apply an ingestion filter preset at start (e.g. 'simulator-quiet')"),
+        .describe("Apply an ingestion filter preset at start (e.g. 'simulator-quiet', which drops HangTracer and com.apple.CoreFoundation, and every com.apple.* entry below error -- so with a com.apple.* subsystem filter it leaves that subsystem's errors only)"),
     }),
   }, async ({ udid, process, subsystem, level, preset }) => {
     try {
