@@ -40,6 +40,7 @@ Package: `com.quern.probe`.
 | Links | deep link landing surface; `link_count` and `link_last_uri` |
 | Web | a `WebView` with fixed local content and named DOM ids, for webview-automation work that currently depends on a third-party app |
 | Diag | crash (main and background thread) and ANR triggers |
+| Location | `set_location` readout mirroring iOS (`location_auth`, `location_lat`, `location_lon`, `location_count`); the permission is granted by the suite, never requested in-app, so no dialog sits over other tabs. Last in the strip, so adding it moved no tab |
 
 The tab bar is itself a fixture for tab-selection probing.
 

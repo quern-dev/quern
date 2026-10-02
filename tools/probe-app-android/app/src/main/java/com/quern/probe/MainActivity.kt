@@ -47,6 +47,8 @@ class MainActivity : AppCompatActivity() {
         "Links" to ::LinksFragment,
         "Web" to ::WebFragment,
         "Diag" to ::DiagFragment,
+        // Last, so adding it moved no existing tab.
+        "Location" to ::LocationFragment,
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {

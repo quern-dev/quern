@@ -15,6 +15,7 @@ from server.models import (
     BootIncompleteError,
     DeviceError,
     DeviceInfo,
+    DeviceOperationUnsupportedError,
     DeviceState,
     DeviceType,
 )
@@ -1523,7 +1524,10 @@ rm -rf /data/local/tmp/tmp-ca-copy
         A default satellite count of 4 avoids anti-spoof heuristics that flag 0 satellites.
         """
         if not self.is_console_serial(serial):
-            raise DeviceError(
+            # A refusal, not a failure: typed so the route answers 400. As a
+            # plain DeviceError it was a 500 prefixed `[adb]` on every
+            # physical phone, which reads as quern having broken (F28).
+            raise DeviceOperationUnsupportedError(
                 "Location simulation needs the emulator console, which is "
                 f"reachable only through an `emulator-NNNN` serial, not {serial}. "
                 "The device may well be an emulator; this connection cannot "

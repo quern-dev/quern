@@ -423,6 +423,16 @@ def _install_and_launch(
         "POST", "/api/v1/device/app/install",
         json={"udid": udid, "app_path": str(artifact)}, timeout=300.0,
     )
+    # Before the first launch, because an install resets permissions and the
+    # Location tab otherwise raises its prompt -- over every test that visits
+    # it, on a fresh device. Required: a refused grant would otherwise surface
+    # as the Location tests skipping on a denied `location_auth`, which reads
+    # as a device limit rather than the failure it is.
+    client.json_ok(
+        "POST", "/api/v1/device/permission",
+        json={"udid": udid, "bundle_id": bundle_id, "permission": "location"},
+        timeout=60.0,
+    )
     client.json_ok(
         "POST", "/api/v1/device/app/launch",
         json={"udid": udid, "bundle_id": bundle_id}, timeout=180.0,

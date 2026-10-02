@@ -47,13 +47,18 @@ final class LocationViewController: UIViewController {
 
         manager.delegate = self
         manager.desiredAccuracy = kCLLocationAccuracyBest
+        // Read it now as well as on change. The manager is created with the
+        // controller, at launch, and CoreLocation reports the initial status
+        // once, then -- before this delegate exists. So a permission granted
+        // before launch never produced a callback here, and the label sat on
+        // its placeholder while the app was authorized (measured: status 4,
+        // no callback, on an iOS 18.6 simulator).
+        showAuthorization()
         manager.requestWhenInUseAuthorization()
         manager.startUpdatingLocation()
     }
-}
 
-extension LocationViewController: CLLocationManagerDelegate {
-    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+    private func showAuthorization() {
         let status: String
         switch manager.authorizationStatus {
         case .authorizedWhenInUse: status = "whenInUse"
@@ -64,6 +69,12 @@ extension LocationViewController: CLLocationManagerDelegate {
         @unknown default: status = "unknown"
         }
         authLabel.text = "authorization: \(status)"
+    }
+}
+
+extension LocationViewController: CLLocationManagerDelegate {
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        showAuthorization()
     }
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {

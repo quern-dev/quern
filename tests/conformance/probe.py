@@ -108,6 +108,12 @@ class Ids:
     # Diag tab
     CRASH_UNCAUGHT = "crash_uncaught"
 
+    # Location tab
+    LOCATION_AUTH = "location_auth"
+    LOCATION_LAT = "location_lat"
+    LOCATION_LON = "location_lon"
+    LOCATION_COUNT = "location_count"
+
     # State tab -- the app's one persistent surface, for the app-state tools
     STATE_GREETING = "state_greeting"
     STATE_COUNTER = "state_counter"
@@ -211,6 +217,10 @@ IOS = ProbeContract(
         Ids.WEB_VIEW: "web_view",
         Ids.WEB_HEADING_NATIVE: "web_heading_native",
         Ids.CRASH_UNCAUGHT: "diag_crash_uncaught",
+        Ids.LOCATION_AUTH: "location_auth",
+        Ids.LOCATION_LAT: "location_lat",
+        Ids.LOCATION_LON: "location_lon",
+        Ids.LOCATION_COUNT: "location_count",
         Ids.STATE_GREETING: "state_greeting",
         Ids.STATE_COUNTER: "state_counter",
         Ids.STATE_FLAG: "state_flag",
@@ -307,6 +317,10 @@ ANDROID = ProbeContract(
         Ids.WEB_VIEW: "web_view",
         Ids.WEB_HEADING_NATIVE: "web_heading_native",
         Ids.CRASH_UNCAUGHT: "diag_crash_uncaught",
+        Ids.LOCATION_AUTH: "location_auth",
+        Ids.LOCATION_LAT: "location_lat",
+        Ids.LOCATION_LON: "location_lon",
+        Ids.LOCATION_COUNT: "location_count",
         # No State tab: the app-state tools are simulator-only and refuse on
         # Android (#314), so there is nothing for one to exercise yet.
         Ids.STATE_GREETING: None,
@@ -351,6 +365,10 @@ ANDROID = ProbeContract(
         "diag": {"landmarks": [
             {"element": "StaticText", "identifier": "diag_heading"},
             {"element": "StaticText", "label": "Diag", "selected": True},
+        ]},
+        "location": {"landmarks": [
+            {"element": "StaticText", "identifier": "location_heading"},
+            {"element": "StaticText", "label": "Location", "selected": True},
         ]},
     },
 )
@@ -842,19 +860,35 @@ class ProbeDriver:
         """
         import time
 
-        frame = None
-        for element in self.ui_tree().get("elements") or []:
-            if element.get("type") in ("Application", "Window") and element.get("frame"):
-                frame = element["frame"]
-                break
-        height = (frame or {}).get("height") or 874.0
-        width = (frame or {}).get("width") or 402.0
+        # The area to swipe: the app's window on iOS. Android reports no
+        # Application or Window element, and the fallback used to be an
+        # iPhone's size in points -- so on a 1440x2960 Pixel this swiped a
+        # strip near the top of the screen, through the tab bar, and a list
+        # that scrolls perfectly well appeared not to (F27). The list itself
+        # is the honest target there.
+        elements = self.ui_tree().get("elements") or []
+        frame = next(
+            (e["frame"] for e in elements
+             if e.get("type") in ("Application", "Window") and e.get("frame")),
+            None,
+        )
+        if frame is None:
+            container = self.contract.id_for(Ids.SCROLL_CONTAINER)
+            frame = next(
+                (e["frame"] for e in elements
+                 if e.get("identifier") == container and e.get("frame")),
+                None,
+            )
+        if frame is None:
+            raise AssertionError("no window or scroll container on screen to swipe")
+        x = frame.get("x", 0) + frame["width"] / 2
+        top = frame.get("y", 0)
         self.client.json_ok(
             "POST", "/api/v1/device/ui/swipe",
             json={
                 "udid": self.udid,
-                "start_x": width / 2, "start_y": height * 0.72,
-                "end_x": width / 2, "end_y": height * 0.30,
+                "start_x": x, "start_y": top + frame["height"] * 0.72,
+                "end_x": x, "end_y": top + frame["height"] * 0.30,
                 "duration": 0.3,
             },
             timeout=90.0,
