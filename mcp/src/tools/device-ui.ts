@@ -698,17 +698,25 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         .int()
         .default(10)
         .describe("Max scroll attempts before giving up (default 10)"),
+      snapshot_depth: z
+        .coerce.number()
+        .int()
+        .min(1)
+        .max(50)
+        .optional()
+        .describe("WDA snapshot depth for the sweep's reads (a physical iPhone, or a simulator after start_driver). Default 12, as for tap_element; pass more if the element is nested deeper."),
       udid: z
         .string()
         .optional()
         .describe("Target device UDID (defaults to active device)"),
     }),
-  }, async ({ label, identifier, max_swipes, udid }) => {
+  }, async ({ label, identifier, max_swipes, udid, snapshot_depth }) => {
     try {
       const body: Record<string, unknown> = { max_swipes };
       if (label) body.label = label;
       if (identifier) body.identifier = identifier;
       if (udid) body.udid = udid;
+      if (snapshot_depth !== undefined) body.snapshot_depth = snapshot_depth;
 
       const data = await apiRequest(
         "POST",

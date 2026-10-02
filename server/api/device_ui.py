@@ -706,6 +706,7 @@ async def scroll_to_element(request: Request, body: ScrollToElementRequest):
                 identifier=body.identifier,
                 udid=body.udid,
                 max_swipes=body.max_swipes,
+                snapshot_depth=body.snapshot_depth,
             ),
             what="scroll_to_element",
         )

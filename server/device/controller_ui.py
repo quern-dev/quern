@@ -3003,6 +3003,7 @@ class DeviceControllerUI:
         identifier: str | None = None,
         udid: str | None = None,
         max_swipes: int = 10,
+        snapshot_depth: int | None = None,
     ) -> dict:
         """Scroll until an element is in view, without interacting with it.
 
@@ -3058,8 +3059,13 @@ class DeviceControllerUI:
             }
 
         # iOS (physical WDA + simulator)
+        # The same shallow depth as tap_element's sweep. Without it every read
+        # in the sweep used whatever depth WDA was last left at -- 25 after any
+        # full read, 34s a read on an iPhone 11's 200-row table -- and the
+        # sweep ran out of deadline before reaching the row (F35).
         el = await self._ios_scroll_to_element(
             resolved, label=label, identifier=identifier, max_swipes=max_swipes,
+            snapshot_depth=self._read_depth(resolved, snapshot_depth),
         )
         self._invalidate_ui_cache(resolved)  # scrolling changes the viewport
         if el is None:

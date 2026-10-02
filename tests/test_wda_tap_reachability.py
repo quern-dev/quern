@@ -418,3 +418,28 @@ async def test_lookups_use_the_centre_not_the_switch_knob():
     centre = (20.0 + 63.0 / 2, 120.0 + 28.0 / 2)
     assert ctrl.wda_client.element_value.call_args.kwargs["center"] == centre
     assert ctrl.wda_client.is_hittable.call_args.kwargs["center"] == centre
+
+
+class TestScrollToElementReadsShallowThroughWda:
+    """Its sweep had no depth, so its reads used whatever WDA was last set to
+    -- 25 after any full read, 34s a read on the iPhone 11's long table --
+    and it ran out of deadline before the row. tap_element's sweep had 12."""
+
+    async def _depth_passed(self, wda: bool, requested=None):
+        ctrl = DeviceController()
+        ctrl.resolve_udid = AsyncMock(return_value="PHONE")
+        ctrl._is_android = lambda udid: False
+        ctrl._served_by_wda = lambda udid: wda
+        ctrl._ios_scroll_to_element = AsyncMock(return_value=None)
+        await ctrl.scroll_to_element(identifier="row_150", udid="PHONE",
+                                     snapshot_depth=requested)
+        return ctrl._ios_scroll_to_element.call_args.kwargs["snapshot_depth"]
+
+    async def test_through_wda_the_sweep_reads_at_12(self):
+        assert await self._depth_passed(wda=True) == 12
+
+    async def test_the_callers_depth_wins(self):
+        assert await self._depth_passed(wda=True, requested=20) == 20
+
+    async def test_off_wda_no_depth(self):
+        assert await self._depth_passed(wda=False) is None

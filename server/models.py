@@ -2208,6 +2208,13 @@ class ScrollToElementRequest(BaseModel):
     identifier: str | None = None
     udid: str | None = None
     max_swipes: int = Field(default=10, ge=1, le=50)
+    snapshot_depth: int | None = Field(
+        default=None, ge=1, le=50,
+        description=(
+            "WDA snapshot depth for the sweep's reads. Default 12 through WDA, as "
+            "for tap_element; pass more if the element is nested deeper."
+        ),
+    )
 
     @model_validator(mode="after")
     def check_target(self):
