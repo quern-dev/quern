@@ -115,7 +115,10 @@ async def recording_events(
             cursor=cursor, limit=limit, detail=detail, flow_id=flow_id)
         manager = getattr(request.app.state, "recordings", None)
         live = bool(manager and manager.is_live(directory))
-        loaded_holes = await asyncio.to_thread(recording_mod.load, directory, live=live)
+        # Markers only: a page must not rebuild every flow in the recording
+        # just to say where its holes are (review).
+        loaded_holes = await asyncio.to_thread(recording_mod.load, directory, live=live,
+                                               markers_only=True)
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"{directory} could not be read: {e}") from e
     return {

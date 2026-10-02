@@ -1028,3 +1028,52 @@ async def test_a_failure_is_written_into_the_file_when_the_file_still_takes_line
     assert any("No space left" in h for h in rec_mod.holes_in(
         rec_mod.load(tmp_path / "r"), {"flow"}, None, None))
 
+
+
+class TestTheCodeRabbitReview:
+    async def test_stopping_an_interrupted_recording_is_never_complete(self, tmp_path):
+        """Its directory came back after the restart (an artifacts volume
+        mounted late): stopping it said `complete: true` with zero counts and
+        left no hole for the downtime (CodeRabbit)."""
+        import shutil
+        src = Sources()
+        first = src.manager()
+        rec = await first.start(SIM, str(tmp_path / "r"), Filters())
+        await src.flows.add(_flow())
+        await _settle()
+        await first.shutdown()
+        shutil.move(tmp_path / "r", tmp_path / "away")
+        second = Sources().manager()
+        await second.resume_all()
+        assert second.get(rec.id).state == "interrupted"
+        shutil.move(tmp_path / "away", tmp_path / "r")
+        done = await second.stop(rec.id)
+        assert done.state == "stopped" and done.complete is False
+        assert done.counts["flow"] == 1, "counted from the file, not left at zero"
+        assert len(done.gaps) == 1 and "not recording" in done.gaps[0]["reason"]
+        manifest = json.loads((tmp_path / "r" / "manifest.json").read_text())
+        assert manifest["complete"] is False
+        loaded = rec_mod.load(tmp_path / "r")
+        assert loaded.stopped and any("not recording" in h[3] for h in loaded.holes)
+
+    async def test_a_page_reads_holes_without_rebuilding_records(self, tmp_path, monkeypatch):
+        src = Sources()
+        first = src.manager()
+        rec = await first.start(SIM, str(tmp_path / "r"), Filters())
+        for _ in range(1100):
+            src.flows._fanout.publish(_flow())
+        await src.server.append(_action())
+        await first.shutdown()
+        second = Sources().manager()
+        await second.resume_all()
+        await second.stop(rec.id)
+        full = rec_mod.load(tmp_path / "r")
+
+        def no_records(*a, **k):
+            raise AssertionError("a record was rebuilt for a markers-only read")
+        monkeypatch.setattr(rec_mod.FlowRecord, "model_validate", no_records)
+        monkeypatch.setattr(rec_mod.LogEntry, "model_validate", no_records)
+        light = rec_mod.load(tmp_path / "r", markers_only=True)
+        assert light.holes == full.holes and light.holes
+        assert (light.stopped, light.warnings) == (full.stopped, full.warnings)
+        assert light.flows == [] and light.actions == []

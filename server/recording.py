@@ -36,6 +36,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from collections.abc import Callable
@@ -532,11 +533,26 @@ class RecordingManager:
         if rec.state == "interrupted":
             # Saved but never resumed: no subscriptions to end. Stopping says
             # so in the file if it can, and drops it from the list to resume.
+            #
+            # And it is never complete: nothing was recorded from its last
+            # line to now. Without a gap for that, it read `complete: true`
+            # with zero counts once its directory came back (review), and the
+            # file had no hole for the downtime -- a false all-clear.
+            last_at = None
+            if rec.events.is_file():
+                with contextlib.suppress(OSError):
+                    tally = await asyncio.to_thread(_tally, rec.events)
+                    rec.counts, rec.dropped, rec.gaps = tally.counts, tally.dropped, tally.gaps
+                    last_at = tally.last_at
+            gap = {"from": last_at.isoformat() if last_at else None, "to": _now().isoformat(),
+                   "reason": f"not recording: {rec.error}"}
+            rec.gaps.append(gap)
             rec.state, rec.stopped_at = "stopped", _now()
             try:
                 await asyncio.to_thread(_append, rec.events, [_line(
                     "stopped", counts=dict(rec.counts), dropped=dict(rec.dropped),
-                    gaps=len(rec.gaps), complete=rec.complete, after=rec.error)], True)
+                    gaps=len(rec.gaps), complete=rec.complete, after=rec.error,
+                    gap=gap)], True)
                 await asyncio.to_thread(_write_json_atomic, rec.manifest, rec.manifest_body())
             except OSError as e:
                 rec.state, rec.error = "failed", f"{rec.error}; stopping it failed too: {e}"
@@ -698,14 +714,21 @@ def _gap_holes(start, end, why) -> list[tuple]:
              f"{int(FLOW_LOOKBACK.total_seconds() // 60)} minutes earlier, would be missing")]
 
 
-def load(directory: Path, *, live: bool = False) -> Loaded:
+#: How a record line begins, as `_line` writes it: type first, compact.
+_RECORD_PREFIXES = tuple(f'{{"type":"{k}",' for k in ("action", "flow", "log", "crash"))
+_AT = re.compile(r'"at":"([^"]+)"')
+
+
+def load(directory: Path, *, live: bool = False, markers_only: bool = False) -> Loaded:
     """Everything in `<directory>/events.jsonl`. A flow written twice -- the
     store updates one when its response arrives -- is kept once, as last
     written. A torn line from a crash mid-write is counted, never fatal.
 
     A file with no `stopped` line holds nothing after its last line, and
     says so as a hole: `live` (this server is still writing it) words it as
-    not yet written rather than lost.
+    not yet written rather than lost. `markers_only` reads what the file
+    says about itself -- holes, markers, whether it stopped -- without
+    rebuilding any record, for a reader that wants only that.
     """
     actions: list[LogEntry] = []
     flows: dict[str, FlowRecord] = {}
@@ -717,6 +740,13 @@ def load(directory: Path, *, live: bool = False) -> Loaded:
     last_at, last_mono, failed = None, None, None
     with open(directory / EVENTS) as f:
         for raw in f:
+            if markers_only and raw.startswith(_RECORD_PREFIXES):
+                # Only the holes are wanted: a record line's body -- a flow
+                # can carry 200KB of bodies -- is never parsed, only its time,
+                # which the trailing hole starts from (review).
+                if m := _AT.search(raw, 0, 200):
+                    last_at = _dt(m.group(1)) or last_at
+                continue
             try:
                 event = json.loads(raw)
                 kind = event["type"]
@@ -757,6 +787,12 @@ def load(directory: Path, *, live: bool = False) -> Loaded:
                     failed = str(event.get("error"))
                 elif kind == "stopped":
                     stopped = True
+                    # A recording stopped without ever resuming carries the
+                    # time it was not recording here.
+                    if isinstance(event.get("gap"), dict):
+                        gap = event["gap"]
+                        holes += _gap_holes(_dt(gap.get("from")), _dt(gap.get("to")),
+                                            gap.get("reason") or "gap")
             except (ValueError, KeyError, TypeError):
                 bad += 1
     if not stopped:

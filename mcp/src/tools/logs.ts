@@ -780,7 +780,7 @@ Pass \`recording\` (an id from start_recording, or the directory it wrote) to bu
       since: z
         .string()
         .optional()
-        .describe("Start time (ISO 8601). No offset means UTC. Defaults to the last 5 minutes."),
+        .describe("Start time (ISO 8601). No offset means UTC. Defaults to the last 5 minutes; with recording, to the recording's start."),
       udid: z
         .string()
         .optional()
