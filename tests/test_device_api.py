@@ -564,6 +564,7 @@ class TestTapElement:
             # rather than "always sweep" (#274). The handler passes the
             # request's value straight through, so this pins the default.
             scroll_to_find=None,
+            snapshot_depth=None,
         )
 
     async def test_tap_element_by_identifier(self, app, auth_headers, mock_controller):
@@ -589,6 +590,7 @@ class TestTapElement:
             # rather than "always sweep" (#274). The handler passes the
             # request's value straight through, so this pins the default.
             scroll_to_find=None,
+            snapshot_depth=None,
         )
 
     async def test_tap_element_with_type_filter(self, app, auth_headers, mock_controller):
@@ -614,6 +616,7 @@ class TestTapElement:
             # rather than "always sweep" (#274). The handler passes the
             # request's value straight through, so this pins the default.
             scroll_to_find=None,
+            snapshot_depth=None,
         )
 
     async def test_tap_element_ambiguous(self, app, auth_headers, mock_controller):
