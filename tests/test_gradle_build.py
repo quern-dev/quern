@@ -200,6 +200,8 @@ class TestTheProject:
         (None, "9.5.1", 17, None),  # newer than the table: no ceiling to state
         (None, "9.1.0", 17, 25),    # a patch number does not lift it past the table
         (None, "8.7", 17, 21), (None, "7.6.4", 11, 19), (None, "7.2", 11, 16),
+        # Gradle 6 runs on Java 8 with AGP 4 and older, and 6.7 up to 15.
+        (None, "6.7.1", 8, 15), (None, "5.6.4", 8, 12), (None, "4.10", 8, 11),
     ])
     def test_the_java_range_follows_the_project(self, tmp_path, daemon_jvm, gradle_v,
                                                 minimum, maximum):
@@ -1208,3 +1210,19 @@ class TestTheThirdReview:
         adb = FakeAdb([AdbTimeout("adb install did not finish within 300s", tool="adb")])
         r = _go(FakeController(adb), _body(project_path=str(built.root)))
         assert "may still have installed" in r["devices"][0].error
+
+
+def test_every_environment_kind_the_code_reports_is_described():
+    """The model's description is what an agent reads to know the kinds; one
+    added in the code and not there is a kind nobody is told about (review)."""
+    import re as _re
+
+    from server.models import EnvironmentProblem
+    produced = set()
+    for source in (Path(__file__).parents[1] / "server" / "device" / "gradle.py",
+                   Path(__file__).parents[1] / "server" / "api" / "build_android.py"):
+        produced |= set(_re.findall(r'kind="([a-z_]+)"', source.read_text()))
+    described = set(_re.findall(r"'([a-z_]+)'",
+                                EnvironmentProblem.model_fields["kind"].description))
+    assert produced and produced <= described, sorted(produced - described)
+

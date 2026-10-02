@@ -48,14 +48,16 @@ xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
         "Gradle build's root (where settings.gradle is) or a module directory inside it."
       ),
       scheme: z.string().optional().describe(
-        "Build scheme name. If omitted, returns an error listing available schemes."
+        "iOS/Xcode: the build scheme name. If omitted for an Xcode project, returns an error " +
+        "listing available schemes. Ignored for a Gradle project: pass variant instead."
       ),
       udids: z.array(z.string()).optional().describe(
         "Device UDIDs from list_devices. Accepts multiple targets — builds once per " +
         "required architecture and installs in parallel. If omitted, uses the active/auto-detected device."
       ),
       configuration: z.string().optional().default("Debug").describe(
-        "Build configuration (default: Debug)"
+        "iOS/Xcode: build configuration (default: Debug). Ignored for a Gradle project, " +
+        "whose variant names the build type."
       ),
       variant: z.string().optional().describe(
         "Android/Gradle: the build variant to assemble, e.g. \"debug\" or \"stagingDebug\" " +
