@@ -16,6 +16,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi import FastAPI
@@ -397,3 +398,32 @@ class TestTheTrace:
         [action] = trace["actions"]
         [flow] = action["flows"]
         assert flow["id"] == "hung" and "never finished" in flow["error"]
+
+
+class TestTheReadLoop:
+    async def test_a_start_line_is_dispatched_and_cleared_when_mitmdump_ends(self):
+        """Driven through `_read_loop`, so the `msg_type` branch is exercised
+        rather than the handler being called directly (a renamed branch left
+        every handler-level test green)."""
+        store = FlowStore()
+        adapter = ProxyAdapter(flow_store=store)
+        line = json.dumps({"type": "request_started", "id": "f_9", "timestamp": time.time(),
+                           "started_monotonic": 1.5,
+                           "request": {"method": "GET", "url": "https://x/", "host": "x"},
+                           "simulator_udid": SIM}).encode() + b"\n"
+
+        class _Stdout:
+            def __aiter__(self):
+                async def gen():
+                    yield line
+                return gen()
+
+        queue = store.starts.subscribe()
+        proc = MagicMock()
+        proc.stdout = _Stdout()
+        adapter._process = proc
+        adapter._running = True
+        await adapter._read_loop()
+        assert queue.get_nowait().id == "f_9", "the addon reported a start and it was dropped"
+        # mitmdump's output ended: nothing it carried will finish.
+        assert store.pending() == []
