@@ -543,10 +543,21 @@ class RecordingManager:
                     "video_started", path=str(rec._segment.path), segment=1,
                     pid=rec._segment.pid)], True)
             except BaseException as e:
-                await _settled(asyncio.ensure_future(self._finish_video(rec, write=False)),
-                               CANCEL_WAIT * 4)
-                self._release_screen(rec)
-                await asyncio.to_thread(_unbegin, rec)
+                # The screen and the files go only once quern-media has gone:
+                # the files are what names it, and `stop` ends in an exit or
+                # a kill of its own. Cancelling that wait left it filming with
+                # nothing pointing at it (CodeRabbit).
+                finish = asyncio.ensure_future(self._finish_video(rec, write=False))
+
+                def cleanup(_: object = None) -> None:
+                    self._release_screen(rec)
+                    _unbegin(rec)
+                try:
+                    await asyncio.shield(finish)
+                except asyncio.CancelledError:
+                    finish.add_done_callback(cleanup)      # once it has, not before
+                    raise
+                cleanup()
                 if not isinstance(e, Exception):
                     raise
                 raise RecordingError(f"video could not be started for {udid}: {e}") from e

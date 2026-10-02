@@ -763,6 +763,33 @@ class TestTheManager:
         assert line["pid"] == 1001
         await manager.stop(rec.id)
 
+    async def test_a_refused_start_waits_for_quern_media_to_go(self, tmp_path, monkeypatch):
+        """The pid could not be written, so the start is refused -- but the
+        screen and the files go only once quern-media has: cancelling that
+        wait left it filming with nothing naming it (CodeRabbit)."""
+        monkeypatch.setattr(rec_mod, "CANCEL_WAIT", 0.02)
+        video = FakeVideo(stop_takes=0.3)
+        done = []
+        real_stop = video.stop
+
+        async def stop(seg):
+            result = await real_stop(seg)
+            done.append(seg.path)
+            return result
+        video.stop = stop
+        real_append = rec_mod._append
+
+        def append(path, lines, sync=False):
+            if any('"video_started"' in line for line in lines):
+                raise OSError(28, "No space left on device")
+            return real_append(path, lines, sync)
+        monkeypatch.setattr(rec_mod, "_append", append)
+        manager = Sources().manager(video)
+        with pytest.raises(RecordingError, match="No space left"):
+            await manager.start(SIM, str(tmp_path / "r"), Filters(video=True))
+        assert done == [tmp_path / "r" / "video-1.mp4"], "stopped before the refusal"
+        assert manager._filming == {} and not (tmp_path / "r" / "events.jsonl").exists()
+
     async def test_a_resumed_segments_pid_is_on_disk_at_once(self, tmp_path):
         first = Sources().manager(FakeVideo())
         rec = await first.start(SIM, str(tmp_path / "r"), Filters(video=True))
