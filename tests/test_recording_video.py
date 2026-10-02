@@ -392,3 +392,24 @@ class TestTheRoute:
             r = client.post("/api/v1/recordings", json={
                 "udid": "emulator-5554", "output_dir": str(tmp_path / "r"), "video": True})
         assert r.status_code == 400 and "video records simulators" in r.json()["detail"]
+
+
+def test_an_action_after_the_last_frame_is_still_in_the_movie(tmp_path):
+    """The movie runs to the stop, past its last frame (measured: 9.09s of
+    movie, 6.65s of frames). An idle screen composites nothing, so the tail
+    can be long."""
+    t = datetime(2026, 10, 1, 12, tzinfo=UTC)
+    _write(tmp_path, [
+        {"type": "started", "at": t.isoformat(), "monotonic": 990.0, "udid": SIM},
+        {"type": "video_started", "at": t.isoformat(), "monotonic": 991.0,
+         "path": "/r/video-1.mp4", "segment": 1},
+        _action_line(t, 1008.0),
+        {"type": "video_stopped", "at": t.isoformat(), "monotonic": 1010.0,
+         "path": "/r/video-1.mp4", "start_host_time": 1000.0, "duration_s": 6.65},
+        {"type": "stopped", "at": t.isoformat(), "monotonic": 1011.0}])
+    loaded = rec_mod.load(tmp_path)
+    [action] = loaded.actions
+    assert loaded.video_at(action.started_monotonic, 0) == {"path": "/r/video-1.mp4",
+                                                            "offset_s": 8.0}
+    assert loaded.video_at(1010.5, 0) is None, "after the stop is not in the movie"
+
