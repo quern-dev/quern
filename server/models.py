@@ -16,6 +16,7 @@ from pydantic import (
     StrictInt,
     StrictStr,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -1928,6 +1929,19 @@ class UIElement(BaseModel):
     help: str | None = None
     custom_actions: list[str] = Field(default_factory=list)
     extra_attrs: dict[str, str] | None = None
+    #: Whether the element's centre is inside the screen. Set only on reads
+    #: through WDA, which -- unlike the accessibility tree -- reports every cell
+    #: of a table whether it is visible or not: measured, `row_199` at y=10450
+    #: on an 896-point screen. Absent from the output when unset, so the other
+    #: backends' elements carry no new key (F32).
+    on_screen: bool | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_on_screen(self, handler):
+        data = handler(self)
+        if isinstance(data, dict) and data.get("on_screen", True) is None:
+            data.pop("on_screen")
+        return data
     """Raw source attributes from the underlying accessibility provider, kept
     verbatim before the per-platform normalizer collapses them. Useful for
     debugging the normalizer itself — e.g., checking whether an Android node

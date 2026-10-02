@@ -645,6 +645,51 @@ class DeviceControllerUI:
             return None, None, "lookup_failed", None
         return hint.scrollable, hint.screen, hint.reason, hint.candidates
 
+    #: The screen's frame changes only on rotation; a short TTL bounds how long
+    #: a rotated device is judged by the old one.
+    _VIEWPORT_TTL = 30.0
+
+    async def _wda_viewport(
+        self, resolved: str, elements: list[UIElement] | None = None,
+    ) -> dict | None:
+        """The app's frame on a WDA-served device, cached briefly."""
+        cache = self.__dict__.setdefault("_viewport_cache", {})
+        hit = cache.get(resolved)
+        if hit and time.time() - hit[1] < self._VIEWPORT_TTL:
+            return hit[0]
+        frame = next(
+            (e.frame for e in elements or [] if e.type == "Application" and e.frame), None,
+        )
+        if frame is None:
+            # The native read, not get_ui_elements: that one marks its result
+            # and would ask for the viewport again.
+            app_els, _ = await self._native_ui_elements(
+                resolved, False, None, None, "Application", None, None, None,
+                probe_containers=False,
+            )
+            frame = next((e.frame for e in app_els if e.frame), None)
+        if frame:
+            cache[resolved] = (frame, time.time())
+        return frame
+
+    async def _mark_on_screen(self, resolved: str, elements: list[UIElement]) -> None:
+        """Set `on_screen` on each element of a WDA read (F32)."""
+        try:
+            viewport = await self._wda_viewport(resolved, elements)
+        except Exception:
+            # Marking is an addition to a read; it must not fail the read.
+            logger.debug("viewport lookup failed", exc_info=True)
+            return
+        if not viewport:
+            return
+        for e in elements:
+            if e.frame and e.type != "Application":
+                cx, cy = get_tap_point(e)
+                e.on_screen = (
+                    viewport["x"] <= cx < viewport["x"] + viewport["width"]
+                    and viewport["y"] <= cy < viewport["y"] + viewport["height"]
+                )
+
     def _read_depth(self, resolved: str, requested: int | None) -> int | None:
         """The WDA snapshot depth for a read made on a caller's behalf.
 
@@ -678,11 +723,7 @@ class DeviceControllerUI:
         match: the on-screen check still applies, and refusing every tap
         because a second WDA query failed would make WDA unusable.
         """
-        app_els, _ = await self.get_ui_elements(
-            resolved, use_cache=False, filter_type="Application",
-            probe_containers=False,
-        )
-        viewport = next((e.frame for e in app_els if e.frame), None)
+        viewport = await self._wda_viewport(resolved)
         kept: list[UIElement] = []
         dropped: list[dict] = []
         for m in matches:
@@ -1500,6 +1541,8 @@ class DeviceControllerUI:
             snapshot_depth, source_timeout, mode,
             probe_containers=probe_containers,
         )
+        if self._served_by_wda(resolved):
+            await self._mark_on_screen(resolved, elements)
         return self._merge_web_overlay(
             resolved, elements,
             filter_label=filter_label, filter_identifier=filter_identifier,

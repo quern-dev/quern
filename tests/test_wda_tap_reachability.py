@@ -50,6 +50,7 @@ def _controller(found: list[UIElement], hittable=True) -> tuple[DeviceController
     ctrl._all_elements_for_context = AsyncMock(return_value=(list(found), True))
     ctrl._identify_for_miss = AsyncMock(return_value={})
     ctrl.wda_client.is_hittable = AsyncMock(return_value=hittable)
+    ctrl._wda_viewport = AsyncMock(return_value=SCREEN)
     backend = MagicMock()
     backend.tap = AsyncMock()
     ctrl._ui_backend = lambda udid: backend
@@ -304,3 +305,50 @@ class TestReadsMadeForTheCallerAreShallowThroughWda:
             )
         assert r.status_code == 200, r.text
         assert ctrl.tap_element.call_args.kwargs["snapshot_depth"] == 30
+
+
+class TestOnScreen:
+    def test_unset_is_not_in_the_output(self):
+        """Every backend's elements would otherwise gain a null key."""
+        el = UIElement(type="Button", label="x")
+        assert "on_screen" not in el.model_dump()
+        assert "on_screen" not in el.model_dump(exclude={"extra_attrs"})
+        assert "on_screen" not in el.model_dump_json()
+
+    def test_set_is_in_the_output(self):
+        assert UIElement(type="Button", on_screen=False).model_dump()["on_screen"] is False
+
+    async def test_a_wda_read_marks_each_element(self):
+        ctrl = DeviceController()
+        ctrl._served_by_wda = lambda udid: True
+        visible, below = _el("row_1", 100), _el("row_199", 10450)
+        ctrl._native_ui_elements = AsyncMock(return_value=([visible, below], "PHONE"))
+        ctrl._wda_viewport = AsyncMock(return_value=SCREEN)
+        elements, _ = await ctrl.get_ui_elements("PHONE")
+        marks = {e.identifier: e.on_screen for e in elements}
+        assert marks == {"row_1": True, "row_199": False}
+
+    async def test_other_backends_are_not_marked(self):
+        ctrl = DeviceController()
+        ctrl._served_by_wda = lambda udid: False
+        ctrl._native_ui_elements = AsyncMock(return_value=([_el("row_1", 100)], "SIM"))
+        ctrl._wda_viewport = AsyncMock(return_value=SCREEN)
+        elements, _ = await ctrl.get_ui_elements("SIM")
+        assert elements[0].on_screen is None
+        ctrl._wda_viewport.assert_not_awaited()
+
+    async def test_the_viewport_is_cached(self):
+        ctrl = DeviceController()
+        app = UIElement(type="Application", label="App", frame=SCREEN)
+        ctrl._native_ui_elements = AsyncMock(return_value=([app], "PHONE"))
+        assert await ctrl._wda_viewport("PHONE") == SCREEN
+        assert await ctrl._wda_viewport("PHONE") == SCREEN
+        assert ctrl._native_ui_elements.await_count == 1
+
+    async def test_a_failed_viewport_lookup_does_not_fail_the_read(self):
+        ctrl = DeviceController()
+        ctrl._served_by_wda = lambda udid: True
+        ctrl._native_ui_elements = AsyncMock(return_value=([_el("row_1", 100)], "PHONE"))
+        ctrl._wda_viewport = AsyncMock(side_effect=RuntimeError("wda down"))
+        elements, _ = await ctrl.get_ui_elements("PHONE")
+        assert elements[0].on_screen is None

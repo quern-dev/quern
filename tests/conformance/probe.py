@@ -582,7 +582,14 @@ class ProbeDriver:
                 f"GET /device/ui/element?identifier={identifier} -> "
                 f"{resp.status_code}: {resp.text[:300]}"
             )
-        return (resp.json() or {}).get("element") or None
+        element = (resp.json() or {}).get("element") or None
+        # Through WDA an element can be reported while off screen -- every
+        # cell of a table is -- and says so with `on_screen: false`. This
+        # method has always meant "on screen", which on the accessibility tree
+        # was the same thing as "reported".
+        if element and element.get("on_screen") is False:
+            return None
+        return element
 
     def text_of(self, identifier: str) -> str | None:
         """Visible text, however this element happens to carry it.
@@ -657,7 +664,7 @@ class ProbeDriver:
             return self.element(locator["identifier"])
         wanted = locator["label"]
         for element in self.ui_tree().get("elements") or []:
-            if element.get("label") == wanted:
+            if element.get("label") == wanted and element.get("on_screen") is not False:
                 return element
         return None
 
@@ -944,7 +951,7 @@ class ProbeDriver:
                 readout = element["label"]          # Android carries it on a label
             index = self._row_index(element)
             frame = element.get("frame")
-            if index is None or not frame:
+            if index is None or not frame or element.get("on_screen") is False:
                 continue
             rows.append((index, frame.get("y", 0.0), frame.get("height", 0.0)))
         if not rows:
