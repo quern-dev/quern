@@ -216,11 +216,23 @@ Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code
     {
       description: `Add a mock response rule. Requests matching the pattern will receive a synthetic response instead of hitting the real server. Mock rules take priority over intercept.
 
-Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code), ~h (header), ~t (content-type), ~b (body). Combine with & (and), | (or), ! (not). Note: ~p is not a valid operator — use ~u for path matching.`,
+Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code), ~h (header), ~t (content-type), ~b (body). Combine with & (and), | (or), ! (not). Note: ~p is not a valid operator — use ~u for path matching.
+
+ONE SIMULATOR: pass simulator_udid to mock only that simulator's requests. Every other device's matching requests reach the real server and are captured as usual, so other simulators (CI runs, other agents) are unaffected. No filter pattern can do this: every simulator's traffic arrives from 127.0.0.1. Quern decides from the process that opened the connection, walked up the live process tree, so it covers that simulator's web views too (its WebKit and Safari traffic). A request quern cannot attribute is NOT mocked by a scoped rule. Needs local capture to be reliable; with only the system proxy, the connection's process may not be known yet when the request arrives. Can't mock HTTPS from a simulator whose TLS is passed through because it does not trust the CA, and never mocks replay_flow (replays come from quern itself). The response's warning says when any of these applies, or when the UDID is not a booted simulator.
+
+ORDER: rules scoped to the requesting simulator are checked before unscoped ones, so a catch-all never shadows a simulator's own mock; within each group, the first rule set wins, and update_mock keeps a rule's place.
+
+A mocked request is recorded once, like any other flow, with mock_rule_id set and the tag "mocked", so captured traffic tells synthetic responses from real ones.`,
       inputSchema: strictParams({
         pattern: z
           .string()
           .describe('Filter pattern (e.g. "~d api.example.com & ~u /v1/users", "~m POST & ~u /v1/login")'),
+        simulator_udid: z
+          .string()
+          .optional()
+          .describe(
+            "Mock only this simulator's requests (its UDID, from list_devices). Omit to mock every device."
+          ),
         status_code: z
           .coerce.number()
           .default(200)
@@ -237,7 +249,7 @@ Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code
           .describe("Response body string"),
       }),
     },
-    async ({ pattern, status_code, headers, body }) => {
+    async ({ pattern, simulator_udid, status_code, headers, body }) => {
       try {
         const response: Record<string, unknown> = {
           status_code,
@@ -246,12 +258,14 @@ Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code
         if (headers) {
           response.headers = headers;
         }
+        const payload: Record<string, unknown> = { pattern, response };
+        if (simulator_udid !== undefined) payload.simulator_udid = simulator_udid;
 
         const data = await apiRequest(
           "POST",
           "/api/v1/proxy/mocks",
           undefined,
-          { pattern, response }
+          payload
         );
 
         return {
@@ -276,7 +290,7 @@ Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code
   server.registerTool(
     "list_mocks",
     {
-      description: `List all active mock response rules.`,
+      description: `List all active mock response rules, each with its simulator_udid scope (null means it mocks every device).`,
       inputSchema: strictParams({}),
     },
     async () => {
@@ -305,7 +319,7 @@ Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code
   server.registerTool(
     "update_mock",
     {
-      description: `Update an existing mock rule's pattern and/or response fields. Only provided fields are changed.`,
+      description: `Update an existing mock rule's pattern, response fields or simulator scope. Only provided fields are changed: omitting simulator_udid keeps the rule's scope, a UDID re-scopes it, and null makes it mock every device.`,
       inputSchema: strictParams({
         rule_id: z.string().describe("The mock rule ID to update"),
         pattern: z
@@ -326,13 +340,24 @@ Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code
           .string()
           .optional()
           .describe("New response body string"),
+        simulator_udid: z
+          .string()
+          .nullable()
+          .optional()
+          .describe(
+            "A UDID to scope the rule to that simulator, or null to mock every device. Omit to keep the current scope."
+          ),
       }),
     },
-    async ({ rule_id, pattern, status_code, headers, body }) => {
+    async ({ rule_id, pattern, status_code, headers, body, simulator_udid }) => {
       try {
         const payload: Record<string, unknown> = {};
         if (pattern !== undefined) {
           payload.pattern = pattern;
+        }
+        // undefined keeps the scope; null is sent, and clears it.
+        if (simulator_udid !== undefined) {
+          payload.simulator_udid = simulator_udid;
         }
         if (
           status_code !== undefined ||

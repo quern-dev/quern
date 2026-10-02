@@ -317,51 +317,55 @@ async def test_handle_released_unknown_noop(adapter):
 
 
 @pytest.mark.asyncio
-async def test_handle_mock_hit(adapter, flow_store, emitted_entries):
-    """_handle_mock_hit should create FlowRecord and emit MOCK log entry."""
+async def test_a_mocked_flow_is_stored_once_and_says_so(adapter, flow_store, emitted_entries):
+    """A mocked request arrives as one flow carrying its rule (#374).
+
+    It used to arrive twice -- a mock_hit record with no simulator, process or
+    address, and the attributed flow -- and neither said it was a mock, so
+    stored traffic double-counted and could not tell synthetic from real.
+    """
     import time
 
-    data = {
-        "type": "mock_hit",
+    await adapter._handle_flow({
+        "type": "flow",
         "id": "f_mock1",
-        "rule_id": "mock_test",
         "timestamp": time.time(),
+        "mock_rule_id": "mock_test",
+        "simulator_udid": "32593887-01F3-47B8-AF34-B2D444DB37FA",
         "request": {
-            "method": "GET",
-            "url": "https://api.example.com/v1/data",
-            "host": "api.example.com",
-            "path": "/v1/data",
-            "headers": {},
-            "body": None,
-            "body_size": 0,
-            "body_truncated": False,
+            "method": "GET", "url": "https://api.example.com/v1/data",
+            "host": "api.example.com", "path": "/v1/data", "headers": {},
+            "body": None, "body_size": 0, "body_truncated": False,
             "body_encoding": "utf-8",
         },
         "response": {
-            "status_code": 200,
-            "reason": "",
-            "headers": {"content-type": "application/json"},
-            "body": '{"mocked": true}',
-            "body_size": 16,
-            "body_truncated": False,
-            "body_encoding": "utf-8",
+            "status_code": 200, "reason": "", "headers": {}, "body": "{}",
+            "body_size": 2, "body_truncated": False, "body_encoding": "utf-8",
         },
-    }
+    })
 
-    await adapter._handle_mock_hit(data)
-
-    # FlowRecord stored
     assert flow_store.size == 1
     record = await flow_store.get("f_mock1")
-    assert record is not None
-    assert record.response.status_code == 200
-
-    # LogEntry emitted
+    assert record.mock_rule_id == "mock_test"
+    assert record.tags == ["mocked"]
+    assert record.simulator_udid == "32593887-01F3-47B8-AF34-B2D444DB37FA"
     assert len(emitted_entries) == 1
-    entry = emitted_entries[0]
-    assert "MOCK" in entry.message
-    assert "GET" in entry.message
-    assert "200" in entry.message
+    assert emitted_entries[0].message.startswith("MOCK (mock_test): ")
+
+
+@pytest.mark.asyncio
+async def test_an_unmocked_flow_carries_no_mock_marker(adapter, flow_store, emitted_entries):
+    import time
+
+    await adapter._handle_flow({
+        "type": "flow", "id": "f_real", "timestamp": time.time(),
+        "request": {"method": "GET", "url": "https://a/b", "host": "a", "path": "/b",
+                    "headers": {}},
+        "response": {"status_code": 200, "headers": {}},
+    })
+    record = await flow_store.get("f_real")
+    assert record.mock_rule_id is None and record.tags == []
+    assert not emitted_entries[0].message.startswith("MOCK")
 
 
 @pytest.mark.asyncio

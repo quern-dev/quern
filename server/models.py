@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+import re
 from datetime import UTC, date, datetime
 from typing import Annotated, Any, Literal
 
@@ -857,6 +858,14 @@ class FlowRecord(BaseModel):
         default=None,
         description="Client IP address (for physical device identification)",
     )
+    mock_rule_id: str | None = Field(
+        default=None,
+        description=(
+            "Set when a mock rule supplied this response rather than the real "
+            "server; names the rule. The flow is also tagged `mocked`, so "
+            "stored traffic can tell synthetic responses from real ones."
+        ),
+    )
 
 
 class FlowQueryParams(BaseModel):
@@ -1182,6 +1191,10 @@ class TraceFlow(BaseModel):
     #: movie of the same quern run, or null.
     video: dict | None = None
     source_process: str | None = None
+    #: Set when a mock rule supplied this response rather than the real
+    #: server, naming the rule (#374): a trace exported for analysis must
+    #: tell synthetic responses from real ones.
+    mock_rule_id: str | None = None
     #: How this flow's device was established: "process" (exact, resolved from
     #: the client pid), "client_ip" (a recorded address, still trusted),
     #: "client_ip_expired" (recorded too long ago to vouch for), or
@@ -1538,6 +1551,28 @@ class ReplayResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+_SIMULATOR_UDID_RE = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
+)
+
+
+def _normalise_mock_scope(value: str | None) -> str | None:
+    """A simulator UDID, upper-cased, or None for an unscoped rule.
+
+    Refused rather than stored when malformed: a scoped rule matches only its
+    simulator's requests and fails closed, so a typo would be a mock that
+    silently never fires -- success and broken looking identical.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _SIMULATOR_UDID_RE.match(value.strip()):
+        raise ValueError(
+            "simulator_udid must be a simulator UDID such as "
+            "'32593887-01F3-47B8-AF34-B2D444DB37FA'; omit it to mock every device"
+        )
+    return value.strip().upper()
+
+
 class MockResponseSpec(BaseModel):
     """Specification for a mock HTTP response."""
 
@@ -1559,6 +1594,17 @@ class SetMockRequest(BaseModel):
     status_code: int | None = None
     headers: dict[str, str] | None = None
     body: str | None = None
+    simulator_udid: str | None = None
+    """Apply the mock only to requests from this simulator.
+
+    Every other device's matching requests go through untouched, and are
+    captured as usual. A request whose simulator cannot be determined is not
+    mocked -- the rule fails closed. Omit to mock every device, as before."""
+
+    @field_validator("simulator_udid")
+    @classmethod
+    def _check_scope(cls, value: str | None) -> str | None:
+        return _normalise_mock_scope(value)
 
     @model_validator(mode="after")
     def wrap_flat_fields(self) -> SetMockRequest:
@@ -1585,6 +1631,17 @@ class UpdateMockRequest(BaseModel):
     status_code: int | None = None
     headers: dict[str, str] | None = None
     body: str | None = None
+    simulator_udid: str | None = None
+    """Omit to keep the rule's scope; a UDID to scope it; null to unscope it.
+
+    Omission preserves and naming overwrites, even with null -- the repo's
+    rule for partial updates. Whether it was named is read from
+    `model_fields_set`, because None alone cannot tell the two apart."""
+
+    @field_validator("simulator_udid")
+    @classmethod
+    def _check_scope(cls, value: str | None) -> str | None:
+        return _normalise_mock_scope(value)
 
     @model_validator(mode="after")
     def wrap_flat_fields(self) -> UpdateMockRequest:
@@ -1610,6 +1667,8 @@ class MockRuleInfo(BaseModel):
     rule_id: str
     pattern: str
     response: MockResponseSpec
+    simulator_udid: str | None = None
+    """The one simulator this rule applies to, or None for every device."""
 
 
 class MockListResponse(BaseModel):

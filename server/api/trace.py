@@ -83,6 +83,8 @@ def _serialise(attribution: Attribution, ip_map: dict[str, tuple[str, bool]]) ->
                 # On the video clock, as `started_monotonic` on the action.
                 "started_monotonic": flow.started_monotonic,
                 "source_process": flow.source_process,
+                # A mocked response, and which rule answered it (#374).
+                "mock_rule_id": flow.mock_rule_id,
                 # On every flow, not only the doubtful ones. A reader should
                 # never have to infer the good case from silence.
                 "identified_by": identified_by(flow, ip_map).value,

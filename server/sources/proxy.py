@@ -146,7 +146,7 @@ class ProxyAdapter(BaseSourceAdapter):
         self._intercept_event: asyncio.Event = asyncio.Event()
 
         # Mock state (server-side mirror)
-        self._mock_rules: list[dict] = []  # [{rule_id, pattern}]
+        self._mock_rules: list[dict] = []  # [{rule_id, pattern, response, simulator_udid}]
 
         # Bypass state (server-side mirror)
         self._bypass_patterns: list[str] = []
@@ -491,8 +491,12 @@ class ProxyAdapter(BaseSourceAdapter):
     async def set_mock(
         self, pattern: str, response: dict,
         rule_id: str | None = None,
+        simulator_udid: str | None = None,
     ) -> str:
         """Add a mock response rule. Returns the rule_id.
+
+        `simulator_udid` scopes the rule to one simulator's requests; the
+        addon fails closed on any request it cannot attribute.
 
         Raises ValueError if pattern is invalid.
         """
@@ -501,21 +505,30 @@ class ProxyAdapter(BaseSourceAdapter):
             rule_id = f"mock_{uuid.uuid4().hex[:8]}"
         self._mock_rules.append({
             "rule_id": rule_id, "pattern": pattern,
-            "response": response,
+            "response": response, "simulator_udid": simulator_udid,
         })
         await self.send_command({
             "action": "set_mock",
             "rule_id": rule_id,
             "pattern": pattern,
             "response": response,
+            "simulator_udid": simulator_udid,
         })
         return rule_id
 
     async def update_mock(
         self, rule_id: str, pattern: str | None = None,
         response: dict | None = None,
+        simulator_udid: str | None = None,
+        *,
+        scope_given: bool = False,
     ) -> dict:
         """Update an existing mock rule. Returns the updated rule.
+
+        The scope changes only when `scope_given`: then `simulator_udid` is the
+        new scope, None meaning every device. Otherwise the rule keeps the
+        scope it had -- an update that names only a new body must not quietly
+        widen a scoped mock to every simulator.
 
         Raises ValueError if not found or pattern invalid.
         """
@@ -524,17 +537,24 @@ class ProxyAdapter(BaseSourceAdapter):
             raise ValueError(f"Mock rule not found: {rule_id}")
         new_pattern = pattern if pattern is not None else rule["pattern"]
         new_response = response if response is not None else rule["response"]
+        new_scope = simulator_udid if scope_given else rule.get("simulator_udid")
         if pattern is not None:
             validate_filter_pattern(new_pattern)
-        self._mock_rules = [r for r in self._mock_rules if r["rule_id"] != rule_id]
-        await self.send_command({"action": "clear_mock", "rule_id": rule_id})
-        updated = {"rule_id": rule_id, "pattern": new_pattern, "response": new_response}
-        self._mock_rules.append(updated)
+        updated = {
+            "rule_id": rule_id, "pattern": new_pattern,
+            "response": new_response, "simulator_udid": new_scope,
+        }
+        # Replaced in place, here and in the addon, which replaces a rule_id
+        # it already holds. Clearing and re-adding moved the rule to the end,
+        # behind rules set after it -- so updating a scoped rule's body could
+        # leave it shadowed by a catch-all.
+        self._mock_rules = [updated if r["rule_id"] == rule_id else r for r in self._mock_rules]
         await self.send_command({
             "action": "set_mock",
             "rule_id": rule_id,
             "pattern": new_pattern,
             "response": new_response,
+            "simulator_udid": new_scope,
         })
         return updated
 
@@ -662,8 +682,6 @@ class ProxyAdapter(BaseSourceAdapter):
                     self._handle_intercepted(data)
                 elif msg_type == "released":
                     self._handle_released(data)
-                elif msg_type == "mock_hit":
-                    await self._handle_mock_hit(data)
                 elif msg_type == "status":
                     await self._handle_status_event(data)
                 elif msg_type == "tls_rejected":
@@ -779,6 +797,10 @@ class ProxyAdapter(BaseSourceAdapter):
         # 2. Emit summary log entry into the processing pipeline
         level = _classify_level(flow)
         message = _format_summary(flow)
+        if flow.mock_rule_id:
+            # The mock's own log line, which used to come from a separate
+            # mock_hit record -- one that also stored the flow a second time.
+            message = f"MOCK ({flow.mock_rule_id}): {message}"
 
         entry = LogEntry(
             id=uuid.uuid4().hex[:8],
@@ -826,28 +848,6 @@ class ProxyAdapter(BaseSourceAdapter):
         """Remove a flow from held_flows when released."""
         flow_id = data.get("id", "")
         self._held_flows.pop(flow_id, None)
-
-    async def _handle_mock_hit(self, data: dict) -> None:
-        """Process a mock hit — create FlowRecord and emit log entry."""
-        flow = self._parse_flow(data)
-        if flow is None:
-            return
-
-        await self.flow_store.add(flow)
-
-        req = flow.request
-        status = flow.response.status_code if flow.response else "?"
-        entry = LogEntry(
-            id=uuid.uuid4().hex[:8],
-            timestamp=flow.timestamp,
-            device_id=self.device_id,
-            process="network",
-            subsystem=req.host,
-            level=LogLevel.INFO,
-            message=f"MOCK: {req.method} {req.path} -> {status}",
-            source=LogSource.PROXY,
-        )
-        await self.emit(entry)
 
     async def _handle_status_event(self, data: dict) -> None:
         """Handle status events from the addon that update local state mirrors."""
@@ -933,7 +933,8 @@ class ProxyAdapter(BaseSourceAdapter):
                 timing=timing,
                 tls=data.get("tls"),
                 error=data.get("error"),
-                tags=[],
+                tags=["mocked"] if data.get("mock_rule_id") else [],
+                mock_rule_id=data.get("mock_rule_id"),
                 source_process=data.get("source_process"),
                 source_pid=data.get("source_pid"),
                 simulator_udid=data.get("simulator_udid"),
