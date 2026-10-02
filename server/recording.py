@@ -1003,7 +1003,9 @@ def load(directory: Path, *, live: bool = False, markers_only: bool = False) -> 
                 elif kind == "video_stopped":
                     path = str(event.get("path"))
                     seg = {k: v for k, v in event.items() if k not in ("type", "at", "monotonic")}
-                    seg["run"] = video_open.pop(path, run)
+                    # Always this run's: a resume closes what is still open.
+                    video_open.pop(path, None)
+                    seg["run"] = run
                     # When the segment stopped: the movie runs to here, past
                     # its last frame -- measured, 9.09s of movie against a
                     # 6.65s frame span -- so an action in that tail is in it.
