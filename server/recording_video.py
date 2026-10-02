@@ -244,8 +244,10 @@ class VideoRecorder:
         while time.monotonic() < deadline:
             with contextlib.suppress(OSError):        # asked again, not read as gone
                 if not await asyncio.to_thread(self._command_of, pid):
-                    return {"path": str(movie), "exited_before_stop": True,
-                        **await asyncio.to_thread(summary, movie)}
+                    # Stopped now, so the movie runs to now: the stop line
+                    # this becomes is its end, as for any other stop.
+                    return {"path": str(movie), "reaped": True,
+                            **await asyncio.to_thread(summary, movie)}
             await asyncio.sleep(0.2)
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.kill(pid, signal.SIGKILL)

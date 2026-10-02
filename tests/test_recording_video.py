@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import signal
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -582,6 +583,32 @@ class TestTheManager:
         first_seg = next(v for v in loaded.video if v["segment"] == 1)
         assert first_seg["run"] == 0 and first_seg["start_host_time"] == 1000.0
         assert [v["segment"] for v in loaded.video] == [1, 2]
+
+    async def test_a_directory_now_holding_another_recording_is_not_resumed(self, tmp_path):
+        """Interrupted because its directory went; the directory came back
+        with a recording started since. Resumed, it wrote into that one's
+        file and took the simulator (live)."""
+        first = Sources().manager(FakeVideo())
+        old = await first.start(SIM, str(tmp_path / "r"), Filters(video=True))
+        await first.shutdown()
+        shutil.rmtree(tmp_path / "r")
+        second = Sources().manager(FakeVideo())
+        await second.resume_all()                       # gone: interrupted
+        new = await second.start(SIM, str(tmp_path / "r"), Filters(video=True))
+        await second.shutdown()
+        third = Sources().manager(FakeVideo())
+        assert await third.resume_all() == [new.id]
+        assert third.get(old.id).state == "interrupted"
+        assert f"now holds recording {new.id}" in third.get(old.id).error
+        await third.get(new.id)._resuming
+        assert third.get(new.id)._segment is not None, "the new one films"
+        before = (tmp_path / "r" / "events.jsonl").read_text()
+        await third.stop(old.id)
+        assert (tmp_path / "r" / "events.jsonl").read_text() == before
+        assert third.get(old.id).complete is False
+        await third.stop(new.id)
+        assert {e.get("recording") for e in _events(tmp_path / "r")
+                if e["type"] == "started"} == {new.id}
 
     async def test_a_movie_left_unfinished_and_not_running_is_lost(self, tmp_path):
         first = Sources().manager(FakeVideo())

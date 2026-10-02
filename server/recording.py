@@ -326,6 +326,8 @@ class _Tally:
     last_segment: int = 0
     #: Segments started and never stopped: path -> the `video_started` line.
     open_video: dict[str, dict] = field(default_factory=dict)
+    #: The recording the file's `started` line names: whose file it is.
+    recording_id: str | None = None
 
 
 def _tally(events: Path) -> _Tally:
@@ -339,6 +341,7 @@ def _tally(events: Path) -> _Tally:
     open_video: dict[str, dict] = {}
     last_segment = 0
     last_at = None
+    recording_id = None
     with open(events, "rb") as f:
         for raw in f:
             try:
@@ -348,6 +351,8 @@ def _tally(events: Path) -> _Tally:
             except (ValueError, KeyError, TypeError):
                 continue          # a torn line from a crash mid-write
             last_at = at
+            if kind == "started" and recording_id is None:
+                recording_id = event.get("recording")
             if kind in counts:
                 counts[kind] += 1
             elif kind == "dropped" and event.get("what"):
@@ -365,7 +370,8 @@ def _tally(events: Path) -> _Tally:
                     video.append({k: v for k, v in event.items()
                                   if k not in ("type", "at", "monotonic")})
     return _Tally(counts=counts, dropped=dropped, gaps=gaps, last_at=last_at, video=video,
-                  last_segment=last_segment, open_video=open_video)
+                  last_segment=last_segment, open_video=open_video,
+                  recording_id=recording_id)
 
 
 class RecordingManager:
@@ -738,6 +744,18 @@ class RecordingManager:
             # with zero counts once its directory came back (review), and the
             # file had no hole for the downtime -- a false all-clear.
             last_at = None
+            theirs = False
+            if rec.events.is_file():
+                with contextlib.suppress(OSError):
+                    theirs = (await asyncio.to_thread(_tally, rec.events)).recording_id \
+                        not in (None, rec.id)
+            if theirs:
+                # Not its file any more: stopping it must not write there.
+                rec.state, rec.stopped_at = "stopped", _now()
+                rec.gaps.append({"from": None, "to": _now().isoformat(),
+                                 "reason": f"not recording: {rec.error}"})
+                await self._save()
+                return rec
             if rec.events.is_file():
                 with contextlib.suppress(OSError):
                     tally = await asyncio.to_thread(_tally, rec.events)
@@ -925,6 +943,15 @@ class RecordingManager:
                 continue
             try:
                 tally = await asyncio.to_thread(_tally, rec.events)
+                if tally.recording_id not in (None, rec.id):
+                    # Its directory went, and came back holding a recording
+                    # started since. Resumed, it appended into that one's
+                    # file and took its simulator's screen (live).
+                    rec.state = "interrupted"
+                    rec.error = (f"{rec.events} now holds recording {tally.recording_id}, "
+                                 f"not this one: it will not be resumed into it")
+                    logger.error("Recording %s cannot resume: %s", rec.id, rec.error)
+                    continue
                 rec.counts, rec.dropped, rec.gaps = tally.counts, tally.dropped, tally.gaps
                 rec.video_segments = tally.video
                 rec._segment_number = tally.last_segment
