@@ -247,6 +247,9 @@ class Recording:
             "stopped_at": self.stopped_at.isoformat() if self.stopped_at else None,
             "counts": dict(self.counts), "dropped": dict(self.dropped),
             "gaps": list(self.gaps), "complete": self.complete,
+            # Said apart from `complete`, so a reader told it is incomplete
+            # can tell lost video from lost events (CodeRabbit).
+            "video_lost": self.video_lost,
             "filters": self.filters.as_dict(), "warnings": list(self.warnings),
         }
 

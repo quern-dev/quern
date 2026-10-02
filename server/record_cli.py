@@ -121,9 +121,16 @@ def main(argv: list[str]) -> int:
             return 3
         if args.require_complete and answer.get("complete") is not True:
             lost = {k: v for k, v in (answer.get("dropped") or {}).items() if v}
+            # The video's own reasons, when it is part of why: otherwise a
+            # run that lost only its movie read "dropped nothing, 0 gaps"
+            # and named no cause at all (CodeRabbit).
+            video = ""
+            if answer.get("video_lost"):
+                why = [w for w in answer.get("warnings") or [] if w.startswith("video")]
+                video = f"; video lost: {'; '.join(why) or 'no movie was recorded'}"
             print(f"quern record stop: {answer['id']} is not complete (state "
                   f"{answer.get('state')}, dropped {lost or 'nothing'}, "
-                  f"{len(answer.get('gaps') or [])} gap(s))", file=sys.stderr)
+                  f"{len(answer.get('gaps') or [])} gap(s){video})", file=sys.stderr)
             return 3
         return 0
     print(json.dumps(answer, indent=2))

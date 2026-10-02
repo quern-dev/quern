@@ -39,7 +39,7 @@ By default only work positively identified as this device's is recorded; include
   });
 
   server.registerTool("stop_recording", {
-    description: `Stop a recording started with start_recording: writes what is still queued, a final "stopped" line and the manifest. Returns counts by kind, what was dropped, the gaps, and "complete" -- true only when nothing was dropped, quern never stopped during it, and any video asked for was recorded and finished in full (a lost or unjoinable movie is in "warnings").`,
+    description: `Stop a recording started with start_recording: writes what is still queued, a final "stopped" line and the manifest. Returns counts by kind, what was dropped, the gaps, and "complete" -- true only when nothing was dropped, quern never stopped during it, and any video asked for was recorded and finished in full ("video_lost" says when a movie is why, and "warnings" which one).`,
     inputSchema: strictParams({
       recording_id: z.string().describe("The id start_recording returned"),
     }),
