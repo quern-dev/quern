@@ -809,6 +809,8 @@ on the same emulator, with no change to quern or the AVD -- to within the last
 printed digit (-58.464019 arrived as -58.464018), which the test now allows.
 So the stuck feed is real but transient, cause still unknown. Open, no issue.
 
+the outcome rather than the request. Open, no issue yet.
+
 ## F27 — the Pixel 3 XL's scroll failures were mostly this suite's own
 
 `ProbeDriver.swipe_down` sized the swipe from an `Application`/`Window`
@@ -849,3 +851,38 @@ Fixed in the app, which now reads the status at load. The tests now fail
 instead of skipping, because the fixture requires the grant to succeed and
 an app that still reports no permission is the defect. A skip that names the
 failure it hides is still a skip, and nobody read it.
+
+## F30 — through WDA, the Scroll tab takes longer to read than the default allows
+
+Measured on an iOS 18.6 simulator after `start_driver`: `/source` for the
+200-row table takes 10.5s and returns 1,027 elements, against a 10s default.
+Quern reports the partial fallback honestly (`source_timed_out`, `degraded`),
+but every identifier on that screen is then missing. The driver now asks for
+30s. Not a bug; recorded because a physical device will be slower still.
+
+## F31 — `get_element` had no `source_timeout` → fixed here
+
+The one read endpoint without it, so on a screen like the above it could only
+answer from the fallback, and a present element came back 404. Added to the
+route, the controller and the MCP tool.
+
+## F32 — through WDA, `tap_element` taps an element that is off screen and reports success
+
+WDA reports every cell of a table, not only the visible ones: with the list at
+the top, `row_199` comes back at y=8856 on an 874-point screen. `tap_element`
+then taps at the element's coordinates: `row_40` returned `{"status": "ok"}`
+with a tap point of y=1882.5, and the list did not move -- `rows 0-17` before
+and after. On the accessibility tree the same request is a 404, because
+off-screen rows are not in it. Through WDA -- that is, on every physical
+iPhone -- a tap that landed on nothing reads as a tap that worked. It also
+means `get_element` finding an element no longer implies it is visible. Open,
+no issue yet; it wants a decision between scrolling the element into view and
+refusing.
+
+## F33 — through WDA, clearing one field also clears another
+
+`test_clearing_names_the_field_it_was_told_to[ios]`: after typing into
+`field_default` and clearing `field_email`, `field_default` held its own
+placeholder text rather than `keep-me`. Passes on the accessibility tree.
+Seen in two WDA runs; not yet investigated.
+

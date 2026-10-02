@@ -155,6 +155,11 @@ class ProbeContract:
     #: the live app by `test_landmarks.py`, so it is also a worked example of
     #: what a portable knowledge base looks like for each platform.
     screens: dict[str, dict] = field(default_factory=dict)
+    #: Screen name -> an identifier only that screen's content carries, which
+    #: `goto` waits for. Not the landmarks: a bar tab's landmark identifier is
+    #: its tab item, on screen from every tab. Empty where the wait is not
+    #: needed (Android, whose pages are all in the tree at once anyway).
+    screen_ready: dict[str, str] = field(default_factory=dict)
 
     def id_for(self, logical: str) -> str | None:
         return self.ids.get(logical)
@@ -230,6 +235,13 @@ IOS = ProbeContract(
         Ids.STATE_RESET: "state_reset",
     },
     tab_identifier="tab_{name}",
+    screen_ready={
+        "text": "field_default", "controls": "control_switch",
+        "scroll": "scroll_to_top", "links": "link_count", "logs": "log_start",
+        "location": "location_auth", "web": "web_heading_native",
+        "diag": "diag_crash_uncaught", "state": "state_counter",
+        "widgets": "widget_nav_done", "lists": "lists_table",
+    },
     row_identifier_template="row_{index}",
     row_label_template="Row {index}",
     ready_identifier="tab_text",
@@ -655,6 +667,33 @@ class ProbeDriver:
     # -- navigation --------------------------------------------------------
 
     def goto(self, tab: str) -> None:
+        """Select a tab, then wait until that screen is actually the one read.
+
+        The wait is what makes this work through WDA: a fixed pause after the
+        tap was enough for the accessibility tree, but WDA's view of a large
+        screen lags the tap -- 1.2s after selecting Scroll it still served 79
+        elements of the previous screen, and the next tap found nothing.
+        """
+        self._navigate(tab)
+        self._wait_for_screen(tab.lower())
+
+    def _wait_for_screen(self, name: str, timeout_s: float = 30.0) -> None:
+        """Poll for an identifier only that screen's content carries."""
+        import time
+
+        identifier = self.contract.screen_ready.get(name)
+        if identifier is None:
+            return
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self.element(identifier) is not None:
+                return
+            time.sleep(0.5)
+        raise AssertionError(
+            f"went to {name!r} but {identifier!r} did not appear within {timeout_s:.0f}s"
+        )
+
+    def _navigate(self, tab: str) -> None:
         """Select a tab by name, on either platform.
 
         The iOS path is the awkward one, and the awkwardness is iOS's, not
