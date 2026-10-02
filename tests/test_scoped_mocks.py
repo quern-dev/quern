@@ -208,9 +208,12 @@ class TestAMockedRequestIsRecordedOnce:
             a.response(flow)
         assert "mock_rule_id" not in out.lines[0]
 
-    def test_a_non_dict_metadata_is_no_marker(self):
+    @pytest.mark.parametrize("metadata", [MagicMock(), None, "x"])
+    def test_a_non_dict_metadata_is_no_marker(self, metadata):
+        """None too: reading it unchecked raised inside the response hook,
+        which would lose the flow's record altogether."""
         flow = _flow()
-        flow.metadata = MagicMock()
+        flow.metadata = metadata
         assert addon_mod._mock_marker(flow) is None
 
 
