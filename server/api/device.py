@@ -1180,11 +1180,14 @@ async def _start_device_logging(
         "adapter_id": adapter.adapter_id,
         "preset_applied": preset_applied,
         "purged": purged,
-        # json: lines carry the os_log subsystem. text: only the library, and
-        # subsystem rules -- device-quiet's com.apple.* -- match nothing.
-        "format": adapter.output_format,
     }
-    if adapter.output_format == "text":
+    # iOS only -- the same path starts Android's logcat, which has one form.
+    # json: lines carry the os_log subsystem. text: only the library, and
+    # subsystem rules -- device-quiet's com.apple.* -- match nothing.
+    output_format = getattr(adapter, "output_format", None)
+    if output_format is not None:
+        result["format"] = output_format
+    if output_format == "text":
         result["warnings"] = [TEXT_MODE_WARNING]
     return result
 
