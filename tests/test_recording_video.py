@@ -137,10 +137,12 @@ class TestTheRecorder:
         assert (await recorder.stop(seg))["start_host_time"] is None
 
     async def test_a_process_that_exits_at_once_is_a_start_failure(self, tmp_path):
-        process = FakeProcess(["error: no booted simulator SIM-V"], exits_at_once=2)
+        process = FakeProcess(["error: no booted simulator SIM-V", "", "USAGE", "  a", "  b",
+                               "  c", "  d", "  e"], exits_at_once=2)
         recorder, _ = self._recorder(process)
-        with pytest.raises(VideoError, match="exited \\(2\\).*no booted simulator"):
+        with pytest.raises(VideoError, match="exited \\(2\\).*no booted simulator") as e:
             await recorder.start(SIM, tmp_path / "video-1.mp4")
+        assert "USAGE" not in str(e.value), "the error, not the usage printed after it"
 
     async def test_a_simulator_not_booted_is_a_start_failure(self, tmp_path):
         """quern-media binds its port before it finds the simulator is not
@@ -344,6 +346,7 @@ class FakeVideo:
 
     async def start(self, udid, path):
         if self.fail_start:
+            path.with_suffix(".log").write_text("error: no booted simulator\n")
             raise VideoError("no booted simulator")
         self.started.append(path)
         await asyncio.sleep(0)
@@ -542,7 +545,7 @@ class TestTheManager:
         manager = Sources().manager(FakeVideo(fail_start=True))
         with pytest.raises(RecordingError):
             await manager.start(SIM, str(tmp_path / "r"), Filters(video=True))
-        assert list((tmp_path / "r").iterdir()) == []
+        assert list((tmp_path / "r").iterdir()) == []      # its log too
         manager._video = FakeVideo()
         rec = await manager.start(SIM, str(tmp_path / "r"), Filters(video=True))
         await manager.stop(rec.id)

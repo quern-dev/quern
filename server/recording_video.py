@@ -86,7 +86,11 @@ def _lines(log: Path) -> list[str]:
 
 
 def _tail(lines: list[str]) -> str:
-    return " / ".join(lines[-5:]) or "no output"
+    """What to quote of quern-media's output: its `error:` lines when it
+    wrote any -- a failure prints its usage after the error, and the last
+    lines alone quoted the usage and not why (live) -- else its last lines."""
+    errors = [x.strip() for x in lines if x.lstrip().startswith("error:")]
+    return " / ".join(errors[-3:] or lines[-5:]) or "no output"
 
 
 def summary(movie: Path) -> dict:

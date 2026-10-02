@@ -267,8 +267,9 @@ async def _settled(task: asyncio.Task | None) -> None:
 
 def _unbegin(rec: Recording) -> None:
     """Remove the files a refused start wrote: its directory is the
-    caller's, and a retry into it must not find a recording there."""
-    for path in (rec.events, rec.manifest):
+    caller's, and a retry into it must not find a recording there. The
+    refusal already carries what quern-media's log said."""
+    for path in (rec.events, rec.manifest, rec.dir / "video-1.log"):
         with contextlib.suppress(OSError):
             path.unlink()
 
