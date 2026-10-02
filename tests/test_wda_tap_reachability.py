@@ -224,3 +224,25 @@ class TestWdaNotSetUpReachesTheCaller:
             )
         assert r.status_code == 400, r.text
         assert "setup_wda" in r.text
+
+
+async def test_clear_text_hands_the_backend_the_fields_identifier():
+    """The backend can only clear the right field if it is told which one."""
+    ctrl = DeviceController()
+    ctrl.resolve_udid = AsyncMock(return_value="PHONE")
+    ctrl._warn_if_input_is_suppressed = AsyncMock()
+    ctrl._is_android = lambda udid: False
+    fields = [
+        UIElement(type="TextField", identifier="field_default",
+                  frame={"x": 0, "y": 100, "width": 100, "height": 40}),
+        UIElement(type="TextField", identifier="field_email",
+                  frame={"x": 0, "y": 200, "width": 100, "height": 40}),
+    ]
+    ctrl.get_ui_elements = AsyncMock(return_value=(fields, "PHONE"))
+    backend = MagicMock()
+    backend.select_all_and_delete = AsyncMock()
+    ctrl._ui_backend = lambda udid: backend
+    await ctrl.clear_text(identifier="field_email", udid="PHONE")
+    kwargs = backend.select_all_and_delete.call_args.kwargs
+    assert kwargs["identifier"] == "field_email"
+    assert (kwargs["x"], kwargs["y"]) == (50, 220)
