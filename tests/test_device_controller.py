@@ -1191,6 +1191,10 @@ class TestGetUIElementsWdaDispatch:
 
         cached_elements = parse_elements(_FAKE_IDB_OUTPUT)
         ctrl._ui_cache["PHYS-0001"] = (cached_elements, time.time())
+        # The on_screen marking's viewport lookup is its own concern
+        # (tests/test_wda_tap_reachability.py); stubbed so this test still
+        # measures only which path the read took.
+        ctrl._wda_viewport = AsyncMock(return_value=None)
 
         ctrl.wda_client.find_elements_by_query = AsyncMock()
         ctrl.wda_client.describe_all = AsyncMock()
