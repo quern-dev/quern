@@ -472,6 +472,17 @@ There are two common beta flavors:
 **(a) Tagged prerelease** — when you want a citable beta version that tarball
 users can install:
 
+**The version files carry the prerelease too**: `pyproject.toml`,
+`mcp/package.json` and both entries in `mcp/package-lock.json` say
+`N.M.K-beta.X`, spelled exactly like the tag without its `v`. A tarball install
+reads its own version from `pyproject.toml` and compares it with the tag the
+channel offers, so a beta whose files say plain `N.M.K` is stranded: the next
+beta compares *older* (`N.M.K-beta.2` < `N.M.K`) and is refused as a downgrade,
+and the stable `N.M.K` compares equal and reads as already up to date. 0.14.1
+and 0.15.0's betas were versioned this way; 0.18.1-beta.1 was not, and
+0.24.0-beta.1 copied it and was pulled minutes after publishing. The stable
+release then bumps the files to plain `N.M.K` as usual.
+
 ```sh
 # Tag on the commit you want beta users to land on (usually main HEAD).
 git tag -a vN.M.K-beta.X -m "vN.M.K beta X"
