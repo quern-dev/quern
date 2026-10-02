@@ -323,12 +323,12 @@ holds in `flow_store`. `flows_captured` is only what survived.
 | MCP Tool | Method | Path | Description |
 |---|---|---|---|
 | `get_ui_tree` | GET | `/api/v1/device/ui` | Accessibility tree |
-| `get_element_state` | GET | `/api/v1/device/ui/element` | Query specific element state |
+| `get_element_state` | GET | `/api/v1/device/ui/element` | Query specific element state. Takes `snapshot_depth` and `source_timeout`; elements read through WDA carry `on_screen` |
 | `wait_for_element` | POST | `/api/v1/device/ui/wait-for-element` | Poll until element appears |
 | `get_screen_summary` | GET | `/api/v1/device/screen-summary` | LLM-optimized screen description |
 | `tap` | POST | `/api/v1/device/ui/tap` | Tap at coordinates |
 | `restore_simulator_input` | POST | `/api/v1/device/ui/restore-input` | Take a simulator's touch, button and keyboard services back from Xcode 27's Device Hub. Restarts SpringBoard, so running apps are killed |
-| `tap_element` | POST | `/api/v1/device/ui/tap-element` | Tap element by label/identifier. With `scroll_to_find` (the default) this can sweep for a long time; a client that disconnects abandons it rather than leaving it running. The request is closed **499** server-side, which a caller that has hung up does not receive — the observable effect is that the device stops being driven |
+| `tap_element` | POST | `/api/v1/device/ui/tap-element` | Tap element by label/identifier. Through WDA it taps only an element that is on screen and hittable, and a not-found lists the unreachable matches; `snapshot_depth` (WDA default 12) sets how deep the read goes, and a physical iPhone without `setup_wda` is a 400. With `scroll_to_find` (the default) this can sweep for a long time; a client that disconnects abandons it rather than leaving it running. The request is closed **499** server-side, which a caller that has hung up does not receive — the observable effect is that the device stops being driven |
 | `swipe` | POST | `/api/v1/device/ui/swipe` | Swipe gesture |
 | `scroll_to_element` | POST | `/api/v1/device/ui/scroll-to-element` | Scroll a container until the target is in view, without tapping it. On iOS, bounded by a wall-clock deadline as well as `max_swipes`. A client that disconnects abandons the sweep instead of leaving it driving the device. The request is closed **499** server-side; a caller that has hung up does not receive it, so the observable effect is that the device is released |
 | `get_web_content` | POST | `/api/v1/device/ui/web-content` | Read WKWebView content the accessibility tree cannot see (iOS simulator only) |

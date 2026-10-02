@@ -315,6 +315,9 @@ Physical iOS devices are supported for screenshots, UI automation, log capture, 
 - `grant_permission` — simulators only
 - `start_device_logging` / `stop_device_logging` — on-demand log capture for physical devices (vs `start_simulator_logging` for simulators). Captures os_log and Logger output only — `print()` writes to stdout and is not captured. Both support `preset` parameter to apply ingestion filters at start time
 - `get_latest_crash` with a `udid` parameter — pulls crash reports directly from the physical device
+- `tap_element` taps only an element a tap can reach: its centre on screen and XCUITest reporting it hittable. Elements read through WDA carry `on_screen`. When every match is unreachable the not-found response lists them and why — scroll the element into view (`scroll_to_element`) rather than retrying the tap
+- Reads made for `tap_element`, `get_element`, `wait_for_element` and `scroll_to_element` go through WDA at depth 12, which keeps long lists fast (measured: 3.9s instead of 34.5s on a 200-row list). Pass `snapshot_depth` when the element sits deeper; a miss reports the depth it used
+- A physical iPhone that has never had `setup_wda` is a **400 naming `setup_wda`**, not a failure to retry: run setup first
 - `preview_device` — opens a live macOS video preview window of the device screen: CoreMediaIO for USB-connected physical devices, and quern-media's MJPEG stream for booted simulators. Each device is independently controlled — add and remove individual previews without affecting others. Use `stop_preview` with a UDID to close one device, or without to close all. `preview_status` shows per-device breakdown and available devices
 
 ---
@@ -344,6 +347,8 @@ Open real-time video windows to see what's happening on USB-connected physical d
 3. After each step, call `get_screen_summary` to verify the expected state before continuing — this catches where the reproduction diverges from expectations
 4. Check logs and network flows alongside UI state to build the full picture
 5. If the bug reproduces, capture a diagnostic bundle: screenshot, logs, network flows, and UI tree
+
+**To keep the whole run**, call `start_recording(udid=...)` before step 1 and `stop_recording` after. Quern's buffers are bounded and shared, so a long run outlives them; a recording writes the device's actions, full network flows (including requests that never finished) and app logs to disk, and on a simulator `video=true` films the screen too. Read it back as a timeline with `get_trace(recording=<id>)`, where each action carries the flows and logs it caused, or page through it with `get_recording`.
 
 **Key insight**: Verify state at each step. The step where expected and actual diverge is where the bug lives.
 
