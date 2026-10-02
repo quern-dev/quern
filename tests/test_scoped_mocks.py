@@ -158,6 +158,18 @@ class TestAScopedRule:
             _run(a, flow)
         assert flow.response is None and _mocked_by(flow) is None
 
+    def test_an_uncached_simulator_never_matches_even_a_scope_spelt_like_one(self):
+        """The addon takes its scope from a command and does not validate it,
+        so the placeholder for "a simulator, UDID not cached yet" must not be
+        able to match a rule whose scope happens to read the same."""
+        a = _addon(("odd", addon_mod.UNKNOWN_SIMULATOR))
+        flow = _flow("alpha")
+        with patch.dict(addon_mod._client_process_info, {"alpha": {"pid": 7}}), \
+             patch.object(addon_mod, "_simulator_instance_for_pid",
+                          return_value=(addon_mod.UNKNOWN_SIMULATOR, 50)):
+            _run(a, flow)
+        assert _mocked_by(flow) is None
+
     def test_a_lookup_still_running_is_not_waited_for(self):
         """The system proxy's socket lookup may still be running when the
         request arrives. Waiting blocked mitmproxy's event loop for up to 0.5s
