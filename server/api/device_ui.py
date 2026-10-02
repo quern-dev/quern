@@ -74,7 +74,7 @@ async def get_ui_elements(
     snapshot_depth: int | None = Query(
         default=None, ge=1, le=50,
         description=(
-            "WDA accessibility tree depth (1-50, default 10). "
+            "WDA accessibility tree depth (1-50, default 25). "
             "Only affects physical devices."
         ),
     ),
@@ -185,6 +185,20 @@ async def get_element(
     identifier: str | None = Query(default=None),
     element_type: str | None = Query(default=None, alias="type"),
     udid: str | None = Query(default=None),
+    source_timeout: float | None = Query(
+        default=None, ge=1, le=60,
+        description=(
+            "Override the WDA /source timeout in seconds, for reads through WDA "
+            "(a physical device, or a simulator after start_driver)."
+        ),
+    ),
+    snapshot_depth: int | None = Query(
+        default=None, ge=1, le=50,
+        description=(
+            "WDA snapshot depth for this read. Default 12 through WDA; pass more "
+            "if the element is nested deeper."
+        ),
+    ),
 ):
     """Get a single element's state without fetching the entire UI tree.
 
@@ -195,6 +209,11 @@ async def get_element(
     - identifier: Element identifier (case-sensitive)
     - type: Element type to narrow results (optional)
     - udid: Device UDID (auto-resolves if omitted)
+    - source_timeout: WDA /source timeout. It was missing here alone among the
+      read endpoints, so on a screen whose tree takes longer than the default
+      to serialise -- a 200-row table took 10.5s through WDA on a simulator --
+      this could only ever answer from the partial fallback, and a present
+      element came back 404 (F31).
 
     Only one of label, label_contains, or label_prefix may be provided.
 
@@ -218,6 +237,8 @@ async def get_element(
             identifier=identifier,
             element_type=element_type,
             udid=udid,
+            source_timeout=source_timeout,
+            snapshot_depth=snapshot_depth,
         )
         return {"element": element, "udid": resolved_udid}
     except DeviceError as e:
@@ -274,6 +295,7 @@ async def wait_for_element(request: Request, body: WaitForElementRequest):
                 interval=body.interval,
                 udid=body.udid,
                 mode=body.mode,
+                snapshot_depth=body.snapshot_depth,
             )
             result["udid"] = resolved_udid
             # A read happened, so say which backend did it. This route's own
@@ -302,7 +324,7 @@ async def get_screen_summary(
     snapshot_depth: int | None = Query(
         default=None, ge=1, le=50,
         description=(
-            "WDA accessibility tree depth (1-50, default 10). "
+            "WDA accessibility tree depth (1-50, default 25). "
             "Only affects physical devices."
         ),
     ),
@@ -334,7 +356,7 @@ async def get_screen_summary(
     Query params:
     - max_elements: Maximum interactive elements to include (0 = unlimited, default 20)
     - udid: Device UDID (auto-resolves if omitted)
-    - snapshot_depth: WDA accessibility tree depth (1-50, default 10).
+    - snapshot_depth: WDA accessibility tree depth (1-50, default 25).
       Only affects physical devices.
     - strategy: 'skeleton' to skip /source timeout on complex screens (physical devices only)
     - source_timeout: Override WDA /source timeout in seconds (1-60). Physical devices only.
@@ -478,6 +500,7 @@ async def tap_element(request: Request, body: TapElementRequest):
                     source_timeout=body.source_timeout,
                     value=body.value,
                     scroll_to_find=body.scroll_to_find,
+                    snapshot_depth=body.snapshot_depth,
                 ),
                 what="tap_element",
             )
@@ -683,6 +706,7 @@ async def scroll_to_element(request: Request, body: ScrollToElementRequest):
                 identifier=body.identifier,
                 udid=body.udid,
                 max_swipes=body.max_swipes,
+                snapshot_depth=body.snapshot_depth,
             ),
             what="scroll_to_element",
         )

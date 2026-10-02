@@ -416,7 +416,7 @@ def bypass_sandbox(quern: client_mod.QuernClient, proxy_running: dict):
 
 def _install_and_launch(
     client: client_mod.QuernClient, udid: str, artifact, contract,
-    bundle_id: str = probe_mod.BUNDLE_ID,
+    bundle_id: str = probe_mod.BUNDLE_ID, physical: bool = False,
 ):
     """Install the built artifact and bring the app to the foreground."""
     client.json_ok(
@@ -425,26 +425,35 @@ def _install_and_launch(
     )
     # Before the first launch, because an install resets permissions and the
     # Location tab otherwise raises its prompt -- over every test that visits
-    # it, on a fresh device. Required: a refused grant would otherwise surface
-    # as the Location tests skipping on a denied `location_auth`, which reads
-    # as a device limit rather than the failure it is.
-    client.json_ok(
-        "POST", "/api/v1/device/permission",
-        json={"udid": udid, "bundle_id": bundle_id, "permission": "location"},
-        timeout=60.0,
-    )
+    # it, on a fresh device. Required wherever quern can grant one: a refused
+    # grant would otherwise surface as the Location tests failing on
+    # `location_auth`, far from the cause. A physical iPhone is the exception
+    # -- quern grants permissions on simulators only, and `goto` accepts the
+    # prompt there instead -- so it is checked to refuse, not to succeed.
+    grant = {"udid": udid, "bundle_id": bundle_id, "permission": "location"}
+    if physical and contract is probe_mod.IOS:
+        resp = client.post("/api/v1/device/permission", json=grant, timeout=60.0)
+        assert resp.status_code == 400, f"{resp.status_code}: {resp.text[:300]}"
+    else:
+        client.json_ok("POST", "/api/v1/device/permission", json=grant, timeout=60.0)
     client.json_ok(
         "POST", "/api/v1/device/app/launch",
         json={"udid": udid, "bundle_id": bundle_id}, timeout=180.0,
     )
     driver = probe_mod.ProbeDriver(client, udid, contract, bundle_id)
+    driver.physical = physical
     driver.wait_until_ready()
     return driver
 
 
 @pytest.fixture(scope="session")
-def ios_probe(quern: client_mod.QuernClient, ios_simulator: Device):
-    """QuernProbe built, installed and running on an iOS simulator.
+def ios_probe(quern: client_mod.QuernClient, any_ios: Device):
+    """QuernProbe built, installed and running on an iOS simulator or iPhone.
+
+    Takes `any_ios`, which prefers a simulator, so a run reaches a physical
+    device only when it is the one on offer -- pin it with
+    QUERN_CONFORMANCE_DEVICES. The same tests then run against WDA, which is
+    how a physical device is read: the point of running them there.
 
     Session-scoped: the build is the expensive part and the app is stateless
     between tests in every way this suite depends on. Tests that need a
@@ -452,25 +461,30 @@ def ios_probe(quern: client_mod.QuernClient, ios_simulator: Device):
     one left it -- ordering assumptions between tests are how a suite becomes
     unable to run a single test on its own.
     """
-    if not ios_simulator.booted:
+    physical = any_ios.device_type == "device"
+    if not physical and not any_ios.booted:
         quern.json_ok(
             "POST", "/api/v1/device/boot",
-            json={"udid": ios_simulator.udid}, timeout=300.0,
+            json={"udid": any_ios.udid}, timeout=300.0,
         )
 
     # iOS 27 will not launch a bundle without a scene manifest, and reports the
     # launch as successful anyway (#235), so the fixture has to choose before it
     # builds rather than fail afterwards. Below 27 the app-delegate build stays
     # the one under test: it is the older shape, and it is covered nowhere else.
-    scene = probe_mod.scene_lifecycle_required(ios_simulator.os_version)
+    scene = probe_mod.scene_lifecycle_required(any_ios.os_version)
     try:
-        bundle = probe_mod.build_ios(scene=scene)
+        bundle = probe_mod.build_ios(
+            scene=scene,
+            device_udid=probe_mod.hardware_udid(any_ios.udid) if physical else None,
+        )
     except probe_mod.ProbeUnavailable as exc:
         pytest.skip(f"iOS probe app unavailable: {exc}")
 
     return _install_and_launch(
-        quern, ios_simulator.udid, bundle, probe_mod.IOS,
+        quern, any_ios.udid, bundle, probe_mod.IOS,
         probe_mod.SCENE_BUNDLE_ID if scene else probe_mod.BUNDLE_ID,
+        physical=physical,
     )
 
 
@@ -488,7 +502,10 @@ def android_probe(quern: client_mod.QuernClient, any_android: Device):
     except probe_mod.ProbeUnavailable as exc:
         pytest.skip(f"Android probe app unavailable: {exc}")
 
-    return _install_and_launch(quern, any_android.udid, apk, probe_mod.ANDROID)
+    return _install_and_launch(
+        quern, any_android.udid, apk, probe_mod.ANDROID,
+        physical=any_android.device_type == "android_device",
+    )
 
 
 @pytest.fixture

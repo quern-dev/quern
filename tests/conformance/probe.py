@@ -155,6 +155,11 @@ class ProbeContract:
     #: the live app by `test_landmarks.py`, so it is also a worked example of
     #: what a portable knowledge base looks like for each platform.
     screens: dict[str, dict] = field(default_factory=dict)
+    #: Screen name -> an identifier only that screen's content carries, which
+    #: `goto` waits for. Not the landmarks: a bar tab's landmark identifier is
+    #: its tab item, on screen from every tab. Empty where the wait is not
+    #: needed (Android, whose pages are all in the tree at once anyway).
+    screen_ready: dict[str, str] = field(default_factory=dict)
 
     def id_for(self, logical: str) -> str | None:
         return self.ids.get(logical)
@@ -230,6 +235,13 @@ IOS = ProbeContract(
         Ids.STATE_RESET: "state_reset",
     },
     tab_identifier="tab_{name}",
+    screen_ready={
+        "text": "field_default", "controls": "control_switch",
+        "scroll": "scroll_to_top", "links": "link_count", "logs": "log_start",
+        "location": "location_auth", "web": "web_heading_native",
+        "diag": "diag_crash_uncaught", "state": "state_counter",
+        "widgets": "widget_nav_done", "lists": "lists_table",
+    },
     row_identifier_template="row_{index}",
     row_label_template="Row {index}",
     ready_identifier="tab_text",
@@ -392,13 +404,18 @@ class ProbeUnavailable(RuntimeError):
     """The fixture app could not be built or installed, with the reason."""
 
 
-def build_ios(*, scene: bool = False, timeout: float = 600.0) -> Path:
+def build_ios(
+    *, scene: bool = False, device_udid: str | None = None, timeout: float = 600.0,
+) -> Path:
     """Build the iOS probe app and return the bundle path.
 
     `scene` builds the scene-lifecycle variant instead. The two are the same
     sources under two Info.plists, so which one a test runs against changes the
     lifecycle and nothing the contract names -- see `scene_lifecycle_required`
     for when the choice is forced.
+
+    `device_udid` builds for that physical device, signed with a development
+    profile that lists it (`find-profile.py` says what to do when none does).
 
     Raises `ProbeUnavailable` rather than failing a test directly, so the caller
     decides between skip and fail. A missing Xcode is a skip; a build that breaks
@@ -412,7 +429,11 @@ def build_ios(*, scene: bool = False, timeout: float = 600.0) -> Path:
 
     try:
         result = subprocess.run(  # noqa: S603 - fixed path in this repo
-            [str(script), *(["--scene"] if scene else [])],
+            [
+                str(script),
+                *(["--scene"] if scene else []),
+                *(["--device", device_udid] if device_udid else []),
+            ],
             cwd=str(IOS.source_dir),
             capture_output=True,
             text=True,
@@ -425,13 +446,51 @@ def build_ios(*, scene: bool = False, timeout: float = 600.0) -> Path:
         ) from exc
 
     name = "QuernProbeScene.app" if scene else "QuernProbe.app"
-    bundle = IOS.source_dir / "build" / name
+    # Device bundles are kept apart from simulator ones by build.sh.
+    bundle = IOS.source_dir / "build" / ("device" if device_udid else "") / name
     if result.returncode != 0 or not bundle.exists():
         raise ProbeUnavailable(
             f"probe-app build failed (exit {result.returncode}):\n"
             f"{result.stdout[-1500:]}\n{result.stderr[-1500:]}"
         )
     return bundle
+
+
+def hardware_udid(device_id: str) -> str:
+    """The hardware UDID for a device quern names by its CoreDevice identifier.
+
+    Quern lists a physical iPhone by CoreDevice id (`B34C4EE9-…`); a
+    provisioning profile lists hardware UDIDs (`00008030-…`), so signing for
+    the device needs the second. `devicectl` reports both.
+    """
+    import json
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".json") as out:
+        try:
+            result = subprocess.run(  # noqa: S603 - fixed tool
+                ["xcrun", "devicectl", "list", "devices", "--json-output", out.name],
+                capture_output=True, text=True, timeout=60, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ProbeUnavailable(f"devicectl could not run: {exc}") from exc
+        if result.returncode != 0:
+            raise ProbeUnavailable(f"devicectl could not list devices: {result.stderr[-500:]}")
+        # Exit 0 is not a usable answer on its own: an empty or reshaped file
+        # would otherwise escape as a traceback rather than the fixture's skip.
+        try:
+            devices = json.loads(Path(out.name).read_text())["result"]["devices"]
+            if not isinstance(devices, list):
+                raise TypeError(f"devices is {type(devices).__name__}")
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ProbeUnavailable(f"devicectl's device list was unreadable: {exc!r}") from exc
+    for device in devices:
+        if not isinstance(device, dict):
+            continue
+        hardware = (device.get("hardwareProperties") or {}).get("udid")
+        if device_id in (device.get("identifier"), hardware) and hardware:
+            return hardware
+    raise ProbeUnavailable(f"devicectl does not know device {device_id}")
 
 
 def build_android(*, timeout: float = 900.0) -> Path:
@@ -486,6 +545,15 @@ class ProbeDriver:
     #: testing scroll-to-find.
     NO_SCROLL = {"scroll_to_find": False}
 
+    #: Seconds a read through WDA may take. The default (10s) is just short of
+    #: what the Scroll tab's 200 rows need on a simulator (10.5s measured), and
+    #: a timed-out read is answered from a partial fallback in which every
+    #: identifier on that screen is missing. Ignored by the accessibility-tree
+    #: backends, so it costs nothing off WDA. The depth matches quern's own
+    #: default for reads made on a caller's behalf: the full tree at 25 took
+    #: 34s on an iPhone 11's Scroll tab, past even this timeout (F35).
+    READ = {"source_timeout": 30, "snapshot_depth": 12}
+
     def __init__(
         self,
         client,
@@ -501,20 +569,24 @@ class ProbeDriver:
         #: *not* running succeeds and leaves the app up, so the reset silently
         #: does nothing and the next test inherits the last one's state.
         self.bundle_id = bundle_id
+        #: A physical device rather than a simulator or emulator. Set by the
+        #: fixture, which knows; tests use it to expect a refusal where a
+        #: feature exists only on simulated hardware.
+        self.physical = False
 
     # -- reading -----------------------------------------------------------
 
     def ui_tree(self, **params) -> dict:
         return self.client.json_ok(
             "GET", "/api/v1/device/ui",
-            params={"udid": self.udid, **params}, timeout=90.0,
+            params={"udid": self.udid, **self.READ, **params}, timeout=90.0,
         )
 
     def element(self, identifier: str) -> dict | None:
         """One element's state, or None when it is not on screen."""
         resp = self.client.get(
             "/api/v1/device/ui/element",
-            params={"udid": self.udid, "identifier": identifier},
+            params={"udid": self.udid, "identifier": identifier, **self.READ},
             timeout=60.0,
         )
         if resp.status_code == 404:
@@ -524,7 +596,14 @@ class ProbeDriver:
                 f"GET /device/ui/element?identifier={identifier} -> "
                 f"{resp.status_code}: {resp.text[:300]}"
             )
-        return (resp.json() or {}).get("element") or None
+        element = (resp.json() or {}).get("element") or None
+        # Through WDA an element can be reported while off screen -- every
+        # cell of a table is -- and says so with `on_screen: false`. This
+        # method has always meant "on screen", which on the accessibility tree
+        # was the same thing as "reported".
+        if element and element.get("on_screen") is False:
+            return None
+        return element
 
     def text_of(self, identifier: str) -> str | None:
         """Visible text, however this element happens to carry it.
@@ -560,14 +639,15 @@ class ProbeDriver:
     def tap(self, identifier: str, **extra):
         return self.client.json_ok(
             "POST", "/api/v1/device/ui/tap-element",
-            json={"udid": self.udid, "identifier": identifier, **self.NO_SCROLL, **extra},
+            json={"udid": self.udid, "identifier": identifier, **self.NO_SCROLL,
+                  **self.READ, **extra},
             timeout=90.0,
         )
 
     def tap_label(self, label: str, **extra):
         return self.client.json_ok(
             "POST", "/api/v1/device/ui/tap-element",
-            json={"udid": self.udid, "label": label, **self.NO_SCROLL, **extra},
+            json={"udid": self.udid, "label": label, **self.NO_SCROLL, **self.READ, **extra},
             timeout=90.0,
         )
 
@@ -598,7 +678,7 @@ class ProbeDriver:
             return self.element(locator["identifier"])
         wanted = locator["label"]
         for element in self.ui_tree().get("elements") or []:
-            if element.get("label") == wanted:
+            if element.get("label") == wanted and element.get("on_screen") is not False:
                 return element
         return None
 
@@ -637,6 +717,77 @@ class ProbeDriver:
     # -- navigation --------------------------------------------------------
 
     def goto(self, tab: str) -> None:
+        """Select a tab, then wait until that screen is actually the one read.
+
+        The wait is what makes this work through WDA: a fixed pause after the
+        tap was enough for the accessibility tree, but WDA's view of a large
+        screen lags the tap -- 1.2s after selecting Scroll it still served 79
+        elements of the previous screen, and the next tap found nothing.
+        """
+        self._dismiss_keyboard()
+        self._navigate(tab)
+        self._accept_permission_prompt()
+        self._wait_for_screen(tab.lower())
+
+    #: The system location prompt's accepting button, in the order tried.
+    _ACCEPT = ("Allow While Using App", "Allow Once")
+
+    def _accept_permission_prompt(self) -> None:
+        """Accept the location prompt if the Location tab raised one.
+
+        On a simulator the fixture grants the permission before launch, so it
+        never appears. A physical iPhone cannot be granted one, and the prompt
+        then sat over the app -- every later test failed to find the tab bar
+        behind it, the same cascade the Dictation prompt caused.
+        """
+        import time
+
+        if self.contract.platform != "ios" or not self.physical:
+            return
+        time.sleep(1.0)  # the prompt arrives a moment after the tab
+        labels = {e.get("label") for e in self.ui_tree().get("elements") or []}
+        for label in self._ACCEPT:
+            if label in labels:
+                self.tap_label(label)
+                time.sleep(1.0)
+                return
+
+    def _dismiss_keyboard(self) -> None:
+        """Put away a software keyboard before tapping the tab bar.
+
+        On a physical iPhone it stays up after typing and covers the tab bar
+        (no hardware keyboard to suppress it, as a simulator has). Only the
+        Text tab has fields, so its dismiss button is on screen whenever the
+        keyboard is.
+        """
+        import time
+
+        if self.contract.platform != "ios":
+            return
+        elements = self.ui_tree().get("elements") or []
+        if not any(e.get("type") == "Keyboard" for e in elements):
+            return
+        if any(e.get("identifier") == "text_dismiss_keyboard" for e in elements):
+            self.tap("text_dismiss_keyboard")
+            time.sleep(0.8)
+
+    def _wait_for_screen(self, name: str, timeout_s: float = 30.0) -> None:
+        """Poll for an identifier only that screen's content carries."""
+        import time
+
+        identifier = self.contract.screen_ready.get(name)
+        if identifier is None:
+            return
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self.element(identifier) is not None:
+                return
+            time.sleep(0.5)
+        raise AssertionError(
+            f"went to {name!r} but {identifier!r} did not appear within {timeout_s:.0f}s"
+        )
+
+    def _navigate(self, tab: str) -> None:
         """Select a tab by name, on either platform.
 
         The iOS path is the awkward one, and the awkwardness is iOS's, not
@@ -661,20 +812,28 @@ class ProbeDriver:
             time.sleep(1.2)
             return
 
-        self.tap_label("More", element_type="RadioButton", skip_stability_check=True)
+        # By position, not by type. "More" names two elements -- the tab and,
+        # once a More screen is pushed, the back button -- and the type that
+        # told them apart (RadioButton vs Button) exists on the accessibility
+        # tree only: through WDA both are `Button "More"`, and every request
+        # by type came back ambiguous. The tab is the lowest one on screen.
+        mores = self._more_elements()
+        if not mores:
+            raise AssertionError("no 'More' tab on screen")
+        self._tap_center(mores[-1])
         time.sleep(1.2)
-        if "More" in self.labels():
-            # Pop whatever the More stack was left on. Absent is fine: it means
-            # we are already looking at the list.
-            resp = self.client.post(
-                "/api/v1/device/ui/tap-element",
-                json={"udid": self.udid, "label": "More", "element_type": "Button",
-                      **self.NO_SCROLL},
-                timeout=90.0,
-            )
-            if resp.is_success:
-                time.sleep(1.0)
-        self.tap_label(tab.capitalize())
+        mores = self._more_elements()
+        if len(mores) >= 2:
+            # Selecting More shows whatever its stack was left on; the higher
+            # "More" is that screen's back button. Pop to the list.
+            self._tap_center(mores[0])
+            time.sleep(1.0)
+        # The system More list's rows sit one level below quern's default WDA
+        # depth (12): measured on an iPhone 11, they appear at 13 (1.2s), while
+        # 13 on the 200-row Scroll table costs 26s -- so the depth is asked for
+        # here, where it is known to be needed, not raised for every read.
+        # Ignored off WDA. See #375.
+        self.tap_label(tab.capitalize(), snapshot_depth=13)
         time.sleep(1.2)
 
     def _goto_android(self, label: str) -> None:
@@ -740,6 +899,25 @@ class ProbeDriver:
             timeout=90.0,
         )
         time.sleep(0.8)
+
+    def _more_elements(self) -> list[dict]:
+        """Every element labelled "More", top of the screen first."""
+        found = [
+            e for e in self.ui_tree().get("elements") or []
+            if e.get("label") == "More" and e.get("type") in ("RadioButton", "Button")
+            and e.get("frame")
+        ]
+        return sorted(found, key=lambda e: e["frame"]["y"])
+
+    def _tap_center(self, element: dict) -> None:
+        frame = element["frame"]
+        self.client.json_ok(
+            "POST", "/api/v1/device/ui/tap",
+            json={"udid": self.udid,
+                  "x": frame["x"] + frame["width"] / 2,
+                  "y": frame["y"] + frame["height"] / 2},
+            timeout=90.0,
+        )
 
     def relaunch(self) -> None:
         """Terminate and relaunch, returning the app to its initial state.
@@ -816,7 +994,7 @@ class ProbeDriver:
                 readout = element["label"]          # Android carries it on a label
             index = self._row_index(element)
             frame = element.get("frame")
-            if index is None or not frame:
+            if index is None or not frame or element.get("on_screen") is False:
                 continue
             rows.append((index, frame.get("y", 0.0), frame.get("height", 0.0)))
         if not rows:

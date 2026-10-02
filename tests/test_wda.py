@@ -992,7 +992,11 @@ class TestXctestrunRename:
             patch("server.device.wda.XCTESTRUN", fake_stable),
             patch("server.device.wda.WDA_DERIVED", tmp_path),
         ):
-            with pytest.raises(RuntimeError, match="No .xctestrun file found"):
+            from server.models import WdaNotSetUpError
+
+            # Typed, so routes answer 400 with the remedy instead of a bare
+            # 500 (F34), and the remedy is in the message.
+            with pytest.raises(WdaNotSetUpError, match="setup_wda"):
                 _find_xctestrun()
 
 

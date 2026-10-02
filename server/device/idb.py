@@ -466,6 +466,7 @@ class IdbBackend:
     async def select_all_and_delete(
         self, udid: str, x: float, y: float,
         element_type: str | None = None,
+        identifier: str | None = None,  # unused: this backend clears at (x, y)
     ) -> None:
         """Select all text in focused field and delete it.
 

@@ -548,6 +548,7 @@ class DeviceControllerUI:
         filter_label: str | None,
         identifier: str | None,
         element_type: str | None,
+        snapshot_depth: int | None = None,
     ) -> tuple[list[UIElement], bool]:
         """The whole screen, for identification and for not-found context.
 
@@ -567,7 +568,7 @@ class DeviceControllerUI:
         if not (filter_label or identifier or element_type):
             return elements, True
         try:
-            full, _ = await self.get_ui_elements(resolved)
+            full, _ = await self.get_ui_elements(resolved, snapshot_depth=snapshot_depth)
         except Exception:
             logger.debug("full-tree read for screen context failed", exc_info=True)
             return elements, False
@@ -644,6 +645,132 @@ class DeviceControllerUI:
             return None, None, "lookup_failed", None
         return hint.scrollable, hint.screen, hint.reason, hint.candidates
 
+    #: The screen's frame changes only on rotation; a short TTL bounds how long
+    #: a rotated device is judged by the old one.
+    _VIEWPORT_TTL = 30.0
+
+    async def _wda_viewport(
+        self, resolved: str, elements: list[UIElement] | None = None,
+    ) -> dict | None:
+        """The app's frame on a WDA-served device, cached briefly.
+
+        A frame in the read being marked wins over the cache: it is current,
+        and the cache can be up to a TTL old -- across a rotation, long enough
+        to judge every element against the wrong bounds.
+        """
+        cache = self.__dict__.setdefault("_viewport_cache", {})
+        frame = next(
+            (e.frame for e in elements or [] if e.type == "Application" and e.frame), None,
+        )
+        if frame is None:
+            hit = cache.get(resolved)
+            if hit and time.time() - hit[1] < self._VIEWPORT_TTL:
+                return hit[0]
+            # The native read, not get_ui_elements: that one marks its result
+            # and would ask for the viewport again.
+            app_els, _ = await self._native_ui_elements(
+                resolved, False, None, None, "Application", None, None, None,
+                probe_containers=False,
+            )
+            frame = next((e.frame for e in app_els if e.frame), None)
+        if frame:
+            cache[resolved] = (frame, time.time())
+        return frame
+
+    async def _mark_on_screen(self, resolved: str, elements: list[UIElement]) -> None:
+        """Set `on_screen` on each element of a WDA read (F32)."""
+        try:
+            viewport = await self._wda_viewport(resolved, elements)
+        except Exception:
+            # Marking is an addition to a read; it must not fail the read.
+            logger.debug("viewport lookup failed", exc_info=True)
+            return
+        if not viewport:
+            return
+        for e in elements:
+            if e.frame and e.type != "Application":
+                cx, cy = get_tap_point(e)
+                e.on_screen = (
+                    viewport["x"] <= cx < viewport["x"] + viewport["width"]
+                    and viewport["y"] <= cy < viewport["y"] + viewport["height"]
+                )
+
+    def _read_depth(self, resolved: str, requested: int | None) -> int | None:
+        """The WDA snapshot depth for a read made on a caller's behalf.
+
+        The caller's own number wins. Otherwise, through WDA, the shallow
+        action depth: the global default walks every cell of a long list and
+        took 34.5s on an iPhone 11 (F35). Off WDA there is no depth to set.
+        """
+        if requested is not None:
+            return requested
+        if self._served_by_wda(resolved):
+            from server.device.wda_client import ACTION_SNAPSHOT_DEPTH
+
+            return ACTION_SNAPSHOT_DEPTH
+        return None
+
+    async def _wda_reachable_only(
+        self, resolved: str, matches: list[UIElement],
+    ) -> tuple[list[UIElement], list[dict]]:
+        """Split WDA matches into those a tap can reach and those it cannot.
+
+        Reachable means the tap point is inside the app's frame *and* XCUITest
+        calls the element hittable -- the rule bajutsu adopted after measuring
+        XCUITest's own auto-scroll tap succeed 2 times in 3 near a screen edge
+        (bajutsu PR #2119). Off-screen alone misses an element under the
+        keyboard: measured on an iPhone 11, a tab item at y=817 under a
+        keyboard spanning 595-838 was "tapped" with an `ok`, and the tap landed
+        on the keyboard -- once on its Dictate key, which raised a system
+        prompt over the app.
+
+        A hittability answer that could not be had (None) does not drop the
+        match: the on-screen check still applies, and refusing every tap
+        because a second WDA query failed would make WDA unusable.
+        """
+        viewport = await self._wda_viewport(resolved)
+        kept: list[UIElement] = []
+        dropped: list[dict] = []
+        for m in matches:
+            if m.frame is None:
+                kept.append(m)
+                continue
+            cx, cy = get_tap_point(m)
+            why = None
+            if viewport and not (
+                viewport["x"] <= cx < viewport["x"] + viewport["width"]
+                and viewport["y"] <= cy < viewport["y"] + viewport["height"]
+            ):
+                why = (
+                    f"{m.label or m.identifier!r} is off screen at "
+                    f"({cx:.0f}, {cy:.0f}); the screen is "
+                    f"{viewport['width']:.0f}x{viewport['height']:.0f}"
+                )
+                reason = "off_screen"
+            else:
+                # The element's centre, not its tap point: for a switch the
+                # tap point is the knob, and the lookup matches candidates by
+                # the centre of their frame.
+                hittable = await self.wda_client.is_hittable(
+                    resolved, identifier=m.identifier, label=m.label or None,
+                    center=get_center(m),
+                )
+                if hittable is False:
+                    why = (
+                        f"{m.label or m.identifier!r} is covered at "
+                        f"({cx:.0f}, {cy:.0f}) -- XCUITest reports it not "
+                        "hittable; the keyboard or an alert may be over it"
+                    )
+                    reason = "not_hittable"
+            if why is None:
+                kept.append(m)
+            else:
+                dropped.append({
+                    "label": m.label, "identifier": m.identifier,
+                    "x": cx, "y": cy, "reason": reason, "why": why,
+                })
+        return kept, dropped
+
     async def _ios_scroll_to_element(
         self,
         resolved: str,
@@ -653,6 +780,7 @@ class DeviceControllerUI:
         target_known_absent: bool = False,
         deadline_s: float | None = None,
         report: dict | None = None,
+        snapshot_depth: int | None = None,
     ) -> UIElement | None:
         """Scroll an iOS scroll container until the target element is on-screen.
 
@@ -788,7 +916,7 @@ class DeviceControllerUI:
             els, _ = await self.get_ui_elements(
                 resolved, use_cache=False,
                 filter_label=label, filter_identifier=identifier,
-                probe_containers=probe,
+                probe_containers=probe, snapshot_depth=snapshot_depth,
             )
             return _pick(find_element(els, label=label, identifier=identifier))
 
@@ -857,6 +985,7 @@ class DeviceControllerUI:
             """
             els, _ = await self.get_ui_elements(
                 resolved, use_cache=False, probe_containers=probe,
+                snapshot_depth=snapshot_depth,
             )
             matches = find_element(els, label=label, identifier=identifier)
             return _pick(matches), _fingerprint(els)
@@ -1420,6 +1549,8 @@ class DeviceControllerUI:
             snapshot_depth, source_timeout, mode,
             probe_containers=probe_containers,
         )
+        if self._served_by_wda(resolved):
+            await self._mark_on_screen(resolved, elements)
         return self._merge_web_overlay(
             resolved, elements,
             filter_label=filter_label, filter_identifier=filter_identifier,
@@ -1490,6 +1621,10 @@ class DeviceControllerUI:
             # below, so `backend` went on naming whatever served the last full
             # read -- `sim-bridge` on a simulator just put in WDA mode (#336).
             self._last_read_backend[resolved] = self.wda_client.TOOL_NAME
+            if snapshot_depth is not None:
+                # WDA's depth is a session setting: queries honour it too, and
+                # a deep one makes a query on a long list as slow as /source.
+                await self.wda_client._set_snapshot_depth(resolved, snapshot_depth)
             elements, query_elapsed = await self._wda_direct_query(
                 resolved, label=filter_label,
                 identifier=filter_identifier, element_type=filter_type,
@@ -1615,6 +1750,8 @@ class DeviceControllerUI:
         identifier: str | None = None,
         element_type: str | None = None,
         udid: str | None = None,
+        source_timeout: float | None = None,
+        snapshot_depth: int | None = None,
     ) -> tuple[dict, str]:
         """Get a single element's state without fetching the entire UI tree.
 
@@ -1638,7 +1775,11 @@ class DeviceControllerUI:
         # in-flight read or change its result -- only the label, which is the one
         # thing this change exists to get right.
         backend = self._backend_name(udid)
-        elements, resolved = await self.get_ui_elements(udid)
+        resolved = await self.resolve_udid(udid)
+        elements, resolved = await self.get_ui_elements(
+            resolved, source_timeout=source_timeout,
+            snapshot_depth=self._read_depth(resolved, snapshot_depth),
+        )
         matches = find_element(
             elements, label=label, label_contains=label_contains,
             label_prefix=label_prefix, identifier=identifier,
@@ -1681,6 +1822,7 @@ class DeviceControllerUI:
         interval: float = 0.5,
         udid: str | None = None,
         mode: str | None = None,
+        snapshot_depth: int | None = None,
     ) -> tuple[dict, str]:
         """Wait for an element to satisfy a condition (server-side polling).
 
@@ -1781,6 +1923,7 @@ class DeviceControllerUI:
                 filter_identifier=identifier,
                 filter_type=element_type,
                 mode=mode,
+                snapshot_depth=self._read_depth(resolved, snapshot_depth),
             )
 
             matches = find_element(
@@ -1985,6 +2128,7 @@ class DeviceControllerUI:
         source_timeout: float | None = None,
         value: str | None = None,
         scroll_to_find: bool | None = None,
+        snapshot_depth: int | None = None,
     ) -> dict:
         """Find an element by label/identifier and tap its center.
 
@@ -2094,12 +2238,15 @@ class DeviceControllerUI:
         # Traditional path: fetch full UI tree
         filter_label = _effective_filter_label(label, label_contains, label_prefix)
         cache_hits_before = self._cache_hits
+        depth_for = await self.resolve_udid(udid)
+        read_depth = self._read_depth(depth_for, snapshot_depth)
         elements, resolved = await self.get_ui_elements(
-            udid,
+            depth_for,
             filter_label=filter_label,
             filter_identifier=identifier,
             filter_type=element_type,
             source_timeout=source_timeout,
+            snapshot_depth=read_depth,
         )
         served_from_cache = self._cache_hits > cache_hits_before
 
@@ -2109,6 +2256,15 @@ class DeviceControllerUI:
             label_prefix=label_prefix, identifier=identifier,
             element_type=element_type,
         )
+        # Through WDA, a match is not yet a tap target: WDA reports every cell
+        # of a table, on screen or not, and elements under the keyboard. Only
+        # one whose centre is on screen and that XCUITest calls hittable is
+        # tapped; the rest are treated as not found, so the sweep below (or the
+        # not-found answer) handles them as it does on the accessibility tree,
+        # where they are simply absent (F32).
+        unreachable: list[dict] = []
+        if matches and self._served_by_wda(resolved):
+            matches, unreachable = await self._wda_reachable_only(resolved, matches)
 
         # iOS off-screen retry: on a tree-path miss, scroll the target into view
         # and retry. Android selector-misses are handled by the fast path above,
@@ -2147,6 +2303,7 @@ class DeviceControllerUI:
                 # at once, and `identify_screen` needs no device read of its own.
                 all_elements, complete = await self._all_elements_for_context(
                     resolved, elements, filter_label, identifier, element_type,
+                    snapshot_depth=read_depth,
                 )
                 all_elements_complete = complete
                 if not complete:
@@ -2175,7 +2332,7 @@ class DeviceControllerUI:
                 scrolled = await self._ios_scroll_to_element(
                     resolved, label=label, identifier=identifier, max_swipes=10,
                     target_known_absent=not served_from_cache,
-                    report=sweep,
+                    report=sweep, snapshot_depth=read_depth,
                 )
                 if scrolled is not None:
                     # The sweep finds by label or identifier alone, so the
@@ -2188,6 +2345,13 @@ class DeviceControllerUI:
                         label_prefix=label_prefix, identifier=identifier,
                         element_type=element_type,
                     )
+                    if matches and self._served_by_wda(resolved):
+                        # On screen after the sweep is not the same as
+                        # reachable: the keyboard or a sheet can still be
+                        # over it.
+                        matches, unreachable = await self._wda_reachable_only(
+                            resolved, matches,
+                        )
                 # The tree moved, so context gathered before the sweep is stale.
                 all_elements = None
 
@@ -2204,7 +2368,7 @@ class DeviceControllerUI:
                 all_elements, all_elements_complete = (
                     await self._all_elements_for_context(
                         resolved, elements, filter_label, identifier,
-                        element_type,
+                        element_type, snapshot_depth=read_depth,
                     )
                 )
             screen_context = _build_screen_context(all_elements)
@@ -2223,7 +2387,7 @@ class DeviceControllerUI:
             )
             if screenshot:
                 screen_context["screenshot"] = screenshot
-            return {
+            result = {
                 "status": "not_found",
                 "detail": f"No element found matching {search_desc}",
                 "screen_context": screen_context,
@@ -2236,6 +2400,24 @@ class DeviceControllerUI:
                 # an unknown screen and worthless on one recorded as fixed.
                 "scroll": _scroll_report(sweep, scroll_to_find),
             }
+            if read_depth is not None and self._served_by_wda(resolved):
+                # A shallow read is a reason something can be missing, so the
+                # answer says how deep it looked and how to look deeper --
+                # otherwise "not found" reads as "not there".
+                result["snapshot_depth"] = read_depth
+                result["detail"] += (
+                    f" (read through WDA at snapshot_depth={read_depth}; if the "
+                    "element is nested deeper, retry with a larger snapshot_depth)"
+                )
+            if unreachable:
+                # Found, but not tappable -- a different fact from "not there",
+                # and the one that decides what the caller does next.
+                result["unreachable"] = unreachable
+                result["detail"] = (
+                    f"Found {search_desc}, but not where a tap can reach it: "
+                    + "; ".join(u["why"] for u in unreachable)
+                )
+            return result
 
         if len(matches) == 1:
             el = matches[0]
@@ -2274,6 +2456,25 @@ class DeviceControllerUI:
                 return result
 
             # Value check for switches/toggles: skip tap if already in desired state
+            if value is not None and not el.value and self._served_by_wda(resolved):
+                # WDA's element query carries no values, so the match read
+                # here has none -- and treating that as "not set" taps a switch
+                # that may already be on, toggling it off (F36). Ask for the
+                # attribute itself; if even that cannot be read, refuse rather
+                # than guess, since a guess flips real state.
+                read = await self.wda_client.element_value(
+                    resolved, identifier=el.identifier, label=el.label or None,
+                    center=get_center(el),
+                )
+                if read is None:
+                    raise DeviceError(
+                        f"Could not read the current value of "
+                        f"{el.label or el.identifier!r} through WDA, so a "
+                        f"value-aware tap cannot tell whether it is already "
+                        f"{value!r}. Tap without value= to toggle it.",
+                        tool=self._backend_name(resolved),
+                    )
+                el = el.model_copy(update={"value": read})
             if value is not None:
                 current_value = el.value or ""
                 if current_value == value:
@@ -2335,6 +2536,7 @@ class DeviceControllerUI:
                     filter_label=filter_label,
                     filter_identifier=identifier,
                     filter_type=element_type,
+                    snapshot_depth=read_depth,
                 )
 
                 matches_check = find_element(
@@ -2375,6 +2577,7 @@ class DeviceControllerUI:
                             filter_label=filter_label,
                             filter_identifier=identifier,
                             filter_type=element_type,
+                            snapshot_depth=read_depth,
                         )
 
                         matches_final = find_element(
@@ -2805,6 +3008,7 @@ class DeviceControllerUI:
         identifier: str | None = None,
         udid: str | None = None,
         max_swipes: int = 10,
+        snapshot_depth: int | None = None,
     ) -> dict:
         """Scroll until an element is in view, without interacting with it.
 
@@ -2860,8 +3064,13 @@ class DeviceControllerUI:
             }
 
         # iOS (physical WDA + simulator)
+        # The same shallow depth as tap_element's sweep. Without it every read
+        # in the sweep used whatever depth WDA was last left at -- 25 after any
+        # full read, 34s a read on an iPhone 11's 200-row table -- and the
+        # sweep ran out of deadline before reaching the row (F35).
         el = await self._ios_scroll_to_element(
             resolved, label=label, identifier=identifier, max_swipes=max_swipes,
+            snapshot_depth=self._read_depth(resolved, snapshot_depth),
         )
         self._invalidate_ui_cache(resolved)  # scrolling changes the viewport
         if el is None:
@@ -3097,6 +3306,7 @@ class DeviceControllerUI:
         if (target.extra_attrs or {}).get("source") not in ("web-inspector", "web-probe"):
             await backend.select_all_and_delete(
                 resolved, x=cx, y=cy, element_type=target.type,
+                identifier=target.identifier,
             )
             self._invalidate_ui_cache(resolved)
             return resolved

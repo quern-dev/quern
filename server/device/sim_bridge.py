@@ -768,6 +768,7 @@ class SimBridgeBackend:
         x: float,
         y: float,
         element_type: str | None = None,
+        identifier: str | None = None,  # unused: this backend clears at (x, y)
     ) -> None:
         """Select all text and delete it. Triple-tap to select, then backspace.
 

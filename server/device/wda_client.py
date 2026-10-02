@@ -125,6 +125,14 @@ _LAST_SOURCE_READ: contextvars.ContextVar[tuple[str, float] | None] = (
 # WDA default is 50 — 25 resolves most screens;
 # skeleton fallback handles dense maps
 SNAPSHOT_MAX_DEPTH = 25
+
+#: The depth reads made on a caller's behalf use -- tap_element, get_element,
+#: wait_for_element -- unless they ask for more. Measured on an iPhone 11 on a
+#: 200-row table: 12 reads in 3.9s and holds the tab bar, the controls and
+#: every row's identifier; past it the read walks each cell's insides, 1,055
+#: elements in 34.5s, and the next tap times out (F35). 11 loses the rows and
+#: 10 the tab bar. Deeper nesting is the caller's to ask for.
+ACTION_SNAPSHOT_DEPTH = 12
 FORWARD_START_PORT = 18100  # base port for usbmux forwards
 FORWARD_KILL_GRACE = 3  # seconds to wait for SIGTERM before SIGKILL
 IDLE_TIMEOUT = 15 * 60  # 15 minutes
@@ -1479,15 +1487,91 @@ class WdaBackend:
             predicate=predicate, class_chain=class_chain,
         )
 
+    async def element_attribute(
+        self, udid: str, name: str, *, identifier: str | None, label: str | None,
+        center: tuple[float, float],
+    ):
+        """One XCUITest attribute of the element at `center`, or None if unknown.
+
+        The element is found again by identifier (or label), and the candidate
+        whose frame is centred at `center` is the one asked about, because a
+        query can return several -- a label is often repeated. None means the
+        question could not be put (no selector, no candidate there, WDA error);
+        the caller must not read that as any particular answer.
+        """
+        if identifier:
+            using, value = "accessibility id", identifier
+        elif label:
+            escaped = label.replace("\\", "\\\\").replace("'", "\\'")
+            using, value = "predicate string", f"label == '{escaped}'"
+        else:
+            return None
+        candidates = await self.find_elements_by_query(udid, using, value)
+        cx, cy = center
+
+        def _distance(el: dict) -> float:
+            f = el.get("frame") or {}
+            if not f:
+                return float("inf")
+            return abs(f["x"] + f["width"] / 2 - cx) + abs(f["y"] + f["height"] / 2 - cy)
+
+        best = min(candidates, key=_distance, default=None)
+        if best is None or _distance(best) > 2.0 or not best.get("_wda_element_id"):
+            return None
+        try:
+            resp = await self._request(
+                "get", udid, f"/element/{best['_wda_element_id']}/attribute/{name}",
+                use_session=True, timeout=SKELETON_QUERY_TIMEOUT,
+            )
+        except (DeviceError, WdaError):
+            return None
+        return resp.json().get("value")
+
+    async def is_hittable(
+        self, udid: str, *, identifier: str | None, label: str | None,
+        center: tuple[float, float],
+    ) -> bool | None:
+        """XCUITest's `isHittable` for the element at `center`, or None if unknown."""
+        value = await self.element_attribute(
+            udid, "hittable", identifier=identifier, label=label, center=center,
+        )
+        if isinstance(value, str):
+            value = value.strip().lower() in ("true", "1")
+        return value if isinstance(value, bool) else None
+
+    async def element_value(
+        self, udid: str, *, identifier: str | None, label: str | None,
+        center: tuple[float, float],
+    ) -> str | None:
+        """The element's `value` as a string, or None if it could not be read.
+
+        Needed because WDA's element query does not return values -- measured:
+        a switch came back with type, rect, label and enabled, and no value --
+        so a value-aware tap that trusted the query always saw "unknown" and
+        toggled (F36).
+        """
+        value = await self.element_attribute(
+            udid, "value", identifier=identifier, label=label, center=center,
+        )
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return "1" if value else "0"
+        return str(value)
+
     async def select_all_and_delete(
         self, udid: str, x: float, y: float,
         element_type: str | None = None,
+        identifier: str | None = None,
     ) -> None:
-        """Clear text in a field via WDA's native element clear.
+        """Clear the text field at (x, y) via WDA's native element clear.
 
-        Uses POST /element to find the text field by class name, then calls
-        POST /element/:uuid/clear. Falls back to triple-tap + backspace
-        if the native approach fails.
+        The field is found by identifier when it has one, otherwise as the
+        text field whose frame is centred at (x, y). It used to be the *first*
+        element of the field's class, with the coordinates unused, so clearing
+        `field_email` emptied `field_default` -- reproduced under WDA on a
+        simulator and on an iPhone 11 (F33). Falls back to triple-tap +
+        backspace at (x, y) when no element can be pinned down.
         """
         # Map our normalized type names to XCUIElementType class names
         class_map = {
@@ -1498,30 +1582,38 @@ class WdaBackend:
             "TextView": "XCUIElementTypeTextView",
         }
 
-        # Build ordered list of class names to try (preferred type first)
-        class_names = []
-        if element_type and element_type in class_map:
-            class_names.append(class_map[element_type])
-        class_names.extend(v for v in class_map.values() if v not in class_names)
+        def _centred_on_point(candidates: list[dict]) -> str | None:
+            for el in candidates:
+                f = el.get("frame") or {}
+                if f and abs(f["x"] + f["width"] / 2 - x) <= 2 and \
+                        abs(f["y"] + f["height"] / 2 - y) <= 2:
+                    return el.get("_wda_element_id")
+            return None
 
-        for class_name in class_names:
+        element_id = None
+        if identifier:
+            element_id = _centred_on_point(
+                await self.find_elements_by_query(udid, "accessibility id", identifier),
+            )
+        if element_id is None:
+            class_names = []
+            if element_type and element_type in class_map:
+                class_names.append(class_map[element_type])
+            class_names.extend(v for v in class_map.values() if v not in class_names)
+            for class_name in class_names:
+                element_id = _centred_on_point(
+                    await self.find_elements_by_query(udid, "class name", class_name),
+                )
+                if element_id:
+                    break
+
+        if element_id:
             try:
-                resp = await self._request("post", udid, "/element",
-                                           use_session=True, json={
-                    "using": "class name",
-                    "value": class_name,
-                })
-                value = resp.json().get("value", {})
-                element_id = (value.get("ELEMENT")
-                              or value.get("element-6066-11e4-a52e-4f735466cecf"))
-                if not element_id:
-                    continue
-                await self._request("post", udid,
-                                    f"/element/{element_id}/clear",
+                await self._request("post", udid, f"/element/{element_id}/clear",
                                     use_session=True)
                 return
             except WdaError:
-                continue
+                pass
 
         # Fallback: triple-tap + backspace (works on simulators via idb)
         for _ in range(3):

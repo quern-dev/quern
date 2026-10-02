@@ -161,6 +161,12 @@ async def start_wda_driver(request: Request, body: StartDriverRequest):
 
     try:
         result = await start_driver(udid=body.udid, os_version=device.os_version)
+    except DeviceError as e:
+        # Typed refusals -- WDA not set up (F34) -- keep their status and
+        # message rather than becoming a bare 500.
+        from server.api.device import _handle_device_error
+
+        raise _handle_device_error(e)
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
 

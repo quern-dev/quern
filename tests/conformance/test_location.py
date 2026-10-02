@@ -44,10 +44,16 @@ def _physical_android(probe) -> bool:
     return probe.contract.platform == "android" and not probe.udid.startswith("emulator-")
 
 
+def _physical_iphone(probe) -> bool:
+    return probe.contract.platform == "ios" and probe.physical
+
+
 @pytest.fixture
 def location_tab(probe):
     if _physical_android(probe):
         pytest.skip("a physical Android phone has no emulator console to simulate location")
+    if _physical_iphone(probe):
+        pytest.skip("quern simulates location on simulators only")
     probe.goto("location")
     auth = _labels(probe)["auth"] or ""
     # A failure, not a skip: the fixture granted the permission and required
@@ -131,4 +137,14 @@ def test_a_physical_android_phone_refuses_clearly(quern, probe) -> None:
     )
     assert resp.status_code == 400, f"{resp.status_code}: {resp.text[:300]}"
     assert "emulator console" in resp.text, resp.text[:300]
+
+
+def test_a_physical_iphone_refuses_clearly(quern, probe) -> None:
+    if not _physical_iphone(probe):
+        pytest.skip("only a physical iPhone refuses set_location")
+    resp = quern.post(
+        "/api/v1/device/location",
+        json={"udid": probe.udid, "latitude": 10.0, "longitude": 10.0}, timeout=60.0,
+    )
+    assert resp.status_code == 400, f"{resp.status_code}: {resp.text[:300]}"
 

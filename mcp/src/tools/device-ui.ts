@@ -22,7 +22,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
         .min(1)
         .max(50)
         .optional()
-        .describe("WDA accessibility tree depth (1-50, default 10). Lower = faster but may miss labels. Higher = more detail but may hang on complex screens like maps. Only affects devices served by WDA (physical iPhones, or a simulator after start_driver)."),
+        .describe("WDA accessibility tree depth (1-50, default 25). Lower = faster but may miss labels. Higher = more detail but may hang on complex screens like maps. Only affects devices served by WDA (physical iPhones, or a simulator after start_driver)."),
       strategy: z
         .enum(["skeleton"])
         .optional()
@@ -101,8 +101,21 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
         .string()
         .optional()
         .describe("Target device UDID (defaults to active device)"),
+      source_timeout: z
+        .coerce.number()
+        .min(1)
+        .max(60)
+        .optional()
+        .describe("Seconds to allow a WDA read (a physical device, or a simulator after start_driver). A screen with a long list can take longer than the default to read through WDA; the response then comes from a partial fallback, and an element that is there can be reported missing."),
+      snapshot_depth: z
+        .coerce.number()
+        .int()
+        .min(1)
+        .max(50)
+        .optional()
+        .describe("WDA snapshot depth for this read (a physical iPhone, or a simulator after start_driver). Default 12: tab bars, controls and list rows are within it, and on a long list it reads ~9x faster than the full walk (34.5s vs 3.9s measured on an iPhone 11). If the element is nested deeper -- some SwiftUI layouts -- a not-found answer says the depth it used; retry with a larger value."),
     }),
-  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid }) => {
+  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, snapshot_depth }) => {
     try {
       const data = await apiRequest("GET", "/api/v1/device/ui/element", {
         label,
@@ -111,6 +124,8 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
         identifier,
         type: element_type,
         udid,
+        source_timeout,
+        snapshot_depth,
       });
 
       return {
@@ -185,6 +200,13 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
         .enum(["flat"])
         .optional()
         .describe("Use 'flat' to engage the patched idb companion's flat-mode output (idb backend only). Rarely needed now — the default path probes hidden tab-bar/nav-bar children automatically. Simulators only."),
+      snapshot_depth: z
+        .coerce.number()
+        .int()
+        .min(1)
+        .max(50)
+        .optional()
+        .describe("WDA snapshot depth for this read (a physical iPhone, or a simulator after start_driver). Default 12: tab bars, controls and list rows are within it, and on a long list it reads ~9x faster than the full walk (34.5s vs 3.9s measured on an iPhone 11). If the element is nested deeper -- some SwiftUI layouts -- a not-found answer says the depth it used; retry with a larger value."),
     }),
   }, async ({
     label,
@@ -198,6 +220,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
     interval,
     udid,
     mode,
+    snapshot_depth,
   }) => {
     try {
       const body: Record<string, unknown> = {
@@ -214,6 +237,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
       if (value !== undefined) body.value = value;
       if (mode !== undefined) body.mode = mode;
       if (udid !== undefined) body.udid = udid;
+      if (snapshot_depth !== undefined) body.snapshot_depth = snapshot_depth;
 
       const data = await apiRequest(
         "POST",
@@ -258,7 +282,7 @@ This is the recommended first step before interacting with UI. Use this to disco
         .min(1)
         .max(50)
         .optional()
-        .describe("WDA accessibility tree depth (1-50, default 10). Lower = faster but may miss labels. Higher = more detail but may hang on complex screens like maps. Only affects devices served by WDA (physical iPhones, or a simulator after start_driver)."),
+        .describe("WDA accessibility tree depth (1-50, default 25). Lower = faster but may miss labels. Higher = more detail but may hang on complex screens like maps. Only affects devices served by WDA (physical iPhones, or a simulator after start_driver)."),
       strategy: z
         .enum(["skeleton"])
         .optional()
@@ -456,6 +480,13 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         .boolean()
         .default(false)
         .describe("Capture before/after screenshots around the tap. Returns file paths in screenshots.before and screenshots.after."),
+      snapshot_depth: z
+        .coerce.number()
+        .int()
+        .min(1)
+        .max(50)
+        .optional()
+        .describe("WDA snapshot depth for this read (a physical iPhone, or a simulator after start_driver). Default 12: tab bars, controls and list rows are within it, and on a long list it reads ~9x faster than the full walk (34.5s vs 3.9s measured on an iPhone 11). If the element is nested deeper -- some SwiftUI layouts -- a not-found answer says the depth it used; retry with a larger value."),
       settle_delay: z
         .coerce.number()
         .min(0)
@@ -463,7 +494,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         .optional()
         .describe("Seconds to wait before capturing after screenshot/screen context (default 1.0). Increase for slow devices or complex transitions."),
     }),
-  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value, scroll_to_find, include_screen_context, capture_screenshots, settle_delay }) => {
+  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value, scroll_to_find, include_screen_context, capture_screenshots, settle_delay, snapshot_depth }) => {
     try {
       const body: Record<string, unknown> = {};
       if (label) body.label = label;
@@ -485,6 +516,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
       if (include_screen_context) body.include_screen_context = true;
       if (capture_screenshots) body.capture_screenshots = true;
       if (settle_delay !== undefined) body.settle_delay = settle_delay;
+      if (snapshot_depth !== undefined) body.snapshot_depth = snapshot_depth;
 
       const data = await apiRequest(
         "POST",
@@ -666,17 +698,25 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         .int()
         .default(10)
         .describe("Max scroll attempts before giving up (default 10)"),
+      snapshot_depth: z
+        .coerce.number()
+        .int()
+        .min(1)
+        .max(50)
+        .optional()
+        .describe("WDA snapshot depth for the sweep's reads (a physical iPhone, or a simulator after start_driver). Default 12, as for tap_element; pass more if the element is nested deeper."),
       udid: z
         .string()
         .optional()
         .describe("Target device UDID (defaults to active device)"),
     }),
-  }, async ({ label, identifier, max_swipes, udid }) => {
+  }, async ({ label, identifier, max_swipes, udid, snapshot_depth }) => {
     try {
       const body: Record<string, unknown> = { max_swipes };
       if (label) body.label = label;
       if (identifier) body.identifier = identifier;
       if (udid) body.udid = udid;
+      if (snapshot_depth !== undefined) body.snapshot_depth = snapshot_depth;
 
       const data = await apiRequest(
         "POST",

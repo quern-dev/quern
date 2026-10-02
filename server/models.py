@@ -16,6 +16,7 @@ from pydantic import (
     StrictInt,
     StrictStr,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -1752,6 +1753,16 @@ class DeviceOperationUnsupportedError(DeviceError):
     """
 
 
+class WdaNotSetUpError(DeviceOperationUnsupportedError):
+    """WDA has not been built for physical devices on this Mac yet.
+
+    A refusal with a remedy, so it carries the remedy. It was a RuntimeError
+    that escaped `launch_app` and every other WDA-backed route as a bare
+    `500 Internal Server Error`, swallowing the one sentence that said what to
+    do (F34).
+    """
+
+
 class AppStateNotFoundError(DeviceError):
     """A checkpoint, container, plist or key that the request named is not there.
 
@@ -1918,6 +1929,19 @@ class UIElement(BaseModel):
     help: str | None = None
     custom_actions: list[str] = Field(default_factory=list)
     extra_attrs: dict[str, str] | None = None
+    #: Whether the element's centre is inside the screen. Set only on reads
+    #: through WDA, which -- unlike the accessibility tree -- reports every cell
+    #: of a table whether it is visible or not: measured, `row_199` at y=10450
+    #: on an 896-point screen. Absent from the output when unset, so the other
+    #: backends' elements carry no new key (F32).
+    on_screen: bool | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_on_screen(self, handler):
+        data = handler(self)
+        if isinstance(data, dict) and data.get("on_screen", True) is None:
+            data.pop("on_screen")
+        return data
     """Raw source attributes from the underlying accessibility provider, kept
     verbatim before the per-platform normalizer collapses them. Useful for
     debugging the normalizer itself — e.g., checking whether an Android node
@@ -2133,6 +2157,15 @@ class TapElementRequest(BaseModel):
     #: `scrollable: true`. Previously defaulted to `True`, which swiped screens
     #: that cannot scroll -- see #274 and `ScreenLandmarks.scrollable`.
     scroll_to_find: bool | None = None
+    snapshot_depth: int | None = Field(
+        default=None, ge=1, le=50,
+        description=(
+            "WDA snapshot depth for this read (a physical device, or a simulator "
+            "after start_driver). Default 12: deep enough for tab bars, controls "
+            "and list rows, and nine times faster than the full walk on a long "
+            "list. Pass more if the element is nested deeper."
+        ),
+    )
     include_screen_context: bool = False
     capture_screenshots: bool = False
     settle_delay: float = Field(default=1.0, ge=0, le=10)
@@ -2175,6 +2208,13 @@ class ScrollToElementRequest(BaseModel):
     identifier: str | None = None
     udid: str | None = None
     max_swipes: int = Field(default=10, ge=1, le=50)
+    snapshot_depth: int | None = Field(
+        default=None, ge=1, le=50,
+        description=(
+            "WDA snapshot depth for the sweep's reads. Default 12 through WDA, as "
+            "for tap_element; pass more if the element is nested deeper."
+        ),
+    )
 
     @model_validator(mode="after")
     def check_target(self):
@@ -2348,6 +2388,15 @@ class WaitForElementRequest(BaseModel):
     interval: float = Field(default=0.5, ge=0.1, le=5)
     udid: str | None = None
     mode: str | None = None  # "flat" for custom companion flat mode
+    snapshot_depth: int | None = Field(
+        default=None, ge=1, le=50,
+        description=(
+            "WDA snapshot depth for this read (a physical device, or a simulator "
+            "after start_driver). Default 12: deep enough for tab bars, controls "
+            "and list rows, and nine times faster than the full walk on a long "
+            "list. Pass more if the element is nested deeper."
+        ),
+    )
 
     @model_validator(mode="after")
     def check_label_exclusivity(self):

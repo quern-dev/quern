@@ -585,6 +585,8 @@ class TestBackendIsReportedOnEveryWdaPath:
         controller._wda_direct_query = AsyncMock(
             return_value=([UIElement(type="Button", label="Home")], 0.1),
         )
+        # The on_screen marking's own lookup is tested elsewhere.
+        controller._wda_viewport = AsyncMock(return_value=None)
         elements, _ = await controller.get_ui_elements(SIM, filter_label="Home")
         controller._wda_direct_query.assert_awaited_once()
         assert controller.backend_that_served(SIM) == "wda"

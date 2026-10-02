@@ -834,6 +834,106 @@ and an iOS simulator: neither the console nor simctl refuses it. The request
 model now bounds latitude to ±90 and longitude to ±180, a 422 before any
 device is touched.
 
+## F30 — through WDA, the Scroll tab takes longer to read than the default allows
+
+Measured on an iOS 18.6 simulator after `start_driver`: `/source` for the
+200-row table takes 10.5s and returns 1,027 elements, against a 10s default.
+Quern reports the partial fallback honestly (`source_timed_out`, `degraded`),
+but every identifier on that screen is then missing. The driver now asks for
+30s. Not a bug; recorded because a physical device will be slower still.
+
+## F31 — `get_element` had no `source_timeout` → fixed here
+
+The one read endpoint without it, so on a screen like the above it could only
+answer from the fallback, and a present element came back 404. Added to the
+route, the controller and the MCP tool.
+
+## F32 — through WDA, `tap_element` taps an element that is off screen and reports success → fixed here
+
+WDA reports every cell of a table, not only the visible ones: with the list at
+the top, `row_199` comes back at y=8856 on an 874-point screen. `tap_element`
+then taps at the element's coordinates: `row_40` returned `{"status": "ok"}`
+with a tap point of y=1882.5, and the list did not move -- `rows 0-17` before
+and after. On the accessibility tree the same request is a 404, because
+off-screen rows are not in it. Through WDA -- that is, on every physical
+iPhone -- a tap that landed on nothing reads as a tap that worked. It also
+means `get_element` finding an element no longer implies it is visible. It
+wanted a decision between scrolling the element into view and refusing.
+
+**It is wider than off-screen: an element under the keyboard too** (iPhone 11,
+iOS 26.7, physical). With the keyboard up (y 595-838), `tab_controls` sits at
+y=817 beneath it; `tap_element` tapped y=844, answered `ok`, and Controls never
+opened. Worse, the keyboard's Dictate key (x 332-405, y 824) lies where the More
+tab is, so a `goto` to a More screen with the keyboard up tapped it and raised
+the system "Enable Dictation?" prompt -- which then sat over the app for the
+rest of the run, failing two dozen later tests. bajutsu (PR #2119) refuses a
+tap unless the centre is on screen *and* XCUITest reports the element
+hittable; that rule covers both cases.
+
+**Fixed here with that rule.** A match that fails it is not tapped; when no
+match passes, the 404 lists the ones that failed and why. Elements read
+through WDA also carry `on_screen`, so a read says what is visible.
+
+## F33 — through WDA, clearing one field clears the first field instead → fixed here
+
+`WdaClient.select_all_and_delete` is given the target's coordinates and does not
+use them: it asks WDA for the first element of class `XCUIElementTypeTextField`
+and clears that. So clearing `field_email` emptied `field_default` and left the
+email untouched -- reproduced on a simulator under WDA and on a physical
+iPhone 11. The coordinates are only used by the triple-tap fallback. Fixed
+here: the field is found by identifier, or by the element of its class at the
+given point, and never as "first of its class".
+
+## F34 — `launch_app` on a physical iPhone without WDA set up is a bare 500 → fixed here
+
+`RuntimeError: No .xctestrun file found. Run setup_wda() first` escapes
+`launch_app` uncaught, so the caller gets `500 Internal Server Error` with no
+body worth reading -- while the message it swallowed says exactly what to do.
+Seen against a fresh `QUERN_STATE_DIR`. Fixed here: it is now `WdaNotSetUpError`,
+a 400 naming `setup_wda` and `POST /api/v1/device/wda/setup`.
+
+## F35 — on a physical iPhone, a long list makes every WDA read too slow to use
+
+iPhone 11, iOS 26.7, the probe's Scroll tab (200 rows): one full `/source`
+took **34.5s** and returned 1,055 elements; the targeted queries quern tries
+first are as slow on that screen, so once the app was on it even finding
+`tab_text` to leave failed, and every later test failed with it. The same
+screen took 10.5s on a simulator (F30).
+
+The depth is what costs: at `snapshot_depth=12` the same read took **3.9s**,
+247 elements, and still carried `tab_text`, `scroll_to_top` and all 200 row
+identifiers; at 8 it took 0.4s and carried none of them. So the default walk
+spends most of its time inside each cell. Open: whether quern's default depth
+for WDA should change, or whether the endpoints that read on the caller's
+behalf (`tap_element`, `get_element`) should take `snapshot_depth` too.
+
+**Resolved by giving them one, default 12.** No single default fits every
+screen, measured on the same iPhone 11:
+
+| screen | depth 12 | depth 13 |
+|---|---|---|
+| system More list | rows missing | rows found, 1.2s |
+| 200-row table | 3.4s, all 200 rows | 26.4s, 852 elements |
+
+So reads made for the caller default to 12, a miss says the depth it used and
+how to go deeper, and the suite's `goto` asks for 13 on the More list where it
+knows it needs it. Recording that per screen is #375.
+
+`scroll_to_element` was missed at first: it took no depth, so its sweep
+read at whatever depth WDA was last left at, which was 25 after any full
+read. The scroll tests, which had passed on the iPhone before, then timed
+out. It now takes `snapshot_depth` like the others, with the same default.
+
+## F36 — through WDA, a value-aware tap toggled a switch that was already set → fixed here
+
+WDA's element query returns no values (measured: a switch came back with type,
+rect, label and enabled only), so `tap_element(value="1")` saw the current
+value as unknown, tapped anyway, and turned an "on" switch off on the second
+call. It now reads the element's `value` attribute through WDA when the match
+has none, and refuses rather than guesses if that fails. Matching that read to
+the element uses the frame's centre: a switch's tap point is its knob, 85%
+across, and matching by it found nothing.
+
 ## F37 — the iOS location readback had never run: the probe never showed its own authorization → fixed here
 
 Found while answering review on #382. The iOS probe's `CLLocationManager` is
