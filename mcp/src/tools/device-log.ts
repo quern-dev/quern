@@ -31,7 +31,7 @@ NOTE (iOS): Does NOT capture print() — use os.Logger instead.`,
       preset: z
         .string()
         .optional()
-        .describe("Apply an ingestion filter preset at start (e.g. 'device-quiet', which drops noisy system daemons, CoreBrightness, and every com.apple.* entry below error -- Apple's errors and faults are kept. The com.apple.* rule needs a pymobiledevice3 with syslog --format json: the response's "format" says which is in use, with a warning when it is "text")"),
+        .describe("Apply an ingestion filter preset at start (e.g. 'device-quiet', which drops noisy system daemons, CoreBrightness, and every com.apple.* entry below error -- Apple's errors and faults are kept. The com.apple.* rule needs a pymobiledevice3 with syslog --format json: the response's 'format' says which is in use, with a warning when it is 'text')"),
     }),
   }, async ({ udid, process, match, preset }) => {
     try {
