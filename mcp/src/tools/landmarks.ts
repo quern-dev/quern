@@ -65,7 +65,7 @@ Element types are matched across backends: a landmark on the accessibility tree'
   });
 
   server.registerTool("identify_screen", {
-    description: `Identify the current screen by matching the live UI tree against loaded landmarks. Returns the matched screen name, confidence level (exact/ambiguous/none), and partial matches. Load landmarks first with load_landmarks.
+    description: `Identify the current screen by matching the live UI tree against loaded landmarks. Returns the matched screen name, confidence level (exact/ambiguous/none), and partial matches. Load landmarks first with load_landmarks; with none loaded for the app, error is no_landmarks_loaded and hint names what is loaded and what to do.
 
 partial_matches contains EVERY non-fully-matched screen (including zero-match), sorted by descending match count so the best candidate is first. Each entry has a 'landmarks' array with per-landmark match results, so you can debug "why didn't my landmarks match?" without re-running identification — the failing selectors are right there in the response.
 
@@ -106,7 +106,7 @@ A landmark that matched only because its element type is named differently on th
   });
 
   server.registerTool("list_landmarks", {
-    description: `List all loaded landmark sets, showing the app identifier and number of screens for each. 'remembered' lists the knowledge bases loaded at every start (load_landmarks remember=true): each one's path, whether that path's set is loaded now (loaded, loaded_from), and at_start -- how many screens loaded at this start, or why it did not.`,
+    description: `List all loaded landmark sets, showing the app identifier and number of screens for each. 'sources' says where each set was loaded from: a knowledge base path, or 'inline' -- so two checkouts of one app can be told apart. 'remembered' lists the knowledge bases loaded at every start (load_landmarks remember=true): each one's path, whether that path's set is loaded now (loaded, loaded_from), and at_start -- how many screens loaded at this start, or why it did not.`,
     inputSchema: strictParams({}),
   }, async () => {
     try {

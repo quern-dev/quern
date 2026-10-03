@@ -91,13 +91,16 @@ export async function apiRequest(
   return JSON.parse(text);
 }
 
-export async function probeServer(): Promise<void> {
+/** Whether the server answered. Any answer counts: the question is whether
+ * anything is listening, and a later request reports its own status. */
+export async function probeServer(): Promise<boolean> {
   const server = discoverServer();
   try {
     await fetch(new URL("/health", server.url).toString(), {
       signal: AbortSignal.timeout(3000),
     });
     console.error(`Connected to Quern at ${server.url}`);
+    return true;
   } catch {
     if (server.source === "default") {
       // Naming the guessed URL here read as "your server at 9100 is down",
@@ -111,5 +114,6 @@ export async function probeServer(): Promise<void> {
         `WARNING: Cannot reach Quern at ${server.url} — use ensure_server tool to start it`
       );
     }
+    return false;
   }
 }
