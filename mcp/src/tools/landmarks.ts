@@ -8,6 +8,8 @@ export function registerLandmarkTools(server: McpServer): void {
   server.registerTool("load_landmarks", {
     description: `Load screen landmarks for an app from a knowledge base directory or inline JSON. Landmarks enable screen identification — matching the current UI state against known screen definitions. Landmarks are scoped by app identifier so multiple apps can be loaded simultaneously.
 
+Landmarks are held in memory and gone at every restart: set remember=true with a path to load that knowledge base again at every start (list_landmarks shows what is remembered; unload_landmarks with forget=true stops it). With a path inside a project's .quern/, app can be omitted -- the project's .quern/config.json names it.
+
 The response includes a 'skipped' array listing screen files the loader couldn't turn into landmarks, with categorized reasons:
   - legacy_format: file uses the pre-landmarks 'identify_by:' field. Includes the original entries so an agent can propose a migration to the new schema with user review.
   - no_landmarks: file has neither field (likely a stub).
