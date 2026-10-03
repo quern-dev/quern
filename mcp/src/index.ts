@@ -12,7 +12,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { probeServer } from "./http.js";
+import { apiRequest, probeServer } from "./http.js";
 import { registerLogTools } from "./tools/logs.js";
 import { registerProxyTools } from "./tools/proxy.js";
 import { registerInterceptTools } from "./tools/intercept.js";
@@ -26,6 +26,11 @@ import { registerBuildTools } from "./tools/build.js";
 import { registerAppStateTools } from "./tools/app-state.js";
 import { registerOslogTools } from "./tools/oslog.js";
 import { registerAppKnowledgeTools } from "./tools/app-knowledge.js";
+import {
+  autoloadKnowledge,
+  detectProjectKnowledge,
+  knowledgeInstructions,
+} from "./project-knowledge.js";
 import { registerLandmarkTools } from "./tools/landmarks.js";
 import { registerSystemTools } from "./tools/system.js";
 import { registerRecordingTools } from "./tools/recordings.js";
@@ -48,6 +53,15 @@ function readOwnVersion(): string {
 }
 
 const MCP_VERSION = readOwnVersion();
+
+// The project this session is in -- the client starts this process there.
+const PROJECT_KNOWLEDGE = (() => {
+  try {
+    return detectProjectKnowledge();
+  } catch {
+    return null;
+  }
+})();
 
 const instructions = [
   "Quern is a debug server for AI-assisted iOS development — it captures logs, intercepts network traffic, and controls simulators/devices via MCP tools.",
@@ -81,6 +95,7 @@ const instructions = [
   "TROUBLESHOOTING: If tools fail with connection errors, call ensure_server to check/restart the server.",
   "",
   "For the full agent guide with workflows, advanced patterns, and troubleshooting: read the quern://guide resource.",
+  ...(PROJECT_KNOWLEDGE ? knowledgeInstructions(PROJECT_KNOWLEDGE) : []),
 ].join("\n");
 
 const server = new McpServer(
@@ -241,6 +256,11 @@ async function checkVersionSkew(): Promise<void> {
 async function main(): Promise<void> {
   await probeServer();
   await checkVersionSkew();
+  if (PROJECT_KNOWLEDGE?.knowledgeDir) {
+    // Best-effort, and said either way: the instructions already name the
+    // call to make if this did not take.
+    console.error(`Knowledge base: ${await autoloadKnowledge(PROJECT_KNOWLEDGE, apiRequest)}`);
+  }
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

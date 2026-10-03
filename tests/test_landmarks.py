@@ -744,6 +744,11 @@ class TestLandmarkRegistry:
         assert result["matched"] is None
         assert result["confidence"] == "none"
         assert result["error"] == "no_landmarks_loaded"
+        # The way forward, said where the agent asked: load one if the app
+        # has one, and suggest building one -- not build it -- if not.
+        assert "load_landmarks" in result["hint"]
+        assert "suggest building one to the user" in result["hint"]
+        assert "init_app_knowledge" in result["hint"]
 
     def test_app_scoping(self):
         registry = LandmarkRegistry()

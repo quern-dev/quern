@@ -497,6 +497,19 @@ class TestScreenSummary:
         assert data["udid"] == "AAAA-1111"
         assert "interactive_elements" in data
 
+    async def test_identify_with_nothing_loaded_says_so_and_what_to_do(
+        self, app, auth_headers, mock_controller,
+    ):
+        """"Could not identify" read exactly like "identified nothing"."""
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/v1/device/screen-summary",
+                                    params={"identify": "true"}, headers=auth_headers)
+        data = resp.json()
+        assert data["identified_as"] is None
+        assert data["identify_error"] == "no_landmarks_loaded"
+        assert "init_app_knowledge" in data["identify_hint"]
+
     async def test_screen_summary_with_udid(self, app, auth_headers, mock_controller):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:

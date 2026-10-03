@@ -802,6 +802,17 @@ def scan_knowledge_base(path: Path) -> KnowledgeBaseScan:
 # ---------------------------------------------------------------------------
 
 
+#: What to do when identification has nothing to match against.
+NO_KNOWLEDGE_BASE_HINT = (
+    "No knowledge base is loaded. If the app has one (a .quern/knowledge "
+    "folder in its project), load it with load_landmarks(path=<project root>) "
+    "-- remember=true keeps it loaded across restarts. If it has none, suggest "
+    "building one to the user rather than starting it yourself: "
+    "init_app_knowledge and the quern://app-knowledge-guide resource walk "
+    "through it."
+)
+
+
 class LandmarkRegistry:
     """In-memory registry of screen landmarks, scoped by app identifier."""
 
@@ -1122,6 +1133,10 @@ class LandmarkRegistry:
                 "matched": None,
                 "confidence": "none",
                 "error": "no_landmarks_loaded",
+                # The moment an agent finds out it has no knowledge base is
+                # the moment it asked "what screen am I on?" -- so the way
+                # forward is said here, not only in the session's instructions.
+                "hint": NO_KNOWLEDGE_BASE_HINT,
                 "matched_landmarks": [],
                 "partial_matches": [],
             }

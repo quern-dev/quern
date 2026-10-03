@@ -325,7 +325,7 @@ holds in `flow_store`. `flows_captured` is only what survived.
 | `get_ui_tree` | GET | `/api/v1/device/ui` | Accessibility tree |
 | `get_element_state` | GET | `/api/v1/device/ui/element` | Query specific element state. Takes `snapshot_depth` and `source_timeout`; elements read through WDA carry `on_screen` |
 | `wait_for_element` | POST | `/api/v1/device/ui/wait-for-element` | Poll until element appears |
-| `get_screen_summary` | GET | `/api/v1/device/screen-summary` | LLM-optimized screen description |
+| `get_screen_summary` | GET | `/api/v1/device/screen-summary` | LLM-optimized screen description. With `identify=true`, `identified_as` and `confidence`; when identification could not run, `identify_error` and `identify_hint` say why and what to do |
 | `tap` | POST | `/api/v1/device/ui/tap` | Tap at coordinates |
 | `restore_simulator_input` | POST | `/api/v1/device/ui/restore-input` | Take a simulator's touch, button and keyboard services back from Xcode 27's Device Hub. Restarts SpringBoard, so running apps are killed |
 | `tap_element` | POST | `/api/v1/device/ui/tap-element` | Tap element by label/identifier. Through WDA it taps only an element that is on screen and hittable, and a not-found lists the unreachable matches; `snapshot_depth` (WDA default 12) sets how deep the read goes, and a physical iPhone without `setup_wda` is a 400. With `scroll_to_find` (the default) this can sweep for a long time; a client that disconnects abandons it rather than leaving it running. The request is closed **499** server-side, which a caller that has hung up does not receive — the observable effect is that the device stops being driven |
@@ -394,7 +394,7 @@ holds in `flow_store`. `flows_captured` is only what survived.
 |---|---|---|---|
 | `init_app_knowledge` | — | — | Scaffolds or detects a `.quern/knowledge/` directory on disk; performs no server call |
 | `load_landmarks` | POST | `/api/v1/landmarks/load` | Load landmarks from a knowledge base path or inline JSON. Returns `screens` count, a categorized `skipped[]` array (legacy-format files, stubs, malformed YAML), and a `conventions` block: each file's declared `landmark_conventions` beside the findings quern computed. `remember=true` loads it again at every server start (kept in `~/.quern/config.json`); `app` may be omitted for a path in a project's `.quern/`, whose `config.json` names it. A path that is not a directory is a 400 |
-| `identify_screen` | POST | `/api/v1/landmarks/identify` | Match the live UI tree against loaded landmarks. Returns matched screen, confidence, and full per-landmark detail in `partial_matches`. |
+| `identify_screen` | POST | `/api/v1/landmarks/identify` | Match the live UI tree against loaded landmarks. Returns matched screen, confidence, and full per-landmark detail in `partial_matches`. With nothing loaded: `error: "no_landmarks_loaded"` and a `hint` saying how to load a knowledge base, or to suggest building one |
 | `list_landmarks` | GET | `/api/v1/landmarks` | List loaded landmark sets per app, and under `remembered` each knowledge base loaded at every start: its path, whether it is loaded, and `at_start` (screens loaded at this start, or why it did not load) |
 | `unload_landmarks` | DELETE | `/api/v1/landmarks` | Unload landmarks for an app or all apps. `forget=true` also stops loading it at every start |
 | `validate_landmarks` | POST | `/api/v1/landmarks/validate` | Detect collisions between screens with overlapping landmark sets, and report the same `conventions` block as `load_landmarks` |
