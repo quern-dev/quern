@@ -39,6 +39,9 @@ WDA_TIMEOUT = 10.0  # seconds for HTTP requests
 # seconds for tap/swipe/type — WDA serializes requests,
 # so actions queue behind slow queries
 ACTION_TIMEOUT = 25.0
+#: A front-app read is a status check made while waiting on an open; a
+#: healthy WDA answers it in about 0.1s (measured on an iPhone 12).
+ACTIVE_APP_TIMEOUT = 3.0
 # seconds, for everything newer than A13. Measured on an iPhone 15 Pro (A17 Pro,
 # iOS 26), WDA built with Xcode 27: 5.15-5.34s across four samples on the home
 # screen -- a *denser* tree than the iPhone 11's, 714KB against 448KB, in half
@@ -1466,15 +1469,36 @@ class WdaBackend:
         as did `devicectl --payload-url`, while the same link without the
         bundle id navigated. Needs iOS 16.4; WDA falls back to Siri before it.
         """
-        await self._request("post", udid, "/url",
-                            use_session=True, timeout=ACTION_TIMEOUT,
-                            json={"url": url})
+        try:
+            # raise_on_timeout: a timed-out request is otherwise re-sent after
+            # reconnecting, and WDA may already have opened the URL -- opening
+            # it twice is a different test (#74).
+            await self._request("post", udid, "/url",
+                                use_session=True, timeout=ACTION_TIMEOUT,
+                                raise_on_timeout=True, json={"url": url})
+        except httpx.TimeoutException as exc:
+            raise DeviceError(
+                f"WDA did not answer opening {url} on {udid[:8]} within "
+                f"{ACTION_TIMEOUT:.0f}s. It may have opened anyway, so it was not "
+                "re-sent; check the screen before opening it again.",
+                tool="wda",
+            ) from exc
 
     async def active_app(self, udid: str) -> str | None:
         """The bundle id of the application in front, or None when WDA
         answered without naming one. Raises DeviceError when it could not be
-        asked -- "could not ask" is not "nothing is in front"."""
-        resp = await self._request("get", udid, "/wda/activeAppInfo")
+        asked -- "could not ask" is not "nothing is in front".
+
+        Bounded short, and a timeout is not treated as a lost connection: it
+        is a status read made while waiting on something else, and must
+        neither hold that up nor tear down the connection it depends on."""
+        try:
+            resp = await self._request("get", udid, "/wda/activeAppInfo",
+                                       timeout=ACTIVE_APP_TIMEOUT, raise_on_timeout=True)
+        except httpx.TimeoutException as exc:
+            raise DeviceError(
+                f"WDA activeAppInfo on {udid[:8]} did not answer within "
+                f"{ACTIVE_APP_TIMEOUT:.0f}s", tool="wda") from exc
         try:
             value = resp.json().get("value")
         except (ValueError, AttributeError) as exc:

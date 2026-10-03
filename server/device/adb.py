@@ -87,11 +87,18 @@ _AM_START_UNRESOLVED = (
 )
 
 #: `topResumedActivity=ActivityRecord{b931055 u0 com.android.chrome/org.chromium...Activity t1747}`,
-#: measured on a Pixel 5 (Android 14) and an API 32 emulator. The
-#: `mResumedActivity:` spelling is the older one, kept for devices that predate
-#: the top-resumed field; it has not been measured here.
+#: measured on a Pixel 5 (Android 14) and an API 32 emulator. It is the one
+#: system-wide answer; `mResumedActivity:` lines are per task, and with split
+#: screen or a second display there can be several, so they are only the
+#: fallback for a device that predates the top-resumed field (not measured).
+_TOP_RESUMED_ACTIVITY = re.compile(
+    r"topResumedActivity=ActivityRecord\{\S+ u\d+ ([^\s/]+)/(\S+)")
 _RESUMED_ACTIVITY = re.compile(
-    r"(?:topResumedActivity=|mResumedActivity: )ActivityRecord\{\S+ u\d+ ([^\s/]+)/(\S+)")
+    r"mResumedActivity: ActivityRecord\{\S+ u\d+ ([^\s/]+)/(\S+)")
+
+#: Reads made while waiting on a link must not be able to hang the open that
+#: is waiting on them.
+_STATE_READ_TIMEOUT = 5.0
 
 _AM_START_FAILURES = (
     "Error: Activity not started",
@@ -1625,14 +1632,47 @@ rm -rf /data/local/tmp/tmp-ca-copy
         claims the URL) and a crash, which leaves the launcher in front.
         """
         stdout, _ = await self._run_adb_for_device(
-            serial, "shell", "dumpsys", "activity", "activities")
-        match = _RESUMED_ACTIVITY.search(stdout)
+            serial, "shell", "dumpsys", "activity", "activities",
+            timeout=_STATE_READ_TIMEOUT)
+        match = _TOP_RESUMED_ACTIVITY.search(stdout) or _RESUMED_ACTIVITY.search(stdout)
         if not match:
             return None
         package, activity = match.group(1), match.group(2)
         if activity.startswith("."):
             activity = package + activity
         return package, f"{package}/{activity}"
+
+    async def device_time(self, serial: str) -> str:
+        """The device's clock as epoch seconds with milliseconds, the form
+        `logcat -T` takes. The device's, not the Mac's: the two drift, and a
+        window opened on the wrong clock misses the crash or finds an old one."""
+        stdout, _ = await self._run_adb_for_device(
+            serial, "shell", "date", "+%s.%N", timeout=_STATE_READ_TIMEOUT)
+        value = stdout.strip()
+        match = re.fullmatch(r"(\d+)\.(\d{3})\d*", value)
+        if not match:
+            raise DeviceError(f"could not read the clock on {serial}: {value!r}", tool="adb")
+        return f"{match.group(1)}.{match.group(2)}"
+
+    async def crashed_since(self, serial: str, package: str, since: str) -> str | None:
+        """The exception `package` crashed with since `since` (a `device_time`),
+        or None if it did not. Read from the crash buffer, which outlives the
+        screen: a crash can leave the home screen in front, or -- when the app
+        had a task -- the app's own previous activity, which reads as the app
+        having opened the link. Measured on a Pixel 5 (Android 14): the buffer
+        carries `Process: <package>, PID: <n>` and the exception on the next
+        line. Read, never cleared: the buffer is the user's."""
+        stdout, _ = await self._run_adb_for_device(
+            serial, "logcat", "-b", "crash", "-d", "-v", "epoch", "-T", since,
+            timeout=_STATE_READ_TIMEOUT)
+        lines = stdout.splitlines()
+        marker = f"Process: {package}, PID:"
+        for i, line in enumerate(lines):
+            if marker in line:
+                following = lines[i + 1] if i + 1 < len(lines) else ""
+                exception = following.split("AndroidRuntime:", 1)[-1].strip()
+                return exception or "the app crashed (no exception line followed)"
+        return None
 
     async def grant_permission(self, serial: str, package: str, permission: str) -> None:
         """Grant a runtime permission to an app.

@@ -52,6 +52,24 @@ def _reads(*values):
     return read
 
 
+def _timeline(*steps):
+    """A front-of-screen reader driven by the clock: `steps` are
+    (seconds after the first read, value) pairs, each holding until the
+    next. The first read starts the clock -- it is the before-open read."""
+    import time
+    t0: list[float] = []
+
+    async def read(_udid):
+        if not t0:
+            t0.append(time.monotonic())
+        now = time.monotonic() - t0[0]
+        value = [v for at, v in steps if at <= now][-1]
+        if isinstance(value, Exception):
+            raise value
+        return value
+    return read
+
+
 def _ctrl(udid: str, kind: DeviceType) -> DeviceController:
     ctrl = DeviceController()
     ctrl._device_type_cache[udid] = kind
@@ -62,6 +80,8 @@ def _ctrl(udid: str, kind: DeviceType) -> DeviceController:
     ctrl.wda_client.active_app = AsyncMock(return_value=APP)
     ctrl.adb.open_url = AsyncMock()
     ctrl.adb.resumed_activity = AsyncMock(return_value=(APP, f"{APP}/.MainActivity"))
+    ctrl.adb.device_time = AsyncMock(return_value="1791040468.688")
+    ctrl.adb.crashed_since = AsyncMock(return_value=None)
     ctrl._OPEN_URL_FRONTMOST_TIMEOUT_S = 0.05
     ctrl._OPEN_URL_FRONTMOST_INTERVAL_S = 0.01
     ctrl._OPEN_URL_SETTLE_S = 0.05
@@ -122,6 +142,21 @@ class TestASimulatorOnAnyBackend:
 
 
 class TestASimulatorCannotAlwaysTell:
+    async def test_the_app_is_found_among_several_application_elements(self):
+        ctrl = _simulator_on("sim-bridge")
+        ctrl.get_ui_elements = AsyncMock(return_value=(
+            [_app_element("SpringBoard"), _app_element("Example")], SIM))
+        _, outcome = await ctrl.open_url(URL, bundle_id=APP)
+        assert outcome["opened_in_app"] is True
+
+    async def test_a_display_name_lookup_that_raises_does_not_stop_the_open(self):
+        ctrl = _simulator_on("sim-bridge")
+        ctrl.simctl.app_display_name = AsyncMock(side_effect=RuntimeError("plist"))
+        _, outcome = await ctrl.open_url(URL, bundle_id=APP)
+        ctrl.simctl.open_url.assert_awaited_once_with(SIM, URL)
+        assert outcome["opened_in_app"] is None
+        assert "plist" in outcome["opened_in_app_error"]
+
     async def test_an_app_whose_name_cannot_be_read_is_unknown_not_absent(self):
         ctrl = _simulator_on("sim-bridge")
         ctrl.simctl.app_display_name = AsyncMock(return_value=None)
@@ -175,58 +210,83 @@ class TestAPhysicalIPhone:
         assert "apple-app-site-association" in outcome["warning"]
 
     async def test_an_app_already_in_front_is_watched_until_the_link_would_have_left(self):
-        """Measured: Safari takes the front ~1s after `/url` returns, and the
-        first read in that gap still sees the app. Reading once reported an
+        """Measured: Safari takes the front ~1s after `/url` returns, and a
+        read in that gap still sees the app. Reading early reported an
         unclaimed path as opened in it."""
-        ctrl = _ctrl(PHONE, DeviceType.DEVICE)
-        ctrl._OPEN_URL_SETTLE_S = 0.1
-        reads = iter([APP, APP, APP])          # before, then twice inside the gap
+        import time
 
-        async def front(udid):
-            return next(reads, "com.apple.mobilesafari")
-        ctrl.wda_client.active_app = front
+        ctrl = _ctrl(PHONE, DeviceType.DEVICE)
+        ctrl._OPEN_URL_SETTLE_S = 0.15
+        ctrl._OPEN_URL_FRONTMOST_TIMEOUT_S = 2.0
+        ctrl.wda_client.active_app = _timeline((0, APP), (0.08, "com.apple.mobilesafari"))
+        t = time.monotonic()
         _, outcome = await ctrl.open_url(URL, bundle_id=APP)
         assert outcome["opened_in_app"] is False
         assert outcome["foreground_app"] == "com.apple.mobilesafari"
+        # It was there and has gone: that is the answer, with no wait for a
+        # cold start that is not coming.
+        assert time.monotonic() - t < 1.0
 
     async def test_an_app_already_in_front_that_stays_is_a_success(self):
         ctrl = _ctrl(PHONE, DeviceType.DEVICE)
         _, outcome = await ctrl.open_url(URL, bundle_id=APP)
         assert outcome["opened_in_app"] is True
 
-    async def test_an_unreadable_front_before_the_open_is_watched_too(self):
-        """Not knowing what was in front is treated as "maybe the app": the
-        cautious side, which costs the settle time rather than a false yes."""
+    async def test_a_cold_start_slower_than_the_settle_is_waited_for(self):
+        """Not in front before the open, so something else in front after
+        the settle is "not yet", not "no"."""
         ctrl = _ctrl(PHONE, DeviceType.DEVICE)
-        ctrl._OPEN_URL_SETTLE_S = 0.1
-        reads = iter([DeviceError("blip", tool="wda"), APP, APP])
-
-        async def front(udid):
-            r = next(reads, "com.apple.mobilesafari")
-            if isinstance(r, Exception):
-                raise r
-            return r
-        ctrl.wda_client.active_app = front
+        ctrl._OPEN_URL_SETTLE_S = 0.05
+        ctrl._OPEN_URL_FRONTMOST_TIMEOUT_S = 1.0
+        ctrl.wda_client.active_app = _timeline((0, "com.apple.springboard"), (0.2, APP))
         _, outcome = await ctrl.open_url(URL, bundle_id=APP)
-        assert outcome["opened_in_app"] is False
+        assert outcome["opened_in_app"] is True
+
+    async def test_an_unreadable_front_before_the_open_is_not_taken_as_the_app(self):
+        """Review: treating "could not read" as "the app was there" turned a
+        slow cold start into a false no, with a warning to match."""
+        ctrl = _ctrl(PHONE, DeviceType.DEVICE)
+        ctrl._OPEN_URL_SETTLE_S = 0.05
+        ctrl._OPEN_URL_FRONTMOST_TIMEOUT_S = 1.0
+        ctrl.wda_client.active_app = _timeline(
+            (0, DeviceError("blip", tool="wda")), (0.01, "com.apple.springboard"), (0.2, APP))
+        _, outcome = await ctrl.open_url(URL, bundle_id=APP)
+        assert outcome["opened_in_app"] is True
+
+    async def test_a_before_read_that_raises_anything_does_not_stop_the_open(self):
+        ctrl = _ctrl(PHONE, DeviceType.DEVICE)
+        ctrl.wda_client.active_app = _reads(RuntimeError("bug in a reader"), APP)
+        _, outcome = await ctrl.open_url(URL, bundle_id=APP)
+        ctrl.wda_client.open_url.assert_awaited_once()
+        assert outcome["opened_in_app"] is True
 
     async def test_reads_that_fail_after_the_hand_over_cannot_decide(self):
-        """A sighting from inside the gap is the one that cannot be trusted,
-        so it must not stand in for the reads that failed after it."""
+        """A sighting from before the open must not stand in for the reads
+        that failed after it."""
         ctrl = _ctrl(PHONE, DeviceType.DEVICE)
-        ctrl._OPEN_URL_SETTLE_S = 0.1
         ctrl._OPEN_URL_FRONTMOST_TIMEOUT_S = 0.2
-        reads = iter([APP, APP])
-
-        async def front(udid):
-            r = next(reads, None)
-            if r is None:
-                raise DeviceError("WDA gone", tool="wda")
-            return r
-        ctrl.wda_client.active_app = front
+        ctrl.wda_client.active_app = _reads(APP, DeviceError("WDA gone", tool="wda"))
         _, outcome = await ctrl.open_url(URL, bundle_id=APP)
         assert outcome["opened_in_app"] is None
         assert "WDA gone" in outcome["opened_in_app_error"]
+        assert "warning" not in outcome, "could not tell is not a failure"
+
+    async def test_a_slow_read_cannot_hold_the_open_past_its_deadline(self):
+        import asyncio
+        import time
+
+        ctrl = _ctrl(PHONE, DeviceType.DEVICE)
+        ctrl._OPEN_URL_SETTLE_S = 0.05
+        ctrl._OPEN_URL_FRONTMOST_TIMEOUT_S = 0.3
+        ctrl._OPEN_URL_PREREAD_TIMEOUT_S = 0.2
+
+        async def stuck(_udid):
+            await asyncio.sleep(30)
+        ctrl.wda_client.active_app = stuck
+        t = time.monotonic()
+        _, outcome = await ctrl.open_url(URL, bundle_id=APP)
+        assert time.monotonic() - t < 2.0
+        assert outcome["opened_in_app"] is None
 
     async def test_a_read_that_fails_then_works_still_answers(self):
         ctrl = _ctrl(PHONE, DeviceType.DEVICE)
@@ -244,6 +304,12 @@ class TestAPhysicalIPhone:
         assert outcome["opened_in_app"] is None
         assert "WDA down" in outcome["opened_in_app_error"]
 
+    async def test_the_screen_is_read_fresh_after_the_open(self):
+        ctrl = _ctrl(PHONE, DeviceType.DEVICE)
+        ctrl._invalidate_ui_cache = MagicMock()
+        await ctrl.open_url(URL)
+        ctrl._invalidate_ui_cache.assert_called_once_with(PHONE)
+
 
 class TestAndroid:
     async def test_the_default_is_a_tapped_link_not_a_package_delivery(self):
@@ -259,24 +325,56 @@ class TestAndroid:
         ctrl.simctl.open_url.assert_not_awaited()
         ctrl.wda_client.open_url.assert_not_awaited()
 
-    async def test_an_app_that_crashes_on_the_link_is_not_a_success(self):
-        """Measured on a Pixel 5: the activity a production `/dl/profile` tap
-        reaches was in front ~0.4s, then crashed. A read in that gap had
-        reported the crash as opened_in_app: true."""
+    async def test_a_crash_is_read_from_the_crash_buffer_not_the_screen(self):
+        """Review: a crash can leave the app's own previous activity in
+        front, which reads as the link having opened. Measured on a Pixel 5
+        (production `/dl/profile`): the crash buffer names the process."""
         ctrl = _ctrl(PIXEL, DeviceType.ANDROID_DEVICE)
-        ctrl._OPEN_URL_SETTLE_S = 0.1
-        ctrl._OPEN_URL_FRONTMOST_TIMEOUT_S = 0.2
-        home = ("com.google.android.apps.nexuslauncher",
-                "com.google.android.apps.nexuslauncher/.NexusLauncherActivity")
-        reads = iter([home, (APP, f"{APP}/.LinkAccountActivity")])   # before, then the gap
-
-        async def front(serial):
-            return next(reads, home)
-        ctrl.adb.resumed_activity = front
+        ctrl.adb.crashed_since = AsyncMock(return_value="java.lang.RuntimeException: boom")
         _, outcome = await ctrl.open_url(URL, bundle_id=APP)
-        assert outcome["opened_in_app"] is False
-        assert outcome["foreground_app"] == "com.google.android.apps.nexuslauncher"
-        assert "get_latest_crash" in outcome["warning"]
+        ctrl.adb.crashed_since.assert_awaited_once_with(PIXEL, APP, "1791040468.688")
+        assert outcome["crashed"] is True
+        assert outcome["opened_in_app"] is False, "the app in front is not the link"
+        assert "crashed on the link" in outcome["warning"]
+        assert "RuntimeException: boom" in outcome["warning"]
+
+    async def test_no_crash_is_said_as_such(self):
+        ctrl = _ctrl(PIXEL, DeviceType.ANDROID_DEVICE)
+        _, outcome = await ctrl.open_url(URL, bundle_id=APP)
+        assert outcome["crashed"] is False and outcome["opened_in_app"] is True
+
+    @pytest.mark.parametrize("broken", ["device_time", "crashed_since"])
+    async def test_a_crash_check_that_could_not_run_is_unknown(self, broken):
+        ctrl = _ctrl(PIXEL, DeviceType.ANDROID_DEVICE)
+        setattr(ctrl.adb, broken, AsyncMock(side_effect=DeviceError("adb hung", tool="adb")))
+        _, outcome = await ctrl.open_url(URL, bundle_id=APP)
+        assert outcome["crashed"] is None
+        assert "adb hung" in outcome["crash_check_error"]
+        assert outcome["opened_in_app"] is True, "the screen check still answers"
+
+    async def test_only_web_links_carry_browsable(self):
+        """Review: an intent with a category reaches only filters declaring
+        it, and the Contacts viewer for `content://` URIs does not."""
+        ctrl = _ctrl(PIXEL, DeviceType.ANDROID_DEVICE)
+        await ctrl.open_url("content://com.android.contacts/contacts/1")
+        ctrl.adb.open_url.assert_awaited_once_with(
+            PIXEL, "content://com.android.contacts/contacts/1", package=None, browsable=False)
+
+    async def test_a_link_that_went_to_the_browser_points_at_direct(self):
+        ctrl = _ctrl(PIXEL, DeviceType.ANDROID_DEVICE)
+        chrome = ("com.android.chrome", "com.android.chrome/.IntentDispatcher")
+        ctrl.adb.resumed_activity = AsyncMock(return_value=chrome)
+        _, outcome = await ctrl.open_url(URL, bundle_id=APP)
+        assert outcome["foreground_app"] == "com.android.chrome"
+        assert "pass direct=true" in outcome["warning"]
+
+    async def test_a_direct_delivery_that_did_not_stay_does_not_suggest_direct(self):
+        ctrl = _ctrl(PIXEL, DeviceType.ANDROID_DEVICE)
+        chrome = ("com.android.chrome", "com.android.chrome/.IntentDispatcher")
+        ctrl.adb.resumed_activity = AsyncMock(return_value=chrome)
+        _, outcome = await ctrl.open_url(URL, bundle_id=APP, direct=True)
+        assert "direct=true" not in outcome["warning"], "it was already direct"
+        assert "handed the link on" in outcome["warning"]
 
     async def test_direct_delivers_to_the_package_as_espresso_does(self):
         ctrl = _ctrl(PIXEL, DeviceType.ANDROID_DEVICE)
@@ -308,24 +406,6 @@ class TestAndroid:
         assert outcome["opened_in_app"] is False
         assert "app chooser" in outcome["warning"]
         assert "more than one activity" in outcome["warning"]
-
-    async def test_a_link_that_went_to_the_browser_points_at_direct(self):
-        ctrl = _ctrl(PIXEL, DeviceType.ANDROID_DEVICE)
-        chrome = ("com.android.chrome", "com.android.chrome/.IntentDispatcher")
-        ctrl.adb.resumed_activity = AsyncMock(return_value=chrome)
-        _, outcome = await ctrl.open_url(URL, bundle_id=APP)
-        assert outcome["foreground_app"] == "com.android.chrome"
-        assert "pass direct=true" in outcome["warning"]
-        assert "get_latest_crash" in outcome["warning"], "a crash leaves another app in front too"
-
-    async def test_a_direct_delivery_that_did_not_stay_suggests_a_crash(self):
-        ctrl = _ctrl(PIXEL, DeviceType.ANDROID_DEVICE)
-        home = ("com.google.android.apps.nexuslauncher",
-                "com.google.android.apps.nexuslauncher/.NexusLauncherActivity")
-        ctrl.adb.resumed_activity = AsyncMock(return_value=home)
-        _, outcome = await ctrl.open_url(URL, bundle_id=APP, direct=True)
-        assert "direct=true" not in outcome["warning"], "it was already direct"
-        assert "get_latest_crash" in outcome["warning"]
 
     async def test_nothing_resumed_is_seen_as_nothing_in_front(self):
         ctrl = _ctrl(PIXEL, DeviceType.ANDROID_DEVICE)
@@ -400,6 +480,56 @@ class TestTheAdbCalls:
         adb = self._adb("ACTIVITY MANAGER ACTIVITIES\n" + line + "\n")
         assert await adb.resumed_activity(PIXEL) == expected
 
+    async def test_the_system_wide_answer_beats_a_per_task_line(self):
+        """Review: with split screen, a task's `mResumedActivity` can come
+        first in the dump; `topResumedActivity` is the one that answers."""
+        adb = self._adb(
+            "  mResumedActivity: ActivityRecord{1 u0 com.other.split/.Pane t2}\n"
+            "  topResumedActivity=ActivityRecord{2 u0 com.example.App/.Main t3}\n")
+        assert await adb.resumed_activity(PIXEL) == ("com.example.App",
+                                                     "com.example.App/com.example.App.Main")
+
+    async def test_reads_are_bounded(self):
+        adb = self._adb("")
+        await adb.resumed_activity(PIXEL)
+        assert adb._run_adb_for_device.call_args.kwargs["timeout"] is not None
+
+    async def test_the_device_clock_is_read_to_the_millisecond(self):
+        adb = self._adb("1791040468.688123456\n")
+        assert await adb.device_time(PIXEL) == "1791040468.688"
+
+    async def test_an_unreadable_device_clock_raises(self):
+        with pytest.raises(DeviceError, match="clock"):
+            await self._adb("date: bad format\n").device_time(PIXEL)
+
+    # Measured on a Pixel 5 (Android 14), `logcat -b crash -d -v epoch -T <t>`.
+    _CRASH = (
+        "--------- beginning of crash\n"
+        "         1791040468.874 24251 24251 E AndroidRuntime: FATAL EXCEPTION: main\n"
+        "         1791040468.874 24251 24251 E AndroidRuntime: Process: "
+        "com.example.App, PID: 24251\n"
+        "         1791040468.874 24251 24251 E AndroidRuntime: java.lang.RuntimeException: "
+        "Unable to start activity ComponentInfo{com.example.App/.LinkAccountActivity}\n"
+        "         1791040468.874 24251 24251 E AndroidRuntime: \tat android.app."
+        "ActivityThread.performLaunchActivity(ActivityThread.java:3782)\n")
+
+    async def test_a_crash_of_the_app_is_found_with_its_exception(self):
+        adb = self._adb(self._CRASH)
+        found = await adb.crashed_since(PIXEL, "com.example.App", "1791040468.688")
+        assert found.startswith("java.lang.RuntimeException: Unable to start activity")
+        args = adb._run_adb_for_device.call_args.args
+        assert args == (PIXEL, "logcat", "-b", "crash", "-d", "-v", "epoch",
+                        "-T", "1791040468.688")
+        assert "-c" not in args, "the crash buffer is the user's: read, never cleared"
+
+    async def test_another_apps_crash_is_not_this_ones(self):
+        adb = self._adb(self._CRASH)
+        assert await adb.crashed_since(PIXEL, "com.example.App.other", "1") is None
+        assert await adb.crashed_since(PIXEL, "com.example", "1") is None
+
+    async def test_an_empty_crash_buffer_is_no_crash(self):
+        assert await self._adb("").crashed_since(PIXEL, "com.example.App", "1") is None
+
     async def test_no_resumed_activity_is_none(self):
         assert await self._adb("ACTIVITY MANAGER ACTIVITIES\n").resumed_activity(PIXEL) is None
 
@@ -427,6 +557,37 @@ class TestTheWdaCalls:
         assert args[:3] == ("post", PHONE, "/url")
         assert kwargs["json"] == {"url": URL}
         assert kwargs["use_session"] is True
+
+    async def test_a_timed_out_open_is_not_sent_twice(self):
+        """Review: `_request` reconnects and re-sends on a timeout, and WDA
+        may already have opened the URL."""
+        import httpx
+
+        from server.device.wda_client import WdaBackend
+
+        wda = WdaBackend()
+        wda._request = AsyncMock(side_effect=httpx.ReadTimeout("slow"))
+        with pytest.raises(DeviceError, match="may have opened anyway"):
+            await wda.open_url(PHONE, URL)
+        assert wda._request.await_count == 1
+        assert wda._request.call_args.kwargs["raise_on_timeout"] is True
+
+    async def test_a_slow_front_read_is_a_short_error_not_a_reconnect(self):
+        import httpx
+
+        from server.device.wda_client import WdaBackend
+
+        wda = WdaBackend()
+        wda._request = AsyncMock(side_effect=httpx.ReadTimeout("slow"))
+        with pytest.raises(DeviceError, match="did not answer"):
+            await wda.active_app(PHONE)
+        kwargs = wda._request.call_args.kwargs
+        assert kwargs["raise_on_timeout"] is True and kwargs["timeout"] <= 5
+
+    async def test_an_answer_of_the_wrong_shape_raises(self):
+        wda = self._backend(["not", "an", "object"])
+        with pytest.raises(DeviceError, match="unreadable"):
+            await wda.active_app(PHONE)
 
     async def test_active_app_names_the_bundle(self):
         wda = self._backend({"value": {"bundleId": APP, "pid": 1, "name": ""}})

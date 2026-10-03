@@ -1455,6 +1455,9 @@ class DeviceController(DeviceControllerUI):
     #: front for ~0.4s and force-finished at ~1.0s, and a read in that gap
     #: reported a crash as a success.
     _OPEN_URL_SETTLE_S = 2.0
+    #: Bound on the reads taken before the open. They are side checks: a
+    #: device slow to answer one must cost the check, never the open.
+    _OPEN_URL_PREREAD_TIMEOUT_S = 3.0
 
     async def open_url(
         self, url: str, udid: str | None = None, bundle_id: str | None = None,
@@ -1464,7 +1467,7 @@ class DeviceController(DeviceControllerUI):
 
         Returns the resolved udid and an outcome: `via` (simctl, wda or adb),
         `route` (system or direct), and with `bundle_id` whether that app
-        ended up in front.
+        ended up in front -- and on Android whether it crashed.
 
         The default is the system's own routing everywhere, because that is
         what a user's tap does and the only route that tests it: universal
@@ -1478,8 +1481,12 @@ class DeviceController(DeviceControllerUI):
         simulator goes through `simctl openurl` whether sim-bridge, idb or a
         WDA runner reads its screen -- as `launch_app` does. A physical
         iPhone goes through WDA's `/url` without a bundle id (see
-        `WdaBackend.open_url`). Android sends the VIEW intent with no package
-        and the BROWSABLE category, as a tap does.
+        `WdaBackend.open_url`). Android sends the VIEW intent with no
+        package, and for an http(s) link the BROWSABLE category a browser tap
+        carries. Only for http(s): an intent with a category reaches only
+        filters that declare it, and a `content:` URI's viewer, or an app's
+        scheme registered without BROWSABLE, does not -- those were opened
+        without it before and still are.
 
         `direct` is the opt-in for links the system will not route to the
         app -- a staging build's, which are not verified App Links. On
@@ -1509,26 +1516,46 @@ class DeviceController(DeviceControllerUI):
                 tool="adb",
             )
         kind = "android" if android else "device" if physical else "simulator"
-        # What to look for, and what is in front now, are both read before
-        # the open: afterwards the app in front may be the one leaving.
+        # Everything the check needs is read before the open: afterwards the
+        # app in front may be the one leaving, and a crash window has to
+        # start before the crash. None of it may stop the open itself.
         expected: str | None = None
         unknown: dict | None = None
         before: str | None = None
+        crash_since: str | None = None
+        crash_check_error: str | None = None
         if bundle_id:
-            expected = (await self.simctl.app_display_name(resolved, bundle_id)
-                        if kind == "simulator" else bundle_id)
-            if not expected:
-                unknown = {"opened_in_app": None,
-                           "opened_in_app_error": f"could not read {bundle_id}'s display "
-                                                  "name on this simulator -- is it installed?"}
-            else:
+            if kind == "simulator":
                 try:
-                    before, _ = await self._foreground_app(resolved, kind)
-                except Exception:  # noqa: BLE001 - unknown is treated as "maybe already there"
+                    expected = await self.simctl.app_display_name(resolved, bundle_id)
+                except Exception as exc:  # noqa: BLE001 - the check fails, not the open
+                    unknown = {"opened_in_app": None,
+                               "opened_in_app_error": f"could not read {bundle_id}'s "
+                                                      f"display name: {exc}"}
+                else:
+                    if not expected:
+                        unknown = {"opened_in_app": None,
+                                   "opened_in_app_error": f"could not read {bundle_id}'s "
+                                                          "display name on this simulator "
+                                                          "-- is it installed?"}
+            else:
+                expected = bundle_id
+            if expected:
+                try:
+                    before, _ = await asyncio.wait_for(
+                        self._foreground_app(resolved, kind, expected),
+                        self._OPEN_URL_PREREAD_TIMEOUT_S)
+                except Exception:  # noqa: BLE001 - unknown just means "not known to be there"
                     before = None
+            if android:
+                try:
+                    crash_since = await self.adb.device_time(resolved)
+                except Exception as exc:  # noqa: BLE001 - reported as an unchecked crash
+                    crash_check_error = f"could not read the device clock: {exc}"
         if android:
+            web = url.lower().startswith(("http://", "https://"))
             await self.adb.open_url(resolved, url, package=bundle_id if direct else None,
-                                    browsable=not direct)
+                                    browsable=web and not direct)
             via = "adb"
         elif physical:
             await self.wda_client.open_url(resolved, url)
@@ -1542,11 +1569,33 @@ class DeviceController(DeviceControllerUI):
             outcome.update(unknown)
         elif expected:
             outcome.update(await self._url_landed_in(
-                resolved, kind, expected,
-                already_in_front=before is None or before == expected))
+                resolved, kind, expected, already_in_front=before == expected))
+            if android:
+                outcome.update(await self._crash_since_open(
+                    resolved, bundle_id, crash_since, crash_check_error))
             if outcome.get("opened_in_app") is False:
                 outcome["warning"] = self._landed_elsewhere(bundle_id, kind, direct, outcome)
         return resolved, outcome
+
+    async def _crash_since_open(
+        self, serial: str, package: str, since: str | None, error: str | None,
+    ) -> dict:
+        """Whether `package` crashed after the open, from the crash buffer.
+
+        The screen cannot say: a crash leaves the home screen in front, or
+        the app's own previous activity when it had a task, and that reads
+        as the link having opened. `crashed` is True or False only when the
+        buffer was read; otherwise it is None with `crash_check_error`."""
+        if since is None:
+            return {"crashed": None, "crash_check_error": error or "no crash window"}
+        try:
+            exception = await self.adb.crashed_since(serial, package, since)
+        except Exception as exc:  # noqa: BLE001 - reported, not a verdict
+            return {"crashed": None, "crash_check_error": str(exc) or type(exc).__name__}
+        if exception is None:
+            return {"crashed": False}
+        # The app is not showing the link, whatever is in front.
+        return {"crashed": True, "crash": exception, "opened_in_app": False}
 
     async def _url_landed_in(
         self, udid: str, kind: str, expected: str, *, already_in_front: bool,
@@ -1554,45 +1603,45 @@ class DeviceController(DeviceControllerUI):
         """Watch the front after an open, and say whether `expected` ended up
         there.
 
-        A sighting proves nothing until `_OPEN_URL_SETTLE_S` has passed: the
+        Nothing is read until `_OPEN_URL_SETTLE_S` has passed: before it the
         app may be about to lose the front to the link, or may have taken the
-        link and be about to crash on it. So only a read after that decides.
-        After it, the expected app in front is the answer. Something else in
-        front is an answer too when the expected app was in front before the
-        open -- it was there and has gone -- and otherwise only at the
-        deadline, since a cold start may simply not have arrived yet.
+        link and be about to crash on it, so no earlier sighting could be
+        believed. After it, the expected app in front is the answer.
+        Something else in front is an answer at once only when the expected
+        app was known to be in front before the open -- it was there and has
+        gone; otherwise reads continue to the deadline, since a cold start
+        may simply not have arrived yet. Each read is bounded by the time
+        left, so the deadline holds against a slow read.
 
         `opened_in_app` is True or False only on the strength of a read that
-        worked: when no read after the settle point worked it is None, with
-        the reason, so "could not tell" never reads as either answer.
-        `foreground_app` is what was seen in front -- a bundle id or package
-        on a device, the app's display name on a simulator, where only the
-        accessibility tree is there to ask -- and on Android
-        `foreground_activity` names the component too.
+        worked: when none did it is None, with the reason, so "could not
+        tell" never reads as either answer. `foreground_app` is what was seen
+        in front -- a bundle id or package on a device, the app's display
+        name on a simulator, where only the accessibility tree is there to
+        ask -- and on Android `foreground_activity` names the component too.
         """
         start = time.monotonic()
-        settle = start + self._OPEN_URL_SETTLE_S
         deadline = start + max(self._OPEN_URL_FRONTMOST_TIMEOUT_S, self._OPEN_URL_SETTLE_S)
+        await asyncio.sleep(self._OPEN_URL_SETTLE_S)
         seen: dict | None = None
-        # Only a read taken once the settle point has passed may decide: a
-        # sighting before it is exactly the one that cannot be trusted.
         error = "no read was taken after the hand-over"
         while True:
+            left = deadline - time.monotonic()
             try:
-                app, activity = await self._foreground_app(udid, kind)
+                app, activity = await asyncio.wait_for(
+                    self._foreground_app(udid, kind, expected), max(left, 0.5))
             except Exception as exc:  # noqa: BLE001 - a failed read is reported, not a verdict
                 error = str(exc) or type(exc).__name__
             else:
-                if time.monotonic() >= settle:
-                    seen = {"foreground_app": app}
-                    if activity:
-                        seen["foreground_activity"] = activity
-                    if app == expected:
-                        return {"opened_in_app": True, **seen}
-                    if already_in_front:
-                        # It was there and has gone: whatever is in front
-                        # now took the link.
-                        return {"opened_in_app": False, **seen}
+                seen = {"foreground_app": app}
+                if activity:
+                    seen["foreground_activity"] = activity
+                if app == expected:
+                    return {"opened_in_app": True, **seen}
+                if already_in_front:
+                    # It was there and has gone: whatever is in front now
+                    # took the link.
+                    return {"opened_in_app": False, **seen}
             if time.monotonic() >= deadline:
                 break
             await asyncio.sleep(self._OPEN_URL_FRONTMOST_INTERVAL_S)
@@ -1601,11 +1650,15 @@ class DeviceController(DeviceControllerUI):
                     "opened_in_app_error": f"could not read the app in front: {error}"}
         return {"opened_in_app": False, **seen}
 
-    async def _foreground_app(self, udid: str, kind: str) -> tuple[str | None, str | None]:
+    async def _foreground_app(
+        self, udid: str, kind: str, expected: str | None = None,
+    ) -> tuple[str | None, str | None]:
         """What is in front, and on Android which activity: the resumed
         activity's package there, WDA's bundle id on an iPhone, the
         Application element's label on a simulator, through whichever
-        backend reads it. Raises when it cannot be read."""
+        backend reads it -- `expected` if any labelled Application element
+        carries it, as `_is_frontmost` asks, else the first. Raises when it
+        cannot be read."""
         if kind == "android":
             resumed = await self.adb.resumed_activity(udid)
             return resumed if resumed else (None, None)
@@ -1614,7 +1667,10 @@ class DeviceController(DeviceControllerUI):
         elements, _ = await self.get_ui_elements(
             udid, use_cache=False, filter_type="Application", probe_containers=False,
         )
-        return next((e.label for e in elements if e.label), None), None
+        labels = [e.label for e in elements if e.label]
+        if expected is not None and expected in labels:
+            return expected, None
+        return (labels[0] if labels else None), None
 
     @staticmethod
     def _landed_elsewhere(bundle_id: str, kind: str, direct: bool, outcome: dict) -> str:
@@ -1623,6 +1679,9 @@ class DeviceController(DeviceControllerUI):
         next is the one who needs it."""
         front = outcome.get("foreground_app") or "another app"
         activity = outcome.get("foreground_activity") or ""
+        if outcome.get("crashed"):
+            return (f"{bundle_id} crashed on the link: {outcome.get('crash')}. "
+                    "get_latest_crash has the full report.")
         if activity.endswith("ResolverActivity"):
             return (f"The URL did not open in {bundle_id}: Android showed its app "
                     "chooser, because more than one activity claims this URL. A user "
@@ -1632,13 +1691,10 @@ class DeviceController(DeviceControllerUI):
             return (said + " For an https link this usually means the app's associated "
                     "domains (apple-app-site-association) do not claim this path.")
         if direct:
-            return (said + " The intent was delivered to the app, so it either handed "
-                    "the link on or crashed starting -- if the home screen is in front, "
-                    "check get_latest_crash.")
-        return (said + " Either the link is not a verified App Link for this app -- for a "
-                "staging or other unverified link, pass direct=true -- or the app took it "
-                "and crashed, which leaves the home screen in front: check "
-                "get_latest_crash.")
+            return (said + " The intent was delivered to the app, which handed the link "
+                    "on.")
+        return (said + " The link is not a verified App Link for this app; for a staging "
+                "or other unverified link, pass direct=true.")
 
     async def grant_permission(
         self, bundle_id: str, permission: str, udid: str | None = None,
