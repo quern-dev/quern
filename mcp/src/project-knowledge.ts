@@ -145,6 +145,22 @@ function samePlace(a: string, b: string): boolean {
   return real(a) === real(b);
 }
 
+/** Errors that mean the connection was never made, so no request left this
+ * process. Anything else -- a reset, a timeout, no code at all -- may have
+ * arrived first. Node's fetch reports these as `fetch failed` with the code
+ * on `cause` (measured on Node 22: ECONNREFUSED for a closed port). */
+const NEVER_CONNECTED = new Set([
+  "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH", "EADDRNOTAVAIL",
+]);
+
+function connectionCode(e: unknown): string | undefined {
+  const pick = (x: unknown) =>
+    x && typeof x === "object" && typeof (x as { code?: unknown }).code === "string"
+      ? (x as { code: string }).code
+      : undefined;
+  return pick((e as { cause?: unknown })?.cause) ?? pick(e);
+}
+
 /** Load the project's knowledge base into the running server, unless it is
  * empty, unnamed, already loaded, or another checkout's set for the same app
  * is -- which is said, not replaced: sessions in two worktrees share one
@@ -184,12 +200,16 @@ export async function autoloadKnowledge(
     }
     return { kind: "not_loaded", reason: `the server answered ${JSON.stringify(result).slice(0, 200)}` };
   } catch (e) {
-    const reason = e instanceof Error ? e.message : String(e);
+    const code = connectionCode(e);
+    const message = e instanceof Error ? e.message : String(e);
+    const reason = code ? `${message} (${code})` : message;
     // A load that was sent and never answered may still finish: the server
     // does not cancel the scan when this side gives up, so "not loaded"
-    // could be false a moment later (CodeRabbit). An HTTP status is the
-    // server's own refusal, which is an answer.
-    return loadSent && !reason.startsWith("HTTP ")
+    // could be false a moment later (CodeRabbit). Two failures are answers
+    // all the same: an HTTP status is the server's own refusal, and a
+    // connection that was never made cannot have delivered anything.
+    const answered = message.startsWith("HTTP ") || NEVER_CONNECTED.has(code ?? "");
+    return loadSent && !answered
       ? { kind: "load_unknown", reason }
       : { kind: "not_loaded", reason };
   }

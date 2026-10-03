@@ -149,6 +149,19 @@ test("a load sent and never answered is unknown, not absent", async () => {
   assert.match(text, /list_landmarks/);
   assert.doesNotMatch(text, /NOT loaded/);
 
+  // A load whose connection was refused never left: that is an answer.
+  const refusedConn = Object.assign(new TypeError("fetch failed"),
+    { cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }) });
+  const neverSent = await autoloadKnowledge(pk, fakeRequest({ load: refusedConn }).request, true);
+  assert.equal(neverSent.kind, "not_loaded", "nothing was delivered, so nothing can finish");
+  assert.match(neverSent.reason, /ECONNREFUSED/);
+
+  // A reset may come after the server has the request.
+  const reset = Object.assign(new TypeError("fetch failed"),
+    { cause: Object.assign(new Error("socket hang up"), { code: "ECONNRESET" }) });
+  assert.equal(
+    (await autoloadKnowledge(pk, fakeRequest({ load: reset }).request, true)).kind, "load_unknown");
+
   // Failing before the load was sent is still a plain "not loaded".
   const listingDown = await autoloadKnowledge(pk, async () => { throw new Error("ECONNREFUSED"); }, true);
   assert.deepEqual(listingDown, { kind: "not_loaded", reason: "ECONNREFUSED" });
