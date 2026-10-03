@@ -821,8 +821,9 @@ class TestTheManager:
         video.reap = forever
         second = Sources().manager(video)
         await asyncio.wait_for(second.resume_all(), RESUME_BOUND)
-        # The reap below never ends: any bound catches an unbounded shutdown.
-        await asyncio.wait_for(second.shutdown(), 10.0)
+        # The reap below never ends, so this catches an unbounded shutdown --
+        # and stays inside the 5s `quern stop` allows, which is the property.
+        await asyncio.wait_for(second.shutdown(), 4.0)
         await _settle()
         assert video.started == [], "no new movie once quern is stopping"
         assert any(e["type"] == "paused" for e in _events(tmp_path / "r"))

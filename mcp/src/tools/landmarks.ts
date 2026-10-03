@@ -106,7 +106,7 @@ A landmark that matched only because its element type is named differently on th
   });
 
   server.registerTool("list_landmarks", {
-    description: `List all loaded landmark sets, showing the app identifier and number of screens for each. 'remembered' lists the knowledge bases loaded at every start (load_landmarks remember=true): each one's path, whether that path's set is loaded now (loaded, loaded_from), and at_start -- how many screens loaded at this start, or why it did not.`,
+    description: `List all loaded landmark sets, showing the app identifier and number of screens for each. 'sources' says where each set was loaded from: a knowledge base path, or 'inline' -- so two checkouts of one app can be told apart. 'remembered' lists the knowledge bases loaded at every start (load_landmarks remember=true): each one's path, whether that path's set is loaded now (loaded, loaded_from), and at_start -- how many screens loaded at this start, or why it did not.`,
     inputSchema: strictParams({}),
   }, async () => {
     try {
