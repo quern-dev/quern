@@ -411,3 +411,26 @@ async def test_output_that_closes_without_an_exit_is_said_as_such(adapter, monke
     await _run(adapter, _Exited(None, [], exits=False))
     assert "closed its output but has not exited" in adapter._error
     assert "None" not in adapter._error
+
+
+async def test_start_drains_stderr_from_the_first_line(monkeypatch, adapter):
+    """The drain is what keeps a chatty pymobiledevice3 from stalling on a
+    full pipe; start must begin it, not leave it to the end."""
+    from server.sources import device_log
+    proc = _Exited(None, [b"tunnel ready\n", b"warning: slow device\n"], exits=False)
+    proc.stdout = _Stream()
+
+    async def spawn(*cmd, **kw):
+        return proc
+    monkeypatch.setattr(device_log.asyncio, "create_subprocess_exec", spawn)
+
+    async def cmd():
+        return ["pmd3", "syslog", "live"]
+    monkeypatch.setattr(adapter, "_build_command", cmd)
+    await adapter.start()
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert list(adapter._stderr_tail) == ["tunnel ready", "warning: slow device"]
+    adapter._running = False
+    for task in (adapter._read_task, adapter._stderr_task):
+        task.cancel()
