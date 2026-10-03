@@ -132,8 +132,26 @@ test("a load of nothing is not a load", async () => {
     const outcome = await autoloadKnowledge(pk, fakeRequest({ load }).request, true);
     assert.equal(outcome.kind, "not_loaded", JSON.stringify(load));
   }
-  const down = await autoloadKnowledge(pk, fakeRequest({ load: new Error("ECONNREFUSED") }).request, true);
-  assert.deepEqual(down, { kind: "not_loaded", reason: "ECONNREFUSED" });
+  const refused = await autoloadKnowledge(
+    pk, fakeRequest({ load: new Error("HTTP 400: not a directory") }).request, true);
+  assert.equal(refused.kind, "not_loaded", "a status is the server's answer");
+});
+
+test("a load sent and never answered is unknown, not absent", async () => {
+  // The server does not cancel the scan when the client gives up, so the set
+  // can arrive after start-up said it was missing (CodeRabbit on #391).
+  const pk = detectProjectKnowledge(project({ knowledge: true, bundle: APP }));
+  const timedOut = await autoloadKnowledge(
+    pk, fakeRequest({ load: new Error("The operation was aborted due to timeout") }).request, true);
+  assert.equal(timedOut.kind, "load_unknown");
+  const text = knowledgeInstructions(pk, timedOut).join("\n");
+  assert.match(text, /may still finish/);
+  assert.match(text, /list_landmarks/);
+  assert.doesNotMatch(text, /NOT loaded/);
+
+  // Failing before the load was sent is still a plain "not loaded".
+  const listingDown = await autoloadKnowledge(pk, async () => { throw new Error("ECONNREFUSED"); }, true);
+  assert.deepEqual(listingDown, { kind: "not_loaded", reason: "ECONNREFUSED" });
 });
 
 test("a set already loaded is kept: this checkout's said as such, another's left in place", async () => {

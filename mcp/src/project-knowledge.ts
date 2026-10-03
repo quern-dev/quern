@@ -35,7 +35,8 @@ export type KnowledgeOutcome =
   | { kind: "loaded"; app: string; screens: number }
   | { kind: "already"; app: string; screens: number }
   | { kind: "other"; app: string; from: string }
-  | { kind: "not_loaded"; reason: string };
+  | { kind: "not_loaded"; reason: string }
+  | { kind: "load_unknown"; reason: string };
 
 function isDir(path: string): boolean {
   try {
@@ -159,6 +160,7 @@ export async function autoloadKnowledge(
     return { kind: "not_loaded", reason: "its .quern/config.json names no bundle_id" };
   }
   if (!reachable) return { kind: "not_loaded", reason: "the quern server was not reachable" };
+  let loadSent = false;
   try {
     const listing = (await request("GET", "/api/v1/landmarks/", undefined, undefined,
       AUTOLOAD_TIMEOUT_MS)) as { sets?: Record<string, number>; sources?: Record<string, string> };
@@ -171,6 +173,7 @@ export async function autoloadKnowledge(
         ? { kind: "already", app: pk.bundleId, screens: loaded }
         : { kind: "other", app: pk.bundleId, from: from || "a path this quern does not report" };
     }
+    loadSent = true;
     const result = (await request("POST", "/api/v1/landmarks/load", undefined,
       { source: pk.knowledgeDir, app: pk.bundleId }, AUTOLOAD_TIMEOUT_MS)) as {
       screens?: number;
@@ -181,7 +184,14 @@ export async function autoloadKnowledge(
     }
     return { kind: "not_loaded", reason: `the server answered ${JSON.stringify(result).slice(0, 200)}` };
   } catch (e) {
-    return { kind: "not_loaded", reason: e instanceof Error ? e.message : String(e) };
+    const reason = e instanceof Error ? e.message : String(e);
+    // A load that was sent and never answered may still finish: the server
+    // does not cancel the scan when this side gives up, so "not loaded"
+    // could be false a moment later (CodeRabbit). An HTTP status is the
+    // server's own refusal, which is an answer.
+    return loadSent && !reason.startsWith("HTTP ")
+      ? { kind: "load_unknown", reason }
+      : { kind: "not_loaded", reason };
   }
 }
 
@@ -208,6 +218,10 @@ export function knowledgeInstructions(pk: ProjectKnowledge, outcome: KnowledgeOu
       return ["", `${kb} -- NOT loaded: ${outcome.reason}. identify_screen will find nothing ` +
         `until you call ${loadCall}` + (pk.bundleId ? "" : " with the app's bundle id") +
         ` (after ensure_server, if the server was down). ${readIt}`];
+    case "load_unknown":
+      return ["", `${kb} -- load sent but not confirmed: ${outcome.reason}. It may still ` +
+        "finish on the server. Call list_landmarks to see whether it did, and " +
+        `${loadCall} if it did not. ${readIt}`];
     case "empty":
       return ["", `${kb} -- started, but it has no screens yet. When identifying screens would ` +
         "help the task, suggest filling it in to the user -- do not start it unasked: the " +
