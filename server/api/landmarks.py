@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import asdict
@@ -121,20 +122,23 @@ async def load_landmarks(request: Request, body: LoadLandmarksRequest):
     registry = _get_registry(request)
 
     if body.source:
-        knowledge = _knowledge_dir(body.source)
-        app = body.app or _app_from_project(knowledge)
+        # Directory checks, file reads, the scan and the config lock all go
+        # to a thread: a slow volume must not stall every other request
+        # (CodeRabbit). The registry update stays here, on the loop.
+        knowledge = await asyncio.to_thread(_knowledge_dir, body.source)
+        app = body.app or await asyncio.to_thread(_app_from_project, knowledge)
         if not app:
             raise HTTPException(
                 status_code=400,
                 detail=f"app is required: no .quern/config.json with a bundle_id "
                        f"beside {knowledge}",
             )
-        scan = scan_knowledge_base(knowledge)
+        scan = await asyncio.to_thread(scan_knowledge_base, knowledge)
         if body.remember and not scan.screens:
             # Refused before anything is replaced: a 400 that had already
             # swapped the loaded set for an empty one read as "nothing
             # happened" while identification went dead (review).
-            earlier = config_mod.get_knowledge_bases().get(app)
+            earlier = (await asyncio.to_thread(config_mod.get_knowledge_bases)).get(app)
             raise HTTPException(
                 status_code=400,
                 detail=(f"not loaded or remembered: {knowledge} has no screens with landmarks"
@@ -146,7 +150,8 @@ async def load_landmarks(request: Request, body: LoadLandmarksRequest):
             try:
                 # Absolute, but with its symlinks kept: the path as given is
                 # the one meant, and a link repointed later should be followed.
-                config_mod.remember_knowledge_base(app, str(knowledge.absolute()))
+                await asyncio.to_thread(
+                    config_mod.remember_knowledge_base, app, str(knowledge.absolute()))
             except OSError as e:
                 raise HTTPException(
                     status_code=500,
@@ -259,12 +264,12 @@ async def list_landmarks(request: Request):
     # What loads at every start, and how it went at this one: a remembered
     # knowledge base that did not load is said here, not only in the log.
     at_start = getattr(request.app.state, "landmark_startup", {}) or {}
-    if not config_mod.knowledge_bases_readable():
+    if not await asyncio.to_thread(config_mod.knowledge_bases_readable):
         # Never "nothing remembered" on the strength of a file nobody read.
         return {"sets": sets, "total_screens": total, "remembered": None,
                 "remembered_error": f"{config_mod.USER_CONFIG_FILE} cannot be read"}
     remembered = []
-    for app, path in sorted(config_mod.get_knowledge_bases().items()):
+    for app, path in sorted((await asyncio.to_thread(config_mod.get_knowledge_bases)).items()):
         loaded_from = registry.source(app)
         remembered.append({
             "app": app, "path": path,
@@ -303,7 +308,7 @@ async def unload_landmarks(
     if not forget:
         return {"unloaded": unloaded}
     try:
-        forgotten = config_mod.forget_knowledge_base(app)
+        forgotten = await asyncio.to_thread(config_mod.forget_knowledge_base, app)
     except OSError as e:
         raise HTTPException(
             status_code=500, detail=f"unloaded, but could not forget it: {e}",

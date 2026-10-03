@@ -112,7 +112,12 @@ class ServerConfig:
         return key
 
 
-def read_user_config() -> dict:
+class ConfigUnreadable(OSError):
+    """~/.quern/config.json exists and is not a JSON object: writing it now
+    would replace every setting in it with the one being written."""
+
+
+def read_user_config(*, strict: bool = False) -> dict:
     """Read user config from ~/.quern/config.json. Returns {} if missing or invalid.
 
     "Invalid" includes a document that parses but is not an object. A config
@@ -126,9 +131,15 @@ def read_user_config() -> dict:
     try:
         parsed = json.loads(USER_CONFIG_FILE.read_text())
     except Exception as e:
+        if strict:
+            raise ConfigUnreadable(f"{USER_CONFIG_FILE} cannot be read ({e}); not "
+                                   f"overwriting it -- fix or remove it first") from e
         logger.warning("Failed to read config file %s: %s", USER_CONFIG_FILE, e)
         return {}
     if not isinstance(parsed, dict):
+        if strict:
+            raise ConfigUnreadable(f"{USER_CONFIG_FILE} holds {type(parsed).__name__}, not an "
+                                   f"object; not overwriting it -- fix or remove it first")
         logger.warning(
             "Config file %s holds %s, not an object; ignoring it",
             USER_CONFIG_FILE, type(parsed).__name__,
@@ -268,7 +279,7 @@ def _config_lock():
         handle.close()
 
 
-def update_user_config(change: Callable[[dict], None]) -> None:
+def update_user_config(change: Callable[[dict], None], *, strict: bool = False) -> None:
     """Apply `change` to the config and persist it, as one atomic step.
 
     The read and the write are inside one lock deliberately. Reading outside it
@@ -288,7 +299,10 @@ def update_user_config(change: Callable[[dict], None]) -> None:
     a move across filesystems is a copy and the window comes back.
     """
     with _config_lock():
-        config = read_user_config()
+        # Strict, for a writer that must not replace a file it cannot read:
+        # the read that decides is this one, inside the lock -- a check
+        # before it can be outrun by an edit (CodeRabbit).
+        config = read_user_config(strict=strict)
         change(config)
         tmp = USER_CONFIG_FILE.with_name(f".{USER_CONFIG_FILE.name}.{os.getpid()}.tmp")
         try:
@@ -299,29 +313,11 @@ def update_user_config(change: Callable[[dict], None]) -> None:
             raise
 
 
-class ConfigUnreadable(OSError):
-    """~/.quern/config.json exists and is not a JSON object: writing it now
-    would replace every setting in it with the one being written."""
-
-
-def _require_readable_config() -> None:
-    if not USER_CONFIG_FILE.exists():
-        return
-    try:
-        parsed = json.loads(USER_CONFIG_FILE.read_text())
-    except (OSError, ValueError) as e:
-        raise ConfigUnreadable(f"{USER_CONFIG_FILE} cannot be read ({e}); not "
-                               f"overwriting it -- fix or remove it first") from e
-    if not isinstance(parsed, dict):
-        raise ConfigUnreadable(f"{USER_CONFIG_FILE} holds {type(parsed).__name__}, not an "
-                               f"object; not overwriting it -- fix or remove it first")
-
-
 def knowledge_bases_readable() -> bool:
     """False when the config exists and cannot be read, so "nothing
     remembered" is never said on the strength of a file nobody could read."""
     try:
-        _require_readable_config()
+        read_user_config(strict=True)
     except ConfigUnreadable:
         return False
     return True
@@ -343,22 +339,19 @@ def get_knowledge_bases() -> dict[str, str]:
 def remember_knowledge_base(app: str, path: str) -> None:
     """Load `path` for `app` at every start from now on. Raises
     ConfigUnreadable rather than replace a config it cannot read."""
-    _require_readable_config()
-
     def change(config: dict) -> None:
         kbs = config.get("knowledge_bases")
         if not isinstance(kbs, dict):
             kbs = {}
         kbs[app] = path
         config["knowledge_bases"] = kbs
-    update_user_config(change)
+    update_user_config(change, strict=True)
 
 
 def forget_knowledge_base(app: str | None) -> list[str]:
     """Stop loading `app`'s knowledge base at start -- every one, for None.
     Returns the apps forgotten. Raises ConfigUnreadable rather than replace
     a config it cannot read."""
-    _require_readable_config()
     forgotten: list[str] = []
 
     def change(config: dict) -> None:
@@ -370,7 +363,7 @@ def forget_knowledge_base(app: str | None) -> list[str]:
                 del kbs[name]
                 forgotten.append(name)
         config["knowledge_bases"] = kbs
-    update_user_config(change)
+    update_user_config(change, strict=True)
     return forgotten
 
 

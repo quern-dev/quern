@@ -335,3 +335,16 @@ class TestReview:
         outcomes = load_remembered(registry, {APP: "~/proj"})
         assert outcomes[APP]["screens"] == 1 and registry.list_sets() == {APP: 1}
 
+
+
+def test_the_locked_read_is_the_strict_one(monkeypatch):
+    """A check before the lock can be outrun by an edit; the read inside
+    it decides (CodeRabbit). `change` never sees an unreadable file."""
+    config_mod.USER_CONFIG_FILE.write_text("[1, 2]")
+    seen = []
+    with pytest.raises(config_mod.ConfigUnreadable):
+        config_mod.update_user_config(seen.append, strict=True)
+    assert seen == [] and config_mod.USER_CONFIG_FILE.read_text() == "[1, 2]"
+    # The default stays lenient for every other writer.
+    config_mod.update_user_config(lambda c: c.__setitem__("x", 1))
+    assert json.loads(config_mod.USER_CONFIG_FILE.read_text()) == {"x": 1}

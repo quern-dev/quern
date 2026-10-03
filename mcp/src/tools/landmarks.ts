@@ -128,7 +128,7 @@ A landmark that matched only because its element type is named differently on th
   });
 
   server.registerTool("unload_landmarks", {
-    description: `Unload landmarks for a specific app or all apps. Frees the memory used by landmark definitions.`,
+    description: `Unload landmarks for a specific app or all apps. Frees the memory used by landmark definitions. With forget=true it also stops a remembered knowledge base loading at every start -- every one of them, if app is omitted.`,
     inputSchema: strictParams({
       app: z
         .string()
