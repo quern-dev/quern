@@ -299,6 +299,34 @@ def update_user_config(change: Callable[[dict], None]) -> None:
             raise
 
 
+class ConfigUnreadable(OSError):
+    """~/.quern/config.json exists and is not a JSON object: writing it now
+    would replace every setting in it with the one being written."""
+
+
+def _require_readable_config() -> None:
+    if not USER_CONFIG_FILE.exists():
+        return
+    try:
+        parsed = json.loads(USER_CONFIG_FILE.read_text())
+    except (OSError, ValueError) as e:
+        raise ConfigUnreadable(f"{USER_CONFIG_FILE} cannot be read ({e}); not "
+                               f"overwriting it -- fix or remove it first") from e
+    if not isinstance(parsed, dict):
+        raise ConfigUnreadable(f"{USER_CONFIG_FILE} holds {type(parsed).__name__}, not an "
+                               f"object; not overwriting it -- fix or remove it first")
+
+
+def knowledge_bases_readable() -> bool:
+    """False when the config exists and cannot be read, so "nothing
+    remembered" is never said on the strength of a file nobody could read."""
+    try:
+        _require_readable_config()
+    except ConfigUnreadable:
+        return False
+    return True
+
+
 def get_knowledge_bases() -> dict[str, str]:
     """Remembered knowledge bases, app -> path: loaded at every start.
 
@@ -313,7 +341,10 @@ def get_knowledge_bases() -> dict[str, str]:
 
 
 def remember_knowledge_base(app: str, path: str) -> None:
-    """Load `path` for `app` at every start from now on."""
+    """Load `path` for `app` at every start from now on. Raises
+    ConfigUnreadable rather than replace a config it cannot read."""
+    _require_readable_config()
+
     def change(config: dict) -> None:
         kbs = config.get("knowledge_bases")
         if not isinstance(kbs, dict):
@@ -325,7 +356,9 @@ def remember_knowledge_base(app: str, path: str) -> None:
 
 def forget_knowledge_base(app: str | None) -> list[str]:
     """Stop loading `app`'s knowledge base at start -- every one, for None.
-    Returns the apps forgotten."""
+    Returns the apps forgotten. Raises ConfigUnreadable rather than replace
+    a config it cannot read."""
+    _require_readable_config()
     forgotten: list[str] = []
 
     def change(config: dict) -> None:

@@ -104,7 +104,7 @@ A landmark that matched only because its element type is named differently on th
   });
 
   server.registerTool("list_landmarks", {
-    description: `List all loaded landmark sets, showing the app identifier and number of screens for each.`,
+    description: `List all loaded landmark sets, showing the app identifier and number of screens for each. 'remembered' lists the knowledge bases loaded at every start (load_landmarks remember=true): each one's path, whether that path's set is loaded now (loaded, loaded_from), and at_start -- how many screens loaded at this start, or why it did not.`,
     inputSchema: strictParams({}),
   }, async () => {
     try {
@@ -137,7 +137,7 @@ A landmark that matched only because its element type is named differently on th
       forget: z
         .boolean()
         .optional()
-        .describe("Also stop loading it at every start, if it was remembered"),
+        .describe("Also stop loading it at every start, if it was remembered. With no app, every remembered knowledge base is forgotten."),
     }),
   }, async ({ app, forget }) => {
     try {

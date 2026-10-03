@@ -93,18 +93,22 @@ def _knowledge_dir(source: str) -> Path:
     path = Path(source).expanduser()
     if (path / ".quern" / "knowledge").is_dir():
         path = path / ".quern" / "knowledge"
+    elif path.name == ".quern" and (path / "knowledge").is_dir():
+        path = path / "knowledge"
     if not path.is_dir():
         raise HTTPException(status_code=400, detail=f"{source} is not a directory")
     return path
 
 
 def _app_from_project(knowledge: Path) -> str | None:
-    """The bundle id a project's `.quern/config.json` names, beside its
-    `knowledge/` -- the file `init_app_knowledge` writes."""
-    if knowledge.name != "knowledge" or knowledge.parent.name != ".quern":
+    """The bundle id a project's `.quern/config.json` names -- the file
+    `init_app_knowledge` writes -- for `.quern/knowledge` or its `screens/`."""
+    quern = next((p for p in (knowledge.parent, knowledge.parent.parent)
+                  if p.name == ".quern"), None)
+    if quern is None:
         return None
     try:
-        bundle = json.loads((knowledge.parent / "config.json").read_text()).get("bundle_id")
+        bundle = json.loads((quern / "config.json").read_text()).get("bundle_id")
     except (OSError, ValueError, AttributeError):
         return None
     return bundle if isinstance(bundle, str) and bundle else None
@@ -125,16 +129,20 @@ async def load_landmarks(request: Request, body: LoadLandmarksRequest):
                 detail=f"app is required: no .quern/config.json with a bundle_id "
                        f"beside {knowledge}",
             )
-        count, skipped = registry.load_from_path(app, str(knowledge))
+        scan = scan_knowledge_base(knowledge)
+        if body.remember and not scan.screens:
+            # Refused before anything is replaced: a 400 that had already
+            # swapped the loaded set for an empty one read as "nothing
+            # happened" while identification went dead (review).
+            earlier = config_mod.get_knowledge_bases().get(app)
+            raise HTTPException(
+                status_code=400,
+                detail=(f"not loaded or remembered: {knowledge} has no screens with landmarks"
+                        + (f"; {app} stays remembered at {earlier}" if earlier else "")),
+            )
+        count, skipped = registry.load_scan(app, scan, str(knowledge))
         remembered = False
         if body.remember:
-            if count == 0:
-                # Loaded or not, an empty one is not worth loading at every
-                # start: it is far likelier a wrong path than a choice.
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"not remembered: {knowledge} has no screens with landmarks",
-                )
             try:
                 # Absolute, but with its symlinks kept: the path as given is
                 # the one meant, and a link repointed later should be followed.
@@ -251,12 +259,30 @@ async def list_landmarks(request: Request):
     # What loads at every start, and how it went at this one: a remembered
     # knowledge base that did not load is said here, not only in the log.
     at_start = getattr(request.app.state, "landmark_startup", {}) or {}
-    remembered = [
-        {"app": app, "path": path, "loaded": app in sets, "screens": sets.get(app),
-         "at_start": at_start.get(app)}
-        for app, path in sorted(config_mod.get_knowledge_bases().items())
-    ]
+    if not config_mod.knowledge_bases_readable():
+        # Never "nothing remembered" on the strength of a file nobody read.
+        return {"sets": sets, "total_screens": total, "remembered": None,
+                "remembered_error": f"{config_mod.USER_CONFIG_FILE} cannot be read"}
+    remembered = []
+    for app, path in sorted(config_mod.get_knowledge_bases().items()):
+        loaded_from = registry.source(app)
+        remembered.append({
+            "app": app, "path": path,
+            # This path's set, not just any set for the app: a later manual
+            # load from elsewhere is not the remembered one (review).
+            "loaded": loaded_from is not None and _same_place(loaded_from, path),
+            "loaded_from": loaded_from,
+            "screens": sets.get(app),
+            "at_start": at_start.get(app),
+        })
     return {"sets": sets, "total_screens": total, "remembered": remembered}
+
+
+def _same_place(a: str, b: str) -> bool:
+    try:
+        return Path(a).expanduser().resolve() == Path(b).expanduser().resolve()
+    except OSError:
+        return a == b
 
 
 # ---------------------------------------------------------------------------

@@ -173,17 +173,19 @@ class TestStart:
         outcomes = load_remembered(registry, {
             "good": str(good), "gone": str(tmp_path / "gone"), "empty": str(empty)})
         assert outcomes["good"]["screens"] == 1 and "error" not in outcomes["good"]
+        assert outcomes["good"]["skipped"] == 0
         assert "not a directory" in outcomes["gone"]["error"]
         assert "no screens with landmarks" in outcomes["empty"]["error"]
-        assert registry.list_sets()["good"] == 1 and "gone" not in registry.list_sets()
+        # An empty one is not registered: it would list as loaded (review).
+        assert registry.list_sets() == {"good": 1}
 
     def test_one_that_raises_never_stops_the_start(self, tmp_path, monkeypatch):
         good = _project(tmp_path / "good")
         registry = LandmarkRegistry()
 
-        def boom(app, path):
+        def boom(app, scan, path):
             raise RuntimeError("parser exploded")
-        monkeypatch.setattr(registry, "load_from_path", boom)
+        monkeypatch.setattr(registry, "load_scan", boom)
         outcomes = load_remembered(registry, {"good": str(good)})
         assert "parser exploded" in outcomes["good"]["error"]
 
@@ -216,3 +218,120 @@ class TestUnload:
         r = client.delete("/api/v1/landmarks/", params={"app": APP, "forget": "true"}).json()
         assert r == {"unloaded": APP, "forgotten": [APP]}
         assert config_mod.get_knowledge_bases() == {}
+
+
+class TestReview:
+    def test_a_refused_remember_leaves_what_was_loaded(self, tmp_path):
+        """It used to load the empty directory first and refuse after: a 400
+        that had silently emptied the set (review)."""
+        good = _project(tmp_path / "good")
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        client, app = _client()
+        client.post("/api/v1/landmarks/load",
+                    json={"app": APP, "source": str(good), "remember": True})
+        r = client.post("/api/v1/landmarks/load",
+                        json={"app": APP, "source": str(empty), "remember": True})
+        assert r.status_code == 400
+        assert f"stays remembered at {good.absolute()}" in r.json()["detail"]
+        assert app.state.landmark_registry.list_sets() == {APP: 1}
+        assert config_mod.get_knowledge_bases() == {APP: str(good.absolute())}
+
+    def test_loaded_means_the_remembered_path_is_loaded(self, tmp_path):
+        """Another directory's set for the same app is not the remembered
+        one, and an inline load is not either (review)."""
+        a = _project(tmp_path / "a")
+        b = _project(tmp_path / "b")
+        client, _ = _client()
+        client.post("/api/v1/landmarks/load", json={"app": APP, "source": str(a), "remember": True})
+        row = client.get("/api/v1/landmarks/").json()["remembered"][0]
+        assert row["loaded"] is True and row["path"] == str(a.absolute())
+        assert row["screens"] == 1
+        client.post("/api/v1/landmarks/load", json={"app": APP, "source": str(b)})
+        row = client.get("/api/v1/landmarks/").json()["remembered"][0]
+        assert row["loaded"] is False and row["loaded_from"] == str(b)
+        client.post("/api/v1/landmarks/load", json={
+            "app": APP, "landmarks": {"Home": [{"element": "Button", "label": "OK"}]}})
+        row = client.get("/api/v1/landmarks/").json()["remembered"][0]
+        assert row["loaded"] is False and row["loaded_from"] == "inline"
+
+    def test_a_config_that_cannot_be_read_is_never_overwritten_or_read_as_empty(self):
+        config_mod.USER_CONFIG_FILE.write_text('{"auto_install_cert": true, ')
+        before = config_mod.USER_CONFIG_FILE.read_text()
+        with pytest.raises(config_mod.ConfigUnreadable):
+            config_mod.remember_knowledge_base(APP, "/kb")
+        with pytest.raises(config_mod.ConfigUnreadable):
+            config_mod.forget_knowledge_base(APP)
+        assert config_mod.USER_CONFIG_FILE.read_text() == before
+        client, _ = _client()
+        listing = client.get("/api/v1/landmarks/").json()
+        assert listing["remembered"] is None and "cannot be read" in listing["remembered_error"]
+        r = client.delete("/api/v1/landmarks/", params={"app": APP, "forget": "true"})
+        assert r.status_code == 500 and "could not forget" in r.json()["detail"]
+
+    def test_forget_keeps_other_settings(self):
+        config_mod.USER_CONFIG_FILE.write_text(json.dumps(
+            {"auto_install_cert": True, "knowledge_bases": {APP: "/kb"}}))
+        config_mod.forget_knowledge_base(APP)
+        assert json.loads(config_mod.USER_CONFIG_FILE.read_text())["auto_install_cert"] is True
+
+    @pytest.mark.parametrize("config_text, expected", [
+        ('{"bundle_id": "com.ok"}', "com.ok"),
+        ('{"bundle_id": 42}', None),
+        ('{"bundle_id": ""}', None),
+        ('{"bundle_id": "com.ok", ', None),          # malformed
+        ('["com.ok"]', None),                       # not an object
+    ])
+    def test_the_project_config_is_read_carefully(self, tmp_path, config_text, expected):
+        from server.api.landmarks import _app_from_project
+        knowledge = _project(tmp_path / "p", bundle=None)
+        (tmp_path / "p" / ".quern" / "config.json").write_text(config_text)
+        assert _app_from_project(knowledge) == expected
+        assert _app_from_project(knowledge / "screens") == expected
+
+    def test_only_a_quern_directory_names_the_app(self, tmp_path):
+        """A config.json beside some other knowledge directory is not one."""
+        from server.api.landmarks import _app_from_project
+        other = tmp_path / "notes" / "knowledge"
+        other.mkdir(parents=True)
+        (tmp_path / "notes" / "config.json").write_text('{"bundle_id": "com.wrong"}')
+        assert _app_from_project(other) is None
+
+    def test_every_project_path_finds_the_knowledge_and_the_app(self, tmp_path):
+        _project(tmp_path / "proj", bundle="com.from.config")
+        client, _ = _client()
+        for source in ("proj", "proj/.quern", "proj/.quern/knowledge",
+                       "proj/.quern/knowledge/screens"):
+            r = client.post("/api/v1/landmarks/load", json={"source": str(tmp_path / source)})
+            assert r.status_code == 200 and r.json()["loaded"] == "com.from.config", source
+            assert r.json()["screens"] == 1, source
+
+    def test_the_answer_names_the_directory_loaded(self, tmp_path):
+        knowledge = _project(tmp_path / "proj")
+        client, _ = _client()
+        r = client.post("/api/v1/landmarks/load",
+                        json={"app": APP, "source": str(tmp_path / "proj")})
+        assert r.json()["source"] == str(knowledge)
+
+    def test_a_relative_or_home_path_is_remembered_absolute(self, tmp_path, monkeypatch):
+        _project(tmp_path / "home" / "proj")
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        client, _ = _client()
+        r = client.post("/api/v1/landmarks/load",
+                        json={"app": APP, "source": "~/proj", "remember": True})
+        assert r.status_code == 200, r.text
+        assert config_mod.get_knowledge_bases()[APP] == str(
+            tmp_path / "home" / "proj" / ".quern" / "knowledge")
+        monkeypatch.chdir(tmp_path / "home")
+        client.post("/api/v1/landmarks/load",
+                    json={"app": "rel", "source": "proj", "remember": True})
+        assert config_mod.get_knowledge_bases()["rel"] == str(
+            tmp_path / "home" / "proj" / ".quern" / "knowledge")
+
+    def test_a_hand_edited_entry_with_home_and_a_root_still_loads(self, tmp_path, monkeypatch):
+        _project(tmp_path / "home" / "proj")
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        registry = LandmarkRegistry()
+        outcomes = load_remembered(registry, {APP: "~/proj"})
+        assert outcomes[APP]["screens"] == 1 and registry.list_sets() == {APP: 1}
+
