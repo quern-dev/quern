@@ -27,6 +27,7 @@ physical device app logs, similar to SimulatorLogAdapter for simulators.
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import os
@@ -176,6 +177,10 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
         #: a JSON capture's lines are read as JSON -- a text capture's
         #: continuation line can be a JSON body of its own (review).
         self.output_format: str | None = None
+        #: pymobiledevice3's last stderr lines, drained as they come: unread,
+        #: the pipe fills and the capture stalls with no error (CodeRabbit).
+        self._stderr_tail: collections.deque[str] = collections.deque(maxlen=20)
+        self._stderr_task: asyncio.Task | None = None
         self._process: asyncio.subprocess.Process | None = None
         self._read_task: asyncio.Task | None = None
 
@@ -261,6 +266,8 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
         self._running = True
         self.started_at = self._now()
         self._read_task = asyncio.create_task(self._read_loop())
+        self._stderr_tail.clear()
+        self._stderr_task = asyncio.create_task(self._drain_stderr())
         logger.info(
             "PhysicalDeviceLog adapter started (udid=%s, process=%s)",
             self.udid[:8],
@@ -278,15 +285,17 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
             except TimeoutError:
                 self._process.kill()
 
-        if self._read_task and not self._read_task.done():
-            self._read_task.cancel()
-            try:
-                await self._read_task
-            except asyncio.CancelledError:
-                pass
+        for task in (self._read_task, self._stderr_task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
         self._process = None
         self._read_task = None
+        self._stderr_task = None
         logger.info("PhysicalDeviceLog adapter stopped (udid=%s)", self.udid[:8])
 
     async def _read_loop(self) -> None:
@@ -407,18 +416,35 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
         except (ValueError, TypeError, AttributeError):
             return None
 
+    async def _drain_stderr(self) -> None:
+        """Keep pymobiledevice3's stderr empty, and its last lines."""
+        proc = self._process
+        if proc is None or proc.stderr is None:
+            return
+        try:
+            while line := await proc.stderr.readline():
+                text = line.decode("utf-8", errors="replace").rstrip()
+                if text:
+                    self._stderr_tail.append(text)
+        except (OSError, ValueError):
+            pass
+
     async def _exit_reason(self) -> str:
-        """What pymobiledevice3 said as it exited on its own."""
+        """What pymobiledevice3 said as it ended its output on its own."""
         proc = self._process
         code = None
-        detail = b""
         if proc is not None:
             try:
                 code = await asyncio.wait_for(proc.wait(), 5)
-                if proc.stderr is not None:
-                    detail = await asyncio.wait_for(proc.stderr.read(4096), 2)
-            except (TimeoutError, OSError, ValueError):
+            except TimeoutError:
                 pass
-        text = detail.decode(errors="replace").strip()[-300:]
-        return f"pymobiledevice3 syslog exited ({code})" + (f": {text}" if text else "")
-
+        if self._stderr_task is not None:
+            # Let the drain take what was written last.
+            try:
+                await asyncio.wait_for(asyncio.shield(self._stderr_task), 2)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+        tail = " / ".join(list(self._stderr_tail)[-5:])[-300:]
+        status = (f"exited ({code})" if code is not None
+                  else "closed its output but has not exited")
+        return f"pymobiledevice3 syslog {status}" + (f": {tail}" if tail else "")

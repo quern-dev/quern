@@ -194,3 +194,23 @@ async def test_a_summary_keeps_the_sender():
     summary = emitted[1]
     assert summary.repeat_count == 1 and summary.sender == "CFNetwork"
 
+
+@pytest.mark.asyncio
+async def test_the_same_text_from_another_sender_or_level_is_its_own_entry():
+    """Two libraries saying the same thing are two entries; and an ERROR
+    after a DEBUG of the same text must not be folded into the DEBUG one,
+    which a filter quieting below error would then drop (CodeRabbit)."""
+    emitted: list[LogEntry] = []
+
+    async def capture(entry: LogEntry) -> None:
+        emitted.append(entry)
+    dedup = Deduplicator(on_entry=capture, window_seconds=5.0)
+    base = _make_entry("connection reset", timestamp=_ts(0))
+    await dedup.process(base.model_copy(update={"sender": "Network", "level": LogLevel.DEBUG}))
+    await dedup.process(base.model_copy(update={"sender": "CFNetwork", "level": LogLevel.DEBUG,
+                                                "timestamp": _ts(1)}))
+    await dedup.process(base.model_copy(update={"sender": "Network", "level": LogLevel.ERROR,
+                                                "timestamp": _ts(2)}))
+    assert [(e.sender, e.level) for e in emitted] == [
+        ("Network", LogLevel.DEBUG), ("CFNetwork", LogLevel.DEBUG), ("Network", LogLevel.ERROR)]
+

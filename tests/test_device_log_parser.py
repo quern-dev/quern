@@ -348,22 +348,66 @@ async def test_a_long_line_does_not_end_the_capture(monkeypatch, adapter):
     assert seen["limit"] == device_log._LINE_LIMIT == 4 * 1024 * 1024
 
 
+class _Stream:
+    def __init__(self, lines=()):
+        self.lines = list(lines)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise StopAsyncIteration
+
+    async def readline(self):
+        await asyncio.sleep(0)
+        return self.lines.pop(0) if self.lines else b""
+
+
+class _Exited:
+    def __init__(self, code, stderr_lines, exits=True):
+        self.returncode = code
+        self.stdout = _Stream()
+        self.stderr = _Stream(stderr_lines)
+        self.exits = exits
+
+    async def wait(self):
+        if not self.exits:
+            await asyncio.sleep(3600)
+        return self.returncode
+
+
+async def _run(adapter, proc):
+    adapter._process = proc
+    adapter._running = True
+    adapter._stderr_task = asyncio.create_task(adapter._drain_stderr())
+    await adapter._read_loop()
+
+
 async def test_a_capture_that_exits_by_itself_says_why(adapter):
     """A downgraded pymobiledevice3 rejects `--format` at once; the capture
     must not just stop (review)."""
-    class Stream:
-        def __init__(self, data): self.data = data
-        def __aiter__(self): return self
-        async def __anext__(self): raise StopAsyncIteration
-        async def read(self, n): return self.data
-
-    class Proc:
-        returncode = 2
-        stdout = Stream(b"")
-        stderr = Stream(b"Error: No such option: --format")
-        async def wait(self): return 2
-    adapter._process = Proc()
-    adapter._running = True
-    await adapter._read_loop()
+    await _run(adapter, _Exited(2, [b"Usage: pymobiledevice3 syslog live [OPTIONS]\n",
+                                    b"Error: No such option: --format\n"]))
     assert adapter.status().status == "error"
     assert "exited (2)" in adapter._error and "No such option: --format" in adapter._error
+
+
+async def test_stderr_is_drained_and_its_last_lines_kept(adapter):
+    """Unread, a full stderr pipe stalls the capture; read once at the end,
+    only its first 4 KiB were seen (CodeRabbit)."""
+    lines = [f"warning {i}\n".encode() for i in range(500)] + [b"fatal: tunnel lost\n"]
+    await _run(adapter, _Exited(1, lines))
+    assert "fatal: tunnel lost" in adapter._error and "warning 0" not in adapter._error
+    assert len(adapter._stderr_tail) <= 20
+
+
+async def test_output_that_closes_without_an_exit_is_said_as_such(adapter, monkeypatch):
+    from server.sources import device_log
+    real_wait_for = device_log.asyncio.wait_for
+
+    async def quick(aw, timeout):
+        return await real_wait_for(aw, min(timeout, 0.05))
+    monkeypatch.setattr(device_log.asyncio, "wait_for", quick)
+    await _run(adapter, _Exited(None, [], exits=False))
+    assert "closed its output but has not exited" in adapter._error
+    assert "None" not in adapter._error

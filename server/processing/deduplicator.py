@@ -90,8 +90,16 @@ class Deduplicator:
 
     @staticmethod
     def _make_key(entry: LogEntry) -> str:
-        """Create a dedup key from process + message content."""
-        raw = f"{entry.process}:{entry.message}"
+        """Create a dedup key from where an entry came from and what it says.
+
+        Sender, subsystem and level as well as process and message: the same
+        text from two libraries is two entries, and the same text at DEBUG and
+        then at ERROR must not fold the error into a summary carrying DEBUG --
+        which an ingestion filter quieting below error would then drop
+        (CodeRabbit, review).
+        """
+        raw = "\x1f".join((entry.process, entry.sender, entry.subsystem,
+                            entry.level.value, entry.message))
         return hashlib.md5(raw.encode(), usedforsecurity=False).hexdigest()
 
     async def process(self, entry: LogEntry) -> None:
