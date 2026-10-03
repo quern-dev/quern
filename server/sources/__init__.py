@@ -39,6 +39,7 @@ class BaseSourceAdapter(abc.ABC):
         self.started_at: datetime | None = None
         self._running: bool = False
         self._error: str | None = None
+        self._note: str | None = None
 
     @abc.abstractmethod
     async def start(self) -> None:
@@ -84,6 +85,7 @@ class BaseSourceAdapter(abc.ABC):
             entries_captured=self.entries_captured,
             started_at=self.started_at,
             error=self._error,
+            note=self._note,
         )
 
     @staticmethod

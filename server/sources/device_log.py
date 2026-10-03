@@ -11,6 +11,15 @@ This differs from idevicesyslog format (used by SyslogAdapter):
 - Curly braces for subsystem instead of parentheses
 - Uppercase level names (NOTICE, ERROR, DEBUG, INFO, FAULT)
 
+With a pymobiledevice3 that has `--format json`, each line is a JSON object
+instead, and carries what the text form leaves out: the os_log subsystem and
+category (`label`) alongside the sending library (`image_name`). The text form
+puts the library in braces where a subsystem would go, so `subsystem` used to
+hold "CFNetwork" on a device and "com.apple.CFNetwork" on a simulator, and a
+filter written for one did nothing on the other: `device-quiet`'s
+`com.apple.network` exclude never matched a device line. JSON is used when the
+installed pymobiledevice3 offers it; the text form remains the fallback.
+
 This adapter is on-demand — agents start/stop it when they want to capture
 physical device app logs, similar to SimulatorLogAdapter for simulators.
 """
@@ -18,7 +27,11 @@ physical device app logs, similar to SimulatorLogAdapter for simulators.
 from __future__ import annotations
 
 import asyncio
+import collections
+import json
 import logging
+import os
+import posixpath
 import re
 import uuid
 from datetime import UTC, datetime
@@ -30,6 +43,77 @@ from server.sources import BaseSourceAdapter, EntryCallback
 logger = logging.getLogger(__name__)
 
 _UNCHANGED = object()  # Sentinel for reconfigure() defaults
+
+#: A line can carry a long message; asyncio's default 64 KiB line limit ends
+#: the read loop on the first one that is longer.
+_LINE_LIMIT = 4 * 1024 * 1024
+
+#: (binary, its modification time) -> whether its `syslog live` takes
+#: `--format json`. The time is in the key so an upgrade or a downgrade of
+#: pymobiledevice3 -- which quern offers -- is asked again, not answered from
+#: before it.
+_JSON_SUPPORT: dict[tuple[str, int], bool] = {}
+
+#: The help text, plainly: rich colours it under FORCE_COLOR and wraps it to
+#: COLUMNS, and either split `--format` so the probe missed it (review).
+#: How long the help text may take before JSON is given up on for this start.
+PROBE_TIMEOUT = 30.0  # s
+
+_PLAIN_ENV = {"NO_COLOR": "1", "TERM": "dumb", "COLUMNS": "200"}
+_ANSI = re.compile(rb"\x1b\[[0-9;]*m")
+
+TEXT_MODE_WARNING = (
+    "this pymobiledevice3 has no `syslog live --format json`, so device lines "
+    "carry the sending library and no os_log subsystem: subsystem filters on "
+    "com.apple.* -- device-quiet's included -- match nothing. "
+    "`pipx upgrade pymobiledevice3` fixes it."
+)
+
+
+def _probe_key(binary: str) -> tuple[str, int]:
+    try:
+        return binary, os.stat(binary).st_mtime_ns
+    except OSError:
+        return binary, 0
+
+
+async def _supports_json(binary: str) -> bool:
+    """Whether this pymobiledevice3's `syslog live` has `--format json`.
+
+    Asked once per binary until it changes. A help text that cannot be read
+    -- no binary, a timeout, a non-zero exit -- counts as no for this start
+    and is not kept: the text form works everywhere, only with less in it,
+    and the next start asks again."""
+    key = _probe_key(binary)
+    if key not in _JSON_SUPPORT:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                binary, "syslog", "live", "--help",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                env={**os.environ, **_PLAIN_ENV})
+            try:
+                out, _ = await asyncio.wait_for(proc.communicate(), PROBE_TIMEOUT)
+            except (TimeoutError, asyncio.CancelledError):
+                # Reaped on a cancelled start too -- stop() cannot, the probe
+                # being no capture -- and a second cancellation must not cut
+                # the reap short (CodeRabbit).
+                proc.kill()
+                reap = asyncio.ensure_future(proc.wait())
+                try:
+                    await asyncio.shield(reap)
+                except asyncio.CancelledError:
+                    await reap
+                raise
+            if proc.returncode != 0:
+                raise OSError(f"`syslog live --help` exited {proc.returncode}: "
+                              f"{out.decode(errors='replace').strip()[-200:]}")
+            out = _ANSI.sub(b"", out)
+            _JSON_SUPPORT[key] = b"--format" in out and b"json" in out
+        except (OSError, TimeoutError) as e:
+            logger.warning("Could not read pymobiledevice3's syslog options (%s); "
+                           "device logs will carry no os_log subsystem", e)
+            return False
+    return _JSON_SUPPORT[key]
 
 # Regex to parse pymobiledevice3 syslog live output lines
 # Format: "2026-02-21 21:22:45.272141 LogTester{Foundation}[2915] <NOTICE>: message"
@@ -96,6 +180,14 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
         self.process_filter = process_filter
         self.match_filter = match_filter
         self._tunnel_udid: str | None = None
+        #: "json" or "text": what this capture asked pymobiledevice3 for. Only
+        #: a JSON capture's lines are read as JSON -- a text capture's
+        #: continuation line can be a JSON body of its own (review).
+        self.output_format: str | None = None
+        #: pymobiledevice3's last stderr lines, drained as they come: unread,
+        #: the pipe fills and the capture stalls with no error (CodeRabbit).
+        self._stderr_tail: collections.deque[str] = collections.deque(maxlen=20)
+        self._stderr_task: asyncio.Task | None = None
         self._process: asyncio.subprocess.Process | None = None
         self._read_task: asyncio.Task | None = None
 
@@ -126,6 +218,13 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
             cmd.extend(["-pn", self.process_filter])
         if self.match_filter:
             cmd.extend(["-m", self.match_filter])
+        if await _supports_json(str(binary)):
+            cmd.extend(["--format", "json"])
+            self.output_format = "json"
+            self._note = None
+        else:
+            self.output_format = "text"
+            self._note = TEXT_MODE_WARNING
 
         return cmd
 
@@ -158,6 +257,7 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=_LINE_LIMIT,
             )
         except FileNotFoundError:
             self._error = (
@@ -173,6 +273,8 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
         self._running = True
         self.started_at = self._now()
         self._read_task = asyncio.create_task(self._read_loop())
+        self._stderr_tail.clear()
+        self._stderr_task = asyncio.create_task(self._drain_stderr())
         logger.info(
             "PhysicalDeviceLog adapter started (udid=%s, process=%s)",
             self.udid[:8],
@@ -190,15 +292,17 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
             except TimeoutError:
                 self._process.kill()
 
-        if self._read_task and not self._read_task.done():
-            self._read_task.cancel()
-            try:
-                await self._read_task
-            except asyncio.CancelledError:
-                pass
+        for task in (self._read_task, self._stderr_task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
         self._process = None
         self._read_task = None
+        self._stderr_task = None
         logger.info("PhysicalDeviceLog adapter stopped (udid=%s)", self.udid[:8])
 
     async def _read_loop(self) -> None:
@@ -222,6 +326,11 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
                 entry = self._parse_line(line)
                 if entry is not None:
                     await self.emit(entry)
+            if self._running:
+                # The output ended while nobody asked it to: pymobiledevice3
+                # exited. Say why -- a downgraded one rejects `--format` at
+                # once, and the capture would otherwise just stop (review).
+                self._error = await self._exit_reason()
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -233,6 +342,10 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
 
     def _parse_line(self, line: str) -> LogEntry | None:
         """Parse a single pymobiledevice3 syslog output line into a LogEntry."""
+        if self.output_format == "json" and line.startswith("{"):
+            entry = self._parse_json(line)
+            if entry is not None:
+                return entry
         match = PMD3_SYSLOG_PATTERN.match(line)
         if not match:
             return LogEntry(
@@ -259,10 +372,86 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
             timestamp=ts,
             device_id=self.device_id,
             process=process,
-            subsystem=subsystem or "",
+            # The text form's braces hold the sending library, not an os_log
+            # subsystem; it goes where that belongs.
+            sender=subsystem or "",
             pid=int(pid_str) if pid_str else None,
             level=level,
             message=message,
             source=LogSource.DEVICE,
             raw=line,
         )
+
+    def _parse_json(self, line: str) -> LogEntry | None:
+        """One `--format json` line, or None if it is not one -- then it is
+        parsed as text, and kept raw at worst, never dropped."""
+        try:
+            d = json.loads(line)
+            # pymobiledevice3's own keys, not just any object with a message.
+            if not isinstance(d, dict) or not {"pid", "timestamp", "level", "message"} <= d.keys():
+                return None
+            label = d.get("label") or {}
+            try:
+                ts = host_local_to_utc(datetime.fromisoformat(d["timestamp"]))
+            except (KeyError, TypeError, ValueError):
+                ts = self._now()
+            process = posixpath.basename(d.get("filename") or "")
+            subsystem = label.get("subsystem") or ""
+            category = label.get("category") or ""
+            sender = posixpath.basename(d.get("image_name") or "")
+            pid = d.get("pid") if isinstance(d.get("pid"), int) else None
+            level_name = str(d.get("level") or "")
+            message = str(d.get("message") or "")
+            return LogEntry(
+                id=uuid.uuid4().hex[:8],
+                timestamp=ts,
+                device_id=self.device_id,
+                process=process,
+                subsystem=subsystem,
+                category=category,
+                sender=sender,
+                pid=pid,
+                level=PMD3_LEVEL_MAP.get(level_name.lower(), LogLevel.INFO),
+                message=message,
+                source=LogSource.DEVICE,
+                # The text form, label included -- not the JSON object, whose
+                # UUIDs, offsets and container paths doubled what every log
+                # query returned per entry (review).
+                raw=(f"{d.get('timestamp')} {process}{{{sender}}}[{pid}] <{level_name}>: "
+                     f"{message}" + (f" [{subsystem}][{category}]" if subsystem else "")),
+            )
+        except (ValueError, TypeError, AttributeError):
+            return None
+
+    async def _drain_stderr(self) -> None:
+        """Keep pymobiledevice3's stderr empty, and its last lines."""
+        proc = self._process
+        if proc is None or proc.stderr is None:
+            return
+        try:
+            while line := await proc.stderr.readline():
+                text = line.decode("utf-8", errors="replace").rstrip()
+                if text:
+                    self._stderr_tail.append(text)
+        except (OSError, ValueError):
+            pass
+
+    async def _exit_reason(self) -> str:
+        """What pymobiledevice3 said as it ended its output on its own."""
+        proc = self._process
+        code = None
+        if proc is not None:
+            try:
+                code = await asyncio.wait_for(proc.wait(), 5)
+            except TimeoutError:
+                pass
+        if self._stderr_task is not None:
+            # Let the drain take what was written last.
+            try:
+                await asyncio.wait_for(asyncio.shield(self._stderr_task), 2)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+        tail = " / ".join(list(self._stderr_tail)[-5:])[-300:]
+        status = (f"exited ({code})" if code is not None
+                  else "closed its output but has not exited")
+        return f"pymobiledevice3 syslog {status}" + (f": {tail}" if tail else "")

@@ -1,5 +1,7 @@
+
 """Tests for the OSLog source adapter parser."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -133,3 +135,16 @@ def test_build_command_with_both_filters():
     assert "subsystem ==" in predicate
     assert "processImagePath ENDSWITH" in predicate
     assert " AND " in predicate
+
+
+def test_an_oslog_entry_names_its_sender():
+    from server.sources.oslog import OslogAdapter
+    a = OslogAdapter()
+    line = json.dumps({"eventMessage": "m", "subsystem": "com.myapp", "category": "c",
+                       "timestamp": "2026-02-07 14:23:01.234567-0800", "messageType": "Default",
+                       "processID": 1, "processImagePath": "/x/MyApp",
+                       "senderImagePath": "/usr/lib/libsystem_trace.dylib",
+                       "eventType": "logEvent"})
+    entry = a._parse_ndjson_line(line)
+    assert entry.sender == "libsystem_trace.dylib" and entry.subsystem == "com.myapp"
+

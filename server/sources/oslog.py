@@ -220,6 +220,7 @@ class OslogAdapter(BaseSourceAdapter):
             device_id=self.device_id,
             process=process_name,
             subsystem=data.get("subsystem", ""),
+            sender=extract_process_name(data.get("senderImagePath", "")),
             category=data.get("category", ""),
             pid=data.get("processID"),
             level=level,
