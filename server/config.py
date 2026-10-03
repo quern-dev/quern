@@ -302,7 +302,7 @@ def update_user_config(change: Callable[[dict], None], *, strict: bool = False) 
         # Strict, for a writer that must not replace a file it cannot read:
         # the read that decides is this one, inside the lock -- a check
         # before it can be outrun by an edit (CodeRabbit).
-        config = read_user_config(strict=strict)
+        config = read_user_config(strict=True) if strict else read_user_config()
         change(config)
         tmp = USER_CONFIG_FILE.with_name(f".{USER_CONFIG_FILE.name}.{os.getpid()}.tmp")
         try:
