@@ -1442,23 +1442,140 @@ class DeviceController(DeviceControllerUI):
             await self.simctl.set_location(resolved, latitude, longitude)
         return resolved
 
+    #: How long an iOS `open_url` waits for the expected app to come to the
+    #: front. A universal link hands over in well under a second; the rest is
+    #: a cold start's margin.
+    _OPEN_URL_FRONTMOST_TIMEOUT_S = 5.0
+    _OPEN_URL_FRONTMOST_INTERVAL_S = 0.25
+    #: How long to watch when the expected app was already in front, so a
+    #: link that is about to leave it is seen leaving. Measured on an iPhone
+    #: 12 (iOS 26.5): Safari took the front 0.84-1.23s after WDA's `/url`
+    #: returned, and the first read in that gap still saw the app -- which is
+    #: how an unclaimed path was first reported as opened in it.
+    _OPEN_URL_SETTLE_S = 2.0
+
     async def open_url(
         self, url: str, udid: str | None = None, bundle_id: str | None = None,
-    ) -> str:
-        """Open a URL on the device. Returns the resolved udid.
+    ) -> tuple[str, dict]:
+        """Open a URL on the device. Returns the resolved udid and what
+        became of it: `via`, and on iOS with `bundle_id` whether that app
+        ended up in front.
 
-        On Android, pass `bundle_id` (the app package) to deliver the URL
-        straight to that app — needed for deep links on debug/staging builds
-        that aren't verified App Links (otherwise Android opens the browser).
-        Ignored on iOS (universal links route to the associated app by the OS).
+        Chosen by the kind of device, never by the UI backend. Opening a URL
+        is the system's routing, not a UI action, so a simulator goes through
+        `simctl openurl` whether sim-bridge, idb or a WDA runner is reading
+        its screen -- as `launch_app` does. A physical iPhone goes through
+        WDA's `/url` without a bundle id, the same system routing; see
+        `WdaBackend.open_url` for why the bundle id is withheld.
+
+        So `bundle_id` means two things. On Android it delivers the intent to
+        that package -- needed for deep links on debug/staging builds that
+        aren't verified App Links, which otherwise open the browser. On iOS it
+        delivers nothing: it names the app the link is expected to open in,
+        and quern reports whether it did, because a link the app's associated
+        domains do not claim opens in Safari and the open itself still
+        succeeds.
         """
         resolved = await self.resolve_udid(udid)
         if self._is_android(resolved):
             await self.adb.open_url(resolved, url, package=bundle_id)
-        else:
+            return resolved, {"via": "adb"}
+        physical = self._is_physical(resolved)
+        if not physical:
             self._require_simulator(resolved, "Open URL")
+        # What to look for, and what is in front now, are both read before
+        # the open: afterwards the app in front may be the one leaving.
+        expected: str | None = None
+        unknown: dict | None = None
+        before: str | None = None
+        if bundle_id:
+            expected = (bundle_id if physical
+                        else await self.simctl.app_display_name(resolved, bundle_id))
+            if not expected:
+                unknown = {"opened_in_app": None,
+                           "opened_in_app_error": f"could not read {bundle_id}'s display "
+                                                  "name on this simulator -- is it installed?"}
+            else:
+                try:
+                    before = await self._foreground_app(resolved, physical)
+                except Exception:  # noqa: BLE001 - unknown is treated as "maybe already there"
+                    before = None
+        if physical:
+            await self.wda_client.open_url(resolved, url)
+            via = "wda"
+        else:
             await self.simctl.open_url(resolved, url)
-        return resolved
+            via = "simctl"
+        self._invalidate_ui_cache(resolved)
+        outcome: dict = {"via": via}
+        if unknown:
+            outcome.update(unknown)
+        elif expected:
+            outcome.update(await self._url_landed_in(
+                resolved, physical, expected,
+                already_in_front=before is None or before == expected))
+        return resolved, outcome
+
+    async def _url_landed_in(
+        self, udid: str, physical: bool, expected: str, *, already_in_front: bool,
+    ) -> dict:
+        """Watch the front after an open, and say whether `expected` ended up
+        there.
+
+        Two cases, because the same first read means opposite things in
+        each. If another app was in front, the expected one arriving is the
+        answer, so the first sighting returns. If the expected app was
+        already in front -- or nobody could tell -- seeing it proves nothing
+        until the hand-over would have happened, so the front is watched for
+        `_OPEN_URL_SETTLE_S` and the last read decides.
+
+        `opened_in_app` is True or False only on the strength of a read that
+        worked: when every read failed it is None, with the reason, so "could
+        not tell" never reads as either answer. `foreground_app` is what was
+        last seen in front -- a bundle id on a device, where WDA names one,
+        and the app's display name on a simulator, where only the
+        accessibility tree is there to ask.
+        """
+        start = time.monotonic()
+        settle = start + (self._OPEN_URL_SETTLE_S if already_in_front else 0.0)
+        deadline = start + max(self._OPEN_URL_FRONTMOST_TIMEOUT_S, settle - start)
+        seen: str | None = None
+        # Only a read taken once the settle point has passed may decide: a
+        # sighting before it is exactly the one that cannot be trusted.
+        decided_by_read = False
+        error = "no read was taken after the hand-over"
+        while True:
+            try:
+                current = await self._foreground_app(udid, physical)
+            except Exception as exc:  # noqa: BLE001 - a failed read is reported, not a verdict
+                error = str(exc) or type(exc).__name__
+            else:
+                if time.monotonic() >= settle:
+                    seen, decided_by_read = current, True
+                    if seen == expected:
+                        return {"opened_in_app": True, "foreground_app": seen}
+                    if already_in_front:
+                        # It was there and has gone: whatever is in front
+                        # now took the link.
+                        return {"opened_in_app": False, "foreground_app": seen}
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(self._OPEN_URL_FRONTMOST_INTERVAL_S)
+        if not decided_by_read:
+            return {"opened_in_app": None,
+                    "opened_in_app_error": f"could not read the app in front: {error}"}
+        return {"opened_in_app": False, "foreground_app": seen}
+
+    async def _foreground_app(self, udid: str, physical: bool) -> str | None:
+        """What is in front: WDA's bundle id on a device, the Application
+        element's label on a simulator, through whichever backend reads it.
+        Raises when it cannot be read."""
+        if physical:
+            return await self.wda_client.active_app(udid)
+        elements, _ = await self.get_ui_elements(
+            udid, use_cache=False, filter_type="Application", probe_containers=False,
+        )
+        return next((e.label for e in elements if e.label), None)
 
     async def grant_permission(
         self, bundle_id: str, permission: str, udid: str | None = None,

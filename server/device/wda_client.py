@@ -1453,6 +1453,38 @@ class WdaBackend:
                             use_session=True, timeout=ACTION_TIMEOUT,
                             json={"bundleId": bundle_id})
 
+    async def open_url(self, udid: str, url: str) -> None:
+        """Open a URL the way another app on the device would.
+
+        No `bundleId`, deliberately. Without one WDA asks the system to open
+        the URL with its default handler, which for an https link is the
+        universal-link routing -- the app's associated domains checked against
+        the domain's apple-app-site-association. With one it hands the URL to
+        that app directly, skipping the check that deep-link testing exists to
+        exercise: measured on an iPhone 12 (iOS 26.5), a `/dl/` link the app
+        handles only as a universal link reached it that way and did nothing,
+        as did `devicectl --payload-url`, while the same link without the
+        bundle id navigated. Needs iOS 16.4; WDA falls back to Siri before it.
+        """
+        await self._request("post", udid, "/url",
+                            use_session=True, timeout=ACTION_TIMEOUT,
+                            json={"url": url})
+
+    async def active_app(self, udid: str) -> str | None:
+        """The bundle id of the application in front, or None when WDA
+        answered without naming one. Raises DeviceError when it could not be
+        asked -- "could not ask" is not "nothing is in front"."""
+        resp = await self._request("get", udid, "/wda/activeAppInfo")
+        try:
+            value = resp.json().get("value")
+        except (ValueError, AttributeError) as exc:
+            raise DeviceError(
+                f"WDA activeAppInfo on {udid[:8]} answered something unreadable",
+                tool="wda",
+            ) from exc
+        bundle = value.get("bundleId") if isinstance(value, dict) else None
+        return bundle if isinstance(bundle, str) and bundle else None
+
     async def terminate_app(self, udid: str, bundle_id: str) -> None:
         """Terminate an app via WDA."""
         await self._request("post", udid, "/wda/apps/terminate",

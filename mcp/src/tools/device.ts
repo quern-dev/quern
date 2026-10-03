@@ -670,7 +670,7 @@ Use this to build visual test reports — every action becomes a timestamped ste
   });
 
   server.registerTool("open_url", {
-    description: `Open a URL on a simulator or emulator using the platform's default handler. Supports any URI scheme the device has a handler for: https://, geo: (maps), tel:, mailto:, custom app URL schemes, deep links, universal links, and settings URIs (Android: android.settings.* actions, iOS: App-prefs:).
+    description: `Open a URL on a simulator, emulator, or physical iPhone using the platform's default handler. Supports any URI scheme the device has a handler for: https://, geo: (maps), tel:, mailto:, custom app URL schemes, deep links, universal links, and settings URIs (Android: android.settings.* actions, iOS: App-prefs:).
 
 Note: tel: and mailto: are unavailable on iOS simulators (no Phone or Mail app).
 
@@ -680,7 +680,9 @@ Examples:
 - Settings: "App-prefs:WIFI" (iOS) — Android uses action-based intents via adb
 - Deep link: "myapp://path/to/screen"
 
-Android deep links: pass bundle_id (the app package) to deliver the URL straight to that app. Needed for https deep links on debug/staging builds, which usually aren't verified App Links — without a package target Android opens the browser instead of the app.`,
+Android deep links: pass bundle_id (the app package) to deliver the URL straight to that app. Needed for https deep links on debug/staging builds, which usually aren't verified App Links — without a package target Android opens the browser instead of the app.
+
+iOS: the URL always goes through the system's own routing -- simctl openurl on a simulator (whichever UI backend is reading it), WDA's /url on a physical iPhone (iOS 16.4+) -- so an https link reaches the app only if its associated domains (apple-app-site-association) claim the path, exactly as for a real user. bundle_id does not target delivery on iOS, which would skip that check: it names the app the link should open in, and the response says whether it did -- opened_in_app true/false with foreground_app (a bundle id on a device, the app's display name on a simulator), plus a warning when it did not. opened_in_app is null, with opened_in_app_error, when quern could not tell. The response's 'via' names the route taken: simctl, wda, or adb.`,
     inputSchema: strictParams({
       url: z.string().describe(
         "URL or URI to open (e.g. https://example.com, geo:48.8,2.3?z=15, maps://?ll=48.8,2.3)"
@@ -692,7 +694,7 @@ Android deep links: pass bundle_id (the app package) to deliver the URL straight
       bundle_id: z
         .string()
         .optional()
-        .describe("Android only: app package to receive the intent directly (bypasses App Links verification). Use for deep links on debug/staging builds; ignored on iOS."),
+        .describe("Android: app package to receive the intent directly (bypasses App Links verification) -- use for deep links on debug/staging builds. iOS: the app the link is expected to open in; quern waits up to 5s for it to come to the front and reports opened_in_app. It does not change how the URL is delivered on iOS."),
       include_screen_context: z
         .boolean()
         .default(false)

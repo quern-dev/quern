@@ -355,7 +355,7 @@ holds in `flow_store`. `flows_captured` is only what survived.
 | MCP Tool | Method | Path | Description |
 |---|---|---|---|
 | `set_location` | POST | `/api/v1/device/location` | Set GPS location |
-| `open_url` | POST | `/api/v1/device/open-url` | Open a URL via the platform's default handler (Android can target a package) |
+| `open_url` | POST | `/api/v1/device/open-url` | Open a URL via the platform's default handler: `simctl openurl` on a simulator whatever its UI backend, WDA `/url` on a physical iPhone (system routing, so universal links are checked against the app's associated domains), adb on Android, where `bundle_id` targets the package. On iOS `bundle_id` names the app the link should open in, and the response reports `opened_in_app` (null with `opened_in_app_error` when it could not tell), `foreground_app`, and a `warning` when it did not. `via` names the route |
 | `grant_permission` | POST | `/api/v1/device/permission` | Grant app permission |
 | `set_locale` | POST | `/api/v1/device/locale` | Set the system locale (Android) |
 | `set_hardware_keyboard` | POST | `/api/v1/device/keyboard` | Attach/detach the simulated hardware keyboard (iOS simulators) |

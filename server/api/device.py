@@ -773,14 +773,26 @@ async def set_location(request: Request, body: SetLocationRequest):
 @router.post("/open-url")
 @logged_action("open_url", category="device.action")
 async def open_url(request: Request, body: OpenUrlRequest):
-    """Open a URL on a simulator or emulator."""
+    """Open a URL on a simulator, emulator, or device."""
     controller = _get_controller(request)
     try:
         resolved = await controller.resolve_udid(body.udid)
         if body.capture_screenshots:
             before = await _capture_action_screenshot(controller, resolved, "open_url_before")
-        udid = await controller.open_url(url=body.url, udid=body.udid, bundle_id=body.bundle_id)
-        result: dict = {"status": "ok", "udid": udid, "url": body.url}
+        udid, outcome = await controller.open_url(
+            url=body.url, udid=body.udid, bundle_id=body.bundle_id)
+        result: dict = {"status": "ok", "udid": udid, "url": body.url, **outcome}
+        if outcome.get("opened_in_app") is False:
+            # Still "ok": the URL was opened, and where it went is the answer
+            # a deep-link test is asking for. Said on the response, not only
+            # in the log, because the caller deciding what to do next is the
+            # one who needs it.
+            result["warning"] = (
+                f"The URL did not open in {body.bundle_id}; "
+                f"{outcome.get('foreground_app') or 'another app'} is in front. "
+                "For an https link this usually means the app's associated "
+                "domains (apple-app-site-association) do not claim this path."
+            )
         if body.capture_screenshots:
             await asyncio.sleep(body.settle_delay)
             after = await _capture_action_screenshot(controller, udid, "open_url_after")
