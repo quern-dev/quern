@@ -2336,6 +2336,8 @@ class OpenUrlRequest(BaseModel):
     url: str
     udid: str | None = None
     bundle_id: str | None = None
+    #: Android only: deliver to `bundle_id` instead of the system's routing.
+    direct: bool = False
     include_screen_context: bool = False
     capture_screenshots: bool = False
     settle_delay: float = Field(default=1.0, ge=0, le=10)

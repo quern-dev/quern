@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -84,6 +85,13 @@ _AM_START_UNRESOLVED = (
     "unable to resolve Intent",
     "Error: Activity class",
 )
+
+#: `topResumedActivity=ActivityRecord{b931055 u0 com.android.chrome/org.chromium...Activity t1747}`,
+#: measured on a Pixel 5 (Android 14) and an API 32 emulator. The
+#: `mResumedActivity:` spelling is the older one, kept for devices that predate
+#: the top-resumed field; it has not been measured here.
+_RESUMED_ACTIVITY = re.compile(
+    r"(?:topResumedActivity=|mResumedActivity: )ActivityRecord\{\S+ u\d+ ([^\s/]+)/(\S+)")
 
 _AM_START_FAILURES = (
     "Error: Activity not started",
@@ -1539,25 +1547,34 @@ rm -rf /data/local/tmp/tmp-ca-copy
             str(longitude), str(latitude), "0", str(satellites),
         )
 
-    async def open_url(self, serial: str, url: str, package: str | None = None) -> None:
+    async def open_url(
+        self, serial: str, url: str, package: str | None = None, *, browsable: bool = False,
+    ) -> None:
         """Open a URL via Android's VIEW intent.
 
-        Runs: adb -s <serial> shell am start -a android.intent.action.VIEW -d <url> [<package>]
+        Runs: adb -s <serial> shell am start -a android.intent.action.VIEW
+              [-c android.intent.category.BROWSABLE] -d <url> [<package>]
         Supports any URI scheme the device has a handler for: https://, geo:,
         tel:, mailto:, custom app schemes, etc.
 
-        When `package` is given, the intent is delivered directly to that app,
-        bypassing Android App Links verification. This is required to drive deep
-        links into a debug/staging build: such https links are usually NOT
-        verified App Links (autoVerify=false and/or the debug signing cert isn't
-        in the domain's assetlinks.json), so a package-less VIEW intent falls
-        through to the browser instead of opening the app.
+        Two shapes, and the controller picks one. Without `package` and with
+        `browsable`, the intent is the one a tapped link sends: resolved by the
+        system, so https links go through App Links verification, and only
+        filters that accept BROWSABLE can take it -- an activity a test can open
+        but a tap cannot is exactly what this shape exists to catch. With
+        `package` it is delivered directly to that app, bypassing verification,
+        as the app's own Espresso deep-link tests do (`setPackage`, no
+        BROWSABLE). That is required for a debug/staging build, whose https
+        links are usually not verified App Links, so a package-less intent falls
+        through to the browser.
         """
         args = [
             serial, "shell", "am", "start",
             "-a", "android.intent.action.VIEW",
-            "-d", url,
         ]
+        if browsable:
+            args += ["-c", "android.intent.category.BROWSABLE"]
+        args += ["-d", url]
         if package:
             args.append(package)
         stdout, stderr = await self._run_adb_for_device(*args)
@@ -1589,7 +1606,33 @@ rm -rf /data/local/tmp/tmp-ca-copy
                     if unhandled
                     else f"Could not launch {url} on {serial}"
                 )
-                raise DeviceError(f"{summary}: {detail}", tool="adb")
+                hint = (
+                    " -- as a tapped link (BROWSABLE). direct=true with the app's "
+                    "bundle_id delivers it to that package regardless, the way "
+                    "an Espresso test does"
+                    if unhandled and browsable and not package else ""
+                )
+                raise DeviceError(f"{summary}: {detail}{hint}", tool="adb")
+
+    async def resumed_activity(self, serial: str) -> tuple[str, str] | None:
+        """The activity in front, as (package, component), or None when no
+        activity is resumed -- the screen off, or mid-transition. Raises
+        DeviceError when it cannot be asked.
+
+        The component is reported as well as the package because the package
+        alone hides the two outcomes worth naming after an open: Android's
+        chooser (`android/...ResolverActivity`, when more than one activity
+        claims the URL) and a crash, which leaves the launcher in front.
+        """
+        stdout, _ = await self._run_adb_for_device(
+            serial, "shell", "dumpsys", "activity", "activities")
+        match = _RESUMED_ACTIVITY.search(stdout)
+        if not match:
+            return None
+        package, activity = match.group(1), match.group(2)
+        if activity.startswith("."):
+            activity = package + activity
+        return package, f"{package}/{activity}"
 
     async def grant_permission(self, serial: str, package: str, permission: str) -> None:
         """Grant a runtime permission to an app.

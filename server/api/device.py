@@ -780,19 +780,11 @@ async def open_url(request: Request, body: OpenUrlRequest):
         if body.capture_screenshots:
             before = await _capture_action_screenshot(controller, resolved, "open_url_before")
         udid, outcome = await controller.open_url(
-            url=body.url, udid=body.udid, bundle_id=body.bundle_id)
+            url=body.url, udid=body.udid, bundle_id=body.bundle_id, direct=body.direct)
+        # Still "ok" when it opened elsewhere: the URL was opened, and where it
+        # went -- with `warning` saying so -- is the answer a deep-link test is
+        # asking for.
         result: dict = {"status": "ok", "udid": udid, "url": body.url, **outcome}
-        if outcome.get("opened_in_app") is False:
-            # Still "ok": the URL was opened, and where it went is the answer
-            # a deep-link test is asking for. Said on the response, not only
-            # in the log, because the caller deciding what to do next is the
-            # one who needs it.
-            result["warning"] = (
-                f"The URL did not open in {body.bundle_id}; "
-                f"{outcome.get('foreground_app') or 'another app'} is in front. "
-                "For an https link this usually means the app's associated "
-                "domains (apple-app-site-association) do not claim this path."
-            )
         if body.capture_screenshots:
             await asyncio.sleep(body.settle_delay)
             after = await _capture_action_screenshot(controller, udid, "open_url_after")
