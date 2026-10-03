@@ -93,9 +93,16 @@ async def _supports_json(binary: str) -> bool:
                 env={**os.environ, **_PLAIN_ENV})
             try:
                 out, _ = await asyncio.wait_for(proc.communicate(), PROBE_TIMEOUT)
-            except TimeoutError:
+            except (TimeoutError, asyncio.CancelledError):
+                # Reaped on a cancelled start too -- stop() cannot, the probe
+                # being no capture -- and a second cancellation must not cut
+                # the reap short (CodeRabbit).
                 proc.kill()
-                await proc.wait()
+                reap = asyncio.ensure_future(proc.wait())
+                try:
+                    await asyncio.shield(reap)
+                except asyncio.CancelledError:
+                    await reap
                 raise
             if proc.returncode != 0:
                 raise OSError(f"`syslog live --help` exited {proc.returncode}: "

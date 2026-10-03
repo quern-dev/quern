@@ -434,3 +434,19 @@ async def test_start_drains_stderr_from_the_first_line(monkeypatch, adapter):
     adapter._running = False
     for task in (adapter._read_task, adapter._stderr_task):
         task.cancel()
+
+
+async def test_a_cancelled_start_reaps_the_probe(monkeypatch):
+    """stop() cannot reach the help process: it is no capture (CodeRabbit)."""
+    from server.sources import device_log
+    hung = _Proc(hang=True)
+    _spawner(monkeypatch, {"pmd3": hung})
+    task = asyncio.create_task(device_log._supports_json("pmd3"))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert hung.killed
+    assert device_log._JSON_SUPPORT == {}
+
