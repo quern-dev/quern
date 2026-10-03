@@ -34,6 +34,11 @@ from server.storage.ring_buffer import RingBuffer
 
 SIM = "SIM-V"
 
+#: How long a resume may take before a test calls it hung. Only "returns" vs
+#: "waits on the video forever" matters, so it is generous: 2s timed out on a
+#: busy CI runner, in a resume that writes the state file on a worker thread.
+RESUME_BOUND = 30.0
+
 
 @pytest.fixture(autouse=True)
 def _state_dir(tmp_path, monkeypatch):
@@ -549,7 +554,7 @@ class TestTheManager:
         rec = await first.start(SIM, str(tmp_path / "r"), Filters(video=True))
         await first.shutdown()
         second = Sources().manager(video)
-        await asyncio.wait_for(second.resume_all(), 2.0)
+        await asyncio.wait_for(second.resume_all(), RESUME_BOUND)
         await second.stop(rec.id)
         assert video.started == [tmp_path / "r" / "video-1.mp4", tmp_path / "r" / "video-2.mp4"]
         manifest = json.loads((tmp_path / "r" / "manifest.json").read_text())
@@ -560,7 +565,7 @@ class TestTheManager:
         rec = await first.start(SIM, str(tmp_path / "r"), Filters(video=True))
         await first.shutdown()
         second = Sources().manager(FakeVideo(fail_start=True))
-        assert await asyncio.wait_for(second.resume_all(), 2.0) == [rec.id]
+        assert await asyncio.wait_for(second.resume_all(), RESUME_BOUND) == [rec.id]
         await second.get(rec.id)._resuming
         assert any("video segment 2: could not be started" in w
                    for w in second.get(rec.id).warnings)
@@ -631,7 +636,7 @@ class TestTheManager:
         second = Sources().manager(FakeVideo())
         moved = tmp_path / "moved"
         (tmp_path / "r").rename(moved)
-        await asyncio.wait_for(second.resume_all(), 2.0)       # its directory is gone
+        await asyncio.wait_for(second.resume_all(), RESUME_BOUND)       # its directory is gone
         moved.rename(tmp_path / "r")
         done = await second.stop(rec.id)
         assert done.complete is False
@@ -648,7 +653,7 @@ class TestTheManager:
                   "duration_s": 30.0, "frames": 9}
         video = FakeVideo(reaped=reaped)
         second = Sources().manager(video)
-        await asyncio.wait_for(second.resume_all(), 2.0)
+        await asyncio.wait_for(second.resume_all(), RESUME_BOUND)
         await second.get(rec.id)._resuming
         assert video.reap_calls == [(1001, str(tmp_path / "r" / "video-1.mp4"))]
         await second.stop(rec.id)
@@ -666,11 +671,11 @@ class TestTheManager:
         await first.shutdown()
         shutil.rmtree(tmp_path / "r")
         second = Sources().manager(FakeVideo())
-        await asyncio.wait_for(second.resume_all(), 2.0)                       # gone: interrupted
+        await asyncio.wait_for(second.resume_all(), RESUME_BOUND)   # gone: interrupted
         new = await second.start(SIM, str(tmp_path / "r"), Filters(video=True))
         await second.shutdown()
         third = Sources().manager(FakeVideo())
-        assert await asyncio.wait_for(third.resume_all(), 2.0) == [new.id]
+        assert await asyncio.wait_for(third.resume_all(), RESUME_BOUND) == [new.id]
         assert third.get(old.id).state == "interrupted"
         assert f"now holds recording {new.id}" in third.get(old.id).error
         await third.get(new.id)._resuming
@@ -688,7 +693,7 @@ class TestTheManager:
         rec = await first.start(SIM, str(tmp_path / "r"), Filters(video=True))
         await first._flush(rec)
         second = Sources().manager(FakeVideo(reaped=None))
-        await asyncio.wait_for(second.resume_all(), 2.0)
+        await asyncio.wait_for(second.resume_all(), RESUME_BOUND)
         await second.get(rec.id)._resuming
         done = await second.stop(rec.id)
         assert done.complete is False
@@ -710,7 +715,7 @@ class TestTheManager:
             return await real_start(udid, path)
         video.start = slow_start
         second = Sources().manager(video)
-        assert await asyncio.wait_for(second.resume_all(), 2.0) == [rec.id]
+        assert await asyncio.wait_for(second.resume_all(), RESUME_BOUND) == [rec.id]
         assert video.started == []
         stopping = asyncio.create_task(second.stop(rec.id))
         await _settle()
@@ -738,7 +743,7 @@ class TestTheManager:
             return await real_reap(pid, movie)
         video.reap = slow_reap
         second = Sources().manager(video)
-        await asyncio.wait_for(second.resume_all(), 2.0)
+        await asyncio.wait_for(second.resume_all(), RESUME_BOUND)
         stopping = asyncio.create_task(second.stop(rec.id))
         await _settle()
         gate.set()
@@ -795,7 +800,7 @@ class TestTheManager:
         rec = await first.start(SIM, str(tmp_path / "r"), Filters(video=True))
         await first.shutdown()
         second = Sources().manager(FakeVideo())
-        await asyncio.wait_for(second.resume_all(), 2.0)
+        await asyncio.wait_for(second.resume_all(), RESUME_BOUND)
         await second.get(rec.id)._resuming
         assert any(e["type"] == "video_started" and e["segment"] == 2
                    for e in _events(tmp_path / "r"))
@@ -815,8 +820,10 @@ class TestTheManager:
             await asyncio.Event().wait()
         video.reap = forever
         second = Sources().manager(video)
-        await asyncio.wait_for(second.resume_all(), 2.0)
-        await asyncio.wait_for(second.shutdown(), 2.0)
+        await asyncio.wait_for(second.resume_all(), RESUME_BOUND)
+        # The reap below never ends, so this catches an unbounded shutdown --
+        # and stays inside the 5s `quern stop` allows, which is the property.
+        await asyncio.wait_for(second.shutdown(), 4.0)
         await _settle()
         assert video.started == [], "no new movie once quern is stopping"
         assert any(e["type"] == "paused" for e in _events(tmp_path / "r"))
@@ -832,7 +839,7 @@ class TestTheManager:
             await gate.wait()
         video.reap = slow_reap
         second = Sources().manager(video)
-        await asyncio.wait_for(second.resume_all(), 2.0)
+        await asyncio.wait_for(second.resume_all(), RESUME_BOUND)
         second.get(rec.id)._pausing = True
         gate.set()
         await second.get(rec.id)._resuming
@@ -849,7 +856,8 @@ class TestTheManager:
             f.write('{"type":"dropped","at":"2026-10-01T12:00:00+00:00","what":"flow",'
                     '"count":"many"}\n{"type":["x"],"at":"2026-10-01T12:00:00+00:00"}\n')
         second = Sources().manager()
-        assert sorted(await asyncio.wait_for(second.resume_all(), 2.0)) == sorted([a.id, b.id])
+        resumed = await asyncio.wait_for(second.resume_all(), RESUME_BOUND)
+        assert sorted(resumed) == sorted([a.id, b.id])
         await second.shutdown()
 
     async def test_a_reap_that_ends_after_the_recording_failed_is_kept(self, tmp_path):
@@ -864,7 +872,7 @@ class TestTheManager:
             return {"path": str(movie), "start_host_time": 1000.0, "duration_s": 5.0}
         video.reap = slow_reap
         second = Sources().manager(video)
-        await asyncio.wait_for(second.resume_all(), 2.0)
+        await asyncio.wait_for(second.resume_all(), RESUME_BOUND)
         resumed = second.get(rec.id)
         await second._fail(resumed, "disk full")
         gate.set()
@@ -886,7 +894,7 @@ class TestTheManager:
             return await real_start(udid, path)
         video.start = slow_start
         second = Sources().manager(video)
-        await asyncio.wait_for(second.resume_all(), 2.0)
+        await asyncio.wait_for(second.resume_all(), RESUME_BOUND)
         await _settle()
         await second._fail(second.get(rec.id), "disk full")
         gate.set()
@@ -899,7 +907,7 @@ class TestTheManager:
         rec = await first.start(SIM, str(tmp_path / "r"), Filters(video=True))
         await first.shutdown()
         second = Sources().manager(FakeVideo())
-        await asyncio.wait_for(second.resume_all(), 2.0)
+        await asyncio.wait_for(second.resume_all(), RESUME_BOUND)
         await second.get(rec.id)._resuming
         with pytest.raises(RecordingError, match="already being filmed"):
             await second.start(SIM, str(tmp_path / "other"), Filters(video=True))

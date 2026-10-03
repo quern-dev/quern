@@ -744,6 +744,28 @@ class TestLandmarkRegistry:
         assert result["matched"] is None
         assert result["confidence"] == "none"
         assert result["error"] == "no_landmarks_loaded"
+        # The way forward, said where the agent asked: load one if the app
+        # has one, and suggest building one -- not build it -- if not.
+        assert "load_landmarks" in result["hint"]
+        assert "suggest building one to the user" in result["hint"]
+        assert "init_app_knowledge" in result["hint"]
+
+    def test_identify_no_landmarks_for_this_app_names_what_is_loaded(self):
+        """"No knowledge base is loaded" is false while another app's set is,
+        and sends the reader to build one the app may already have."""
+        registry = LandmarkRegistry()
+        registry.load("com.other.app", [ScreenLandmarks(
+            screen="Home", landmarks=[Landmark(element="navigationBar", label="Home")])])
+        result = registry.identify([_el("Button", "OK")], app="com.example.app")
+        assert result["error"] == "no_landmarks_loaded"
+        assert result["hint"].startswith(
+            "No knowledge base is loaded for com.example.app; landmarks are loaded "
+            "for com.other.app.")
+        assert "app=<bundle id>" in result["hint"]
+        # An empty set is not something to point at.
+        registry.load("com.other.app", [])
+        result = registry.identify([_el("Button", "OK")], app="com.example.app")
+        assert result["hint"].startswith("No knowledge base is loaded. ")
 
     def test_app_scoping(self):
         registry = LandmarkRegistry()

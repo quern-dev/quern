@@ -144,6 +144,14 @@ async def load_landmarks(request: Request, body: LoadLandmarksRequest):
                 detail=(f"not loaded or remembered: {knowledge} has no screens with landmarks"
                         + (f"; {app} stays remembered at {earlier}" if earlier else "")),
             )
+        if not scan.screens and registry.list_sets().get(app):
+            # The same trade without remember: loading nothing over a set
+            # that identifies screens empties it, and the 200 says "loaded".
+            raise HTTPException(
+                status_code=400,
+                detail=(f"not loaded: {knowledge} has no screens with landmarks, and "
+                        f"{app}'s loaded set from {registry.source(app)} was left in place"),
+            )
         count, skipped = registry.load_scan(app, scan, str(knowledge))
         remembered = False
         if body.remember:
@@ -261,12 +269,15 @@ async def list_landmarks(request: Request):
     registry = _get_registry(request)
     sets = registry.list_sets()
     total = sum(sets.values())
+    # Where each set came from: a path, or "inline". Two checkouts of one app
+    # share a server, so "loaded" alone cannot say whose set it is.
+    sources = {app: registry.source(app) for app in sets}
     # What loads at every start, and how it went at this one: a remembered
     # knowledge base that did not load is said here, not only in the log.
     at_start = getattr(request.app.state, "landmark_startup", {}) or {}
     if not await asyncio.to_thread(config_mod.knowledge_bases_readable):
         # Never "nothing remembered" on the strength of a file nobody read.
-        return {"sets": sets, "total_screens": total, "remembered": None,
+        return {"sets": sets, "sources": sources, "total_screens": total, "remembered": None,
                 "remembered_error": f"{config_mod.USER_CONFIG_FILE} cannot be read"}
     remembered = []
     for app, path in sorted((await asyncio.to_thread(config_mod.get_knowledge_bases)).items()):
@@ -280,7 +291,7 @@ async def list_landmarks(request: Request):
             "screens": sets.get(app),
             "at_start": at_start.get(app),
         })
-    return {"sets": sets, "total_screens": total, "remembered": remembered}
+    return {"sets": sets, "sources": sources, "total_screens": total, "remembered": remembered}
 
 
 def _same_place(a: str, b: str) -> bool:

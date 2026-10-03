@@ -237,6 +237,37 @@ class TestReview:
         assert app.state.landmark_registry.list_sets() == {APP: 1}
         assert config_mod.get_knowledge_bases() == {APP: str(good.absolute())}
 
+    def test_an_empty_load_never_empties_a_loaded_set(self, tmp_path):
+        """Without remember too: loading nothing over a working set used to
+        replace it and answer 200, so identification went dead quietly."""
+        good = _project(tmp_path / "good")
+        empty = _project(tmp_path / "empty", screens=False)
+        client, app = _client()
+        client.post("/api/v1/landmarks/load", json={"app": APP, "source": str(good)})
+        r = client.post("/api/v1/landmarks/load", json={"app": APP, "source": str(empty)})
+        assert r.status_code == 400
+        assert f"loaded set from {good} was left in place" in r.json()["detail"]
+        assert app.state.landmark_registry.list_sets() == {APP: 1}
+        assert app.state.landmark_registry.source(APP) == str(good)
+
+    def test_an_empty_load_with_nothing_loaded_still_answers(self, tmp_path):
+        """Nothing to protect, so a started-but-empty knowledge base loads as
+        zero screens, as it did -- the refusal is about the set it would
+        replace, not the emptiness."""
+        empty = _project(tmp_path / "empty", screens=False)
+        client, _ = _client()
+        r = client.post("/api/v1/landmarks/load", json={"app": APP, "source": str(empty)})
+        assert r.status_code == 200 and r.json()["screens"] == 0
+
+    def test_list_says_where_each_set_came_from(self, tmp_path):
+        a = _project(tmp_path / "a")
+        client, _ = _client()
+        client.post("/api/v1/landmarks/load", json={"app": APP, "source": str(a)})
+        client.post("/api/v1/landmarks/load", json={
+            "app": "other", "landmarks": {"Home": [{"element": "Button", "label": "OK"}]}})
+        assert client.get("/api/v1/landmarks/").json()["sources"] == {
+            APP: str(a), "other": "inline"}
+
     def test_loaded_means_the_remembered_path_is_loaded(self, tmp_path):
         """Another directory's set for the same app is not the remembered
         one, and an inline load is not either (review)."""

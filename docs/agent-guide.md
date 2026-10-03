@@ -248,10 +248,11 @@ When the question is "what screen am I on right now?" — for verifying navigati
 
 **Workflow:**
 
-1. Load landmarks from the app's knowledge base:
+1. Load landmarks from the app's knowledge base. In the app's own project you usually need not: the MCP server loads the project's `.quern/knowledge` at session start, and the session's instructions say whether it did. Set `QUERN_PROJECT_DIR` in the MCP server's environment to point it at another project. Elsewhere -- or to keep it loaded across restarts:
    ```
-   load_landmarks(app="org.example.myapp", path="/Users/dev/myapp/.quern/knowledge")
+   load_landmarks(path="/Users/dev/myapp", remember=true)
    ```
+   In an app project with no knowledge base, the instructions say that too, and `identify_screen` answers `no_landmarks_loaded` with a `hint`. Suggest building one to the user -- `init_app_knowledge` and `quern://app-knowledge-guide` -- rather than starting it unasked: it is a guided tour with them, and it writes into their repo.
    Or pass landmarks inline (useful for ad-hoc identification):
    ```
    load_landmarks(app="...", landmarks={"home-tab": [{"element": "RadioButton", "identifier": "tab.home", "selected": true}]})

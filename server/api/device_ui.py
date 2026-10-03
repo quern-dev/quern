@@ -388,6 +388,11 @@ async def get_screen_summary(
             result = registry.identify(elements, page_urls=page_urls)
             summary["identified_as"] = result["matched"]
             summary["confidence"] = result["confidence"]
+            # "Could not identify" and "identified nothing" read alike from
+            # the two fields above; the reason, and the way forward, say which.
+            if result.get("error"):
+                summary["identify_error"] = result["error"]
+                summary["identify_hint"] = result.get("hint")
 
         return summary
     except DeviceError as e:
