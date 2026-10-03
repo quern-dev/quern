@@ -300,7 +300,7 @@ This is the recommended first step before interacting with UI. Use this to disco
       identify: z
         .boolean()
         .optional()
-        .describe("Match screen against loaded landmarks. Adds identified_as and confidence fields to the response."),
+        .describe("Match screen against loaded landmarks. Adds identified_as and confidence fields to the response, and, when there was nothing to match against, identify_error and an identify_hint saying what to load or build."),
     }),
   }, async ({ max_elements, udid, snapshot_depth, strategy, source_timeout, mode, identify }) => {
     try {

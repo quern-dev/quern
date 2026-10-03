@@ -30,6 +30,7 @@ import {
   autoloadKnowledge,
   detectProjectKnowledge,
   knowledgeInstructions,
+  type KnowledgeOutcome,
 } from "./project-knowledge.js";
 import { registerLandmarkTools } from "./tools/landmarks.js";
 import { registerSystemTools } from "./tools/system.js";
@@ -63,7 +64,7 @@ const PROJECT_KNOWLEDGE = (() => {
   }
 })();
 
-const instructions = [
+const BASE_INSTRUCTIONS = [
   "Quern is a debug server for AI-assisted iOS development — it captures logs, intercepts network traffic, and controls simulators/devices via MCP tools.",
   "",
   "SESSION START: resolve_device → get_screen_summary → proxy_status",
@@ -95,126 +96,132 @@ const instructions = [
   "TROUBLESHOOTING: If tools fail with connection errors, call ensure_server to check/restart the server.",
   "",
   "For the full agent guide with workflows, advanced patterns, and troubleshooting: read the quern://guide resource.",
-  ...(PROJECT_KNOWLEDGE ? knowledgeInstructions(PROJECT_KNOWLEDGE) : []),
-].join("\n");
+];
 
-const server = new McpServer(
-  {
-    name: "quern-debug-server",
-    version: MCP_VERSION,
-  },
-  { instructions },
-);
+// Built in main(), after the knowledge base load: the instructions are fixed
+// when the server is constructed, and they say how that load went rather than
+// promising one that may not happen.
+function buildServer(instructions: string): McpServer {
+  const server = new McpServer(
+    {
+      name: "quern-debug-server",
+      version: MCP_VERSION,
+    },
+    { instructions },
+  );
 
-// ---------------------------------------------------------------------------
-// Tools
-// ---------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // Tools
+  // ---------------------------------------------------------------------------
 
-registerLogTools(server);
-registerProxyTools(server);
-registerRecordingTools(server);
-registerInterceptTools(server);
-registerDeviceTools(server);
-registerDeviceUITools(server);
-registerDevicePoolTools(server);
-registerSimulatorLogTools(server);
-registerDeviceLogTools(server);
-registerWdaTools(server);
-registerBuildTools(server);
-registerAppStateTools(server);
-registerOslogTools(server);
-registerAppKnowledgeTools(server);
-registerLandmarkTools(server);
-registerSystemTools(server);
+  registerLogTools(server);
+  registerProxyTools(server);
+  registerRecordingTools(server);
+  registerInterceptTools(server);
+  registerDeviceTools(server);
+  registerDeviceUITools(server);
+  registerDevicePoolTools(server);
+  registerSimulatorLogTools(server);
+  registerDeviceLogTools(server);
+  registerWdaTools(server);
+  registerBuildTools(server);
+  registerAppStateTools(server);
+  registerOslogTools(server);
+  registerAppKnowledgeTools(server);
+  registerLandmarkTools(server);
+  registerSystemTools(server);
 
-// ---------------------------------------------------------------------------
-// Resources
-// ---------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // Resources
+  // ---------------------------------------------------------------------------
 
-function readResourceFile(filename: string): string {
-  try {
-    const filePath = join(__dirname, "..", "..", "docs", filename);
-    return readFileSync(filePath, "utf-8");
-  } catch (e) {
-    return `Error: Could not read ${filename} — ${e instanceof Error ? e.message : String(e)}`;
+  function readResourceFile(filename: string): string {
+    try {
+      const filePath = join(__dirname, "..", "..", "docs", filename);
+      return readFileSync(filePath, "utf-8");
+    } catch (e) {
+      return `Error: Could not read ${filename} — ${e instanceof Error ? e.message : String(e)}`;
+    }
   }
+
+  server.resource(
+    "guide",
+    "quern://guide",
+    {
+      description:
+        "Agent guide: principles, workflows, tool selection, and performance tips",
+      mimeType: "text/markdown",
+    },
+    async () => ({
+      contents: [
+        {
+          uri: "quern://guide",
+          mimeType: "text/markdown",
+          text: readResourceFile("agent-guide.md"),
+        },
+      ],
+    })
+  );
+
+  server.resource(
+    "api-reference",
+    "quern://api-reference",
+    {
+      description:
+        "Complete REST API reference: every MCP tool and the endpoint behind it, plus the endpoints that have no tool (SSE streams, public probes). Read this when calling the HTTP API directly instead of through MCP.",
+      mimeType: "text/markdown",
+    },
+    async () => ({
+      contents: [
+        {
+          uri: "quern://api-reference",
+          mimeType: "text/markdown",
+          text: readResourceFile("api-reference.md"),
+        },
+      ],
+    })
+  );
+
+  server.resource(
+    "app-knowledge-guide",
+    "quern://app-knowledge-guide",
+    {
+      description:
+        "Guide for building an app knowledge base: how to conduct a guided tour, document screens, flows, deep links, and quirks",
+      mimeType: "text/markdown",
+    },
+    async () => ({
+      contents: [
+        {
+          uri: "quern://app-knowledge-guide",
+          mimeType: "text/markdown",
+          text: readResourceFile("app-knowledge-guide.md"),
+        },
+      ],
+    })
+  );
+
+  server.resource(
+    "troubleshooting",
+    "quern://troubleshooting",
+    {
+      description:
+        "iOS error patterns, crash report reading guide, and debugging tips",
+      mimeType: "text/markdown",
+    },
+    async () => ({
+      contents: [
+        {
+          uri: "quern://troubleshooting",
+          mimeType: "text/markdown",
+          text: readResourceFile("troubleshooting.md"),
+        },
+      ],
+    })
+  );
+
+  return server;
 }
-
-server.resource(
-  "guide",
-  "quern://guide",
-  {
-    description:
-      "Agent guide: principles, workflows, tool selection, and performance tips",
-    mimeType: "text/markdown",
-  },
-  async () => ({
-    contents: [
-      {
-        uri: "quern://guide",
-        mimeType: "text/markdown",
-        text: readResourceFile("agent-guide.md"),
-      },
-    ],
-  })
-);
-
-server.resource(
-  "api-reference",
-  "quern://api-reference",
-  {
-    description:
-      "Complete REST API reference: every MCP tool and the endpoint behind it, plus the endpoints that have no tool (SSE streams, public probes). Read this when calling the HTTP API directly instead of through MCP.",
-    mimeType: "text/markdown",
-  },
-  async () => ({
-    contents: [
-      {
-        uri: "quern://api-reference",
-        mimeType: "text/markdown",
-        text: readResourceFile("api-reference.md"),
-      },
-    ],
-  })
-);
-
-server.resource(
-  "app-knowledge-guide",
-  "quern://app-knowledge-guide",
-  {
-    description:
-      "Guide for building an app knowledge base: how to conduct a guided tour, document screens, flows, deep links, and quirks",
-    mimeType: "text/markdown",
-  },
-  async () => ({
-    contents: [
-      {
-        uri: "quern://app-knowledge-guide",
-        mimeType: "text/markdown",
-        text: readResourceFile("app-knowledge-guide.md"),
-      },
-    ],
-  })
-);
-
-server.resource(
-  "troubleshooting",
-  "quern://troubleshooting",
-  {
-    description:
-      "iOS error patterns, crash report reading guide, and debugging tips",
-    mimeType: "text/markdown",
-  },
-  async () => ({
-    contents: [
-      {
-        uri: "quern://troubleshooting",
-        mimeType: "text/markdown",
-        text: readResourceFile("troubleshooting.md"),
-      },
-    ],
-  })
-);
 
 // ---------------------------------------------------------------------------
 // Main
@@ -254,14 +261,19 @@ async function checkVersionSkew(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  await probeServer();
-  await checkVersionSkew();
-  if (PROJECT_KNOWLEDGE?.knowledgeDir) {
-    // Best-effort, and said either way: the instructions already name the
-    // call to make if this did not take.
-    console.error(`Knowledge base: ${await autoloadKnowledge(PROJECT_KNOWLEDGE, apiRequest)}`);
+  const reachable = await probeServer();
+  if (reachable) await checkVersionSkew();
+  let knowledge: string[] = [];
+  if (PROJECT_KNOWLEDGE) {
+    // Best-effort, bounded, and skipped outright when the probe found no
+    // server -- the client is waiting on this before it can connect.
+    const outcome: KnowledgeOutcome = await autoloadKnowledge(
+      PROJECT_KNOWLEDGE, apiRequest, reachable);
+    if (outcome.kind !== "none") console.error(`Knowledge base: ${JSON.stringify(outcome)}`);
+    knowledge = knowledgeInstructions(PROJECT_KNOWLEDGE, outcome);
   }
 
+  const server = buildServer([...BASE_INSTRUCTIONS, ...knowledge].join("\n"));
   const transport = new StdioServerTransport();
   await server.connect(transport);
 

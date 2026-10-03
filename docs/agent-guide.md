@@ -248,7 +248,7 @@ When the question is "what screen am I on right now?" — for verifying navigati
 
 **Workflow:**
 
-1. Load landmarks from the app's knowledge base. In the app's own project you usually need not: the MCP server loads the project's `.quern/knowledge` at session start, and the session's instructions say so. Elsewhere -- or to keep it loaded across restarts:
+1. Load landmarks from the app's knowledge base. In the app's own project you usually need not: the MCP server loads the project's `.quern/knowledge` at session start, and the session's instructions say whether it did. Set `QUERN_PROJECT_DIR` in the MCP server's environment to point it at another project. Elsewhere -- or to keep it loaded across restarts:
    ```
    load_landmarks(path="/Users/dev/myapp", remember=true)
    ```

@@ -510,6 +510,21 @@ class TestScreenSummary:
         assert data["identify_error"] == "no_landmarks_loaded"
         assert "init_app_knowledge" in data["identify_hint"]
 
+    async def test_a_successful_identify_carries_no_error_or_hint(
+        self, app, auth_headers, mock_controller,
+    ):
+        """The two fields are the failure's; a match must not inherit them."""
+        from server.device.landmarks import Landmark, ScreenLandmarks
+        app.state.landmark_registry.load("com.example.app", [ScreenLandmarks(
+            screen="Home", landmarks=[Landmark(element="Button", label="Maps")])])
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/v1/device/screen-summary",
+                                    params={"identify": "true"}, headers=auth_headers)
+        data = resp.json()
+        assert data["identified_as"] == "Home"
+        assert "identify_error" not in data and "identify_hint" not in data
+
     async def test_screen_summary_with_udid(self, app, auth_headers, mock_controller):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:

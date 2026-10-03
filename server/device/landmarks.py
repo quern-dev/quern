@@ -805,12 +805,27 @@ def scan_knowledge_base(path: Path) -> KnowledgeBaseScan:
 #: What to do when identification has nothing to match against.
 NO_KNOWLEDGE_BASE_HINT = (
     "No knowledge base is loaded. If the app has one (a .quern/knowledge "
-    "folder in its project), load it with load_landmarks(path=<project root>) "
-    "-- remember=true keeps it loaded across restarts. If it has none, suggest "
-    "building one to the user rather than starting it yourself: "
-    "init_app_knowledge and the quern://app-knowledge-guide resource walk "
-    "through it."
+    "folder in its project), load it with load_landmarks(path=<project root>, "
+    "app=<bundle id>) -- app may be left out when the project's "
+    ".quern/config.json names it, and remember=true keeps it loaded across "
+    "restarts. If it has none, suggest building one to the user rather than "
+    "starting it yourself: init_app_knowledge and the "
+    "quern://app-knowledge-guide resource walk through it."
 )
+
+
+def no_knowledge_base_hint(app: str | None, loaded: list[str]) -> str:
+    """The hint, naming what *is* loaded when that is another app's set:
+    "no knowledge base" is false then, and sends the reader to build one
+    for an app that may already have it."""
+    if not loaded:
+        return NO_KNOWLEDGE_BASE_HINT
+    return (
+        f"No knowledge base is loaded for {app}; landmarks are loaded for "
+        f"{', '.join(sorted(loaded))}. If the app under test is one of those, "
+        "identify without app (or with that bundle id). Otherwise: "
+        + NO_KNOWLEDGE_BASE_HINT.removeprefix("No knowledge base is loaded. ")
+    )
 
 
 class LandmarkRegistry:
@@ -1136,7 +1151,8 @@ class LandmarkRegistry:
                 # The moment an agent finds out it has no knowledge base is
                 # the moment it asked "what screen am I on?" -- so the way
                 # forward is said here, not only in the session's instructions.
-                "hint": NO_KNOWLEDGE_BASE_HINT,
+                "hint": no_knowledge_base_hint(
+                    app, [a for a, n in self.list_sets().items() if n]),
                 "matched_landmarks": [],
                 "partial_matches": [],
             }
