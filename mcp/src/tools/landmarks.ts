@@ -8,6 +8,8 @@ export function registerLandmarkTools(server: McpServer): void {
   server.registerTool("load_landmarks", {
     description: `Load screen landmarks for an app from a knowledge base directory or inline JSON. Landmarks enable screen identification — matching the current UI state against known screen definitions. Landmarks are scoped by app identifier so multiple apps can be loaded simultaneously.
 
+Landmarks are held in memory and gone at every restart: set remember=true with a path to load that knowledge base again at every start (list_landmarks shows what is remembered; unload_landmarks with forget=true stops it). With a path inside a project's .quern/, app can be omitted -- the project's .quern/config.json names it.
+
 The response includes a 'skipped' array listing screen files the loader couldn't turn into landmarks, with categorized reasons:
   - legacy_format: file uses the pre-landmarks 'identify_by:' field. Includes the original entries so an agent can propose a migration to the new schema with user review.
   - no_landmarks: file has neither field (likely a stub).
@@ -21,20 +23,27 @@ Element types are matched across backends: a landmark on the accessibility tree'
     inputSchema: strictParams({
       app: z
         .string()
-        .describe("App identifier (e.g. bundle ID like 'com.example.app')"),
+        .optional()
+        .describe("App identifier (e.g. bundle ID like 'com.example.app'). Optional with a path inside a project's .quern/ -- its config.json names the app."),
       path: z
         .string()
         .optional()
         .describe(
-          "Path to the knowledge base directory containing screens/ with landmark-annotated markdown files"
+          "Path to the knowledge base directory containing screens/ with landmark-annotated markdown files, or the project root holding .quern/knowledge"
         ),
       landmarks: inlineLandmarks.optional(),
+      remember: z
+        .boolean()
+        .optional()
+        .describe("Load this knowledge base again at every quern start (kept in ~/.quern/config.json). list_landmarks shows what is remembered and how it loaded; unload_landmarks(forget=true) stops it."),
     }),
-  }, async ({ app, path, landmarks }) => {
+  }, async ({ app, path, landmarks, remember }) => {
     try {
-      const body: Record<string, unknown> = { app };
+      const body: Record<string, unknown> = {};
+      if (app) body.app = app;
       if (path) body.source = path;
       if (landmarks) body.landmarks = landmarks;
+      if (remember !== undefined) body.remember = remember;
       const data = await apiRequest("POST", "/api/v1/landmarks/load", undefined, body);
 
       return {
@@ -97,7 +106,7 @@ A landmark that matched only because its element type is named differently on th
   });
 
   server.registerTool("list_landmarks", {
-    description: `List all loaded landmark sets, showing the app identifier and number of screens for each.`,
+    description: `List all loaded landmark sets, showing the app identifier and number of screens for each. 'remembered' lists the knowledge bases loaded at every start (load_landmarks remember=true): each one's path, whether that path's set is loaded now (loaded, loaded_from), and at_start -- how many screens loaded at this start, or why it did not.`,
     inputSchema: strictParams({}),
   }, async () => {
     try {
@@ -121,17 +130,22 @@ A landmark that matched only because its element type is named differently on th
   });
 
   server.registerTool("unload_landmarks", {
-    description: `Unload landmarks for a specific app or all apps. Frees the memory used by landmark definitions.`,
+    description: `Unload landmarks for a specific app or all apps. Frees the memory used by landmark definitions. With forget=true it also stops a remembered knowledge base loading at every start -- every one of them, if app is omitted.`,
     inputSchema: strictParams({
       app: z
         .string()
         .optional()
         .describe("App to unload (omit to unload all)"),
+      forget: z
+        .boolean()
+        .optional()
+        .describe("Also stop loading it at every start, if it was remembered. With no app, every remembered knowledge base is forgotten."),
     }),
-  }, async ({ app }) => {
+  }, async ({ app, forget }) => {
     try {
       const params: Record<string, string> = {};
       if (app) params.app = app;
+      if (forget) params.forget = "true";
       const data = await apiRequest("DELETE", "/api/v1/landmarks", params);
       return {
         content: [

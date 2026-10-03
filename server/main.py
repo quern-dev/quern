@@ -690,8 +690,13 @@ def create_app(
     app.state.network_state = None  # populated when the lifespan starts the monitor
 
     # Screen landmarks
-    from server.device.landmarks import LandmarkRegistry
+    from server.config import get_knowledge_bases
+    from server.device.landmarks import LandmarkRegistry, load_remembered
     app.state.landmark_registry = LandmarkRegistry()
+    # Knowledge bases remembered with load_landmarks(remember=true), and how
+    # each one loaded -- list_landmarks reports it.
+    app.state.landmark_startup = load_remembered(
+        app.state.landmark_registry, get_knowledge_bases())
 
     # Screenshot timeline state
     app.state.active_timeline = None

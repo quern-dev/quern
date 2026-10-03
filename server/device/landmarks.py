@@ -809,6 +809,8 @@ class LandmarkRegistry:
         self._sets: dict[str, list[ScreenLandmarks]] = {}
         self._web_content: dict[str, list[WebContentHint]] = {}
         self._conventions: dict[str, list[FileConventions]] = {}
+        #: Where each app's set came from: a directory, or "inline".
+        self._sources: dict[str, str] = {}
 
     def load(
         self,
@@ -823,6 +825,7 @@ class LandmarkRegistry:
         loaded.
         """
         self._sets[app] = screens
+        self._sources[app] = "inline"
         self._conventions[app] = [
             replace(entry, app=app) for entry in conventions or []
         ]
@@ -843,10 +846,21 @@ class LandmarkRegistry:
         and the list of files that could not be turned into landmarks
         (with categorized reasons in each entry).
         """
-        scan = scan_knowledge_base(Path(path))
+        return self.load_scan(app, scan_knowledge_base(Path(path)), path)
+
+    def load_scan(
+        self, app: str, scan: KnowledgeBaseScan, path: str,
+    ) -> tuple[int, list[SkippedFile]]:
+        """Load a scan already made -- so a caller can look at it first and
+        refuse it without replacing what is loaded."""
         count = self.load(app, scan.screens, scan.conventions)
         self._web_content[app] = scan.web_content
+        self._sources[app] = path
         return count, scan.skipped
+
+    def source(self, app: str) -> str | None:
+        """Where `app`'s loaded set came from, or None if none is loaded."""
+        return self._sources.get(app) if app in self._sets else None
 
     def web_content(self, app: str | None = None) -> list[WebContentHint]:
         """Recorded web view facts, for one app or all of them."""
@@ -863,10 +877,12 @@ class LandmarkRegistry:
             self._sets.clear()
             self._web_content.clear()
             self._conventions.clear()
+            self._sources.clear()
             return "all"
         self._sets.pop(app, None)
         self._web_content.pop(app, None)
         self._conventions.pop(app, None)
+        self._sources.pop(app, None)
         return app
 
     def list_sets(self) -> dict[str, int]:
@@ -1134,3 +1150,43 @@ class LandmarkRegistry:
     def is_empty(self) -> bool:
         """True if no landmarks are loaded."""
         return not self._sets
+
+
+def load_remembered(
+    registry: LandmarkRegistry, knowledge_bases: Mapping[str, str],
+) -> dict[str, dict]:
+    """Load each remembered knowledge base, and say how each one went: the
+    answer is what `list_landmarks` shows, because a knowledge base that did
+    not load -- a checkout moved, a volume not mounted -- reported only in the
+    server log is one nobody driving quern will see.
+
+    Never raises: a knowledge base that will not load must not stop the
+    server starting.
+    """
+    outcomes: dict[str, dict] = {}
+    for app, path in knowledge_bases.items():
+        outcome: dict = {"path": path}
+        try:
+            # A hand-edited entry may say ~ or name the project root.
+            directory = Path(path).expanduser()
+            if (directory / ".quern" / "knowledge").is_dir():
+                directory = directory / ".quern" / "knowledge"
+            if not directory.is_dir():
+                outcome["error"] = f"{path} is not a directory: moved, deleted, or not mounted"
+            else:
+                scan = scan_knowledge_base(directory)
+                outcome["skipped"] = len(scan.skipped)
+                if not scan.screens:
+                    # Not registered: an empty set would list as loaded.
+                    outcome["screens"] = 0
+                    outcome["error"] = f"{path} has no screens with landmarks"
+                else:
+                    outcome["screens"], _ = registry.load_scan(app, scan, path)
+        except Exception as e:  # noqa: BLE001 -- said, never fatal to start
+            outcome["error"] = f"could not be loaded: {e}"
+            logger.exception("Remembered knowledge base for %s at %s did not load", app, path)
+        if outcome.get("error"):
+            logger.warning("Remembered knowledge base for %s: %s", app, outcome["error"])
+        outcomes[app] = outcome
+    return outcomes
+

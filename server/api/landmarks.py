@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from dataclasses import asdict
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import ValidationError
 
+from server import config as config_mod
 from server.api.actions import logged_action
 from server.device.landmarks import (
     FileConventions,
@@ -82,6 +86,35 @@ def _get_controller(request: Request):
 # ---------------------------------------------------------------------------
 
 
+def _knowledge_dir(source: str) -> Path:
+    """The directory to load: `source`, or the `.quern/knowledge` inside it
+    when `source` is a project root. A path that is not a directory is a
+    400: it used to load zero screens and say nothing, which is how a
+    moved checkout would look loaded-but-empty at every start."""
+    path = Path(source).expanduser()
+    if (path / ".quern" / "knowledge").is_dir():
+        path = path / ".quern" / "knowledge"
+    elif path.name == ".quern" and (path / "knowledge").is_dir():
+        path = path / "knowledge"
+    if not path.is_dir():
+        raise HTTPException(status_code=400, detail=f"{source} is not a directory")
+    return path
+
+
+def _app_from_project(knowledge: Path) -> str | None:
+    """The bundle id a project's `.quern/config.json` names -- the file
+    `init_app_knowledge` writes -- for `.quern/knowledge` or its `screens/`."""
+    quern = next((p for p in (knowledge.parent, knowledge.parent.parent)
+                  if p.name == ".quern"), None)
+    if quern is None:
+        return None
+    try:
+        bundle = json.loads((quern / "config.json").read_text()).get("bundle_id")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return bundle if isinstance(bundle, str) and bundle else None
+
+
 @router.post("/load")
 @logged_action("load_landmarks", category="knowledge")
 async def load_landmarks(request: Request, body: LoadLandmarksRequest):
@@ -89,14 +122,58 @@ async def load_landmarks(request: Request, body: LoadLandmarksRequest):
     registry = _get_registry(request)
 
     if body.source:
-        count, skipped = registry.load_from_path(body.app, body.source)
+        # Directory checks, file reads, the scan and the config lock all go
+        # to a thread: a slow volume must not stall every other request
+        # (CodeRabbit). The registry update stays here, on the loop.
+        knowledge = await asyncio.to_thread(_knowledge_dir, body.source)
+        app = body.app or await asyncio.to_thread(_app_from_project, knowledge)
+        if not app:
+            raise HTTPException(
+                status_code=400,
+                detail=f"app is required: no .quern/config.json with a bundle_id "
+                       f"beside {knowledge}",
+            )
+        scan = await asyncio.to_thread(scan_knowledge_base, knowledge)
+        if body.remember and not scan.screens:
+            # Refused before anything is replaced: a 400 that had already
+            # swapped the loaded set for an empty one read as "nothing
+            # happened" while identification went dead (review).
+            earlier = (await asyncio.to_thread(config_mod.get_knowledge_bases)).get(app)
+            raise HTTPException(
+                status_code=400,
+                detail=(f"not loaded or remembered: {knowledge} has no screens with landmarks"
+                        + (f"; {app} stays remembered at {earlier}" if earlier else "")),
+            )
+        count, skipped = registry.load_scan(app, scan, str(knowledge))
+        remembered = False
+        if body.remember:
+            try:
+                # Absolute, but with its symlinks kept: the path as given is
+                # the one meant, and a link repointed later should be followed.
+                await asyncio.to_thread(
+                    config_mod.remember_knowledge_base, app, str(knowledge.absolute()))
+            except OSError as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"loaded {count} screens, but could not remember them: {e}",
+                ) from e
+            remembered = True
         return {
-            "loaded": body.app,
-            "source": body.source,
+            "loaded": app,
+            "source": str(knowledge),
             "screens": count,
             "skipped": _serialize_skipped(skipped),
-            "conventions": conventions_report(registry.conventions(body.app)),
+            "remembered": remembered,
+            "conventions": conventions_report(registry.conventions(app)),
         }
+
+    if body.remember:
+        raise HTTPException(
+            status_code=400,
+            detail="remember needs a source path: inline landmarks have nothing to load again",
+        )
+    if not body.app:
+        raise HTTPException(status_code=400, detail="app is required for inline landmarks")
 
     if body.landmarks:
         screens: list[ScreenLandmarks] = []
@@ -184,7 +261,33 @@ async def list_landmarks(request: Request):
     registry = _get_registry(request)
     sets = registry.list_sets()
     total = sum(sets.values())
-    return {"sets": sets, "total_screens": total}
+    # What loads at every start, and how it went at this one: a remembered
+    # knowledge base that did not load is said here, not only in the log.
+    at_start = getattr(request.app.state, "landmark_startup", {}) or {}
+    if not await asyncio.to_thread(config_mod.knowledge_bases_readable):
+        # Never "nothing remembered" on the strength of a file nobody read.
+        return {"sets": sets, "total_screens": total, "remembered": None,
+                "remembered_error": f"{config_mod.USER_CONFIG_FILE} cannot be read"}
+    remembered = []
+    for app, path in sorted((await asyncio.to_thread(config_mod.get_knowledge_bases)).items()):
+        loaded_from = registry.source(app)
+        remembered.append({
+            "app": app, "path": path,
+            # This path's set, not just any set for the app: a later manual
+            # load from elsewhere is not the remembered one (review).
+            "loaded": loaded_from is not None and _same_place(loaded_from, path),
+            "loaded_from": loaded_from,
+            "screens": sets.get(app),
+            "at_start": at_start.get(app),
+        })
+    return {"sets": sets, "total_screens": total, "remembered": remembered}
+
+
+def _same_place(a: str, b: str) -> bool:
+    try:
+        return Path(a).expanduser().resolve() == Path(b).expanduser().resolve()
+    except OSError:
+        return a == b
 
 
 # ---------------------------------------------------------------------------
@@ -197,11 +300,20 @@ async def list_landmarks(request: Request):
 async def unload_landmarks(
     request: Request,
     app: str | None = Query(default=None, description="App to unload (omit = all)"),
+    forget: bool = Query(default=False, description="Also stop loading it at every start"),
 ):
     """Unload landmarks for a specific app or all apps."""
     registry = _get_registry(request)
     unloaded = registry.unload(app)
-    return {"unloaded": unloaded}
+    if not forget:
+        return {"unloaded": unloaded}
+    try:
+        forgotten = await asyncio.to_thread(config_mod.forget_knowledge_base, app)
+    except OSError as e:
+        raise HTTPException(
+            status_code=500, detail=f"unloaded, but could not forget it: {e}",
+        ) from e
+    return {"unloaded": unloaded, "forgotten": forgotten}
 
 
 # ---------------------------------------------------------------------------
