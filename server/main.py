@@ -691,7 +691,7 @@ def create_app(
 
     # Screen landmarks
     from server.config import get_knowledge_bases
-    from server.device.landmarks import LandmarkRegistry, load_remembered
+    from server.knowledge.landmarks import LandmarkRegistry, load_remembered
     app.state.landmark_registry = LandmarkRegistry()
     # Knowledge bases remembered with load_landmarks(remember=true), and how
     # each one loaded -- list_landmarks reports it.

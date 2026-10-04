@@ -25,7 +25,7 @@ never fire.
 
 Five, in one parser, all deliberate and none of them reported to a caller:
 
-| `server/device/landmarks.py` | what is dropped |
+| `server/knowledge/landmarks.py` | what is dropped |
 |---|---|
 | `scrollable` coercion | a non-boolean value, read as unset |
 | landmark entry not a dict | the entry, `continue` |

@@ -26,7 +26,8 @@ from server.device.element_types import (
     rule_for,
     type_matches,
 )
-from server.device.landmarks import (
+from server.device.ui_elements import find_element, parse_elements
+from server.knowledge.landmarks import (
     CURRENT_LANDMARK_CONVENTIONS,
     LandmarkRegistry,
     check_conventions,
@@ -36,7 +37,6 @@ from server.device.landmarks import (
     match_landmark_via,
     scan_knowledge_base,
 )
-from server.device.ui_elements import find_element, parse_elements
 from server.main import create_app
 from server.models import DeviceType, Landmark, ScreenLandmarks, UIElement
 

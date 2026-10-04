@@ -19,7 +19,7 @@ from server.api.device import (
     _handle_device_error,
 )
 from server.device.controller import DeviceController
-from server.device.landmarks import needs_page_urls
+from server.knowledge.landmarks import needs_page_urls
 from server.models import (
     ClearTextRequest,
     DeviceError,

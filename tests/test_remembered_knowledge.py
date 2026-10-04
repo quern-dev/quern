@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 
 from server import config as config_mod
 from server.api.landmarks import router
-from server.device.landmarks import LandmarkRegistry, load_remembered
+from server.knowledge.landmarks import LandmarkRegistry, load_remembered
 
 APP = "com.example.app"
 
