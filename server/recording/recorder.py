@@ -118,8 +118,9 @@ KEYFRAME_TRIGGERS = ("actions", "requests")
 #: The clock request keyframes are rate-limited by; a seam for tests, which
 #: must not patch `time.monotonic` itself -- asyncio's loop reads it too.
 _monotonic = time.monotonic
-#: At most one request keyframe per recording this often. A burst of requests
-#: is one seek point, not a burst of keyframes.
+#: A request asks for a keyframe only this long after the last one of any
+#: kind. A burst of requests is one seek point, not a burst of keyframes, and
+#: the requests an action sets off already have the action's.
 REQUEST_KEYFRAME_INTERVAL = 1.0
 
 
@@ -307,8 +308,9 @@ class Recording:
     #: Held, and compared by identity: an id is reused as soon as its action
     #: is freed, and keying on it gave 1 of 50 actions a keyframe (review).
     _keyframed: deque = field(default_factory=lambda: deque(maxlen=64), repr=False)
-    #: When the last request keyframe was asked for (monotonic).
-    _last_request_keyframe: float = field(default=float("-inf"), repr=False)
+    #: When a keyframe was last asked for (monotonic) -- by an action, a
+    #: request or a caller -- so a request just after one adds none.
+    _last_keyframe: float = field(default=float("-inf"), repr=False)
     #: Flow ids this recording saw start, so a flow whose start it never saw
     #: -- a mocked request, or a response that beat its start report -- is a
     #: request too.
@@ -781,6 +783,7 @@ class RecordingManager:
             if any(a is action for a in rec._keyframed):
                 continue
             rec._keyframed.append(action)
+            rec._last_keyframe = _monotonic()
             self._spawn(self._video.keyframe(rec._segment))
 
     async def _finish_video(self, rec: Recording, *, write: bool = True) -> None:
@@ -835,15 +838,18 @@ class RecordingManager:
 
     def _request_keyframe(self, rec: Recording) -> None:
         """A request started on a device this recording is filming: make it a
-        seek point (#415), at most once a `REQUEST_KEYFRAME_INTERVAL`. Never
-        awaited -- a request must not wait on video."""
+        seek point (#415), unless a keyframe was asked for within the last
+        `REQUEST_KEYFRAME_INTERVAL`. In a run quern drives, most requests start
+        just after the action that caused them, and measured, 7 of 12 request
+        keyframes landed within 0.6s of that action's: seek points already
+        there. Never awaited -- a request must not wait on video."""
         if ("requests" not in rec.filters.keyframes or rec._segment is None
                 or self._video is None or rec.state != "recording"):
             return
         now = _monotonic()
-        if now - rec._last_request_keyframe < REQUEST_KEYFRAME_INTERVAL:
+        if now - rec._last_keyframe < REQUEST_KEYFRAME_INTERVAL:
             return
-        rec._last_request_keyframe = now
+        rec._last_keyframe = now
         self._spawn(self._video.keyframe(rec._segment))
 
     async def keyframe(self, recording_id: str, label: str | None = None) -> bool:
@@ -859,6 +865,7 @@ class RecordingManager:
             raise RecordingNotFilming(f"{recording_id} is not recording video")
         if rec.state != "recording" or rec._segment is None or self._video is None:
             raise RecordingNotFilming(f"{recording_id} has no movie recording right now")
+        rec._last_keyframe = _monotonic()
         asked = await self._video.keyframe(rec._segment)
         rec._pending.append(_line("mark", {
             "timestamp": _now().isoformat(), "label": label, "keyframe_requested": asked}))

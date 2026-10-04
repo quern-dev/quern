@@ -186,6 +186,43 @@ class TestRequestKeyframes:
         assert len(video.keyframes) == 2
         await manager.stop(rec.id)
 
+    @pytest.mark.parametrize("first", ["action", "caller"])
+    async def test_a_request_just_after_another_keyframe_adds_none(
+        self, tmp_path, monkeypatch, first,
+    ):
+        """The requests an action sets off start just after it: their keyframe
+        is the action's, already there. Measured, 7 of 12 were."""
+        src, manager, rec, video = await self._filming(tmp_path)
+        clock = [100.0]
+        monkeypatch.setattr(rec_mod, "_monotonic", lambda: clock[0])
+        if first == "action":
+            manager._on_action_device(SIM, object())
+        else:
+            await manager.keyframe(rec.id)
+        clock[0] += rec_mod.REQUEST_KEYFRAME_INTERVAL / 2
+        src.flows.note_started(_flow(response=False))
+        await _settle()
+        assert len(video.keyframes) == 1
+        clock[0] += rec_mod.REQUEST_KEYFRAME_INTERVAL
+        src.flows.note_started(_flow(response=False))
+        await _settle()
+        assert len(video.keyframes) == 2, "a request between actions is a seek point"
+        await manager.stop(rec.id)
+
+    async def test_an_action_just_after_a_request_still_gets_one(self, tmp_path, monkeypatch):
+        """The action is the seek point that matters; requests yield to it,
+        never the other way round."""
+        src, manager, rec, video = await self._filming(tmp_path)
+        clock = [100.0]
+        monkeypatch.setattr(rec_mod, "_monotonic", lambda: clock[0])
+        src.flows.note_started(_flow(response=False))
+        await _settle()
+        clock[0] += rec_mod.REQUEST_KEYFRAME_INTERVAL / 10
+        manager._on_action_device(SIM, object())
+        await _settle()
+        assert len(video.keyframes) == 2
+        await manager.stop(rec.id)
+
     async def test_actions_only_asks_none_for_requests(self, tmp_path):
         src, manager, rec, video = await self._filming(tmp_path, keyframes=("actions",))
         src.flows.note_started(_flow(response=False))

@@ -967,7 +967,9 @@ class RecordingStartRequest(BaseModel):
         "captured is a run that looks fine and holds nothing."))
     keyframes: list[Literal["actions", "requests"]] | None = Field(default=None, description=(
         "With video, what asks for a keyframe, so it is a seek point in the movie: "
-        "quern's actions, and each request the device starts (at most one a second). "
+        "quern's actions, and each request the device starts, unless a keyframe was asked "
+        "for in the last second: a burst adds one, and the requests an action sets off "
+        "add none. "
         "Default both; a run quern does not drive, such as an XCUITest suite, has no "
         "actions, and requests are its only seek points. Request keyframes need "
         "`flows` in `kinds`. An empty list asks for none."))
