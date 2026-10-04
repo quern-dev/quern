@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from server.device.wda_selector import ElementSelector
+from server.device.ios.wda_selector import ElementSelector
 from server.models import (
     DeviceError,
     WdaAppCrashedError,
@@ -558,7 +558,7 @@ class WdaBackend:
             )
 
         logger.info("WDA not reachable on %s, auto-starting driver...", udid[:8])
-        from server.device.wda import start_driver
+        from server.device.ios.wda import start_driver
 
         result = await start_driver(udid, os_version)
         if not result.get("ready"):
@@ -583,7 +583,7 @@ class WdaBackend:
 
     async def _try_tunneld_connection(self, udid: str) -> str | None:
         """Try to connect to WDA via the tunneld tunnel address."""
-        from server.device.tunneld import get_tunneld_devices, resolve_tunnel_udid
+        from server.device.ios.tunneld import get_tunneld_devices, resolve_tunnel_udid
 
         tunnel_udid = await resolve_tunnel_udid(udid)
         if not tunnel_udid:
@@ -617,7 +617,7 @@ class WdaBackend:
         self, udid: str,
     ) -> tuple[str, asyncio.subprocess.Process, int]:
         """Start a pymobiledevice3 usbmux forward for a pre-iOS 17 device."""
-        from server.device.tunneld import find_pymobiledevice3_binary
+        from server.device.ios.tunneld import find_pymobiledevice3_binary
 
         binary = find_pymobiledevice3_binary()
         if not binary:
@@ -1104,7 +1104,7 @@ class WdaBackend:
 
     async def _restart_wda(self, udid: str) -> None:
         """Stop and restart the WDA driver for a device, clearing cached connection."""
-        from server.device.wda import start_driver, stop_driver
+        from server.device.ios.wda import start_driver, stop_driver
 
         # Clear cached connection
         await self._drop_connection(udid)

@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from server.device.adb import AdbBackend
+from server.device.android.adb import AdbBackend
 
 
 @pytest.fixture
@@ -182,7 +182,7 @@ class TestWirelessDebuggingSerialsCountAsNetwork:
     prevent."""
 
     def test_the_mdns_form_is_a_network_transport(self):
-        from server.device.adb import AdbBackend
+        from server.device.android.adb import AdbBackend
 
         assert AdbBackend.is_network_transport(
             "adb-8BAY0WCL7-AbCdEf._adb-tls-connect._tcp"

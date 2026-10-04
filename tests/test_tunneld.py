@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 
-import server.device.tunneld as tunneld_module
-from server.device.tunneld import (
+import server.device.ios.tunneld as tunneld_module
+from server.device.ios.tunneld import (
     LAUNCHCTL,
     LOG_PATH,
     TUNNELD_LABEL,
@@ -74,7 +74,7 @@ class TestIsTunneldRunning:
         mock_response = MagicMock()
         mock_response.status_code = 200
 
-        with patch("server.device.tunneld.httpx.AsyncClient") as mock_client_cls:
+        with patch("server.device.ios.tunneld.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(return_value=mock_response)
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -84,7 +84,7 @@ class TestIsTunneldRunning:
             assert await is_tunneld_running() is True
 
     async def test_not_running(self):
-        with patch("server.device.tunneld.httpx.AsyncClient") as mock_client_cls:
+        with patch("server.device.ios.tunneld.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(side_effect=httpx.ConnectError("refused"))
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -108,7 +108,7 @@ class TestGetTunneldDevices:
         mock_response.status_code = 200
         mock_response.json.return_value = devices
 
-        with patch("server.device.tunneld.httpx.AsyncClient") as mock_client_cls:
+        with patch("server.device.ios.tunneld.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(return_value=mock_response)
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -120,7 +120,7 @@ class TestGetTunneldDevices:
             assert "00008130-AAAA" in result
 
     async def test_connection_error_returns_empty(self):
-        with patch("server.device.tunneld.httpx.AsyncClient") as mock_client_cls:
+        with patch("server.device.ios.tunneld.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(side_effect=httpx.ConnectError("refused"))
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -169,7 +169,7 @@ class TestResolveTunnelUdid:
             return mock_proc
 
         with (
-            patch("server.device.tunneld.get_tunneld_devices", return_value=devices),
+            patch("server.device.ios.tunneld.get_tunneld_devices", return_value=devices),
             patch("asyncio.create_subprocess_exec", side_effect=fake_subprocess),
         ):
             result = await resolve_tunnel_udid("53DA57AA-1234")
@@ -177,7 +177,7 @@ class TestResolveTunnelUdid:
             assert _tunnel_udid_cache["53DA57AA-1234"] == "00008130-AAAA"
 
     async def test_not_found(self):
-        with patch("server.device.tunneld.get_tunneld_devices", return_value={}):
+        with patch("server.device.ios.tunneld.get_tunneld_devices", return_value={}):
             result = await resolve_tunnel_udid("UNKNOWN-UUID")
             assert result is None
 
@@ -213,7 +213,7 @@ class TestResolveTunnelUdid:
             return mock_proc
 
         with (
-            patch("server.device.tunneld.get_tunneld_devices", return_value=devices),
+            patch("server.device.ios.tunneld.get_tunneld_devices", return_value=devices),
             patch("asyncio.create_subprocess_exec", side_effect=fake_subprocess),
         ):
             result = await resolve_tunnel_udid("53DA57AA-1111")
@@ -233,7 +233,7 @@ class TestResolveTunnelUdid:
         mock_proc.returncode = 1
 
         with (
-            patch("server.device.tunneld.get_tunneld_devices", return_value=devices),
+            patch("server.device.ios.tunneld.get_tunneld_devices", return_value=devices),
             patch("asyncio.create_subprocess_exec", return_value=mock_proc),
         ):
             result = await resolve_tunnel_udid("53DA57AA-1111")
@@ -275,7 +275,7 @@ class TestGeneratePlist:
 
 class TestInstalledPlistFreshness:
     def test_missing_plist_reports_outdated(self, tmp_path):
-        with patch("server.device.tunneld.PLIST_PATH", tmp_path / "absent.plist"):
+        with patch("server.device.ios.tunneld.PLIST_PATH", tmp_path / "absent.plist"):
             assert installed_plist_log_path() is None
             assert installed_plist_is_current() is False
 
@@ -284,9 +284,9 @@ class TestInstalledPlistFreshness:
         plist_file = tmp_path / "com.quern.tunneld.plist"
         plist_file.write_text(generate_plist(binary))
         with (
-            patch("server.device.tunneld.PLIST_PATH", plist_file),
+            patch("server.device.ios.tunneld.PLIST_PATH", plist_file),
             patch(
-                "server.device.tunneld.find_pymobiledevice3_binary",
+                "server.device.ios.tunneld.find_pymobiledevice3_binary",
                 return_value=binary,
             ),
         ):
@@ -302,7 +302,7 @@ class TestInstalledPlistFreshness:
             str(LOG_PATH), "/Users/somebody/.quern/tunneld.log",
         )
         plist_file.write_text(legacy)
-        with patch("server.device.tunneld.PLIST_PATH", plist_file):
+        with patch("server.device.ios.tunneld.PLIST_PATH", plist_file):
             assert installed_plist_log_path() == Path(
                 "/Users/somebody/.quern/tunneld.log",
             )
@@ -319,9 +319,9 @@ class TestInstalledPlistFreshness:
         plist_file = tmp_path / "com.quern.tunneld.plist"
         plist_file.write_text(generate_plist(binary_in_plist))
         with (
-            patch("server.device.tunneld.PLIST_PATH", plist_file),
+            patch("server.device.ios.tunneld.PLIST_PATH", plist_file),
             patch(
-                "server.device.tunneld.find_pymobiledevice3_binary",
+                "server.device.ios.tunneld.find_pymobiledevice3_binary",
                 return_value=Path("/usr/local/bin/pymobiledevice3"),
             ),
         ):
@@ -335,9 +335,9 @@ class TestInstalledPlistFreshness:
             generate_plist(Path("/nonexistent/pymobiledevice3")),
         )
         with (
-            patch("server.device.tunneld.PLIST_PATH", plist_file),
+            patch("server.device.ios.tunneld.PLIST_PATH", plist_file),
             patch(
-                "server.device.tunneld.find_pymobiledevice3_binary",
+                "server.device.ios.tunneld.find_pymobiledevice3_binary",
                 return_value=None,
             ),
         ):
@@ -351,9 +351,9 @@ class TestInstalledPlistFreshness:
         plist_file = tmp_path / "com.quern.tunneld.plist"
         plist_file.write_text(generate_plist(binary_in_plist))
         with (
-            patch("server.device.tunneld.PLIST_PATH", plist_file),
+            patch("server.device.ios.tunneld.PLIST_PATH", plist_file),
             patch(
-                "server.device.tunneld.find_pymobiledevice3_binary",
+                "server.device.ios.tunneld.find_pymobiledevice3_binary",
                 return_value=Path("/usr/local/bin/pymobiledevice3"),
             ),
         ):
@@ -362,7 +362,7 @@ class TestInstalledPlistFreshness:
     def test_unparseable_plist_reports_outdated(self, tmp_path):
         plist_file = tmp_path / "com.quern.tunneld.plist"
         plist_file.write_text("not a real plist")
-        with patch("server.device.tunneld.PLIST_PATH", plist_file):
+        with patch("server.device.ios.tunneld.PLIST_PATH", plist_file):
             assert installed_plist_log_path() is None
             assert installed_plist_is_current() is False
 
@@ -417,12 +417,12 @@ class TestInstallDaemonUpgradePath:
 
         with (
             patch(
-                "server.device.tunneld.find_pymobiledevice3_binary",
+                "server.device.ios.tunneld.find_pymobiledevice3_binary",
                 return_value=Path("/usr/bin/pymobiledevice3"),
             ),
-            patch("server.device.tunneld.PLIST_PATH", tmp_path / "tunneld.plist"),
-            patch("server.device.tunneld._run_sudo", side_effect=fake_run_sudo),
-            patch("server.device.tunneld.time.sleep"),  # speed up the test
+            patch("server.device.ios.tunneld.PLIST_PATH", tmp_path / "tunneld.plist"),
+            patch("server.device.ios.tunneld._run_sudo", side_effect=fake_run_sudo),
+            patch("server.device.ios.tunneld.time.sleep"),  # speed up the test
         ):
             assert install_daemon() == 0
 
@@ -441,15 +441,15 @@ class TestInstallDaemonUpgradePath:
 
         with (
             patch(
-                "server.device.tunneld.find_pymobiledevice3_binary",
+                "server.device.ios.tunneld.find_pymobiledevice3_binary",
                 return_value=Path("/usr/bin/pymobiledevice3"),
             ),
-            patch("server.device.tunneld.PLIST_PATH", tmp_path / "tunneld.plist"),
+            patch("server.device.ios.tunneld.PLIST_PATH", tmp_path / "tunneld.plist"),
             patch(
-                "server.device.tunneld._run_sudo",
+                "server.device.ios.tunneld._run_sudo",
                 side_effect=lambda args, timeout: (calls.append(args), True)[1],
             ),
-            patch("server.device.tunneld.time.sleep"),
+            patch("server.device.ios.tunneld.time.sleep"),
         ):
             assert install_daemon() == 0
 
@@ -470,12 +470,12 @@ class TestInstallDaemonUpgradePath:
 
         with (
             patch(
-                "server.device.tunneld.find_pymobiledevice3_binary",
+                "server.device.ios.tunneld.find_pymobiledevice3_binary",
                 return_value=Path("/usr/bin/pymobiledevice3"),
             ),
-            patch("server.device.tunneld.PLIST_PATH", tmp_path / "tunneld.plist"),
-            patch("server.device.tunneld._run_sudo", side_effect=fake_run_sudo),
-            patch("server.device.tunneld.time.sleep"),
+            patch("server.device.ios.tunneld.PLIST_PATH", tmp_path / "tunneld.plist"),
+            patch("server.device.ios.tunneld._run_sudo", side_effect=fake_run_sudo),
+            patch("server.device.ios.tunneld.time.sleep"),
         ):
             assert install_daemon() == 0
 
@@ -492,12 +492,12 @@ class TestInstallDaemonUpgradePath:
 
         with (
             patch(
-                "server.device.tunneld.find_pymobiledevice3_binary",
+                "server.device.ios.tunneld.find_pymobiledevice3_binary",
                 return_value=Path("/usr/bin/pymobiledevice3"),
             ),
-            patch("server.device.tunneld.PLIST_PATH", tmp_path / "tunneld.plist"),
-            patch("server.device.tunneld._run_sudo", side_effect=fake_run_sudo),
-            patch("server.device.tunneld.time.sleep"),
+            patch("server.device.ios.tunneld.PLIST_PATH", tmp_path / "tunneld.plist"),
+            patch("server.device.ios.tunneld._run_sudo", side_effect=fake_run_sudo),
+            patch("server.device.ios.tunneld.time.sleep"),
         ):
             assert install_daemon() == 1
 
@@ -520,12 +520,12 @@ class TestRestartDaemon:
         plist = tmp_path / "tunneld.plist"
         plist.write_text("")
         return (
-            patch("server.device.tunneld.PLIST_PATH", plist),
-            patch("server.device.tunneld._run_sudo", side_effect=fake_run_sudo),
-            patch("server.device.tunneld.time.sleep"),
-            patch("server.device.tunneld._tunneld_devices", return_value=(serving, [])),
+            patch("server.device.ios.tunneld.PLIST_PATH", plist),
+            patch("server.device.ios.tunneld._run_sudo", side_effect=fake_run_sudo),
+            patch("server.device.ios.tunneld.time.sleep"),
+            patch("server.device.ios.tunneld._tunneld_devices", return_value=(serving, [])),
             patch(
-                "server.device.tunneld.launchd_job",
+                "server.device.ios.tunneld.launchd_job",
                 return_value={"state": "running", "pid": "1"} if loaded else {},
             ),
         )
@@ -583,14 +583,14 @@ class TestRestartDaemon:
         plist = tmp_path / "tunneld.plist"
         plist.write_text("")
         with (
-            patch("server.device.tunneld.PLIST_PATH", plist),
+            patch("server.device.ios.tunneld.PLIST_PATH", plist),
             patch(
-                "server.device.tunneld._run_sudo",
+                "server.device.ios.tunneld._run_sudo",
                 side_effect=lambda args, timeout, non_interactive=False: calls.append(args) or True,
             ),
-            patch("server.device.tunneld.time.sleep"),
-            patch("server.device.tunneld._tunneld_devices", side_effect=lambda: next(serving)),
-            patch("server.device.tunneld.launchd_job", return_value={"state": "running"}),
+            patch("server.device.ios.tunneld.time.sleep"),
+            patch("server.device.ios.tunneld._tunneld_devices", side_effect=lambda: next(serving)),
+            patch("server.device.ios.tunneld.launchd_job", return_value={"state": "running"}),
         ):
             assert _restart_daemon() == 0
 
@@ -605,8 +605,8 @@ class TestRestartDaemon:
             return True
 
         with (
-            patch("server.device.tunneld.PLIST_PATH", tmp_path / "absent.plist"),
-            patch("server.device.tunneld._run_sudo", side_effect=fake_run_sudo),
+            patch("server.device.ios.tunneld.PLIST_PATH", tmp_path / "absent.plist"),
+            patch("server.device.ios.tunneld._run_sudo", side_effect=fake_run_sudo),
         ):
             assert _restart_daemon() == 1
         assert calls == []
@@ -670,7 +670,7 @@ class TestRecoveryIsNonInteractiveWhenAutomatic:
         hang, so the automatic path must fail instead of asking."""
         with (
             patch("subprocess.run", return_value=MagicMock(returncode=1)) as run,
-            patch("server.device.tunneld._wait_until_serving", return_value=False),
+            patch("server.device.ios.tunneld._wait_until_serving", return_value=False),
         ):
             assert recover_wedged_tunneld(non_interactive=True) is False
         assert run.call_args[0][0][:2] == ["sudo", "-n"]
@@ -678,7 +678,7 @@ class TestRecoveryIsNonInteractiveWhenAutomatic:
     def test_interactive_by_default_for_the_cli(self):
         with (
             patch("subprocess.run", return_value=MagicMock(returncode=0)) as run,
-            patch("server.device.tunneld._wait_until_serving", return_value=True),
+            patch("server.device.ios.tunneld._wait_until_serving", return_value=True),
         ):
             assert recover_wedged_tunneld() is True
         assert run.call_args[0][0][:2] == ["sudo", "/bin/launchctl"]
@@ -691,14 +691,14 @@ class TestHealthDoesNotBlockTheEventLoop:
 
     async def test_launchd_job_runs_on_a_worker_thread(self):
         with (
-            patch("server.device.tunneld.is_tunneld_running", return_value=True),
+            patch("server.device.ios.tunneld.is_tunneld_running", return_value=True),
             # Patching `installed_plist_is_current` here became a no-op when
             # it was derived from drift, and the real drift check then read
             # this machine's actual /Library/LaunchDaemons plist -- host state
             # deciding a test about the event loop.
-            patch("server.device.tunneld.installed_plist_drift", return_value=None),
+            patch("server.device.ios.tunneld.installed_plist_drift", return_value=None),
             patch(
-                "server.device.tunneld.find_pymobiledevice3_binary",
+                "server.device.ios.tunneld.find_pymobiledevice3_binary",
                 return_value=Path("/bin/pmd3"),
             ),
             patch.object(Path, "exists", return_value=True),
@@ -785,7 +785,7 @@ class TestRecoveryGrant:
                 "subprocess.run",
                 return_value=MagicMock(returncode=1, stderr="parse error near line 1"),
             ),
-            patch("server.device.tunneld._run_sudo", side_effect=fake_run_sudo),
+            patch("server.device.ios.tunneld._run_sudo", side_effect=fake_run_sudo),
         ):
             assert install_recovery_grant() == 1
 
@@ -803,8 +803,8 @@ class TestRecoveryGrant:
 
         with (
             patch("subprocess.run", return_value=MagicMock(returncode=0, stderr="")),
-            patch("server.device.tunneld._run_sudo", side_effect=fake_run_sudo),
-            patch("server.device.tunneld.can_recover_unattended", return_value=True),
+            patch("server.device.ios.tunneld._run_sudo", side_effect=fake_run_sudo),
+            patch("server.device.ios.tunneld.can_recover_unattended", return_value=True),
         ):
             assert install_recovery_grant() == 0
 
@@ -817,10 +817,10 @@ class TestRecoveryGrant:
         the rule it just wrote and report failure after a successful install."""
         with (
             patch("subprocess.run", return_value=MagicMock(returncode=0, stderr="")),
-            patch("server.device.tunneld._run_sudo", return_value=True),
-            patch("server.device.tunneld._grant_user", return_value="jerimiah"),
+            patch("server.device.ios.tunneld._run_sudo", return_value=True),
+            patch("server.device.ios.tunneld._grant_user", return_value="jerimiah"),
             patch(
-                "server.device.tunneld.can_recover_unattended", return_value=True
+                "server.device.ios.tunneld.can_recover_unattended", return_value=True
             ) as probe,
         ):
             assert install_recovery_grant() == 0
@@ -831,8 +831,8 @@ class TestRecoveryGrant:
         reporting the first as the second would be a false all-clear."""
         with (
             patch("subprocess.run", return_value=MagicMock(returncode=0, stderr="")),
-            patch("server.device.tunneld._run_sudo", return_value=True),
-            patch("server.device.tunneld.can_recover_unattended", return_value=False),
+            patch("server.device.ios.tunneld._run_sudo", return_value=True),
+            patch("server.device.ios.tunneld.can_recover_unattended", return_value=False),
         ):
             assert install_recovery_grant() == 1
         assert "still asks for a password" in capsys.readouterr().out
@@ -860,8 +860,8 @@ class TestCliTunneld:
 
     def test_status_command(self):
         with (
-            patch("server.device.tunneld.find_pymobiledevice3_binary", return_value=None),
-            patch("server.device.tunneld.PLIST_PATH") as mock_plist,
+            patch("server.device.ios.tunneld.find_pymobiledevice3_binary", return_value=None),
+            patch("server.device.ios.tunneld.PLIST_PATH") as mock_plist,
         ):
             mock_plist.exists.return_value = False
             with patch("urllib.request.urlopen", side_effect=Exception("refused")):

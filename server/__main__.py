@@ -1101,7 +1101,7 @@ def main() -> None:
             _check_args("set-update-check", sys.argv[2:], operands=1)))
 
     if len(sys.argv) >= 2 and sys.argv[1] == "tunneld":
-        from server.device.tunneld import cli_tunneld
+        from server.device.ios.tunneld import cli_tunneld
         sys.exit(cli_tunneld(sys.argv[2:]))
 
     # All other commands need the full server stack

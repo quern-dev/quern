@@ -3,7 +3,7 @@
 > **Status: shipped in v0.13.** This doc is the original design spec — kept
 > for the rationale and the technique notes (private-framework dlopen,
 > token dispatcher pattern, IOHIDDigitizer path). The implementation lives
-> in `tools/sim-bridge.swift` and `server/device/sim_bridge.py`. Behavior
+> in `tools/sim-bridge.swift` and `server/device/ios/sim_bridge.py`. Behavior
 > notes (button name normalization, server-side `objectAtPoint` probing,
 > RadioButton/CheckBox in summaries, installer skip on Xcode 26+) accrued
 > after the spec was written — see `CHANGELOG.md` for the running list.
@@ -213,7 +213,7 @@ check without spawning a subprocess.
 
 ### SimBridgeBackend
 
-New file: `server/device/sim_bridge.py`
+New file: `server/device/ios/sim_bridge.py`
 
 ```python
 class SimBridgeBackend:
@@ -277,8 +277,8 @@ are architecture-specific.
 
 ```
 tools/sim-bridge.swift          — Single-file Swift source (~1000-1200 lines)
-server/device/sim_bridge.py     — Python backend (subprocess manager + protocol)
-server/device/idb.py            — Existing idb backend (kept as fallback)
+server/device/ios/sim_bridge.py     — Python backend (subprocess manager + protocol)
+server/device/ios/idb.py            — Existing idb backend (kept as fallback)
 ```
 
 ## Out of Scope

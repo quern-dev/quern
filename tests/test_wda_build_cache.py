@@ -26,7 +26,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from server.device import wda
+from server.device.ios import wda
 
 
 @pytest.fixture

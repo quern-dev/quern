@@ -109,8 +109,8 @@ class TestTheStartBannerReportsRealDrift:
 
         installed = tmp_path / "com.quern.tunneld.plist"
         installed.write_text("")
-        monkeypatch.setattr("server.device.tunneld.PLIST_PATH", installed)
-        monkeypatch.setattr("server.device.tunneld.installed_plist_drift", lambda: drift)
+        monkeypatch.setattr("server.device.ios.tunneld.PLIST_PATH", installed)
+        monkeypatch.setattr("server.device.ios.tunneld.installed_plist_drift", lambda: drift)
         state = {"pid": 1, "server_port": 9100, "started_at": None,
                  "proxy_status": "stopped", "proxy_port": 9101}
         daemon._print_status(state)
@@ -132,9 +132,9 @@ class TestTheStartBannerReportsRealDrift:
         reinstall."""
         from server.lifecycle import daemon
 
-        monkeypatch.setattr("server.device.tunneld.PLIST_PATH", tmp_path / "absent.plist")
+        monkeypatch.setattr("server.device.ios.tunneld.PLIST_PATH", tmp_path / "absent.plist")
         monkeypatch.setattr(
-            "server.device.tunneld.installed_plist_drift",
+            "server.device.ios.tunneld.installed_plist_drift",
             lambda: "the installed plist could not be read",
         )
         state = {"pid": 1, "server_port": 9100, "started_at": None,

@@ -110,7 +110,7 @@ def _canonicalised(state: dict[str, dict]) -> dict[str, dict]:
     about the certificate. Only `wifi_proxy_configs` unions, keyed by SSID, and
     a repeated SSID takes the later one for the same reason.
     """
-    from server.device.devicectl import canonical_device_id
+    from server.device.ios.devicectl import canonical_device_id
 
     merged: dict[str, dict] = {}
     for udid, record in state.items():
@@ -133,7 +133,7 @@ def read_cert_state_for_device(udid: str) -> dict | None:
 
     Returns None if no state exists for the device.
     """
-    from server.device.devicectl import canonical_device_id
+    from server.device.ios.devicectl import canonical_device_id
 
     # The *key* too, not only the state. `read_cert_state` canonicalises what
     # it returns, so a caller asking by the hardware udid looked for a key that
@@ -272,7 +272,7 @@ def forget_device_proxy_configs(udid: str) -> list[str]:
     so it asserted a removal that the very next read contradicted -- a claim
     that could not fail, which is the shape that keeps getting through here.
     """
-    from server.device.devicectl import canonical_device_id
+    from server.device.ios.devicectl import canonical_device_id
 
     canonical = canonical_device_id(udid)
     before = set((read_cert_state_for_device(udid) or {}).get(

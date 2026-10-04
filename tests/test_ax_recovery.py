@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from server.device import ax_recovery
+from server.device.ios import ax_recovery
 
 # Canonical simctl UDIDs: the code refuses anything else, because a loose match
 # against a short placeholder is exactly how it would kill the wrong bridge.
@@ -93,7 +93,7 @@ async def test_recovery_is_attempted_once_and_not_looped():
     """A retry storm here is actively harmful: sim-bridge serialises commands
     and does not cancel abandoned ones, so repeated recovery attempts turn into
     a multi-minute drain that presents as a hang (#68)."""
-    from server.device.sim_bridge import SimBridgeBackend, SimBridgeManager
+    from server.device.ios.sim_bridge import SimBridgeBackend, SimBridgeManager
 
     backend = SimBridgeBackend(SimBridgeManager())
     calls = {"fetch": 0}
@@ -113,7 +113,7 @@ async def test_recovery_is_attempted_once_and_not_looped():
 
 @pytest.mark.parametrize("healthy_second_read", [True])
 async def test_a_healthy_tree_after_recovery_is_returned(healthy_second_read):
-    from server.device.sim_bridge import SimBridgeBackend, SimBridgeManager
+    from server.device.ios.sim_bridge import SimBridgeBackend, SimBridgeManager
 
     backend = SimBridgeBackend(SimBridgeManager())
     reads = iter([[_app()], [_app(width=393.0, height=852.0, label="Probe")]])

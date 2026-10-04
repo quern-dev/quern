@@ -754,7 +754,7 @@ class TestEndpoint:
         """The id Xcode, Finder and idevice_id show. On a cold server the alias
         is learned by the refresh, so the id has to be canonicalised after it:
         before, the phone is unknown and is skipped as such."""
-        from server.device import devicectl
+        from server.device.ios import devicectl
         from server.models import CrashReport, DeviceType
         from server.sources.crash import PullResult
 
@@ -1052,7 +1052,7 @@ class TestClearDeviceCrashes:
         """listings: what successive `crash ls` calls answer. The delete
         removes the names it is given, except `refuse`. `exact` records the
         phone's hardware UDID ("LIB") as its alias, as devicectl does."""
-        from server.device import devicectl
+        from server.device.ios import devicectl
         from server.sources import ios_crash
 
         if exact:
@@ -1127,7 +1127,7 @@ class TestClearDeviceCrashes:
         assert "not connected over USB" in resp.json()["detail"]
 
     async def test_a_listing_that_fails_deletes_nothing(self, app, monkeypatch):
-        from server.device import devicectl
+        from server.device.ios import devicectl
         from server.sources import ios_crash
 
         devicectl._remember_identity("00008101-PHONE", "LIB")
@@ -1149,7 +1149,7 @@ class TestClearDeviceCrashes:
     async def test_a_delete_that_fails_partway_says_what_is_gone(self, app, monkeypatch):
         """The delete is permanent and goes one report at a time: a 502 that
         says only why reads as "nothing was deleted"."""
-        from server.device import devicectl
+        from server.device.ios import devicectl
         from server.sources import ios_crash
 
         devicectl._remember_identity("00008101-PHONE", "LIB")
@@ -1184,7 +1184,7 @@ class TestClearDeviceCrashes:
         assert sent == []
 
     async def test_a_tool_failure_is_not_a_success(self, app, monkeypatch):
-        from server.device import devicectl
+        from server.device.ios import devicectl
         from server.sources import ios_crash
 
         devicectl._remember_identity("00008101-PHONE", "LIB")

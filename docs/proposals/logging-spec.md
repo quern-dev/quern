@@ -199,7 +199,7 @@ two useful axes into one and leaves two taxonomies to drift apart.
 
 So: **every logger is `logging.getLogger(__name__)`.** It is the Python
 convention, it costs nothing to maintain, new modules get it free, and it
-makes `process` discriminating — `server.device.sim_input` rather than
+makes `process` discriminating — `server.device.ios.sim_input` rather than
 `quern-debug-server.device` shared across six modules, which could not
 distinguish anything. Category stays orthogonal, and the trace gets two real
 axes instead of one.

@@ -26,7 +26,8 @@ from server.config import CONFIG_DIR
 
 logger = logging.getLogger(__name__)
 
-ICON_PATH = Path(__file__).parent / "resources" / "wda-icon.png"
+# server/device/resources, shared with media/preview.py.
+ICON_PATH = Path(__file__).resolve().parents[1] / "resources" / "wda-icon.png"
 
 WDA_BUNDLE_ID = "dev.quern.driver"
 WDA_RUNNER_BUNDLE_ID = f"{WDA_BUNDLE_ID}.xctrunner"
@@ -428,7 +429,7 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
         #
         # 15.0 is the bottom of that band and matches quern's actual WDA floor:
         # `install_wda` routes iOS 15-16 devices through ideviceinstaller, and
-        # `server/device/usbmux.py` exists to enumerate them. It will need
+        # `server/device/ios/usbmux.py` exists to enumerate them. It will need
         # raising when Apple next moves the floor; the error names the new range.
         f"IPHONEOS_DEPLOYMENT_TARGET={WDA_MIN_DEPLOYMENT_TARGET}",
         "-allowProvisioningUpdates",
@@ -890,7 +891,7 @@ async def start_driver(udid: str, os_version: str) -> dict:
         save_wda_state(state)
 
     # Resolve hardware UDID for iOS 17+ tunneld devices
-    from server.device.tunneld import resolve_tunnel_udid
+    from server.device.ios.tunneld import resolve_tunnel_udid
 
     major = _parse_ios_major_version(os_version)
     hw_udid = udid
@@ -926,7 +927,7 @@ async def start_driver(udid: str, os_version: str) -> dict:
 
     # Poll for WDA to become responsive
     # For tunneld devices, use the tunnel address; for usbmux, use localhost
-    from server.device.tunneld import get_tunneld_devices
+    from server.device.ios.tunneld import get_tunneld_devices
 
     wda_url = None
     if major >= 17:

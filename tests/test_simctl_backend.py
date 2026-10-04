@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from server.device.simctl import SimctlBackend
+from server.device.ios.simctl import SimctlBackend
 from server.models import DeviceError, DeviceState, DeviceType
 
 #: This file *is* the discovery code -- the autouse stubs in conftest replace
@@ -455,17 +455,17 @@ class TestScreenshot:
 class TestXcodeGate:
     """On a no-Xcode Mac, simctl methods short-circuit without invoking
     xcrun. The macOS install dialog fires before xcrun returns, so the
-    backend can't recover after the fact — see server/device/_xcode.py."""
+    backend can't recover after the fact — see server/device/ios/_xcode.py."""
 
     async def test_is_available_returns_false_without_invoking_xcrun(self, monkeypatch):
-        monkeypatch.setattr("server.device.simctl.xcode_available", lambda: False)
+        monkeypatch.setattr("server.device.ios.simctl.xcode_available", lambda: False)
         backend = SimctlBackend()
         with patch("asyncio.create_subprocess_exec") as exec_mock:
             assert await backend.is_available() is False
         assert exec_mock.call_count == 0
 
     async def test_list_devices_returns_empty_without_invoking_xcrun(self, monkeypatch):
-        monkeypatch.setattr("server.device.simctl.xcode_available", lambda: False)
+        monkeypatch.setattr("server.device.ios.simctl.xcode_available", lambda: False)
         backend = SimctlBackend()
         with patch("asyncio.create_subprocess_exec") as exec_mock:
             assert await backend.list_devices() == []
@@ -493,7 +493,7 @@ class TestALaunchThatDidNotSurvive:
             assert await backend.launch_app("AAAA-1111", "com.example.App") is None
 
     def test_a_pid_that_is_gone_is_not_alive(self):
-        with patch("server.device.simctl.os.kill", side_effect=ProcessLookupError):
+        with patch("server.device.ios.simctl.os.kill", side_effect=ProcessLookupError):
             assert SimctlBackend.process_is_alive(4242) is False
 
     def test_an_unknown_pid_counts_as_alive(self):
@@ -503,7 +503,7 @@ class TestALaunchThatDidNotSurvive:
         assert SimctlBackend.process_is_alive(None) is True
 
     def test_someone_elses_process_counts_as_alive(self):
-        with patch("server.device.simctl.os.kill", side_effect=PermissionError):
+        with patch("server.device.ios.simctl.os.kill", side_effect=PermissionError):
             assert SimctlBackend.process_is_alive(4242) is True
 
     @staticmethod
@@ -664,12 +664,12 @@ class TestMalformedOutputDoesNotEscape:
         backend = SimctlBackend()
         backend._run_simctl = AsyncMock(return_value=('{"devices": {"iOS', ""))
 
-        with patch("server.device.simctl.xcode_available", return_value=True):
+        with patch("server.device.ios.simctl.xcode_available", return_value=True):
             assert await backend.list_devices() == []
 
     async def test_non_json_output_lists_no_devices(self):
         backend = SimctlBackend()
         backend._run_simctl = AsyncMock(return_value=("command not found", ""))
 
-        with patch("server.device.simctl.xcode_available", return_value=True):
+        with patch("server.device.ios.simctl.xcode_available", return_value=True):
             assert await backend.list_devices() == []

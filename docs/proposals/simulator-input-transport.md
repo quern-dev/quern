@@ -80,7 +80,7 @@ the concrete lead open question 2 was missing — the transport is guest XPC to
 
 ### Where the two projects already agree
 
-Quern's `server/device/sim_input.py` and baguette's `SimctlInputSurface`
+Quern's `server/device/ios/sim_input.py` and baguette's `SimctlInputSurface`
 converged, independently, on the same repair:
 
 | | quern | baguette |

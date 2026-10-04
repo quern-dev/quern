@@ -25,7 +25,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from server.device.adb import AdbBackend
+from server.device.android.adb import AdbBackend
 from server.device.controller import DeviceController
 from server.models import DeviceError, DeviceType
 

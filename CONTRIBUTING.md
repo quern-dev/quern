@@ -19,11 +19,11 @@ AI Agent (Claude Code, Cursor, etc.)
     │                  │
     └── via HTTP ──→ server/       (Python FastAPI, port 9100)
                        │
-                       ├── device/      Device control, iOS and Android: simulators (simctl,
-                       │                sim-bridge, idb), physical iPhones (WDA, devicectl,
-                       │                pymobiledevice3, tunneld), Android (adb, uiautomator2);
-                       │                also media/ (preview windows, screenshots) and web/
-                       │                (web content inside apps)
+                       ├── device/      Device control: the controllers, with backends in ios/
+                       │                (simctl, sim-bridge, idb, WDA, devicectl,
+                       │                pymobiledevice3, tunneld) and android/ (adb,
+                       │                uiautomator2); media/ (preview windows, screenshots);
+                       │                web/ (web content inside apps)
                        ├── knowledge/   App knowledge bases: landmarks, screen identification
                        ├── tooling/     The host's external tools: probing, versions, updates
                        ├── builds/      Android builds (Gradle, JDK discovery) and build

@@ -38,7 +38,7 @@ up can be counted separately from what a person noticed.
 
 **Status:** filed as [#180](https://github.com/quern-dev/quern/issues/180) — open — mechanism confirmed by reading; live symptom observed once.
 
-`server/device/simctl.py:60` probes availability by running `xcrun simctl help`
+`server/device/ios/simctl.py:60` probes availability by running `xcrun simctl help`
 and awaiting it:
 
 ```python
@@ -194,8 +194,8 @@ rather than a caller.
 ```
   File "server/api/device_ui.py", line 362, in tap_element
   File "server/device/controller_ui.py", line 1646, in tap_element
-  File "server/device/sim_bridge.py", line 525, in tap
-  File "server/device/sim_bridge.py", line 407, in _send_admitted
+  File "server/device/ios/sim_bridge.py", line 525, in tap
+  File "server/device/ios/sim_bridge.py", line 407, in _send_admitted
     raise RuntimeError(f"sim-bridge: {error}")
 RuntimeError: sim-bridge: tap failed
 ```
@@ -316,7 +316,7 @@ of `Developer`, so no search rooted at the developer directory can reach it.
 
 Quern hardcodes the old layout in three places:
 
-- `server/device/sim_bridge.py:112` — `is_available()` builds
+- `server/device/ios/sim_bridge.py:112` — `is_available()` builds
   `Path(dev_dir) / "Library" / "PrivateFrameworks" / "SimulatorKit.framework"`,
   so sim-bridge now reports unavailable.
 - `tools/sim-bridge.swift:47` and `:81` (`hasSimulatorKit`) — the `dlopen` path
@@ -375,7 +375,7 @@ clear #3 -> HTTP 200 {"status":"ok"}   value now: '…to-be-cl'
 
 One character per call, `{"status":"ok"}` every time.
 
-**Root cause.** `server/device/u2_client.py:541`, `select_all_and_delete`:
+**Root cause.** `server/device/android/u2_client.py:541`, `select_all_and_delete`:
 
 ```python
 subprocess.run([... "input", "keyevent", "KEYCODE_MOVE_HOME"], ...)
@@ -463,7 +463,7 @@ anything.
 
 Fixed on `fix/xcode-27-simulatorkit-path`, branched from `main`. Both layouts
 are now checked, in one resolver per language rather than a constant repeated at
-each call site — `find_simulator_kit()` in `server/device/sim_bridge.py` and
+each call site — `find_simulator_kit()` in `server/device/ios/sim_bridge.py` and
 `simulatorKitPath(at:)` in `tools/sim-bridge.swift`. Each returns the path it
 found rather than a boolean, so the availability answer cannot drift from the
 file that actually gets `dlopen`ed. No version switch: two `stat`s, and the next

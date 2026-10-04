@@ -340,7 +340,7 @@ async def collect_sites() -> list[ToolSite]:
     ))
 
     # --- pymobiledevice3, as a binary -------------------------------------
-    from server.device.tunneld import find_pymobiledevice3_binary
+    from server.device.ios.tunneld import find_pymobiledevice3_binary
 
     binary = find_pymobiledevice3_binary()
     binary_path = str(binary) if binary else None

@@ -28,7 +28,7 @@ async def _recover_tunneld_if_wedged() -> bool:
     moment to raise an authentication dialog: the caller is usually a script,
     and a blocked prompt is indistinguishable from a hang.
     """
-    from server.device.tunneld import (
+    from server.device.ios.tunneld import (
         can_recover_unattended,
         recover_wedged_tunneld,
         tunneld_health,
@@ -104,7 +104,7 @@ class Pmd3Backend:
 
     async def is_available(self) -> bool:
         """Check that pymobiledevice3 is installed *and* answers."""
-        from server.device.tunneld import find_pymobiledevice3_binary
+        from server.device.ios.tunneld import find_pymobiledevice3_binary
 
         binary = find_pymobiledevice3_binary()
         if binary is None:
@@ -119,7 +119,7 @@ class Pmd3Backend:
         iOS 16-: Falls back to usbmuxd-based connection without tunnel:
                  `pymobiledevice3 developer dvt screenshot`
         """
-        from server.device.tunneld import (
+        from server.device.ios.tunneld import (
             find_pymobiledevice3_binary,
             is_tunneld_running,
             resolve_tunnel_udid,
@@ -228,7 +228,7 @@ class Pmd3Backend:
 
     async def _get_binary(self) -> str:
         """Get the pymobiledevice3 binary path."""
-        from server.device.tunneld import find_pymobiledevice3_binary
+        from server.device.ios.tunneld import find_pymobiledevice3_binary
         binary = find_pymobiledevice3_binary()
         if not binary:
             raise DeviceError(

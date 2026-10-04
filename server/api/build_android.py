@@ -23,7 +23,7 @@ from fastapi import HTTPException
 
 from server.builds import build_records, gradle
 from server.builds import jdk as jdk_mod
-from server.device.adb import AdbTimeout
+from server.device.android.adb import AdbTimeout
 from server.models import (
     BuildDiagnostic,
     BuildRecord,

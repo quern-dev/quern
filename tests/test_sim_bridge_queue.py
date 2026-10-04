@@ -27,7 +27,7 @@ import asyncio
 
 import pytest
 
-from server.device.sim_bridge import (
+from server.device.ios.sim_bridge import (
     MAX_CONCURRENT_OPERATIONS,
     SimBridgeBackend,
     SimBridgeManager,
@@ -304,7 +304,7 @@ async def test_a_late_response_cannot_be_matched_to_the_next_command(mgr, monkey
     async def short_wait(awaitable, timeout):
         return await real_wait_for(awaitable, timeout=0.15 if timeout == 30.0 else timeout)
 
-    monkeypatch.setattr("server.device.sim_bridge.asyncio.wait_for", short_wait)
+    monkeypatch.setattr("server.device.ios.sim_bridge.asyncio.wait_for", short_wait)
 
     with pytest.raises(DeviceError, match="timed out"):
         await mgr.send({"cmd": "describe-ui", "udid": "SIM-A"})
@@ -331,7 +331,7 @@ async def test_the_timeout_message_warns_against_auto_retry(mgr, monkeypatch):
     async def short_wait(awaitable, timeout):
         return await real_wait_for(awaitable, timeout=0.15 if timeout == 30.0 else timeout)
 
-    monkeypatch.setattr("server.device.sim_bridge.asyncio.wait_for", short_wait)
+    monkeypatch.setattr("server.device.ios.sim_bridge.asyncio.wait_for", short_wait)
 
     with pytest.raises(DeviceError) as exc:
         await mgr.send({"cmd": "tap", "udid": "SIM-A"})

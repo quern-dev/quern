@@ -83,7 +83,7 @@ xcrun devicectl device info details --device <hw-udid>
 ```
 
 There are two independent RemoteXPC tunnel providers, and
-`server/device/wda_client.py` only consults tunneld — it tries the tunneld
+`server/device/ios/wda_client.py` only consults tunneld — it tries the tunneld
 address, finds nothing for a wifi device, and falls through to a usbmux
 forward that cannot work without a cable.
 

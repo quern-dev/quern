@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from server.api.actions import logged_action
-from server.device.devicectl import canonical_device_id, spellings_of
+from server.device.ios.devicectl import canonical_device_id, spellings_of
 from server.models import (
     ClearCrashesResponse,
     ClearDeviceCrashesRequest,

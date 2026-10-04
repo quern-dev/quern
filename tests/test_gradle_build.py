@@ -20,7 +20,7 @@ from fastapi import HTTPException
 from server.api import build_android, build_app
 from server.builds import gradle
 from server.builds import jdk as jdk_mod
-from server.device.adb import AdbTimeout
+from server.device.android.adb import AdbTimeout
 from server.models import BuildDiagnostic, BuildResult, DeviceError, DeviceState, DeviceType
 
 FIXTURES = Path(__file__).parent / "fixtures" / "gradle"

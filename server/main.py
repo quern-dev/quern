@@ -365,7 +365,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # without this a restart would quietly move them back to sim-bridge while
     # WDA went on running underneath.
     try:
-        from server.device.wda import restore_simulator_mode
+        from server.device.ios.wda import restore_simulator_mode
 
         await restore_simulator_mode(device_controller.wda_client)
     except Exception:
@@ -1684,7 +1684,7 @@ def _report_service_health(fix: bool = False) -> bool:
     complete = True
 
     try:
-        from server.device.tunneld import tunneld_health
+        from server.device.ios.tunneld import tunneld_health
 
         health = asyncio.run(tunneld_health())
     except Exception as exc:

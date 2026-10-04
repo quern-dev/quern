@@ -31,7 +31,7 @@ class UsbmuxBackend:
         if self._binary is not None:
             return self._binary
 
-        from server.device.tunneld import find_pymobiledevice3_binary
+        from server.device.ios.tunneld import find_pymobiledevice3_binary
 
         path = find_pymobiledevice3_binary()
         if path:

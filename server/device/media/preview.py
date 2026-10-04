@@ -103,7 +103,7 @@ async def booted_simulators() -> list[tuple[str, str]]:
     simulator udid apart from a device name, and a test that shells out to
     simctl to find out is neither fast nor offline-safe.
     """
-    from server.device.simctl import SimctlBackend
+    from server.device.ios.simctl import SimctlBackend
     from server.models import DeviceState
 
     devices = await SimctlBackend().list_devices()

@@ -20,7 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from server.config import ServerConfig
-from server.device import adb as adb_module
+from server.device.android import adb as adb_module
 from server.device.controller import DeviceController
 from server.main import create_app
 from server.models import DeviceError, DeviceState, DeviceType, EraseIncompleteError

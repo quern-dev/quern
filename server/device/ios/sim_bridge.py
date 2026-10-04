@@ -23,7 +23,8 @@ from contextvars import ContextVar
 from pathlib import Path
 
 from server.config import CONFIG_DIR
-from server.device import ax_recovery, probing
+from server.device import probing
+from server.device.ios import ax_recovery
 from server.models import DeviceError, SimBridgeSaturatedError
 from server.tooling.tool_probe import probe_stdout
 
@@ -37,7 +38,7 @@ _TOOL = "sim-bridge"
 QUERN_BIN_DIR = CONFIG_DIR / "bin"
 BINARY_NAME = "sim-bridge"
 _SOURCE_CANDIDATES = [
-    Path(__file__).resolve().parent.parent.parent / "tools" / "sim-bridge.swift",
+    Path(__file__).resolve().parents[3] / "tools" / "sim-bridge.swift",
 ]
 
 # Max length of one stdout JSON line from the subprocess. asyncio's default

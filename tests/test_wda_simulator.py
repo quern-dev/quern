@@ -18,13 +18,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from server.device import wda
-from server.device.ui_elements import parse_elements
-from server.device.wda_client import (
+from server.device.ios import wda
+from server.device.ios.wda_client import (
     WdaBackend,
     _map_wda_element,
     _map_wda_element_from_query,
 )
+from server.device.ui_elements import parse_elements
 
 SIM = "66EF8B35-4384-447E-84E8-4951BA26B181"
 

@@ -3,7 +3,7 @@
 Xcode 27's Device Hub attaches a guest HID daemon; the guest answers by
 disconnecting the legacy touch, button and keyboard services quern drives, and
 every tap and keystroke is then accepted and discarded. See
-server/device/sim_input.py for the mechanism and the sources.
+server/device/ios/sim_input.py for the mechanism and the sources.
 
 These tests pin the parts a live run cannot: what each `notifyutil` answer
 means, the order of the repair, and that a boot repairs while an input call
@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from server.device import sim_input
+from server.device.ios import sim_input
 from server.models import DeviceError
 
 

@@ -26,8 +26,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from server.device import devicectl as dc
 from server.device.controller import DeviceController
+from server.device.ios import devicectl as dc
 from server.models import DeviceType
 from server.proxy.cert_state import CERT_STATE_FILE
 
@@ -114,7 +114,7 @@ async def _listed() -> None:
     backend = dc.DevicectlBackend()
     with patch.object(
         backend, "_run_devicectl", AsyncMock(return_value=(_DEVICECTL_JSON, "")),
-    ), patch("server.device.devicectl.xcode_available", return_value=True):
+    ), patch("server.device.ios.devicectl.xcode_available", return_value=True):
         await backend.list_devices()
 
 
@@ -374,7 +374,7 @@ class TestIdentityIsRecordedBeforeTheFilters:
         with _patch.object(
             backend, "_run_devicectl",
             _AsyncMock(return_value=(_json.dumps({"result": {"devices": [dev]}}), "")),
-        ), _patch("server.device.devicectl.xcode_available", return_value=True):
+        ), _patch("server.device.ios.devicectl.xcode_available", return_value=True):
             await backend.list_devices()
 
     async def test_an_unpaired_device_is_still_nameable(self):

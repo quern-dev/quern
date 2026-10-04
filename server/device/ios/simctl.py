@@ -12,7 +12,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from server.device._xcode import xcode_available
+from server.device.ios._xcode import xcode_available
 from server.models import AppInfo, DeviceError, DeviceInfo, DeviceState, DeviceType
 from server.tooling.tool_probe import probe_command
 
@@ -103,7 +103,7 @@ class SimctlBackend:
         """List all simulators by parsing simctl list devices --json.
 
         Short-circuits when Xcode isn't installed so the macOS "install
-        developer tools" dialog doesn't fire. See server/device/_xcode.py.
+        developer tools" dialog doesn't fire. See server/device/ios/_xcode.py.
         """
         if not xcode_available():
             return []

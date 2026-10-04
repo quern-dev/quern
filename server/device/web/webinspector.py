@@ -17,7 +17,7 @@ requires a lockdown object a simulator does not have.
 Requires the target app to opt its webviews in with `isInspectable = true`
 (defaults to false since iOS 16.4). Debug/internal builds only — never ship it.
 
-Note this imports `pymobiledevice3` as a library. `server/device/pmd3.py`
+Note this imports `pymobiledevice3` as a library. `server/device/ios/pmd3.py`
 separately shells out to a pipx-installed CLI for physical-device work; the two
 are different installs and are floored independently.
 """

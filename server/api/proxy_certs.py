@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from server.api.actions import action, logged_action
-from server.device.devicectl import canonical_device_id
+from server.device.ios.devicectl import canonical_device_id
 from server.models import (
     CertInstallRequest,
     CertStatusResponse,

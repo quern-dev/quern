@@ -168,8 +168,8 @@ def test_enumeration_answers_empty_without_asking_the_machine(isolated):
     a real `xcrun`, and the spawn guard beside it turns that into a failure --
     which is the point: the two fixtures test each other."""
     isolated.makepyfile(_PREAMBLE + """
-from server.device.simctl import SimctlBackend
-from server.device.adb import AdbBackend
+from server.device.ios.simctl import SimctlBackend
+from server.device.android.adb import AdbBackend
 
 async def test_backends_find_nothing():
     assert await SimctlBackend().list_devices() == []
@@ -195,7 +195,7 @@ def test_the_availability_stub_answers_for_the_object_the_controller_asks(isolat
     """
     isolated.makepyfile(_PREAMBLE + """
 import asyncio
-from server.device.sim_bridge import SimBridgeManager
+from server.device.ios.sim_bridge import SimBridgeManager
 
 async def test_availability_costs_no_subprocess():
     spawned = []

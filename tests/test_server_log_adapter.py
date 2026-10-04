@@ -78,13 +78,13 @@ class TestEmission:
     async def test_process_is_logger_name(self, adapter_with_entries):
         adapter, entries = adapter_with_entries
 
-        test_logger = logging.getLogger("server.device.pmd3")
+        test_logger = logging.getLogger("server.device.ios.pmd3")
         test_logger.warning("tunnel failed")
 
         await asyncio.sleep(0.05)
 
         entry = next(e for e in entries if e.message == "tunnel failed")
-        assert entry.process == "server.device.pmd3"
+        assert entry.process == "server.device.ios.pmd3"
 
     @pytest.mark.asyncio
     async def test_device_id_is_server(self, adapter_with_entries):

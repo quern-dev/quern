@@ -718,7 +718,7 @@ class TestThePartsTheMutationsFound:
     def test_a_physical_device_named_by_its_other_spelling(self, tmp_path, monkeypatch):
         """Actions record one of a phone's two identifiers; a recording started
         with the other would match none of them."""
-        from server.device import devicectl
+        from server.device.ios import devicectl
         monkeypatch.setattr(devicectl, "_identity_aliases", {})
         devicectl._remember_identity("CD-UUID", "00008030-HW")
         with TestClient(_app(Sources())) as client:
@@ -984,7 +984,7 @@ class TestTheReview:
         assert loaded.monotonic_resets == 1 and len(loaded.clock_anchors) == 2
 
     def test_the_recording_trace_canonicalises_its_udid(self, tmp_path, monkeypatch):
-        from server.device import devicectl
+        from server.device.ios import devicectl
         monkeypatch.setattr(devicectl, "_identity_aliases", {})
         devicectl._remember_identity("CD-UUID", "00008030-HW")
         t = datetime(2026, 10, 1, 12, tzinfo=UTC)

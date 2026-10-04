@@ -25,11 +25,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from server.device.android.u2_client import U2Backend
 from server.device.controller import DeviceController
-from server.device.idb import IdbBackend
-from server.device.sim_bridge import SimBridgeBackend
-from server.device.u2_client import U2Backend
-from server.device.wda_client import WdaBackend
+from server.device.ios.idb import IdbBackend
+from server.device.ios.sim_bridge import SimBridgeBackend
+from server.device.ios.wda_client import WdaBackend
 from server.models import DeviceError, DeviceType
 
 
@@ -252,7 +252,7 @@ class TestASimBridgeFailureReachesTheCaller:
     def test_the_manager_and_the_backend_agree_on_the_spelling(self):
         """The manager raises before any backend exists, so it cannot read
         `TOOL_NAME` off one. Two literals would let those drift apart."""
-        from server.device.sim_bridge import _TOOL
+        from server.device.ios.sim_bridge import _TOOL
 
         assert SimBridgeBackend.TOOL_NAME == _TOOL
 

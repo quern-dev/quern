@@ -211,7 +211,7 @@ class TestCheckToolsSurvivesOneBadProbe:
             patch.object(ctrl.pmd3, "is_available", AsyncMock(return_value=True)),
             patch.object(ctrl.adb, "is_available", AsyncMock(return_value=False)),
             patch.object(ctrl.sim_bridge_manager, "is_available", AsyncMock(return_value=True)),
-            patch("server.device.tunneld.is_tunneld_running", AsyncMock(return_value=False)),
+            patch("server.device.ios.tunneld.is_tunneld_running", AsyncMock(return_value=False)),
         ):
             tools = await ctrl.check_tools()
 
@@ -238,7 +238,7 @@ class TestCheckToolsSurvivesOneBadProbe:
             patch.object(ctrl.pmd3, "is_available", slow),
             patch.object(ctrl.adb, "is_available", slow),
             patch.object(ctrl.sim_bridge_manager, "is_available", slow),
-            patch("server.device.tunneld.is_tunneld_running", slow),
+            patch("server.device.ios.tunneld.is_tunneld_running", slow),
         ):
             start = time.perf_counter()
             await ctrl.check_tools()
@@ -270,7 +270,7 @@ class TestTheBackendIsNotLatchedAtStartup:
                 ctrl.sim_bridge_manager, "is_available",
                 AsyncMock(return_value=sim_bridge),
             ),
-            patch("server.device.tunneld.is_tunneld_running", AsyncMock(return_value=True)),
+            patch("server.device.ios.tunneld.is_tunneld_running", AsyncMock(return_value=True)),
         ):
             return await ctrl.check_tools(adopt=True)
 
@@ -408,7 +408,7 @@ class TestTheCompanionCheckAsksTheBinary:
         on one would pass whether or not the variable was ever set. The real
         companion is ad-hoc signed in `~/.quern/bin` and does receive it.
         """
-        from server.device.idb import IdbBackend
+        from server.device.ios.idb import IdbBackend
         from server.lifecycle.setup import _companion_probe_env
 
         companion = tmp_path / "bin" / "idb_companion"
@@ -505,13 +505,13 @@ class TestHotPathsDoNotSpawnSubprocesses:
     # assertion that caught it.
     @pytest.mark.device_discovery
     async def test_listing_devices_does_not_probe(self):
-        from server.device.adb import AdbBackend
+        from server.device.android.adb import AdbBackend
 
         backend = AdbBackend()
         backend._adb_path = "/usr/bin/adb"
         backend._run_adb = AsyncMock(return_value=("List of devices attached\n", ""))
         backend.list_avds = AsyncMock(return_value=[])
-        with patch("server.device.adb.probe_command", AsyncMock()) as probe:
+        with patch("server.device.android.adb.probe_command", AsyncMock()) as probe:
             await backend.list_devices()
         assert probe.await_count == 0, (
             "list_devices spawned a liveness probe, so every device listing now "
@@ -527,7 +527,7 @@ class TestHotPathsDoNotSpawnSubprocesses:
         ctrl = DeviceController()
         ctrl.adb._adb_path = "/usr/bin/adb"
         ctrl.adb.list_avds = AsyncMock(return_value=[])
-        with patch("server.device.adb.probe_command", AsyncMock()) as probe:
+        with patch("server.device.android.adb.probe_command", AsyncMock()) as probe:
             ctrl.adb.is_installed()
             await ctrl.adb.list_avds()
         assert probe.await_count == 0
@@ -551,7 +551,7 @@ class TestMeasuringIsNotSelecting:
                 ctrl.sim_bridge_manager, "is_available",
                 AsyncMock(return_value=sim_bridge),
             ),
-            patch("server.device.tunneld.is_tunneld_running", AsyncMock(return_value=True)),
+            patch("server.device.ios.tunneld.is_tunneld_running", AsyncMock(return_value=True)),
         ):
             return await ctrl.check_tools(**kw)
 
