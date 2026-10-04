@@ -649,7 +649,7 @@ class TestTeardownFailureReporting:
         # appears only in our message.
         #
         # Deliberately not matched on the logger name. CI failed this while
-        # it passed locally, reporting the records as `server.device.media.preview`
+        # it passed locally, reporting the records as `server.device.preview`
         # against a source that named the logger `quern-debug-server.preview`.
         # The cause: Actions checks out the PR *merged with its base*, and
         # main had renamed the logger to `getLogger(__name__)` as part of

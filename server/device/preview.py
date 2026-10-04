@@ -9,7 +9,7 @@ forwarder here passed, its post-swap setup being the new tree's. So this is
 a precaution, cheaper than proving that for every release.
 
 Exactly those names, pinned in `tests/test_forwarders.py`. Nothing in this
-tree imports from here: import from `server.device.media`. Sunset: remove once
+tree imports from here: import from `server.device.media.preview`. Sunset: remove once
 four releases have shipped after the one containing this move (#396).
 """
 
