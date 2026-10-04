@@ -10,8 +10,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from server.device.element_types import equivalence, related_type_names
+from server.device.media.screenshots import annotate_screenshot
 from server.device.probing import frame_key
-from server.device.screenshots import annotate_screenshot
 from server.device.ui_elements import (
     find_children_of,
     find_element,

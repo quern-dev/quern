@@ -102,7 +102,7 @@ Important but not hard.
 | `device/controller.py:378` | `_require_simulator()` only tests `_is_physical`, so **Android UDIDs fall through to simctl**. Affects `erase_device`, `clear_app_data`, and all 8 app-state endpoints |
 | `device/adb.py:302` | Emulator vs physical is decided by `serial.startswith("emulator-")`. A **remote emulator** reached over `adb connect` has serial `host:port` and is misclassified as physical — losing boot, shutdown, `adb emu` GPS, and the rootable-emulator cert path. Probe `ro.kernel.qemu` / `ro.boot.qemu` instead |
 | `controller_ui.py:44`, `screenshot_timeline.py:16`, `api/device.py:82` | Hardcoded `/tmp/quern/...`. Use `tempfile.gettempdir()` and scope per instance — see Multi-agent below |
-| `device/screenshots.py:102,205` | `/System/Library/Fonts/Helvetica.ttc` for annotated screenshots. Falls back to `load_default()`, so labels degrade rather than break |
+| `device/media/screenshots.py:102,205` | `/System/Library/Fonts/Helvetica.ttc` for annotated screenshots. Falls back to `load_default()`, so labels degrade rather than break |
 | `proxy/system_proxy.py:68`, `setup.py:2228` | `route -n get default` → `ip route get 1.1.1.1` |
 | `lifecycle/state.py:249,298` | `ifconfig` parsing → `psutil.net_if_addrs()` |
 | `lifecycle/state.py:365,381` | `networksetup -getairportnetwork` for SSID → `nmcli` / `iwgetid`. Feeds the `wifi_proxy_stale` warning, which still matters for Wi-Fi-attached Android devices |

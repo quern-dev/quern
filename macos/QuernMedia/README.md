@@ -21,7 +21,7 @@ elapsed time.
 
 ## How quern uses it
 
-`server/device/media_engine.py` builds and installs the binary.
+`server/device/media/media_engine.py` builds and installs the binary.
 `PreviewManager.add_simulator` starts one `quern-media` per simulator serving
 MJPEG on loopback, and `ios-preview` opens a window on that stream via its
 `add_stream` command. A stream that dies reports `window_closed`, so the

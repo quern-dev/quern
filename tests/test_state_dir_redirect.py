@@ -38,7 +38,7 @@ PATHS = [
     ("server.lifecycle.setup", "INSTALL_MANIFEST"),
     ("server.lifecycle.setup", "TOOL_SNAPSHOT"),
     ("server.device.pool", "POOL_FILE"),
-    ("server.device.preview", "QUERN_BIN_DIR"),
+    ("server.device.media.preview", "QUERN_BIN_DIR"),
     ("server.device.sim_bridge", "QUERN_BIN_DIR"),
     ("server.device.u2_client", "_QUERN_DRIVER_APK"),
     ("server.sources.crash", "CRASH_DIR"),

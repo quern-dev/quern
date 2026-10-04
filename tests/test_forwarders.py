@@ -40,6 +40,9 @@ FORWARDED_TO = {
     "server.device.web_content": "server.device.web.web_content",
     "server.device.web_probing": "server.device.web.web_probing",
     "server.device.webinspector": "server.device.web.webinspector",
+    "server.device.preview": "server.device.media.preview",
+    "server.device.scrcpy_preview": "server.device.media.scrcpy_preview",
+    "server.device.media_engine": "server.device.media.media_engine",
 }
 
 #: Verbatim, from releases v0.18.0-v0.24.0-beta.1. The tool_updates and
@@ -67,6 +70,12 @@ OLD_IMPORTS = (
     "from server.device.webinspector import WebInspectorError, simulator_udid_for_application",
     "from server.device.webinspector import SimulatorWebInspector",
     "from server.device.webinspector import simulator_udid_for_application",
+    # 3e
+    "from server.device.preview import PreviewManager",
+    "from server.device.preview import build_preview_bundle",
+    "from server.device.scrcpy_preview import ScrcpyPreview",
+    # v0.24.0-beta.1 only: a beta-channel server updating out of the beta.
+    "from server.device.media_engine import build_media_engine",
 )
 
 

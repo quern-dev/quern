@@ -6,7 +6,7 @@ import io
 
 from PIL import Image
 
-from server.device.screenshots import annotate_screenshot
+from server.device.media.screenshots import annotate_screenshot
 from server.models import UIElement
 
 # ---------------------------------------------------------------------------

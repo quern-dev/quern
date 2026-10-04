@@ -269,7 +269,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # After every buffer it reads from exists, and before anything can add
     # to them: a recording resumed late would miss what arrived meanwhile.
     from server.api.trace import read_ip_map
-    from server.device.media_engine import build_media_engine
+    from server.device.media.media_engine import build_media_engine
     from server.recording.recorder import RecordingManager
     from server.recording.video import VideoRecorder
     app.state.recordings = RecordingManager(
@@ -430,12 +430,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
 
     # Preview manager (live device screen preview)
-    from server.device.preview import PreviewManager
+    from server.device.media.preview import PreviewManager
     preview_manager = PreviewManager()
     app.state.preview_manager = preview_manager
 
     # Scrcpy preview (Android live device screen preview)
-    from server.device.scrcpy_preview import ScrcpyPreview
+    from server.device.media.scrcpy_preview import ScrcpyPreview
     scrcpy_preview = ScrcpyPreview()
     app.state.scrcpy_preview = scrcpy_preview
     if scrcpy_preview.is_available():

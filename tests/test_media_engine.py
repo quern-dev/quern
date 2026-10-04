@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
-from server.device import media_engine
+from server.device.media import media_engine
 
 
 @pytest.fixture
@@ -256,7 +256,7 @@ class TestAsyncBuildWrapper:
         has to hand the blocking half to a thread."""
         import threading
 
-        from server.device import media_engine
+        from server.device.media import media_engine
 
         seen: dict = {}
 

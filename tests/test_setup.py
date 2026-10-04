@@ -1647,7 +1647,7 @@ class TestBuildPreviewApp:
         from server.lifecycle.setup import build_preview_app
 
         with patch("server.lifecycle.setup._which", return_value="/usr/bin/swiftc"), \
-             patch("server.device.preview.build_preview_bundle") as build:
+             patch("server.device.media.preview.build_preview_bundle") as build:
             result = build_preview_app()
 
         build.assert_called_once()
@@ -1699,7 +1699,7 @@ class TestBuildPreviewApp:
         from server.lifecycle.setup import build_preview_app
 
         with patch("server.lifecycle.setup._which", return_value="/usr/bin/swiftc"), \
-             patch("server.device.preview.build_preview_bundle",
+             patch("server.device.media.preview.build_preview_bundle",
                    side_effect=PermissionError("~/.quern is not writable")):
             result = build_preview_app()
 
@@ -1711,7 +1711,7 @@ class TestBuildPreviewApp:
         from server.lifecycle.setup import build_preview_app
 
         with patch("server.lifecycle.setup._which", return_value="/usr/bin/swiftc"), \
-             patch("server.device.preview.build_preview_bundle",
+             patch("server.device.media.preview.build_preview_bundle",
                    side_effect=RuntimeError("swiftc exploded")):
             result = build_preview_app()
 
