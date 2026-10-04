@@ -43,13 +43,15 @@ done
 # created and marked is ever removed.
 MARKER=".quern-cli-live-copy"
 if [[ -z "${_QUERN_CLI_LIVE_COPY:-}" ]]; then
-  copy="$(mktemp -d "${TMPDIR:-/tmp}/quern-cli-live-script.XXXXXX")"
+  # Physical paths on both sides of the check below: macOS's TMPDIR ends in a
+  # slash, and a mktemp path with "//" in it never equals what `pwd` prints.
+  copy="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/quern-cli-live-script.XXXXXX")" && pwd -P)"
   cp -R "$ROOT/scripts" "$copy/"
   : > "$copy/$MARKER"
   _QUERN_CLI_LIVE_COPY="$copy" _QUERN_CLI_LIVE_ROOT="$ROOT" \
     exec bash "$copy/scripts/cli-live-test.sh" "$@"
 fi
-SCRIPT_COPY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_COPY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 ROOT="${_QUERN_CLI_LIVE_ROOT:-}"
 if [[ "$SCRIPT_COPY" != "$_QUERN_CLI_LIVE_COPY" || "$SCRIPT_COPY" == "$ROOT" \
       || -z "$ROOT" || ! -f "$SCRIPT_COPY/$MARKER" ]]; then
@@ -417,8 +419,9 @@ grep -q "$TREE" "$HOME_SB/.claude.json" && ok "it points into this tree" || bad 
   && ok "Claude Code's other server is still there" || bad "mcp-install removed another server from Claude Code"
 [[ "$(json_get "$HOME_SB/.cursor/mcp.json" '"someone-else" in d.get("mcpServers", {})')" == "True" ]] \
   && ok "Cursor's other server is still there" || bad "mcp-install removed another server from Cursor"
-# Every client `all` names. The name, not the path: the sandbox path itself
-# contains "quern".
+# Every client `all` names, each checked by its own key: opencode and codex
+# register as "quern", the others as "quern-debug". By key, not by grepping
+# for "quern" -- the sandbox path itself contains it.
 CLIENT_CONFIGS=(
   "$HOME_SB/.claude.json"
   "$HOME_SB/Library/Application Support/Claude/claude_desktop_config.json"
@@ -426,10 +429,17 @@ CLIENT_CONFIGS=(
   "$HOME_SB/.config/opencode/opencode.json"
   "$HOME_SB/.codex/config.toml"
 )
-registered() { local f n=0; for f in "${CLIENT_CONFIGS[@]}"; do grep -q "quern-debug" "$f" 2>/dev/null && n=$((n + 1)); done; echo "$n"; }
+client_has_quern() {
+  case "$1" in
+    *.toml) grep -q '^\[mcp_servers\.quern\]' "$1" 2>/dev/null ;;
+    */opencode.json) [[ "$(json_get "$1" '"quern" in d.get("mcp", {})')" == "True" ]] ;;
+    *) [[ "$(json_get "$1" '"quern-debug" in d.get("mcpServers", {})')" == "True" ]] ;;
+  esac
+}
+registered() { local f n=0; for f in "${CLIENT_CONFIGS[@]}"; do client_has_quern "$f" && n=$((n + 1)); done; echo "$n"; }
 [[ "$(registered)" -eq ${#CLIENT_CONFIGS[@]} ]] \
-  && ok "all ${#CLIENT_CONFIGS[@]} clients have a quern-debug entry" \
-  || bad "only $(registered) of ${#CLIENT_CONFIGS[@]} clients have a quern-debug entry"
+  && ok "all ${#CLIENT_CONFIGS[@]} clients have a quern entry" \
+  || bad "only $(registered) of ${#CLIENT_CONFIGS[@]} clients have a quern entry"
 record mcp-install "registered:$(registered)/${#CLIENT_CONFIGS[@]} others-kept:$(json_get "$HOME_SB/.claude.json" 'd.get("numStartups")')"
 
 run grant-full-perms q grant-full-perms
@@ -646,8 +656,8 @@ left="$(json_get "$HOME_SB/.claude.json" '[k for k in d.get("mcpServers", {}) if
   && ok "and so did its other server" || bad "uninstall removed another tool's server from Claude Code"
 [[ "$(json_get "$HOME_SB/.cursor/mcp.json" 'sorted(d.get("mcpServers", {}))')" == "['someone-else']" ]] \
   && ok "Cursor is back to just its other server" || bad "Cursor's config is not as it was: $(cat "$HOME_SB/.cursor/mcp.json")"
-[[ "$(registered)" -eq 0 ]] && ok "no client is left with a quern-debug entry" \
-  || bad "$(registered) of ${#CLIENT_CONFIGS[@]} clients still have a quern-debug entry"
+[[ "$(registered)" -eq 0 ]] && ok "no client is left with a quern entry" \
+  || bad "$(registered) of ${#CLIENT_CONFIGS[@]} clients still have a quern entry"
 # What uninstall leaves in Claude Code's settings is recorded rather than
 # judged: its summary does not mention the checklist hook or the
 # grant-full-perms rules, and whether it should is a question for an issue.
