@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from server.device import tunneld
+from server.device.ios import tunneld
 
 FIXTURES = Path(__file__).parent / "fixtures" / "envs"
 

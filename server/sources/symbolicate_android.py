@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from server.builds import elf
-from server.device.adb import _SDK_SEARCH_PATHS, _find_sdk_tool
+from server.device.android.adb import _SDK_SEARCH_PATHS, _find_sdk_tool
 from server.models import BuildRecord, CrashFrame, CrashReport, ImageSymbols
 from server.sources import android_dropbox, crash_frames
 

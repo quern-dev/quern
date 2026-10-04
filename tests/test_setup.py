@@ -867,7 +867,7 @@ class TestHomeOnExternal:
 class TestCheckPymobiledevice3:
     def test_not_installed_returns_warning(self):
         with patch(
-            "server.device.tunneld.find_pymobiledevice3_binary",
+            "server.device.ios.tunneld.find_pymobiledevice3_binary",
             return_value=None,
         ):
             result = check_pymobiledevice3()
@@ -877,7 +877,7 @@ class TestCheckPymobiledevice3:
     def test_installed_under_normal_home_is_ok(self):
         with (
             patch(
-                "server.device.tunneld.find_pymobiledevice3_binary",
+                "server.device.ios.tunneld.find_pymobiledevice3_binary",
                 return_value=Path(
                     "/Users/alice/.local/pipx/venvs/pymobiledevice3/bin/pymobiledevice3",
                 ),
@@ -897,7 +897,7 @@ class TestCheckPymobiledevice3:
         # to surface this so it can offer `sudo pipx install --global`.
         with (
             patch(
-                "server.device.tunneld.find_pymobiledevice3_binary",
+                "server.device.ios.tunneld.find_pymobiledevice3_binary",
                 return_value=Path(
                     "/Volumes/Home/jham/.local/pipx/venvs/pymobiledevice3/bin/pymobiledevice3",
                 ),
@@ -919,7 +919,7 @@ class TestCheckPymobiledevice3:
         # so the check must not flag it.
         with (
             patch(
-                "server.device.tunneld.find_pymobiledevice3_binary",
+                "server.device.ios.tunneld.find_pymobiledevice3_binary",
                 return_value=Path("/usr/local/bin/pymobiledevice3"),
             ),
             patch("server.lifecycle.setup._run", return_value=(0, "9.15.1\n", "")),
@@ -1175,7 +1175,7 @@ class TestAssumeYes:
         # than the CA on CONTRIBUTING's own test, not smaller -- and `-y`
         # cannot answer the password prompt that follows, so saying yes on the
         # user's behalf buys a hang.
-        ("the tunneld daemon", "from server.device.tunneld import install_daemon"),
+        ("the tunneld daemon", "from server.device.ios.tunneld import install_daemon"),
         # sudo, writing outside $HOME.
         ("a system-wide pipx install", 'pipx_bin, "install", "--global"'),
         # A user-wide macOS setting that `quern uninstall` never reverts.
@@ -1729,7 +1729,7 @@ class TestTunneldDriftReporting:
         as the problem -- so the reinstall looked like it had not worked."""
         from pathlib import Path
 
-        from server.device import tunneld
+        from server.device.ios import tunneld
 
         monkeypatch.setattr(tunneld, "_read_installed_plist", lambda: {"Label": "x"})
         monkeypatch.setattr(tunneld, "installed_plist_log_path", lambda: tunneld.LOG_PATH)
@@ -1747,7 +1747,7 @@ class TestTunneldDriftReporting:
     def test_a_stale_log_path_still_says_so(self, monkeypatch):
         from pathlib import Path
 
-        from server.device import tunneld
+        from server.device.ios import tunneld
 
         monkeypatch.setattr(tunneld, "_read_installed_plist", lambda: {"Label": "x"})
         monkeypatch.setattr(
@@ -1763,7 +1763,7 @@ class TestTunneldDriftReporting:
         second says the daemon is broken too. Returning early reported the
         first and hid the second."""
 
-        from server.device import tunneld
+        from server.device.ios import tunneld
 
         plist = tmp_path / "com.quern.tunneld.plist"
         plist.write_text("")
@@ -1784,7 +1784,7 @@ class TestTunneldDriftReporting:
         """generate_plist() writes [binary, "remote", "tunneld"]. A plist with
         the right binary and different trailing arguments launches something
         other than the tunnel daemon, and passed a check that read args[0]."""
-        from server.device import tunneld
+        from server.device.ios import tunneld
 
         monkeypatch.setattr(tunneld, "_read_installed_plist", lambda: {"Label": "x"})
         monkeypatch.setattr(tunneld, "installed_plist_log_path", lambda: tunneld.LOG_PATH)
@@ -1798,7 +1798,7 @@ class TestTunneldDriftReporting:
     def test_a_current_plist_reports_no_drift(self, monkeypatch):
         from pathlib import Path
 
-        from server.device import tunneld
+        from server.device.ios import tunneld
 
         monkeypatch.setattr(tunneld, "_read_installed_plist", lambda: {"Label": "x"})
         monkeypatch.setattr(tunneld, "installed_plist_log_path", lambda: tunneld.LOG_PATH)

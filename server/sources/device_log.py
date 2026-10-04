@@ -36,7 +36,7 @@ import re
 import uuid
 from datetime import UTC, datetime
 
-from server.device.tunneld import find_pymobiledevice3_binary, resolve_tunnel_udid
+from server.device.ios.tunneld import find_pymobiledevice3_binary, resolve_tunnel_udid
 from server.models import LogEntry, LogLevel, LogSource
 from server.sources import BaseSourceAdapter, EntryCallback
 

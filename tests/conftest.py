@@ -203,7 +203,7 @@ def _reset_active_device_sidecar():
 def _default_xcode_available(monkeypatch):
     """Default xcode_available() to True so existing iOS-backend tests work
     regardless of whether the CI runner has Xcode installed. Each consumer
-    holds its own local reference (`from server.device._xcode import
+    holds its own local reference (`from server.device.ios._xcode import
     xcode_available`), so we patch every import site. Tests verifying the
     no-Xcode gate can monkeypatch the same names to ``lambda: False``.
 
@@ -214,8 +214,8 @@ def _default_xcode_available(monkeypatch):
     def _make_stub():
         return functools.lru_cache(maxsize=1)(lambda: True)
     for path in (
-        "server.device.simctl.xcode_available",
-        "server.device.devicectl.xcode_available",
+        "server.device.ios.simctl.xcode_available",
+        "server.device.ios.devicectl.xcode_available",
         "server.lifecycle.setup.xcode_available",
     ):
         monkeypatch.setattr(path, _make_stub())
@@ -294,7 +294,7 @@ def _no_device_identity_leaks_between_tests():
     writes come from every file that loads a device list -- which is most of
     them -- and only the file doing the reading would ever think to clear it.
     """
-    from server.device import devicectl
+    from server.device.ios import devicectl
 
     devicectl._identity_aliases.clear()
     yield
@@ -336,10 +336,10 @@ def _no_hardware_attached(monkeypatch, request):
     if request.node.get_closest_marker("device_discovery"):
         return
 
-    from server.device.adb import AdbBackend
-    from server.device.devicectl import DevicectlBackend
-    from server.device.simctl import SimctlBackend
-    from server.device.usbmux import UsbmuxBackend
+    from server.device.android.adb import AdbBackend
+    from server.device.ios.devicectl import DevicectlBackend
+    from server.device.ios.simctl import SimctlBackend
+    from server.device.ios.usbmux import UsbmuxBackend
 
     async def _none(self, *a, **k):
         return []
@@ -357,9 +357,9 @@ def _no_hardware_attached(monkeypatch, request):
     # so the code under test takes its normal path rather than its
     # tool-missing one -- a test about the missing path patches its own
     # instance, which shadows this.
-    from server.device.idb import IdbBackend
-    from server.device.pmd3 import Pmd3Backend
-    from server.device.sim_bridge import SimBridgeManager
+    from server.device.ios.idb import IdbBackend
+    from server.device.ios.pmd3 import Pmd3Backend
+    from server.device.ios.sim_bridge import SimBridgeManager
 
     async def _yes(self, *a, **k):
         return True
@@ -389,7 +389,7 @@ _DEVICE_TOOLS = frozenset({
     "idb", "idb_companion", "pymobiledevice3", "scrcpy",
     # Added after review: each of these is spawned by `server/` and reads the
     # machine. `ideviceinstaller` installs an app on a real attached iPhone
-    # (`server/device/wda.py`), the webkit proxies talk to one, and
+    # (`server/device/ios/wda.py`), the webkit proxies talk to one, and
     # `xcode-select` / `xcodebuild` / `swiftc` report whatever toolchain this
     # particular laptop has.
     "ideviceinstaller", "ios-webkit-debug-proxy", "ios_webkit_debug_proxy",
@@ -746,7 +746,7 @@ def no_simulator_input_probes(monkeypatch, request):
         # `_spawn` stubbed, which this fixture would replace out from under it.
         return
 
-    from server.device import sim_input
+    from server.device.ios import sim_input
 
     async def not_suppressed(udid):
         return False

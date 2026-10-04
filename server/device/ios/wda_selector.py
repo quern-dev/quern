@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING
 from server.models import WdaElementNotFoundError
 
 if TYPE_CHECKING:
-    from server.device.wda_client import WdaBackend
+    from server.device.ios.wda_client import WdaBackend
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +198,7 @@ class ElementSelector:
         el = await self.get(timeout=timeout)
         wda_id = el.get("_wda_element_id")
         if wda_id:
-            from server.device.wda_client import ACTION_TIMEOUT
+            from server.device.ios.wda_client import ACTION_TIMEOUT
             await self._backend._request(
                 "post", self._udid, f"/element/{wda_id}/clear",
                 use_session=True, timeout=ACTION_TIMEOUT,

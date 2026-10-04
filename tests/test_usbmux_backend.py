@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from server.device.usbmux import UsbmuxBackend
+from server.device.ios.usbmux import UsbmuxBackend
 from server.models import DeviceState, DeviceType
 
 #: This file *is* the discovery code -- the autouse stubs in conftest replace
@@ -139,7 +139,7 @@ class TestListDevices:
     async def test_binary_not_found(self):
         backend = UsbmuxBackend()
         # _binary is None, _find_binary returns None
-        with patch("server.device.usbmux.UsbmuxBackend._find_binary", return_value=None):
+        with patch("server.device.ios.usbmux.UsbmuxBackend._find_binary", return_value=None):
             devices = await backend.list_devices()
         assert devices == []
 

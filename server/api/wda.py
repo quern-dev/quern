@@ -55,7 +55,7 @@ async def setup_wda(request: Request, body: SetupWdaRequest):
 
     if device.device_type == DeviceType.SIMULATOR:
         # No team, no provisioning, no install: just the simulator build (#336).
-        from server.device.wda import build_wda_simulator
+        from server.device.ios.wda import build_wda_simulator
 
         try:
             built = await build_wda_simulator(force=body.force)
@@ -79,7 +79,7 @@ async def setup_wda(request: Request, body: SetupWdaRequest):
             detail=f"Device {body.udid} has no OS version info. Is it connected?",
         )
 
-    from server.device.wda import setup_wda as _setup_wda
+    from server.device.ios.wda import setup_wda as _setup_wda
 
     try:
         result = await _setup_wda(
@@ -134,7 +134,7 @@ async def start_wda_driver(request: Request, body: StartDriverRequest):
     device = await _validate_ios_device(controller, body.udid)
 
     if device.device_type == DeviceType.SIMULATOR:
-        from server.device.wda import start_driver_simulator
+        from server.device.ios.wda import start_driver_simulator
 
         try:
             result = await start_driver_simulator(body.udid)
@@ -157,7 +157,7 @@ async def start_wda_driver(request: Request, body: StartDriverRequest):
             detail=f"Device {body.udid} has no OS version info. Is it connected?",
         )
 
-    from server.device.wda import start_driver
+    from server.device.ios.wda import start_driver
 
     try:
         result = await start_driver(udid=body.udid, os_version=device.os_version)
@@ -186,7 +186,7 @@ async def stop_wda_driver(request: Request, body: StopDriverRequest):
     except Exception:
         pass
 
-    from server.device.wda import stop_driver
+    from server.device.ios.wda import stop_driver
 
     try:
         result = await stop_driver(udid=body.udid)

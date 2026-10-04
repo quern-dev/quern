@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from server.device.u2_client import (
+from server.device.android.u2_client import (
     U2Backend,
     _flatten_tree,
     _map_class,
@@ -485,7 +485,7 @@ class TestConnectionLifecycle:
     @pytest.mark.asyncio
     async def test_lazy_connect(self):
         backend = U2Backend()
-        with patch("server.device.u2_client.U2Backend._connect") as mock_connect:
+        with patch("server.device.android.u2_client.U2Backend._connect") as mock_connect:
             mock_device = MagicMock()
             mock_device.dump_hierarchy.return_value = SAMPLE_HIERARCHY
             mock_connect.return_value = mock_device

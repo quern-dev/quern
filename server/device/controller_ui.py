@@ -705,7 +705,7 @@ class DeviceControllerUI:
         if requested is not None:
             return requested
         if self._served_by_wda(resolved):
-            from server.device.wda_client import ACTION_SNAPSHOT_DEPTH
+            from server.device.ios.wda_client import ACTION_SNAPSHOT_DEPTH
 
             return ACTION_SNAPSHOT_DEPTH
         return None
@@ -2054,7 +2054,7 @@ class DeviceControllerUI:
         Once, because the check costs a `simctl spawn` (~0.5s) and the answer
         cannot change without a reboot or the repair, both of which clear the
         record. Not a refusal: the state is not conclusive (see
-        server/device/sim_input.py), and refusing input that would have worked
+        server/device/ios/sim_input.py), and refusing input that would have worked
         is worse than the warning.
         """
         if self._input_checked.get(resolved) is not None:
@@ -2070,7 +2070,7 @@ class DeviceControllerUI:
         if self._is_android(resolved) or self._is_physical(resolved):
             self._input_checked[resolved] = True
             return
-        from server.device import sim_input
+        from server.device.ios import sim_input
 
         try:
             suppressed = await sim_input.legacy_input_is_suppressed(resolved)
@@ -2104,7 +2104,7 @@ class DeviceControllerUI:
         """
         if self._input_checked.get(udid) is not False:
             return None
-        from server.device import sim_input
+        from server.device.ios import sim_input
 
         return sim_input.suppressed_input_warning(udid)
 

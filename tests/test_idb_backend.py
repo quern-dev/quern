@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from server.device import probing
-from server.device.idb import IdbBackend
+from server.device.ios.idb import IdbBackend
 from server.models import DeviceError
 
 #: This file *is* the discovery code -- the autouse stubs in conftest replace
@@ -49,7 +49,7 @@ class TestIsAvailable:
         backend = IdbBackend()
         with (
             patch.object(IdbBackend, "_find_idb", return_value="/usr/local/bin/idb"),
-            patch("server.device.idb.probe_command", AsyncMock(return_value=True)),
+            patch("server.device.ios.idb.probe_command", AsyncMock(return_value=True)),
         ):
             assert await backend.is_available() is True
 
@@ -57,7 +57,7 @@ class TestIsAvailable:
         backend = IdbBackend()
         with (
             patch.object(IdbBackend, "_find_idb", return_value="/usr/local/bin/idb"),
-            patch("server.device.idb.probe_command", AsyncMock(return_value=False)),
+            patch("server.device.ios.idb.probe_command", AsyncMock(return_value=False)),
         ):
             assert await backend.is_available() is False
 
@@ -67,7 +67,7 @@ class TestIsAvailable:
         backend = IdbBackend()
         with (
             patch.object(IdbBackend, "_find_idb", return_value="/usr/local/bin/idb"),
-            patch("server.device.idb.probe_command", AsyncMock(return_value=True)) as probe,
+            patch("server.device.ios.idb.probe_command", AsyncMock(return_value=True)) as probe,
         ):
             await backend.is_available()
         env = probe.await_args.kwargs["env"]

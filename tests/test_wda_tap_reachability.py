@@ -121,7 +121,7 @@ class TestTapElementRefusesWhatItCannotReach:
 
 class TestIsHittable:
     async def _client(self, candidates, attribute):
-        from server.device.wda_client import WdaBackend
+        from server.device.ios.wda_client import WdaBackend
 
         client = WdaBackend.__new__(WdaBackend)
         client.find_elements_by_query = AsyncMock(return_value=candidates)
@@ -158,7 +158,7 @@ class TestClearTargetsTheFieldItWasGiven:
     the coordinates, so clearing field_email emptied field_default."""
 
     def _client(self, by_query: dict):
-        from server.device.wda_client import WdaBackend
+        from server.device.ios.wda_client import WdaBackend
 
         client = WdaBackend.__new__(WdaBackend)
 
@@ -254,7 +254,7 @@ class TestReadsMadeForTheCallerAreShallowThroughWda:
     at depth 12 it took 3.9s and still held everything a tap needs."""
 
     def test_default_through_wda_is_the_action_depth(self):
-        from server.device.wda_client import ACTION_SNAPSHOT_DEPTH
+        from server.device.ios.wda_client import ACTION_SNAPSHOT_DEPTH
 
         ctrl = DeviceController()
         ctrl._served_by_wda = lambda udid: True
@@ -412,7 +412,7 @@ class TestValueAwareTapReadsTheValueThroughWda:
 
     @pytest.mark.parametrize("raw, expected", [("1", "1"), (0, "0"), (True, "1"), (None, None)])
     async def test_element_value_normalises(self, raw, expected):
-        from server.device.wda_client import WdaBackend
+        from server.device.ios.wda_client import WdaBackend
 
         client = WdaBackend.__new__(WdaBackend)
         client.element_attribute = AsyncMock(return_value=raw)

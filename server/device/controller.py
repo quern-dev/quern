@@ -7,17 +7,17 @@ import logging
 import time
 
 from server import logging_ext
-from server.device.adb import AdbBackend
+from server.device.android.adb import AdbBackend
+from server.device.android.u2_client import U2Backend
 from server.device.controller_ui import DeviceControllerUI
-from server.device.devicectl import DevicectlBackend, canonical_device_id, spellings_of
-from server.device.idb import IdbBackend
+from server.device.ios.devicectl import DevicectlBackend, canonical_device_id, spellings_of
+from server.device.ios.idb import IdbBackend
+from server.device.ios.pmd3 import Pmd3Backend
+from server.device.ios.sim_bridge import SimBridgeBackend, SimBridgeManager
+from server.device.ios.simctl import SimctlBackend
+from server.device.ios.usbmux import UsbmuxBackend
+from server.device.ios.wda_client import WdaBackend
 from server.device.media.screenshots import process_screenshot
-from server.device.pmd3 import Pmd3Backend
-from server.device.sim_bridge import SimBridgeBackend, SimBridgeManager
-from server.device.simctl import SimctlBackend
-from server.device.u2_client import U2Backend
-from server.device.usbmux import UsbmuxBackend
-from server.device.wda_client import WdaBackend
 from server.lifecycle.state import read_active_udid, write_active_udid
 from server.logging_ext import current_action
 from server.models import (
@@ -132,7 +132,7 @@ class DeviceController(DeviceControllerUI):
         # Device type cache: udid -> DeviceType (populated by list_devices)
         self._device_type_cache: dict[str, DeviceType] = {}
         # Simulators whose input services have been checked this boot.
-        # See server/device/sim_input.py; the check costs a `simctl
+        # See server/device/ios/sim_input.py; the check costs a `simctl
         # spawn` (~0.5s), so it is paid once per device rather than per
         # tap.
         self._input_checked: dict[str, bool] = {}
@@ -258,7 +258,7 @@ class DeviceController(DeviceControllerUI):
         """
         import time
 
-        from server.device.tunneld import is_tunneld_running
+        from server.device.ios.tunneld import is_tunneld_running
 
         # `max_age` exists because this is no longer cheap. Seven probes, six of
         # them subprocesses, and `GET /api/v1/device/list` calls it on every
@@ -939,7 +939,7 @@ class DeviceController(DeviceControllerUI):
         Never fatal to a boot: a simulator that cannot receive input is worth
         far more than no simulator, and the next input call says so plainly.
         """
-        from server.device import sim_input
+        from server.device.ios import sim_input
 
         # A previous boot of this udid may have left a verdict behind, and it
         # describes a device that no longer exists. Cleared before the probe,

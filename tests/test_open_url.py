@@ -441,7 +441,7 @@ class TestTheUnknown:
 
 class TestTheAdbCalls:
     def _adb(self, stdout=""):
-        from server.device.adb import AdbBackend
+        from server.device.android.adb import AdbBackend
 
         adb = AdbBackend()
         adb._run_adb_for_device = AsyncMock(return_value=(stdout, ""))
@@ -548,7 +548,7 @@ class TestTheAdbCalls:
 
 class TestTheWdaCalls:
     def _backend(self, response_json=None, *, raises=None):
-        from server.device.wda_client import WdaBackend
+        from server.device.ios.wda_client import WdaBackend
 
         wda = WdaBackend()
         resp = MagicMock()
@@ -575,7 +575,7 @@ class TestTheWdaCalls:
         may already have opened the URL."""
         import httpx
 
-        from server.device.wda_client import WdaBackend
+        from server.device.ios.wda_client import WdaBackend
 
         wda = WdaBackend()
         wda._request = AsyncMock(side_effect=httpx.ReadTimeout("slow"))
@@ -587,7 +587,7 @@ class TestTheWdaCalls:
     async def test_a_slow_front_read_is_a_short_error_not_a_reconnect(self):
         import httpx
 
-        from server.device.wda_client import WdaBackend
+        from server.device.ios.wda_client import WdaBackend
 
         wda = WdaBackend()
         wda._request = AsyncMock(side_effect=httpx.ReadTimeout("slow"))

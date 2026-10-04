@@ -19,9 +19,9 @@ from pathlib import Path
 
 import pytest
 
-from server.device import ax_recovery
-from server.device.idb import IdbBackend
-from server.device.sim_bridge import SimBridgeBackend, SimBridgeManager
+from server.device.ios import ax_recovery
+from server.device.ios.idb import IdbBackend
+from server.device.ios.sim_bridge import SimBridgeBackend, SimBridgeManager
 
 FIXTURES = Path(__file__).parent / "fixtures" / "ax-wedge"
 WEDGED = json.loads((FIXTURES / "wedged-idb-describe-all.json").read_text())
@@ -385,7 +385,7 @@ class TestACancelledReadDoesNotLeakItsChild:
         return proc
 
     async def test_ax_recovery_run_kills_and_reaps_on_cancel(self, monkeypatch):
-        from server.device import ax_recovery as axr
+        from server.device.ios import ax_recovery as axr
 
         proc = await self._cancel_while_communicating(
             monkeypatch, axr, lambda: axr._run("/bin/sleep", "30", timeout=30),
@@ -394,7 +394,7 @@ class TestACancelledReadDoesNotLeakItsChild:
         assert proc.waited, "the killed child was never reaped"
 
     async def test_idb_run_kills_and_reaps_on_cancel(self, monkeypatch):
-        from server.device import idb as idb_module
+        from server.device.ios import idb as idb_module
 
         backend = IdbBackend()
         monkeypatch.setattr(IdbBackend, "_resolve_binary", lambda self: "/bin/sleep")

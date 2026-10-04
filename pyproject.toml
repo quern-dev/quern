@@ -34,7 +34,7 @@ dependencies = [
     # await lands on a plain return value and raises TypeError ("object NoneType
     # can't be used in 'await' expression"). Loud, but only at call time, and the
     # message does not mention the version -- hence the floor. Verified at 7.7.1,
-    # 8.0.0, 9.15.1 and 11.3.0. Note this is a library import; server/device/pmd3.py
+    # 8.0.0, 9.15.1 and 11.3.0. Note this is a library import; server/device/ios/pmd3.py
     # separately shells out to a pipx-installed CLI, a different install.
     "pymobiledevice3>=8.0",
     "pydantic>=2.0",                    # inherited; v1 genuinely breaks, but 2.0 exactly is untested

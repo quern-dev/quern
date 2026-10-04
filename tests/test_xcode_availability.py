@@ -1,4 +1,4 @@
-"""Tests for server.device._xcode.xcode_available preflight."""
+"""Tests for server.device.ios._xcode.xcode_available preflight."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import pytest
 def _clear_xcode_cache(monkeypatch):
     """Clear the lru_cache between tests and bypass the autouse conftest
     fixture so we exercise the real implementation."""
-    from server.device import _xcode
+    from server.device.ios import _xcode
     _xcode.xcode_available.cache_clear()
     # Clear DEVELOPER_DIR so its presence doesn't shortcut the check.
     monkeypatch.delenv("DEVELOPER_DIR", raising=False)
@@ -27,7 +27,7 @@ def _xcode_select_result(returncode: int, stdout: str = ""):
 
 
 def test_returns_true_when_xcode_select_reports_a_developer_dir():
-    from server.device._xcode import xcode_available
+    from server.device.ios._xcode import xcode_available
     with patch(
         "subprocess.run",
         return_value=_xcode_select_result(0, "/Applications/Xcode.app/Contents/Developer\n"),
@@ -41,14 +41,14 @@ def test_returns_true_when_xcode_select_reports_a_developer_dir():
 def test_returns_false_when_xcode_select_exits_nonzero():
     """No developer dir configured — Mac will trigger the install dialog
     if anything invokes xcrun, so we must report unavailable."""
-    from server.device._xcode import xcode_available
+    from server.device.ios._xcode import xcode_available
     with patch("subprocess.run", return_value=_xcode_select_result(2, "")):
         assert xcode_available() is False
 
 
 def test_returns_false_when_xcode_select_returns_empty_stdout():
     """Defensive: rc==0 but no dev dir means xcrun would still fail."""
-    from server.device._xcode import xcode_available
+    from server.device.ios._xcode import xcode_available
     with patch("subprocess.run", return_value=_xcode_select_result(0, "   \n")):
         assert xcode_available() is False
 
@@ -56,7 +56,7 @@ def test_returns_false_when_xcode_select_returns_empty_stdout():
 def test_returns_true_when_developer_dir_env_var_is_set(monkeypatch):
     """Quern's setup script sets DEVELOPER_DIR as a runtime fix-up — that
     counts even if xcode-select isn't pointed at anything useful."""
-    from server.device._xcode import xcode_available
+    from server.device.ios._xcode import xcode_available
     monkeypatch.setenv("DEVELOPER_DIR", "/Applications/Xcode.app/Contents/Developer")
     # xcode-select isn't called when DEVELOPER_DIR is set.
     with patch("subprocess.run") as run_mock:
@@ -67,14 +67,14 @@ def test_returns_true_when_developer_dir_env_var_is_set(monkeypatch):
 def test_returns_false_on_subprocess_exception():
     """Defensive: subprocess failure shouldn't propagate; we report
     unavailable so callers gate their xcrun calls."""
-    from server.device._xcode import xcode_available
+    from server.device.ios._xcode import xcode_available
     with patch("subprocess.run", side_effect=OSError("xcode-select not found")):
         assert xcode_available() is False
 
 
 def test_result_is_cached_across_calls():
     """The lru_cache means we don't shell out on every backend probe."""
-    from server.device._xcode import xcode_available
+    from server.device.ios._xcode import xcode_available
     with patch(
         "subprocess.run",
         return_value=_xcode_select_result(0, "/Applications/Xcode.app/Contents/Developer\n"),
@@ -88,7 +88,7 @@ def test_result_is_cached_across_calls():
 def test_cache_clear_forces_reprobe():
     """cache_clear() should make the next call shell out again. Used by
     setup.py after it mutates DEVELOPER_DIR mid-process."""
-    from server.device._xcode import xcode_available
+    from server.device.ios._xcode import xcode_available
     with patch(
         "subprocess.run",
         return_value=_xcode_select_result(0, "/dir\n"),

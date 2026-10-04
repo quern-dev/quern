@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from server.device.devicectl import DevicectlBackend
+from server.device.ios.devicectl import DevicectlBackend
 from server.models import DeviceError, DeviceState, DeviceType
 
 #: This file *is* the discovery code -- the autouse stubs in conftest replace
@@ -332,17 +332,17 @@ class TestRunDevicectl:
 
 class TestXcodeGate:
     """On a no-Xcode Mac, devicectl methods short-circuit without invoking
-    xcrun. See server/device/_xcode.py."""
+    xcrun. See server/device/ios/_xcode.py."""
 
     async def test_is_available_returns_false_without_invoking_xcrun(self, monkeypatch):
-        monkeypatch.setattr("server.device.devicectl.xcode_available", lambda: False)
+        monkeypatch.setattr("server.device.ios.devicectl.xcode_available", lambda: False)
         backend = DevicectlBackend()
         with patch("asyncio.create_subprocess_exec") as exec_mock:
             assert await backend.is_available() is False
         assert exec_mock.call_count == 0
 
     async def test_list_devices_returns_empty_without_invoking_xcrun(self, monkeypatch):
-        monkeypatch.setattr("server.device.devicectl.xcode_available", lambda: False)
+        monkeypatch.setattr("server.device.ios.devicectl.xcode_available", lambda: False)
         backend = DevicectlBackend()
         with patch("asyncio.create_subprocess_exec") as exec_mock:
             assert await backend.list_devices() == []

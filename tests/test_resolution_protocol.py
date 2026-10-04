@@ -882,7 +882,7 @@ class TestParseDeviceFamily:
     """Test SimctlBackend._parse_device_family()."""
 
     def test_iphone(self):
-        from server.device.simctl import SimctlBackend
+        from server.device.ios.simctl import SimctlBackend
 
         assert (
             SimctlBackend._parse_device_family(
@@ -892,7 +892,7 @@ class TestParseDeviceFamily:
         )
 
     def test_ipad(self):
-        from server.device.simctl import SimctlBackend
+        from server.device.ios.simctl import SimctlBackend
 
         assert (
             SimctlBackend._parse_device_family(
@@ -902,7 +902,7 @@ class TestParseDeviceFamily:
         )
 
     def test_apple_watch(self):
-        from server.device.simctl import SimctlBackend
+        from server.device.ios.simctl import SimctlBackend
 
         assert (
             SimctlBackend._parse_device_family(
@@ -912,7 +912,7 @@ class TestParseDeviceFamily:
         )
 
     def test_apple_tv(self):
-        from server.device.simctl import SimctlBackend
+        from server.device.ios.simctl import SimctlBackend
 
         assert (
             SimctlBackend._parse_device_family(
@@ -922,7 +922,7 @@ class TestParseDeviceFamily:
         )
 
     def test_unknown(self):
-        from server.device.simctl import SimctlBackend
+        from server.device.ios.simctl import SimctlBackend
 
         assert SimctlBackend._parse_device_family("") == ""
         assert (

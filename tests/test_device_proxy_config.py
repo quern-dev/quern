@@ -495,7 +495,7 @@ class TestItWillNotStrandADeviceItCannotReach:
         assert "Settings > Wi-Fi" not in out["hint"]
 
     def test_the_transport_shape_is_the_test(self):
-        from server.device.adb import AdbBackend
+        from server.device.android.adb import AdbBackend
 
         assert AdbBackend.is_network_transport("192.168.1.9:5555") is True
         assert AdbBackend.is_network_transport("emulator-5554") is False

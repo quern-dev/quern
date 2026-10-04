@@ -1,0 +1,1569 @@
+"""WebDriverAgent setup for physical device UI automation.
+
+Handles cloning, building, and installing WDA on physical iOS devices.
+State is persisted in ~/.quern/wda-state.json following the cert_state.py pattern.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import fcntl
+import json
+import logging
+import os
+import plistlib
+import re
+import shutil
+import signal
+import weakref
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import httpx
+
+from server.config import CONFIG_DIR
+
+logger = logging.getLogger(__name__)
+
+# server/device/resources, shared with media/preview.py.
+ICON_PATH = Path(__file__).resolve().parents[1] / "resources" / "wda-icon.png"
+
+WDA_BUNDLE_ID = "dev.quern.driver"
+WDA_RUNNER_BUNDLE_ID = f"{WDA_BUNDLE_ID}.xctrunner"
+
+WDA_DIR = CONFIG_DIR / "wda"
+WDA_REPO = WDA_DIR / "WebDriverAgent"
+WDA_DERIVED = WDA_DIR / "build"
+
+WDA_APP = WDA_DERIVED / "Build" / "Products" / "Debug-iphoneos" / "WebDriverAgentRunner-Runner.app"
+XCTESTRUN = WDA_DERIVED / "Build" / "Products" / "quern-driver.xctestrun"
+WDA_STATE_FILE = CONFIG_DIR / "wda-state.json"
+WDA_LOG_DIR = CONFIG_DIR / "wda"
+
+#: Floor passed to xcodebuild, because upstream WebDriverAgent declares 13.0 and
+#: Xcode 27 rejects anything under 15.0. Anything in [15.0, 17.0] is equivalent
+#: in practice -- see `build_wda` for why the upper bound is where it is.
+WDA_MIN_DEPLOYMENT_TARGET = "15.0"
+
+DRIVER_START_TIMEOUT = 30
+
+# Simulators (#336). A separate build: `generic/platform=iOS` makes an
+# iphoneos/arm64 artifact a simulator cannot run, and the two must not share
+# derived data or one build would clobber the other.
+WDA_DERIVED_SIM = WDA_DIR / "build-sim"
+#: Simulators share the Mac's network, so WDA in a simulator binds the Mac's
+#: port -- two simulators on 8100 would collide, and the pre-iOS-17 physical
+#: path falls back to polling localhost:8100, where it would find a simulator's
+#: WDA and call the phone ready. So simulators get their own range.
+SIM_PORT_FIRST = 8200
+SIM_PORT_LAST = 8299
+#: First start on a simulator installs the runner as well as launching it.
+SIM_DRIVER_START_TIMEOUT = 90
+DRIVER_STOP_TIMEOUT = 5
+
+CLONE_TIMEOUT = 60
+BUILD_TIMEOUT = 600
+
+
+# ---------------------------------------------------------------------------
+# State persistence (follows cert_state.py pattern)
+# ---------------------------------------------------------------------------
+
+
+def read_wda_state() -> dict[str, Any]:
+    """Read wda-state.json with shared file lock."""
+    if not WDA_STATE_FILE.exists():
+        return {"cloned": False, "builds": {}}
+
+    try:
+        fd = WDA_STATE_FILE.open("r")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH)
+            content = fd.read()
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
+
+        if not content.strip():
+            return {"cloned": False, "builds": {}}
+        return json.loads(content)
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Failed to read WDA state file: %s", e)
+        return {"cloned": False, "builds": {}}
+
+
+def save_wda_state(state: dict[str, Any]) -> None:
+    """Write wda-state.json with exclusive file lock."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+    if not WDA_STATE_FILE.exists():
+        WDA_STATE_FILE.touch()
+
+    fd = WDA_STATE_FILE.open("a+")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        fd.seek(0)
+        fd.truncate()
+        fd.write(json.dumps(state, indent=2))
+        fd.flush()
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
+
+
+# ---------------------------------------------------------------------------
+# Signing identity discovery
+# ---------------------------------------------------------------------------
+
+# Xcode teamType values:
+#   "Individual" — paid Apple Developer Program (personal)
+#   "Organization" — paid Apple Developer Program (company/org)
+#   "InHouse" — Apple Developer Enterprise Program
+#   "Free" — free Apple ID (no paid enrollment)
+_FREE_TEAM_TYPES = {"Free"}
+
+
+def _is_free_account(team_type: str) -> bool:
+    """Check if a team type indicates a free (unpaid) Apple developer account."""
+    return team_type in _FREE_TEAM_TYPES
+
+
+def discover_signing_identities() -> list[dict[str, str]]:
+    """Read provisioning teams from Xcode's account preferences.
+
+    Returns list of dicts with keys: team_id, team_name, team_type.
+
+    Important: the team_id here is the *Xcode/App Store Connect* team ID,
+    NOT the Organizational Unit from the keychain certificate (those can
+    differ and xcodebuild only accepts the Xcode team ID).
+    """
+    import plistlib
+
+    plist_path = Path.home() / "Library" / "Preferences" / "com.apple.dt.Xcode.plist"
+    if not plist_path.exists():
+        logger.warning("Xcode preferences not found at %s", plist_path)
+        return []
+
+    try:
+        with open(plist_path, "rb") as f:
+            prefs = plistlib.load(f)
+    except Exception as e:
+        logger.warning("Failed to read Xcode preferences: %s", e)
+        return []
+
+    teams_by_account = prefs.get("IDEProvisioningTeamByIdentifier", {})
+
+    seen: set[str] = set()
+    identities: list[dict[str, str]] = []
+    for _account_id, teams in teams_by_account.items():
+        for team in teams:
+            team_id = team.get("teamID", "")
+            if not team_id or team_id in seen:
+                continue
+            seen.add(team_id)
+            identities.append({
+                "team_id": team_id,
+                "team_name": team.get("teamName", ""),
+                "team_type": team.get("teamType", ""),
+            })
+
+    return identities
+
+
+# ---------------------------------------------------------------------------
+# Clone
+# ---------------------------------------------------------------------------
+
+
+async def clone_wda() -> bool:
+    """Clone WebDriverAgent repo if not already present.
+
+    Returns True if a fresh clone was performed, False if skipped.
+    """
+    if WDA_REPO.exists() and (WDA_REPO / ".git").exists():
+        logger.info("WDA repo already cloned at %s", WDA_REPO)
+        return False
+
+    WDA_DIR.mkdir(parents=True, exist_ok=True)
+
+    logger.info("Cloning WebDriverAgent into %s", WDA_REPO)
+    proc = await asyncio.create_subprocess_exec(
+        "git", "clone", "--depth", "1",
+        "https://github.com/appium/WebDriverAgent.git",
+        str(WDA_REPO),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=CLONE_TIMEOUT
+        )
+    except TimeoutError:
+        proc.kill()
+        raise RuntimeError(
+            f"git clone timed out after {CLONE_TIMEOUT}s"
+        )
+
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"git clone failed (rc={proc.returncode}): {stderr.decode()}"
+        )
+
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Customize (inject app icon)
+# ---------------------------------------------------------------------------
+
+
+# Known UUIDs from the upstream WDA project.pbxproj — Debug and Release
+# build settings for WebDriverAgentRunner target.
+_DEBUG_CONFIG_UUID = "EEF988321C486604005CA669"
+_RELEASE_CONFIG_UUID = "EEF988331C486604005CA669"
+
+
+def customize_wda(repo: Path | None = None) -> bool:
+    """Inject a custom Quern app icon and display name into the WDA project.
+
+    Rather than adding a new asset catalog (which conflicts with the upstream's
+    existing one in WebDriverAgentLib), this replaces the upstream icon PNGs
+    directly and patches build settings for PRODUCT_NAME.
+
+    Idempotent — returns False if already customized.
+    Returns True if customization was applied.
+    """
+    repo = repo or WDA_REPO
+
+    if not ICON_PATH.exists():
+        raise RuntimeError(f"WDA icon not found at {ICON_PATH}")
+
+    # --- Step 1: Ensure AppIcon asset catalog exists with our icon ---
+    # The upstream WDA repo doesn't ship an asset catalog, so we create one
+    # in WebDriverAgentLib (which the pbxproj already references via
+    # ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon).
+    xcassets_dir = repo / "WebDriverAgentLib" / "Assets.xcassets"
+    appiconset_dir = xcassets_dir / "AppIcon.appiconset"
+    appiconset_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write Contents.json for the asset catalog
+    contents_json = {
+        "images": [
+            {
+                "filename": "AppIcon-1024.png",
+                "idiom": "universal",
+                "platform": "ios",
+                "size": "1024x1024",
+            }
+        ],
+        "info": {"author": "xcode", "version": 1},
+    }
+    (appiconset_dir / "Contents.json").write_text(json.dumps(contents_json, indent=2) + "\n")
+
+    # Copy our icon
+    shutil.copy2(ICON_PATH, appiconset_dir / "AppIcon-1024.png")
+    logger.debug("Created AppIcon asset catalog at %s", appiconset_dir)
+
+    # --- Step 2: Patch build settings for PRODUCT_NAME ---
+    pbxproj_path = repo / "WebDriverAgent.xcodeproj" / "project.pbxproj"
+    if not pbxproj_path.exists():
+        raise RuntimeError(f"project.pbxproj not found at {pbxproj_path}")
+
+    content = pbxproj_path.read_text()
+
+    # Idempotency: check if PRODUCT_NAME is already set
+    if "PRODUCT_NAME = QuernDriver" in content:
+        logger.info("WDA already customized — skipping")
+        return False
+
+    # --- Replace bundle ID ---
+    content = content.replace(
+        "PRODUCT_BUNDLE_IDENTIFIER = com.facebook.WebDriverAgentRunner;",
+        f"PRODUCT_BUNDLE_IDENTIFIER = {WDA_BUNDLE_ID};",
+    )
+
+    # --- Inject PRODUCT_NAME into Runner build configs ---
+    for config_uuid in (_DEBUG_CONFIG_UUID, _RELEASE_CONFIG_UUID):
+        config_pattern = re.compile(
+            rf"({config_uuid}\s*/\*[^*]*\*/\s*=\s*\{{[^}}]*?"
+            r"buildSettings\s*=\s*\{)\s*\n",
+            re.DOTALL,
+        )
+        content = config_pattern.sub(
+            r"\1\n"
+            r"\t\t\t\tPRODUCT_NAME = QuernDriver;\n",
+            content,
+        )
+
+    pbxproj_path.write_text(content)
+    logger.info("Customized WDA project: replaced icons, bundle ID, and set PRODUCT_NAME")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Build
+# ---------------------------------------------------------------------------
+
+
+async def _xcode_build_id() -> str | None:
+    """Xcode's build number, e.g. `17A5241e`, or None if it cannot be read.
+
+    The build number rather than the marketing version: betas ship repeatedly
+    as "26.0" with different builds, and a toolchain change is exactly what this
+    is for.
+    """
+    from server.tooling.tool_probe import probe_stdout
+
+    out = await probe_stdout("xcodebuild", "-version", tool="xcodebuild")
+    if out is None:
+        return None
+    for line in out.splitlines():
+        if line.startswith("Build version "):
+            return line.split("Build version ", 1)[1].strip() or None
+    return None
+
+
+async def _build_is_current(state: dict[str, Any], team_id: str) -> bool:
+    """Whether the existing WDA build can be reused.
+
+    Three questions, and the cache used to ask only the first.
+
+    **Does the signing team match?** The original key, and still necessary.
+
+    **Are the artifacts actually there?** They were never checked, and that is
+    #188: `force` removes the derived data *before* building, while
+    `build_team_id` is written only after a build that succeeded. So a forced
+    rebuild that fails leaves state from the last *good* build with nothing on
+    disk to match it -- and every later run skips the build, then `install_wda`
+    raises "WDA app not found — build first". Building is precisely what the
+    skip refuses to do, so there is no way out without knowing to pass `force`.
+
+    **Was it built with this toolchain?** #189. The cache carried no record of
+    what produced the artifact, so upgrading Xcode -- the event most likely to
+    invalidate it -- was invisible. Xcode 27 is the live example: every machine
+    that had built WDA before the upgrade kept the old artifact, and only found
+    out at the next forced rebuild, which is also the moment the old one is
+    deleted.
+
+    A recorded value that is *absent* is not treated as a mismatch. Existing
+    installs have no `build_xcode`, and rebuilding WDA for everyone on upgrade
+    -- minutes, and a provisioning round trip on a free account -- is a poor
+    trade for detecting a staleness we cannot actually confirm. Absent means no
+    opinion; present-and-different means rebuild. The first build after this
+    ships records the fingerprint, and every change after that is caught.
+    """
+    if state.get("build_team_id") != team_id:
+        return False
+    if not (WDA_APP.exists() and XCTESTRUN.exists()):
+        logger.info("WDA state claims a build for %s, but the artifacts are "
+                    "missing — rebuilding", team_id)
+        return False
+    recorded = state.get("build_deployment_target")
+    if recorded is not None and recorded != WDA_MIN_DEPLOYMENT_TARGET:
+        logger.info("WDA was built against deployment target %s, now %s — "
+                    "rebuilding", recorded, WDA_MIN_DEPLOYMENT_TARGET)
+        return False
+    recorded_xcode = state.get("build_xcode")
+    if recorded_xcode is not None:
+        current = await _xcode_build_id()
+        # A toolchain we cannot read is not a toolchain that differs. The build
+        # below will fail on its own terms if Xcode is genuinely unusable, and
+        # that failure says more than a rebuild triggered by a probe timeout.
+        if current is not None and current != recorded_xcode:
+            logger.info("WDA was built with Xcode %s, now %s — rebuilding",
+                        recorded_xcode, current)
+            return False
+    return True
+
+
+async def build_wda(team_id: str, force: bool = False) -> bool:
+    """Build WDA for a given signing team.
+
+    The build uses ``generic/platform=iOS`` so the artifact works on any
+    arm64 device — no device-specific UDID is needed.  Builds are cached
+    by *team_id* only; a rebuild is triggered when the team changes or
+    when *force* is True.
+
+    Returns True if a fresh build was performed, False if skipped.
+    """
+    state = read_wda_state()
+    if not force and await _build_is_current(state, team_id):
+        logger.info("WDA already built for team %s", team_id)
+        return False
+
+    if not WDA_REPO.exists():
+        raise RuntimeError("WDA repo not cloned — call clone_wda() first")
+
+    if force and WDA_DERIVED.exists():
+        import shutil
+        logger.info("Force rebuild: removing derived data at %s", WDA_DERIVED)
+        shutil.rmtree(WDA_DERIVED)
+
+    logger.info("Building WDA for team %s", team_id)
+    proc = await asyncio.create_subprocess_exec(
+        "xcodebuild", "build-for-testing",
+        "-project", str(WDA_REPO / "WebDriverAgent.xcodeproj"),
+        "-scheme", "WebDriverAgentRunner",
+        "-destination", "generic/platform=iOS",
+        f"DEVELOPMENT_TEAM={team_id}",
+        f"PRODUCT_BUNDLE_IDENTIFIER={WDA_BUNDLE_ID}",
+        "CODE_SIGNING_ALLOWED=YES",
+        # Upstream WebDriverAgent still declares a 13.0 deployment target, and
+        # Xcode 27 refuses anything below 15.0:
+        #
+        #   error: The iOS deployment target 'IPHONEOS_DEPLOYMENT_TARGET' is set
+        #   to 13.0, but the range of supported deployment target versions is
+        #   15.0 to 27.0.x. (in target 'WebDriverAgentRunner')
+        #
+        # Overridden on the command line, where it outranks every layer in the
+        # project and so reaches WebDriverAgentLib as well as the Runner.
+        #
+        # Any value in [15.0, 17.0] is equivalent today, and the reason is
+        # measurable rather than inferred: the outer Runner app is stamped from
+        # Xcode 27's own XCTRunner template, which is built at 17.0, so the
+        # runner lands at minos 17.0 whether this says 15.0 or 17.0 -- only the
+        # inner .xctest and framework take this value. Above 17.0 the inner
+        # bundle becomes the binding floor and a build flag silently narrows the
+        # supported device range, which is why the tests pin both ends.
+        #
+        # 15.0 is the bottom of that band and matches quern's actual WDA floor:
+        # `install_wda` routes iOS 15-16 devices through ideviceinstaller, and
+        # `server/device/ios/usbmux.py` exists to enumerate them. It will need
+        # raising when Apple next moves the floor; the error names the new range.
+        f"IPHONEOS_DEPLOYMENT_TARGET={WDA_MIN_DEPLOYMENT_TARGET}",
+        "-allowProvisioningUpdates",
+        "-derivedDataPath", str(WDA_DERIVED),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=BUILD_TIMEOUT
+        )
+    except TimeoutError:
+        proc.kill()
+        raise RuntimeError(
+            f"xcodebuild timed out after {BUILD_TIMEOUT}s"
+        )
+
+    if proc.returncode != 0:
+        stderr_text = stderr.decode()
+        stdout_text = stdout.decode()
+        combined = stderr_text + stdout_text
+
+        # Detect specific failure modes and provide actionable guidance
+        if "No Account for Team" in combined:
+            raise RuntimeError(
+                f"Xcode has no account logged in for team '{team_id}'. "
+                "Open Xcode → Settings → Accounts and sign in with the "
+                "Apple ID associated with this team, then retry."
+            )
+        if "No signing certificate" in combined:
+            raise RuntimeError(
+                f"No signing certificate found for team '{team_id}'. "
+                "Open Xcode → Settings → Accounts → select the team → "
+                "Manage Certificates → add an 'Apple Development' certificate."
+            )
+
+        # Known signing failures get named before the raw output. A free
+        # account exhausting its app-ID slots, or a profile that expired, is a
+        # thing the reader can act on; twenty lines of xcodebuild is not.
+        diagnosis = _diagnose_signing_output(combined)
+        stdout_tail = "\n".join(stdout_text.splitlines()[-20:])
+        if diagnosis:
+            raise RuntimeError(
+                f"xcodebuild failed (rc={proc.returncode}): {diagnosis}\n"
+                f"stdout (last 20 lines): {stdout_tail}"
+            )
+        raise RuntimeError(
+            f"xcodebuild failed (rc={proc.returncode}):\n"
+            f"stderr: {stderr_text}\n"
+            f"stdout (last 20 lines): {stdout_tail}"
+        )
+
+    # Post-process: inject icon and display name into the Runner app
+    await _post_process_runner_app(team_id)
+
+    # Rename the xctestrun file to a stable name
+    _rename_xctestrun()
+
+    # A zero exit is not proof of a usable build. Recording one without its
+    # artifacts would claim a success nothing can install; `_build_is_current`
+    # would catch it next run, but this run would fail later and less legibly.
+    missing = [p.name for p in (WDA_APP, XCTESTRUN) if not p.exists()]
+    if missing:
+        raise RuntimeError(
+            "xcodebuild reported success but did not produce "
+            f"{', '.join(missing)} under {WDA_DERIVED}"
+        )
+
+    # Update state
+    now = datetime.now(UTC).isoformat()
+    state = read_wda_state()
+    state["cloned"] = True
+    state["build_team_id"] = team_id
+    state["built_at"] = now
+    # What this artifact was built *with*, so the next run can tell whether it
+    # still matches. Written only here, after a build that returned zero.
+    state["build_deployment_target"] = WDA_MIN_DEPLOYMENT_TARGET
+    # Cleared, not merely skipped, when the probe fails. Leaving the previous
+    # value would describe *this* artifact with the fingerprint of the one
+    # before it -- and the window in which the probe fails is xcodebuild hanging
+    # during Xcode's first-launch tasks (#180), which is exactly when the
+    # toolchain has just changed. CONTRIBUTING: a success marker must not
+    # survive a failure, and not writing it is insufficient when it may already
+    # be current from an earlier success.
+    xcode = await _xcode_build_id()
+    if xcode:
+        state["build_xcode"] = xcode
+    else:
+        state.pop("build_xcode", None)
+    save_wda_state(state)
+
+    return True
+
+
+async def _post_process_runner_app(team_id: str) -> None:
+    """Patch the auto-generated Runner .app with our icon and display name.
+
+    Xcode's build-for-testing generates WebDriverAgentRunner-Runner.app as a
+    wrapper around the .xctest bundle.  The icon and PRODUCT_NAME from our
+    build settings only land in the inner .xctest — the outer Runner app gets
+    Xcode defaults.  This function copies the icon assets, sets
+    CFBundleDisplayName, and re-signs the app.
+    """
+    runner_app = WDA_APP  # WebDriverAgentRunner-Runner.app
+    xctest_dir = runner_app / "PlugIns" / "WebDriverAgentRunner.xctest"
+
+    if not runner_app.exists():
+        logger.warning("Runner app not found at %s — skipping post-process", runner_app)
+        return
+
+    # Generate icon PNGs at the sizes iOS expects and copy into the Runner app.
+    # We do this directly from our source icon rather than relying on the build
+    # producing them — the upstream WDA repo doesn't ship an asset catalog.
+    try:
+        from PIL import Image
+        src_icon = Image.open(ICON_PATH)
+        icon_sizes = [
+            ("AppIcon60x60@2x.png", 120),
+            ("AppIcon60x60@3x.png", 180),
+            ("AppIcon76x76@2x.png", 152),
+            ("AppIcon83.5x83.5@2x.png", 167),
+            ("AppIcon-1024.png", 1024),
+        ]
+        icon_names = []
+        for name, size in icon_sizes:
+            resized = src_icon.resize((size, size), Image.LANCZOS)
+            resized.save(runner_app / name)
+            icon_names.append(name)
+            logger.debug("Generated %s (%dx%d)", name, size, size)
+    except Exception as e:
+        logger.warning("Could not generate icon PNGs: %s", e)
+        icon_names = []
+
+    # Also copy compiled asset catalog from xctest if present (bonus)
+    xctest_car = xctest_dir / "Assets.car"
+    runner_car = runner_app / "Assets.car"
+    if xctest_car.exists():
+        shutil.copy2(xctest_car, runner_car)
+
+    # Patch Info.plist to set display name and icon references
+    info_plist = runner_app / "Info.plist"
+    if info_plist.exists():
+        with open(info_plist, "rb") as f:
+            plist = plistlib.load(f)
+
+        plist["CFBundleDisplayName"] = "QuernDriver"
+
+        # Add CFBundleIcons so iOS uses our AppIcon PNGs
+        if icon_names:
+            plist["CFBundleIcons"] = {
+                "CFBundlePrimaryIcon": {
+                    "CFBundleIconFiles": [
+                        f.replace(".png", "").rstrip("~ipad") for f in icon_names
+                    ],
+                    "UIPrerenderedIcon": False,
+                }
+            }
+
+        with open(info_plist, "wb") as f:
+            plistlib.dump(plist, f)
+
+    # Re-sign the app since we modified its contents.
+    # Find the signing identity that matches the team_id from the keychain.
+    # We just modified the app's Info.plist and icon assets, so its existing
+    # signature no longer matches. Re-signing is mandatory: a half-customized
+    # app whose signature seals a stale Info.plist installs on-device with
+    # 0xe8008001 (ApplicationVerificationFailed). Fail loudly rather than
+    # leave a broken bundle behind.
+    logger.info("Re-signing Runner app after post-processing")
+    signing_identity = await _find_signing_identity(team_id)
+    if not signing_identity:
+        raise RuntimeError(
+            f"Post-processed the WDA Runner app but found no signing identity "
+            f"for team {team_id} to re-sign it. The app's signature no longer "
+            f"matches its patched Info.plist and would fail to install. "
+            f"Re-run setup_wda with force:true."
+        )
+
+    # Re-sign inner xctest first, then outer app
+    for bundle in [xctest_dir, runner_app]:
+        proc = await asyncio.create_subprocess_exec(
+            "codesign", "--force", "--sign", signing_identity,
+            "--preserve-metadata=identifier,entitlements",
+            str(bundle),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"Re-signing {bundle.name} failed after post-processing: "
+                f"{stderr.decode()}"
+            )
+
+    logger.info("Post-processed Runner app: display name, icon, and signature updated")
+
+
+async def _find_signing_identity(team_id: str) -> str | None:
+    """Extract the signing identity from the existing xctest code signature.
+
+    This is more reliable than guessing from the keychain, since xcodebuild
+    already selected the correct identity during the build.
+    """
+    xctest = WDA_APP / "PlugIns" / "WebDriverAgentRunner.xctest"
+    if not xctest.exists():
+        return None
+
+    proc = await asyncio.create_subprocess_exec(
+        "codesign", "-d", "--verbose=2", str(xctest),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    # codesign -d outputs to stderr
+    output = stderr.decode()
+
+    # Look for: Authority=Apple Development: name (ID)
+    for line in output.splitlines():
+        if line.startswith("Authority=Apple Development:"):
+            return line.split("=", 1)[1]
+
+    return None
+
+
+async def _runner_app_signature_valid() -> bool:
+    """Return True if the built Runner app's code signature verifies on disk.
+
+    A False here (with the app present) means a prior post-process patched the
+    Info.plist/icons but the signature was left sealing the old contents — the
+    app would fail to install with 0xe8008001. Missing app also returns False.
+    """
+    if not WDA_APP.exists():
+        return False
+    proc = await asyncio.create_subprocess_exec(
+        "codesign", "--verify", "--deep", "--strict", str(WDA_APP),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    await proc.communicate()
+    return proc.returncode == 0
+
+
+# ---------------------------------------------------------------------------
+# xctestrun helpers
+# ---------------------------------------------------------------------------
+
+
+def _rename_xctestrun() -> None:
+    """Rename the generated *.xctestrun to quern-driver.xctestrun for stable reference."""
+    products_dir = WDA_DERIVED / "Build" / "Products"
+    if not products_dir.exists():
+        return
+
+    for f in products_dir.glob("*.xctestrun"):
+        if f.name == "quern-driver.xctestrun":
+            continue
+        dest = products_dir / "quern-driver.xctestrun"
+        f.rename(dest)
+        logger.info("Renamed %s → %s", f.name, dest.name)
+        return
+
+
+def _find_xctestrun() -> Path:
+    """Find the xctestrun file — prefer stable name, fall back to glob."""
+    if XCTESTRUN.exists():
+        return XCTESTRUN
+
+    products_dir = WDA_DERIVED / "Build" / "Products"
+    if products_dir.exists():
+        for f in products_dir.glob("*.xctestrun"):
+            return f
+
+    from server.models import WdaNotSetUpError
+
+    raise WdaNotSetUpError(
+        "WebDriverAgent is not set up for physical devices on this Mac: no "
+        ".xctestrun was found. Run the setup_wda tool (POST "
+        "/api/v1/device/wda/setup) once with the device connected, then retry.",
+        tool="wda",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Runner log diagnostics
+# ---------------------------------------------------------------------------
+
+# Known failure patterns in xcodebuild test-without-building output.
+# Each tuple: (substring to match, user-facing diagnosis)
+_RUNNER_FAILURE_PATTERNS = [
+    (
+        "Supported platforms for the buildables in the current scheme is empty",
+        "The xctestrun file is invalid for this device. This usually means:\n"
+        "- The provisioning profile expired (free accounts = 7 days). "
+        "Fix: re-run setup_wda with force:true.\n"
+        "- The device hasn't trusted the developer profile. "
+        "Fix: Settings > General > VPN & Device Management.\n"
+        "- Xcode signing changed since the build. "
+        "Fix: re-run setup_wda with force:true.",
+    ),
+    (
+        "The device is locked",
+        "The device screen is locked. Unlock the device and try again.",
+    ),
+    (
+        "Unable to launch",
+        "WDA failed to launch on the device. The app may need to be trusted:\n"
+        "Settings > General > VPN & Device Management > tap the developer profile > Trust.",
+    ),
+    (
+        "This application's application-identifier entitlement "
+        "does not match",
+        "The provisioning profile doesn't match the installed WDA. "
+        "Fix: re-run setup_wda with force:true.",
+    ),
+    (
+        "No signing certificate",
+        "No signing certificate found. Open Xcode > Settings > Accounts and ensure "
+        "a valid Apple Development certificate exists for this team.",
+    ),
+    (
+        # Found by running the real command: with -allowProvisioningUpdates,
+        # which is what build_wda passes, a team Xcode has never seen produces
+        # this rather than "No Account for Team".
+        "No Accounts: Add a new account in Accounts settings",
+        "Xcode has no Apple ID signed in. Open Xcode > Settings > Accounts and "
+        "add the Apple ID for this team, then retry.",
+    ),
+    (
+        "The maximum number of apps for free development profiles has been reached",
+        "Free Apple developer account limit reached: a free profile may sign at "
+        "most 3 apps installed on one device at a time. Delete a free-signed "
+        "app from the device, or use a paid developer account.\n"
+        "Note that Xcode counts *offloaded* apps toward the three, so the "
+        "device can look emptier than it is — check Settings > General > "
+        "iPhone Storage for offloaded apps.\n"
+        "This is not the separate 10-App-IDs-per-7-days registration limit; "
+        "waiting does not clear this one.",
+    ),
+    (
+        # Deliberately *after* the max-apps entry. Xcode reports the
+        # device-install limit as the reason automatic provisioning failed,
+        # and the signing step then emits this generic line as well -- so
+        # first-match-wins would answer the specific condition with the
+        # generic remedy, which is a rebuild that cannot clear it. Specific
+        # before generic, and the ordering is covered by a test.
+        #
+        # On a free account with slots to spare, this is what an expired
+        # 7-day profile looks like.
+        "were found: Xcode couldn't find any",
+        "No provisioning profile matches this build. On a free account that "
+        "usually means the 7-day profile expired — re-run setup_wda with "
+        "force:true. Otherwise check that the signing team is still present in "
+        "Xcode > Settings > Accounts, and that its certificate has not been "
+        "revoked.",
+    ),
+    (
+        "Device is not available",
+        "The device disconnected or is not available. Reconnect the USB cable and try again.",
+    ),
+]
+
+
+def _diagnose_signing_output(text: str) -> str | None:
+    """Translate known xcodebuild/runner failures into something actionable.
+
+    Shared between the build and the runner log on purpose. The table lived
+    behind the runner-log path alone, so a *build* that failed on the free
+    account's app-ID limit printed twenty raw lines of xcodebuild, while the
+    identical condition at runner start printed an explanation. The build is
+    where a free account hits it first -- signing is what consumes the slot.
+
+    That matters more now that a toolchain change can trigger a rebuild: the
+    rebuild is the right call, and the user is entitled to know why it failed
+    in terms they can act on.
+    """
+    for pattern, diagnosis in _RUNNER_FAILURE_PATTERNS:
+        if pattern in text:
+            return diagnosis
+    return None
+
+
+def _diagnose_runner_failure(log_path: Path) -> str | None:
+    """Read the runner log and return a user-friendly diagnosis, or None."""
+    if not log_path.exists():
+        return "Runner log not found — xcodebuild may not have started."
+
+    try:
+        log_text = log_path.read_text(errors="replace")
+    except Exception:
+        return None
+
+    diagnosis = _diagnose_signing_output(log_text)
+    if diagnosis:
+        return diagnosis
+
+    # If the log is very short and empty-ish, xcodebuild crashed early
+    if len(log_text.strip()) < 50:
+        return (
+            "xcodebuild produced almost no output — it may have crashed on startup. "
+            f"Check the full log: {log_path}"
+        )
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Driver lifecycle (start / stop xcodebuild test-without-building)
+# ---------------------------------------------------------------------------
+
+
+async def _poll_wda_status(url: str, timeout: float = DRIVER_START_TIMEOUT) -> bool:
+    """Poll WDA /status until it responds 200, with timeout."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(f"{url}/status", timeout=3.0)
+                if resp.status_code == 200:
+                    return True
+        except Exception:
+            pass
+        await asyncio.sleep(1.0)
+    return False
+
+
+def _is_process_alive(pid: int) -> bool:
+    """Check if a process with given PID is still running."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
+async def start_driver(udid: str, os_version: str) -> dict:
+    """Start WDA on a physical device via xcodebuild test-without-building.
+
+    Spawns xcodebuild as a background process with output redirected to a log file.
+    Tracks PID in wda-state.json so the process persists across server restarts.
+
+    Returns dict with {status, udid, pid, ready}.
+    """
+    xctestrun_path = _find_xctestrun()
+
+    state = read_wda_state()
+    runners = state.get("runners", {})
+
+    # Check for existing runner
+    existing = runners.get(udid)
+    if existing:
+        pid = existing.get("pid")
+        if pid and _is_process_alive(pid):
+            logger.info("WDA driver already running for %s (pid %d)", udid[:8], pid)
+            return {"status": "already_running", "udid": udid, "pid": pid, "ready": True}
+        # Stale PID — clean up
+        logger.info("Cleaning stale WDA runner for %s (pid %s)", udid[:8], pid)
+        del runners[udid]
+        state["runners"] = runners
+        save_wda_state(state)
+
+    # Resolve hardware UDID for iOS 17+ tunneld devices
+    from server.device.ios.tunneld import resolve_tunnel_udid
+
+    major = _parse_ios_major_version(os_version)
+    hw_udid = udid
+    if major >= 17:
+        resolved = await resolve_tunnel_udid(udid)
+        if resolved:
+            hw_udid = resolved
+
+    # Prepare log file
+    WDA_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = WDA_LOG_DIR / f"runner-{udid[:8]}.log"
+
+    logger.info("Starting WDA driver for %s (hw_udid=%s)", udid[:8], hw_udid)
+
+    # The child holds its own copy of the descriptor; the server's is closed
+    # here, including when the spawn raises. Left open, every start leaked one.
+    with open(log_path, "w") as log_file:
+        proc = await asyncio.create_subprocess_exec(
+            "xcodebuild", "test-without-building",
+            "-xctestrun", str(xctestrun_path),
+            "-destination", f"id={hw_udid}",
+            stdout=log_file,
+            stderr=log_file,
+        )
+
+    # Save runner state immediately (before polling)
+    state = read_wda_state()
+    state.setdefault("runners", {})[udid] = {
+        "pid": proc.pid,
+        "hw_udid": hw_udid,
+        "log_path": str(log_path),
+        "started_at": datetime.now(UTC).isoformat(),
+    }
+    save_wda_state(state)
+
+    # Poll for WDA to become responsive
+    # For tunneld devices, use the tunnel address; for usbmux, use localhost
+    from server.device.ios.tunneld import get_tunneld_devices
+
+    wda_url = None
+    if major >= 17:
+        devices = await get_tunneld_devices()
+        tunnel_udid = await resolve_tunnel_udid(udid)
+        tunnels = devices.get(tunnel_udid or udid, [])
+        if tunnels:
+            addr = tunnels[0].get("tunnel-address")
+            if addr:
+                wda_url = f"http://[{addr}]:8100"
+
+    if not wda_url:
+        wda_url = "http://localhost:8100"
+
+    ready = await _poll_wda_status(wda_url, timeout=DRIVER_START_TIMEOUT)
+
+    if not ready:
+        logger.warning(
+            "WDA did not become responsive within %ds for %s",
+            DRIVER_START_TIMEOUT, udid[:8],
+        )
+
+    result: dict[str, Any] = {
+        "status": "started",
+        "udid": udid,
+        "pid": proc.pid,
+        "ready": ready,
+    }
+
+    # If WDA failed to become ready, diagnose from the runner log
+    if not ready:
+        diagnosis = _diagnose_runner_failure(log_path)
+        if diagnosis:
+            result["error"] = diagnosis
+        result["log_path"] = str(log_path)
+
+    return result
+
+
+async def stop_driver(udid: str) -> dict:
+    """Stop WDA driver for a device.
+
+    Sends SIGTERM, waits up to 5s, then SIGKILL if needed.
+    Removes runner entry from wda-state.json.
+    """
+    state = read_wda_state()
+    runners = state.get("runners", {})
+    existing = runners.get(udid)
+
+    if not existing:
+        return {"status": "not_running", "udid": udid}
+
+    pid = existing.get("pid")
+    if not pid or not _is_process_alive(pid):
+        # Already dead — clean up state
+        del runners[udid]
+        state["runners"] = runners
+        save_wda_state(state)
+        return {"status": "not_running", "udid": udid}
+
+    logger.info("Stopping WDA driver for %s (pid %d)", udid[:8], pid)
+
+    # SIGTERM
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+
+    # Wait for exit
+    for _ in range(DRIVER_STOP_TIMEOUT * 10):
+        if not _is_process_alive(pid):
+            break
+        await asyncio.sleep(0.1)
+    else:
+        # Still alive — SIGKILL
+        logger.warning("WDA driver pid %d did not stop, sending SIGKILL", pid)
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    # Clean up state
+    state = read_wda_state()
+    runners = state.get("runners", {})
+    runners.pop(udid, None)
+    state["runners"] = runners
+    save_wda_state(state)
+
+    return {"status": "stopped", "udid": udid}
+
+
+# ---------------------------------------------------------------------------
+# Simulators (#336)
+# ---------------------------------------------------------------------------
+#
+# Not a special case of the device path but a simpler one: no signing team, no
+# provisioning, no 7-day expiry, and no install step -- `test-without-building`
+# against a simulator destination installs the runner itself.
+
+
+_SIM_LOCKS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _sim_lock(name: str) -> asyncio.Lock:
+    """A lock per running event loop.
+
+    Not a module-level `asyncio.Lock()`: that binds to the first loop that
+    contends for it and raises on any other, so a second loop in the same
+    process -- every async test, any embedding -- breaks on its first
+    contended start. Held weakly, so a finished loop takes its locks with it.
+
+    - "build": two simulator builds at once would each `rmtree` the other's
+      derived data and race xcodebuild into it.
+    - "start": choosing a port and recording it are separated by the spawn's
+      await, so without this two simulators started together were both handed
+      8200 -- and whichever WDA won the port answered both, sending one
+      simulator's reads and taps to the other with both reporting ready. Found
+      by review, reproduced with two concurrent starts.
+    """
+    loop = asyncio.get_running_loop()
+    locks = _SIM_LOCKS.get(loop)
+    if locks is None:
+        locks = _SIM_LOCKS[loop] = {}
+    return locks.setdefault(name, asyncio.Lock())
+
+
+def _find_sim_xctestrun() -> Path | None:
+    products = WDA_DERIVED_SIM / "Build" / "Products"
+    if products.exists():
+        for f in sorted(products.glob("*.xctestrun")):
+            return f
+    return None
+
+
+async def _sim_build_is_current(state: dict[str, Any]) -> bool:
+    """Reusable if the artifact exists and was built by this Xcode.
+
+    Unlike the device build, an *absent* fingerprint means rebuild: there are
+    no existing simulator builds to spare, so the strict rule costs nothing.
+    """
+    if _find_sim_xctestrun() is None:
+        return False
+    recorded = state.get("sim_build_xcode")
+    if recorded is None:
+        return False
+    if state.get("sim_build_deployment_target") != WDA_MIN_DEPLOYMENT_TARGET:
+        return False
+    current = await _xcode_build_id()
+    return current is None or current == recorded
+
+
+async def build_wda_simulator(force: bool = False) -> bool:
+    """Build WDA for the iOS Simulator. Returns True if it built.
+
+    Unsigned: a simulator does not enforce code signing on a test runner, so
+    there is no team to choose and nothing to provision. Serialised: a second
+    caller waits, then finds the first one's build current.
+    """
+    async with _sim_lock("build"):
+        return await _build_wda_simulator(force)
+
+
+def _clear_sim_build_fingerprint() -> None:
+    state = read_wda_state()
+    state.pop("sim_build_xcode", None)
+    state.pop("sim_build_deployment_target", None)
+    save_wda_state(state)
+
+
+async def _build_wda_simulator(force: bool) -> bool:
+    state = read_wda_state()
+    if not force and await _sim_build_is_current(state):
+        return False
+
+    if not WDA_REPO.exists():
+        await clone_wda()
+        customize_wda()
+
+    # Cleared before anything is removed or built, so no failure path -- a
+    # timeout included -- can leave a fingerprint describing an artifact that
+    # is gone. (The first version cleared it after the build, which a timeout
+    # raised past.)
+    _clear_sim_build_fingerprint()
+    if WDA_DERIVED_SIM.exists():
+        import shutil
+        shutil.rmtree(WDA_DERIVED_SIM)
+
+    logger.info("Building WDA for the iOS Simulator")
+    proc = await asyncio.create_subprocess_exec(
+        "xcodebuild", "build-for-testing",
+        "-project", str(WDA_REPO / "WebDriverAgent.xcodeproj"),
+        "-scheme", "WebDriverAgentRunner",
+        "-destination", "generic/platform=iOS Simulator",
+        f"PRODUCT_BUNDLE_IDENTIFIER={WDA_BUNDLE_ID}",
+        "CODE_SIGNING_ALLOWED=NO",
+        # The same floor as the device build, for the same reason -- Xcode 27
+        # refuses upstream's 13.0. See build_wda.
+        f"IPHONEOS_DEPLOYMENT_TARGET={WDA_MIN_DEPLOYMENT_TARGET}",
+        "-derivedDataPath", str(WDA_DERIVED_SIM),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=BUILD_TIMEOUT)
+    except BaseException as exc:
+        # Cancellation as well as a timeout: a client that gives up on the
+        # first start_driver cancels this task, and an xcodebuild left running
+        # goes on writing into WDA_DERIVED_SIM after the lock is released --
+        # where the next build would rmtree it and start a second one
+        # (CodeRabbit on #362). Reaped under a shield, so a second cancel
+        # cannot leave it running either.
+        if proc.returncode is None:
+            proc.kill()
+            try:
+                await asyncio.shield(proc.wait())
+            except BaseException:
+                pass
+        if isinstance(exc, TimeoutError):
+            raise RuntimeError(
+                f"xcodebuild (simulator) timed out after {BUILD_TIMEOUT}s",
+            ) from exc
+        raise
+
+    if proc.returncode != 0:
+        tail = "\n".join((stderr.decode() + stdout.decode()).splitlines()[-25:])
+        raise RuntimeError(f"xcodebuild (simulator) failed (rc={proc.returncode}):\n{tail}")
+    if _find_sim_xctestrun() is None:
+        raise RuntimeError(
+            f"xcodebuild (simulator) reported success but produced no .xctestrun "
+            f"under {WDA_DERIVED_SIM}"
+        )
+
+    xcode = await _xcode_build_id()
+    state = read_wda_state()
+    if xcode:
+        state["sim_build_xcode"] = xcode
+    state["sim_build_deployment_target"] = WDA_MIN_DEPLOYMENT_TARGET
+    state["sim_built_at"] = datetime.now(UTC).isoformat()
+    save_wda_state(state)
+    return True
+
+
+def _port_is_free(port: int) -> bool:
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+        try:
+            s.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
+def _allocate_sim_port(runners: dict[str, Any]) -> int:
+    taken = {r.get("port") for r in runners.values() if r.get("simulator")}
+    for port in range(SIM_PORT_FIRST, SIM_PORT_LAST + 1):
+        if port not in taken and _port_is_free(port):
+            return port
+    raise RuntimeError(
+        f"No free port for WDA in {SIM_PORT_FIRST}-{SIM_PORT_LAST}; stop a "
+        "simulator's driver (stop_driver) or free a port in that range."
+    )
+
+
+def _runner_pid(udid: str) -> int | None:
+    """The recorded pid for this runner, or None if there is no record.
+
+    Read before any poll, never after: a concurrent stop_driver can remove the
+    entry while a poll is waiting, and indexing it afterwards raised KeyError
+    (CodeRabbit on #362).
+    """
+    return (read_wda_state().get("runners", {}).get(udid) or {}).get("pid")
+
+
+def simulator_runner_port(udid: str) -> int | None:
+    """The port of a live WDA runner on this simulator, or None."""
+    runner = read_wda_state().get("runners", {}).get(udid)
+    if not runner or not runner.get("simulator"):
+        return None
+    pid = runner.get("pid")
+    if not pid or not _is_process_alive(pid):
+        return None
+    return runner.get("port")
+
+
+def live_simulator_runners() -> dict[str, int]:
+    """Every simulator with a live WDA runner, as {udid: port}. For restoring
+    WDA mode after a server restart -- runners outlive the server."""
+    out = {}
+    for udid, runner in read_wda_state().get("runners", {}).items():
+        if runner.get("simulator") and runner.get("port"):
+            pid = runner.get("pid")
+            if pid and _is_process_alive(pid):
+                out[udid] = runner["port"]
+    return out
+
+
+async def _answers(port: int, timeout: float = 3.0) -> bool:
+    return await _poll_wda_status(f"http://127.0.0.1:{port}", timeout=timeout)
+
+
+async def start_driver_simulator(udid: str) -> dict:
+    """Start WDA on a simulator, building it first if needed.
+
+    Returns {status, udid, pid, port, ready}. While it runs, quern serves that
+    simulator's UI reads and actions through WDA -- XCUITest's view.
+    """
+    port = simulator_runner_port(udid)
+    if port is not None:
+        # A live pid is not a working runner: it may be hung, or a start that
+        # was cancelled mid-poll. Ask it.
+        pid = _runner_pid(udid)
+        if await _answers(port) and pid is not None and simulator_runner_port(udid) == port:
+            return {"status": "already_running", "udid": udid, "pid": pid,
+                    "port": port, "ready": True}
+        logger.info("WDA on simulator %s is alive but not answering; restarting", udid[:8])
+        await stop_driver(udid)
+
+    built = await build_wda_simulator()
+    xctestrun = _find_sim_xctestrun()
+    if xctestrun is None:
+        raise RuntimeError("WDA simulator build missing after build_wda_simulator()")
+
+    raced_port: int | None = None
+    async with _sim_lock("start"):
+        # Re-checked under the lock: a concurrent start for this simulator
+        # may have just spawned one. Its readiness is polled *after* the lock
+        # is released -- the lock is shared by every simulator, and holding it
+        # through a 90s poll stalled starts for unrelated ones (CodeRabbit on
+        # #362). It only has to cover choosing a port and recording it.
+        raced_port = simulator_runner_port(udid)
+        if raced_port is None:
+            state = read_wda_state()
+            runners = state.get("runners", {})
+            runners.pop(udid, None)  # a dead entry for this simulator
+            port = _allocate_sim_port(runners)
+
+            WDA_LOG_DIR.mkdir(parents=True, exist_ok=True)
+            log_path = WDA_LOG_DIR / f"runner-{udid[:8]}.log"
+            env = dict(os.environ)
+            # xcodebuild hands TEST_RUNNER_* variables to the runner with the
+            # prefix removed; WDA reads USE_PORT.
+            env["TEST_RUNNER_USE_PORT"] = str(port)
+            logger.info("Starting WDA on simulator %s, port %d", udid[:8], port)
+            with open(log_path, "w") as log_file:
+                proc = await asyncio.create_subprocess_exec(
+                    "xcodebuild", "test-without-building",
+                    "-xctestrun", str(xctestrun),
+                    "-destination", f"id={udid}",
+                    stdout=log_file, stderr=log_file, env=env,
+                )
+
+            # Recorded before the lock is released: this entry is what reserves
+            # the port against the next start.
+            state = read_wda_state()
+            state.setdefault("runners", {})[udid] = {
+                "pid": proc.pid,
+                "port": port,
+                "simulator": True,
+                "log_path": str(log_path),
+                "started_at": datetime.now(UTC).isoformat(),
+            }
+            save_wda_state(state)
+
+    if raced_port is not None:
+        pid = _runner_pid(udid)
+        ready = await _answers(raced_port, timeout=SIM_DRIVER_START_TIMEOUT)
+        # Answering is not enough if the record went away during the poll:
+        # a concurrent stop removed it, and registering it now would route the
+        # simulator to a runner that is being torn down.
+        ready = ready and simulator_runner_port(udid) == raced_port
+        return {"status": "already_running", "udid": udid, "pid": pid,
+                "port": raced_port, "ready": ready}
+
+    ready = await _answers(port, timeout=SIM_DRIVER_START_TIMEOUT)
+    result: dict[str, Any] = {
+        "status": "started", "udid": udid, "pid": proc.pid,
+        "port": port, "ready": ready, "built": built,
+    }
+    if not ready:
+        # Not left registered: routing would send this simulator's reads to a
+        # WDA that is not answering. Stopped and removed, so it stays on its
+        # default backend, and the failure is the answer -- not a half-on mode.
+        await stop_driver(udid)
+        result["status"] = "failed"
+        diagnosis = _diagnose_runner_failure(log_path)
+        result["error"] = diagnosis or (
+            f"WDA did not answer on port {port} within "
+            f"{SIM_DRIVER_START_TIMEOUT}s; the simulator stays on its default backend."
+        )
+        result["log_path"] = str(log_path)
+    return result
+
+
+async def restore_simulator_mode(wda_client: Any) -> list[str]:
+    """Re-register every simulator whose WDA runner survived a restart and
+    still answers. Returns the UDIDs restored.
+
+    Runners outlive the server -- they are tracked by pid in wda-state.json --
+    but the routing is in memory, so without this a restart would quietly move
+    them back to sim-bridge while WDA went on running underneath.
+    """
+    restored = []
+    for udid, port in (await answering_simulator_runners()).items():
+        wda_client.register_simulator(udid, port)
+        logger.info("Simulator %s is in WDA mode (port %d)", udid[:8], port)
+        restored.append(udid)
+    return restored
+
+
+async def answering_simulator_runners() -> dict[str, int]:
+    """Simulators whose WDA runner is alive *and answering*, as {udid: port}.
+
+    For the startup restore. A pid check alone would register a hung runner,
+    or a recycled pid that is now something else entirely.
+    """
+    out = {}
+    for udid, port in live_simulator_runners().items():
+        if await _answers(port, timeout=2.0):
+            out[udid] = port
+        else:
+            logger.warning(
+                "WDA on simulator %s is not answering on port %d; leaving it on "
+                "sim-bridge (start_driver again to use WDA)", udid[:8], port,
+            )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Install
+# ---------------------------------------------------------------------------
+
+
+def _parse_ios_major_version(os_version: str) -> int:
+    """Extract major version from strings like 'iOS 17.2' or 'iOS 15.8.6'."""
+    m = re.search(r"(\d+)", os_version)
+    if not m:
+        raise ValueError(f"Cannot parse iOS version from: {os_version!r}")
+    return int(m.group(1))
+
+
+async def install_wda(udid: str, os_version: str) -> None:
+    """Install WDA app on a physical device.
+
+    Routes by iOS version:
+    - iOS 17+: xcrun devicectl device install app
+    - iOS 15-16: ideviceinstaller, or pymobiledevice3 as fallback
+    """
+    if not WDA_APP.exists():
+        raise RuntimeError(
+            f"WDA app not found at {WDA_APP} — build first"
+        )
+
+    major = _parse_ios_major_version(os_version)
+
+    if major >= 17:
+        logger.info("Installing WDA via devicectl on device %s", udid)
+        proc = await asyncio.create_subprocess_exec(
+            "xcrun", "devicectl", "device", "install", "app",
+            "--device", udid, str(WDA_APP),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        tool = "devicectl"
+    elif shutil.which("ideviceinstaller"):
+        logger.info("Installing WDA via ideviceinstaller on device %s", udid)
+        proc = await asyncio.create_subprocess_exec(
+            "ideviceinstaller", "-u", udid, "install", str(WDA_APP),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        tool = "ideviceinstaller"
+    else:
+        pmd3 = shutil.which("pymobiledevice3")
+        if not pmd3:
+            raise RuntimeError(
+                "Neither ideviceinstaller nor pymobiledevice3 found. "
+                "Install with: brew install ideviceinstaller"
+            )
+        logger.info("Installing WDA via pymobiledevice3 on device %s", udid)
+        proc = await asyncio.create_subprocess_exec(
+            pmd3, "apps", "install", "--udid", udid, str(WDA_APP),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        tool = "pymobiledevice3"
+
+    stdout, stderr = await proc.communicate()
+
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"{tool} install failed (rc={proc.returncode}): {stderr.decode()}"
+        )
+
+    # Record install in state
+    now = datetime.now(UTC).isoformat()
+    state = read_wda_state()
+    state.setdefault("installs", {})[udid] = {"installed_at": now}
+    save_wda_state(state)
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------------
+
+
+async def setup_wda(
+    udid: str,
+    os_version: str,
+    team_id: str | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Full WDA setup orchestrator.
+
+    Steps:
+    1. Discover signing identities
+    2. If no team_id provided, auto-select (1 identity) or return list (multiple)
+    3. Clone WDA repo (idempotent)
+    4. Customize WDA (inject app icon, idempotent)
+    5. Build WDA (idempotent per device+team)
+    6. Install WDA on device
+
+    Returns a result dict with status and details.
+    """
+    # Step 1: Discover signing teams from Xcode preferences
+    identities = discover_signing_identities()
+
+    if not identities:
+        return {
+            "status": "error",
+            "error": "No provisioning teams found in Xcode preferences. "
+                     "Open Xcode → Settings → Accounts and sign in with "
+                     "an Apple Developer account.",
+        }
+
+    # Step 2: Resolve team_id
+    if team_id is None:
+        # Check if a team was previously selected
+        state = read_wda_state()
+        saved_team = state.get("build_team_id")
+        valid_teams = {i["team_id"] for i in identities}
+        if saved_team and saved_team in valid_teams:
+            team_id = saved_team
+            logger.info("Reusing previously selected team %s", team_id)
+        elif len(identities) == 1:
+            team_id = identities[0]["team_id"]
+        else:
+            return {
+                "status": "needs_identity_selection",
+                "identities": identities,
+                "message": "Multiple signing identities found. "
+                           "Call again with team_id set to one of the listed team IDs.",
+            }
+
+    # Validate that the chosen team_id exists in identities
+    valid_teams = {i["team_id"] for i in identities}
+    if team_id not in valid_teams:
+        return {
+            "status": "error",
+            "error": f"team_id '{team_id}' not found in available identities. "
+                     f"Available: {sorted(valid_teams)}",
+        }
+
+    # Step 3: Clone
+    cloned = await clone_wda()
+
+    # Update clone state
+    state = read_wda_state()
+    state["cloned"] = True
+    save_wda_state(state)
+
+    # Step 4: Customize (inject app icon)
+    customize_wda()
+
+    # Step 5: Build (device-independent, keyed by team_id only)
+    built = await build_wda(team_id, force=force)
+
+    # Step 5b: Self-heal a stale signature. build_wda is cached by team, so a
+    # skipped build won't re-run the post-process re-sign. If a *previous* run
+    # left the on-disk app with a signature that no longer verifies (patched
+    # Info.plist, interrupted re-sign), installing it fails with 0xe8008001.
+    # Re-run the post-process (re-patch + re-sign) so we never install a broken
+    # bundle — without forcing a full rebuild.
+    if not built and not await _runner_app_signature_valid():
+        logger.warning(
+            "WDA Runner app signature does not verify — re-signing before install"
+        )
+        await _post_process_runner_app(team_id)
+
+    # Step 6: Install
+    await install_wda(udid, os_version)
+
+    # Look up team details for the response
+    team_info = next((i for i in identities if i["team_id"] == team_id), {})
+    team_type = team_info.get("team_type", "")
+
+    result: dict[str, Any] = {
+        "status": "ok",
+        "udid": udid,
+        "team_id": team_id,
+        "team_type": team_type,
+        "cloned": cloned,
+        "built": built,
+        "installed": True,
+    }
+
+    # Surface warnings for free/personal developer accounts
+    if _is_free_account(team_type):
+        result["warnings"] = [
+            "Free Apple developer account detected. Limitations:",
+            "- Provisioning profiles expire after 7 days "
+            "— re-run setup_wda with force:true weekly.",
+            # Two different Apple limits, previously merged into one sentence
+            # with the remedy for the wrong one. Registering a bundle ID and
+            # installing an app on a device are separate budgets.
+            "- Two budgets, and WDA spends from both. It registers 2 App IDs "
+            "(dev.quern.driver for the test bundle, .xctrunner for the "
+            "runner) against a limit of 10 per rolling 7 days — that one "
+            "clears by waiting.",
+            "- It also installs 1 app on the device (the runner, shown as "
+            "QuernDriver) against a limit of 3 free-signed apps installed at "
+            "once, leaving 2 for your own. That limit does NOT clear by "
+            "waiting: delete a free-signed app from the device, or use a paid "
+            "account ($99/yr). Xcode counts offloaded apps toward the three "
+            "as well, so check Settings > General > iPhone Storage if the "
+            "device looks emptier than the error suggests.",
+            "- The device must trust the developer profile: "
+            "Settings > General > VPN & Device Management "
+            "> tap your profile > Trust.",
+            "- If WDA fails to launch, check the runner log "
+            "at ~/.quern/wda/runner-<udid>.log.",
+        ]
+
+    return result

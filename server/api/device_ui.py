@@ -414,7 +414,7 @@ async def restore_input(request: Request, body: RestoreInputRequest):
     place it is automatic is a boot quern performed itself, where nothing is
     running yet.
     """
-    from server.device import sim_input
+    from server.device.ios import sim_input
 
     controller = _get_controller(request)
     try:

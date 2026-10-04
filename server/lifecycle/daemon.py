@@ -212,7 +212,7 @@ def _print_status(state: dict) -> None:
             print(f"{prefix}{line}")
 
     try:
-        from server.device.tunneld import PLIST_PATH, installed_plist_drift
+        from server.device.ios.tunneld import PLIST_PATH, installed_plist_drift
         # The third copy of this. Two others said "old user-home log path"
         # whichever condition had drifted; this one is printed in the start
         # banner, so it said it more often than either. Report what drifted.

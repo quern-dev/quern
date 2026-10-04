@@ -19,7 +19,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from server.device.devicectl import canonical_device_id
+from server.device.ios.devicectl import canonical_device_id
 from server.models import LogQueryParams, LogSource, TraceResponse, UtcDatetime
 from server.recording import recorder as recording_mod
 from server.trace import (

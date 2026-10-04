@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from server.device.pmd3 import Pmd3Backend, _no_tunnel_hint, _recover_tunneld_if_wedged
+from server.device.ios.pmd3 import Pmd3Backend, _no_tunnel_hint, _recover_tunneld_if_wedged
 from server.models import DeviceError
 
 #: This file *is* the discovery code -- the autouse stubs in conftest replace
@@ -38,10 +38,10 @@ class TestIsAvailable:
         backend = Pmd3Backend()
         with (
             patch(
-                "server.device.tunneld.find_pymobiledevice3_binary",
+                "server.device.ios.tunneld.find_pymobiledevice3_binary",
                 return_value=Path("/bin/pmd3"),
             ),
-            patch("server.device.pmd3.probe_command", AsyncMock(return_value=True)),
+            patch("server.device.ios.pmd3.probe_command", AsyncMock(return_value=True)),
         ):
             assert await backend.is_available() is True
 
@@ -49,16 +49,16 @@ class TestIsAvailable:
         backend = Pmd3Backend()
         with (
             patch(
-                "server.device.tunneld.find_pymobiledevice3_binary",
+                "server.device.ios.tunneld.find_pymobiledevice3_binary",
                 return_value=Path("/bin/pmd3"),
             ),
-            patch("server.device.pmd3.probe_command", AsyncMock(return_value=False)),
+            patch("server.device.ios.pmd3.probe_command", AsyncMock(return_value=False)),
         ):
             assert await backend.is_available() is False
 
     async def test_not_available(self):
         backend = Pmd3Backend()
-        with patch("server.device.tunneld.find_pymobiledevice3_binary", return_value=None):
+        with patch("server.device.ios.tunneld.find_pymobiledevice3_binary", return_value=None):
             assert await backend.is_available() is False
 
 
@@ -71,7 +71,7 @@ class TestScreenshot:
     async def test_binary_not_found(self):
         backend = Pmd3Backend()
 
-        with patch("server.device.tunneld.find_pymobiledevice3_binary", return_value=None):
+        with patch("server.device.ios.tunneld.find_pymobiledevice3_binary", return_value=None):
             with pytest.raises(DeviceError, match="pymobiledevice3 not found"):
                 await backend.screenshot("UUID")
 
@@ -81,11 +81,12 @@ class TestScreenshot:
         fake_png = b"\x89PNG\r\n\x1a\nfake_image_data"
 
         with (
-            patch("server.device.tunneld.is_tunneld_running", return_value=True),
+            patch("server.device.ios.tunneld.is_tunneld_running", return_value=True),
             patch(
-                "server.device.tunneld.find_pymobiledevice3_binary", return_value=Path("/bin/pmd3")
+                "server.device.ios.tunneld.find_pymobiledevice3_binary",
+                return_value=Path("/bin/pmd3")
             ),
-            patch("server.device.tunneld.resolve_tunnel_udid", return_value="00008130-AAAA"),
+            patch("server.device.ios.tunneld.resolve_tunnel_udid", return_value="00008130-AAAA"),
             patch("asyncio.create_subprocess_exec") as mock_exec,
             patch("tempfile.NamedTemporaryFile") as mock_tmp,
         ):
@@ -113,10 +114,11 @@ class TestScreenshot:
         fake_png = b"\x89PNG\r\n\x1a\nfake_image_data"
 
         with (
-            patch("server.device.tunneld.is_tunneld_running", return_value=False),
-            patch("server.device.pmd3._recover_tunneld_if_wedged", return_value=False),
+            patch("server.device.ios.tunneld.is_tunneld_running", return_value=False),
+            patch("server.device.ios.pmd3._recover_tunneld_if_wedged", return_value=False),
             patch(
-                "server.device.tunneld.find_pymobiledevice3_binary", return_value=Path("/bin/pmd3")
+                "server.device.ios.tunneld.find_pymobiledevice3_binary",
+                return_value=Path("/bin/pmd3")
             ),
             patch("asyncio.create_subprocess_exec") as mock_exec,
             patch("tempfile.NamedTemporaryFile") as mock_tmp,
@@ -148,11 +150,12 @@ class TestScreenshot:
         fake_png = b"\x89PNG\r\n\x1a\nfake_image_data"
 
         with (
-            patch("server.device.tunneld.is_tunneld_running", return_value=True),
+            patch("server.device.ios.tunneld.is_tunneld_running", return_value=True),
             patch(
-                "server.device.tunneld.find_pymobiledevice3_binary", return_value=Path("/bin/pmd3")
+                "server.device.ios.tunneld.find_pymobiledevice3_binary",
+                return_value=Path("/bin/pmd3")
             ),
-            patch("server.device.tunneld.resolve_tunnel_udid", return_value=None),
+            patch("server.device.ios.tunneld.resolve_tunnel_udid", return_value=None),
             patch("asyncio.create_subprocess_exec") as mock_exec,
             patch("tempfile.NamedTemporaryFile") as mock_tmp,
         ):
@@ -177,11 +180,12 @@ class TestScreenshot:
         backend = Pmd3Backend()
 
         with (
-            patch("server.device.tunneld.is_tunneld_running", return_value=True),
+            patch("server.device.ios.tunneld.is_tunneld_running", return_value=True),
             patch(
-                "server.device.tunneld.find_pymobiledevice3_binary", return_value=Path("/bin/pmd3")
+                "server.device.ios.tunneld.find_pymobiledevice3_binary",
+                return_value=Path("/bin/pmd3")
             ),
-            patch("server.device.tunneld.resolve_tunnel_udid", return_value="00008130-AAAA"),
+            patch("server.device.ios.tunneld.resolve_tunnel_udid", return_value="00008130-AAAA"),
             patch("asyncio.create_subprocess_exec") as mock_exec,
             patch("tempfile.NamedTemporaryFile") as mock_tmp,
         ):
@@ -203,10 +207,11 @@ class TestScreenshot:
         backend = Pmd3Backend()
 
         with (
-            patch("server.device.tunneld.is_tunneld_running", return_value=False),
-            patch("server.device.pmd3._recover_tunneld_if_wedged", return_value=False),
+            patch("server.device.ios.tunneld.is_tunneld_running", return_value=False),
+            patch("server.device.ios.pmd3._recover_tunneld_if_wedged", return_value=False),
             patch(
-                "server.device.tunneld.find_pymobiledevice3_binary", return_value=Path("/bin/pmd3")
+                "server.device.ios.tunneld.find_pymobiledevice3_binary",
+                return_value=Path("/bin/pmd3")
             ),
             patch("asyncio.create_subprocess_exec") as mock_exec,
             patch("tempfile.NamedTemporaryFile") as mock_tmp,
@@ -256,10 +261,11 @@ class TestScreenshotFailureNamesTheCause:
         backend = Pmd3Backend()
 
         with (
-            patch("server.device.tunneld.is_tunneld_running", return_value=False),
-            patch("server.device.pmd3._recover_tunneld_if_wedged", return_value=False),
+            patch("server.device.ios.tunneld.is_tunneld_running", return_value=False),
+            patch("server.device.ios.pmd3._recover_tunneld_if_wedged", return_value=False),
             patch(
-                "server.device.tunneld.find_pymobiledevice3_binary", return_value=Path("/bin/pmd3")
+                "server.device.ios.tunneld.find_pymobiledevice3_binary",
+                return_value=Path("/bin/pmd3")
             ),
             patch("asyncio.create_subprocess_exec") as mock_exec,
             patch("tempfile.NamedTemporaryFile") as mock_tmp,
@@ -281,11 +287,12 @@ class TestScreenshotFailureNamesTheCause:
         backend = Pmd3Backend()
 
         with (
-            patch("server.device.tunneld.is_tunneld_running", return_value=True),
+            patch("server.device.ios.tunneld.is_tunneld_running", return_value=True),
             patch(
-                "server.device.tunneld.find_pymobiledevice3_binary", return_value=Path("/bin/pmd3")
+                "server.device.ios.tunneld.find_pymobiledevice3_binary",
+                return_value=Path("/bin/pmd3")
             ),
-            patch("server.device.tunneld.resolve_tunnel_udid", return_value="00008130-AAAA"),
+            patch("server.device.ios.tunneld.resolve_tunnel_udid", return_value="00008130-AAAA"),
             patch("asyncio.create_subprocess_exec") as mock_exec,
             patch("tempfile.NamedTemporaryFile") as mock_tmp,
         ):
@@ -312,9 +319,9 @@ class TestAutoRecoveryGate:
 
     async def test_recovers_a_wedge_when_authorised(self):
         with (
-            patch("server.device.tunneld.tunneld_health", return_value=self._health("wedged")),
-            patch("server.device.tunneld.can_recover_unattended", return_value=True),
-            patch("server.device.tunneld.recover_wedged_tunneld", return_value=True) as recover,
+            patch("server.device.ios.tunneld.tunneld_health", return_value=self._health("wedged")),
+            patch("server.device.ios.tunneld.can_recover_unattended", return_value=True),
+            patch("server.device.ios.tunneld.recover_wedged_tunneld", return_value=True) as recover,
         ):
             assert await _recover_tunneld_if_wedged() is True
         recover.assert_called_once()
@@ -323,9 +330,9 @@ class TestAutoRecoveryGate:
         """Signalling a job that is not running fixes nothing, and would trade
         a clear failure for a confusing one."""
         with (
-            patch("server.device.tunneld.tunneld_health", return_value=self._health("stopped")),
-            patch("server.device.tunneld.can_recover_unattended", return_value=True),
-            patch("server.device.tunneld.recover_wedged_tunneld") as recover,
+            patch("server.device.ios.tunneld.tunneld_health", return_value=self._health("stopped")),
+            patch("server.device.ios.tunneld.can_recover_unattended", return_value=True),
+            patch("server.device.ios.tunneld.recover_wedged_tunneld") as recover,
         ):
             assert await _recover_tunneld_if_wedged() is False
         recover.assert_not_called()
@@ -335,9 +342,9 @@ class TestAutoRecoveryGate:
         it would only add seconds to a screenshot that fails either way."""
         with (
             patch(
-                "server.device.tunneld.tunneld_health", return_value=self._health("wedged")
+                "server.device.ios.tunneld.tunneld_health", return_value=self._health("wedged")
             ) as health,
-            patch("server.device.tunneld.can_recover_unattended", return_value=False),
+            patch("server.device.ios.tunneld.can_recover_unattended", return_value=False),
         ):
             assert await _recover_tunneld_if_wedged() is False
         assert health.call_count == 1, "re-probed despite having no authority to act"
@@ -346,9 +353,9 @@ class TestAutoRecoveryGate:
         """A screenshot is the wrong moment to raise an auth dialog: the
         caller is usually a script, and a blocked prompt looks like a hang."""
         with (
-            patch("server.device.tunneld.tunneld_health", return_value=self._health("wedged")),
-            patch("server.device.tunneld.can_recover_unattended", return_value=False),
-            patch("server.device.tunneld.recover_wedged_tunneld") as recover,
+            patch("server.device.ios.tunneld.tunneld_health", return_value=self._health("wedged")),
+            patch("server.device.ios.tunneld.can_recover_unattended", return_value=False),
+            patch("server.device.ios.tunneld.recover_wedged_tunneld") as recover,
         ):
             assert await _recover_tunneld_if_wedged() is False
         recover.assert_not_called()

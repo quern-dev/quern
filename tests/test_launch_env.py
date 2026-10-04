@@ -236,8 +236,8 @@ class TestAndroid:
 
 class TestTheBackends:
     async def test_simctl_restart_terminates_the_running_process(self, monkeypatch):
-        import server.device.simctl as simctl_mod
-        from server.device.simctl import SimctlBackend
+        import server.device.ios.simctl as simctl_mod
+        from server.device.ios.simctl import SimctlBackend
 
         seen: dict = {}
 
@@ -256,8 +256,8 @@ class TestTheBackends:
         assert seen["env"]["SIMCTL_CHILD_QUERN_AUTOMATION"] == "YES"
 
     async def test_simctl_without_restart_has_no_terminate_flag(self, monkeypatch):
-        import server.device.simctl as simctl_mod
-        from server.device.simctl import SimctlBackend
+        import server.device.ios.simctl as simctl_mod
+        from server.device.ios.simctl import SimctlBackend
 
         seen: dict = {}
 
@@ -282,7 +282,7 @@ class TestTheBackends:
     )
 
     async def test_running_pid_finds_the_app_and_not_a_longer_bundle_id(self):
-        from server.device.simctl import SimctlBackend
+        from server.device.ios.simctl import SimctlBackend
 
         simctl = SimctlBackend()
         simctl._run_simctl = AsyncMock(return_value=(self._LAUNCHCTL, ""))
@@ -290,7 +290,7 @@ class TestTheBackends:
         simctl._run_simctl.assert_awaited_once_with("spawn", SIM, "launchctl", "list")
 
     async def test_running_pid_of_a_stopped_app_is_none(self):
-        from server.device.simctl import SimctlBackend
+        from server.device.ios.simctl import SimctlBackend
 
         simctl = SimctlBackend()
         simctl._run_simctl = AsyncMock(return_value=(
@@ -302,7 +302,7 @@ class TestTheBackends:
         """Review: a launchd that names app jobs differently would otherwise
         report every app as stopped. A booted simulator always runs some
         (measured on iOS 26.5: Spotlight, the widget renderer)."""
-        from server.device.simctl import SimctlBackend
+        from server.device.ios.simctl import SimctlBackend
 
         simctl = SimctlBackend()
         simctl._run_simctl = AsyncMock(return_value=(
@@ -311,8 +311,8 @@ class TestTheBackends:
             await simctl.running_pid(SIM, APP)
 
     async def test_simctl_lets_env_override_quern_automation(self, monkeypatch):
-        import server.device.simctl as simctl_mod
-        from server.device.simctl import SimctlBackend
+        import server.device.ios.simctl as simctl_mod
+        from server.device.ios.simctl import SimctlBackend
 
         seen: dict = {}
 
@@ -331,7 +331,7 @@ class TestTheBackends:
         app, the second answer is false, and restarted read false."""
         import httpx
 
-        from server.device.wda_client import WdaBackend
+        from server.device.ios.wda_client import WdaBackend
 
         wda = WdaBackend()
         wda._request = AsyncMock(side_effect=httpx.ReadTimeout("slow"))
@@ -345,7 +345,7 @@ class TestTheBackends:
         has terminated the app, and was being re-sent."""
         import httpx
 
-        from server.device.wda_client import WdaBackend
+        from server.device.ios.wda_client import WdaBackend
 
         wda = WdaBackend()
         wda._request = AsyncMock(side_effect=httpx.ReadError("reset"))
@@ -360,7 +360,7 @@ class TestTheBackends:
         that kept its old environment."""
         import httpx
 
-        from server.device.wda_client import WdaBackend
+        from server.device.ios.wda_client import WdaBackend
 
         wda = WdaBackend()
         wda._request = AsyncMock(side_effect=httpx.ReadTimeout("slow"))
@@ -374,7 +374,7 @@ class TestTheBackends:
         assert await self._wda(payload).terminate_app(PHONE, APP) is expected
 
     def _wda(self, payload=None, *, raises=None):
-        from server.device.wda_client import WdaBackend
+        from server.device.ios.wda_client import WdaBackend
 
         wda = WdaBackend()
         resp = MagicMock()

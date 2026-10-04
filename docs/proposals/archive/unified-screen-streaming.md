@@ -300,7 +300,7 @@ not of Android. Framing Android as "a transport, not a frame source" was a
 conclusion about one tool, generalised too far.
 
 Quern already installs `quern-driver.apk` (a patched uiautomator2 build,
-`server/device/u2_client.py`), so on-device presence and an APK build and
+`server/device/android/u2_client.py`), so on-device presence and an APK build and
 install pipeline already exist — normally the expensive part of shipping a
 custom streamer.
 

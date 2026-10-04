@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from server.device.adb import AdbBackend
+from server.device.android.adb import AdbBackend
 from server.models import DeviceError, DeviceState, DeviceType
 
 #: This file *is* the discovery code -- the autouse stubs in conftest replace
@@ -25,9 +25,9 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 class TestIsAvailable:
     async def test_available_when_adb_on_path_and_answering(self):
-        with patch("server.device.adb._find_sdk_tool", return_value="/usr/bin/adb"):
+        with patch("server.device.android.adb._find_sdk_tool", return_value="/usr/bin/adb"):
             backend = AdbBackend()
-        with patch("server.device.adb.probe_command", AsyncMock(return_value=True)):
+        with patch("server.device.android.adb.probe_command", AsyncMock(return_value=True)):
             assert await backend.is_available() is True
 
     async def test_a_present_binary_that_does_not_answer_is_unavailable(self):
@@ -37,9 +37,9 @@ class TestIsAvailable:
         broken, and `quern doctor` called it healthy -- which sends the reader
         looking anywhere but at adb.
         """
-        with patch("server.device.adb._find_sdk_tool", return_value="/usr/bin/adb"):
+        with patch("server.device.android.adb._find_sdk_tool", return_value="/usr/bin/adb"):
             backend = AdbBackend()
-        with patch("server.device.adb.probe_command", AsyncMock(return_value=False)):
+        with patch("server.device.android.adb.probe_command", AsyncMock(return_value=False)):
             assert await backend.is_available() is False
 
     async def test_being_installed_is_a_separate_cheaper_question(self):
@@ -49,12 +49,12 @@ class TestIsAvailable:
         command it guards fails on its own terms anyway. Collapsing them would
         put a subprocess probe in front of every device listing.
         """
-        with patch("server.device.adb._find_sdk_tool", return_value="/usr/bin/adb"):
+        with patch("server.device.android.adb._find_sdk_tool", return_value="/usr/bin/adb"):
             backend = AdbBackend()
         assert backend.is_installed() is True
 
     async def test_unavailable_when_no_adb(self):
-        with patch("server.device.adb._find_sdk_tool", return_value=None):
+        with patch("server.device.android.adb._find_sdk_tool", return_value=None):
             backend = AdbBackend()
         assert await backend.is_available() is False
 
@@ -328,7 +328,7 @@ class TestOpenUrlReportsAnUnhandledUrl:
     """
 
     def _backend(self, monkeypatch, stdout, stderr=""):
-        from server.device.adb import AdbBackend
+        from server.device.android.adb import AdbBackend
 
         backend = AdbBackend()
 
@@ -453,7 +453,7 @@ class TestOpenUrlReportsAnUnhandledUrl:
         all. The decision being pinned is that each marker carries enough
         context to be adb's own error rather than an echo of the input.
         """
-        from server.device.adb import _AM_START_FAILURES
+        from server.device.android.adb import _AM_START_FAILURES
 
         for marker in _AM_START_FAILURES:
             assert marker.startswith("Error:") or marker == "unable to resolve Intent", (
@@ -517,7 +517,7 @@ class TestAdbTimeout:
 
         backend = AdbBackend()
         backend._adb_path = "/usr/bin/adb"
-        with patch("server.device.adb.asyncio.create_subprocess_exec",
+        with patch("server.device.android.adb.asyncio.create_subprocess_exec",
                    AsyncMock(return_value=Proc())):
             with pytest.raises(DeviceError, match="did not answer within 0.05s"):
                 await backend._run_adb("-s", "x", "uninstall", "p", timeout=0.05)
@@ -545,7 +545,9 @@ class TestUnjudgedRuns:
         seen = []
         backend = AdbBackend()
         backend._adb_path = "/usr/bin/adb"
-        with patch("server.device.adb.asyncio.create_subprocess_exec", self._spawn(seen, Proc())):
+        with patch(
+            "server.device.android.adb.asyncio.create_subprocess_exec", self._spawn(seen, Proc()),
+        ):
             await backend.install_apk_result("s", "/a.apk")
             assert await backend.install_apk_result("s", "/a.apk", allow_downgrade=True) == (
                 0, "Success\n", "")
@@ -553,7 +555,7 @@ class TestUnjudgedRuns:
         assert seen[1][1:] == ("-s", "s", "install", "-r", "-d", "/a.apk")
 
     async def test_a_hung_install_is_killed_and_raises_a_timeout(self):
-        from server.device.adb import AdbTimeout
+        from server.device.android.adb import AdbTimeout
 
         killed = []
 
@@ -573,7 +575,9 @@ class TestUnjudgedRuns:
 
         backend = AdbBackend()
         backend._adb_path = "/usr/bin/adb"
-        with patch("server.device.adb.asyncio.create_subprocess_exec", self._spawn([], Proc())):
+        with patch(
+            "server.device.android.adb.asyncio.create_subprocess_exec", self._spawn([], Proc()),
+        ):
             with pytest.raises(AdbTimeout, match="install did not finish within 0.05s"):
                 await backend.install_apk_result("s", "/a.apk", timeout=0.05)
         assert killed == [True]

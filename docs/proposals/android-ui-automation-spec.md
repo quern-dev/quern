@@ -56,7 +56,7 @@ Phase 1 (this spec) focuses on uiautomator2 integration. scrcpy-based input and 
 
 ## Architecture
 
-### New component: `server/device/u2_client.py`
+### New component: `server/device/android/u2_client.py`
 
 Async wrapper around `uiautomator2` that exposes the same interface as `IdbBackend` and `WdaBackend`:
 
@@ -162,7 +162,7 @@ uiautomator2 v3 manages the on-device server lifecycle automatically:
 
 Add `uiautomator2` to `requirements.txt` / `pyproject.toml`.
 
-### 2. New file: `server/device/u2_client.py`
+### 2. New file: `server/device/android/u2_client.py`
 
 - `U2Backend` class with the interface above.
 - `_connect(serial)` → lazy, cached `uiautomator2.Device` per serial.

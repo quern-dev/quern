@@ -32,7 +32,7 @@ from server.lifecycle.stale_modules import refresh_if_stale
 refresh_if_stale()
 
 from server.config import CONFIG_DIR, quern_cmd  # noqa: E402
-from server.device._xcode import xcode_available  # noqa: E402
+from server.device.ios._xcode import xcode_available  # noqa: E402
 from server.lifecycle.invocation import MENUBAR, invoked_by, run_it_yourself  # noqa: E402
 
 # ── Result types ──────────────────────────────────────────────────────────
@@ -2343,7 +2343,7 @@ def check_pymobiledevice3() -> CheckResult:
     while the user is logged in but won't be reachable at boot, which means
     the tunneld LaunchDaemon can't start until login completes.
     """
-    from server.device.tunneld import find_pymobiledevice3_binary
+    from server.device.ios.tunneld import find_pymobiledevice3_binary
 
     binary = find_pymobiledevice3_binary()
     if not binary:
@@ -2376,7 +2376,7 @@ def check_pymobiledevice3() -> CheckResult:
 
 def check_tunneld() -> CheckResult:
     """Check if the tunneld LaunchDaemon is installed and running."""
-    from server.device.tunneld import (
+    from server.device.ios.tunneld import (
         PLIST_PATH,
         TUNNELD_URL,
         installed_plist_drift,
@@ -3132,12 +3132,12 @@ def run_setup(assume_yes: bool = False) -> int:
                 # could not answer the password prompt that follows anyway,
                 # so saying yes on the user's behalf buys a hang.
                 if _prompt_yn(prompt, deliberate=True):
-                    from server.device.tunneld import install_daemon
+                    from server.device.ios.tunneld import install_daemon
                     if install_daemon() == 0:
                         print("    Waiting for tunneld to start...", end="", flush=True)
                         import urllib.request
 
-                        from server.device.tunneld import TUNNELD_URL
+                        from server.device.ios.tunneld import TUNNELD_URL
                         for _ in range(20):
                             time.sleep(0.5)
                             try:
@@ -3651,11 +3651,11 @@ def run_uninstall() -> int:
     # ── Remove tunneld LaunchDaemon ──
 
     try:
-        from server.device.tunneld import PLIST_PATH
+        from server.device.ios.tunneld import PLIST_PATH
         if PLIST_PATH.exists():
             print()
             if _prompt_yn("  Remove tunneld LaunchDaemon (requires sudo)?", default=True):
-                from server.device.tunneld import uninstall_daemon
+                from server.device.ios.tunneld import uninstall_daemon
                 uninstall_daemon()
     except Exception:
         pass  # tunneld module may not import if deps are gone

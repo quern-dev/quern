@@ -307,7 +307,7 @@ class TestCheckTools:
         ctrl.pmd3.is_available = AsyncMock(return_value=True)
         ctrl.adb.is_available = AsyncMock(return_value=True)
         ctrl.sim_bridge_manager.is_available = AsyncMock(return_value=True)
-        with patch("server.device.tunneld.is_tunneld_running", return_value=True):
+        with patch("server.device.ios.tunneld.is_tunneld_running", return_value=True):
             tools = await ctrl.check_tools()
         assert tools == {
             "simctl": True,
@@ -327,7 +327,7 @@ class TestCheckTools:
         ctrl.pmd3.is_available = AsyncMock(return_value=False)
         ctrl.adb.is_available = AsyncMock(return_value=False)
         ctrl.sim_bridge_manager.is_available = AsyncMock(return_value=False)
-        with patch("server.device.tunneld.is_tunneld_running", return_value=False):
+        with patch("server.device.ios.tunneld.is_tunneld_running", return_value=False):
             tools = await ctrl.check_tools()
         assert tools == {
             "simctl": True,
@@ -347,7 +347,7 @@ class TestCheckTools:
         ctrl.pmd3.is_available = AsyncMock(return_value=False)
         ctrl.adb.is_available = AsyncMock(return_value=False)
         ctrl.sim_bridge_manager.is_available = AsyncMock(return_value=False)
-        with patch("server.device.tunneld.is_tunneld_running", return_value=False):
+        with patch("server.device.ios.tunneld.is_tunneld_running", return_value=False):
             tools = await ctrl.check_tools()
         assert tools == {
             "simctl": False,
@@ -1294,7 +1294,7 @@ def _usb_controller(phones, usb):
     usb: usbmux's (udid, name) list. Aliases are recorded by the fake devicectl
     pass, as the real one records them from `hardwareProperties.udid`. Both
     are read at each listing, so a test can change them between listings."""
-    from server.device import devicectl
+    from server.device.ios import devicectl
 
     ctrl = DeviceController()
     ctrl.simctl.list_devices = AsyncMock(return_value=[])
@@ -1407,7 +1407,7 @@ class TestUdidMapping:
         to a crash pull, it was answered "not connected over USB" for an
         iPhone 12 that was plugged in. The alias is recorded by the refresh
         itself, as on a server that has not listed devices yet."""
-        from server.device import devicectl
+        from server.device.ios import devicectl
 
         ctrl = DeviceController()
         ctrl.simctl.list_devices = AsyncMock(return_value=[])
@@ -1434,7 +1434,7 @@ class TestUdidMapping:
         one phone could be given the other's UDID, and its crash reports filed
         under the other -- on disk, once pulls kept a directory per phone. And
         usbmux keyed by name dropped one of the two before matching began."""
-        from server.device import devicectl
+        from server.device.ios import devicectl
 
         ctrl = _usb_controller(
             {"CORE-A": ("iPhone", "00008101-AAAA"), "CORE-B": ("iPhone", "00008101-BBBB")},
@@ -1711,7 +1711,7 @@ class TestAndroidCheckTools:
         ctrl.devicectl.is_available = AsyncMock(return_value=True)
         ctrl.pmd3.is_available = AsyncMock(return_value=True)
         ctrl.adb.is_available = AsyncMock(return_value=True)
-        with patch("server.device.tunneld.is_tunneld_running", return_value=True):
+        with patch("server.device.ios.tunneld.is_tunneld_running", return_value=True):
             tools = await ctrl.check_tools()
         assert "adb" in tools
         assert tools["adb"] is True
@@ -1723,7 +1723,7 @@ class TestAndroidCheckTools:
         ctrl.devicectl.is_available = AsyncMock(return_value=False)
         ctrl.pmd3.is_available = AsyncMock(return_value=False)
         ctrl.adb.is_available = AsyncMock(return_value=False)
-        with patch("server.device.tunneld.is_tunneld_running", return_value=False):
+        with patch("server.device.ios.tunneld.is_tunneld_running", return_value=False):
             tools = await ctrl.check_tools()
         assert tools["adb"] is False
 
@@ -1732,14 +1732,14 @@ class TestAndroidUIBackendSelection:
     def test_android_emulator_uses_u2_backend(self):
         ctrl = DeviceController()
         ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR
-        from server.device.u2_client import U2Backend
+        from server.device.android.u2_client import U2Backend
 
         assert isinstance(ctrl._ui_backend("emulator-5554"), U2Backend)
 
     def test_android_physical_uses_u2_backend(self):
         ctrl = DeviceController()
         ctrl._device_type_cache["ZY224H6L"] = DeviceType.ANDROID_DEVICE
-        from server.device.u2_client import U2Backend
+        from server.device.android.u2_client import U2Backend
 
         assert isinstance(ctrl._ui_backend("ZY224H6L"), U2Backend)
 

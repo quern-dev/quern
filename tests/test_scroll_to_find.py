@@ -268,10 +268,10 @@ async def test_every_backend_accepts_the_probe_keyword():
     """
     import inspect
 
-    from server.device.idb import IdbBackend
-    from server.device.sim_bridge import SimBridgeBackend
-    from server.device.u2_client import U2Backend
-    from server.device.wda_client import WdaBackend
+    from server.device.android.u2_client import U2Backend
+    from server.device.ios.idb import IdbBackend
+    from server.device.ios.sim_bridge import SimBridgeBackend
+    from server.device.ios.wda_client import WdaBackend
 
     for backend in (SimBridgeBackend, IdbBackend, WdaBackend, U2Backend):
         params = inspect.signature(backend.describe_all).parameters

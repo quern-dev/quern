@@ -21,7 +21,7 @@ import json
 
 import pytest
 
-from server.device import devicectl
+from server.device.ios import devicectl
 from server.proxy import cert_state
 
 

@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from server.device.sim_bridge import (
+from server.device.ios.sim_bridge import (
     SIMULATOR_KIT_RELATIVE_PATHS,
     SimBridgeBackend,
     SimBridgeManager,
@@ -361,7 +361,7 @@ class TestIsAvailableResolvesTheSamePath:
         the layout check it exists to exercise -- and the two positive tests
         fail there outright.
         """
-        from server.device import sim_bridge as sb
+        from server.device.ios import sim_bridge as sb
 
         monkeypatch.setattr(sb.shutil, "which", lambda _name: "/usr/bin/swiftc")
         monkeypatch.setattr(
@@ -403,7 +403,7 @@ class TestTheBinaryCacheIsKeyedOnContent:
     """
 
     def _manager(self, monkeypatch, tmp_path, source_text: str):
-        from server.device import sim_bridge as sb
+        from server.device.ios import sim_bridge as sb
 
         src = tmp_path / "sim-bridge.swift"
         src.write_text(source_text)
@@ -439,9 +439,11 @@ class TestTheBinaryCacheIsKeyedOnContent:
             return P()
 
         monkeypatch.setattr(
-            "server.device.sim_bridge.asyncio.create_subprocess_exec", fake_compile,
+            "server.device.ios.sim_bridge.asyncio.create_subprocess_exec", fake_compile,
         )
-        monkeypatch.setattr("server.device.sim_bridge.shutil.which", lambda _n: "/usr/bin/swiftc")
+        monkeypatch.setattr(
+            "server.device.ios.sim_bridge.shutil.which", lambda _n: "/usr/bin/swiftc",
+        )
 
         await mgr.ensure_binary()
         assert compiled == [True], "the first build did not happen"
@@ -476,9 +478,11 @@ class TestTheBinaryCacheIsKeyedOnContent:
             return P()
 
         monkeypatch.setattr(
-            "server.device.sim_bridge.asyncio.create_subprocess_exec", fake_compile,
+            "server.device.ios.sim_bridge.asyncio.create_subprocess_exec", fake_compile,
         )
-        monkeypatch.setattr("server.device.sim_bridge.shutil.which", lambda _n: "/usr/bin/swiftc")
+        monkeypatch.setattr(
+            "server.device.ios.sim_bridge.shutil.which", lambda _n: "/usr/bin/swiftc",
+        )
 
         await mgr.ensure_binary()
         await mgr.ensure_binary()
@@ -514,9 +518,11 @@ class TestTheBinaryCacheIsKeyedOnContent:
             return P()
 
         monkeypatch.setattr(
-            "server.device.sim_bridge.asyncio.create_subprocess_exec", fake_compile,
+            "server.device.ios.sim_bridge.asyncio.create_subprocess_exec", fake_compile,
         )
-        monkeypatch.setattr("server.device.sim_bridge.shutil.which", lambda _n: "/usr/bin/swiftc")
+        monkeypatch.setattr(
+            "server.device.ios.sim_bridge.shutil.which", lambda _n: "/usr/bin/swiftc",
+        )
 
         # What the upgrade leaves: a binary, and nothing recording what built it.
         mgr._binary_path.write_text("the stale pre-fix binary")
@@ -546,9 +552,11 @@ class TestTheBinaryCacheIsKeyedOnContent:
             return P()
 
         monkeypatch.setattr(
-            "server.device.sim_bridge.asyncio.create_subprocess_exec", failing,
+            "server.device.ios.sim_bridge.asyncio.create_subprocess_exec", failing,
         )
-        monkeypatch.setattr("server.device.sim_bridge.shutil.which", lambda _n: "/usr/bin/swiftc")
+        monkeypatch.setattr(
+            "server.device.ios.sim_bridge.shutil.which", lambda _n: "/usr/bin/swiftc",
+        )
 
         with pytest.raises(DeviceError, match="Failed to compile"):
             await mgr.ensure_binary()
@@ -566,7 +574,7 @@ class TestTheTwoHalvesAgreeOnSymlinkedDeveloperDirs:
     """
 
     def test_a_symlinked_developer_dir_still_resolves(self, tmp_path):
-        from server.device.sim_bridge import find_simulator_kit
+        from server.device.ios.sim_bridge import find_simulator_kit
 
         contents = tmp_path / "Xcode.app" / "Contents"
         real_dev = contents / "Developer"
@@ -767,9 +775,9 @@ class TestProbeFlagIsHonouredOnEveryPath:
 
         poisoned = iter([True, False])
         with (
-            patch("server.device.sim_bridge.ax_recovery.looks_poisoned",
+            patch("server.device.ios.sim_bridge.ax_recovery.looks_poisoned",
                   lambda _flat: next(poisoned, False)),
-            patch("server.device.sim_bridge.ax_recovery.reset_bridge",
+            patch("server.device.ios.sim_bridge.ax_recovery.reset_bridge",
                   AsyncMock(return_value=True)),
         ):
             await backend.describe_all("udid", probe=False)
@@ -788,7 +796,7 @@ class TestProbeFlagIsHonouredOnEveryPath:
         whenever sim-bridge is unavailable. Checking only that it *accepts* the
         keyword let an implementation that ignored it pass.
         """
-        from server.device.idb import IdbBackend
+        from server.device.ios.idb import IdbBackend
 
         backend = IdbBackend()
         backend._run = AsyncMock(  # type: ignore[method-assign]
@@ -841,8 +849,8 @@ class TestSwipesCanBeHeld:
         idb has no way to hold a swipe, so losing this flag would put the #84
         failure back on every simulator that falls back to idb.
         """
-        from server.device.idb import IdbBackend
-        from server.device.wda_client import WdaBackend
+        from server.device.ios.idb import IdbBackend
+        from server.device.ios.wda_client import WdaBackend
 
         assert IdbBackend.swipe_is_controlled is False
         assert getattr(SimBridgeBackend, "swipe_is_controlled", True) is not False

@@ -100,7 +100,7 @@ Important but not hard.
 |---|---|
 | `device/controller.py:368` | `_device_type()` defaults an unknown UDID to `SIMULATOR` — on a machine with no simulators |
 | `device/controller.py:378` | `_require_simulator()` only tests `_is_physical`, so **Android UDIDs fall through to simctl**. Affects `erase_device`, `clear_app_data`, and all 8 app-state endpoints |
-| `device/adb.py:302` | Emulator vs physical is decided by `serial.startswith("emulator-")`. A **remote emulator** reached over `adb connect` has serial `host:port` and is misclassified as physical — losing boot, shutdown, `adb emu` GPS, and the rootable-emulator cert path. Probe `ro.kernel.qemu` / `ro.boot.qemu` instead |
+| `device/android/adb.py:302` | Emulator vs physical is decided by `serial.startswith("emulator-")`. A **remote emulator** reached over `adb connect` has serial `host:port` and is misclassified as physical — losing boot, shutdown, `adb emu` GPS, and the rootable-emulator cert path. Probe `ro.kernel.qemu` / `ro.boot.qemu` instead |
 | `controller_ui.py:44`, `screenshot_timeline.py:16`, `api/device.py:82` | Hardcoded `/tmp/quern/...`. Use `tempfile.gettempdir()` and scope per instance — see Multi-agent below |
 | `device/media/screenshots.py:102,205` | `/System/Library/Fonts/Helvetica.ttc` for annotated screenshots. Falls back to `load_default()`, so labels degrade rather than break |
 | `proxy/system_proxy.py:68`, `setup.py:2228` | `route -n get default` → `ip route get 1.1.1.1` |
@@ -300,7 +300,7 @@ One mechanism is implemented, and it is wired oddly
 
 Quern's implemented path installs to the **system** trust store —
 `/system/etc/security/cacerts/` via remount, tmpfs overlay, or API-34 `nsenter`
-APEX injection (`device/adb.py:559-697`). That needs `adb root`, hence Google
+APEX injection (`device/android/adb.py:559-697`). That needs `adb root`, hence Google
 APIs images and not Google Play ones. It is the strongest option because it
 works against any app without app changes.
 

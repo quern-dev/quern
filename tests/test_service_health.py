@@ -59,13 +59,13 @@ def launchctl(monkeypatch):
             assert cmd[:2] == ["launchctl", "print"], cmd
             return SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
 
-        monkeypatch.setattr("server.device.tunneld.subprocess.run", fake_run)
+        monkeypatch.setattr("server.device.ios.tunneld.subprocess.run", fake_run)
 
     return install
 
 
 def test_launchd_job_reads_the_scalar_fields(launchctl):
-    from server.device.tunneld import launchd_job
+    from server.device.ios.tunneld import launchd_job
 
     launchctl(LAUNCHCTL_RUNNING)
     job = launchd_job()
@@ -78,14 +78,14 @@ def test_nested_endpoint_state_does_not_overwrite_the_job_state(launchctl):
     """`launchctl print` repeats `state = active` for every endpoint. Taking the
     last match would report the job as active whatever it is really doing, and
     the wedge signature depends entirely on this field."""
-    from server.device.tunneld import launchd_job
+    from server.device.ios.tunneld import launchd_job
 
     launchctl(LAUNCHCTL_RUNNING)
     assert launchd_job()["state"] == "running"
 
 
 def test_launchd_job_is_empty_when_the_job_is_unknown(launchctl):
-    from server.device.tunneld import launchd_job
+    from server.device.ios.tunneld import launchd_job
 
     launchctl("Could not find service", returncode=113)
     assert launchd_job() == {}
@@ -95,8 +95,8 @@ def test_launchd_job_survives_launchctl_being_absent(monkeypatch):
     def boom(*_a, **_k):
         raise OSError("no launchctl")
 
-    monkeypatch.setattr("server.device.tunneld.subprocess.run", boom)
-    from server.device.tunneld import launchd_job
+    monkeypatch.setattr("server.device.ios.tunneld.subprocess.run", boom)
+    from server.device.ios.tunneld import launchd_job
 
     assert launchd_job() == {}
 
@@ -126,22 +126,22 @@ def tunneld_env(monkeypatch, tmp_path):
     async def fake_running():
         return state["serving"]
 
-    monkeypatch.setattr("server.device.tunneld.is_tunneld_running", fake_running)
-    monkeypatch.setattr("server.device.tunneld.launchd_job", lambda: state["job"])
+    monkeypatch.setattr("server.device.ios.tunneld.is_tunneld_running", fake_running)
+    monkeypatch.setattr("server.device.ios.tunneld.launchd_job", lambda: state["job"])
     monkeypatch.setattr(
-        "server.device.tunneld.installed_plist_drift", lambda: state["plist_drift"])
+        "server.device.ios.tunneld.installed_plist_drift", lambda: state["plist_drift"])
     monkeypatch.setattr(
-        "server.device.tunneld.installed_plist_log_path", lambda: Path("/old/log"))
+        "server.device.ios.tunneld.installed_plist_log_path", lambda: Path("/old/log"))
     monkeypatch.setattr(
-        "server.device.tunneld.find_pymobiledevice3_binary", lambda: state["binary"])
-    monkeypatch.setattr("server.device.tunneld.PLIST_PATH", plist)
+        "server.device.ios.tunneld.find_pymobiledevice3_binary", lambda: state["binary"])
+    monkeypatch.setattr("server.device.ios.tunneld.PLIST_PATH", plist)
     return state
 
 
 async def test_wedged_is_http_down_while_launchd_says_running(tunneld_env):
     """The #73 signature. A daemon that holds no listener and never exits is
     invisible to KeepAlive, so launchd reports it healthy forever."""
-    from server.device.tunneld import tunneld_health
+    from server.device.ios.tunneld import tunneld_health
 
     tunneld_env["serving"] = False
     tunneld_env["job"] = {"state": "running", "pid": "825"}
@@ -155,7 +155,7 @@ async def test_wedged_is_http_down_while_launchd_says_running(tunneld_env):
 async def test_stopped_is_http_down_with_launchd_not_running(tunneld_env):
     """Same HTTP symptom as wedged, opposite remedy — which is the entire
     reason the launchd state is consulted at all."""
-    from server.device.tunneld import tunneld_health
+    from server.device.ios.tunneld import tunneld_health
 
     tunneld_env["serving"] = False
     tunneld_env["job"] = {}
@@ -167,7 +167,7 @@ async def test_stopped_is_http_down_with_launchd_not_running(tunneld_env):
 async def test_the_wedged_remedy_avoids_kickstart(tunneld_env):
     """`kickstart -k` sends SIGKILL and hung launchctl on macOS 15; the codebase
     already says so in install_daemon. It must never be the advice."""
-    from server.device.tunneld import tunneld_health
+    from server.device.ios.tunneld import tunneld_health
 
     tunneld_env["serving"] = False
     tunneld_env["job"] = {"state": "running", "pid": "1"}
@@ -179,7 +179,7 @@ async def test_the_wedged_remedy_avoids_kickstart(tunneld_env):
 
 
 async def test_missing_binary_is_reported_before_anything_else(tunneld_env):
-    from server.device.tunneld import tunneld_health
+    from server.device.ios.tunneld import tunneld_health
 
     tunneld_env["binary"] = None
     health = await tunneld_health()
@@ -188,15 +188,15 @@ async def test_missing_binary_is_reported_before_anything_else(tunneld_env):
 
 
 async def test_missing_plist_reads_as_not_installed(tunneld_env, monkeypatch, tmp_path):
-    from server.device.tunneld import tunneld_health
+    from server.device.ios.tunneld import tunneld_health
 
-    monkeypatch.setattr("server.device.tunneld.PLIST_PATH", tmp_path / "absent.plist")
+    monkeypatch.setattr("server.device.ios.tunneld.PLIST_PATH", tmp_path / "absent.plist")
     health = await tunneld_health()
     assert health.status == "not_installed"
 
 
 async def test_a_serving_daemon_on_a_stale_plist_is_flagged(tunneld_env):
-    from server.device.tunneld import tunneld_health
+    from server.device.ios.tunneld import tunneld_health
 
     tunneld_env["plist_drift"] = "log path is /old/log, expected /Library/Logs/…"
     tunneld_env["job"] = {"state": "running", "pid": "5"}
@@ -211,7 +211,7 @@ async def test_a_plist_the_weaker_check_misses_is_still_flagged(tunneld_env):
     -- and launches something other than the tunnel daemon. Gating health on
     that check reported healthy while `tunneld status` said outdated, about the
     same plist."""
-    from server.device.tunneld import tunneld_health
+    from server.device.ios.tunneld import tunneld_health
 
     tunneld_env["plist_drift"] = "arguments are ['remote', 'start-tunnel'], expected …"
     tunneld_env["job"] = {"state": "running", "pid": "5"}
@@ -231,7 +231,7 @@ async def test_health_uses_the_same_check_the_cli_does(monkeypatch, tmp_path):
     the right log path, and trailing arguments that would launch something
     other than the tunnel daemon.
     """
-    from server.device import tunneld
+    from server.device.ios import tunneld
 
     binary = tmp_path / "pymobiledevice3"
     binary.write_text("#!/bin/sh\n")
@@ -283,7 +283,7 @@ async def test_a_running_daemon_from_an_old_binary_is_not_called_a_stale_plist(t
     because it left `plist_drift` at None, asserting a machine that cannot
     exist.
     """
-    from server.device.tunneld import tunneld_health
+    from server.device.ios.tunneld import tunneld_health
 
     tunneld_env["plist_drift"] = "binary is /old/pymobiledevice3, but quern now resolves …"
     tunneld_env["job"] = {"state": "running", "pid": "5",
@@ -302,7 +302,7 @@ async def test_binary_drift_is_caught_while_serving(tunneld_env):
     """The daemon runs whatever the plist froze in. A second pipx install
     shadowing it drifts silently -- the old binary keeps serving perfectly, so
     the HTTP probe stays green."""
-    from server.device.tunneld import tunneld_health
+    from server.device.ios.tunneld import tunneld_health
 
     tunneld_env["job"] = {"state": "running", "pid": "5", "program": "/other/pymobiledevice3"}
     health = await tunneld_health()
@@ -311,7 +311,7 @@ async def test_binary_drift_is_caught_while_serving(tunneld_env):
 
 
 async def test_healthy_when_everything_lines_up(tunneld_env):
-    from server.device.tunneld import tunneld_health
+    from server.device.ios.tunneld import tunneld_health
 
     tunneld_env["job"] = {
         "state": "running", "pid": "825", "program": str(tunneld_env["binary"]),
@@ -522,7 +522,7 @@ def test_reinstall_without_the_wheel_fails_cleanly(monkeypatch):
 @pytest.fixture
 def wedged_tunneld(monkeypatch):
     """A wedged daemon and a stale extension, both reported through doctor."""
-    from server.device.tunneld import TunneldHealth
+    from server.device.ios.tunneld import TunneldHealth
 
     async def health():
         return TunneldHealth(
@@ -531,7 +531,7 @@ def wedged_tunneld(monkeypatch):
             remedy="sudo launchctl bootout system/com.quern.tunneld && ...",
         )
 
-    monkeypatch.setattr("server.device.tunneld.tunneld_health", health)
+    monkeypatch.setattr("server.device.ios.tunneld.tunneld_health", health)
     monkeypatch.setattr(ext_mod, "extension_health", lambda: ext_mod.ExtensionHealth(
         status="stale", shipped="2.1/3", activated="2.0/1",
         detail="macOS is running 2.0/1 but the wheel ships 2.1/3",
@@ -587,12 +587,12 @@ def test_without_fix_the_extension_is_only_reported(wedged_tunneld, capsys):
 
 
 def test_a_healthy_extension_is_never_reinstalled(monkeypatch, capsys):
-    from server.device.tunneld import TunneldHealth
+    from server.device.ios.tunneld import TunneldHealth
 
     async def health():
         return TunneldHealth(status="healthy", serving=True, detail="serving")
 
-    monkeypatch.setattr("server.device.tunneld.tunneld_health", health)
+    monkeypatch.setattr("server.device.ios.tunneld.tunneld_health", health)
     monkeypatch.setattr(ext_mod, "extension_health", lambda: ext_mod.ExtensionHealth(
         status="healthy", shipped="2.0/1", activated="2.0/1", detail="2.0/1 activated"))
 
@@ -609,7 +609,7 @@ def test_a_broken_check_does_not_break_doctor(monkeypatch, capsys):
     async def boom():
         raise RuntimeError("launchctl exploded")
 
-    monkeypatch.setattr("server.device.tunneld.tunneld_health", boom)
+    monkeypatch.setattr("server.device.ios.tunneld.tunneld_health", boom)
     monkeypatch.setattr(ext_mod, "extension_health", lambda: (_ for _ in ()).throw(
         RuntimeError("systemextensionsctl exploded")))
 

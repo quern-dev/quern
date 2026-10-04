@@ -27,6 +27,8 @@ import pathlib
 
 import pytest
 
+from tests.test_forwarders import FORWARDED_TO
+
 _SERVER = pathlib.Path(__file__).resolve().parents[1] / "server"
 
 #: Modules whose caller is a terminal. A user running `quern setup` wants
@@ -40,7 +42,7 @@ _TERMINAL_FACING = {
     "lifecycle/menubar.py",
     "lifecycle/daemon.py",
     "lifecycle/capture_env.py",
-    "device/tunneld.py",  # the `quern tunneld ...` subcommands
+    "device/ios/tunneld.py",  # the `quern tunneld ...` subcommands
     "recording/cli.py",  # `quern record ...`, run in a shell or a CI step
 }
 
@@ -66,10 +68,19 @@ def _prints_in(path: pathlib.Path) -> list[tuple[int, str]]:
     ]
 
 
+#: Forwarders left at old paths by #396. They run no code of their own; a
+#: printing name one re-exports is printed by the module it lives in, which
+#: is checked under its own path -- and old releases import those names only
+#: from terminal callers.
+_FORWARDERS = {
+    "/".join(module.split(".")[1:]) + ".py" for module in FORWARDED_TO
+}
+
+
 def _server_path_modules() -> list[pathlib.Path]:
     return [
         p for p in sorted(_SERVER.rglob("*.py"))
-        if str(p.relative_to(_SERVER)) not in _TERMINAL_FACING
+        if str(p.relative_to(_SERVER)) not in _TERMINAL_FACING | _FORWARDERS
     ]
 
 

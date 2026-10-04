@@ -619,9 +619,9 @@ def test_the_backends_declare_how_their_swipes_end():
     every simulator that falls back to idb. WDA returns at rest, so without its
     flag a physical device pays for every read twice.
     """
-    from server.device.idb import IdbBackend
-    from server.device.sim_bridge import SimBridgeBackend
-    from server.device.wda_client import WdaBackend
+    from server.device.ios.idb import IdbBackend
+    from server.device.ios.sim_bridge import SimBridgeBackend
+    from server.device.ios.wda_client import WdaBackend
 
     assert IdbBackend.swipe_is_controlled is False
     assert getattr(SimBridgeBackend, "swipe_is_controlled", True) is not False

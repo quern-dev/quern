@@ -11,7 +11,8 @@ import sys
 from pathlib import Path
 
 from server.config import CONFIG_DIR, quern_cmd
-from server.device import ax_recovery, probing
+from server.device import probing
+from server.device.ios import ax_recovery
 from server.models import DeviceError
 from server.tooling.tool_probe import probe_command
 

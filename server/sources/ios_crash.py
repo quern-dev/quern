@@ -101,7 +101,7 @@ def command() -> list[str] | None:
     """
     if importlib.util.find_spec("pymobiledevice3") is not None:
         return [sys.executable, "-m", "pymobiledevice3"]
-    from server.device.tunneld import find_pymobiledevice3_binary
+    from server.device.ios.tunneld import find_pymobiledevice3_binary
 
     path = find_pymobiledevice3_binary()
     return [str(path)] if path else None

@@ -76,7 +76,7 @@ reviews:
         home, lock, siri, volume*, applepay). A timeout on a write is ambiguous:
         the command was already written to stdin and may have executed. See #74.
 
-    - path: "server/device/sim_bridge.py"
+    - path: "server/device/ios/sim_bridge.py"
       instructions: |
         The asyncio.Lock serialising commands is load-bearing, not tidiness. The
         wire protocol carries no request IDs — sim-bridge.swift reads with

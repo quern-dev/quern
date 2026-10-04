@@ -325,7 +325,7 @@ def test_the_two_pipx_candidate_lists_agree():
     lookup does describes a machine the lookup does not see."""
     from pathlib import Path
 
-    from server.device.tunneld import pipx_candidates
+    from server.device.ios.tunneld import pipx_candidates
     from server.lifecycle.capture_env import CANDIDATES
 
     home = str(Path.home())
