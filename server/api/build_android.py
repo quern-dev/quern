@@ -21,8 +21,8 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from server.device import build_records, gradle
-from server.device import jdk as jdk_mod
+from server.builds import build_records, gradle
+from server.builds import jdk as jdk_mod
 from server.device.adb import AdbTimeout
 from server.models import (
     BuildDiagnostic,

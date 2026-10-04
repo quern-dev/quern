@@ -6,7 +6,7 @@ nothing at all in a stripped Release build. Only the exact build's DWARF turns
 an offset into `AppDelegate.swift:13`, so each image is matched by UUID:
 
 1. quern's own build records, which keep a device build's dSYMs past the next
-   build (`server/device/build_records.py`);
+   build (`server/builds/build_records.py`);
 2. Spotlight, which indexes dSYMs in Xcode's DerivedData and archives
    (`com_apple_xcode_dsym_uuids`). It does not index `~/.quern`, being hidden,
    which is one reason the records come first.
@@ -32,7 +32,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from server.device import build_records
+from server.builds import build_records
 from server.models import CrashFrame, CrashImage, CrashReport, ImageSymbols
 from server.sources import crash_frames, symbolicate_android
 

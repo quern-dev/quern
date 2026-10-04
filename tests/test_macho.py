@@ -12,7 +12,7 @@ from __future__ import annotations
 import struct
 import uuid
 
-from server.device import macho
+from server.builds import macho
 
 ARM64 = 0x0100000C
 X86_64 = 0x01000007

@@ -997,7 +997,7 @@ class TestOneRead:
 class TestLastFew:
     def test_an_unsearchable_parent_is_not_no_records(self, tmp_path):
         """3.14 answered is_dir() False and globbed nothing: "no records"."""
-        from server.device import build_records
+        from server.builds import build_records
         parent = tmp_path / "state"
         (parent / "build-records").mkdir(parents=True)
         parent.chmod(0)

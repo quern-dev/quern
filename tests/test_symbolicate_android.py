@@ -21,8 +21,8 @@ from pathlib import Path
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from server.builds import build_records, elf
 from server.config import ServerConfig
-from server.device import build_records, elf
 from server.main import create_app
 from server.models import CrashFrame, CrashImage, CrashReport
 from server.sources import android_dropbox, crash_frames, symbolicate, symbolicate_android

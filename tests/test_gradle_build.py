@@ -18,8 +18,8 @@ import pytest
 from fastapi import HTTPException
 
 from server.api import build_android, build_app
-from server.device import gradle
-from server.device import jdk as jdk_mod
+from server.builds import gradle
+from server.builds import jdk as jdk_mod
 from server.device.adb import AdbTimeout
 from server.models import BuildDiagnostic, BuildResult, DeviceError, DeviceState, DeviceType
 
@@ -1250,11 +1250,13 @@ def test_every_environment_kind_the_code_reports_is_described():
     added in the code and not there is a kind nobody is told about (review)."""
     import re as _re
 
+    from server.api import build_android
     from server.models import EnvironmentProblem
     produced = set()
-    for source in (Path(__file__).parents[1] / "server" / "device" / "gradle.py",
-                   Path(__file__).parents[1] / "server" / "api" / "build_android.py"):
-        produced |= set(_re.findall(r'kind="([a-z_]+)"', source.read_text()))
+    # Located through the modules, not spelled as paths, so a move cannot
+    # leave this reading a file that is no longer there (#396).
+    for module in (gradle, build_android):
+        produced |= set(_re.findall(r'kind="([a-z_]+)"', Path(module.__file__).read_text()))
     described = set(_re.findall(r"'([a-z_]+)'",
                                 EnvironmentProblem.model_fields["kind"].description))
     assert produced and produced <= described, sorted(produced - described)

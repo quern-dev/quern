@@ -21,7 +21,7 @@ from types import SimpleNamespace
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from server.device import build_records
+from server.builds import build_records
 from server.models import BuildBinary, BuildRecord, BuildResult
 from tests.test_macho import ARM64, X86_64, fat, thin
 

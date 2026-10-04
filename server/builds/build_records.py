@@ -39,8 +39,8 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from server.builds import elf, macho
 from server.config import CONFIG_DIR
-from server.device import elf, macho
 from server.models import BuildBinary, BuildRecord
 
 logger = logging.getLogger(__name__)
