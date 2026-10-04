@@ -57,6 +57,12 @@ def test_nothing_in_this_tree_imports_through_the_forwarders():
         if ".".join(rel.parts) in forwarders:
             continue
         for node in ast.walk(ast.parse(path.read_text())):
+            # `import server.device.tool_updates` as well as `from ... import`
+            # (CodeRabbit on #400).
+            if isinstance(node, ast.Import) and any(
+                alias.name in forwarders for alias in node.names
+            ):
+                offenders.append(f"{rel}:{node.lineno}")
             if isinstance(node, ast.ImportFrom) and node.module in forwarders:
                 offenders.append(f"{rel}:{node.lineno}")
             if isinstance(node, ast.ImportFrom) and node.module == "server.device":
