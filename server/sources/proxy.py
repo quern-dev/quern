@@ -48,6 +48,17 @@ logger = logging.getLogger(__name__)
 #: process would run its module-level monkey-patch of mitmproxy's connection
 #: handler here too. `tests/test_sim_tls.py` asserts the two spellings agree.
 TRUSTED_SIMULATORS_ENV = "QUERN_TRUSTED_SIMULATORS"
+#: Where the addon writes events: a pipe of their own, not mitmdump's stdout.
+#: mitmproxy logs errors and their tracebacks to stdout even with `--quiet`,
+#: and a traceback line that is only a string literal parses as JSON -- which
+#: ended the read loop twice in a CI run and took local capture down with it.
+EVENT_FD_ENV = "QUERN_EVENT_FD"
+#: The longest event line read whole. A flow carries its bodies; past this the
+#: line is skipped and logged, never fatal.
+EVENT_LINE_LIMIT = 1024 * 1024
+#: Bad lines logged in full before the log thins out to one in every hundred,
+#: so something spewing cannot fill the server log.
+BAD_LINES_LOGGED = 20
 
 
 def validate_filter_pattern(pattern: str) -> None:
@@ -135,6 +146,12 @@ class ProxyAdapter(BaseSourceAdapter):
         self._process: asyncio.subprocess.Process | None = None
         self._read_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
+        self._stdout_task: asyncio.Task | None = None
+        # The addon's events, on their own pipe (EVENT_FD_ENV). None reads
+        # stdout instead, as tests and an addon from before the pipe do.
+        self._events: asyncio.StreamReader | None = None
+        self._events_transport: asyncio.ReadTransport | None = None
+        self._bad_lines = 0
 
         # Intercept state (server-side mirror of addon state)
         self._intercept_pattern: str | None = None
@@ -321,6 +338,11 @@ class ProxyAdapter(BaseSourceAdapter):
             else ",".join(self._trusted_simulators)
         )
 
+        # The events pipe. The child keeps the write end; the parent closes its
+        # copy as soon as the child has it, so the read end sees EOF exactly
+        # when mitmdump exits.
+        read_fd, write_fd = os.pipe()
+        env[EVENT_FD_ENV] = str(write_fd)
         try:
             self._process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -328,15 +350,43 @@ class ProxyAdapter(BaseSourceAdapter):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 stdin=asyncio.subprocess.PIPE,
-                limit=1024 * 1024,  # 1MB line buffer (default 64KB too small for large bodies)
+                pass_fds=(write_fd,),
+                limit=EVENT_LINE_LIMIT,
             )
         except Exception as e:
+            os.close(read_fd)
             self._error = f"Failed to start mitmdump: {e}"
             logger.error(self._error)
+            return
+        finally:
+            os.close(write_fd)
+
+        try:
+            loop = asyncio.get_running_loop()
+            self._events = asyncio.StreamReader(limit=EVENT_LINE_LIMIT, loop=loop)
+            self._events_transport, _ = await loop.connect_read_pipe(
+                lambda: asyncio.StreamReaderProtocol(self._events, loop=loop),
+                os.fdopen(read_fd, "rb", buffering=0),
+            )
+        except Exception as e:
+            # No channel means no events: a proxy that captures and reports
+            # nothing. Stop it rather than run it blind.
+            os.close(read_fd)
+            self._events = None
+            self._error = f"Could not read mitmdump's events: {e}"
+            logger.error(self._error)
+            self._process.kill()
+            await self._process.wait()
+            self._process = None
             return
 
         self._running = True
         self.started_at = self._now()
+        # A start that succeeded supersedes whatever ended the last run. Kept,
+        # `/proxy/status` went on reporting "error" for a proxy that was up and
+        # capturing, which reads as down to anything gating on it.
+        self._error = None
+        self._bad_lines = 0
         # Cleared here as well as in `stop()`, because the field says "since the
         # proxy started" and `stop()` is not always what ended the last run: if
         # mitmdump exits on its own, `_read_loop` just falls out of its loop and
@@ -354,6 +404,7 @@ class ProxyAdapter(BaseSourceAdapter):
             })
         self._read_task = asyncio.create_task(self._read_loop())
         self._stderr_task = asyncio.create_task(self._drain_stderr())
+        self._stdout_task = asyncio.create_task(self._drain_stdout())
         logger.info(
             "Proxy adapter started (mitmdump on %s:%d)",
             self.listen_host,
@@ -376,7 +427,7 @@ class ProxyAdapter(BaseSourceAdapter):
             except TimeoutError:
                 self._process.kill()
 
-        for task in (self._read_task, getattr(self, "_stderr_task", None)):
+        for task in (self._read_task, self._stderr_task, self._stdout_task):
             if task and not task.done():
                 task.cancel()
                 try:
@@ -384,9 +435,14 @@ class ProxyAdapter(BaseSourceAdapter):
                 except asyncio.CancelledError:
                     pass
 
+        if self._events_transport is not None:
+            self._events_transport.close()
+        self._events_transport = None
+        self._events = None
         self._process = None
         self._read_task = None
         self._stderr_task = None
+        self._stdout_task = None
 
         # Clear intercept/mock/bypass state
         self._intercept_pattern = None
@@ -653,13 +709,72 @@ class ProxyAdapter(BaseSourceAdapter):
     # Read loop and event handlers
     # -------------------------------------------------------------------
 
-    async def _read_loop(self) -> None:
-        """Read JSON Lines from mitmdump stdout and dispatch."""
-        assert self._process is not None
-        assert self._process.stdout is not None
+    async def _event_lines(self):
+        """Raw lines from the addon: its events pipe, or stdout without one.
 
+        A line past EVENT_LINE_LIMIT is skipped, not fatal. StreamReader raises
+        for it and discards what it buffered, and an `async for` would have
+        ended there -- the same death as a bad line, by another road.
+        """
+        assert self._process is not None
+        stream = self._events if self._events is not None else self._process.stdout
+        assert stream is not None
+        if not isinstance(stream, asyncio.StreamReader):
+            async for raw_line in stream:
+                yield raw_line
+            return
+        while True:
+            try:
+                raw_line = await stream.readline()
+            except ValueError:
+                self._bad_line("an event line over the size limit was skipped", b"")
+                continue
+            if not raw_line:
+                return
+            yield raw_line
+
+    def _bad_line(self, what: str, line: bytes | str) -> None:
+        """Log a line the loop could not use, quoting it -- bounded."""
+        self._bad_lines += 1
+        if self._bad_lines <= BAD_LINES_LOGGED or self._bad_lines % 100 == 0:
+            text = line.decode("utf-8", errors="replace") if isinstance(line, bytes) else line
+            logger.warning(
+                "mitmdump: %s (%d so far): %r", what, self._bad_lines, text[:500],
+            )
+
+    async def _dispatch(self, data: dict) -> None:
+        msg_type = data.get("type")
+        if msg_type == "flow":
+            await self._handle_flow(data)
+        elif msg_type == "request_started":
+            self._handle_started(data)
+        elif msg_type == "intercepted":
+            self._handle_intercepted(data)
+        elif msg_type == "released":
+            self._handle_released(data)
+        elif msg_type == "status":
+            await self._handle_status_event(data)
+        elif msg_type == "tls_rejected":
+            self._handle_tls_rejected(data)
+        elif msg_type == "tls_passthrough":
+            self._handle_tls_passthrough(data)
+        elif msg_type == "error":
+            logger.warning("Addon error: %s", data)
+
+    async def _read_loop(self) -> None:
+        """Read the addon's events and dispatch them, one line at a time.
+
+        Nothing a single line holds may end this loop. It did, twice in one
+        CI run: a line that parsed as a JSON string reached `data.get`, the
+        exception left the loop, and mitmdump kept running with nobody reading
+        it -- so local capture routed the simulator into a pipe that filled and
+        stalled, and every request failed until someone restarted the proxy.
+        A bad line now costs that line, and a handler's bug costs its event.
+        """
+        assert self._process is not None
+        process = self._process
         try:
-            async for raw_line in self._process.stdout:
+            async for raw_line in self._event_lines():
                 if not self._running:
                     break
 
@@ -670,26 +785,18 @@ class ProxyAdapter(BaseSourceAdapter):
                 try:
                     data = json.loads(line)
                 except json.JSONDecodeError:
-                    logger.debug("Non-JSON line from mitmdump: %s", line[:200])
+                    self._bad_line("a line that is not JSON", line)
+                    continue
+                if not isinstance(data, dict):
+                    self._bad_line("a JSON line that is not an object", line)
                     continue
 
-                msg_type = data.get("type")
-                if msg_type == "flow":
-                    await self._handle_flow(data)
-                elif msg_type == "request_started":
-                    self._handle_started(data)
-                elif msg_type == "intercepted":
-                    self._handle_intercepted(data)
-                elif msg_type == "released":
-                    self._handle_released(data)
-                elif msg_type == "status":
-                    await self._handle_status_event(data)
-                elif msg_type == "tls_rejected":
-                    self._handle_tls_rejected(data)
-                elif msg_type == "tls_passthrough":
-                    self._handle_tls_passthrough(data)
-                elif msg_type == "error":
-                    logger.warning("Addon error: %s", data)
+                try:
+                    await self._dispatch(data)
+                except Exception:
+                    logger.exception(
+                        "Proxy event handler failed; skipping the event: %r", line[:500],
+                    )
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -697,11 +804,58 @@ class ProxyAdapter(BaseSourceAdapter):
                 self._error = f"Read loop error: {e}"
                 logger.exception("Proxy read loop failed")
         finally:
+            unexpected = self._running
             self._running = False
             # Nothing mitmdump was carrying will finish now. Left in place,
             # they would read as in flight forever.
             if dropped := self.flow_store.drop_pending():
                 logger.info("Proxy stopped with %d request(s) in flight", dropped)
+            if unexpected:
+                await self._end_unexpected_run(process)
+
+    async def _end_unexpected_run(self, process) -> None:
+        """The loop ended without `stop()`: report it, and leave nothing half-alive.
+
+        A mitmdump nobody reads is worse than none. Local capture keeps routing
+        the captured apps through it, its output pipe fills, and their requests
+        hang -- while a proxy that has exited lets them through uncaptured.
+        """
+        returncode = getattr(process, "returncode", None)
+        if returncode is None and isinstance(process, asyncio.subprocess.Process):
+            logger.error("Proxy read loop ended with mitmdump still running; stopping it")
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5.0)
+            except TimeoutError:
+                process.kill()
+            returncode = process.returncode
+        if not self._error:
+            self._error = (
+                f"mitmdump exited unexpectedly (code {returncode})"
+                if returncode is not None else "mitmdump stopped unexpectedly"
+            )
+        logger.error("Proxy stopped: %s", self._error)
+        try:
+            await asyncio.to_thread(update_state, proxy_status="stopped")
+        except Exception:
+            logger.exception("Could not record the proxy as stopped")
+
+    async def _drain_stdout(self) -> None:
+        """Log mitmdump's own stdout. Events no longer travel here, but
+        mitmproxy's logger does -- its errors and tracebacks -- and those are
+        what explain a crash afterwards."""
+        assert self._process is not None
+        if self._events is None or self._process.stdout is None:
+            return  # without a pipe, stdout is the events: _read_loop owns it
+        try:
+            async for raw_line in self._process.stdout:
+                line = raw_line.decode("utf-8", errors="replace").rstrip()
+                if line:
+                    logger.warning("mitmdump: %s", line)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Could not read mitmdump's stdout")
 
     async def _drain_stderr(self) -> None:
         """Read and log stderr from mitmdump so errors aren't lost."""
