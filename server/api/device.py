@@ -604,16 +604,17 @@ async def install_app(request: Request, body: InstallAppRequest):
 @router.post("/app/launch")
 @logged_action("launch_app", category="device.action")
 async def launch_app(request: Request, body: LaunchAppRequest):
-    """Launch an app on a simulator."""
+    """Launch an app on a simulator, emulator, or device."""
     controller = _get_controller(request)
     try:
         resolved = await controller.resolve_udid(body.udid)
         if body.capture_screenshots:
             before = await _capture_action_screenshot(controller, resolved, "launch_before")
-        udid = await controller.launch_app(
+        udid, info = await controller.launch_app(
             bundle_id=body.bundle_id, udid=body.udid, env=body.env,
         )
-        result: dict = {"status": "launched", "udid": udid, "bundle_id": body.bundle_id}
+        result: dict = {"status": "launched", "udid": udid, "bundle_id": body.bundle_id,
+                        **info}
         if body.capture_screenshots:
             await asyncio.sleep(body.settle_delay)
             after = await _capture_action_screenshot(controller, udid, "launch_after")
