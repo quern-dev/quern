@@ -773,14 +773,18 @@ async def set_location(request: Request, body: SetLocationRequest):
 @router.post("/open-url")
 @logged_action("open_url", category="device.action")
 async def open_url(request: Request, body: OpenUrlRequest):
-    """Open a URL on a simulator or emulator."""
+    """Open a URL on a simulator, emulator, or device."""
     controller = _get_controller(request)
     try:
         resolved = await controller.resolve_udid(body.udid)
         if body.capture_screenshots:
             before = await _capture_action_screenshot(controller, resolved, "open_url_before")
-        udid = await controller.open_url(url=body.url, udid=body.udid, bundle_id=body.bundle_id)
-        result: dict = {"status": "ok", "udid": udid, "url": body.url}
+        udid, outcome = await controller.open_url(
+            url=body.url, udid=body.udid, bundle_id=body.bundle_id, direct=body.direct)
+        # Still "ok" when it opened elsewhere: the URL was opened, and where it
+        # went -- with `warning` saying so -- is the answer a deep-link test is
+        # asking for.
+        result: dict = {"status": "ok", "udid": udid, "url": body.url, **outcome}
         if body.capture_screenshots:
             await asyncio.sleep(body.settle_delay)
             after = await _capture_action_screenshot(controller, udid, "open_url_after")

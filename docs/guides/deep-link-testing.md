@@ -21,7 +21,13 @@ These are the "proper" deep links — verified, secure, and they work even if th
 
 ## Testing with open_url
 
-Quern's `open_url` dispatches URIs directly through the OS's intent resolver (Android) or URL dispatch system (iOS). This is the same code path as tapping a link in a text message, a push notification, or another app — **not** the same as opening in a browser.
+Quern's `open_url` opens a URL the way a tapped link arrives, through the operating system's own routing:
+
+- **iOS simulator**: `simctl openurl`, whichever UI backend is reading the screen.
+- **Physical iPhone**: WDA's `/url` with no bundle id (iOS 16.4+), which asks the system to open the URL as another app would. With a bundle id WDA would hand the URL to the app directly and skip the universal-link check, so quern never sends one.
+- **Android**: a `VIEW` intent with no package, carrying the `BROWSABLE` category for an http(s) link, as a browser tap does. Other schemes go without it, since a viewer such as Contacts' for `content://` URIs does not declare it.
+
+Pass `bundle_id` to have quern confirm where the link went — see [Did it open in the app?](#did-it-open-in-the-app) below.
 
 ### Testing Custom Schemes
 
@@ -31,14 +37,9 @@ This is the simplest case. The OS looks up which app registered the `myapp://` s
 
 > "Open the deep link, then check if we landed on the order detail screen for order 12345"
 
-What happens when nothing handles the scheme differs by platform, and the difference matters:
+When nothing handles the scheme, every platform fails loudly. On a simulator `simctl` raises with `NSOSStatusErrorDomain, code=-10814`; on a physical iPhone WDA answers with `LSApplicationWorkspaceErrorDomain Code=115` (measured on iOS 26.5), and quern raises that. On Android `am start` exits 0 even when it cannot resolve the intent, so quern reads its output and raises "No app on … handled …" ([#78](https://github.com/quern-dev/quern/issues/78)).
 
-- **iOS** fails loudly. `simctl` exits non-zero and Quern raises, so you get an error containing `NSOSStatusErrorDomain, code=-10814` and `Simulator device failed to open <url>`.
-- **Android currently reports success.** `am start` exits 0 even when it cannot resolve the intent — it writes `Error: Activity not started, unable to resolve Intent` to stderr and returns 0 anyway — so `open_url` answers `{"status": "ok"}` for a URL nothing can open. It is indistinguishable from a working deep link.
-
-So on Android, **do not treat `status: ok` as evidence the link resolved.** Verify the destination instead: follow the call with `get_screen_summary` (or `wait_for_element` on something only the target screen has) and assert you actually landed there. That is the right habit on both platforms, and on Android it is the only signal you have.
-
-This is tracked as [#78](https://github.com/quern-dev/quern/issues/78); once it's fixed, a failed Android dispatch will raise like iOS does.
+A link that *is* handled can still land on the wrong screen, so verify the destination: pass `bundle_id`, and follow the call with `wait_for_element` on something only the target screen has.
 
 ### Testing Universal Links / App Links
 
@@ -46,22 +47,33 @@ This is tracked as [#78](https://github.com/quern-dev/quern/issues/78); once it'
 
 This is where it gets subtle. When you use `open_url` with an HTTPS URL:
 
-- **On Android**: `am start -a android.intent.action.VIEW` sends the URL through the intent resolver. If the app has a verified App Link for that domain, the app opens directly. If not, the user gets a disambiguation dialog (or it opens in the browser).
-- **On iOS**: `simctl openurl` dispatches through the same system as link taps. If the app has a valid universal link registration for the domain, the app opens. If not, Safari opens.
+- **On Android**: the intent goes with no package and `BROWSABLE`, so the system resolves it as it would a tap. If the app has a verified App Link for that domain, the app opens directly. If not, the browser opens. If two activities claim the path, Android shows its app chooser, and so does a user's tap.
+- **On iOS**: `simctl openurl` on a simulator, WDA's `/url` on a device, both through the system that handles link taps. If the app has a valid universal link registration for the path, the app opens. If not, Safari opens.
 
 So `open_url` with an HTTPS URL tests whether verification is actually working — **for a build where verification is supposed to work.** On a release build, the browser opening instead of your app means something in the chain (server config → OS verification → app entitlements) is broken.
 
 **On a debug or staging build, the browser opening is often correct behaviour rather than a bug** — but for different reasons per platform, and only Android gives you a way around it.
 
-**Android.** Debug builds are usually signed with a keystore whose certificate hash is absent from `assetlinks.json`, and staging domains frequently host no verification file at all, so the link genuinely is not a verified App Link. Auditing assetlinks here means debugging something that is working as configured. To drive the link into the app anyway, name the package:
+**Android.** Debug builds are usually signed with a keystore whose certificate hash is absent from `assetlinks.json`, and staging domains frequently host no verification file at all, so the link genuinely is not a verified App Link. Auditing assetlinks here means debugging something that is working as configured. To drive the link into the app anyway, deliver it to the package:
 
-> "Open https://staging.myapp.com/product/abc123 on the emulator, targeting com.myapp.debug"
+> "Open https://staging.myapp.com/product/abc123 on the emulator with direct=true, bundle_id com.myapp.debug"
 
-`open_url` accepts a package that is passed straight to `am start`, delivering the intent to that app and bypassing verification entirely.
+`direct=true` addresses the intent to `bundle_id`, as an Espresso test's `setPackage` does, bypassing verification entirely. Keep it for links the system will not route: it cannot find a link a user's tap would not reach, and it can show a chooser a tap would not, or skip one a tap would show. Test production links without it.
 
-**iOS has no equivalent bypass.** `open_url` calls `simctl openurl`, which takes only a URL — the `bundle_id` parameter is accepted by the API but **ignored on iOS**, so passing it changes nothing and gives no warning that it did nothing. If Safari opens on iOS, that is a real signal about your Associated Domains entitlement and AASA file, not something to wave away as "just a debug build". Test iOS routing through your custom scheme, and test universal links with a build whose entitlements actually match the domain.
+**iOS has no equivalent bypass.** `direct=true` is refused on iOS with a 400, rather than quietly taking the system route for a caller who believes it bypassed verification; `bundle_id` there only names the app to confirm. If Safari opens on iOS, that is a real signal about your Associated Domains entitlement and AASA file, not something to wave away as "just a debug build". Test iOS routing through your custom scheme, and test universal links with a build whose entitlements actually match the domain.
 
 Either way, keep the two questions apart: **routing** (does the path reach the right screen with the right parameters) and **verification** (does the OS agree the domain belongs to your app). They fail independently, so testing them together tells you less than testing them separately.
+
+### Did it open in the app?
+
+`open_url` succeeding means the URL was opened, not that the app took it — a path the domain does not claim opens in the browser, and that is still a successful open. Pass `bundle_id` and quern reports what happened:
+
+- `opened_in_app`: whether that app was in front once the hand-over had settled. Two seconds pass before a read counts, because both wrong answers were measured inside that window: on an iPhone Safari took the front about a second after the open while the app still read as in front, and on Android an activity that crashed on the link was in front for 0.4 seconds first.
+- `foreground_app`: what was in front instead — a bundle id or package on a device, the display name on a simulator — and on Android `foreground_activity`.
+- `crashed` (Android): whether the app crashed after the open, read from the crash buffer. The screen cannot say: a crash can leave the home screen in front, or the app's own previous screen, which looks exactly like the link having opened.
+- `warning`: where the link went and what that usually means — not claimed by the domain, Android's app chooser, a crash.
+
+`opened_in_app` and `crashed` are null, with `opened_in_app_error` or `crash_check_error`, when quern could not tell: that is never reported as either answer.
 
 ### Testing Both for the Same Screen
 

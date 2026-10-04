@@ -670,7 +670,7 @@ Use this to build visual test reports — every action becomes a timestamped ste
   });
 
   server.registerTool("open_url", {
-    description: `Open a URL on a simulator or emulator using the platform's default handler. Supports any URI scheme the device has a handler for: https://, geo: (maps), tel:, mailto:, custom app URL schemes, deep links, universal links, and settings URIs (Android: android.settings.* actions, iOS: App-prefs:).
+    description: `Open a URL on a simulator, emulator, or physical iPhone using the platform's default handler. Supports any URI scheme the device has a handler for: https://, geo: (maps), tel:, mailto:, custom app URL schemes, deep links, universal links, and settings URIs (Android: android.settings.* actions, iOS: App-prefs:).
 
 Note: tel: and mailto: are unavailable on iOS simulators (no Phone or Mail app).
 
@@ -680,7 +680,11 @@ Examples:
 - Settings: "App-prefs:WIFI" (iOS) — Android uses action-based intents via adb
 - Deep link: "myapp://path/to/screen"
 
-Android deep links: pass bundle_id (the app package) to deliver the URL straight to that app. Needed for https deep links on debug/staging builds, which usually aren't verified App Links — without a package target Android opens the browser instead of the app.`,
+Deep links open the way a tapped link does, on every platform: through the system's own routing, so an https link reaches the app only if the domain says it may -- apple-app-site-association on iOS (simctl openurl on a simulator, whichever UI backend is reading it; WDA's /url on a physical iPhone, iOS 16.4+), assetlinks.json App Links on Android (a VIEW intent with no package, carrying the BROWSABLE category a browser tap does for an http(s) link; other schemes go without it, as before). That is the route that tests what a user gets.
+
+direct=true (Android only) delivers the intent to bundle_id instead, bypassing App Links verification the way the app's Espresso tests do. Use it for staging and other debug builds, whose links are not verified App Links and would otherwise open in the browser. iOS refuses direct: it has no route that keeps universal-link routing.
+
+bundle_id names the app the link should open in, and quern reports whether it did: opened_in_app true/false with foreground_app (a bundle id or package on a device, the display name on a simulator) and on Android foreground_activity, plus a warning when it went elsewhere -- the browser, or Android's app chooser (more than one activity claims the URL). On Android, crashed says whether the app crashed after the open, read from the crash buffer, because a crash can leave the app's own previous screen in front and look like success. opened_in_app and crashed are null, with opened_in_app_error or crash_check_error, when quern could not tell. A sighting counts only 2s after the open, so a confirmed open takes at least that long. 'via' names the transport (simctl, wda, adb) and 'route' the routing (system, direct).`,
     inputSchema: strictParams({
       url: z.string().describe(
         "URL or URI to open (e.g. https://example.com, geo:48.8,2.3?z=15, maps://?ll=48.8,2.3)"
@@ -692,7 +696,11 @@ Android deep links: pass bundle_id (the app package) to deliver the URL straight
       bundle_id: z
         .string()
         .optional()
-        .describe("Android only: app package to receive the intent directly (bypasses App Links verification). Use for deep links on debug/staging builds; ignored on iOS."),
+        .describe("The app the link should open in. quern waits up to 5s for it to come to the front and reports opened_in_app. It does not change how the URL is delivered unless direct=true."),
+      direct: z
+        .boolean()
+        .optional()
+        .describe("Android only: deliver the intent to bundle_id instead of the system's routing, bypassing App Links verification (as Espresso does). Needed for staging/debug builds, whose links are not verified App Links. Requires bundle_id; refused on iOS."),
       include_screen_context: z
         .boolean()
         .default(false)
@@ -708,11 +716,12 @@ Android deep links: pass bundle_id (the app package) to deliver the URL straight
         .optional()
         .describe("Seconds to wait before capturing after screenshot/screen context (default 1.0)."),
     }),
-  }, async ({ url, udid, bundle_id, include_screen_context, capture_screenshots, settle_delay }) => {
+  }, async ({ url, udid, bundle_id, direct, include_screen_context, capture_screenshots, settle_delay }) => {
     try {
       const body: Record<string, unknown> = { url };
       if (udid) body.udid = udid;
       if (bundle_id) body.bundle_id = bundle_id;
+      if (direct) body.direct = true;
       if (include_screen_context) body.include_screen_context = true;
       if (capture_screenshots) body.capture_screenshots = true;
       if (settle_delay !== undefined) body.settle_delay = settle_delay;

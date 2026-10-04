@@ -355,7 +355,7 @@ holds in `flow_store`. `flows_captured` is only what survived.
 | MCP Tool | Method | Path | Description |
 |---|---|---|---|
 | `set_location` | POST | `/api/v1/device/location` | Set GPS location |
-| `open_url` | POST | `/api/v1/device/open-url` | Open a URL via the platform's default handler (Android can target a package) |
+| `open_url` | POST | `/api/v1/device/open-url` | Open a URL the way a tapped link does, through the system's routing: `simctl openurl` on a simulator whatever its UI backend, WDA `/url` on a physical iPhone, and on Android a VIEW intent with no package, with the BROWSABLE category for an http(s) link -- so universal links and App Links are checked as for a user. `direct=true` (Android only, needs `bundle_id`; 400 on iOS) delivers to the package instead, bypassing App Links verification, for staging builds. `bundle_id` names the app the link should open in: the response reports `opened_in_app` (null with `opened_in_app_error` when it could not tell), `foreground_app`, `foreground_activity` on Android, `crashed` on Android (from the crash buffer; null with `crash_check_error` when it could not be read), and a `warning` when it went elsewhere. `via` names the transport, `route` the routing |
 | `grant_permission` | POST | `/api/v1/device/permission` | Grant app permission |
 | `set_locale` | POST | `/api/v1/device/locale` | Set the system locale (Android) |
 | `set_hardware_keyboard` | POST | `/api/v1/device/keyboard` | Attach/detach the simulated hardware keyboard (iOS simulators) |

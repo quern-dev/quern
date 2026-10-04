@@ -245,7 +245,7 @@ def identifying_app():
     ctrl._active_udid = "AAAA-1111"
     ctrl.resolve_udid = AsyncMock(return_value="AAAA-1111")
     ctrl.launch_app = AsyncMock(return_value="AAAA-1111")
-    ctrl.open_url = AsyncMock(return_value="AAAA-1111")
+    ctrl.open_url = AsyncMock(return_value=("AAAA-1111", {"via": "simctl"}))
     ctrl.get_screen_summary = AsyncMock(return_value=(
         {"screen_title": "T", "summary": "S", "element_count": 1,
          "interactive_elements": []},

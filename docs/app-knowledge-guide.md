@@ -516,6 +516,8 @@ This can be semi-automated: open each link, capture the screen, propose the veri
 **What we've learned about deep link testing:**
 
 - **Universal links on simulators:** Always use `open_url` (quern tool). Raw `simctl openurl` often opens Safari instead of the app.
+- **Pass `bundle_id`, and read `opened_in_app`.** `open_url` takes the route a tapped link takes, so a path the domain does not claim opens in the browser, and the open itself still succeeds. With `bundle_id`, quern reports whether the app ended up in front, and a `warning` names where the link went instead -- including Android's app chooser (two activities claim the path), and on Android `crashed` says whether the app crashed on it. A `verify` that times out is easier to read once you know which of those happened.
+- **Staging links on Android need `direct=true`.** Debug and staging builds are rarely verified App Links, so the system route opens them in the browser. `direct=true` delivers to the package, as Espresso does. It skips verification, so it cannot find a link a user's tap would not reach, and it can show a chooser a tap would not: test production links without it.
 - **Pending deep links:** When a universal link is opened while logged out, the app may hold it as "pending" and execute it after login — landing on the deep link target, not the default home screen. Test setup must account for this.
 - **Coaching modals:** Deep links to screens with first-visit coaching need those modals suppressed via plist. The `QUERN_AUTOMATION` env var prevents the app from wiping coaching flags on launch.
 - **Per-account behavior:** The same deep link can behave differently on Basic vs Premium. Capture this in `premium_gated` and `basic_shows_upsell` fields.
