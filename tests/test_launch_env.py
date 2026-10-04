@@ -326,6 +326,32 @@ class TestTheBackends:
         await SimctlBackend().launch_app(SIM, APP, env={"QUERN_AUTOMATION": "NO"})
         assert seen["env"]["SIMCTL_CHILD_QUERN_AUTOMATION"] == "NO"
 
+    async def test_a_timed_out_terminate_is_not_resent_and_reads_the_state_instead(self):
+        """CodeRabbit on #393: re-sent after WDA had already terminated the
+        app, the second answer is false, and restarted read false."""
+        import httpx
+
+        from server.device.wda_client import WdaBackend
+
+        wda = WdaBackend()
+        wda._request = AsyncMock(side_effect=httpx.ReadTimeout("slow"))
+        wda.app_state = AsyncMock(return_value=1)
+        assert await wda.terminate_app(PHONE, APP) is None, "stopped, but was it running?"
+        assert wda._request.await_count == 1
+        assert wda._request.call_args.kwargs["raise_on_timeout"] is True
+
+    @pytest.mark.parametrize("state", [2, 3, 4])
+    async def test_a_timed_out_terminate_of_an_app_still_running_fails(self, state):
+        import httpx
+
+        from server.device.wda_client import WdaBackend
+
+        wda = WdaBackend()
+        wda._request = AsyncMock(side_effect=httpx.ReadTimeout("slow"))
+        wda.app_state = AsyncMock(return_value=state)
+        with pytest.raises(DeviceError, match="still running"):
+            await wda.terminate_app(PHONE, APP)
+
     @pytest.mark.parametrize("payload,expected", [
         ({"value": True}, True), ({"value": False}, False), ({"value": None}, None), ([], None)])
     async def test_wda_terminate_says_whether_it_was_running(self, payload, expected):

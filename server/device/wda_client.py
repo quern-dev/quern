@@ -1556,10 +1556,27 @@ class WdaBackend:
 
     async def terminate_app(self, udid: str, bundle_id: str) -> bool | None:
         """Terminate an app via WDA. Returns whether it was running and was
-        terminated -- WDA answers true only then -- or None when the answer
-        was not a boolean."""
-        resp = await self._request("post", udid, "/wda/apps/terminate",
-                                   use_session=True, json={"bundleId": bundle_id})
+        terminated -- WDA answers true only then -- or None when that cannot
+        be told: the answer was not a boolean, or the request timed out.
+
+        Not re-sent on a timeout. WDA may already have terminated the app,
+        and a second request would find it stopped and answer false, which
+        reads as "it was never running" (CodeRabbit on #393). The app's state
+        is read instead, which is safe to repeat: still running is a failure,
+        stopped is a success whose first answer was lost."""
+        try:
+            resp = await self._request("post", udid, "/wda/apps/terminate",
+                                       use_session=True, raise_on_timeout=True,
+                                       json={"bundleId": bundle_id})
+        except httpx.TimeoutException as exc:
+            state = await self.app_state(udid, bundle_id)
+            if state in (2, 3, 4):
+                raise DeviceError(
+                    f"WDA did not answer terminating {bundle_id} on {udid[:8]}, and it "
+                    f"is still running (XCUIApplication state {state})",
+                    tool="wda",
+                ) from exc
+            return None
         try:
             value = resp.json().get("value")
         except (ValueError, AttributeError):
