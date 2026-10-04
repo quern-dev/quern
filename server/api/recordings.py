@@ -1,6 +1,6 @@
 """Recordings: a device's actions, flows and logs, written to disk as they arrive (#364).
 
-The routes are thin; `server/recording.py` holds the recorder and says why it
+The routes are thin; `server/recording/recorder.py` holds the recorder and says why it
 is shaped the way it is.
 """
 
@@ -12,12 +12,12 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from server import recording as recording_mod
 from server.api.actions import logged_action
 from server.api.trace import _proxy_is_running
 from server.device.devicectl import canonical_device_id
 from server.models import DeviceType, RecordingStartRequest, UtcDatetime
-from server.recording import KINDS, Filters, RecordingError, RecordingManager
+from server.recording import recorder as recording_mod
+from server.recording.recorder import KINDS, Filters, RecordingError, RecordingManager
 
 router = APIRouter(prefix="/api/v1/recordings", tags=["recordings"])
 

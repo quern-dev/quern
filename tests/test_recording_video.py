@@ -22,14 +22,14 @@ from fastapi.testclient import TestClient
 
 from server import config as config_mod
 from server import logging_ext
-from server import recording as rec_mod
 from server.api.actions import ActionScope
 from server.api.recordings import router as recordings_router
 from server.api.trace import router as trace_router
 from server.models import DeviceType, LogEntry, LogLevel, LogSource
 from server.proxy.flow_store import FlowStore
-from server.recording import Filters, RecordingError, RecordingManager
-from server.recording_video import Segment, VideoError, VideoRecorder
+from server.recording import recorder as rec_mod
+from server.recording.recorder import Filters, RecordingError, RecordingManager
+from server.recording.video import Segment, VideoError, VideoRecorder
 from server.storage.ring_buffer import RingBuffer
 
 SIM = "SIM-V"
@@ -193,7 +193,7 @@ class TestTheRecorder:
     async def test_a_start_that_times_out_stops_what_it_started(self, tmp_path, monkeypatch):
         """Never capturing and never exiting: given up on, and not left
         running to film a recording that was refused."""
-        from server import recording_video
+        from server.recording import video as recording_video
         monkeypatch.setattr(recording_video, "START_TIMEOUT", 0.3)
         process = FakeProcess()
         recorder, _ = self._recorder(process)
@@ -202,7 +202,7 @@ class TestTheRecorder:
         assert process.signals == [signal.SIGINT]
 
     async def test_a_finish_that_hangs_is_killed_and_said(self, tmp_path, monkeypatch):
-        from server import recording_video
+        from server.recording import video as recording_video
         monkeypatch.setattr(recording_video, "STOP_TIMEOUT", 0.2)
         process = FakeProcess([STREAMING])
         recorder, _ = self._recorder(process)
@@ -298,7 +298,7 @@ class TestReaping:
             killed.append((pid, sig))
             (tmp_path / "video-1.log").write_text(STREAMING + "\n" + SUMMARY + "\n")
             alive["v"] = False
-        monkeypatch.setattr("server.recording_video.os.kill", fake_kill)
+        monkeypatch.setattr("server.recording.video.os.kill", fake_kill)
         recorder = VideoRecorder(binary=None, command_of=lambda pid: (
             f"/q/quern-media --sim-udid {SIM} --record {movie}" if alive["v"] else ""))
         result = await recorder.reap(77, movie)
@@ -324,7 +324,7 @@ class TestReaping:
         """pid reused by quern's own preview, or another recording -- even one
         whose movie's path contains this one's."""
         killed = []
-        monkeypatch.setattr("server.recording_video.os.kill", lambda *a: killed.append(a))
+        monkeypatch.setattr("server.recording.video.os.kill", lambda *a: killed.append(a))
         movie = tmp_path / "a" / "video-1.mp4"
         for other in (f"/q/quern-media --sim-udid {SIM} --serve 8422",
                       f"/q/quern-media --sim-udid {SIM} --record /x{movie} --serve 1"):
@@ -337,7 +337,7 @@ class TestReaping:
         movie = tmp_path / "video-1.mp4"
         log = tmp_path / "video-1.log"
         log.write_text(STREAMING + "\n")
-        monkeypatch.setattr("server.recording_video.os.kill", lambda *a: None)
+        monkeypatch.setattr("server.recording.video.os.kill", lambda *a: None)
         mine = f"/q/quern-media --sim-udid {SIM} --record {movie} --serve 1"
         answers = iter(["mine", "error", "mine", "gone"])
 
@@ -354,7 +354,7 @@ class TestReaping:
 
     async def test_a_pid_now_some_other_process_is_left_alone(self, tmp_path, monkeypatch):
         killed = []
-        monkeypatch.setattr("server.recording_video.os.kill", lambda *a: killed.append(a))
+        monkeypatch.setattr("server.recording.video.os.kill", lambda *a: killed.append(a))
         recorder = VideoRecorder(binary=None, command_of=lambda pid: "/usr/bin/vim notes")
         assert await recorder.reap(77, tmp_path / "video-1.mp4") is None
         assert killed == []

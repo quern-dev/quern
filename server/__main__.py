@@ -1085,7 +1085,7 @@ def main() -> None:
     # One operand each -- the value being set. Each helper reads only its
     # first argument, so without this a second word was persisted-and-ignored.
     if len(sys.argv) >= 2 and sys.argv[1] == "record":
-        from server.record_cli import main as record_main
+        from server.recording.cli import main as record_main
 
         sys.exit(record_main(sys.argv[2:]))
 

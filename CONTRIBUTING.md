@@ -31,8 +31,10 @@ AI Agent (Claude Code, Cursor, etc.)
                        ├── storage/     In-memory ring buffer and fan-out
                        ├── lifecycle/   Daemon, state.json, ports, setup, updates, watchdog
                        ├── api/         HTTP route handlers
+                       ├── recording/   Recording a run to disk: the recorder, simulator
+                       │                video, and the `quern record` CLI
                        └── *.py         models, the app (main.py), CLI (__main__.py),
-                                        recording and trace
+                                        trace attribution, screenshot timeline
 
 macos/       Swift: the menu-bar app (QuernMenuBar) and the media engine (QuernMedia)
 tools/       Native helpers and probe apps (sim-bridge, ios-preview, probe-app*)
