@@ -22,7 +22,7 @@ import sys
 import time
 import uuid
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -124,7 +124,7 @@ def _human_size(nbytes: int) -> str:
     return f"{nbytes / (1024 * 1024):.1f}MB"
 
 
-def _signal(process, method: str) -> None:
+def _signal(process: asyncio.subprocess.Process, method: str) -> None:
     """Send a process a signal, treating "it is already gone" as done.
 
     asyncio raises ProcessLookupError once it has torn the subprocess transport
@@ -759,7 +759,11 @@ class ProxyAdapter(BaseSourceAdapter):
     # Read loop and event handlers
     # -------------------------------------------------------------------
 
-    async def _lines(self, stream, on_overlong):
+    async def _lines(
+        self,
+        stream: asyncio.StreamReader | AsyncIterable[bytes],
+        on_overlong: Callable[[], None],
+    ) -> AsyncIterator[bytes]:
         """Raw lines from a stream, skipping any line past its reader's limit.
 
         StreamReader raises for an over-long line, and an `async for` over it
@@ -781,7 +785,7 @@ class ProxyAdapter(BaseSourceAdapter):
                 return
             yield raw_line
 
-    async def _event_lines(self):
+    async def _event_lines(self) -> AsyncIterator[bytes]:
         """Raw lines from the addon: its events pipe, or stdout without one.
 
         A line past EVENT_LINE_LIMIT is skipped, not fatal. StreamReader raises
@@ -877,7 +881,7 @@ class ProxyAdapter(BaseSourceAdapter):
             if unexpected:
                 await self._end_unexpected_run(process)
 
-    async def _end_unexpected_run(self, process) -> None:
+    async def _end_unexpected_run(self, process: asyncio.subprocess.Process) -> None:
         """The loop ended without `stop()`: report it, and leave nothing half-alive.
 
         A mitmdump nobody reads is worse than none. Local capture keeps routing
