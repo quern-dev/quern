@@ -851,7 +851,8 @@ class WdaBackend:
     async def _request(
         self, method: str, udid: str, path: str,
         use_session: bool = False, timeout: float | None = None,
-        raise_on_timeout: bool = False, _is_retry: bool = False,
+        raise_on_timeout: bool = False, raise_if_maybe_delivered: bool = False,
+        _is_retry: bool = False,
         _is_connection_retry: bool = False,
         **kwargs,
     ) -> httpx.Response:
@@ -860,6 +861,10 @@ class WdaBackend:
         If use_session=True, prepends /session/{sessionId} to the path.
         If raise_on_timeout=True, re-raises httpx.TimeoutException directly
         instead of wrapping it in DeviceError (so callers can handle timeouts).
+        If raise_if_maybe_delivered=True, any transport error that may have
+        come after WDA had the request -- everything but a refused connection
+        -- is re-raised as the httpx exception and never re-sent: for a write
+        whose second answer would differ from its first (CodeRabbit on #393).
 
         On WdaInvalidSessionError with use_session=True, automatically clears
         the stale session, creates a new one, and retries once.
@@ -886,6 +891,11 @@ class WdaBackend:
             if raise_on_timeout and isinstance(exc, httpx.TimeoutException):
                 # Caller wants to handle timeouts — don't invalidate connection
                 # (WDA may still be alive, just slow on this request)
+                raise
+            if raise_if_maybe_delivered and not isinstance(exc, httpx.ConnectError):
+                if not isinstance(exc, httpx.TimeoutException):
+                    # The connection itself failed; a slow one is kept.
+                    await self._drop_connection(udid, expected=conn_used)
                 raise
             # Connection lost — invalidate cached connection, and kill
             # its forward: this fires on ordinary transport errors and
@@ -1559,21 +1569,24 @@ class WdaBackend:
         terminated -- WDA answers true only then -- or None when that cannot
         be told: the answer was not a boolean, or the request timed out.
 
-        Not re-sent on a timeout. WDA may already have terminated the app,
-        and a second request would find it stopped and answer false, which
-        reads as "it was never running" (CodeRabbit on #393). The app's state
-        is read instead, which is safe to repeat: still running is a failure,
-        stopped is a success whose first answer was lost."""
+        Never re-sent once WDA may have it -- a timeout, or a connection lost
+        while the answer was coming back. WDA may already have terminated the
+        app, and a second request would find it stopped and answer false,
+        which reads as "it was never running" (CodeRabbit on #393). The app's
+        state is read instead, which is safe to repeat: stopped (1) is a
+        success whose answer was lost; anything else -- still running, or
+        WDA's "unknown" (0) -- is a failure, since a stop cannot be confirmed."""
         try:
             resp = await self._request("post", udid, "/wda/apps/terminate",
-                                       use_session=True, raise_on_timeout=True,
+                                       use_session=True, raise_if_maybe_delivered=True,
                                        json={"bundleId": bundle_id})
-        except httpx.TimeoutException as exc:
+        except httpx.HTTPError as exc:
             state = await self.app_state(udid, bundle_id)
-            if state in (2, 3, 4):
+            if state != 1:
                 raise DeviceError(
-                    f"WDA did not answer terminating {bundle_id} on {udid[:8]}, and it "
-                    f"is still running (XCUIApplication state {state})",
+                    f"WDA did not answer terminating {bundle_id} on {udid[:8]} "
+                    f"({type(exc).__name__}), and it cannot be confirmed stopped "
+                    f"(XCUIApplication state {state})",
                     tool="wda",
                 ) from exc
             return None

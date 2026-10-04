@@ -338,10 +338,26 @@ class TestTheBackends:
         wda.app_state = AsyncMock(return_value=1)
         assert await wda.terminate_app(PHONE, APP) is None, "stopped, but was it running?"
         assert wda._request.await_count == 1
-        assert wda._request.call_args.kwargs["raise_on_timeout"] is True
+        assert wda._request.call_args.kwargs["raise_if_maybe_delivered"] is True
 
-    @pytest.mark.parametrize("state", [2, 3, 4])
-    async def test_a_timed_out_terminate_of_an_app_still_running_fails(self, state):
+    async def test_a_connection_lost_after_terminate_is_settled_the_same_way(self):
+        """CodeRabbit on #393: a ReadError, like a timeout, can come after WDA
+        has terminated the app, and was being re-sent."""
+        import httpx
+
+        from server.device.wda_client import WdaBackend
+
+        wda = WdaBackend()
+        wda._request = AsyncMock(side_effect=httpx.ReadError("reset"))
+        wda.app_state = AsyncMock(return_value=1)
+        assert await wda.terminate_app(PHONE, APP) is None
+        assert wda._request.await_count == 1
+
+    @pytest.mark.parametrize("state", [0, 2, 3, 4, 7])
+    async def test_a_timed_out_terminate_not_confirmed_stopped_fails(self, state):
+        """Only 1 is stopped. 0 is WDA's "unknown" (CodeRabbit on #393): read
+        as stopped, a launch could go on and report env applied to a process
+        that kept its old environment."""
         import httpx
 
         from server.device.wda_client import WdaBackend
@@ -349,7 +365,7 @@ class TestTheBackends:
         wda = WdaBackend()
         wda._request = AsyncMock(side_effect=httpx.ReadTimeout("slow"))
         wda.app_state = AsyncMock(return_value=state)
-        with pytest.raises(DeviceError, match="still running"):
+        with pytest.raises(DeviceError, match="cannot be confirmed stopped"):
             await wda.terminate_app(PHONE, APP)
 
     @pytest.mark.parametrize("payload,expected", [
