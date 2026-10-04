@@ -443,7 +443,11 @@ quern set-channel [name]     # Show or set the update channel (stable / beta)
 quern record start --udid UDID [--out DIR]   # Record a device's actions, flows and logs to disk
 quern record start --udid UDID --kinds flows,logs --host H --exclude-host H --include-unattributed --video
 quern record start --udid UDID --allow-passthrough   # Record even if the simulator lacks quern's CA (no HTTPS captured)
+quern record start --udid UDID --kinds flows --bodies errors --max-body-bytes 4096 --exclude-content-type image/
+                             # A small recording of a long run: every flow, few bodies
 quern record stop ID [--require-complete]    # ...until stopped; exit 3 if anything was lost
+quern record keyframe ID [--label TEXT]   # Make this moment a seek point, and mark it in the recording
+quern record start --udid UDID --video --keyframes requests   # Seek points at requests only (default: actions and requests)
 quern record list            # Recordings running on this server
 quern set-update-check [on|off]
                              # Show or set the automatic daily update check
@@ -475,13 +479,13 @@ quern tunneld <cmd>          # Manage the tunneld LaunchDaemon (install/uninstal
 
 ## MCP Tools
 
-119 tools available via MCP. All tools are lazy-loaded and won't hog your context just by connecting the MCP. They are lightweight API wrappers and are easy for the Agent to use.
+120 tools available via MCP. All tools are lazy-loaded and won't hog your context just by connecting the MCP. They are lightweight API wrappers and are easy for the Agent to use.
 
 | Category | Tools |
 |----------|-------|
 | Server | `ensure_server` |
 | Updates | `update_quern`, `set_update_channel` |
-| Logs | `tail_logs`, `query_logs`, `get_log_summary`, `get_errors`, `get_build_result`, `parse_build_output`, `get_latest_crash`, `clear_crashes`, `clear_device_crashes`, `set_log_filter`, `get_log_filter`, `list_log_sources`, `get_trace`, `start_recording`, `stop_recording`, `get_recording`, `list_recordings`, `start_simulator_logging`, `stop_simulator_logging`, `start_device_logging`, `stop_device_logging`, `start_oslog_streaming`, `stop_oslog_streaming` |
+| Logs | `tail_logs`, `query_logs`, `get_log_summary`, `get_errors`, `get_build_result`, `parse_build_output`, `get_latest_crash`, `clear_crashes`, `clear_device_crashes`, `set_log_filter`, `get_log_filter`, `list_log_sources`, `get_trace`, `start_recording`, `stop_recording`, `recording_keyframe`, `get_recording`, `list_recordings`, `start_simulator_logging`, `stop_simulator_logging`, `start_device_logging`, `stop_device_logging`, `start_oslog_streaming`, `stop_oslog_streaming` |
 | Network | `query_flows`, `list_pending_requests`, `wait_for_flow`, `get_flow_detail`, `get_flow_summary`, `start_capture_session`, `stop_capture_session`, `proxy_status`, `start_proxy`, `stop_proxy`, `proxy_setup_guide`, `verify_proxy_setup`, `install_proxy_cert`, `record_device_proxy_config`, `set_local_capture`, `set_bypass`, `clear_bypass` |
 | System Proxy | `configure_system_proxy`, `unconfigure_system_proxy` |
 | Intercept & Mock | `set_intercept`, `clear_intercept`, `list_held_flows`, `release_flow`, `replay_flow`, `set_mock`, `list_mocks`, `update_mock`, `clear_mocks` |

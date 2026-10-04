@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fnmatch
 import json
 import logging
 import os
@@ -70,6 +71,10 @@ class RecordingError(ValueError):
     """A recording that cannot be started or found, in words for the caller."""
 
 
+class RecordingNotFilming(RecordingError):
+    """A keyframe was asked of a recording with no movie recording now (#415)."""
+
+
 def _state_file() -> Path:
     # Read at call time: QUERN_STATE_DIR redirects CONFIG_DIR, and a path
     # computed at import would outlive the redirection a test sets up.
@@ -82,20 +87,107 @@ def _now() -> datetime:
 
 def host_matches(host: str, patterns: list[str]) -> bool:
     """`api.example.com` matches `example.com` and `api.example.com`; never
-    `badexample.com`."""
+    `badexample.com`.
+
+    A pattern with a wildcard is a glob over the whole host (#416), for the
+    hosts a parent cannot name without naming too much:
+    `*.s3.*.amazonaws.com` covers every regional bucket, where
+    `s3.amazonaws.com` matches none of them -- `gs-x.s3.us-east-1.amazonaws.com`
+    is not its subdomain -- and `amazonaws.com` matches all of AWS.
+    """
     host = host.lower().rstrip(".")
     for p in patterns:
-        p = p.lower().strip().lstrip(".").rstrip(".")
-        if p and (host == p or host.endswith("." + p)):
+        p = p.lower().strip().rstrip(".")
+        if not p:
+            continue
+        if any(c in p for c in "*?["):
+            if fnmatch.fnmatchcase(host, p):
+                return True
+            continue
+        p = p.lstrip(".")
+        if host == p or host.endswith("." + p):
             return True
     return False
+
+
+#: What `bodies` can keep (#416). "errors" keeps the bodies a failure needs:
+#: a response that is not 2xx, and a request that never got one.
+BODY_POLICIES = ("all", "errors", "none")
+#: What can ask quern-media for a keyframe (#415).
+KEYFRAME_TRIGGERS = ("actions", "requests")
+#: The clock request keyframes are rate-limited by; a seam for tests, which
+#: must not patch `time.monotonic` itself -- asyncio's loop reads it too.
+_monotonic = time.monotonic
+#: At most one request keyframe per recording this often. A burst of requests
+#: is one seek point, not a burst of keyframes.
+REQUEST_KEYFRAME_INTERVAL = 1.0
+
+
+def _content_type(part: dict) -> str:
+    for k, v in (part.get("headers") or {}).items():
+        if k.lower() == "content-type":
+            return str(v).lower()
+    return ""
+
+
+def _truncate(part: dict, limit: int) -> None:
+    """Cut a body to `limit` bytes; `body_size` keeps the full size."""
+    body = part.get("body")
+    if body is None:
+        return
+    if part.get("body_encoding") == "base64":
+        keep = limit - limit % 4  # whole base64 quanta, so what is kept decodes
+        if len(body) > keep:
+            part["body"] = body[:keep]
+            part["body_truncated"] = True
+        return
+    raw = body.encode("utf-8")
+    if len(raw) > limit:
+        part["body"] = raw[:limit].decode("utf-8", errors="ignore")
+        part["body_truncated"] = True
+
+
+def shape_bodies(kind: str, data: dict, filters: Filters) -> dict:
+    """A flow as this recording keeps it: every request and response, with the
+    bodies its options allow (#416). Metadata, and `body_size`, are untouched,
+    so a dropped body is still known to have existed; `body_omitted` says why.
+
+    A CI recording of 911 flows came to 18 MB, two thirds of it one API's
+    response bodies -- requests the recording needs and bodies it almost never
+    does, which no host filter can separate.
+    """
+    if filters.bodies == "all" and filters.max_body_bytes is None \
+            and not filters.exclude_content_types:
+        return data
+    keep = True
+    if filters.bodies == "none":
+        keep = False
+    elif filters.bodies == "errors":
+        # Unanswered counts as an error, which is also what keeps a
+        # request_started line's body: it has no response yet, and if none
+        # ever comes it is the only line there is.
+        response = data.get("response")
+        status = response.get("status_code") if response else None
+        keep = bool(data.get("error")) or status is None or not 200 <= status < 300
+    excluded = [t.strip().lower() for t in filters.exclude_content_types or [] if t.strip()]
+    for side in ("request", "response"):
+        part = data.get(side)
+        if not part or part.get("body") is None:
+            continue
+        if not keep:
+            part["body"], part["body_omitted"] = None, f"bodies={filters.bodies}"
+        elif excluded and _content_type(part).startswith(tuple(excluded)):
+            part["body"], part["body_omitted"] = None, "content type excluded"
+        elif filters.max_body_bytes is not None:
+            _truncate(part, filters.max_body_bytes)
+    return data
 
 
 #: What a recording can collect. `logs` is the device's app logs and its crash
 #: reports together, as the trace takes them.
 KINDS = ("actions", "flows", "logs")
 #: The event types each kind writes.
-_EVENT_TYPES = {"actions": ("action",), "flows": ("flow", "request_started"),
+_EVENT_TYPES = {"actions": ("action", "mark"), "flows": ("flow", "request_started"),
                 "logs": ("log", "crash")}
 
 
@@ -117,6 +209,14 @@ class Filters:
     include_unattributed: bool = False
     #: A simulator's screen as video, one movie per quern run (phase 3).
     video: bool = False
+    #: Bodies (#416): which to keep, how much of each, and content types to
+    #: drop. Every flow's metadata is kept whatever these say.
+    bodies: str = "all"
+    max_body_bytes: int | None = None
+    exclude_content_types: list[str] | None = None
+    #: What asks for a keyframe when filming (#415). Requests matter for runs
+    #: quern does not drive: a CI suite has no quern actions at all.
+    keyframes: tuple[str, ...] = KEYFRAME_TRIGGERS
 
     def __post_init__(self) -> None:
         unknown = [k for k in self.kinds if k not in KINDS]
@@ -124,18 +224,38 @@ class Filters:
             raise RecordingError(f"kinds must be some of {', '.join(KINDS)}, not "
                                  f"{list(self.kinds)}")
         self.kinds = tuple(k for k in KINDS if k in self.kinds)
+        if self.bodies not in BODY_POLICIES:
+            raise RecordingError(f"bodies must be one of {', '.join(BODY_POLICIES)}, "
+                                 f"not {self.bodies!r}")
+        if self.max_body_bytes is not None and self.max_body_bytes < 0:
+            raise RecordingError("max_body_bytes cannot be negative")
+        if unknown := [k for k in self.keyframes if k not in KEYFRAME_TRIGGERS]:
+            raise RecordingError(f"keyframes must be some of {', '.join(KEYFRAME_TRIGGERS)}, "
+                                 f"not {unknown}")
+        self.keyframes = tuple(k for k in KEYFRAME_TRIGGERS if k in self.keyframes)
 
     def as_dict(self) -> dict:
         return {"kinds": list(self.kinds), "hosts": self.hosts,
                 "exclude_hosts": self.exclude_hosts,
-                "include_unattributed": self.include_unattributed, "video": self.video}
+                "include_unattributed": self.include_unattributed, "video": self.video,
+                "bodies": self.bodies, "max_body_bytes": self.max_body_bytes,
+                "exclude_content_types": self.exclude_content_types,
+                "keyframes": list(self.keyframes)}
 
     @classmethod
     def from_dict(cls, d: dict) -> Filters:
+        # Each new field defaults to what a recording made before it did, so a
+        # manifest from an earlier quern resumes as it was recorded.
         return cls(kinds=tuple(d.get("kinds") or KINDS), hosts=d.get("hosts"),
                    exclude_hosts=d.get("exclude_hosts"),
                    include_unattributed=bool(d.get("include_unattributed", False)),
-                   video=bool(d.get("video", False)))
+                   video=bool(d.get("video", False)),
+                   bodies=d.get("bodies") or "all",
+                   max_body_bytes=d.get("max_body_bytes"),
+                   exclude_content_types=d.get("exclude_content_types"),
+                   # A manifest from before #415 has no `keyframes`: it was
+                   # recorded with action keyframes only, and resumes so.
+                   keyframes=tuple(d["keyframes"]) if "keyframes" in d else ("actions",))
 
 
 def _anchor() -> dict:
@@ -187,6 +307,12 @@ class Recording:
     #: Held, and compared by identity: an id is reused as soon as its action
     #: is freed, and keying on it gave 1 of 50 actions a keyframe (review).
     _keyframed: deque = field(default_factory=lambda: deque(maxlen=64), repr=False)
+    #: When the last request keyframe was asked for (monotonic).
+    _last_request_keyframe: float = field(default=float("-inf"), repr=False)
+    #: Flow ids this recording saw start, so a flow whose start it never saw
+    #: -- a mocked request, or a response that beat its start report -- is a
+    #: request too.
+    _started_ids: deque = field(default_factory=lambda: deque(maxlen=512), repr=False)
     #: One stop at a time: a second, while the first finalises the movie,
     #: wrote `stopped` before `video_stopped` (review).
     _stop_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
@@ -387,8 +513,8 @@ def _tally(events: Path) -> _Tally:
                 # after this one, which the next save then forgot (review).
                 if kind == "started" and recording_id is None:
                     recording_id = event.get("recording")
-                if kind in counts:
-                    counts[kind] += 1
+                if kind in counts or kind == "mark":  # marks only when there are any
+                    counts[kind] = counts.get(kind, 0) + 1
                 elif kind == "dropped" and event.get("what"):
                     what = event["what"]
                     dropped[what] = dropped.get(what, 0) + int(event.get("count") or 0)
@@ -650,6 +776,8 @@ class RecordingManager:
         for rec in self._recordings.values():
             if rec.state != "recording" or rec._segment is None or rec.udid != udid:
                 continue
+            if "actions" not in rec.filters.keyframes:
+                continue
             if any(a is action for a in rec._keyframed):
                 continue
             rec._keyframed.append(action)
@@ -690,8 +818,52 @@ class RecordingManager:
     async def _pump(self, rec: Recording, kind: str, queue: asyncio.Queue) -> None:
         while True:
             item = await queue.get()
-            rec._pending.append(_line(kind, item.model_dump(mode="json")))
+            rec._pending.append(_line(kind, self._record_of(rec, kind, item)))
             rec.counts[kind] = rec.counts.get(kind, 0) + 1
+            if kind == "request_started":
+                rec._started_ids.append(item.id)
+                self._request_keyframe(rec)
+            elif kind == "flow" and item.id not in rec._started_ids:
+                self._request_keyframe(rec)
+
+    @staticmethod
+    def _record_of(rec: Recording, kind: str, item) -> dict:
+        data = item.model_dump(mode="json")
+        if kind in ("flow", "request_started"):
+            data = shape_bodies(kind, data, rec.filters)
+        return data
+
+    def _request_keyframe(self, rec: Recording) -> None:
+        """A request started on a device this recording is filming: make it a
+        seek point (#415), at most once a `REQUEST_KEYFRAME_INTERVAL`. Never
+        awaited -- a request must not wait on video."""
+        if ("requests" not in rec.filters.keyframes or rec._segment is None
+                or self._video is None or rec.state != "recording"):
+            return
+        now = _monotonic()
+        if now - rec._last_request_keyframe < REQUEST_KEYFRAME_INTERVAL:
+            return
+        rec._last_request_keyframe = now
+        self._spawn(self._video.keyframe(rec._segment))
+
+    async def keyframe(self, recording_id: str, label: str | None = None) -> bool:
+        """Ask for a keyframe now, for a driver quern does not see (#415): a CI
+        step or a test marking the moment it cares about. True if it was asked.
+
+        Leaves a `mark` line, with the label if given, so the moment is in the
+        recording and not only in the movie's keyframe count, which says
+        nothing about when or why.
+        """
+        rec = self.get(recording_id)
+        if not rec.filters.video:
+            raise RecordingNotFilming(f"{recording_id} is not recording video")
+        if rec.state != "recording" or rec._segment is None or self._video is None:
+            raise RecordingNotFilming(f"{recording_id} has no movie recording right now")
+        asked = await self._video.keyframe(rec._segment)
+        rec._pending.append(_line("mark", {
+            "timestamp": _now().isoformat(), "label": label, "keyframe_requested": asked}))
+        rec.counts["mark"] = rec.counts.get("mark", 0) + 1
+        return asked
 
     def _note_drops(self, rec: Recording) -> None:
         """A `dropped` line for whatever each subscription lost since the last."""
@@ -762,7 +934,7 @@ class RecordingManager:
         for kind, _, queue in rec._subs:
             while not queue.empty():
                 item = queue.get_nowait()
-                rec._pending.append(_line(kind, item.model_dump(mode="json")))
+                rec._pending.append(_line(kind, self._record_of(rec, kind, item)))
                 rec.counts[kind] = rec.counts.get(kind, 0) + 1
 
     async def _fail(self, rec: Recording, why: str) -> None:
@@ -1117,6 +1289,9 @@ class Loaded:
     #: Requests the file has a start for and no flow: hung, cut off by a gap
     #: or the end, or lost with dropped flows. Each carries why in `error`.
     unfinished: list[FlowRecord] = field(default_factory=list)
+    #: Moments an outside driver marked with a keyframe (#415): each with
+    #: `timestamp`, `label` and `keyframe_requested`.
+    marks: list[dict] = field(default_factory=list)
     #: Video segments, each with the quern run it was recorded in, and
     #: `start_host_time` from quern-media's summary (None if it gave none).
     video: list[dict] = field(default_factory=list)
@@ -1185,6 +1360,7 @@ def load(directory: Path, *, live: bool = False, markers_only: bool = False) -> 
     rebuilding any record, for a reader that wants only that.
     """
     actions: list[LogEntry] = []
+    marks: list[dict] = []
     flows: dict[str, FlowRecord] = {}
     starts: dict[str, FlowRecord] = {}
     version = 1
@@ -1237,6 +1413,8 @@ def load(directory: Path, *, live: bool = False, markers_only: bool = False) -> 
                     if flow.id not in flows:
                         starts[flow.id] = flow
                     runs.setdefault(flow.id, run)
+                elif kind == "mark":
+                    marks.append(event.get("data") or {})
                 elif kind in ("log", "crash"):
                     logs.append(LogEntry.model_validate(event["data"]))
                 elif kind in ("started", "resumed"):
@@ -1309,6 +1487,7 @@ def load(directory: Path, *, live: bool = False, markers_only: bool = False) -> 
                "the recording did not stop cleanly: nothing after its last line is in it")
         holes += _gap_holes(last_at, None, why, exact_flows=version >= 2)
     return Loaded(actions=actions, flows=list(flows.values()), logs=logs, udid=udid,
+                  marks=marks,
                   holes=holes, stopped=stopped, unreadable_lines=bad,
                   clock_anchors=anchors, monotonic_resets=resets, warnings=warnings,
                   unfinished=[_unfinished(f, cut, stopped=stopped, live=live)
@@ -1399,6 +1578,9 @@ def _summary(kind: str, data: dict) -> dict:
                 "status": resp.get("status_code") if resp else None,
                 "error": data.get("error"),
                 "total_ms": (data.get("timing") or {}).get("total_ms")}
+    if kind == "mark":
+        return {"timestamp": data.get("timestamp"), "label": data.get("label"),
+                "keyframe_requested": data.get("keyframe_requested")}
     if kind == "action":
         return {"timestamp": data.get("timestamp"), "action": data.get("action"),
                 "outcome": data.get("outcome"), "duration_ms": data.get("duration_ms"),

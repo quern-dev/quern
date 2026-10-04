@@ -942,9 +942,11 @@ class RecordingStartRequest(BaseModel):
         "missing, refused if it already holds a recording. Default "
         "~/.quern/recordings/<id>."))
     hosts: list[str] | None = Field(default=None, description=(
-        "Only flows to these hosts (and their subdomains)."))
+        "Only flows to these hosts (and their subdomains), or matching a glob over "
+        "the whole host such as `*.s3.*.amazonaws.com`."))
     exclude_hosts: list[str] | None = Field(default=None, description=(
-        "Drop flows to these hosts (and their subdomains), e.g. analytics."))
+        "Drop flows to these hosts (and their subdomains), e.g. analytics, or matching "
+        "a glob over the whole host such as `*.s3.*.amazonaws.com`."))
     kinds: list[Literal["actions", "flows", "logs"]] | None = Field(default=None, description=(
         "What to collect: any of actions (quern's own), flows (full detail) and logs "
         "(the app's log lines and crash reports). Default all three."))
@@ -954,7 +956,8 @@ class RecordingStartRequest(BaseModel):
         "traffic, and it would land in every device's recording."))
     video: bool = Field(default=False, description=(
         "Also record the simulator's screen to <output_dir>/video-<n>.mp4, one movie per "
-        "quern run, with a keyframe at each action's start. Simulators only. Refused, "
+        "quern run, with a keyframe at each action's start and at requests (see "
+        "`keyframes`). Simulators only. Refused, "
         "rather than recorded without video, if video cannot start."))
     allow_passthrough: bool = Field(default=False, description=(
         "Start even if this simulator does not trust quern's CA. Under local capture "
@@ -962,6 +965,33 @@ class RecordingStartRequest(BaseModel):
         "requests fail for the whole run. Without it such a start is refused (428) unless "
         "auto_install_cert installs the CA first: recording flows that cannot be "
         "captured is a run that looks fine and holds nothing."))
+    keyframes: list[Literal["actions", "requests"]] | None = Field(default=None, description=(
+        "With video, what asks for a keyframe, so it is a seek point in the movie: "
+        "quern's actions, and each request the device starts (at most one a second). "
+        "Default both; a run quern does not drive, such as an XCUITest suite, has no "
+        "actions, and requests are its only seek points. Request keyframes need "
+        "`flows` in `kinds`. An empty list asks for none."))
+    bodies: Literal["all", "errors", "none"] = Field(default="all", description=(
+        "Which flow bodies to keep. Every flow's request and response metadata is kept "
+        "either way. `errors` keeps response bodies only for a response that is not 2xx "
+        "and a request that never got one -- what a failure needs. A request's own body "
+        "is kept on the line written when it starts, before anyone knows whether it "
+        "will be answered; `max_body_bytes` bounds it."))
+    max_body_bytes: int | None = Field(default=None, ge=0, description=(
+        "Keep at most this many bytes of each kept body (for a binary body, this many "
+        "base64 characters); `body_size` still says the full size and "
+        "`body_truncated` that it was cut."))
+    exclude_content_types: list[str] | None = Field(default=None, description=(
+        "Drop bodies whose Content-Type starts with any of these, e.g. `image/`, "
+        "`text/html`. The flow itself is kept."))
+
+
+class RecordingKeyframeRequest(BaseModel):
+    """Optional body for POST /api/v1/recordings/{id}/keyframe (#415)."""
+
+    label: str | None = Field(default=None, max_length=500, description=(
+        "What this moment is, e.g. a test's name and step: written into the "
+        "recording's `mark` line."))
 
 
 class CaptureStartRequest(BaseModel):
