@@ -160,7 +160,7 @@ Estimated total: ~50-80 lines of source change + ~150 lines of tests.
 |---|---|
 | `server/api/device_ui.py` | Update `_capture_screen_context()` to call `registry.identify()` when landmarks loaded; add `expected_screen` to relevant request models; thread through to screen_context; raise 400 when `expected_screen` set but registry empty |
 | `server/models.py` | Add optional `expected_screen: str \| None` to `TapElementRequest`, `TypeTextRequest`, `SwipeRequest`, `PressButtonRequest`; add `include_screen_context` to `SwipeRequest` and `PressButtonRequest` |
-| `server/device/landmarks.py` | Update `registry.identify()` to return `1/N` confidence + `candidates` list on ambiguous matches |
+| `server/knowledge/landmarks.py` | Update `registry.identify()` to return `1/N` confidence + `candidates` list on ambiguous matches |
 | `mcp/src/tools/device-ui.ts` | Add `expected_screen` to MCP tool input schemas for the matching tools; add `include_screen_context` to swipe/press wrappers |
 | `tests/test_device_api.py` | New cases for: identify when landmarks loaded, no-op when not loaded, `expected_screen` match, `expected_screen` mismatch, `expected_screen` with no landmarks loaded (400), ambiguous identification |
 | `tests/test_landmarks.py` | New cases for ambiguous-match confidence scoring |
@@ -198,7 +198,7 @@ The MCP wrapper stays thin: parameters pass straight through.
    ```
 3. **Add `include_screen_context` to `swipe` and `press` as part of this work.** Keeps the surface coherent — every action that can change the screen should be able to report what it changed to. Trivial addition since `_capture_screen_context()` already exists.
 4. **Parameter name: `expected_screen`.** Matches the house convention of descriptive parameter names (`max_elements`, `include_screen_context`, `skip_stability_check`); `expect` would be jarringly terse next to its neighbors. Pairs naturally with the response field `matched_expected`.
-5. **Confidence scoring for ambiguous matches.** Update `registry.identify()` so that when N landmarks match, confidence becomes `1/N` and `candidates` lists all matches. Single match stays `confidence: 1.0`. No match stays `confidence: 0.0`. This is a small change inside `server/device/landmarks.py` and warrants its own test cases.
+5. **Confidence scoring for ambiguous matches.** Update `registry.identify()` so that when N landmarks match, confidence becomes `1/N` and `candidates` lists all matches. Single match stays `confidence: 1.0`. No match stays `confidence: 0.0`. This is a small change inside `server/knowledge/landmarks.py` and warrants its own test cases.
 
 ## Naming convention check
 

@@ -514,7 +514,7 @@ class TestScreenSummary:
         self, app, auth_headers, mock_controller,
     ):
         """The two fields are the failure's; a match must not inherit them."""
-        from server.device.landmarks import Landmark, ScreenLandmarks
+        from server.knowledge.landmarks import Landmark, ScreenLandmarks
         app.state.landmark_registry.load("com.example.app", [ScreenLandmarks(
             screen="Home", landmarks=[Landmark(element="Button", label="Maps")])])
         transport = ASGITransport(app=app)

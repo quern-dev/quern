@@ -18,7 +18,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from server.device.controller import DeviceController
-from server.device.landmarks import LandmarkRegistry
+from server.knowledge.landmarks import LandmarkRegistry
 from server.models import DeviceType, Landmark, ScreenLandmarks, UIElement
 
 

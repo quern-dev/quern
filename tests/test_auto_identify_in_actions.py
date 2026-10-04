@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from server.api.device import _capture_screen_context
-from server.device.landmarks import LandmarkRegistry
+from server.knowledge.landmarks import LandmarkRegistry
 from server.models import Landmark, ScreenLandmarks, UIElement
 
 

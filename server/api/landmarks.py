@@ -13,7 +13,7 @@ from pydantic import ValidationError
 
 from server import config as config_mod
 from server.api.actions import logged_action
-from server.device.landmarks import (
+from server.knowledge.landmarks import (
     FileConventions,
     LandmarkRegistry,
     SkippedFile,
@@ -361,7 +361,7 @@ async def validate_landmarks(
             if scan.conventions:
                 result["conventions"] = conventions_report(scan.conventions)
             return result
-        from server.device.landmarks import detect_collisions
+        from server.knowledge.landmarks import detect_collisions
         result = detect_collisions(scan.screens)
         if skipped_payload:
             result["skipped"] = skipped_payload

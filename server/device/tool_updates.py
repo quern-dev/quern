@@ -10,10 +10,10 @@ imports fail mid-update: the 0.18.x updater's tool report after the swap (the
 server answering `/tools/sites` or a WDA setup in that window.
 
 The names forwarded are exactly those imported inside functions by any release
-from v0.18.0 to v0.23.0, found by parsing each tag's `server/`; they are pinned
-in `tests/test_old_updater_imports.py`. Nothing in this tree imports from here:
-import from `server.tooling`. Keep while upgrades from a release before the
-move are supported.
+from v0.18.0 to v0.24.0-beta.1, found by parsing each tag's `server/`; they are
+pinned in `tests/test_forwarders.py`. Nothing in this tree imports from here:
+import from `server.tooling`. Sunset: remove once four releases have shipped
+after the one containing this move (#396).
 """
 
 from server.tooling.tool_updates import (  # noqa: F401

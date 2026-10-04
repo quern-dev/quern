@@ -2,7 +2,7 @@
 
 **Status:** implemented in the follow-up to #336 / #362. The tables live in
 `server/device/element_types.py`; the conventions check in
-`server/device/landmarks.py`. User-facing reference:
+`server/knowledge/landmarks.py`. User-facing reference:
 [`../screen-landmarks.md`](../screen-landmarks.md#across-backends).
 **Raised:** 2026-10-01, while landing #362 (WDA on simulators).
 **Related:** #336, #362; [`knowledge-base-health.md`](knowledge-base-health.md)
