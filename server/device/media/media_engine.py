@@ -36,7 +36,7 @@ BINARY_NAME = "quern-media"
 SCRATCH_DIR = CONFIG_DIR / "build" / "QuernMedia"
 
 _PACKAGE_CANDIDATES = [
-    Path(__file__).resolve().parent.parent.parent / "macos" / "QuernMedia",
+    Path(__file__).resolve().parents[3] / "macos" / "QuernMedia",
 ]
 
 # A cold build is ~7s against ~1.5s for ios-preview's single swiftc call.

@@ -1,4 +1,4 @@
-"""Tests for server/device/preview.py — screen-mirror build and event handling."""
+"""Tests for server/device/media/preview.py — screen-mirror build and event handling."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from collections import deque
 import pytest
 
 from server.device.controller import DeviceError
-from server.device.preview import PreviewManager
+from server.device.media.preview import PreviewManager
 
 
 class TestBuildBundle:
@@ -19,7 +19,7 @@ class TestBuildBundle:
         and then failed to finish the bundle leaves a binary newer than the
         source, so every later call would return it and report success for an
         app macOS cannot launch."""
-        from server.device import preview
+        from server.device.media import preview
 
         bundle = tmp_path / "Quern Preview.app"
         binary = bundle / "Contents" / "MacOS" / "ios-preview"
@@ -54,7 +54,7 @@ class TestBuildBundle:
     def test_a_stuck_compiler_fails_instead_of_hanging(self, tmp_path, monkeypatch):
         """Unbounded, a stuck swiftc hangs `quern setup` with no output and no
         way to tell it apart from a hang in Quern itself."""
-        from server.device import preview
+        from server.device.media import preview
 
         bundle = tmp_path / "Quern Preview.app"
         binary = bundle / "Contents" / "MacOS" / "ios-preview"
@@ -82,7 +82,7 @@ class TestBuildBundle:
 
     def test_the_compile_is_actually_given_a_timeout(self, tmp_path, monkeypatch):
         """A timeout that is never passed to subprocess.run protects nothing."""
-        from server.device import preview
+        from server.device.media import preview
 
         bundle = tmp_path / "Quern Preview.app"
         binary = bundle / "Contents" / "MacOS" / "ios-preview"
@@ -155,7 +155,7 @@ class TestDisconnectEvent:
     def test_a_disconnect_drops_the_device_from_available(self):
         """The server would otherwise advertise an unplugged phone until
         something forced a refresh."""
-        from server.device.preview import PreviewDeviceInfo
+        from server.device.media.preview import PreviewDeviceInfo
 
         mgr = PreviewManager()
         mgr._available = [PreviewDeviceInfo(name="iPhone 11", cmio_id=IPHONE_KEY)]
@@ -313,7 +313,7 @@ class TestSimulatorStreams:
 
     @staticmethod
     def _manager(monkeypatch, process):
-        from server.device import preview
+        from server.device.media import preview
 
         mgr = PreviewManager()
 
@@ -373,7 +373,7 @@ class TestSimulatorStreams:
         process = _LiveStreamProcess()
 
         async def run():
-            from server.device import preview
+            from server.device.media import preview
 
             mgr = PreviewManager()
             mgr._streams["SIM"] = preview._StreamProcess(
@@ -390,7 +390,7 @@ class TestSimulatorStreams:
         process = _LiveStreamProcess()
 
         async def run():
-            from server.device import preview
+            from server.device.media import preview
 
             mgr = PreviewManager()
             mgr._streams["SIM"] = preview._StreamProcess(
@@ -411,7 +411,7 @@ class TestSimulatorStreams:
         directly: the thing that can regress is add_simulator forgetting to
         pass the exclude set, which a direct call cannot catch.
         """
-        from server.device import preview
+        from server.device.media import preview
 
         mgr = PreviewManager()
         mgr._streams["A"] = preview._StreamProcess(
@@ -477,7 +477,7 @@ class TestIdentityResolution:
 
     @staticmethod
     def _available(*pairs):
-        from server.device.preview import PreviewDeviceInfo
+        from server.device.media.preview import PreviewDeviceInfo
 
         mgr = PreviewManager()
         mgr._available = [PreviewDeviceInfo(name=n, cmio_id=i) for n, i in pairs]
@@ -529,8 +529,8 @@ class TestIdentityResolution:
         and unplugging either closes the other's window. Verified that this
         fails when `_add_device` keys on `device.name`.
         """
-        from server.device import preview
-        from server.device.preview import PreviewDeviceInfo
+        from server.device.media import preview
+        from server.device.media.preview import PreviewDeviceInfo
 
         mgr = PreviewManager()
         mgr._available = [
@@ -567,8 +567,8 @@ class TestIdentityResolution:
     def test_add_routes_a_simulator_udid_to_a_stream(self, monkeypatch):
         """One entry point for both kinds: a udid is not a capture device, and
         the caller should not have to know which call to make."""
-        from server.device import preview
-        from server.device.preview import ActivePreview
+        from server.device.media import preview
+        from server.device.media.preview import ActivePreview
 
         mgr = PreviewManager()
         seen: dict = {}
@@ -593,7 +593,7 @@ class TestIdentityResolution:
     def test_an_unknown_identifier_says_it_is_neither(self, monkeypatch):
         """"Device not found" sent the reader looking at the USB cable for a
         simulator that simply was not booted."""
-        from server.device import preview
+        from server.device.media import preview
 
         mgr = PreviewManager()
 
@@ -622,7 +622,7 @@ class TestTeardownFailureReporting:
         """
         import logging
 
-        from server.device import preview
+        from server.device.media import preview
 
         async def run():
             mgr = PreviewManager()
@@ -649,7 +649,7 @@ class TestTeardownFailureReporting:
         # appears only in our message.
         #
         # Deliberately not matched on the logger name. CI failed this while
-        # it passed locally, reporting the records as `server.device.preview`
+        # it passed locally, reporting the records as `server.device.media.preview`
         # against a source that named the logger `quern-debug-server.preview`.
         # The cause: Actions checks out the PR *merged with its base*, and
         # main had renamed the logger to `getLogger(__name__)` as part of
@@ -673,7 +673,7 @@ class TestSharedSourceFreshness:
         parser. Comparing the binary against the script alone would leave an
         edit to the parser silently not taking — the app keeps running the
         previous build and nothing says so."""
-        from server.device import preview
+        from server.device.media import preview
 
         bundle = tmp_path / "Quern Preview.app"
         binary = bundle / "Contents" / "MacOS" / "ios-preview"
@@ -712,7 +712,7 @@ class TestSharedSourcesAreRequired:
         """Filtering to the files that exist compiled the script alone, and
         swiftc then blamed main.swift for a symbol whose file was gone —
         sending the reader to the one file that was fine."""
-        from server.device import preview
+        from server.device.media import preview
 
         missing = tmp_path / "JPEGFraming.swift"  # never created
         monkeypatch.setattr(preview, "_SHARED_SOURCE_CANDIDATES", [missing])
@@ -723,7 +723,7 @@ class TestSharedSourcesAreRequired:
     def test_the_real_shared_sources_all_exist(self):
         """The paths are hardcoded, so a rename inside the Swift package
         breaks the app build. Nothing else in CI compiles that combination."""
-        from server.device import preview
+        from server.device.media import preview
 
         for path in preview._SHARED_SOURCE_CANDIDATES:
             assert path.exists(), f"{path} is referenced by the build but absent"
@@ -742,7 +742,7 @@ class TestRemoveByLabel:
     @staticmethod
     def _with_simulator(*previews):
         """A manager with a live subprocess and the given previews active."""
-        from server.device import preview as preview_mod
+        from server.device.media import preview as preview_mod
 
         mgr = PreviewManager()
         mgr._process = _LiveStreamProcess()
@@ -816,7 +816,7 @@ class TestRemoveByLabel:
     def test_a_capture_device_still_wins_over_a_matching_label(self, monkeypatch):
         """`add` resolves a capture device before it considers a simulator, so
         `remove` must too, or one string names two different windows."""
-        from server.device import preview as preview_mod
+        from server.device.media import preview as preview_mod
 
         mgr = self._with_simulator(("udid-sim", "iPhone 11"))
         mgr._available = [preview_mod.PreviewDeviceInfo(name="iPhone 11", cmio_id="CMIO")]
@@ -890,7 +890,7 @@ class TestSimulatorPreviewRouting:
 
     def test_a_simulator_udid_opens_a_preview(self):
         from server.api.device import PreviewStartRequest, preview_start
-        from server.device import preview as preview_mod
+        from server.device.media import preview as preview_mod
 
         udid = "11111111-2222-3333-4444-555555555555"
         added: list[str] = []
@@ -926,7 +926,7 @@ class TestSimulatorPreviewRouting:
     def test_a_physical_udid_still_resolves_through_a_device_name(self):
         """The existing path, kept honest: CoreMediaIO matches on a name."""
         from server.api.device import PreviewStartRequest, preview_start
-        from server.device import preview as preview_mod
+        from server.device.media import preview as preview_mod
 
         udid = "00008030-000123456789002E"
         added: list[str] = []
@@ -1112,7 +1112,7 @@ class TestSimulatorAddSafety:
         Opening whichever simctl listed first is the defect `_resolve_device`
         and `_key_for_label` both refuse to commit -- and it was asymmetric
         too: `add` picked one while `remove` raised once both were active."""
-        from server.device import preview as preview_mod
+        from server.device.media import preview as preview_mod
 
         mgr = PreviewManager()
 
@@ -1135,7 +1135,7 @@ class TestSimulatorAddSafety:
     def test_a_udid_beats_another_simulators_name(self, monkeypatch):
         """Names are checked only after every udid, so a name colliding with
         some other simulator's udid cannot win."""
-        from server.device import preview as preview_mod
+        from server.device.media import preview as preview_mod
 
         mgr = PreviewManager()
         picked: list[str] = []
@@ -1169,7 +1169,7 @@ class TestSimulatorAddSafety:
         could not reach it: it held its port and the framebuffer subscription
         until the server exited.
         """
-        from server.device import preview as preview_mod
+        from server.device.media import preview as preview_mod
 
         udid = "11111111-2222-3333-4444-555555555555"
         started: list[int] = []
@@ -1243,7 +1243,7 @@ class TestAskingForAPhoneNeverOpensASimulator:
 
     @staticmethod
     def _manager(monkeypatch, *, available=(), booted=()):
-        from server.device import preview as preview_mod
+        from server.device.media import preview as preview_mod
 
         mgr = PreviewManager()
         mgr._available = [
@@ -1347,7 +1347,7 @@ class TestAskingForAPhoneNeverOpensASimulator:
         """Without this the caller cannot tell a phone from a simulator: the
         response carried only a name, and both kinds report the same one."""
         from server.api.device import PreviewStartRequest, preview_start
-        from server.device import preview as preview_mod
+        from server.device.media import preview as preview_mod
 
         mgr = self._manager(monkeypatch, booted=[("sim-udid", "iPhone 16 Pro")])
 
@@ -1411,7 +1411,7 @@ class TestStoppingAPhoneNeverClosesASimulator:
 
     @staticmethod
     def _manager(monkeypatch, *, available, active):
-        from server.device import preview as preview_mod
+        from server.device.media import preview as preview_mod
 
         mgr = PreviewManager()
         mgr._available = [
@@ -1513,7 +1513,7 @@ class TestEverySingleDeviceResponseSaysItsKind:
 
     def test_the_sweep_labels_every_entry(self, monkeypatch):
         from server.api.device import PreviewStartRequest, preview_start
-        from server.device import preview as preview_mod
+        from server.device.media import preview as preview_mod
 
         mgr = PreviewManager()
         mgr._available = [preview_mod.PreviewDeviceInfo(name="iPhone 11", cmio_id="CMIO-1")]

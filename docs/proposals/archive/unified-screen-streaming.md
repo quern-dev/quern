@@ -23,7 +23,7 @@
 >   shipped keeps `ios-preview` (AppKit windows) and `quern-media` (headless
 >   frames) separate, because consolidating meant re-deriving the preview
 >   app's acknowledgement timing to rewrite a feature nobody had complained
->   about. `server/device/media_engine.py` records that decision.
+>   about. `server/device/media/media_engine.py` records that decision.
 > - **`MaxKeyFrameInterval` counts frames, not seconds.** Discovered after
 >   this was written; on an event-driven source the wall-clock gap between
 >   IDRs stretches with idleness, which is what `POST /keyframe` exists for.

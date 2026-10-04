@@ -33,7 +33,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from server.config import CONFIG_DIR
-from server.device.media_engine import build_media_engine
+from server.device.media.media_engine import build_media_engine
 from server.lifecycle.ports import find_available_port
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 QUERN_BIN_DIR = CONFIG_DIR / "bin"
 BINARY_NAME = "ios-preview"
 APP_BUNDLE_NAME = "Quern Preview.app"
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _SOURCE_CANDIDATES = [
     _PROJECT_ROOT / "tools" / "ios-preview" / "main.swift",
 ]
@@ -54,7 +54,7 @@ _SHARED_SOURCE_CANDIDATES = [
     _PROJECT_ROOT / "macos" / "QuernMedia" / "Sources" / "QuernMedia"
     / "Encode" / "JPEGFraming.swift",
 ]
-_RESOURCES_DIR = Path(__file__).resolve().parent / "resources"
+_RESOURCES_DIR = Path(__file__).resolve().parents[1] / "resources"  # server/device/resources
 
 # Where simulator streams start looking for a port. Scanned upward, never
 # hardcoded into anything that outlives the process -- the window is told the

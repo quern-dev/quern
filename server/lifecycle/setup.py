@@ -719,7 +719,7 @@ def build_preview_app() -> CheckResult:
         return result
 
     try:
-        from server.device.preview import build_preview_bundle
+        from server.device.media.preview import build_preview_bundle
 
         build_preview_bundle()
     except (RuntimeError, OSError) as e:

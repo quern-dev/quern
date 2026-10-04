@@ -11,8 +11,8 @@ from server.device.adb import AdbBackend
 from server.device.controller_ui import DeviceControllerUI
 from server.device.devicectl import DevicectlBackend, canonical_device_id, spellings_of
 from server.device.idb import IdbBackend
+from server.device.media.screenshots import process_screenshot
 from server.device.pmd3 import Pmd3Backend
-from server.device.screenshots import process_screenshot
 from server.device.sim_bridge import SimBridgeBackend, SimBridgeManager
 from server.device.simctl import SimctlBackend
 from server.device.u2_client import U2Backend
