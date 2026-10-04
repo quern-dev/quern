@@ -6,7 +6,7 @@
 > companion binary, no subprocess-per-call. This doc remains relevant only as
 > the fallback path for Intel Macs and pre-Xcode-26 setups; the `quern setup`
 > flow skips the companion install entirely when sim-bridge is supported.
-> See [`sim-bridge-spec.md`](sim-bridge-spec.md) for the current backend.
+> See [`proposals/sim-bridge-spec.md`](proposals/sim-bridge-spec.md) for the current backend.
 >
 > An install left over from an older setup is still the fallback when
 > sim-bridge cannot run, so setup offers to replace an outdated one on every

@@ -19,16 +19,28 @@ AI Agent (Claude Code, Cursor, etc.)
     │                  │
     └── via HTTP ──→ server/       (Python FastAPI, port 9100)
                        │
-                       ├── sources/     Log capture (device, simulator, syslog, oslog, crash, build)
-                       ├── proxy/       Network interception (mitmproxy subprocess, port 9101)
-                       ├── device/      Simulator control (simctl, idb)
-                       ├── processing/  Classify, deduplicate, summarize
-                       ├── storage/     In-memory ring buffer
-                       ├── lifecycle/   Daemon, state.json, port scanning, watchdog
-                       └── api/         HTTP route handlers
+                       ├── device/      Device control, iOS and Android: simulators (simctl,
+                       │                sim-bridge, idb), physical iPhones (WDA, devicectl,
+                       │                pymobiledevice3, tunneld), Android (adb, uiautomator2);
+                       │                also builds, preview, web inspection, landmarks
+                       ├── sources/     Log and crash capture (simulator, device, syslog, oslog,
+                       │                logcat, crash reports, symbolication)
+                       ├── proxy/       Network interception (mitmproxy subprocess, port 9101),
+                       │                certificates, local capture
+                       ├── processing/  Classify, deduplicate, filter, summarize
+                       ├── storage/     In-memory ring buffer and fan-out
+                       ├── lifecycle/   Daemon, state.json, ports, setup, updates, watchdog
+                       ├── api/         HTTP route handlers
+                       └── *.py         models, the app (main.py), CLI (__main__.py),
+                                        recording and trace
+
+macos/       Swift: the menu-bar app (QuernMenuBar) and the media engine (QuernMedia)
+tools/       Native helpers and probe apps (sim-bridge, ios-preview, probe-app*)
+templates/   The app-knowledge scaffold `init_app_knowledge` writes
+scripts/     Review, merge and release tooling, and the git hooks
 ```
 
-The MCP server is intentionally thin — just translates tool calls into HTTP requests. All logic lives in the Python server.
+The MCP server is intentionally thin — just translates tool calls into HTTP requests. All logic lives in the Python server. `server/device/` has outgrown its name; #396 tracks splitting it.
 
 ## Running it
 
