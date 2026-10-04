@@ -19,6 +19,7 @@ import ctypes
 import ctypes.util
 import fnmatch
 import json
+import os
 import re
 import subprocess
 import sys
@@ -834,11 +835,52 @@ def _started_monotonic(flow: http.HTTPFlow) -> float | None:
     return value
 
 
+#: The file descriptor the server passes for events, so they do not share
+#: stdout with mitmproxy. mitmproxy's own logger prints there -- `--quiet` keeps
+#: errors, with their tracebacks -- and a traceback line that is only a string
+#: literal is valid JSON. One such line ended the server's read loop and left
+#: local capture pointing at a proxy nobody read from. Unset when an older
+#: server, still running across an update, starts this addon: then stdout,
+#: as before.
+EVENT_FD_ENV = "QUERN_EVENT_FD"
+
+_event_lock = threading.Lock()
+_event_fd: int | None = None
+
+
+def _event_channel() -> int | None:
+    """The events pipe's descriptor, or None to write to stdout."""
+    global _event_fd
+    if _event_fd is None:
+        raw = os.environ.get(EVENT_FD_ENV, "")
+        if raw.isdigit():
+            _event_fd = int(raw)
+            # Ours alone. Inherited, a child of mitmdump -- the redirector it
+            # launches for local capture -- would hold the pipe open, and the
+            # server would not see EOF when mitmdump exits.
+            with contextlib.suppress(OSError):
+                os.set_inheritable(_event_fd, False)
+    return _event_fd
+
+
 def _write_json(obj: dict[str, Any]) -> None:
-    """Write a JSON object as a single line to stdout."""
-    data = json.dumps(obj, separators=(",", ":"), default=str)
-    sys.stdout.buffer.write(data.encode("utf-8") + b"\n")
-    sys.stdout.buffer.flush()
+    """Write a JSON object as one line on the event channel.
+
+    Whole lines, under a lock: events come from mitmproxy's loop and from the
+    stdin reader thread, and a line split by another writer is two lines the
+    server cannot parse.
+    """
+    data = (json.dumps(obj, separators=(",", ":"), default=str) + "\n").encode("utf-8")
+    fd = _event_channel()
+    with _event_lock:
+        if fd is None:
+            sys.stdout.buffer.write(data)
+            sys.stdout.buffer.flush()
+            return
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
 
 
 def _encode_body(raw: bytes | None) -> tuple[str | None, int, bool, str]:
@@ -987,7 +1029,6 @@ class IOSDebugAddon:
         # Bound to the launchd_sim pid each was running as when checked -- see
         # `_simulator_instance_for_pid`. Unbound until `load` has read the
         # process table, so nothing is decrypted before then.
-        import os
         self._trusted_simulators: frozenset[str] | None = _parse_trusted_simulators(
             os.environ.get(TRUSTED_SIMULATORS_ENV),
         )
