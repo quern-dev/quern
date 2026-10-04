@@ -22,27 +22,41 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-# Run from a copy. Bash reads a script as it goes, so editing this file during
-# a run -- the normal thing to do while iterating on it -- shifts the offsets
-# under the running shell, which then executes a fragment of the file as a
-# command. It happened during this script's own development.
-if [[ -z "${CLI_LIVE_ROOT:-}" ]]; then
-  copy="$(mktemp -d "${TMPDIR:-/tmp}/quern-cli-live-script.XXXXXX")"
-  cp -R "$ROOT/scripts" "$copy/"
-  CLI_LIVE_ROOT="$ROOT" exec bash "$copy/scripts/cli-live-test.sh" "$@"
-fi
-ROOT="$CLI_LIVE_ROOT"
-SCRIPT_COPY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REF="HEAD"
 KEEP=0
 for arg in "$@"; do
   case "$arg" in
     --keep) KEEP=1 ;;
-    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) REF="$arg" ;;
   esac
 done
+
+# Run from a copy. Bash reads a script as it goes, so editing this file during
+# a run -- the normal thing to do while iterating on it -- shifts the offsets
+# under the running shell, which then executes a fragment of the file as a
+# command. It happened during this script's own development.
+#
+# The copy is deleted at exit, so it is recognised by more than a variable
+# that could arrive from the environment: an inherited value once made the
+# cleanup `rm -rf` the checkout it ran from. Only a directory this script
+# created and marked is ever removed.
+MARKER=".quern-cli-live-copy"
+if [[ -z "${_QUERN_CLI_LIVE_COPY:-}" ]]; then
+  copy="$(mktemp -d "${TMPDIR:-/tmp}/quern-cli-live-script.XXXXXX")"
+  cp -R "$ROOT/scripts" "$copy/"
+  : > "$copy/$MARKER"
+  _QUERN_CLI_LIVE_COPY="$copy" _QUERN_CLI_LIVE_ROOT="$ROOT" \
+    exec bash "$copy/scripts/cli-live-test.sh" "$@"
+fi
+SCRIPT_COPY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="${_QUERN_CLI_LIVE_ROOT:-}"
+if [[ "$SCRIPT_COPY" != "$_QUERN_CLI_LIVE_COPY" || "$SCRIPT_COPY" == "$ROOT" \
+      || -z "$ROOT" || ! -f "$SCRIPT_COPY/$MARKER" ]]; then
+  echo "error: not running from a copy this script made; refusing to go on" >&2
+  echo "       (unset _QUERN_CLI_LIVE_COPY and _QUERN_CLI_LIVE_ROOT)" >&2
+  exit 2
+fi
 
 # shellcheck source=lib/sandbox.sh
 source "$SCRIPT_COPY/scripts/lib/sandbox.sh"
@@ -53,6 +67,50 @@ source "$SCRIPT_COPY/scripts/lib/sandbox.sh"
 PORT=9197
 PROXY_PORT=9198
 
+SB=""
+TREE=""
+
+# Processes this run started, found by their command line containing the
+# sandbox path -- never "whatever holds the port", which is #405's mistake.
+sandbox_pids() {
+  [[ -n "$SB" ]] || return 0
+  local p pid
+  for p in "$PORT" "$PROXY_PORT"; do
+    for pid in $(lsof -nP -t -iTCP:"$p" -sTCP:LISTEN 2>/dev/null || true); do
+      ps -o args= -p "$pid" 2>/dev/null | grep -qF "$SB" && echo "$pid"
+    done
+  done | sort -u
+}
+
+stop_sandbox_server() {
+  [[ -n "$TREE" && -x "$TREE/quern" ]] && declare -F q >/dev/null \
+    && q stop >/dev/null 2>&1 || true
+  local pids i
+  pids="$(sandbox_pids)"
+  [[ -n "$pids" ]] && kill $pids 2>/dev/null || true
+  for i in $(seq 1 20); do
+    [[ -z "$(sandbox_pids)" ]] && return 0
+    sleep 1
+  done
+  pids="$(sandbox_pids)"
+  [[ -n "$pids" ]] && kill -9 $pids 2>/dev/null || true
+}
+
+cleanup() {
+  local rc=$?
+  stop_sandbox_server
+  if [[ -n "$SB" ]]; then
+    if [[ $KEEP -eq 1 ]]; then
+      printf '\nsandbox kept (server stopped): %s\n' "$SB"
+    else
+      rm -rf "$SB"
+    fi
+  fi
+  rm -rf "$SCRIPT_COPY"   # checked above to be a marked copy, not ROOT
+  exit "$rc"
+}
+trap cleanup EXIT
+
 for p in "$PORT" "$PROXY_PORT"; do
   if lsof -nP -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1; then
     echo "error: port $p is in use; this test needs $PORT and $PROXY_PORT free" >&2
@@ -62,11 +120,6 @@ done
 
 # A template, because macOS `mktemp -d` alone ignores TMPDIR.
 SB="$(mktemp -d "${TMPDIR:-/tmp}/quern-cli-live.XXXXXX")"
-if [[ $KEEP -eq 1 ]]; then
-  trap 'echo; echo "sandbox kept: $SB"' EXIT
-else
-  trap 'stop_sandbox_server; rm -rf "$SB" "$SCRIPT_COPY"' EXIT
-fi
 SKIPS_FILE="$SB/skips"
 : > "$SKIPS_FILE"
 TRANSCRIPT="$SB/transcript.txt"
@@ -96,7 +149,13 @@ mkdir -p "$HOME_SB" "$TREE"
 # writes the real user's preferences through cfprefsd whatever HOME says, and
 # xcode-select and pipx are called directly. Stubbed, and logged -- so what
 # setup *attempted* is checkable too.
-make_stubs "$SB/bin" brew pipx defaults xcode-select
+#
+# And no devices, deliberately: `xcrun` and `adb` are stubbed, so the sandbox
+# server and setup see no simulators, phones or emulators. The real ones are
+# the developer's, and setup would otherwise list them and, given a CA, offer
+# to install it into their trust stores. This tests the CLI, not device
+# control; the server it starts runs with device management unavailable.
+make_stubs "$SB/bin" brew pipx defaults xcode-select xcrun adb
 CALLS="$SB/calls.log"
 : > "$CALLS"
 
@@ -116,26 +175,39 @@ EOF
 
 # Run the tree's own `quern` from inside it, with an environment that is built
 # rather than inherited: an exported variable leaking in from this shell is how
-# a test like this passes for the wrong reason. No network for releases -- an
-# unreachable feed, so update checks exercise their failure path, not GitHub.
+# a test like this passes for the wrong reason.
+#
+# Detached from any terminal -- a new session and stdin from /dev/null -- so a
+# person running this from a shell gets the same run an agent does. Without it
+# setup's prompts reopened /dev/tty, waited on the person at the keyboard, and
+# took their Enter as a yes.
+#
+# Offline once setup is done (it needs pip and npm): https traffic goes to a
+# dead proxy, so `start` makes no real update check and `check-updates` takes
+# its could-not-ask path. QUERN_RELEASES_URL covers the release API the same way.
+DEAD_PROXY="http://127.0.0.1:9"
+Q_OFFLINE=""
 q() {
+  local proxy="${Q_HTTPS_PROXY-$Q_OFFLINE}"
   ( cd "${QCWD:-$TREE}" && env -i \
       HOME="$HOME_SB" \
       QUERN_STATE_DIR="$STATE" \
       QUERN_RELEASES_URL="http://127.0.0.1:9/unreachable" \
       PATH="$SANDBOX_PATH" \
       PIP_CACHE_DIR="$PIP_CACHE_DIR" npm_config_cache="$npm_config_cache" \
-      https_proxy="${Q_HTTPS_PROXY:-}" HTTPS_PROXY="${Q_HTTPS_PROXY:-}" \
+      https_proxy="$proxy" HTTPS_PROXY="$proxy" \
       TERM=dumb \
-      "$TREE/quern" "$@" )
+      python3 -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
+      "$TREE/quern" "$@" ) < /dev/null
 }
 
-# The same, on a pseudo-terminal that answers one prompt once it appears:
+# The same, on a pseudo-terminal that answers prompts as they appear:
 # `uninstall` has no --yes and declines when nobody can be asked, so without a
 # tty it would test only the decline. Piping "y" into `script` does not do it --
 # the EOF arrives first and the prompt reads that. Exits 99 if the prompt never
 # came, so "not asked" cannot pass for "asked and answered"; 97 at a prompt it
 # was not given an answer for, and 98 if the command outlives five minutes.
+# A prompt written "?text" is optional: answered if it appears, not required.
 q_answer() {   # q_answer <prompt> <answer> [<prompt> <answer> ...] -- <quern args...>
   local pairs=()
   while [[ "$1" != "--" ]]; do pairs+=("$1"); shift; done
@@ -148,11 +220,13 @@ q_answer() {   # q_answer <prompt> <answer> [<prompt> <answer> ...] -- <quern ar
 import os, pty, re, select, signal, sys, time
 n = int(sys.argv[1])
 pairs = list(zip(sys.argv[2:2 + n:2], sys.argv[3:2 + n:2]))
+optional = [p.startswith("?") for p, _ in pairs]
+pairs = [(p.lstrip("?"), a) for p, a in pairs]
 argv = sys.argv[2 + n:]
 pid, fd = pty.fork()
 if pid == 0:
     os.execv(argv[0], argv)
-seen, answered, deadline = b"", 0, time.time() + 300
+seen, done, deadline = b"", set(), time.time() + 300
 code = None
 while time.time() < deadline:
     if not select.select([fd], [], [], 1)[0]:
@@ -166,9 +240,12 @@ while time.time() < deadline:
     sys.stdout.buffer.write(data)
     sys.stdout.flush()
     seen += data
-    if answered < len(pairs) and pairs[answered][0].encode() in seen:
-        os.write(fd, (pairs[answered][1] + "\n").encode())
-        seen, answered = b"", answered + 1
+    hit = next((i for i, (p, _) in enumerate(pairs)
+                if i not in done and p.encode() in seen), None)
+    if hit is not None:
+        os.write(fd, (pairs[hit][1] + "\n").encode())
+        seen = b""
+        done.add(hit)
     elif re.search(rb"\[[yY]/[nN]\] *$", seen):
         print("\n[cli-live-test] a prompt nobody expected", flush=True)
         code = 97
@@ -181,7 +258,8 @@ if code is not None:
     os.waitpid(pid, 0)
     sys.exit(code)
 status = os.waitpid(pid, 0)[1]
-sys.exit(os.waitstatus_to_exitcode(status) if answered == len(pairs) else 99)
+required = {i for i, opt in enumerate(optional) if not opt}
+sys.exit(os.waitstatus_to_exitcode(status) if required <= done else 99)
 ' "${#pairs[@]}" "${pairs[@]}" "$TREE/quern" "$@" )
 }
 
@@ -230,12 +308,27 @@ expect_rc() {   # expect_rc <step> <code> <what it means>
 
 # The developer's server keeps its pid through every step. It is the specific
 # accident the sandbox ports exist to prevent, so it is checked, not assumed.
-check_real_server() {
+real_server_ok() {
   [[ -z "$REAL_PID" ]] && return 0
-  if [[ "$(real_server_pid)" == "$REAL_PID" ]] && kill -0 "$REAL_PID" 2>/dev/null; then
-    return 0
+  [[ "$(real_server_pid)" == "$REAL_PID" ]] && kill -0 "$REAL_PID" 2>/dev/null
+}
+check_real_server() {
+  real_server_ok || bad "after $1: the developer's own server (pid $REAL_PID) is gone or replaced"
+}
+
+# A refusal is a message and an exit code, not a crash that also exits non-zero.
+refused() {   # refused <what> <expected text>
+  if [[ "$RC" -eq 0 ]]; then
+    bad "$1 exited 0"
+  elif grep -q "Traceback" "$LOG"; then
+    bad "$1 exited $RC with a traceback, not a refusal"
+    show_log
+  elif ! grep -qi -- "$2" "$LOG"; then
+    bad "$1 exited $RC without saying '$2'"
+    show_log
+  else
+    ok "$1 is refused (exit $RC)"
   fi
-  bad "after $1: the developer's own server (pid $REAL_PID) is gone or replaced"
 }
 
 json_get() {   # json_get <file> <python expression on d>
@@ -250,13 +343,6 @@ except Exception:
 sandbox_server_pid() { json_get "$STATE/state.json" 'd.get("pid", "")'; }
 sandbox_port() { json_get "$STATE/state.json" 'd.get("server_port", "")'; }
 
-stop_sandbox_server() {
-  [[ -x "$TREE/quern" ]] && q stop >/dev/null 2>&1 || true
-  local pid
-  pid="$(lsof -nP -t -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)"
-  [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
-}
-
 healthy() { curl -fsS --max-time 5 "http://127.0.0.1:$1/health" >/dev/null 2>&1; }
 
 printf 'CLI live test of %s (%s)\n' "$REF" "$(git -C "$ROOT" rev-parse --short "$REF")"
@@ -267,7 +353,7 @@ step "Before setup"
 run version q version
 expect_rc "version" 0 "answers before setup has run"
 want="$(sed -n 's/^version = "\(.*\)"/\1/p' "$TREE/pyproject.toml" | head -1)"
-grep -q "$want" "$LOG" && ok "version prints $want" || bad "version does not print $want"
+[[ -n "$want" ]] && grep -qF "$want" "$LOG" && ok "version prints $want" || bad "version does not print '${want}'"
 record version "$(grep -c "$want" "$LOG" | sed 's/^0$/wrong version/; s/^[1-9].*/prints the tree version/')"
 
 # Before setup there is no venv, so the wrapper runs the system python. `help`
@@ -281,7 +367,8 @@ done
 if [[ "$RC" -eq 0 && -z "$missing" ]]; then
   [[ -n "${KNOWN_HELP:-}" ]] && fixed "help before setup" "$KNOWN_HELP" || ok "help before setup lists every core command"
 else
-  known "help before setup exits $RC: $(grep -m1 -o 'No module named [^ ]*' "$LOG" || head -1 "$LOG")" "${KNOWN_HELP:-unfiled}"
+  why="help before setup exits $RC: $(grep -m1 -o 'No module named [^ ]*' "$LOG" || head -1 "$LOG")"
+  if [[ -n "${KNOWN_HELP:-}" ]]; then known "$why" "$KNOWN_HELP"; else bad "$why"; fi
 fi
 record help "missing:${missing:- none}"
 
@@ -290,8 +377,11 @@ step "setup"
 # --------------------------------------------------------------------------
 # Unattended first: the contract is to decline what it cannot ask and say so.
 run setup-no-tty q setup
-record setup-no-tty "$(grep -c 'not answered\|declined' "$LOG" | sed 's/^0$/no declines reported/; s/^[1-9].*/reported what it declined/')"
-ok "setup with no terminal exits $RC (recorded; it declines and names what it could not ask)"
+grep -q "No terminal attached" "$LOG" \
+  && ok "setup with no terminal says so, and declines rather than answering (exit $RC)" \
+  || bad "setup with no terminal did not say it could not ask"
+grep -q "Traceback" "$LOG" && bad "setup with no terminal raised a traceback" || true
+record setup-no-tty "said-no-terminal:$(grep -q 'No terminal attached' "$LOG" && echo y || echo n)"
 check_real_server "setup with no terminal"
 
 run setup-yes q setup --yes
@@ -311,6 +401,7 @@ if [[ ! -x "$TREE/.venv/bin/python" ]]; then
   sed -n '1,40p' "$LOG" | sed 's/^/      /'
   exit 1
 fi
+Q_OFFLINE="$DEAD_PROXY"
 
 # --------------------------------------------------------------------------
 step "mcp-install"
@@ -322,9 +413,24 @@ entry="$(json_get "$HOME_SB/.claude.json" '[k for k in d.get("mcpServers", {}) i
 grep -q "$TREE" "$HOME_SB/.claude.json" && ok "it points into this tree" || bad "the entry does not point at this tree"
 [[ "$(json_get "$HOME_SB/.claude.json" 'd.get("numStartups")')" == "7" ]] \
   && ok "Claude Code's own keys are untouched" || bad "mcp-install changed a key that is not quern's"
+[[ "$(json_get "$HOME_SB/.claude.json" '"someone-else" in d.get("mcpServers", {})')" == "True" ]] \
+  && ok "Claude Code's other server is still there" || bad "mcp-install removed another server from Claude Code"
 [[ "$(json_get "$HOME_SB/.cursor/mcp.json" '"someone-else" in d.get("mcpServers", {})')" == "True" ]] \
   && ok "Cursor's other server is still there" || bad "mcp-install removed another server from Cursor"
-record mcp-install "claude:${entry:-none} others-kept:$(json_get "$HOME_SB/.claude.json" 'd.get("numStartups")')"
+# Every client `all` names. The name, not the path: the sandbox path itself
+# contains "quern".
+CLIENT_CONFIGS=(
+  "$HOME_SB/.claude.json"
+  "$HOME_SB/Library/Application Support/Claude/claude_desktop_config.json"
+  "$HOME_SB/.cursor/mcp.json"
+  "$HOME_SB/.config/opencode/opencode.json"
+  "$HOME_SB/.codex/config.toml"
+)
+registered() { local f n=0; for f in "${CLIENT_CONFIGS[@]}"; do grep -q "quern-debug" "$f" 2>/dev/null && n=$((n + 1)); done; echo "$n"; }
+[[ "$(registered)" -eq ${#CLIENT_CONFIGS[@]} ]] \
+  && ok "all ${#CLIENT_CONFIGS[@]} clients have a quern-debug entry" \
+  || bad "only $(registered) of ${#CLIENT_CONFIGS[@]} clients have a quern-debug entry"
+record mcp-install "registered:$(registered)/${#CLIENT_CONFIGS[@]} others-kept:$(json_get "$HOME_SB/.claude.json" 'd.get("numStartups")')"
 
 run grant-full-perms q grant-full-perms
 expect_rc "grant-full-perms" 0 "writes Claude Code's permission list"
@@ -350,27 +456,34 @@ record set-channel-beta "channel:$(cfg 'd.get("update_channel")')"
 
 cp "$CONFIG" "$SB/config.before-bogus" 2>/dev/null || true
 run set-channel-bogus q set-channel nightly-ish
-[[ "$RC" -ne 0 ]] && ok "an unknown channel is refused (exit $RC)" || bad "an unknown channel exited 0"
+refused "an unknown channel" "channel"
 cmp -s "$CONFIG" "$SB/config.before-bogus" && ok "and config.json is unchanged" || bad "a refused channel still changed config.json"
 record set-channel-bogus "refused:$([[ $RC -ne 0 ]] && echo y || echo n)"
 
 run set-channel-stable q set-channel stable
 expect_rc "set-channel stable" 0 "switches back"
+[[ "$(cfg 'd.get("update_channel")')" == "stable" ]] && ok "config.json says stable" || bad "config.json does not say stable"
 record set-channel-stable "channel:$(cfg 'd.get("update_channel")')"
 
 for v in off on; do
+  want_v="$([[ $v == on ]] && echo True || echo False)"
   run "set-update-check-$v" q set-update-check "$v"
-  expect_rc "set-update-check $v" 0 "persists"
-  record "set-update-check-$v" "$(cat "$CONFIG" | tr -d ' \n' | grep -o '"update_check[^,}]*' || echo 'no key')"
+  expect_rc "set-update-check $v" 0 "accepted"
+  [[ "$(cfg 'd.get("update_check")')" == "$want_v" ]] && ok "config.json has update_check $want_v" \
+    || bad "config.json has update_check '$(cfg 'd.get("update_check")')', expected $want_v"
+  record "set-update-check-$v" "value:$(cfg 'd.get("update_check")')"
 done
 for v in on off; do
+  want_v="$([[ $v == on ]] && echo True || echo False)"
   run "set-auto-install-cert-$v" q set-auto-install-cert "$v"
-  expect_rc "set-auto-install-cert $v" 0 "persists"
+  expect_rc "set-auto-install-cert $v" 0 "accepted"
+  [[ "$(cfg 'd.get("auto_install_cert")')" == "$want_v" ]] && ok "config.json has auto_install_cert $want_v" \
+    || bad "config.json has auto_install_cert '$(cfg 'd.get("auto_install_cert")')', expected $want_v"
   record "set-auto-install-cert-$v" "value:$(cfg 'd.get("auto_install_cert")')"
 done
 cp "$CONFIG" "$SB/config.before-bogus"
 run set-auto-install-cert-bogus q set-auto-install-cert maybe
-[[ "$RC" -ne 0 ]] && ok "set-auto-install-cert refuses 'maybe' (exit $RC)" || bad "set-auto-install-cert accepted 'maybe'"
+refused "set-auto-install-cert maybe" "on"
 cmp -s "$CONFIG" "$SB/config.before-bogus" && ok "and config.json is unchanged" || bad "a refused value still changed config.json"
 record set-auto-install-cert-bogus "refused:$([[ $RC -ne 0 ]] && echo y || echo n)"
 
@@ -378,10 +491,21 @@ record set-auto-install-cert-bogus "refused:$([[ $RC -ne 0 ]] && echo y || echo 
 # would route every simulator on this Mac through the sandbox proxy.
 run enable-local-capture q enable-local-capture --skip-cert-check MyApp
 expect_rc "enable-local-capture" 0 "writes the process list"
+[[ "$(cfg '"MyApp" in d.get("local_capture", [])')" == "True" ]] && ok "config.json captures MyApp" \
+  || bad "config.json does not list MyApp: $(cfg 'd.get("local_capture")')"
 record enable-local-capture "config:$(cfg 'd.get("local_capture")')"
 run disable-local-capture q disable-local-capture
 expect_rc "disable-local-capture" 0 "never refused"
 record disable-local-capture "config:$(cfg 'd.get("local_capture")')"
+# Not just a check: a server started with local capture still configured runs
+# mitmdump in local mode, macOS-wide, over the same process names the
+# developer's own server may be capturing. Nothing starts until this is clear.
+if [[ "$(cfg 'd.get("local_capture", [])')" == "[]" ]]; then
+  ok "local capture is off again"
+else
+  bad "disable-local-capture left $(cfg 'd.get("local_capture")') -- not starting a server that would capture this Mac's traffic"
+  exit 1
+fi
 
 key_before="$(cat "$STATE/api-key" 2>/dev/null || true)"
 run regenerate-key q regenerate-key
@@ -395,7 +519,7 @@ check_real_server "settings"
 step "The server: start, status, url, env, restart, stop"
 # --------------------------------------------------------------------------
 run url-stopped q url
-[[ "$RC" -ne 0 ]] && ok "url with no server exits $RC" || bad "url with no server exited 0"
+refused "url with no server" "No server"
 record url-stopped "$(head -1 "$LOG" | cut -c1-70)"
 
 run start q start --port "$PORT" --proxy-port "$PROXY_PORT"
@@ -408,9 +532,9 @@ check_real_server "start"
 
 run status q status
 expect_rc "status" 0 "a server is running"
-grep -q "$pid1" "$LOG" && ok "status names the server's pid" || bad "status does not name pid $pid1"
+[[ -n "$pid1" ]] && grep -qw "$pid1" "$LOG" && ok "status names the server's pid" || bad "status does not name pid '$pid1'"
 grep -q "$PORT" "$LOG" && ok "status names the port" || bad "status does not name port $PORT"
-record status "names-pid:$(grep -q "$pid1" "$LOG" && echo y || echo n) names-port:$(grep -q "$PORT" "$LOG" && echo y || echo n)"
+record status "names-pid:$([[ -n $pid1 ]] && grep -qw "$pid1" "$LOG" && echo y || echo n) names-port:$(grep -q "$PORT" "$LOG" && echo y || echo n)"
 
 run url q url
 expect_rc "url" 0 "prints the base URL"
@@ -446,8 +570,11 @@ check_real_server "restart"
 run stop q stop
 expect_rc "stop" 0 "stops the daemon"
 sleep 1
-kill -0 "$pid2" 2>/dev/null && bad "pid $pid2 is still running" || ok "the process is gone"
+[[ -n "$pid2" ]] && ! kill -0 "$pid2" 2>/dev/null && ok "the process is gone" || bad "pid '$pid2' is still running"
 lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1 && bad "something still listens on $PORT" || ok "nothing listens on $PORT"
+# The proxy goes with it, though mitmdump can take a few seconds.
+for i in $(seq 1 15); do lsof -nP -iTCP:"$PROXY_PORT" -sTCP:LISTEN >/dev/null 2>&1 || break; sleep 1; done
+lsof -nP -iTCP:"$PROXY_PORT" -sTCP:LISTEN >/dev/null 2>&1 && bad "the proxy still listens on $PROXY_PORT" || ok "nothing listens on $PROXY_PORT"
 record stop "process-gone:$(kill -0 "$pid2" 2>/dev/null && echo n || echo y)"
 
 run stop-again q stop
@@ -463,14 +590,11 @@ record doctor "sections:$(grep -c '^[A-Z]' "$LOG")"
 ok "doctor exits $RC (recorded)"
 
 # The endpoint is hard-coded (update_check.ENDPOINT), so the network is cut
-# rather than the feed moved: urllib honours https_proxy, and a dead proxy is
-# a check that could not ask -- which must not read as "up to date".
-Q_HTTPS_PROXY=http://127.0.0.1:9 run check-updates q check-updates
-if [[ "$RC" -ne 0 ]] && ! grep -qi "up to date" "$LOG"; then
-  ok "check-updates that cannot reach the feed exits $RC and does not say up to date"
-else
-  bad "check-updates with no network exited $RC: $(head -1 "$LOG")"
-fi
+# rather than the feed moved -- q is offline by now -- and a check that could
+# not ask must not read as "up to date".
+run check-updates q check-updates
+refused "check-updates with no network" "Could not check for updates"
+grep -qi "up to date" "$LOG" && bad "and it also said up to date" || true
 record check-updates "$(head -1 "$LOG" | cut -c1-70)"
 
 run capture-env q capture-env "$SB/env-report.txt"
@@ -495,6 +619,7 @@ expect_rc "install-precommit-hook" 0 "registers the hook"
 [[ -x "$STATE/bin/agent-precommit-checklist.sh" ]] && ok "the checklist script is in place" || bad "no executable checklist script in ~/.quern/bin"
 [[ "$(hook_entries)" -ge 1 ]] && ok "settings.json runs it" || bad "settings.json has no entry for the checklist"
 run install-precommit-hook-again q install-precommit-hook
+expect_rc "install-precommit-hook again" 0 "refreshes it"
 [[ "$(hook_entries)" -eq 1 ]] && ok "running it again leaves one entry" || bad "running it again left $(hook_entries) entries"
 record install-precommit-hook "entries:$(hook_entries)"
 check_real_server "diagnostics"
@@ -503,11 +628,14 @@ check_real_server "diagnostics"
 step "uninstall"
 # --------------------------------------------------------------------------
 run uninstall-no-tty q uninstall
-[[ -x "$WRAPPER" ]] && ok "uninstall with no terminal removed nothing" || bad "uninstall with no terminal removed the wrapper"
+[[ -x "$WRAPPER" && "$(registered)" -eq ${#CLIENT_CONFIGS[@]} ]] \
+  && ok "uninstall with no terminal removed nothing (exit $RC)" \
+  || bad "uninstall with no terminal removed something"
 record uninstall-no-tty "wrapper-kept:$([[ -x $WRAPPER ]] && echo y || echo n)"
 
 # "n" to the LaunchDaemon: that one is the real machine's, sudo stub or not.
-run uninstall q_answer "Proceed with uninstall?" y "Remove tunneld LaunchDaemon" n -- uninstall
+# Optional, because it is only asked where the daemon is installed.
+run uninstall q_answer "Proceed with uninstall?" y "?Remove tunneld LaunchDaemon" n -- uninstall
 expect_rc "uninstall" 0 "confirmed through a terminal"
 [[ -e "$WRAPPER" ]] && bad "the wrapper is still there" || ok "the wrapper is gone"
 left="$(json_get "$HOME_SB/.claude.json" '[k for k in d.get("mcpServers", {}) if "quern" in k.lower()]')"
@@ -518,10 +646,12 @@ left="$(json_get "$HOME_SB/.claude.json" '[k for k in d.get("mcpServers", {}) if
   && ok "and so did its other server" || bad "uninstall removed another tool's server from Claude Code"
 [[ "$(json_get "$HOME_SB/.cursor/mcp.json" 'sorted(d.get("mcpServers", {}))')" == "['someone-else']" ]] \
   && ok "Cursor is back to just its other server" || bad "Cursor's config is not as it was: $(cat "$HOME_SB/.cursor/mcp.json")"
+[[ "$(registered)" -eq 0 ]] && ok "no client is left with a quern-debug entry" \
+  || bad "$(registered) of ${#CLIENT_CONFIGS[@]} clients still have a quern-debug entry"
 # What uninstall leaves in Claude Code's settings is recorded rather than
 # judged: its summary does not mention the checklist hook or the
 # grant-full-perms rules, and whether it should is a question for an issue.
-record uninstall "wrapper-gone:$([[ -e $WRAPPER ]] && echo n || echo y) claude-left:$left settings-hook:$(hook_entries) settings-quern-rules:$(json_get "$SETTINGS" 'len([p for p in d.get("permissions", {}).get("allow", []) if "quern" in p])')"
+record uninstall "wrapper-gone:$([[ -e $WRAPPER ]] && echo n || echo y) registered:$(registered) settings-hook:$(hook_entries) settings-quern-rules:$(json_get "$SETTINGS" 'len([p for p in d.get("permissions", {}).get("allow", []) if "quern" in p])')"
 check_real_server "uninstall"
 
 # --------------------------------------------------------------------------
@@ -535,7 +665,11 @@ else
   diff <(echo "$BEFORE") <(echo "$AFTER") | sed 's/^/      /' || true
 fi
 if [[ -n "$REAL_PID" ]]; then
-  check_real_server "the whole run" && ok "the developer's server (pid $REAL_PID) ran throughout"
+  if real_server_ok; then
+    ok "the developer's server (pid $REAL_PID) ran throughout"
+  else
+    bad "the developer's server (pid $REAL_PID) did not survive the run"
+  fi
 fi
 printf '\nStubbed calls:\n'
 sort "$CALLS" | uniq -c | sed 's/^/  /'

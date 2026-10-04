@@ -397,6 +397,24 @@ So: exercise the actual path on the actual hardware, with an isolated
 gone after. If that is impossible, say so in the PR rather than leaving the
 reader to assume it was done.
 
+**An isolated `QUERN_STATE_DIR` does not isolate ports.** `quern start` takes
+its port back from any quern-looking process holding it, healthy or not, and
+reads no state to decide (#405) -- so a test server on 9100 stops the daemon
+of whoever is at the keyboard. Pass `--port` and `--proxy-port`.
+
+**For the CLI there is a script.** `scripts/cli-live-test.sh [ref]` runs every
+command for real in a sandbox -- its own `HOME` and state, `brew`, `pipx`,
+`defaults`, `sudo` and friends stubbed, ports 9197/9198 -- and checks what each
+one did, not only its exit code; it fails if anything outside the sandbox
+changed or the developer's own server lost its pid. It sees no devices --
+`xcrun` and `adb` are stubbed -- and runs offline after setup. Run it before any PR that
+touches `server/lifecycle/`, `server/__main__.py` or the CLI in
+`server/main.py`, which the suite covers worst (#406). It writes a normalised
+transcript named by commit, so a refactor is checked by diffing a run of
+`main` against a run of the branch. It tests committed work, and takes a few
+minutes -- most of it `setup` building a venv, about one with a warm pip
+cache. It mutation-tests: of nine CLI breakages tried, it fails on each.
+
 ### Mutation-test, and never restore with `git checkout`
 
 A test that passes against the bug is worse than no test, and this repo ships
