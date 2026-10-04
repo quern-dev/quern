@@ -37,6 +37,9 @@ FORWARDED_TO = {
     "server.device.tool_versions": "server.tooling.tool_versions",
     "server.device.tool_probe": "server.tooling.tool_probe",
     "server.device.landmarks": "server.knowledge.landmarks",
+    "server.device.web_content": "server.device.web.web_content",
+    "server.device.web_probing": "server.device.web.web_probing",
+    "server.device.webinspector": "server.device.web.webinspector",
 }
 
 #: Verbatim, from releases v0.18.0-v0.24.0-beta.1. The tool_updates and
@@ -53,6 +56,17 @@ OLD_IMPORTS = (
     # 3c
     "from server.device.landmarks import LandmarkRegistry",
     "from server.device.landmarks import detect_collisions",
+    # 3d
+    "from server.device.web_content import _is_app",
+    "from server.device.web_content import _texts_correspond, normalise",
+    "from server.device.web_content import collect_web_content, from_probe",
+    "from server.device.web_probing import app_frame",
+    "from server.device.web_probing import hit_contains",
+    "from server.device.web_probing import sweep_web_content",
+    # Parenthesized over two lines in the original.
+    "from server.device.webinspector import WebInspectorError, simulator_udid_for_application",
+    "from server.device.webinspector import SimulatorWebInspector",
+    "from server.device.webinspector import simulator_udid_for_application",
 )
 
 
