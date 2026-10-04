@@ -678,8 +678,8 @@ def _report_tool_updates(apply: bool = False) -> bool:
     """
     import asyncio
 
-    from server.device.tool_updates import actionable, format_offer, plan_updates
-    from server.device.tool_versions import collect_sites
+    from server.tooling.tool_updates import actionable, format_offer, plan_updates
+    from server.tooling.tool_versions import collect_sites
 
     try:
         async def gather():

@@ -24,8 +24,8 @@ from pathlib import Path
 
 from server.config import CONFIG_DIR
 from server.device import ax_recovery, probing
-from server.device.tool_probe import probe_stdout
 from server.models import DeviceError, SimBridgeSaturatedError
+from server.tooling.tool_probe import probe_stdout
 
 logger = logging.getLogger(__name__)
 

@@ -14,14 +14,14 @@ import json
 
 import pytest
 
-from server.device.tool_versions import (
+from server.lifecycle import setup as setup_mod
+from server.tooling.tool_versions import (
     ToolSite,
     classify_source,
     is_volatile,
     parse_version,
     upgrade_note,
 )
-from server.lifecycle import setup as setup_mod
 
 
 class TestParseVersion:
@@ -286,7 +286,7 @@ class TestVenvDetectionUnderASystemPython:
     it would report every binary there as living in quern's environment."""
 
     def test_a_system_binary_is_not_called_venv(self, monkeypatch):
-        from server.device import tool_versions as tv
+        from server.tooling import tool_versions as tv
         monkeypatch.setattr(tv.sys, "executable", "/usr/bin/python3")
         monkeypatch.setattr(tv.sys, "prefix", "/usr")
         monkeypatch.setattr(tv.sys, "base_prefix", "/usr")   # not a virtualenv
@@ -295,7 +295,7 @@ class TestVenvDetectionUnderASystemPython:
     def test_inside_a_virtualenv_the_interpreter_directory_counts(
         self, monkeypatch, tmp_path,
     ):
-        from server.device import tool_versions as tv
+        from server.tooling import tool_versions as tv
         venv_bin = tmp_path / "env" / "bin"
         venv_bin.mkdir(parents=True)
         monkeypatch.setattr(tv.sys, "executable", str(venv_bin / "python"))
@@ -313,7 +313,7 @@ async def test_every_cli_site_is_asked_whether_its_path_survives_a_shell(monkeyp
     directory locally, and the omission it is guarding against was invisible
     for exactly that reason.
     """
-    from server.device import tool_versions as tv
+    from server.tooling import tool_versions as tv
 
     volatile = "/x/.local/state/fnm_multishells/1_2/bin/tool"
     monkeypatch.setattr(tv.shutil, "which", lambda _n: volatile)
@@ -371,7 +371,7 @@ class TestAWarningOnStderrCannotOutrankTheVersion:
     async def test_the_real_version_on_stdout_wins(self, tmp_path):
         import sys
 
-        from server.device.tool_versions import binary_version
+        from server.tooling.tool_versions import binary_version
 
         tool = self._tool(tmp_path, stdout="11.12.4\n", stderr=self.WARNING + "\n")
         assert await binary_version(sys.executable, [tool]) == "11.12.4"
@@ -382,7 +382,7 @@ class TestAWarningOnStderrCannotOutrankTheVersion:
         # this cannot be "fixed" by ignoring stderr altogether.
         import sys
 
-        from server.device.tool_versions import binary_version
+        from server.tooling.tool_versions import binary_version
 
         tool = self._tool(tmp_path, stdout="", stderr="tool version 3.2.1\n")
         assert await binary_version(sys.executable, [tool]) == "3.2.1"
@@ -390,7 +390,7 @@ class TestAWarningOnStderrCannotOutrankTheVersion:
     async def test_no_version_anywhere_is_none(self, tmp_path):
         import sys
 
-        from server.device.tool_versions import binary_version
+        from server.tooling.tool_versions import binary_version
 
         tool = self._tool(tmp_path, stdout="nothing here\n", stderr="nor here\n")
         assert await binary_version(sys.executable, [tool]) is None
@@ -401,7 +401,7 @@ class TestAWarningOnStderrCannotOutrankTheVersion:
         `parse_version` is unchanged and still returns the first match; it is
         the merge that was wrong.
         """
-        from server.device.tool_versions import parse_version
+        from server.tooling.tool_versions import parse_version
 
         assert parse_version(self.WARNING + "\n11.12.4\n") == "2.6.3"
         assert parse_version("11.12.4\n") == "11.12.4"
@@ -441,7 +441,7 @@ class TestAToolThatWorksButComplains:
     async def test_the_version_is_right_and_the_complaint_is_kept(self, tmp_path):
         import sys
 
-        from server.device.tool_versions import probe_version
+        from server.tooling.tool_versions import probe_version
 
         tool = self._tool(tmp_path, stdout="11.12.4\n", stderr=self.REAL_STDERR)
         version, diagnostic = await probe_version(sys.executable, [tool])
@@ -455,7 +455,7 @@ class TestAToolThatWorksButComplains:
         # message, and there is nothing the reader can do with it.
         import sys
 
-        from server.device.tool_versions import probe_version
+        from server.tooling.tool_versions import probe_version
 
         tool = self._tool(tmp_path, stdout="11.12.4\n", stderr=self.REAL_STDERR)
         _, diagnostic = await probe_version(sys.executable, [tool])
@@ -468,7 +468,7 @@ class TestAToolThatWorksButComplains:
         # noise to anyone not editing that library.
         import sys
 
-        from server.device.tool_versions import probe_version
+        from server.tooling.tool_versions import probe_version
 
         tool = self._tool(tmp_path, stdout="11.12.4\n", stderr=self.REAL_STDERR)
         _, diagnostic = await probe_version(sys.executable, [tool])
@@ -477,7 +477,7 @@ class TestAToolThatWorksButComplains:
     async def test_a_healthy_tool_reports_nothing(self, tmp_path):
         import sys
 
-        from server.device.tool_versions import probe_version
+        from server.tooling.tool_versions import probe_version
 
         tool = self._tool(tmp_path, stdout="1.0.41\n", stderr="")
         assert await probe_version(sys.executable, [tool]) == ("1.0.41", None)
@@ -487,7 +487,7 @@ class TestAToolThatWorksButComplains:
         # once as the version and once as a grievance -- would be nonsense.
         import sys
 
-        from server.device.tool_versions import probe_version
+        from server.tooling.tool_versions import probe_version
 
         tool = self._tool(tmp_path, stdout="", stderr="tool version 3.2.1\n")
         assert await probe_version(sys.executable, [tool]) == ("3.2.1", None)

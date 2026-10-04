@@ -10,7 +10,6 @@ import re
 import shutil
 from pathlib import Path
 
-from server.device.tool_probe import probe_command
 from server.models import (
     AppInfo,
     BootIncompleteError,
@@ -20,6 +19,7 @@ from server.models import (
     DeviceState,
     DeviceType,
 )
+from server.tooling.tool_probe import probe_command
 
 logger = logging.getLogger(__name__)
 

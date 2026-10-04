@@ -12,8 +12,8 @@ from pathlib import Path
 
 from server.config import CONFIG_DIR, quern_cmd
 from server.device import ax_recovery, probing
-from server.device.tool_probe import probe_command
 from server.models import DeviceError
+from server.tooling.tool_probe import probe_command
 
 logger = logging.getLogger(__name__)
 

@@ -161,8 +161,8 @@ class TestUpgradingWhatTheCapturedMachineHasInstalled:
     async def test_the_upgrade_command_matches_where_it_is_installed(
         self, home_on_external
     ):
-        from server.device.tool_updates import plan_updates
-        from server.device.tool_versions import ToolSite
+        from server.tooling.tool_updates import plan_updates
+        from server.tooling.tool_versions import ToolSite
 
         install = next(
             i for i in home_on_external.data["pymobiledevice3_installs"]
