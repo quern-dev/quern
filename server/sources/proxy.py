@@ -11,6 +11,7 @@ Follows the same subprocess pattern as SyslogAdapter.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -121,6 +122,18 @@ def _human_size(nbytes: int) -> str:
     if nbytes < 1024 * 1024:
         return f"{nbytes / 1024:.1f}KB"
     return f"{nbytes / (1024 * 1024):.1f}MB"
+
+
+def _signal(process, method: str) -> None:
+    """Send a process a signal, treating "it is already gone" as done.
+
+    asyncio raises ProcessLookupError once it has torn the subprocess transport
+    down, which an exit already in flight can do between our check and the
+    call. Gone is the outcome the signal was for, and an exception here skipped
+    recording why the proxy stopped (CodeRabbit on #413).
+    """
+    with contextlib.suppress(ProcessLookupError):
+        getattr(process, method)()
 
 
 class ProxyAdapter(BaseSourceAdapter):
@@ -387,7 +400,7 @@ class ProxyAdapter(BaseSourceAdapter):
             self._events = None
             self._error = f"Could not read mitmdump's events: {e}"
             logger.error(self._error)
-            self._process.kill()
+            _signal(self._process, "kill")
             await self._process.wait()
             self._process = None
             return
@@ -434,11 +447,11 @@ class ProxyAdapter(BaseSourceAdapter):
         await asyncio.to_thread(update_state, proxy_status="stopped")
 
         if self._process and self._process.returncode is None:
-            self._process.terminate()
+            _signal(self._process, "terminate")
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
             except TimeoutError:
-                self._process.kill()
+                _signal(self._process, "kill")
 
         for task in (self._read_task, self._stderr_task, self._stdout_task):
             if task and not task.done():
@@ -856,11 +869,11 @@ class ProxyAdapter(BaseSourceAdapter):
                 await asyncio.wait_for(process.wait(), timeout=1.0)
             except TimeoutError:
                 logger.error("Proxy read loop ended with mitmdump still running; stopping it")
-                process.terminate()
+                _signal(process, "terminate")
                 try:
                     await asyncio.wait_for(process.wait(), timeout=5.0)
                 except TimeoutError:
-                    process.kill()
+                    _signal(process, "kill")
                     await process.wait()
         returncode = getattr(process, "returncode", None)
         reason = (

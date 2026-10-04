@@ -419,3 +419,44 @@ class TestTheReviewFindings:
         finally:
             os.close(read_fd)
             os.close(write_fd)
+
+
+class TestASignalToAProcessAlreadyGone:
+    async def test_the_stop_is_still_recorded(self):
+        """asyncio raises ProcessLookupError once its transport is torn down,
+        which an exit already in flight can do before `terminate`. That
+        exception skipped recording the error and the stopped state."""
+
+        class _Gone(asyncio.subprocess.Process):
+            def __init__(self):
+                self._rc = None
+                self._waits = 0
+
+            @property
+            def returncode(self):
+                return self._rc
+
+            async def wait(self):
+                self._waits += 1
+                if self._waits == 1:
+                    await asyncio.sleep(2)   # still "running" past the 1s grace
+                self._rc = -15
+                return -15
+
+            def terminate(self):
+                raise ProcessLookupError
+
+            def kill(self):
+                raise ProcessLookupError
+
+        reader = asyncio.StreamReader()
+        reader.feed_eof()
+        a = ProxyAdapter()
+        process = _Gone()
+        a._process = process
+        a._events = reader
+        a._running = True
+        with patch.object(proxy_mod, "update_state") as state:
+            await a._read_loop()
+        assert a.status().status == "error"
+        state.assert_called_once_with(proxy_status="stopped")
