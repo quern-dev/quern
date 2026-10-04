@@ -413,7 +413,7 @@ touches `server/lifecycle/`, `server/__main__.py` or the CLI in
 transcript named by commit, so a refactor is checked by diffing a run of
 `main` against a run of the branch. It tests committed work, and takes a few
 minutes -- most of it `setup` building a venv, about one with a warm pip
-cache. It mutation-tests: of nine CLI breakages tried, it fails on each.
+cache. It is mutation-tested: ten deliberate CLI breakages, each caught.
 
 ### Mutation-test, and never restore with `git checkout`
 
