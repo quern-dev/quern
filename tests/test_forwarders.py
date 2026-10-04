@@ -43,6 +43,13 @@ FORWARDED_TO = {
     "server.device.preview": "server.device.media.preview",
     "server.device.scrcpy_preview": "server.device.media.scrcpy_preview",
     "server.device.media_engine": "server.device.media.media_engine",
+    "server.device.tunneld": "server.device.ios.tunneld",
+    "server.device.wda": "server.device.ios.wda",
+    "server.device.wda_client": "server.device.ios.wda_client",
+    "server.device.devicectl": "server.device.ios.devicectl",
+    "server.device.simctl": "server.device.ios.simctl",
+    # A module forwarder: old releases import the module itself.
+    "server.device.sim_input": "server.device.ios.sim_input",
 }
 
 #: Verbatim, from releases v0.18.0-v0.24.0-beta.1. The tool_updates and
@@ -76,24 +83,73 @@ OLD_IMPORTS = (
     "from server.device.scrcpy_preview import ScrcpyPreview",
     # v0.24.0-beta.1 only: a beta-channel server updating out of the beta.
     "from server.device.media_engine import build_media_engine",
+    # 3f. Parenthesized lines are joined onto one.
+    "from server.device.tunneld import PLIST_PATH",
+    "from server.device.tunneld import PLIST_PATH, installed_plist_drift",
+    "from server.device.tunneld import PLIST_PATH, TUNNELD_URL, installed_plist_drift",
+    "from server.device.tunneld import TUNNELD_URL",
+    "from server.device.tunneld import can_recover_unattended, recover_wedged_tunneld, tunneld_health",  # noqa: E501
+    "from server.device.tunneld import cli_tunneld",
+    "from server.device.tunneld import find_pymobiledevice3_binary",
+    "from server.device.tunneld import find_pymobiledevice3_binary, is_tunneld_running, resolve_tunnel_udid",  # noqa: E501
+    "from server.device.tunneld import get_tunneld_devices",
+    "from server.device.tunneld import get_tunneld_devices, resolve_tunnel_udid",
+    "from server.device.tunneld import install_daemon",
+    "from server.device.tunneld import is_tunneld_running",
+    "from server.device.tunneld import resolve_tunnel_udid",
+    "from server.device.tunneld import tunneld_health",
+    "from server.device.tunneld import uninstall_daemon",
+    "from server.device.wda import build_wda_simulator",
+    "from server.device.wda import restore_simulator_mode",
+    "from server.device.wda import setup_wda as _setup_wda",
+    "from server.device.wda import start_driver",
+    "from server.device.wda import start_driver, stop_driver",
+    "from server.device.wda import start_driver_simulator",
+    "from server.device.wda import stop_driver",
+    "from server.device.wda_client import ACTION_SNAPSHOT_DEPTH",
+    "from server.device.wda_client import ACTION_TIMEOUT",
+    "from server.device.wda_client import WdaBackend",
+    "from server.device.devicectl import canonical_device_id",
+    "from server.device.simctl import SimctlBackend",
+    "from server.device import sim_input",
 )
+
+
+def _parse(line: str) -> tuple[str, list[tuple[str, str]] | None]:
+    """The forwarder a line imports from, and each name with what it is bound
+    as -- or None for a line importing the module itself."""
+    module, names = line.removeprefix("from ").split(" import ")
+    if module == "server.device":
+        return f"server.device.{names}", None
+    pairs = []
+    for part in names.split(", "):
+        name, _, bound = part.partition(" as ")
+        pairs.append((name, bound or name))
+    return module, pairs
 
 
 @pytest.mark.parametrize("line", OLD_IMPORTS)
 def test_an_old_releases_import_resolves_to_the_current_code(line):
     namespace: dict = {}
     exec(line, namespace)  # noqa: S102 - the line under test, verbatim
-    old = line.split()[1]
-    current = importlib.import_module(FORWARDED_TO[old])
-    for name in line.split(" import ")[1].split(", "):
-        assert namespace[name] is getattr(current, name), name
+    forwarder, pairs = _parse(line)
+    current = importlib.import_module(FORWARDED_TO[forwarder])
+    if pairs is None:
+        assert namespace[forwarder.rsplit(".", 1)[1]] is current
+        return
+    for name, bound in pairs:
+        assert namespace[bound] is getattr(current, name), name
 
 
-def _named_by_old_imports() -> dict[str, set[str]]:
-    named: dict[str, set[str]] = {}
+def _named_by_old_imports() -> dict[str, set[str] | None]:
+    """Each forwarder's names, or None for a module forwarder."""
+    named: dict[str, set[str] | None] = {}
     for line in OLD_IMPORTS:
-        module, names = line.removeprefix("from ").split(" import ")
-        named.setdefault(module, set()).update(names.split(", "))
+        forwarder, pairs = _parse(line)
+        if pairs is None:
+            named[forwarder] = None
+        else:
+            named.setdefault(forwarder, set()).update(n for n, _ in pairs)
     return named
 
 
@@ -110,6 +166,13 @@ def test_a_forwarder_forwards_exactly_the_names_old_releases_import(forwarder):
     tree = ast.parse(path.read_text())
     body = [n for n in tree.body if not (
         isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant))]
+    if _named_by_old_imports()[forwarder] is None:
+        # A module forwarder puts the real module in its own place, and does
+        # nothing else.
+        assert [type(n) for n in body] == [ast.Import, ast.ImportFrom, ast.Assign]
+        moved = importlib.import_module(FORWARDED_TO[forwarder])
+        assert importlib.import_module(forwarder) is moved
+        return
     assert all(isinstance(n, ast.ImportFrom) for n in body), forwarder
     assert {n.module for n in body} == {FORWARDED_TO[forwarder]}
     forwarded = {alias.name for n in body for alias in n.names}
