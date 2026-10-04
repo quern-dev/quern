@@ -27,3 +27,18 @@ def test_the_sim_bridge_source_is_found():
 
     for path in sim_bridge._SOURCE_CANDIDATES:
         assert path.is_file(), path
+
+
+def test_every_package_under_server_has_an_init():
+    """Without one a directory still imports, as a namespace package, so the
+    suite passes -- but pyproject's `packages.find` skips it, and a built
+    install ships without it. ios/ and android/ were created without one."""
+    import pathlib
+
+    server = pathlib.Path(__file__).resolve().parents[1] / "server"
+    missing = [
+        str(d.relative_to(server.parent)) for d in [server, *server.rglob("*")]
+        if d.is_dir() and d.name != "__pycache__" and any(d.glob("*.py"))
+        and not (d / "__init__.py").is_file()
+    ]
+    assert not missing, missing
