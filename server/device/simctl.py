@@ -241,14 +241,25 @@ class SimctlBackend:
     async def running_pid(self, udid: str, bundle_id: str) -> int | None:
         """The pid of `bundle_id`'s running process on the simulator, or None
         when it is not running. Read from the simulator's launchd, whose
-        `launchctl list` names an app's job `UIKitApplication:<bundle>[...]`.
-        Raises DeviceError when the list cannot be read."""
+        `launchctl list` names an app's job `UIKitApplication:<bundle>[...]`
+        (measured on iOS 18.6 and 26.5). Raises DeviceError when the list
+        cannot be read -- or reads as nothing quern recognises: a booted
+        simulator always runs some apps (Spotlight, the widget renderer), so
+        no `UIKitApplication:` job at all means the format changed, and
+        "not running" would then be a confident wrong answer."""
         stdout, _ = await self._run_simctl("spawn", udid, "launchctl", "list")
         label = f"UIKitApplication:{bundle_id}["
+        recognised = False
         for line in stdout.splitlines():
             fields = line.split("\t")
-            if len(fields) == 3 and fields[2].startswith(label) and fields[0].isdigit():
+            if len(fields) != 3 or not fields[2].startswith("UIKitApplication:"):
+                continue
+            recognised = True
+            if fields[2].startswith(label) and fields[0].isdigit():
                 return int(fields[0])
+        if not recognised:
+            raise DeviceError(
+                f"launchctl list on {udid} lists no app jobs quern recognises", tool="simctl")
         return None
 
     @staticmethod

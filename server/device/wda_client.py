@@ -1554,10 +1554,17 @@ class WdaBackend:
         bundle = value.get("bundleId") if isinstance(value, dict) else None
         return bundle if isinstance(bundle, str) and bundle else None
 
-    async def terminate_app(self, udid: str, bundle_id: str) -> None:
-        """Terminate an app via WDA."""
-        await self._request("post", udid, "/wda/apps/terminate",
-                            use_session=True, json={"bundleId": bundle_id})
+    async def terminate_app(self, udid: str, bundle_id: str) -> bool | None:
+        """Terminate an app via WDA. Returns whether it was running and was
+        terminated -- WDA answers true only then -- or None when the answer
+        was not a boolean."""
+        resp = await self._request("post", udid, "/wda/apps/terminate",
+                                   use_session=True, json={"bundleId": bundle_id})
+        try:
+            value = resp.json().get("value")
+        except (ValueError, AttributeError):
+            return None
+        return value if isinstance(value, bool) else None
 
     def element(
         self,

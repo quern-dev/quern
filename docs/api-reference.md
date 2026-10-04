@@ -311,7 +311,7 @@ holds in `flow_store`. `flows_captured` is only what survived.
 | `shutdown_device` | POST | `/api/v1/device/shutdown` | Shutdown simulator |
 | `erase_device` | POST | `/api/v1/device/erase` | Erase a simulator or Android emulator, resetting it to factory state (an emulator is relaunched, possibly on a new serial) |
 | `install_app` | POST | `/api/v1/device/app/install` | Install app |
-| `launch_app` | POST | `/api/v1/device/app/launch` | Launch app. `env` sets environment variables on an iOS simulator or physical iPhone; since they reach only a starting process, a running app is restarted, and the response carries `env_applied` and `restarted` (null when it could not tell whether the app was running). Android takes no environment: `env_applied` is false, with a `warning` |
+| `launch_app` | POST | `/api/v1/device/app/launch` | Launch app. `env` sets environment variables on an iOS simulator or physical iPhone; since they reach only a starting process, a running app is restarted, and the response carries `env_applied` and `restarted` (null when it could not tell whether the app was running). On a physical iPhone, `launch_confirmed` is null with `launch_check_error` when quern could not read whether the app reached the foreground. Android takes no environment: `env_applied` is false, with a `warning`. An env name that is empty or contains `=` or NUL is a 422 |
 | `terminate_app` | POST | `/api/v1/device/app/terminate` | Terminate app |
 | `uninstall_app` | POST | `/api/v1/device/app/uninstall` | Uninstall app |
 | `list_apps` | GET | `/api/v1/device/app/list` | List installed apps |

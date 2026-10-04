@@ -34,9 +34,11 @@ def _ctrl(udid: str, kind: DeviceType) -> DeviceController:
     ctrl._confirm_the_app_came_up = AsyncMock()
     ctrl.wda_client.app_state = AsyncMock(return_value=4)
     ctrl.wda_client.activate_app = AsyncMock()
-    ctrl.wda_client.terminate_app = AsyncMock()
+    ctrl.wda_client.terminate_app = AsyncMock(return_value=True)
     ctrl.wda_client.launch_app = AsyncMock()
     ctrl.adb.launch_app = AsyncMock()
+    ctrl._LAUNCH_FRONT_GRACE_S = 0.05
+    ctrl._LAUNCH_FRONT_INTERVAL_S = 0.01
     return ctrl
 
 
@@ -60,6 +62,33 @@ class TestASimulator:
         ctrl = _ctrl(SIM, DeviceType.SIMULATOR)
         _, info = await ctrl.launch_app(APP, env=ENV)
         assert info == {"env_applied": True, "restarted": False}
+
+    async def test_the_running_check_is_made_before_the_launch(self):
+        """Review: after a restart the new process is always running, so a
+        check made afterwards would always answer "restarted"."""
+        ctrl = _ctrl(SIM, DeviceType.SIMULATOR)
+        launched: list[bool] = []
+        ctrl.simctl.launch_app = AsyncMock(
+            side_effect=lambda *a, **k: launched.append(True) or 4242)
+
+        async def running_pid(udid, bundle):
+            return 81847 if launched else None          # running only once launched
+        ctrl.simctl.running_pid = running_pid
+        _, info = await ctrl.launch_app(APP, env=ENV)
+        assert info["restarted"] is False
+
+    async def test_a_running_check_that_hangs_costs_the_report_not_the_launch(self):
+        import asyncio
+
+        ctrl = _ctrl(SIM, DeviceType.SIMULATOR)
+        ctrl._LAUNCH_STATE_READ_TIMEOUT_S = 0.05
+
+        async def stuck(udid, bundle):
+            await asyncio.sleep(30)
+        ctrl.simctl.running_pid = stuck
+        _, info = await ctrl.launch_app(APP, env=ENV)
+        assert info == {"env_applied": True, "restarted": None}
+        ctrl.simctl.launch_app.assert_awaited_once()
 
     async def test_a_running_check_that_fails_costs_the_report_not_the_launch(self):
         ctrl = _ctrl(SIM, DeviceType.SIMULATOR)
@@ -121,19 +150,74 @@ class TestAPhysicalIPhone:
         _, info = await ctrl.launch_app(APP, env=ENV)
         ctrl.wda_client.terminate_app.assert_awaited_once()
         ctrl.wda_client.launch_app.assert_awaited_once()
-        assert info == {"env_applied": True, "restarted": None}
+        # Terminate's own answer (the fixture's: it was running) settles it.
+        assert info == {"env_applied": True, "restarted": True}
 
-    async def test_a_launch_that_did_not_come_to_the_front_fails(self):
+    @pytest.mark.parametrize("env", [ENV, None])
+    @pytest.mark.parametrize("after", [1, 2, 3])
+    async def test_a_launch_that_never_reaches_the_front_fails(self, env, after):
         ctrl = _ctrl(PHONE, DeviceType.DEVICE)
-        ctrl.wda_client.app_state = AsyncMock(side_effect=[1, 1])
+        ctrl.wda_client.app_state = AsyncMock(side_effect=[1] + [after] * 50)
         with pytest.raises(DeviceError, match="not in the foreground"):
-            await ctrl.launch_app(APP, env=ENV)
+            await ctrl.launch_app(APP, env=env)
 
-    async def test_a_state_read_after_launch_that_fails_is_not_a_failure(self):
+    async def test_a_background_moment_on_the_way_to_the_front_is_not_a_failure(self):
         ctrl = _ctrl(PHONE, DeviceType.DEVICE)
-        ctrl.wda_client.app_state = AsyncMock(side_effect=[1, DeviceError("x", tool="wda")])
+        ctrl._LAUNCH_FRONT_GRACE_S = 1.0
+        ctrl.wda_client.app_state = AsyncMock(side_effect=[1, 3, 3, 4])
+        _, info = await ctrl.launch_app(APP, env=ENV)
+        assert info == {"env_applied": True, "restarted": False}
+
+    async def test_reads_after_launch_that_fail_say_the_launch_is_unconfirmed(self):
+        """Review: the launch stands, but "could not check" is said, not
+        reported as confirmed."""
+        ctrl = _ctrl(PHONE, DeviceType.DEVICE)
+        ctrl.wda_client.app_state = AsyncMock(
+            side_effect=[1] + [DeviceError("WDA gone", tool="wda")] * 50)
         _, info = await ctrl.launch_app(APP, env=ENV)
         assert info["env_applied"] is True
+        assert info["launch_confirmed"] is None
+        assert "WDA gone" in info["launch_check_error"]
+
+    async def test_state_unknown_is_not_taken_for_stopped(self):
+        """Review: XCUIApplication state 0 is "unknown". Read as "stopped",
+        a running app was not terminated, WDA only activated it, and the
+        variables never arrived while the response said they had."""
+        ctrl = _ctrl(PHONE, DeviceType.DEVICE)
+        ctrl.wda_client.app_state = AsyncMock(side_effect=[0, 4])
+        _, info = await ctrl.launch_app(APP, env=ENV)
+        ctrl.wda_client.terminate_app.assert_awaited_once()
+        assert info["restarted"] is True, "WDA's terminate answered that it was running"
+
+    @pytest.mark.parametrize("terminated,expected", [(True, True), (False, False), (None, None)])
+    async def test_an_unknown_state_is_settled_by_what_terminate_answers(
+        self, terminated, expected,
+    ):
+        ctrl = _ctrl(PHONE, DeviceType.DEVICE)
+        ctrl.wda_client.app_state = AsyncMock(side_effect=[DeviceError("x", tool="wda"), 4])
+        ctrl.wda_client.terminate_app = AsyncMock(return_value=terminated)
+        _, info = await ctrl.launch_app(APP, env=ENV)
+        assert info["restarted"] is expected
+
+    @pytest.mark.parametrize("first", [0, DeviceError("x", tool="wda")])
+    async def test_without_env_an_unknown_state_is_activated_as_before(self, first):
+        ctrl = _ctrl(PHONE, DeviceType.DEVICE)
+        ctrl.wda_client.app_state = AsyncMock(side_effect=[first])
+        await ctrl.launch_app(APP)
+        ctrl.wda_client.activate_app.assert_awaited_once()
+        ctrl.wda_client.launch_app.assert_not_awaited()
+
+    async def test_a_terminate_that_fails_says_why_it_was_terminating(self):
+        ctrl = _ctrl(PHONE, DeviceType.DEVICE)
+        ctrl.wda_client.terminate_app = AsyncMock(side_effect=DeviceError("WDA busy", tool="wda"))
+        with pytest.raises(DeviceError, match="so env would apply: WDA busy"):
+            await ctrl.launch_app(APP, env=ENV)
+        ctrl.wda_client.launch_app.assert_not_awaited()
+
+    async def test_env_can_override_quern_automation_as_on_a_simulator(self):
+        ctrl = _ctrl(PHONE, DeviceType.DEVICE)
+        await ctrl.launch_app(APP, env={"QUERN_AUTOMATION": "NO"})
+        assert ctrl.wda_client.launch_app.call_args.args[2] == {"QUERN_AUTOMATION": "NO"}
 
 
 class TestAndroid:
@@ -209,9 +293,43 @@ class TestTheBackends:
         from server.device.simctl import SimctlBackend
 
         simctl = SimctlBackend()
-        simctl._run_simctl = AsyncMock(
-            return_value=(f"-\t0\tUIKitApplication:{APP}[acfb][rb-legacy]\n", ""))
+        simctl._run_simctl = AsyncMock(return_value=(
+            f"-\t0\tUIKitApplication:{APP}[acfb][rb-legacy]\n"
+            "91159\t0\tUIKitApplication:com.apple.Spotlight[0649][rb-legacy]\n", ""))
         assert await simctl.running_pid(SIM, APP) is None
+
+    async def test_a_list_with_no_app_jobs_is_unrecognised_not_not_running(self):
+        """Review: a launchd that names app jobs differently would otherwise
+        report every app as stopped. A booted simulator always runs some
+        (measured on iOS 26.5: Spotlight, the widget renderer)."""
+        from server.device.simctl import SimctlBackend
+
+        simctl = SimctlBackend()
+        simctl._run_simctl = AsyncMock(return_value=(
+            "PID\tStatus\tLabel\n91202\t0\tApplication:com.example.App[1]\n", ""))
+        with pytest.raises(DeviceError, match="recognises"):
+            await simctl.running_pid(SIM, APP)
+
+    async def test_simctl_lets_env_override_quern_automation(self, monkeypatch):
+        import server.device.simctl as simctl_mod
+        from server.device.simctl import SimctlBackend
+
+        seen: dict = {}
+
+        async def fake_exec(*args, **kwargs):
+            seen["env"] = kwargs["env"]
+            proc = MagicMock()
+            proc.returncode = 0
+            proc.communicate = AsyncMock(return_value=(f"{APP}: 1\n".encode(), b""))
+            return proc
+        monkeypatch.setattr(simctl_mod.asyncio, "create_subprocess_exec", fake_exec)
+        await SimctlBackend().launch_app(SIM, APP, env={"QUERN_AUTOMATION": "NO"})
+        assert seen["env"]["SIMCTL_CHILD_QUERN_AUTOMATION"] == "NO"
+
+    @pytest.mark.parametrize("payload,expected", [
+        ({"value": True}, True), ({"value": False}, False), ({"value": None}, None), ([], None)])
+    async def test_wda_terminate_says_whether_it_was_running(self, payload, expected):
+        assert await self._wda(payload).terminate_app(PHONE, APP) is expected
 
     def _wda(self, payload=None, *, raises=None):
         from server.device.wda_client import WdaBackend
@@ -247,6 +365,24 @@ class TestTheBackends:
 
 
 class TestTheResponse:
+    @pytest.mark.parametrize("env", [{"": "x"}, {"A=B": "x"}, {"A\x00": "x"}, {"A": "x\x00"}])
+    async def test_a_name_no_process_can_take_is_a_422_not_a_500(self, env):
+        from httpx import ASGITransport, AsyncClient
+
+        from server.config import ServerConfig
+        from server.main import create_app
+
+        app = create_app(config=ServerConfig(api_key="k"),
+                         enable_oslog=False, enable_crash=False, enable_proxy=False)
+        ctrl = DeviceController()
+        ctrl.launch_app = AsyncMock()
+        app.state.device_controller = ctrl
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post("/api/v1/device/app/launch", json={"bundle_id": APP, "env": env},
+                             headers={"Authorization": "Bearer k"})
+        assert r.status_code == 422, r.text
+        ctrl.launch_app.assert_not_awaited()
+
     async def test_the_report_is_on_the_response(self):
         from httpx import ASGITransport, AsyncClient
 
