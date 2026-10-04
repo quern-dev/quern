@@ -13,8 +13,8 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
 from server.api.actions import logged_action
+from server.builds import build_records, gradle
 from server.config import CONFIG_DIR
-from server.device import build_records, gradle
 from server.models import BuildRecord, BuildResult, DeviceError, DeviceType, EnvironmentProblem
 
 router = APIRouter(prefix="/api/v1/device", tags=["device"])

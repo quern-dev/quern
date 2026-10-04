@@ -22,7 +22,10 @@ AI Agent (Claude Code, Cursor, etc.)
                        ├── device/      Device control, iOS and Android: simulators (simctl,
                        │                sim-bridge, idb), physical iPhones (WDA, devicectl,
                        │                pymobiledevice3, tunneld), Android (adb, uiautomator2);
-                       │                also builds, preview, web inspection, landmarks
+                       │                also preview, web inspection, landmarks
+                       ├── builds/      Android builds (Gradle, JDK discovery) and build
+                       │                records, with the Mach-O and ELF readers that
+                       │                symbolication uses
                        ├── sources/     Log and crash capture (simulator, device, syslog, oslog,
                        │                logcat, crash reports, symbolication)
                        ├── proxy/       Network interception (mitmproxy subprocess, port 9101),

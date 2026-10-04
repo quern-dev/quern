@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import unquote
 
-from server.device import jdk as jdk_mod
+from server.builds import jdk as jdk_mod
 from server.models import BuildDiagnostic, BuildResult, EnvironmentProblem
 
 #: A clean build of a large app runs many minutes; this is for one that hangs.

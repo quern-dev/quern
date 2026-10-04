@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from server.api.actions import logged_action
-from server.device import build_records
+from server.builds import build_records
 from server.models import BuildRecord, BuildResult
 
 router = APIRouter(prefix="/api/v1/builds", tags=["builds"])
