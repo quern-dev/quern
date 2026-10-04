@@ -29,14 +29,14 @@ from unittest.mock import patch
 
 import pytest
 
-from server.device.tool_updates import (
+from server.tooling.tool_updates import (
     CLI_FLOORS,
     format_offer,
     is_behind,
     plan_updates,
     version_tuple,
 )
-from server.device.tool_versions import ToolSite
+from server.tooling.tool_versions import ToolSite
 
 #: The home these tests describe, which is deliberately not the one they run on.
 #:
@@ -377,7 +377,7 @@ async def test_nothing_to_do_renders_nothing():
 @pytest.fixture
 def stale_tool(monkeypatch):
     """One actionable upgrade, with no network, no brew and no real sites."""
-    from server.device import tool_updates
+    from server.tooling import tool_updates
 
     async def fake_sites():
         return [_site()]
@@ -392,8 +392,8 @@ def stale_tool(monkeypatch):
             ),
         ]
 
-    monkeypatch.setattr("server.device.tool_versions.collect_sites", fake_sites)
-    monkeypatch.setattr("server.device.tool_updates.plan_updates", fake_plan)
+    monkeypatch.setattr("server.tooling.tool_versions.collect_sites", fake_sites)
+    monkeypatch.setattr("server.tooling.tool_updates.plan_updates", fake_plan)
 
     ran: list[list[str]] = []
     monkeypatch.setattr(
@@ -429,7 +429,7 @@ def test_a_broken_version_check_does_not_fail_the_update(monkeypatch, capsys):
     async def boom():
         raise RuntimeError("no network")
 
-    monkeypatch.setattr("server.device.tool_versions.collect_sites", boom)
+    monkeypatch.setattr("server.tooling.tool_versions.collect_sites", boom)
 
     from server.lifecycle.updater import _report_tool_updates
 
@@ -504,7 +504,7 @@ def fake_brew_run(monkeypatch):
         async def _run(_args, timeout):  # noqa: ARG001
             return code, stdout
 
-        monkeypatch.setattr("server.device.tool_updates._run", _run)
+        monkeypatch.setattr("server.tooling.tool_updates._run", _run)
 
     return install
 
@@ -512,14 +512,14 @@ def fake_brew_run(monkeypatch):
 async def test_brew_outdated_returns_none_when_brew_is_missing(fake_brew_run):
     """`_run` reports a non-zero code for a binary that does not exist, which is
     the no-homebrew machine. That must not read as 'nothing is outdated'."""
-    from server.device.tool_updates import brew_outdated
+    from server.tooling.tool_updates import brew_outdated
 
     fake_brew_run(1, "")
     assert await brew_outdated() is None
 
 
 async def test_brew_outdated_returns_none_on_unparseable_output(fake_brew_run):
-    from server.device.tool_updates import brew_outdated
+    from server.tooling.tool_updates import brew_outdated
 
     fake_brew_run(0, "not json at all")
     assert await brew_outdated() is None
@@ -527,14 +527,14 @@ async def test_brew_outdated_returns_none_on_unparseable_output(fake_brew_run):
 
 async def test_brew_outdated_distinguishes_nothing_outdated_from_failure(fake_brew_run):
     """A successful call with an empty formulae list is a real answer."""
-    from server.device.tool_updates import brew_outdated
+    from server.tooling.tool_updates import brew_outdated
 
     fake_brew_run(0, '{"formulae": [], "casks": []}')
     assert await brew_outdated() == {}
 
 
 async def test_brew_outdated_maps_name_to_current_version(fake_brew_run):
-    from server.device.tool_updates import brew_outdated
+    from server.tooling.tool_updates import brew_outdated
 
     fake_brew_run(0, '{"formulae": [{"name": "libimobiledevice", '
                      '"installed_versions": ["1.4.0"], "current_version": "1.5.0"}]}')
@@ -544,7 +544,7 @@ async def test_brew_outdated_maps_name_to_current_version(fake_brew_run):
 async def test_brew_outdated_skips_entries_missing_a_version(fake_brew_run):
     """Guards against a partial entry becoming a None latest, which would read
     downstream as 'up to date at None'."""
-    from server.device.tool_updates import brew_outdated
+    from server.tooling.tool_updates import brew_outdated
 
     fake_brew_run(0, '{"formulae": [{"name": "x"}, {"current_version": "2.0"}]}')
     assert await brew_outdated() == {}
@@ -565,7 +565,7 @@ async def test_the_report_shows_brew_dependents_for_a_tool_needing_no_action():
     """The reason this exists. libimobiledevice being current is not the
     interesting part; that two other formulae depend on it is, because that is
     what turns a later upgrade into a decision rather than a command."""
-    from server.device.tool_updates import format_report
+    from server.tooling.tool_updates import format_report
 
     async def brew():
         return {}
@@ -585,7 +585,7 @@ async def test_the_report_shows_brew_dependents_for_a_tool_needing_no_action():
 
 
 async def test_the_report_lists_every_site_including_unmanaged():
-    from server.device.tool_updates import format_report
+    from server.tooling.tool_updates import format_report
 
     async def pypi(_name):
         return "11.3.1"
@@ -604,7 +604,7 @@ async def test_the_report_lists_every_site_including_unmanaged():
 
 
 async def test_the_report_sorts_actionable_first():
-    from server.device.tool_updates import format_report
+    from server.tooling.tool_updates import format_report
 
     async def pypi(_name):
         return "11.3.1"
@@ -619,14 +619,14 @@ async def test_the_report_sorts_actionable_first():
 async def test_the_report_carries_the_source_that_decided_the_action():
     """Without it a reader sees 'not managed' and goes looking for a quern
     setting to change, rather than for Android Studio."""
-    from server.device.tool_updates import format_report
+    from server.tooling.tool_updates import format_report
 
     text = format_report(await _plan([_site(name="adb", source="android-sdk", version="1.0.41")]))
     assert "(android-sdk)" in text
 
 
 def test_the_report_survives_having_nothing_to_report():
-    from server.device.tool_updates import format_report
+    from server.tooling.tool_updates import format_report
 
     assert "none detected" in format_report([])
 
@@ -636,7 +636,7 @@ def test_doctor_reports_without_running_anything(monkeypatch, capsys):
     commands; `quern update --tools` is the only thing that runs them."""
     import subprocess as sp
 
-    from server.device import tool_updates
+    from server.tooling import tool_updates
 
     async def fake_sites():
         return [_site()]
@@ -649,8 +649,8 @@ def test_doctor_reports_without_running_anything(monkeypatch, capsys):
             reason="newer release available (11.3.1)",
         )]
 
-    monkeypatch.setattr("server.device.tool_versions.collect_sites", fake_sites)
-    monkeypatch.setattr("server.device.tool_updates.plan_updates", fake_plan)
+    monkeypatch.setattr("server.tooling.tool_versions.collect_sites", fake_sites)
+    monkeypatch.setattr("server.tooling.tool_updates.plan_updates", fake_plan)
 
     ran = []
     monkeypatch.setattr(sp, "run", lambda *a, **k: ran.append(a))
@@ -668,7 +668,7 @@ def test_a_broken_check_does_not_break_doctor(monkeypatch, capsys):
     async def boom():
         raise RuntimeError("brew exploded")
 
-    monkeypatch.setattr("server.device.tool_versions.collect_sites", boom)
+    monkeypatch.setattr("server.tooling.tool_versions.collect_sites", boom)
 
     from server.main import _report_external_tools
 
@@ -687,7 +687,7 @@ async def test_provenance_is_attached_to_every_brew_site_not_just_one():
     pymobiledevice3 are all brew-installable, and on a machine that installed
     them that way the field that decides whether an upgrade is safe to offer was
     simply absent."""
-    from server.device import tool_versions
+    from server.tooling import tool_versions
 
     asked: list[str] = []
 
@@ -695,7 +695,7 @@ async def test_provenance_is_attached_to_every_brew_site_not_just_one():
         asked.append(formula)
         return True, [f"{formula}-consumer"]
 
-    import server.device.tool_versions as tv
+    import server.tooling.tool_versions as tv
 
     original = tv.brew_provenance
     tv.brew_provenance = fake_provenance
@@ -718,14 +718,14 @@ async def test_provenance_is_attached_to_every_brew_site_not_just_one():
 async def test_one_unreadable_formula_does_not_lose_the_others():
     """Best effort per formula: `brew info` failing on one must not cost the
     provenance of every other, which a bare gather would do."""
-    from server.device import tool_versions
+    from server.tooling import tool_versions
 
     async def flaky(formula):
         if formula == "broken":
             raise RuntimeError("brew info exploded")
         return True, ["consumer"]
 
-    import server.device.tool_versions as tv
+    import server.tooling.tool_versions as tv
 
     original = tv.brew_provenance
     tv.brew_provenance = flaky
@@ -754,7 +754,7 @@ async def test_one_unreadable_formula_does_not_lose_the_others():
 
 @pytest.fixture
 def doctor_with_stale_tool(monkeypatch):
-    from server.device import tool_updates
+    from server.tooling import tool_updates
 
     async def fake_sites():
         return [_site()]
@@ -767,8 +767,8 @@ def doctor_with_stale_tool(monkeypatch):
             reason="newer release available (11.3.1)",
         )]
 
-    monkeypatch.setattr("server.device.tool_versions.collect_sites", fake_sites)
-    monkeypatch.setattr("server.device.tool_updates.plan_updates", fake_plan)
+    monkeypatch.setattr("server.tooling.tool_versions.collect_sites", fake_sites)
+    monkeypatch.setattr("server.tooling.tool_updates.plan_updates", fake_plan)
 
     import subprocess as sp
 
@@ -808,7 +808,7 @@ def test_without_fix_there_is_no_disclaimer(doctor_with_stale_tool, capsys):
 
 def test_fix_is_silent_when_every_tool_is_current(monkeypatch, capsys):
     """No disclaimer when there is nothing it could have fixed anyway."""
-    from server.device import tool_updates
+    from server.tooling import tool_updates
 
     async def fake_sites():
         return [_site()]
@@ -819,8 +819,8 @@ def test_fix_is_silent_when_every_tool_is_current(monkeypatch, capsys):
             source="venv", reason="up to date at 12.2.3",
         )]
 
-    monkeypatch.setattr("server.device.tool_versions.collect_sites", fake_sites)
-    monkeypatch.setattr("server.device.tool_updates.plan_updates", fake_plan)
+    monkeypatch.setattr("server.tooling.tool_versions.collect_sites", fake_sites)
+    monkeypatch.setattr("server.tooling.tool_updates.plan_updates", fake_plan)
 
     from server.main import _report_external_tools
 
@@ -920,7 +920,7 @@ async def test_a_site_without_an_identity_is_unknown_not_current():
 
 async def test_brew_outdated_reads_casks_as_well_as_formulae(fake_brew_run):
     """Reading only `formulae` reported an outdated cask as up to date."""
-    from server.device.tool_updates import brew_outdated
+    from server.tooling.tool_updates import brew_outdated
 
     payload = json.dumps({
         "formulae": [{"name": "libimobiledevice", "current_version": "1.5.0"}],
@@ -937,8 +937,8 @@ async def test_brew_outdated_reads_casks_as_well_as_formulae(fake_brew_run):
 async def test_provenance_asks_brew_about_the_formula_name():
     """`brew info adb` is not a thing. Asking under the tool's nickname returned
     no provenance, which reads downstream as 'not recorded'."""
-    import server.device.tool_versions as tv
-    from server.device import tool_versions
+    import server.tooling.tool_versions as tv
+    from server.tooling import tool_versions
 
     asked: list[str] = []
 
@@ -965,8 +965,8 @@ async def test_provenance_asks_brew_about_the_formula_name():
 def test_a_failed_upgrade_makes_update_exit_nonzero(monkeypatch, capsys):
     """Printing "failed" while the process exits 0 tells a script the opposite
     of what happened."""
-    from server.device import tool_updates
     from server.lifecycle import updater
+    from server.tooling import tool_updates
 
     async def fake_sites():
         return [_site()]
@@ -978,8 +978,8 @@ def test_a_failed_upgrade_makes_update_exit_nonzero(monkeypatch, capsys):
             command=["pipx", "upgrade", "pymobiledevice3"], reason="newer",
         )]
 
-    monkeypatch.setattr("server.device.tool_versions.collect_sites", fake_sites)
-    monkeypatch.setattr("server.device.tool_updates.plan_updates", fake_plan)
+    monkeypatch.setattr("server.tooling.tool_versions.collect_sites", fake_sites)
+    monkeypatch.setattr("server.tooling.tool_updates.plan_updates", fake_plan)
     monkeypatch.setattr(
         updater.subprocess, "run",
         lambda *a, **k: __import__("types").SimpleNamespace(returncode=1))
@@ -989,8 +989,8 @@ def test_a_failed_upgrade_makes_update_exit_nonzero(monkeypatch, capsys):
 
 
 def test_a_raised_upgrade_failure_also_counts(monkeypatch, capsys):
-    from server.device import tool_updates
     from server.lifecycle import updater
+    from server.tooling import tool_updates
 
     async def fake_sites():
         return [_site()]
@@ -1002,8 +1002,8 @@ def test_a_raised_upgrade_failure_also_counts(monkeypatch, capsys):
             command=["pipx", "upgrade", "pymobiledevice3"], reason="newer",
         )]
 
-    monkeypatch.setattr("server.device.tool_versions.collect_sites", fake_sites)
-    monkeypatch.setattr("server.device.tool_updates.plan_updates", fake_plan)
+    monkeypatch.setattr("server.tooling.tool_versions.collect_sites", fake_sites)
+    monkeypatch.setattr("server.tooling.tool_updates.plan_updates", fake_plan)
 
     def boom(*_a, **_k):
         raise PermissionError("pipx not executable")
@@ -1015,8 +1015,8 @@ def test_a_raised_upgrade_failure_also_counts(monkeypatch, capsys):
 def test_reporting_alone_is_never_a_failure(monkeypatch):
     """A stale tool is information. Only `--tools` turns it into an instruction
     that can fail."""
-    from server.device import tool_updates
     from server.lifecycle import updater
+    from server.tooling import tool_updates
 
     async def fake_sites():
         return [_site()]
@@ -1028,8 +1028,8 @@ def test_reporting_alone_is_never_a_failure(monkeypatch):
             command=["pipx", "upgrade", "pymobiledevice3"], reason="newer",
         )]
 
-    monkeypatch.setattr("server.device.tool_versions.collect_sites", fake_sites)
-    monkeypatch.setattr("server.device.tool_updates.plan_updates", fake_plan)
+    monkeypatch.setattr("server.tooling.tool_versions.collect_sites", fake_sites)
+    monkeypatch.setattr("server.tooling.tool_updates.plan_updates", fake_plan)
     assert updater._report_tool_updates(apply=False) is True
 
 
@@ -1329,7 +1329,7 @@ async def test_a_symlink_loop_does_not_crash_the_plan(tmp_path):
 @pytest.fixture
 def globally_installed_tool(monkeypatch):
     """A tool installed with `pipx install --global`, needing sudo to upgrade."""
-    from server.device import tool_updates
+    from server.tooling import tool_updates
 
     async def fake_sites():
         return []
@@ -1345,8 +1345,8 @@ def globally_installed_tool(monkeypatch):
             ),
         ]
 
-    monkeypatch.setattr("server.device.tool_versions.collect_sites", fake_sites)
-    monkeypatch.setattr("server.device.tool_updates.plan_updates", fake_plan)
+    monkeypatch.setattr("server.tooling.tool_versions.collect_sites", fake_sites)
+    monkeypatch.setattr("server.tooling.tool_updates.plan_updates", fake_plan)
 
     ran: list[list[str]] = []
     monkeypatch.setattr(
@@ -1462,7 +1462,7 @@ def test_a_per_user_install_is_not_called_global_when_home_is_a_symlink(
     with its home on an external volume is actually set up, i.e. the exact
     population the global-pipx feature was written for.
     """
-    from server.device.tool_updates import _pipx_is_global
+    from server.tooling.tool_updates import _pipx_is_global
 
     real = tmp_path / "real_home"
     (real / ".local" / "pipx" / "venvs" / "fb-idb" / "bin").mkdir(parents=True)
@@ -1580,7 +1580,7 @@ async def test_a_relocated_global_home_is_still_global(tmp_path, monkeypatch):
 
 
 def _needs_root_update():
-    from server.device.tool_updates import ToolUpdate
+    from server.tooling.tool_updates import ToolUpdate
 
     return ToolUpdate(
         name="pymobiledevice3", role="cli", action="upgrade_available",
@@ -1592,7 +1592,7 @@ def _needs_root_update():
 
 
 def _plain_update():
-    from server.device.tool_updates import ToolUpdate
+    from server.tooling.tool_updates import ToolUpdate
 
     return ToolUpdate(
         name="pymobiledevice3", role="cli", action="upgrade_available",
@@ -1608,7 +1608,7 @@ def test_report_only_does_not_claim_the_command_will_run():
     is a different false claim here -- swapping "you must run this" for
     "quern is about to run this" when it is not.
     """
-    from server.device.tool_updates import format_offer
+    from server.tooling.tool_updates import format_offer
 
     text = format_offer([_plain_update()], apply=False)
     assert "`quern update --tools` will run: pipx upgrade pymobiledevice3" in text
@@ -1616,7 +1616,7 @@ def test_report_only_does_not_claim_the_command_will_run():
 
 def test_the_default_is_the_report_only_wording():
     # A caller that forgets the flag must not accidentally promise execution.
-    from server.device.tool_updates import format_offer
+    from server.tooling.tool_updates import format_offer
 
     assert format_offer([_plain_update()]) == format_offer(
         [_plain_update()], apply=False
@@ -1634,7 +1634,7 @@ def test_every_offered_command_says_who_runs_it():
     why an earlier version of this fix, which only spoke up for `needs_root`,
     would not have helped the person who hit it.
     """
-    from server.device.tool_updates import format_offer
+    from server.tooling.tool_updates import format_offer
 
     text = format_offer([_plain_update()], apply=True)
     assert "will run: pipx upgrade pymobiledevice3" in text
@@ -1644,7 +1644,7 @@ def test_every_offered_command_says_who_runs_it():
 
 
 def test_a_sudo_command_also_says_it_will_ask_for_a_password():
-    from server.device.tool_updates import format_offer
+    from server.tooling.tool_updates import format_offer
 
     text = format_offer([_needs_root_update()], apply=True)
     assert "will run, asking sudo for your password:" in text
@@ -1654,7 +1654,7 @@ def test_a_sudo_command_also_says_it_will_ask_for_a_password():
 def test_doctor_still_speaks_imperatively():
     """`format_report` is doctor's, and doctor never applies anything, so
     "run:" there is correct and must not be swept along with this."""
-    from server.device.tool_updates import format_report
+    from server.tooling.tool_updates import format_report
 
     text = format_report([_plain_update()])
     assert "run: pipx upgrade pymobiledevice3" in text

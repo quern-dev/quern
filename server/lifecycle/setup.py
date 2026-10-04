@@ -3357,7 +3357,7 @@ def _collect_sites_sync() -> list[dict]:
     """Every install site quern uses. Sync, because setup is."""
     import asyncio
 
-    from server.device.tool_versions import collect_sites, upgrade_note
+    from server.tooling.tool_versions import collect_sites, upgrade_note
 
     try:
         sites = asyncio.run(collect_sites())

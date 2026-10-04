@@ -221,16 +221,16 @@ class TestTheFingerprintIsRecorded:
 
     async def test_the_build_id_is_parsed_from_xcodebuild(self):
         output = "Xcode 27.0\nBuild version 17A5241e\n"
-        with patch("server.device.tool_probe.probe_stdout",
+        with patch("server.tooling.tool_probe.probe_stdout",
                    AsyncMock(return_value=output)):
             assert await wda._xcode_build_id() == "17A5241e"
 
     async def test_an_unreadable_xcodebuild_gives_none_not_a_guess(self):
-        with patch("server.device.tool_probe.probe_stdout", AsyncMock(return_value=None)):
+        with patch("server.tooling.tool_probe.probe_stdout", AsyncMock(return_value=None)):
             assert await wda._xcode_build_id() is None
 
     async def test_output_without_a_build_line_gives_none(self):
-        with patch("server.device.tool_probe.probe_stdout",
+        with patch("server.tooling.tool_probe.probe_stdout",
                    AsyncMock(return_value="Xcode 27.0\n")):
             assert await wda._xcode_build_id() is None
 

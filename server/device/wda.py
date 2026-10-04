@@ -312,7 +312,7 @@ async def _xcode_build_id() -> str | None:
     as "26.0" with different builds, and a toolchain change is exactly what this
     is for.
     """
-    from server.device.tool_probe import probe_stdout
+    from server.tooling.tool_probe import probe_stdout
 
     out = await probe_stdout("xcodebuild", "-version", tool="xcodebuild")
     if out is None:

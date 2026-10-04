@@ -23,6 +23,7 @@ AI Agent (Claude Code, Cursor, etc.)
                        │                sim-bridge, idb), physical iPhones (WDA, devicectl,
                        │                pymobiledevice3, tunneld), Android (adb, uiautomator2);
                        │                also preview, web inspection, landmarks
+                       ├── tooling/     The host's external tools: probing, versions, updates
                        ├── builds/      Android builds (Gradle, JDK discovery) and build
                        │                records, with the Mach-O and ELF readers that
                        │                symbolication uses

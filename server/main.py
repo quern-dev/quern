@@ -1753,8 +1753,8 @@ def _report_external_tools(fix: bool = False) -> None:
     """
     import asyncio
 
-    from server.device.tool_updates import format_report, plan_updates
-    from server.device.tool_versions import collect_sites
+    from server.tooling.tool_updates import format_report, plan_updates
+    from server.tooling.tool_versions import collect_sites
 
     print()
     try:
@@ -1770,7 +1770,7 @@ def _report_external_tools(fix: bool = False) -> None:
 
     print(format_report(updates))
 
-    from server.device.tool_updates import actionable
+    from server.tooling.tool_updates import actionable
 
     if fix and actionable(updates):
         print()

@@ -109,7 +109,7 @@ Important but not hard.
 | `lifecycle/ports.py:31`, `sources/proxy.py:189` | `lsof -ti` / `ps` → `psutil`. `lsof` is often not installed on modern distros |
 | `capture_env.py:183,232`, `setup.py:539,612,2594,2664` | PATH split on hardcoded `":"` rather than `os.pathsep` |
 | `api/proxy_certs.py:727-761` | `scutil --nc list` VPN check runs ungated on every `/setup-guide` call |
-| `device/tool_versions.py:456` | `_android_sdk_adb()` checks only the macOS SDK path — inconsistent with `adb.py:36-40`, which already knows `~/Android/Sdk` |
+| `tooling/tool_versions.py:456` | `_android_sdk_adb()` checks only the macOS SDK path — inconsistent with `adb.py:36-40`, which already knows `~/Android/Sdk` |
 
 ### 3. Headless specifics
 

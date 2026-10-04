@@ -374,8 +374,8 @@ class DeviceController(DeviceControllerUI):
         different versions serving different code paths, which is the confusion
         this reports its way out of.
         """
-        from server.device.tool_versions import collect_sites, upgrade_note
         from server.models import ToolSiteInfo
+        from server.tooling.tool_versions import collect_sites, upgrade_note
 
         return [
             ToolSiteInfo(

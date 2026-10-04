@@ -25,7 +25,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from server.device.tool_probe import TOOL_PROBE_TIMEOUT, probe_command, probe_stdout
+from server.tooling.tool_probe import TOOL_PROBE_TIMEOUT, probe_command, probe_stdout
 
 
 class TestAProbeIsBounded:
