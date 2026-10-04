@@ -16,7 +16,7 @@ instead of "which element is this".
 
 from __future__ import annotations
 
-from server.device.web_content import (
+from server.device.web.web_content import (
     Anchor,
     _texts_correspond,
     anchor_verification_targets,
@@ -423,7 +423,7 @@ async def test_a_swept_origin_needs_two_probes_to_agree():
     # Full-width so the sweep actually lands inside it; only this one element
     # can ever match, because nothing else on screen shares any DOM text.
     screen = FakeScreen([native_el("StaticText", "Shared", 0, 206, 402, 40)])
-    from server.device.web_content import anchor_by_probe
+    from server.device.web.web_content import anchor_by_probe
     # 14 probes so a sweep row (y=233) genuinely lands inside the element --
     # with a coarser budget none of them do, and the test would pass because
     # nothing matched rather than because one match was refused.
@@ -439,7 +439,7 @@ async def test_two_agreeing_probes_fix_the_origin():
         native_el("StaticText", "Alpha", 0, 206, 402, 40),
         native_el("StaticText", "Beta", 0, 406, 402, 40),
     ])
-    from server.device.web_content import anchor_by_probe
+    from server.device.web.web_content import anchor_by_probe
     anchor, _ = await anchor_by_probe(
         "SIM", screen.describe_point, contents, SCREEN, max_probes=14)
     assert anchor is not None
@@ -452,7 +452,7 @@ async def test_sweeping_matches_exactly_never_by_containment():
     contents = page([dom("Mastodon is not a single website", 0, 100, 402, 40),
                      dom("Other text entirely", 0, 300, 402, 40)])
     screen = FakeScreen([native_el("Link", "Mastodon", 0, 206, 402, 40)])
-    from server.device.web_content import anchor_by_probe
+    from server.device.web.web_content import anchor_by_probe
     anchor, _ = await anchor_by_probe(
         "SIM", screen.describe_point, contents, SCREEN, max_probes=8)
     assert anchor is None
@@ -464,7 +464,7 @@ async def test_two_samples_of_one_element_are_not_two_agreeing_probes():
     twice, which is precisely what the agreement rule is for."""
     contents = page([dom("Tall block", 0, 100, 402, 300)])
     screen = FakeScreen([native_el("StaticText", "Tall block", 0, 206, 402, 300)])
-    from server.device.web_content import anchor_by_probe
+    from server.device.web.web_content import anchor_by_probe
     anchor, _ = await anchor_by_probe(
         "SIM", screen.describe_point, contents, SCREEN, max_probes=14)
     assert anchor is None, "one element sampled repeatedly is still one element"
@@ -602,7 +602,7 @@ async def test_a_second_page_is_still_swept_after_the_first_is_located():
 
 def test_probed_hits_arrive_looking_like_projected_ones():
     """A caller should not have to know which route found an element."""
-    from server.device.web_content import from_probe
+    from server.device.web.web_content import from_probe
     elements = from_probe([
         {"type": "Button", "AXLabel": "Sign in",
          "frame": {"x": 16, "y": 503, "width": 370, "height": 39}},
@@ -617,14 +617,14 @@ def test_probed_hits_arrive_looking_like_projected_ones():
 
 
 def test_a_probed_element_with_no_area_is_dropped():
-    from server.device.web_content import from_probe
+    from server.device.web.web_content import from_probe
     assert from_probe([{"type": "Button", "AXLabel": "x",
                         "frame": {"x": 0, "y": 0, "width": 0, "height": 10}}]) == []
 
 
 def test_a_probed_field_keeps_its_value():
     """Filling a form means checking what actually landed in the field."""
-    from server.device.web_content import from_probe
+    from server.device.web.web_content import from_probe
     element = from_probe([{"type": "TextField", "AXLabel": "Email",
                            "AXValue": "someone@example.test",
                            "frame": {"x": 0, "y": 0, "width": 10, "height": 10}}])[0]

@@ -1,7 +1,7 @@
 # Webview Automation: the in-bundle agent we did not ship
 
 **Status:** decided and shipped, the other way. Web content is reached through
-WebKit's Web Inspector protocol (`server/device/webinspector.py`, landed
+WebKit's Web Inspector protocol (`server/device/web/webinspector.py`, landed
 2026-09-01 in 0.15.0). The alternative described here — a Quern agent compiled
 into the app's own web bundle — was designed in some detail and then abandoned.
 **Why this file exists:** the rejected design is more attractive than it looks,
@@ -144,6 +144,6 @@ is how the measurement above was taken.
 
 ## 5. Where the code is
 
-- `server/device/webinspector.py` — transport and RPC
-- `server/device/web_content.py`, `web_probing.py` — what reads through it
+- `server/device/web/webinspector.py` — transport and RPC
+- `server/device/web/web_content.py`, `web_probing.py` — what reads through it
 - `server/api/device_ui.py` — the surface it is exposed on

@@ -230,7 +230,7 @@ async def confirm_anchor(
     has to be close enough to land inside the element, and the observed frame
     then supplies the exact offset.
     """
-    from server.device.web_probing import hit_contains
+    from server.device.web.web_probing import hit_contains
 
     probes = 0
     targets = anchor_verification_targets(contents)
@@ -405,7 +405,7 @@ def _largest_cluster(
 
 
 def _contains(frame: dict | None, x: float, y: float) -> bool:
-    from server.device.web_probing import hit_contains
+    from server.device.web.web_probing import hit_contains
     return hit_contains(frame, x, y)
 
 
@@ -491,7 +491,7 @@ async def collect_web_content(
     `inspector` and `describe_point` are injected so this is testable without a
     simulator, the same contract `probing.probe_container` uses.
     """
-    from server.device.web_probing import app_frame
+    from server.device.web.web_probing import app_frame
 
     result: dict = {
         "elements": [], "pages": [], "probes": 0, "anchored": False, "reason": None,

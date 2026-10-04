@@ -20,7 +20,7 @@ from server.device.ui_elements import (
     get_tap_point,
     parse_elements,
 )
-from server.device.web_probing import WebSweepResult
+from server.device.web.web_probing import WebSweepResult
 from server.models import DeviceError, UIElement, WaitCondition
 
 
@@ -1499,8 +1499,8 @@ class DeviceControllerUI:
         ~93ms to be told otherwise is the difference between a wrong action and
         an honest error.
         """
-        from server.device.web_content import _texts_correspond, normalise
-        from server.device.web_probing import hit_contains
+        from server.device.web.web_content import _texts_correspond, normalise
+        from server.device.web.web_probing import hit_contains
 
         frame = element.frame or {}
         x = frame.get("x", 0) + frame.get("width", 0) / 2
@@ -2661,7 +2661,7 @@ class DeviceControllerUI:
 
     async def _connected_web_inspector(self):
         """The shared Web Inspector connection, opening one if needed."""
-        from server.device.webinspector import SimulatorWebInspector
+        from server.device.web.webinspector import SimulatorWebInspector
 
         async with self._web_inspector_lock:
             if self._web_inspector is None:
@@ -2690,8 +2690,8 @@ class DeviceControllerUI:
         """
         if self._is_android(udid) or self._is_physical(udid):
             return False
-        from server.device.web_content import _is_app
-        from server.device.webinspector import simulator_udid_for_application
+        from server.device.web.web_content import _is_app
+        from server.device.web.webinspector import simulator_udid_for_application
 
         booted = await self._booted_simulator_count()
         require_match = booted is None or booted > 1
@@ -2780,7 +2780,7 @@ class DeviceControllerUI:
         half: the aiming is Vision text recognition, and halving the pixels
         costs it the small text.
         """
-        from server.device.web_probing import sweep_web_content
+        from server.device.web.web_probing import sweep_web_content
 
         async def capture() -> bytes | None:
             try:
@@ -2807,8 +2807,8 @@ class DeviceControllerUI:
         native landmarks must not stop being identifiable because the Inspector
         is unreachable.
         """
-        from server.device.web_content import _is_app
-        from server.device.webinspector import simulator_udid_for_application
+        from server.device.web.web_content import _is_app
+        from server.device.web.webinspector import simulator_udid_for_application
 
         if self._is_android(udid) or self._is_physical(udid):
             # Not "no pages" -- no listing at all. Android's tree already holds
@@ -2879,8 +2879,8 @@ class DeviceControllerUI:
         `WebView`, and physical iOS devices are reached over a different
         transport, so on both the ordinary UI tree is the right tool.
         """
-        from server.device.web_content import collect_web_content, from_probe
-        from server.device.webinspector import (
+        from server.device.web.web_content import collect_web_content, from_probe
+        from server.device.web.webinspector import (
             WebInspectorError,
             simulator_udid_for_application,
         )

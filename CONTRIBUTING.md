@@ -22,7 +22,7 @@ AI Agent (Claude Code, Cursor, etc.)
                        ├── device/      Device control, iOS and Android: simulators (simctl,
                        │                sim-bridge, idb), physical iPhones (WDA, devicectl,
                        │                pymobiledevice3, tunneld), Android (adb, uiautomator2);
-                       │                also preview and web inspection
+                       │                also preview; web/ reads web content inside apps
                        ├── knowledge/   App knowledge bases: landmarks, screen identification
                        ├── tooling/     The host's external tools: probing, versions, updates
                        ├── builds/      Android builds (Gradle, JDK discovery) and build

@@ -224,7 +224,7 @@ async def test_a_previous_read_cannot_influence_the_next_one():
     ctrl._booted_simulator_count = lambda: _immediate(1)
     ctrl._connected_web_inspector = lambda: _immediate(object())
 
-    import server.device.web_content as wc
+    import server.device.web.web_content as wc
     original = wc.collect_web_content
     wc.collect_web_content = fake_collect
     try:
@@ -356,7 +356,7 @@ def _web_controller(collect_result, sweep):
 
     ctrl._sweep_web_content = do_sweep
 
-    import server.device.web_content as wc
+    import server.device.web.web_content as wc
     ctrl._original_collect = wc.collect_web_content
 
     async def collect(*a, **kw):
@@ -367,7 +367,7 @@ def _web_controller(collect_result, sweep):
 
 
 def _restore(ctrl):
-    import server.device.web_content as wc
+    import server.device.web.web_content as wc
     wc.collect_web_content = ctrl._original_collect
 
 
@@ -503,7 +503,7 @@ def _url_controller(apps, pages, *, owners, booted=1):
     ctrl._is_physical = lambda _u: False
     ctrl._booted_simulator_count = lambda: _immediate(booted)
     ctrl._connected_web_inspector = lambda: _immediate(_FakeInspector(apps, pages))
-    import server.device.webinspector as wi
+    import server.device.web.webinspector as wi
     ctrl._original_attr = wi.simulator_udid_for_application
 
     async def attribute(app_id):
@@ -514,7 +514,7 @@ def _url_controller(apps, pages, *, owners, booted=1):
 
 
 def _restore_attr(ctrl):
-    import server.device.webinspector as wi
+    import server.device.web.webinspector as wi
     wi.simulator_udid_for_application = ctrl._original_attr
 
 
@@ -782,7 +782,7 @@ async def test_a_web_clear_on_another_simulator_does_not_count():
 
     ctrl._connected_web_inspector = lambda: _immediate(Inspector())
     ctrl._close_web_inspector = lambda: _immediate(None)
-    import server.device.webinspector as wi
+    import server.device.web.webinspector as wi
     original = wi.simulator_udid_for_application
 
     async def elsewhere(_app_id):
