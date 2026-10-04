@@ -1,3 +1,13 @@
+> **Archived, 2026-10-03. Not a plan.** Moved from `docs/` (#396), where it sat
+> among the reference docs although it describes a fix that has shipped twice:
+> as a patch to our idb fork, and natively in sim-bridge, which superseded idb
+> as the default simulator backend. The live description of the hit-test is
+> `server/device/probing.py` and `tools/sim-bridge.swift`; the backend itself
+> is specified in `../sim-bridge-spec.md`.
+>
+> Kept because the idb patch is still the right fix for upstream
+> `idb_companion`, which Intel Macs and pre-Xcode-26 hosts fall back to.
+
 # idb Fix: Probe Childless Group Elements (fixes facebook/idb#767)
 
 > **Status (Quern, v0.13+): shipped natively in sim-bridge.** Quern's
