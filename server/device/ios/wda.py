@@ -903,17 +903,19 @@ async def start_driver(udid: str, os_version: str) -> dict:
     # Prepare log file
     WDA_LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = WDA_LOG_DIR / f"runner-{udid[:8]}.log"
-    log_file = open(log_path, "w")
 
     logger.info("Starting WDA driver for %s (hw_udid=%s)", udid[:8], hw_udid)
 
-    proc = await asyncio.create_subprocess_exec(
-        "xcodebuild", "test-without-building",
-        "-xctestrun", str(xctestrun_path),
-        "-destination", f"id={hw_udid}",
-        stdout=log_file,
-        stderr=log_file,
-    )
+    # The child holds its own copy of the descriptor; the server's is closed
+    # here, including when the spawn raises. Left open, every start leaked one.
+    with open(log_path, "w") as log_file:
+        proc = await asyncio.create_subprocess_exec(
+            "xcodebuild", "test-without-building",
+            "-xctestrun", str(xctestrun_path),
+            "-destination", f"id={hw_udid}",
+            stdout=log_file,
+            stderr=log_file,
+        )
 
     # Save runner state immediately (before polling)
     state = read_wda_state()

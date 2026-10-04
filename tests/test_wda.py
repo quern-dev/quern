@@ -1035,7 +1035,7 @@ class TestStartDriver:
                 "server.device.ios.wda.asyncio.create_subprocess_exec",
                 new_callable=AsyncMock,
                 return_value=proc,
-            ),
+            ) as mock_exec,
             patch("server.device.ios.wda._poll_wda_status", new_callable=AsyncMock, return_value=True),
         ):
             result = await start_driver("DEV-UUID-123", "iOS 17.4")
@@ -1044,6 +1044,9 @@ class TestStartDriver:
         assert result["pid"] == 42
         assert result["ready"] is True
         mock_save.assert_called()
+        # The runner's log handle is the child's to keep, not the server's:
+        # left open, every start leaked a descriptor (CodeRabbit on #404).
+        assert mock_exec.call_args.kwargs["stdout"].closed
 
     async def test_start_driver_already_running(self):
         state = {"runners": {"DEV1": {"pid": 999}}}
