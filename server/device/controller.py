@@ -1638,9 +1638,11 @@ class DeviceController(DeviceControllerUI):
                     seen["foreground_activity"] = activity
                 if app == expected:
                     return {"opened_in_app": True, **seen}
-                if already_in_front:
+                if already_in_front and app is not None:
                     # It was there and has gone: whatever is in front now
-                    # took the link.
+                    # took the link. Nothing in front at all is not that --
+                    # Android reports no resumed activity mid-transition, so
+                    # it waits for a read that names something (CodeRabbit).
                     return {"opened_in_app": False, **seen}
             if time.monotonic() >= deadline:
                 break

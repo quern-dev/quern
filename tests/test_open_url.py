@@ -407,6 +407,18 @@ class TestAndroid:
         assert "app chooser" in outcome["warning"]
         assert "more than one activity" in outcome["warning"]
 
+    async def test_a_transition_with_nothing_resumed_is_not_the_app_leaving(self):
+        """The app was in front before the open; mid-transition Android
+        reports no resumed activity, and that read must not end the wait as
+        "it has gone" (CodeRabbit on #392)."""
+        ctrl = _ctrl(PIXEL, DeviceType.ANDROID_DEVICE)
+        ctrl._OPEN_URL_SETTLE_S = 0.05
+        ctrl._OPEN_URL_FRONTMOST_TIMEOUT_S = 1.0
+        main = (APP, f"{APP}/.MainActivity")
+        ctrl.adb.resumed_activity = _timeline((0, main), (0.01, None), (0.2, main))
+        _, outcome = await ctrl.open_url(URL, bundle_id=APP)
+        assert outcome["opened_in_app"] is True
+
     async def test_nothing_resumed_is_seen_as_nothing_in_front(self):
         ctrl = _ctrl(PIXEL, DeviceType.ANDROID_DEVICE)
         ctrl.adb.resumed_activity = AsyncMock(return_value=None)
