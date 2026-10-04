@@ -7,7 +7,7 @@ server that has not read web content since it started loads this module for
 the first time from the new tree -- here.
 
 Exactly those names, pinned in `tests/test_forwarders.py`. Nothing in this
-tree imports from here: import from `server.device.web`. Sunset: remove once
+tree imports from here: import from `server.device.web.webinspector`. Sunset: remove once
 four releases have shipped after the one containing this move (#396).
 """
 
