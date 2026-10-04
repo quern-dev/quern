@@ -6,7 +6,7 @@ Releases before the move import these names inside functions;
 ACTION_SNAPSHOT_DEPTH only in v0.24.0-beta.1.
 
 Exactly those names, pinned in `tests/test_forwarders.py`. Nothing in this
-tree imports from here: import from `server.device.ios`. Sunset: remove once
+tree imports from here: import from `server.device.ios.wda_client`. Sunset: remove once
 four releases have shipped after the one containing this move (#396).
 """
 

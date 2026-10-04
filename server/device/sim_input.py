@@ -8,7 +8,7 @@ forwards the module rather than names: importing it puts the real module in
 its place, and every attribute -- and every patch -- lands on the one copy.
 
 Pinned in `tests/test_forwarders.py`. Nothing in this tree imports from here:
-import from `server.device.ios`. Sunset: remove once four releases have
+import from `server.device.ios.sim_input`. Sunset: remove once four releases have
 shipped after the one containing this move (#396).
 """
 

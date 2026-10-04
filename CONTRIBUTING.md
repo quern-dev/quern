@@ -21,7 +21,7 @@ AI Agent (Claude Code, Cursor, etc.)
                        │
                        ├── device/      Device control: the controllers, with backends in ios/
                        │                (simctl, sim-bridge, idb, WDA, devicectl,
-                       │                pymobiledevice3, tunneld) and android/ (adb,
+                       │                pymobiledevice3, tunneld, usbmux) and android/ (adb,
                        │                uiautomator2); media/ (preview windows, screenshots);
                        │                web/ (web content inside apps)
                        ├── knowledge/   App knowledge bases: landmarks, screen identification

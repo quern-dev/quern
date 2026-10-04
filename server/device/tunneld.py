@@ -7,7 +7,7 @@ runs after a swap depends on what that process had already loaded, so all of
 them are forwarded.
 
 Exactly those names, pinned in `tests/test_forwarders.py`. Nothing in this
-tree imports from here: import from `server.device.ios`. Sunset: remove once
+tree imports from here: import from `server.device.ios.tunneld`. Sunset: remove once
 four releases have shipped after the one containing this move (#396).
 """
 

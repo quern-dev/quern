@@ -276,7 +276,7 @@ are architecture-specific.
 ## File Layout
 
 ```
-tools/sim-bridge.swift          — Single-file Swift source (~1000-1200 lines)
+tools/sim-bridge.swift              — Single-file Swift source (~1000-1200 lines)
 server/device/ios/sim_bridge.py     — Python backend (subprocess manager + protocol)
 server/device/ios/idb.py            — Existing idb backend (kept as fallback)
 ```

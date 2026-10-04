@@ -115,6 +115,32 @@ OLD_IMPORTS = (
 )
 
 
+#: What old releases read off a module forwarder's module, found the same way
+#: (`sim_input.<name>` in every tag's server/). A module forwarder forwards
+#: everything, so these pin that the names still exist.
+MODULE_ATTRIBUTES = {
+    "server.device.sim_input": (
+        "device_hub_is_running",
+        "legacy_input_is_suppressed",
+        "restore_legacy_input",
+        "suppressed_input_warning",
+        "wait_for_device_hub_to_attach",
+    ),
+}
+
+
+@pytest.mark.parametrize("forwarder", sorted(MODULE_ATTRIBUTES))
+def test_a_module_forwarder_still_has_what_old_releases_read(forwarder):
+    module = importlib.import_module(forwarder)
+    missing = [a for a in MODULE_ATTRIBUTES[forwarder] if not hasattr(module, a)]
+    assert not missing, missing
+
+
+def test_every_module_forwarder_has_its_attributes_pinned():
+    module_forwarders = {f for f, names in _named_by_old_imports().items() if names is None}
+    assert module_forwarders == set(MODULE_ATTRIBUTES)
+
+
 def _parse(line: str) -> tuple[str, list[tuple[str, str]] | None]:
     """The forwarder a line imports from, and each name with what it is bound
     as -- or None for a line importing the module itself."""
