@@ -120,8 +120,11 @@ for p in "$PORT" "$PROXY_PORT"; do
   fi
 done
 
-# A template, because macOS `mktemp -d` alone ignores TMPDIR.
-SB="$(mktemp -d "${TMPDIR:-/tmp}/quern-cli-live.XXXXXX")"
+# A template, because macOS `mktemp -d` alone ignores TMPDIR. And the physical
+# path: macOS's TMPDIR is under /var, a symlink to /private/var, and setup
+# writes resolved paths into the wrapper and MCP entries -- so a check that
+# they point at this tree must compare like with like.
+SB="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/quern-cli-live.XXXXXX")" && pwd -P)"
 SKIPS_FILE="$SB/skips"
 : > "$SKIPS_FILE"
 TRANSCRIPT="$SB/transcript.txt"
@@ -686,7 +689,8 @@ sort "$CALLS" | uniq -c | sed 's/^/  /'
 
 # Outside the tree, named by commit, so a before/after pair is two files to
 # diff: `diff "$TMPDIR"/quern-cli-live-<a>.txt "$TMPDIR"/quern-cli-live-<b>.txt`.
-OUT="${CLI_LIVE_TRANSCRIPT:-${TMPDIR:-/tmp}/quern-cli-live-$(git -C "$ROOT" rev-parse --short "$REF").txt}"
+tmp_dir="${TMPDIR:-/tmp}"
+OUT="${CLI_LIVE_TRANSCRIPT:-${tmp_dir%/}/quern-cli-live-$(git -C "$ROOT" rev-parse --short "$REF").txt}"
 cp "$TRANSCRIPT" "$OUT"
 printf '\nTranscript: %s\n' "$OUT"
 
