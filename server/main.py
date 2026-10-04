@@ -270,8 +270,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # to them: a recording resumed late would miss what arrived meanwhile.
     from server.api.trace import read_ip_map
     from server.device.media_engine import build_media_engine
-    from server.recording import RecordingManager
-    from server.recording_video import VideoRecorder
+    from server.recording.recorder import RecordingManager
+    from server.recording.video import VideoRecorder
     app.state.recordings = RecordingManager(
         server_buffer=server_buffer, ring_buffer=buffer, crash_buffer=crash_buffer,
         flow_store=flow_store, ip_map=read_ip_map,
@@ -2229,7 +2229,7 @@ def cli() -> None:
     elif args.command == "check-updates":
         sys.exit(_cmd_check_updates())
     elif args.command == "record":
-        from server.record_cli import main as record_main
+        from server.recording.cli import main as record_main
 
         sys.exit(record_main(sys.argv[sys.argv.index("record") + 1:]))
     elif args.command == "url":

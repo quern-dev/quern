@@ -23,14 +23,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from server import config as config_mod
-from server import recording as rec_mod
 from server.api.proxy import router as proxy_router
 from server.api.trace import router as trace_router
 from server.models import FlowRecord, FlowRequest, FlowResponse, LogEntry, LogLevel, LogSource
 from server.proxy import flow_store as flow_store_mod
 from server.proxy.addon import IOSDebugAddon
 from server.proxy.flow_store import FlowStore
-from server.recording import Filters, RecordingManager
+from server.recording import recorder as rec_mod
+from server.recording.recorder import Filters, RecordingManager
 from server.sources.proxy import ProxyAdapter
 from server.storage.ring_buffer import RingBuffer
 from tests.test_addon_intercept import CapturedOutput, _make_mock_flow

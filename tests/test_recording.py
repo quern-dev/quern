@@ -18,13 +18,13 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from server import config as config_mod
-from server import record_cli
-from server import recording as rec_mod
 from server.api.recordings import router as recordings_router
 from server.api.trace import router as trace_router
 from server.models import FlowRecord, FlowRequest, FlowResponse, LogEntry, LogLevel, LogSource
 from server.proxy.flow_store import FlowStore
-from server.recording import Filters, RecordingError, RecordingManager
+from server.recording import cli as record_cli
+from server.recording import recorder as rec_mod
+from server.recording.recorder import Filters, RecordingError, RecordingManager
 from server.storage.ring_buffer import RingBuffer
 
 SIM = "SIM-A"
