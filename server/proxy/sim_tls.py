@@ -498,6 +498,13 @@ async def ensure_capturable(
                         "the proxy did not take this simulator into its decrypted set")
         check.entry = next((e for e in report(app) or []
                             if e.udid.upper() == udid.upper()), None)
+        if trusted is False and check.entry is None:
+            # The report lists booted simulators only, so a start against one
+            # that is shut down has no entry to warn from -- and once it boots,
+            # its HTTPS is passed through for the whole run, unannounced.
+            check.warnings.append(
+                f"{udid} does not trust the CA: once it boots, its HTTPS is passed "
+                "through, not captured")
     return check
 
 

@@ -151,6 +151,17 @@ class TestEnsureCapturable:
             _app(trusted=False, in_set=()), SIM, allow_passthrough=True)
         assert check.entry.tls == "passed_through"
 
+    async def test_allow_passthrough_on_a_shut_down_simulator_still_says_so(self, device):
+        """Only booted simulators are in the report, so there was no entry to
+        warn from: a 200 with no warnings, then a run passed through once it
+        booted. Found live-testing the rebase."""
+        device.answers = [False]
+        app = _app(trusted=False, in_set=())
+        app.state.simulator_trust = []
+        check = await sim_tls.ensure_capturable(app, SIM, allow_passthrough=True)
+        assert check.entry is None
+        assert any("passed through" in w for w in check.warnings)
+
     async def test_a_check_that_cannot_run_lets_it_through_and_says_so(self, device):
         device.answers = [OSError("TrustStore unreadable")]
         check = await sim_tls.ensure_capturable(_app(trusted=None, in_set=()), SIM)
