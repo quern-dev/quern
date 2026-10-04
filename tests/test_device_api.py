@@ -56,7 +56,7 @@ def mock_controller(app):
     ctrl.boot = AsyncMock(return_value="AAAA-1111")
     ctrl.shutdown = AsyncMock()
     ctrl.install_app = AsyncMock(return_value="AAAA-1111")
-    ctrl.launch_app = AsyncMock(return_value="AAAA-1111")
+    ctrl.launch_app = AsyncMock(return_value=("AAAA-1111", {}))
     ctrl.terminate_app = AsyncMock(return_value="AAAA-1111")
     ctrl.uninstall_app = AsyncMock(return_value="AAAA-1111")
     ctrl.list_apps = AsyncMock(

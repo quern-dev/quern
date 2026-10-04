@@ -39,6 +39,9 @@ WDA_TIMEOUT = 10.0  # seconds for HTTP requests
 # seconds for tap/swipe/type — WDA serializes requests,
 # so actions queue behind slow queries
 ACTION_TIMEOUT = 25.0
+#: XCUIApplication.launch waits for the app to start, and a cold start of a
+#: large app on an older phone is measured in seconds, not milliseconds.
+LAUNCH_TIMEOUT = 60.0
 #: A front-app read is a status check made while waiting on an open; a
 #: healthy WDA answers it in about 0.1s (measured on an iPhone 12).
 ACTIVE_APP_TIMEOUT = 3.0
@@ -1449,6 +1452,48 @@ class WdaBackend:
         await self._request("post", udid, "/wda/pressButton",
                             use_session=True, timeout=ACTION_TIMEOUT,
                             json={"name": button})
+
+    async def app_state(self, udid: str, bundle_id: str) -> int:
+        """XCUIApplication's state: 1 not running, 2 suspended, 3 running in
+        the background, 4 in the foreground, 0 unknown."""
+        resp = await self._request("post", udid, "/wda/apps/state",
+                                   use_session=True, timeout=ACTION_TIMEOUT,
+                                   json={"bundleId": bundle_id})
+        try:
+            value = resp.json().get("value")
+        except (ValueError, AttributeError) as exc:
+            raise DeviceError(f"WDA apps/state on {udid[:8]} answered something unreadable",
+                              tool="wda") from exc
+        if not isinstance(value, int):
+            raise DeviceError(f"WDA apps/state on {udid[:8]} answered {value!r}", tool="wda")
+        return value
+
+    async def launch_app(
+        self, udid: str, bundle_id: str, environment: dict[str, str],
+    ) -> None:
+        """Start an app with `environment`, through XCUIApplication.
+
+        Measured on an iPhone 12: testmanagerd's launch request carried the
+        variables (`_XCT_launchApplicationWithBundleID:...environment:`).
+        WDA applies them only to an app that is not running -- a running one
+        is just activated, keeping the environment it started with -- so the
+        caller terminates it first when the variables must apply.
+
+        Not re-sent on a timeout: a launch WDA may already have made would
+        be made twice (#74).
+        """
+        try:
+            await self._request("post", udid, "/wda/apps/launch",
+                                use_session=True, timeout=LAUNCH_TIMEOUT,
+                                raise_on_timeout=True,
+                                json={"bundleId": bundle_id, "environment": environment})
+        except httpx.TimeoutException as exc:
+            raise DeviceError(
+                f"WDA did not finish launching {bundle_id} on {udid[:8]} within "
+                f"{LAUNCH_TIMEOUT:.0f}s. It may still be starting, so it was not "
+                "launched again; check the screen.",
+                tool="wda",
+            ) from exc
 
     async def activate_app(self, udid: str, bundle_id: str) -> None:
         """Activate (bring to foreground) an app via WDA."""

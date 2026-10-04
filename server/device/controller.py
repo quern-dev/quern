@@ -1270,19 +1270,94 @@ class DeviceController(DeviceControllerUI):
         bundle_id: str,
         udid: str | None = None,
         env: dict[str, str] | None = None,
-    ) -> str:
-        """Launch an app. Returns the resolved udid."""
+    ) -> tuple[str, dict]:
+        """Launch an app. Returns the resolved udid and, when `env` was
+        given, what became of it: `env_applied`, and `restarted` -- whether a
+        running instance was stopped so the variables could apply.
+
+        An environment reaches only a process that is starting. Both iOS
+        routes bring a running app forward instead, keeping the environment
+        it started with, and say nothing (measured on each), so with `env`
+        quern restarts a running app rather than report variables it never
+        delivered. Without `env` a running app is brought forward as before.
+
+        A physical iPhone launches through WDA (XCUIApplication), which
+        takes an environment; a simulator through `simctl launch`. Both get
+        QUERN_AUTOMATION=YES whenever quern starts the process. Android apps
+        take no environment variables, so there `env` is reported as not
+        applied rather than dropped silently.
+        """
         resolved = await self.resolve_udid(udid)
+        info: dict = {}
         if self._is_android(resolved):
             await self.adb.launch_app(resolved, bundle_id)
+            if env:
+                info = {"env_applied": False,
+                        "warning": "Android apps do not receive environment variables, so "
+                                   "env was not applied. Pass values the app reads from its "
+                                   "launch intent or settings instead."}
         elif self._is_physical(resolved):
-            await self.wda_client.activate_app(resolved, bundle_id)
+            info = await self._launch_on_device(resolved, bundle_id, env)
         else:
-            pid = await self.simctl.launch_app(resolved, bundle_id, env=env)
+            restarted: bool | None = None
+            if env:
+                try:
+                    restarted = await self.simctl.running_pid(resolved, bundle_id) is not None
+                except Exception:  # noqa: BLE001 - only the report loses; the launch goes on
+                    restarted = None
+            pid = await self.simctl.launch_app(resolved, bundle_id, env=env, restart=bool(env))
             self._invalidate_ui_cache(resolved)
             await self._confirm_the_app_came_up(resolved, bundle_id, pid)
+            if env:
+                info = {"env_applied": True, "restarted": restarted}
         self._invalidate_ui_cache(resolved)  # UI changed
-        return resolved
+        return resolved, info
+
+    async def _launch_on_device(
+        self, udid: str, bundle_id: str, env: dict[str, str] | None,
+    ) -> dict:
+        """Launch on a physical iPhone through WDA.
+
+        Without `env`, a running app is activated as before, and one that is
+        not running is started with QUERN_AUTOMATION=YES, as a simulator's
+        is. With `env`, a running app -- or one whose state could not be
+        read, since terminating a stopped app is harmless -- is terminated
+        first, because WDA's launch only activates a running app and its
+        variables would never arrive.
+        """
+        try:
+            state: int | None = await self.wda_client.app_state(udid, bundle_id)
+        except DeviceError:
+            state = None
+        launch_env = {"QUERN_AUTOMATION": "YES", **(env or {})}
+        if env:
+            running = None if state is None else state in (2, 3, 4)
+            if running is not False:
+                await self.wda_client.terminate_app(udid, bundle_id)
+            await self.wda_client.launch_app(udid, bundle_id, launch_env)
+            await self._confirm_in_front_on_device(udid, bundle_id)
+            return {"env_applied": True, "restarted": running}
+        if state == 1:
+            await self.wda_client.launch_app(udid, bundle_id, launch_env)
+            await self._confirm_in_front_on_device(udid, bundle_id)
+        else:
+            await self.wda_client.activate_app(udid, bundle_id)
+        return {}
+
+    async def _confirm_in_front_on_device(self, udid: str, bundle_id: str) -> None:
+        """Fail a launch WDA accepted when the app is not in front after it.
+        XCUIApplication.launch waits for the app, so this is the outcome, not
+        a race; a read that fails is not a verdict and is let pass."""
+        try:
+            state = await self.wda_client.app_state(udid, bundle_id)
+        except DeviceError:
+            return
+        if state != 4:
+            raise DeviceError(
+                f"{bundle_id} was launched and is not in the foreground "
+                f"(XCUIApplication state {state})",
+                tool="wda",
+            )
 
     async def _confirm_the_app_came_up(
         self, udid: str, bundle_id: str, pid: int | None,

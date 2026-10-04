@@ -205,19 +205,27 @@ class SimctlBackend:
 
     async def launch_app(
         self, udid: str, bundle_id: str, env: dict[str, str] | None = None,
+        *, restart: bool = False,
     ) -> int | None:
         """Launch an app on a simulator. Returns the pid simctl reported.
 
         If env is provided, the key-value pairs are passed to the app process
         via the SIMCTL_CHILD_ prefix convention.  QUERN_AUTOMATION=YES is
         always set so apps can detect quern-driven launches.
+
+        An environment reaches only a process that is starting: `simctl
+        launch` on a running app brings it forward and returns its existing
+        pid, with the environment it already had (measured: a second launch
+        with a different variable kept pid and value). `restart` passes
+        `--terminate-running-process`, so the variables apply.
         """
         launch_env = {**os.environ, "SIMCTL_CHILD_QUERN_AUTOMATION": "YES"}
         if env:
             for key, value in env.items():
                 launch_env[f"SIMCTL_CHILD_{key}"] = value
+        flags = ["--terminate-running-process"] if restart else []
         proc = await asyncio.create_subprocess_exec(
-            "xcrun", "simctl", "launch", udid, bundle_id,
+            "xcrun", "simctl", "launch", *flags, udid, bundle_id,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=launch_env,
@@ -229,6 +237,19 @@ class SimctlBackend:
                 tool="simctl",
             )
         return _launched_pid(stdout.decode(errors="replace"))
+
+    async def running_pid(self, udid: str, bundle_id: str) -> int | None:
+        """The pid of `bundle_id`'s running process on the simulator, or None
+        when it is not running. Read from the simulator's launchd, whose
+        `launchctl list` names an app's job `UIKitApplication:<bundle>[...]`.
+        Raises DeviceError when the list cannot be read."""
+        stdout, _ = await self._run_simctl("spawn", udid, "launchctl", "list")
+        label = f"UIKitApplication:{bundle_id}["
+        for line in stdout.splitlines():
+            fields = line.split("\t")
+            if len(fields) == 3 and fields[2].startswith(label) and fields[0].isdigit():
+                return int(fields[0])
+        return None
 
     @staticmethod
     def process_is_alive(pid: int | None) -> bool:

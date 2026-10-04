@@ -240,7 +240,7 @@ NOTE: If you want to capture network traffic from this app:
       env: z
         .record(z.string(), z.string())
         .optional()
-        .describe("Environment variables to pass to the app process (iOS simulators only). Uses the SIMCTL_CHILD_ prefix convention. QUERN_AUTOMATION=YES is always set automatically."),
+        .describe("Environment variables for the app process, on an iOS simulator (simctl's SIMCTL_CHILD_ convention) or a physical iPhone (through WDA). Variables reach only a process that is starting, so with env a running app is restarted; the response says so (restarted) and confirms env_applied. QUERN_AUTOMATION=YES is set whenever quern starts the app. Android apps take no environment variables: env_applied is false there, with a warning."),
       include_screen_context: z
         .boolean()
         .default(false)
