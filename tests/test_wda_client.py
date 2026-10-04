@@ -2880,6 +2880,102 @@ class TestConnectionRecovery:
         assert resp.status_code == 200
         assert call_count == 2
 
+    @pytest.mark.parametrize("exc", [
+        httpx.ReadError("reset"), httpx.RemoteProtocolError("gone"), httpx.ReadTimeout("slow")])
+    async def test_maybe_delivered_errors_are_raised_not_resent(self, exc):
+        """For a write whose second answer would differ (#393): anything that
+        may have reached WDA comes back to the caller, unsent a second time."""
+        backend = _make_session_backend()
+        mock_get = AsyncMock(side_effect=exc)
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = mock_get
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+            with patch.object(backend, "_get_base_url", return_value="http://localhost:8100"):
+                with pytest.raises(type(exc)):
+                    await backend._request("get", "test-udid", "/status",
+                                           raise_if_maybe_delivered=True)
+        assert mock_get.await_count == 1
+
+    async def test_a_refused_connection_is_still_retried_when_maybe_delivered_is_set(self):
+        """A refused connection never carried the request, so re-sending it
+        is safe and the flag leaves it alone."""
+        backend = _make_session_backend()
+        calls = 0
+
+        async def mock_get(url, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise httpx.ConnectError("refused")
+            return _ok_response()
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=mock_get)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+            with patch.object(backend, "_get_base_url", return_value="http://localhost:8100"):
+                resp = await backend._request("get", "test-udid", "/status",
+                                              raise_if_maybe_delivered=True)
+        assert resp.status_code == 200 and calls == 2
+
+    @staticmethod
+    def _client(side_effect):
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=side_effect)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        return mock_client
+
+    async def test_the_guard_survives_a_reconnect(self):
+        """CodeRabbit on #393: the retry after a refused connection carries
+        the guard, so a ReadError on it comes back raw rather than re-sent."""
+        backend = _make_session_backend()
+        calls = 0
+
+        async def mock_get(url, **kwargs):
+            nonlocal calls
+            calls += 1
+            raise httpx.ConnectError("refused") if calls == 1 else httpx.ReadError("reset")
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client_cls.return_value = self._client(mock_get)
+            with patch.object(backend, "_get_base_url", return_value="http://localhost:8100"):
+                with pytest.raises(httpx.ReadError):
+                    await backend._request("get", "test-udid", "/status",
+                                           raise_if_maybe_delivered=True)
+        assert calls == 2
+
+    async def test_the_guard_survives_session_recovery(self):
+        """CodeRabbit on #393: a request re-sent after an invalid session
+        carries the guard, so a ReadError on it is not re-sent a third time."""
+        backend = _make_session_backend()
+        calls = 0
+
+        async def mock_get(url, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return _invalid_session_response()
+            raise httpx.ReadError("reset")
+
+        async def fresh_session(udid):
+            conn = backend._connections.get(udid)
+            if conn and conn.session_id:
+                return conn.session_id
+            conn.session_id = "new-session"
+            return "new-session"
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client_cls.return_value = self._client(mock_get)
+            with patch.object(backend, "_ensure_session", side_effect=fresh_session), \
+                    patch.object(backend, "_drop_connection", AsyncMock()):
+                with pytest.raises(httpx.ReadError):
+                    await backend._request("get", "test-udid", "/element", use_session=True,
+                                           raise_if_maybe_delivered=True)
+        assert calls == 2
+
     async def test_no_double_connection_retry(self):
         """Both attempts fail → raises DeviceError (no infinite loop)."""
         backend = _make_session_backend()

@@ -450,10 +450,12 @@ class TestAppDelegation:
         # 0.06s (CodeRabbit on #247). Confirmation is covered on its own in
         # TestALaunchThatNeverCameUp.
         ctrl._confirm_the_app_came_up = AsyncMock()
-        udid = await ctrl.launch_app("com.example.App")
+        udid, info = await ctrl.launch_app("com.example.App")
         ctrl._confirm_the_app_came_up.assert_awaited_once()
-        ctrl.simctl.launch_app.assert_called_once_with("AAAA-1111", "com.example.App", env=None)
+        ctrl.simctl.launch_app.assert_called_once_with(
+            "AAAA-1111", "com.example.App", env=None, restart=False)
         assert udid == "AAAA-1111"
+        assert info == {}, "no env, nothing to report"
 
     async def test_terminate_app(self):
         ctrl = DeviceController()
@@ -491,9 +493,10 @@ class TestPhysicalAppLifecycle:
         ctrl._active_udid = "PHYS-0001"
         ctrl._device_type_cache["PHYS-0001"] = DeviceType.DEVICE
         ctrl.wda_client.activate_app = AsyncMock()
+        ctrl.wda_client.app_state = AsyncMock(return_value=4)      # already running
         ctrl.devicectl.launch_app = AsyncMock()
 
-        udid = await ctrl.launch_app("com.example.App")
+        udid, _ = await ctrl.launch_app("com.example.App")
         ctrl.wda_client.activate_app.assert_called_once_with("PHYS-0001", "com.example.App")
         ctrl.devicectl.launch_app.assert_not_called()
         assert udid == "PHYS-0001"
@@ -1608,7 +1611,7 @@ class TestAndroidAppLifecycle:
         ctrl.adb.launch_app = AsyncMock()
         ctrl.simctl.launch_app = AsyncMock()
 
-        udid = await ctrl.launch_app("com.example.app")
+        udid, _ = await ctrl.launch_app("com.example.app")
         ctrl.adb.launch_app.assert_called_once_with("emulator-5554", "com.example.app")
         ctrl.simctl.launch_app.assert_not_called()
         assert udid == "emulator-5554"
@@ -2171,7 +2174,7 @@ class TestALaunchThatNeverCameUp:
 
     async def test_an_app_that_comes_up_is_a_success(self):
         ctrl = self._ctrl(frontmost=True, alive=True)
-        assert await ctrl.launch_app("com.example.App") == "AAAA-1111"
+        assert (await ctrl.launch_app("com.example.App"))[0] == "AAAA-1111"
 
     async def test_an_app_that_never_appears_and_is_gone_is_a_failure(self):
         ctrl = self._ctrl(frontmost=False, alive=False)
@@ -2187,7 +2190,7 @@ class TestALaunchThatNeverCameUp:
         """Refusing here would fail every cold start on a loaded machine; the
         caller has `wait_for_element` for readiness."""
         ctrl = self._ctrl(frontmost=False, alive=True)
-        assert await ctrl.launch_app("com.example.App") == "AAAA-1111"
+        assert (await ctrl.launch_app("com.example.App"))[0] == "AAAA-1111"
 
     async def test_an_app_whose_name_cannot_be_read_falls_back_to_the_process(self):
         """No name means the screen cannot answer, so the pid must.
@@ -2198,7 +2201,7 @@ class TestALaunchThatNeverCameUp:
         is not the same as nothing being wrong.
         """
         ctrl = self._ctrl(frontmost=False, alive=True, name=None)
-        assert await ctrl.launch_app("com.example.App") == "AAAA-1111"
+        assert (await ctrl.launch_app("com.example.App"))[0] == "AAAA-1111"
 
     async def test_an_unreadable_name_with_a_dead_process_is_still_a_failure(self):
         ctrl = self._ctrl(frontmost=False, alive=False, name=None)

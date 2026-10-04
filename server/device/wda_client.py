@@ -39,6 +39,9 @@ WDA_TIMEOUT = 10.0  # seconds for HTTP requests
 # seconds for tap/swipe/type — WDA serializes requests,
 # so actions queue behind slow queries
 ACTION_TIMEOUT = 25.0
+#: XCUIApplication.launch waits for the app to start, and a cold start of a
+#: large app on an older phone is measured in seconds, not milliseconds.
+LAUNCH_TIMEOUT = 60.0
 #: A front-app read is a status check made while waiting on an open; a
 #: healthy WDA answers it in about 0.1s (measured on an iPhone 12).
 ACTIVE_APP_TIMEOUT = 3.0
@@ -848,7 +851,8 @@ class WdaBackend:
     async def _request(
         self, method: str, udid: str, path: str,
         use_session: bool = False, timeout: float | None = None,
-        raise_on_timeout: bool = False, _is_retry: bool = False,
+        raise_on_timeout: bool = False, raise_if_maybe_delivered: bool = False,
+        _is_retry: bool = False,
         _is_connection_retry: bool = False,
         **kwargs,
     ) -> httpx.Response:
@@ -857,6 +861,10 @@ class WdaBackend:
         If use_session=True, prepends /session/{sessionId} to the path.
         If raise_on_timeout=True, re-raises httpx.TimeoutException directly
         instead of wrapping it in DeviceError (so callers can handle timeouts).
+        If raise_if_maybe_delivered=True, any transport error that may have
+        come after WDA had the request -- everything but a refused connection
+        -- is re-raised as the httpx exception and never re-sent: for a write
+        whose second answer would differ from its first (CodeRabbit on #393).
 
         On WdaInvalidSessionError with use_session=True, automatically clears
         the stale session, creates a new one, and retries once.
@@ -884,6 +892,11 @@ class WdaBackend:
                 # Caller wants to handle timeouts — don't invalidate connection
                 # (WDA may still be alive, just slow on this request)
                 raise
+            if raise_if_maybe_delivered and not isinstance(exc, httpx.ConnectError):
+                if not isinstance(exc, httpx.TimeoutException):
+                    # The connection itself failed; a slow one is kept.
+                    await self._drop_connection(udid, expected=conn_used)
+                raise
             # Connection lost — invalidate cached connection, and kill
             # its forward: this fires on ordinary transport errors and
             # the reconnect below takes the next port (#296).
@@ -908,6 +921,7 @@ class WdaBackend:
                 return await self._request(
                     method, udid, path, use_session=use_session,
                     timeout=timeout, raise_on_timeout=raise_on_timeout,
+                    raise_if_maybe_delivered=raise_if_maybe_delivered,
                     _is_retry=_is_retry,
                     _is_connection_retry=True,
                     **kwargs,
@@ -949,6 +963,7 @@ class WdaBackend:
                 return await self._request(
                     method, udid, path, use_session=True,
                     timeout=timeout, raise_on_timeout=raise_on_timeout,
+                    raise_if_maybe_delivered=raise_if_maybe_delivered,
                     _is_retry=True,
                     _is_connection_retry=_is_connection_retry,
                     **kwargs,
@@ -1450,6 +1465,48 @@ class WdaBackend:
                             use_session=True, timeout=ACTION_TIMEOUT,
                             json={"name": button})
 
+    async def app_state(self, udid: str, bundle_id: str) -> int:
+        """XCUIApplication's state: 1 not running, 2 suspended, 3 running in
+        the background, 4 in the foreground, 0 unknown."""
+        resp = await self._request("post", udid, "/wda/apps/state",
+                                   use_session=True, timeout=ACTION_TIMEOUT,
+                                   json={"bundleId": bundle_id})
+        try:
+            value = resp.json().get("value")
+        except (ValueError, AttributeError) as exc:
+            raise DeviceError(f"WDA apps/state on {udid[:8]} answered something unreadable",
+                              tool="wda") from exc
+        if not isinstance(value, int):
+            raise DeviceError(f"WDA apps/state on {udid[:8]} answered {value!r}", tool="wda")
+        return value
+
+    async def launch_app(
+        self, udid: str, bundle_id: str, environment: dict[str, str],
+    ) -> None:
+        """Start an app with `environment`, through XCUIApplication.
+
+        Measured on an iPhone 12: testmanagerd's launch request carried the
+        variables (`_XCT_launchApplicationWithBundleID:...environment:`).
+        WDA applies them only to an app that is not running -- a running one
+        is just activated, keeping the environment it started with -- so the
+        caller terminates it first when the variables must apply.
+
+        Not re-sent on a timeout: a launch WDA may already have made would
+        be made twice (#74).
+        """
+        try:
+            await self._request("post", udid, "/wda/apps/launch",
+                                use_session=True, timeout=LAUNCH_TIMEOUT,
+                                raise_on_timeout=True,
+                                json={"bundleId": bundle_id, "environment": environment})
+        except httpx.TimeoutException as exc:
+            raise DeviceError(
+                f"WDA did not finish launching {bundle_id} on {udid[:8]} within "
+                f"{LAUNCH_TIMEOUT:.0f}s. It may still be starting, so it was not "
+                "launched again; check the screen.",
+                tool="wda",
+            ) from exc
+
     async def activate_app(self, udid: str, bundle_id: str) -> None:
         """Activate (bring to foreground) an app via WDA."""
         await self._request("post", udid, "/wda/apps/activate",
@@ -1509,10 +1566,37 @@ class WdaBackend:
         bundle = value.get("bundleId") if isinstance(value, dict) else None
         return bundle if isinstance(bundle, str) and bundle else None
 
-    async def terminate_app(self, udid: str, bundle_id: str) -> None:
-        """Terminate an app via WDA."""
-        await self._request("post", udid, "/wda/apps/terminate",
-                            use_session=True, json={"bundleId": bundle_id})
+    async def terminate_app(self, udid: str, bundle_id: str) -> bool | None:
+        """Terminate an app via WDA. Returns whether it was running and was
+        terminated -- WDA answers true only then -- or None when that cannot
+        be told: the answer was not a boolean, or the request timed out.
+
+        Never re-sent once WDA may have it -- a timeout, or a connection lost
+        while the answer was coming back. WDA may already have terminated the
+        app, and a second request would find it stopped and answer false,
+        which reads as "it was never running" (CodeRabbit on #393). The app's
+        state is read instead, which is safe to repeat: stopped (1) is a
+        success whose answer was lost; anything else -- still running, or
+        WDA's "unknown" (0) -- is a failure, since a stop cannot be confirmed."""
+        try:
+            resp = await self._request("post", udid, "/wda/apps/terminate",
+                                       use_session=True, raise_if_maybe_delivered=True,
+                                       json={"bundleId": bundle_id})
+        except httpx.HTTPError as exc:
+            state = await self.app_state(udid, bundle_id)
+            if state != 1:
+                raise DeviceError(
+                    f"WDA did not answer terminating {bundle_id} on {udid[:8]} "
+                    f"({type(exc).__name__}), and it cannot be confirmed stopped "
+                    f"(XCUIApplication state {state})",
+                    tool="wda",
+                ) from exc
+            return None
+        try:
+            value = resp.json().get("value")
+        except (ValueError, AttributeError):
+            return None
+        return value if isinstance(value, bool) else None
 
     def element(
         self,

@@ -1892,6 +1892,19 @@ class LaunchAppRequest(BaseModel):
     bundle_id: str
     udid: str | None = None
     env: dict[str, str] | None = None
+
+    @field_validator("env")
+    @classmethod
+    def _env_names_are_names(cls, env: dict[str, str] | None) -> dict[str, str] | None:
+        # Refused here, as a 422, rather than by the process spawn: an `=` or
+        # NUL in a name raised ValueError there, which reached the caller as
+        # a bare 500 on a simulator and went through unchecked on a device.
+        for name, value in (env or {}).items():
+            if not name or "=" in name or "\0" in name or "\0" in value:
+                raise ValueError(
+                    f"invalid environment variable {name!r}: names must be non-empty "
+                    "and contain no '=' or NUL, and values no NUL")
+        return env
     include_screen_context: bool = False
     capture_screenshots: bool = False
     settle_delay: float = Field(default=1.0, ge=0, le=10)
