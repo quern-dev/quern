@@ -1,17 +1,24 @@
-"""Moved to `server/tooling/tool_updates.py` (#396). This forwarder is for one
-caller: the `quern update` of releases 0.18.1-0.18.3.
+"""Moved to `server/tooling/tool_updates.py` (#396). This forwarder is for code
+from releases before the move that runs against this tree during an update.
 
-Those updaters swap the source tree and then keep running in the same process,
-and `_report_tool_updates` imports, after the swap, from the *new* tree:
+`quern update` swaps the source tree before anything restarts. Until the
+restart, older code is still running -- the server, and in 0.18.1-0.18.3 the
+updater itself, which keeps going in the same process -- and any import it
+makes inside a function reads the *new* tree. Without these forwarders those
+imports fail mid-update: the 0.18.x updater's tool report after the swap (the
+#212 failure, reproduced with release-rehearsal.sh from v0.18.2), or an old
+server answering `/tools/sites` or a WDA setup in that window.
 
-    from server.device.tool_updates import actionable, format_offer, plan_updates
-    from server.device.tool_versions import collect_sites
-
-Without this file that import fails after the swap -- the update stops with
-the new code installed and nothing rebuilt or restarted, the #212 failure.
-`tests/test_old_updater_imports.py` pins the exact names. Nothing in this tree
-imports from here; import from `server.tooling`. Remove when no supported
-upgrade path starts from 0.18.3 or older.
+The names forwarded are exactly those imported inside functions by any release
+from v0.18.0 to v0.23.0, found by parsing each tag's `server/`; they are pinned
+in `tests/test_old_updater_imports.py`. Nothing in this tree imports from here:
+import from `server.tooling`. Keep while upgrades from a release before the
+move are supported.
 """
 
-from server.tooling.tool_updates import actionable, format_offer, plan_updates  # noqa: F401
+from server.tooling.tool_updates import (  # noqa: F401
+    actionable,
+    format_offer,
+    format_report,
+    plan_updates,
+)

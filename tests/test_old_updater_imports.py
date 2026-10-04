@@ -1,12 +1,16 @@
-"""The imports an older release's updater makes from this tree still resolve.
+"""Imports older releases make from this tree during an update still resolve.
 
-The `quern update` of 0.18.1-0.18.3 swaps the source tree and keeps running in
-the same process, then imports from the *new* tree. A module those imports name
-cannot simply move: the update would fail after the swap, with the new code
-installed and nothing rebuilt or restarted (#212). `server/device/tool_updates.py`
-and `tool_versions.py` are forwarders kept for exactly these lines, which are
-copied verbatim from those releases' `server/lifecycle/updater.py`
-(`_report_tool_updates`).
+`quern update` swaps the source tree before anything restarts, so code from the
+release being replaced is still running against the new files: the server
+until its restart, and in 0.18.1-0.18.3 the updater itself, in-process. Any
+import such code makes inside a function reads the new tree, so a module it
+names cannot simply move (#212). `server/device/tool_updates.py`,
+`tool_versions.py` and `tool_probe.py` are forwarders kept for these.
+
+The pinned set is every name imported inside a function, from the three moved
+modules, by any release from v0.18.0 to v0.23.0 -- found by parsing each tag's
+`server/` (CodeRabbit on #400 found the two the first version missed). The same
+scan found no such imports of the modules moved in #396's phases 2 and 3a.
 """
 
 from __future__ import annotations
@@ -16,10 +20,17 @@ import pathlib
 
 import pytest
 
-#: Verbatim from 0.18.1, 0.18.2 and 0.18.3.
+#: Every function-level import of the moved modules in any release from v0.18.0
+#: to v0.23.0, verbatim (`git grep` over each tag's `server/`). The updater's
+#: lines are 0.18.1-0.18.3's in-process tool report; the rest are an old
+#: server's or CLI's, reachable while an update is between swap and restart.
 OLD_UPDATER_IMPORTS = (
+    "from server.device.tool_probe import probe_stdout",
+    "from server.device.tool_updates import actionable",
     "from server.device.tool_updates import actionable, format_offer, plan_updates",
+    "from server.device.tool_updates import format_report, plan_updates",
     "from server.device.tool_versions import collect_sites",
+    "from server.device.tool_versions import collect_sites, upgrade_note",
 )
 
 
@@ -38,7 +49,8 @@ def test_nothing_in_this_tree_imports_through_the_forwarders():
     `server.tooling...` would patch the real module while the caller read the
     forwarder's copy -- passing for the wrong reason."""
     server = pathlib.Path(__file__).resolve().parents[1] / "server"
-    forwarders = {"server.device.tool_updates", "server.device.tool_versions"}
+    forwarders = {"server.device.tool_updates", "server.device.tool_versions",
+                  "server.device.tool_probe"}
     offenders = []
     for path in server.rglob("*.py"):
         rel = path.relative_to(server.parent).with_suffix("")
@@ -48,6 +60,7 @@ def test_nothing_in_this_tree_imports_through_the_forwarders():
             if isinstance(node, ast.ImportFrom) and node.module in forwarders:
                 offenders.append(f"{rel}:{node.lineno}")
             if isinstance(node, ast.ImportFrom) and node.module == "server.device":
-                if {a.name for a in node.names} & {"tool_updates", "tool_versions"}:
+                if {a.name for a in node.names} & {"tool_updates", "tool_versions",
+                                                   "tool_probe"}:
                     offenders.append(f"{rel}:{node.lineno}")
     assert not offenders, offenders
