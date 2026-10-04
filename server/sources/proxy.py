@@ -195,6 +195,11 @@ class ProxyAdapter(BaseSourceAdapter):
         self.trust_provider: Callable[[], Awaitable[list[str] | None]] | None = None
         #: Connections passed through, per simulator, since the proxy started.
         self._passthrough: dict[str, dict] = {}
+        # What the addon itself last confirmed it decrypts, and how many
+        # confirmations have arrived -- so a caller can tell "sent" from
+        # "in effect" (#414).
+        self._addon_trusted: list[str] | None = None
+        self._addon_trust_seq = 0
         #: Told about each passed-through connection, so the server can re-check
         #: a simulator it has not confirmed rather than wait for the next tick.
         self.on_passthrough: Callable[[str], None] | None = None
@@ -507,6 +512,25 @@ class ProxyAdapter(BaseSourceAdapter):
             "action": "set_trusted_simulators",
             "udids": self._trusted_simulators,
         })
+
+    @property
+    def addon_trust_seq(self) -> int:
+        """How many trusted-set confirmations the addon has sent."""
+        return self._addon_trust_seq
+
+    async def addon_decrypts(self, udid: str, *, after_seq: int,
+                             timeout: float = 3.0) -> bool | None:
+        """Whether the addon decrypts `udid`, by its own confirmation of a set
+        sent after `after_seq`. None when no such confirmation came in time:
+        what was sent is not yet known to be in effect."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while self._addon_trust_seq <= after_seq:
+            if loop.time() >= deadline or not self.is_running:
+                return None
+            await asyncio.sleep(0.05)
+        confirmed = self._addon_trusted
+        return confirmed is None or udid.upper() in confirmed
 
     def passthrough_counts(self) -> dict[str, dict]:
         """Connections passed through since start, keyed by simulator UDID."""
@@ -1106,6 +1130,10 @@ class ProxyAdapter(BaseSourceAdapter):
             await asyncio.to_thread(update_state, proxy_status="running")
         elif event == "stopped":
             await asyncio.to_thread(update_state, proxy_status="stopped")
+        elif event == "trusted_simulators_updated":
+            udids = data.get("udids")
+            self._addon_trusted = None if udids is None else [str(u).upper() for u in udids]
+            self._addon_trust_seq += 1
         elif event == "intercept_set":
             self._intercept_pattern = data.get("pattern")
         elif event == "intercept_cleared":

@@ -468,15 +468,33 @@ class TestComputingTheSet:
         assert app.state.simulator_trust == []
         assert app.state.simulator_trust_failed is True
 
-    async def test_skip_cert_check_decrypts_everything(self, monkeypatch):
+    async def test_skip_cert_check_never_decrypts_a_simulator_known_not_to_trust(
+        self, monkeypatch,
+    ):
+        """It used to answer None -- decrypt everyone -- with B just found not to
+        trust the CA, so every HTTPS request from B failed while the capture
+        reported started (#414). It now widens to what the check could not
+        rule out, which is what the flag is for."""
         from server.proxy import sim_tls
 
-        monkeypatch.setattr(sim_tls, "simulator_trust", AsyncMock(
-            return_value=[{"udid": B, "name": "b", "trusted": False}],
-        ))
+        monkeypatch.setattr(sim_tls, "simulator_trust", AsyncMock(return_value=[
+            {"udid": A, "name": "a", "trusted": True},
+            {"udid": B, "name": "b", "trusted": False},
+            {"udid": "C", "name": "c", "trusted": None},
+        ]))
         app = _app()
         app.state.decrypt_all_simulators = True
-        assert await sim_tls.compute_trusted(app) is None
+        assert await sim_tls.compute_trusted(app) == [A, "C"]
+
+    async def test_skip_cert_check_with_a_failed_lookup_decrypts_nobody(self, monkeypatch):
+        """No list, no knowledge: the previous answer, None, decrypted every
+        simulator on a lookup that had failed."""
+        from server.proxy import sim_tls
+
+        monkeypatch.setattr(sim_tls, "simulator_trust", AsyncMock(return_value=None))
+        app = _app()
+        app.state.decrypt_all_simulators = True
+        assert await sim_tls.compute_trusted(app) == []
 
 
 class TestAnOlderAnswerNeverLandsLast:
@@ -767,6 +785,14 @@ class TestTheReport:
         entry = sim_tls.report(app)[0]
         assert entry.tls == "decrypted"
         assert "will fail" in entry.reason
+
+    def test_decrypting_one_the_check_could_not_read_says_so(self):
+        from server.proxy import sim_tls
+
+        app = self._app([B], [{"udid": B, "name": "b", "trusted": None}])
+        entry = sim_tls.report(app)[0]
+        assert entry.tls == "decrypted"
+        assert "could not tell" in entry.reason
 
     def test_nothing_when_local_capture_is_off(self):
         from server.proxy import sim_tls

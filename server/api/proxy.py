@@ -319,10 +319,23 @@ async def _get_proxy_status(
     )
 
 
+def _deprecations(body) -> list[str] | None:
+    """What a request used that is deprecated, to be said on its response."""
+    from server.proxy.cert_preflight import SKIP_CERT_CHECK_DEPRECATION
+    if body is not None and getattr(body, "skip_cert_check", False):
+        _proxy_logger.warning("skip_cert_check was passed: %s", SKIP_CERT_CHECK_DEPRECATION)
+        return [SKIP_CERT_CHECK_DEPRECATION]
+    return None
+
+
 def _with_tls_note(request: Request, udid: str | None, response):
-    """Attach the passed-through-simulator note to a flow result (#354)."""
+    """Attach the passed-through-simulator note to a flow result (#354), and
+    say when the simulator is refusing the proxy's certificate (#414) -- the
+    one case where an empty result means failing requests, not quiet ones."""
     from server.proxy import sim_tls
-    response.simulator_tls_note = sim_tls.passthrough_note(request.app, udid)
+    notes = [n for n in (sim_tls.passthrough_note(request.app, udid),
+                         sim_tls.rejection_note(request.app, udid)) if n]
+    response.simulator_tls_note = " ".join(notes) or None
     return response
 
 
@@ -422,6 +435,7 @@ async def start_proxy(
 
     resp = await _get_proxy_status(request)
     resp.system_proxy = system_proxy_info
+    resp.deprecations = _deprecations(body)
     return resp
 
 
@@ -601,6 +615,7 @@ async def configure_system(
         configured=True,
         interface=snap.interface,
         original_state="enabled" if snap.http_proxy_enabled else "disabled",
+        deprecations=_deprecations(body),
     )
 
 
@@ -1044,14 +1059,30 @@ async def wait_for_flow(request: Request, body: WaitForFlowRequest) -> WaitForFl
 @logged_action("start_capture", category="proxy")
 async def start_capture(request: Request, body: CaptureStartRequest) -> CaptureStartResponse:
     """Start a capture session to bracket a UI action and isolate its flows."""
+    from server.proxy import sim_tls
+
     manager = request.app.state.capture_sessions
+    warnings: list[str] = []
+    if body.simulator_udid:
+        try:
+            check = await sim_tls.ensure_capturable(
+                request.app, body.simulator_udid, allow_passthrough=body.allow_passthrough,
+            )
+        except sim_tls.CaptureNotReady as e:
+            raise HTTPException(status_code=e.status_code, detail=e.detail) from e
+        warnings = check.warnings
     try:
         session = manager.start(body)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
-    return _with_tls_note(request, body.simulator_udid, CaptureStartResponse(
+    response = _with_tls_note(request, body.simulator_udid, CaptureStartResponse(
         session_id=session.id, start_time=session.start_time,
     ))
+    if warnings:
+        # On the note, where a caller of this endpoint already looks.
+        response.simulator_tls_note = " ".join(
+            [*warnings, *([response.simulator_tls_note] if response.simulator_tls_note else [])])
+    return response
 
 
 @router.post("/capture/stop", response_model=CaptureStopResponse)
@@ -1177,8 +1208,9 @@ async def set_local_capture(
     if processes:
         # Not a refusal any more (#354): a simulator that does not trust the CA
         # has its TLS passed through instead of failing, and `simulator_tls` on
-        # the response says which. `skip_cert_check` now means "decrypt every
-        # simulator anyway", which is what exercising TLS failure needs.
+        # the response says which. `skip_cert_check` is deprecated (#414): it
+        # widens decryption to simulators the check could not vouch for, never
+        # to one known not to trust the CA.
         await _ensure_ca_is_trusted(
             request, skip=body.skip_cert_check, refuse=False,
         )
@@ -1242,4 +1274,5 @@ async def set_local_capture(
     # caller can still connect cause to effect.
     status.capture_added = added_defaults or None
     status.capture_removed = removed or None
+    status.deprecations = _deprecations(body)
     return status

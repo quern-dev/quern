@@ -143,7 +143,13 @@ class TestRefusal:
         every user into trusting a MITM root CA."""
         detail = refusal_detail([{"udid": "AAAA", "name": "iPhone 16 Pro"}])
         actions = {r["action"] for r in detail["resolutions"]}
-        assert actions == {"install_proxy_cert", "set_auto_install_cert", "skip_cert_check"}
+        assert actions == {
+            "install_proxy_cert", "set_auto_install_cert",
+            "set_local_capture", "shutdown_device",
+        }
+        trusts_nothing = actions - {"install_proxy_cert", "set_auto_install_cert"}
+        assert trusts_nothing, "every way out trusts a CA"
+        assert "skip_cert_check" not in actions, "a deprecated option is still advertised"
 
     def test_it_names_the_devices(self):
         detail = refusal_detail([{"udid": "AAAA", "name": "iPhone 16 Pro"}])

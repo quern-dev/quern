@@ -178,16 +178,34 @@ def refusal_detail(missing: list[dict[str, str]]) -> dict:
                     "removable with quern uninstall."
                 ),
             },
+            # Two that do not trust anything. Without them every way out was a
+            # CA install, which is the railroading this refusal exists to avoid
+            # -- and `skip_cert_check`, the old third, is deprecated (#414).
             {
-                "action": "skip_cert_check",
+                "action": "set_local_capture",
                 "detail": (
-                    "Pass skip_cert_check to proceed anyway -- correct when "
-                    "you are deliberately exercising TLS failure. Three "
-                    "endpoints share this refusal, so it does not name one."
+                    "Capture with set_local_capture instead of the system proxy. "
+                    "A simulator that does not trust the CA is passed through "
+                    "there: its apps work, and its HTTPS is not captured."
                 ),
+            },
+            {
+                "action": "shutdown_device",
+                "detail": "Shut down the simulators listed, if they are not needed now.",
             },
         ],
     }
+
+
+#: Said on every response to a request that passes `skip_cert_check` (#414).
+#: Deprecated rather than removed, so a caller still sending it is told
+#: instead of failing. It is no longer offered by the refusal above.
+SKIP_CERT_CHECK_DEPRECATION = (
+    "skip_cert_check is deprecated and will be removed. Install the CA on the "
+    "device (install_proxy_cert) or set auto_install_cert instead. Under local "
+    "capture it no longer decrypts a simulator known not to trust the CA: that "
+    "only ever made every HTTPS request from it fail."
+)
 
 
 async def warn_if_capture_lacks_trust(controller, processes: list[str]) -> list[dict[str, str]]:

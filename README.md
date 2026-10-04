@@ -442,6 +442,7 @@ quern update --tools         # Also upgrade external tools quern installed (pipx
 quern set-channel [name]     # Show or set the update channel (stable / beta)
 quern record start --udid UDID [--out DIR]   # Record a device's actions, flows and logs to disk
 quern record start --udid UDID --kinds flows,logs --host H --exclude-host H --include-unattributed --video
+quern record start --udid UDID --allow-passthrough   # Record even if the simulator lacks quern's CA (no HTTPS captured)
 quern record stop ID [--require-complete]    # ...until stopped; exit 3 if anything was lost
 quern record list            # Recordings running on this server
 quern set-update-check [on|off]
@@ -461,9 +462,10 @@ quern menubar install [--force]
                              # Install the signed app matching this quern and start it;
                              #   how a git install gets a newer app
 quern enable-local-capture [--skip-cert-check] [--whole-mac] [process ...]
-                             # Enable transparent simulator traffic capture. Refuses
-                             #   when a booted simulator does not trust the capture
-                             #   certificate; --skip-cert-check proceeds anyway
+                             # Enable transparent simulator traffic capture. A booted
+                             #   simulator that does not trust the capture certificate
+                             #   has its TLS passed through, not decrypted;
+                             #   --skip-cert-check is deprecated
 quern disable-local-capture  # Disable local capture (never refused)
 quern tunneld <cmd>          # Manage the tunneld LaunchDaemon (install/uninstall/status/restart,
                              #   grant-recovery/revoke-recovery for password-free wedge recovery)
