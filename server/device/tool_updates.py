@@ -11,7 +11,7 @@ server answering `/tools/sites` or a WDA setup in that window.
 
 The names forwarded are exactly those imported inside functions by any release
 from v0.18.0 to v0.23.0, found by parsing each tag's `server/`; they are pinned
-in `tests/test_old_updater_imports.py`. Nothing in this tree imports from here:
+in `tests/test_forwarders.py`. Nothing in this tree imports from here:
 import from `server.tooling`. Keep while upgrades from a release before the
 move are supported.
 """
