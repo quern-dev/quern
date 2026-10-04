@@ -180,8 +180,9 @@ class TestNeverHalfAlive:
 FAKE_MITMDUMP = textwrap.dedent("""\
     #!{python}
     import json, os, sys, time
-    # mitmproxy's logger, on stdout: a traceback line that is valid JSON.
-    print('"addon blew up while handling "', flush=True)
+    # mitmproxy's logger, on stdout: a traceback line that is valid JSON. Not
+    # flushed, as termlog does not flush -- it must arrive anyway.
+    print('"addon blew up while handling "')
     fd = int(os.environ["QUERN_EVENT_FD"])
     os.write(fd, (json.dumps({{"type": "tls_rejected", "sni": "piped.example",
                                "client_ip": "10.0.0.1", "error": "unknown ca",
@@ -222,7 +223,9 @@ class TestTheEventPipe:
                     if "addon blew up" in caplog.text:
                         break
                     await asyncio.sleep(0.05)
-                assert "addon blew up" in caplog.text, "mitmdump's stdout was not logged"
+                assert "addon blew up" in caplog.text, (
+                    "mitmdump's unflushed stdout never reached the log while it ran"
+                )
                 assert a.status().status == "proxying"
             finally:
                 await a.stop()
@@ -260,3 +263,159 @@ class TestTheAddonWriter:
         addon._write_json({"type": "status", "event": "started"})
         (written,), _ = addon.sys.stdout.buffer.write.call_args
         assert json.loads(written) == {"type": "status", "event": "started"}
+
+
+FAKE_EXITS = textwrap.dedent("""\
+    #!{python}
+    import time
+    time.sleep(0.3)
+""")
+
+
+def _fake(tmp_path, source: str) -> str:
+    fake = tmp_path / "mitmdump"
+    fake.write_text(source.format(python=sys.executable))
+    fake.chmod(0o755)
+    return str(fake)
+
+
+def _open_fds() -> int:
+    return len(os.listdir("/dev/fd"))
+
+
+class TestTheReviewFindings:
+    async def test_a_mitmdump_that_exits_is_noticed(self, tmp_path):
+        """EOF on the events pipe needs the parent's copy of the write end
+        closed. Skipping that close passed every proxy test, and a mitmdump
+        that exited stayed "proxying" forever."""
+        a = ProxyAdapter(listen_port=1)
+        with (
+            patch.object(a, "_find_mitmdump", return_value=_fake(tmp_path, FAKE_EXITS)),
+            patch.object(a, "_kill_stale_mitmdump"),
+        ):
+            await a.start()
+            try:
+                for _ in range(60):
+                    if a.status().status == "error":
+                        break
+                    await asyncio.sleep(0.1)
+                assert a.status().status == "error", "an exited mitmdump still reads as running"
+                assert "code 0" in (a._error or "")
+            finally:
+                await a.stop()
+
+    async def test_start_and_stop_leak_no_descriptors(self, tmp_path):
+        a = ProxyAdapter(listen_port=1)
+        fake = _fake(tmp_path, FAKE_MITMDUMP)
+        with (
+            patch.object(a, "_find_mitmdump", return_value=fake),
+            patch.object(a, "_kill_stale_mitmdump"),
+        ):
+            await a.start()
+            await a.stop()
+            before = _open_fds()
+            for _ in range(5):
+                await a.start()
+                await a.stop()
+            assert _open_fds() == before, "each start/stop cycle leaked a descriptor"
+
+    async def test_a_failed_pipe_setup_closes_only_what_it_owns(self, tmp_path):
+        # The events pipe's protocol only: asyncio's own subprocess plumbing
+        # calls connect_read_pipe too, so failing that would fail the spawn.
+        a = ProxyAdapter(listen_port=1)
+        before = _open_fds()
+        with (
+            patch.object(a, "_find_mitmdump", return_value=_fake(tmp_path, FAKE_MITMDUMP)),
+            patch.object(a, "_kill_stale_mitmdump"),
+            patch.object(proxy_mod.asyncio, "StreamReaderProtocol", side_effect=OSError("no pipe")),
+        ):
+            await a.start()
+        assert a._process is None and "no pipe" in (a._error or "")
+        assert _open_fds() == before
+
+    async def test_a_drain_survives_an_over_long_line(self, caplog):
+        """One line past the limit ended the stdout drain; nobody read stdout
+        after that, the pipe filled, and mitmdump froze reporting healthy."""
+        for stream_name, drain in (("stdout", "_drain_stdout"), ("stderr", "_drain_stderr")):
+            reader = asyncio.StreamReader(limit=1024)
+            reader.feed_data(b"x" * 5000 + b"\n")
+            reader.feed_data(f"after the long {stream_name} line\n".encode())
+            reader.feed_eof()
+            a = ProxyAdapter()
+            proc = MagicMock()
+            setattr(proc, stream_name, reader)
+            a._process = proc
+            a._events = asyncio.StreamReader()
+            with caplog.at_level(logging.WARNING, logger="server.sources.proxy"):
+                await getattr(a, drain)()
+            assert f"after the long {stream_name} line" in caplog.text, (
+                f"the {stream_name} drain stopped at the over-long line"
+            )
+
+    async def test_an_older_addon_on_stdout_still_captures(self, caplog):
+        """Files on disk can be older than the running server -- a downgrade,
+        or an update whose restart failed. Its events then come on stdout."""
+        reader = asyncio.StreamReader()
+        reader.feed_data(_rejection("old-addon.example") * 2)
+        reader.feed_eof()
+        a = ProxyAdapter()
+        proc = MagicMock()
+        proc.stdout = reader
+        a._process = proc
+        a._events = asyncio.StreamReader()
+        with caplog.at_level(logging.WARNING, logger="server.sources.proxy"):
+            await a._drain_stdout()
+        assert a._tls_rejections[0].sni == "old-addon.example"
+        assert a._tls_rejections[0].count == 2
+        assert caplog.text.count("predates its event pipe") == 1
+
+    async def test_a_crash_is_not_mistaken_for_a_running_mitmdump(self, caplog):
+        """The pipe's EOF arrives before the child is reaped, so every crash
+        logged "still running" and sent SIGTERM to a process already exiting."""
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", "import time; time.sleep(0.2)",
+        )
+        reader = asyncio.StreamReader()
+        reader.feed_eof()
+        a = ProxyAdapter()
+        a._process = process
+        a._events = reader
+        a._running = True
+        with caplog.at_level(logging.ERROR, logger="server.sources.proxy"):
+            await a._read_loop()
+        assert "still running" not in caplog.text
+        assert "code 0" in a._error
+
+    async def test_an_old_runs_end_does_not_overwrite_a_new_run(self):
+        """A start is allowed while the last run is still being torn down; the
+        old teardown then wrote "stopped" over the healthy new one."""
+        a = ProxyAdapter()
+        old = MagicMock()
+        old.returncode = 1
+        a._process = MagicMock()  # the newer run
+        a._error = None
+        with patch.object(proxy_mod, "update_state") as state:
+            await a._end_unexpected_run(old)
+        assert a._error is None
+        state.assert_not_called()
+
+    async def test_an_unexpected_end_is_recorded_as_stopped(self):
+        a = _adapter_reading()
+        a._process.returncode = 1
+        with patch.object(proxy_mod, "update_state") as state:
+            await a._read_loop()
+        state.assert_called_once_with(proxy_status="stopped")
+
+    def test_the_addons_descriptor_is_not_inherited(self, monkeypatch):
+        from server.proxy import addon
+
+        read_fd, write_fd = os.pipe()
+        try:
+            os.set_inheritable(write_fd, True)
+            monkeypatch.setenv(addon.EVENT_FD_ENV, str(write_fd))
+            monkeypatch.setattr(addon, "_event_fd", None)
+            assert addon._event_channel() == write_fd
+            assert not os.get_inheritable(write_fd)
+        finally:
+            os.close(read_fd)
+            os.close(write_fd)

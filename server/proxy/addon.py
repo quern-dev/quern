@@ -855,6 +855,11 @@ def _event_channel() -> int | None:
         raw = os.environ.get(EVENT_FD_ENV, "")
         if raw.isdigit():
             _event_fd = int(raw)
+            # Ours alone. Inherited, a child of mitmdump -- the redirector it
+            # launches for local capture -- would hold the pipe open, and the
+            # server would not see EOF when mitmdump exits.
+            with contextlib.suppress(OSError):
+                os.set_inheritable(_event_fd, False)
     return _event_fd
 
 

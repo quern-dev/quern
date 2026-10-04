@@ -59,6 +59,8 @@ EVENT_LINE_LIMIT = 1024 * 1024
 #: Bad lines logged in full before the log thins out to one in every hundred,
 #: so something spewing cannot fill the server log.
 BAD_LINES_LOGGED = 20
+#: The most of one mitmdump stdout/stderr line that reaches the server log.
+LOGGED_LINE_MAX = 2000
 
 
 def validate_filter_pattern(pattern: str) -> None:
@@ -147,9 +149,10 @@ class ProxyAdapter(BaseSourceAdapter):
         self._read_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
         self._stdout_task: asyncio.Task | None = None
-        # The addon's events, on their own pipe (EVENT_FD_ENV). None reads
-        # stdout instead, as tests and an addon from before the pipe do.
+        # The addon's events, on their own pipe (EVENT_FD_ENV). None only
+        # before a start, and in tests that hand the loop an iterable stdout.
         self._events: asyncio.StreamReader | None = None
+        self._stdout_events_warned = False
         self._events_transport: asyncio.ReadTransport | None = None
         self._bad_lines = 0
 
@@ -343,6 +346,11 @@ class ProxyAdapter(BaseSourceAdapter):
         # when mitmdump exits.
         read_fd, write_fd = os.pipe()
         env[EVENT_FD_ENV] = str(write_fd)
+        # mitmproxy's logger prints without flushing, so on a pipe its errors
+        # sat in an 8 KB block until something else flushed -- the addon's
+        # events did that by accident, on the shared stdout. Unbuffered, a
+        # traceback reaches the log when it happens, and a crash cannot lose it.
+        env["PYTHONUNBUFFERED"] = "1"
         try:
             self._process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -361,17 +369,21 @@ class ProxyAdapter(BaseSourceAdapter):
         finally:
             os.close(write_fd)
 
+        # The file object owns the descriptor from here: on a failure it is
+        # closed through it, never by number -- the number may already belong
+        # to something else by then.
+        read_file = os.fdopen(read_fd, "rb", buffering=0)
         try:
             loop = asyncio.get_running_loop()
             self._events = asyncio.StreamReader(limit=EVENT_LINE_LIMIT, loop=loop)
             self._events_transport, _ = await loop.connect_read_pipe(
                 lambda: asyncio.StreamReaderProtocol(self._events, loop=loop),
-                os.fdopen(read_fd, "rb", buffering=0),
+                read_file,
             )
         except Exception as e:
             # No channel means no events: a proxy that captures and reports
             # nothing. Stop it rather than run it blind.
-            os.close(read_fd)
+            read_file.close()
             self._events = None
             self._error = f"Could not read mitmdump's events: {e}"
             logger.error(self._error)
@@ -387,6 +399,7 @@ class ProxyAdapter(BaseSourceAdapter):
         # capturing, which reads as down to anything gating on it.
         self._error = None
         self._bad_lines = 0
+        self._stdout_events_warned = False
         # Cleared here as well as in `stop()`, because the field says "since the
         # proxy started" and `stop()` is not always what ended the last run: if
         # mitmdump exits on its own, `_read_loop` just falls out of its loop and
@@ -709,6 +722,28 @@ class ProxyAdapter(BaseSourceAdapter):
     # Read loop and event handlers
     # -------------------------------------------------------------------
 
+    async def _lines(self, stream, on_overlong):
+        """Raw lines from a stream, skipping any line past its reader's limit.
+
+        StreamReader raises for an over-long line, and an `async for` over it
+        ends there. A drain that ends leaves its pipe unread, the pipe fills,
+        and mitmdump blocks writing to it -- the proxy frozen while reporting
+        healthy. So no single line may end any of the three readers.
+        """
+        if not isinstance(stream, asyncio.StreamReader):
+            async for raw_line in stream:
+                yield raw_line
+            return
+        while True:
+            try:
+                raw_line = await stream.readline()
+            except ValueError:
+                on_overlong()
+                continue
+            if not raw_line:
+                return
+            yield raw_line
+
     async def _event_lines(self):
         """Raw lines from the addon: its events pipe, or stdout without one.
 
@@ -719,18 +754,10 @@ class ProxyAdapter(BaseSourceAdapter):
         assert self._process is not None
         stream = self._events if self._events is not None else self._process.stdout
         assert stream is not None
-        if not isinstance(stream, asyncio.StreamReader):
-            async for raw_line in stream:
-                yield raw_line
-            return
-        while True:
-            try:
-                raw_line = await stream.readline()
-            except ValueError:
-                self._bad_line("an event line over the size limit was skipped", b"")
-                continue
-            if not raw_line:
-                return
+        async for raw_line in self._lines(
+            stream,
+            lambda: self._bad_line("an event line over the size limit was skipped", b""),
+        ):
             yield raw_line
 
     def _bad_line(self, what: str, line: bytes | str) -> None:
@@ -820,20 +847,34 @@ class ProxyAdapter(BaseSourceAdapter):
         the captured apps through it, its output pipe fills, and their requests
         hang -- while a proxy that has exited lets them through uncaptured.
         """
-        returncode = getattr(process, "returncode", None)
-        if returncode is None and isinstance(process, asyncio.subprocess.Process):
-            logger.error("Proxy read loop ended with mitmdump still running; stopping it")
-            process.terminate()
+        is_process = isinstance(process, asyncio.subprocess.Process)
+        if is_process and process.returncode is None:
+            # The events pipe reaches EOF before asyncio has reaped an exiting
+            # child, so a crash looked "still running" every time. Give the
+            # exit a moment to register before deciding.
             try:
-                await asyncio.wait_for(process.wait(), timeout=5.0)
+                await asyncio.wait_for(process.wait(), timeout=1.0)
             except TimeoutError:
-                process.kill()
-            returncode = process.returncode
+                logger.error("Proxy read loop ended with mitmdump still running; stopping it")
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5.0)
+                except TimeoutError:
+                    process.kill()
+                    await process.wait()
+        returncode = getattr(process, "returncode", None)
+        reason = (
+            f"mitmdump exited unexpectedly (code {returncode})"
+            if returncode is not None else "mitmdump stopped unexpectedly"
+        )
+        # Teardown takes seconds, and a start is allowed meanwhile: it only
+        # checks `_running`. A newer run owns the status, so this one's ending
+        # must not overwrite it.
+        if self._process is not process:
+            logger.info("An earlier mitmdump ended (%s) after a newer one started", reason)
+            return
         if not self._error:
-            self._error = (
-                f"mitmdump exited unexpectedly (code {returncode})"
-                if returncode is not None else "mitmdump stopped unexpectedly"
-            )
+            self._error = reason
         logger.error("Proxy stopped: %s", self._error)
         try:
             await asyncio.to_thread(update_state, proxy_status="stopped")
@@ -841,35 +882,68 @@ class ProxyAdapter(BaseSourceAdapter):
             logger.exception("Could not record the proxy as stopped")
 
     async def _drain_stdout(self) -> None:
-        """Log mitmdump's own stdout. Events no longer travel here, but
-        mitmproxy's logger does -- its errors and tracebacks -- and those are
-        what explain a crash afterwards."""
+        """Log mitmdump's own stdout: mitmproxy's logger writes there -- its
+        errors and tracebacks -- and those are what explain a crash afterwards.
+
+        An event here means the addon on disk predates its pipe: the files
+        under a running server changed, by a downgrade or an update whose
+        restart failed. Those are dispatched rather than logged, so capture
+        keeps working, and said once."""
         assert self._process is not None
         if self._events is None or self._process.stdout is None:
             return  # without a pipe, stdout is the events: _read_loop owns it
         try:
-            async for raw_line in self._process.stdout:
+            async for raw_line in self._lines(
+                self._process.stdout,
+                lambda: logger.warning("mitmdump: skipped a stdout line over the size limit"),
+            ):
                 line = raw_line.decode("utf-8", errors="replace").rstrip()
-                if line:
-                    logger.warning("mitmdump: %s", line)
+                if not line:
+                    continue
+                if line.startswith("{") and await self._stdout_event(line):
+                    continue
+                logger.warning("mitmdump: %s", line[:LOGGED_LINE_MAX])
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("Could not read mitmdump's stdout")
+
+    async def _stdout_event(self, line: str) -> bool:
+        """Dispatch an event an older addon wrote to stdout. True if it was one."""
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(data, dict) or "type" not in data:
+            return False
+        if not self._stdout_events_warned:
+            self._stdout_events_warned = True
+            logger.warning(
+                "Proxy events are arriving on mitmdump's stdout: the addon on disk "
+                "predates its event pipe. Restart quern to run matching code."
+            )
+        try:
+            await self._dispatch(data)
+        except Exception:
+            logger.exception("Proxy event handler failed; skipping the event: %r", line[:500])
+        return True
 
     async def _drain_stderr(self) -> None:
         """Read and log stderr from mitmdump so errors aren't lost."""
         assert self._process is not None
         assert self._process.stderr is not None
         try:
-            async for raw_line in self._process.stderr:
+            async for raw_line in self._lines(
+                self._process.stderr,
+                lambda: logger.warning("mitmdump stderr: skipped a line over the size limit"),
+            ):
                 line = raw_line.decode("utf-8", errors="replace").rstrip()
                 if line:
-                    logger.warning("mitmdump stderr: %s", line)
+                    logger.warning("mitmdump stderr: %s", line[:LOGGED_LINE_MAX])
         except asyncio.CancelledError:
             raise
         except Exception:
-            pass
+            logger.exception("Could not read mitmdump's stderr")
 
     def _handle_tls_rejected(self, data: dict) -> None:
         """A client refused our certificate.
