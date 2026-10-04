@@ -921,6 +921,7 @@ class WdaBackend:
                 return await self._request(
                     method, udid, path, use_session=use_session,
                     timeout=timeout, raise_on_timeout=raise_on_timeout,
+                    raise_if_maybe_delivered=raise_if_maybe_delivered,
                     _is_retry=_is_retry,
                     _is_connection_retry=True,
                     **kwargs,
@@ -962,6 +963,7 @@ class WdaBackend:
                 return await self._request(
                     method, udid, path, use_session=True,
                     timeout=timeout, raise_on_timeout=raise_on_timeout,
+                    raise_if_maybe_delivered=raise_if_maybe_delivered,
                     _is_retry=True,
                     _is_connection_retry=_is_connection_retry,
                     **kwargs,
