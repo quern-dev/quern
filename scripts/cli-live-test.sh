@@ -217,9 +217,12 @@ q_answer() {   # q_answer <prompt> <answer> [<prompt> <answer> ...] -- <quern ar
   local pairs=()
   while [[ "$1" != "--" ]]; do pairs+=("$1"); shift; done
   shift
+  # Offline like q: the uninstall it drives must not reach the network either.
+  local proxy="${Q_HTTPS_PROXY-$Q_OFFLINE}"
   ( cd "$TREE" && env -i \
       HOME="$HOME_SB" QUERN_STATE_DIR="$STATE" \
       QUERN_RELEASES_URL="http://127.0.0.1:9/unreachable" \
+      https_proxy="$proxy" HTTPS_PROXY="$proxy" \
       PATH="$SANDBOX_PATH" TERM=dumb \
       python3 -c '
 import os, pty, re, select, signal, sys, time
