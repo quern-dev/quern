@@ -18,7 +18,7 @@ import io
 
 import pytest
 
-from server.device import web_probing
+from server.device.web import web_probing
 
 SIM = "F5AF3736-C05F-493F-AA52-CA883B13B18C"
 SCREEN = {"x": 0.0, "y": 0.0, "width": 400.0, "height": 800.0}
@@ -273,7 +273,7 @@ async def test_vision_targets_are_probed_at_their_centres(monkeypatch):
     against 4 on the same page.
     """
     from server.device import vision_ocr
-    from server.device import web_probing as wp
+    from server.device.web import web_probing as wp
 
     monkeypatch.setattr(vision_ocr, "text_regions", lambda png, screen: [
         {"text": "Servers", "confidence": 1.0, "x": 20, "y": 290, "width": 140, "height": 30},
@@ -300,7 +300,7 @@ async def test_a_failed_target_lookup_does_not_poison_the_session():
     """
     from unittest.mock import AsyncMock
 
-    from server.device.webinspector import SimulatorWebInspector
+    from server.device.web.webinspector import SimulatorWebInspector
 
     insp = SimulatorWebInspector()
     insp._send = AsyncMock()
@@ -320,7 +320,7 @@ async def test_another_pages_traffic_is_ignored():
     """
     import json as _json
 
-    from server.device.webinspector import SimulatorWebInspector
+    from server.device.web.webinspector import SimulatorWebInspector
 
     insp = SimulatorWebInspector()
     wanted = _json.dumps({"id": 7, "result": {"mine": True}}).encode()

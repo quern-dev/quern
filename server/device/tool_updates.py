@@ -12,7 +12,7 @@ server answering `/tools/sites` or a WDA setup in that window.
 The names forwarded are exactly those imported inside functions by any release
 from v0.18.0 to v0.24.0-beta.1, found by parsing each tag's `server/`; they are
 pinned in `tests/test_forwarders.py`. Nothing in this tree imports from here:
-import from `server.tooling`. Sunset: remove once four releases have shipped
+import from `server.tooling.tool_updates`. Sunset: remove once four releases have shipped
 after the one containing this move (#396).
 """
 

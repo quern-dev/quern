@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 
-from server.device import webinspector
+from server.device.web import webinspector
 
 
 def test_find_sockets_returns_newest_first(tmp_path, monkeypatch):

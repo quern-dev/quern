@@ -143,7 +143,7 @@ reviews:
         twice. When reviewing a branch that adds a changelog section, check
         whether the base already has that section under `## [Unreleased]`.
 
-    - path: "server/device/webinspector.py"
+    - path: "server/device/web/webinspector.py"
       instructions: |
         `pymobiledevice3>=8.0` is a hard floor with a specific reason:
         `ServiceConnection.send_plist`/`recv_plist` are synchronous in 7.x and
