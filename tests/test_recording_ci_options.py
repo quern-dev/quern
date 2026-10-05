@@ -209,6 +209,26 @@ class TestRequestKeyframes:
         assert len(video.keyframes) == 2, "a request between actions is a seek point"
         await manager.stop(rec.id)
 
+    async def test_a_refused_keyframe_leaves_the_next_request_its_own(
+        self, tmp_path, monkeypatch,
+    ):
+        """quern-media said no: there is no seek point there, so the requests
+        after it must not be held back as if there were (review)."""
+        src, manager, rec, video = await self._filming(tmp_path)
+        clock = [100.0]
+        monkeypatch.setattr(rec_mod, "_monotonic", lambda: clock[0])
+
+        async def refuse(seg):
+            video.keyframes.append(seg.path)
+            return False
+        monkeypatch.setattr(video, "keyframe", refuse)
+        assert await manager.keyframe(rec.id) is False
+        clock[0] += rec_mod.REQUEST_KEYFRAME_INTERVAL / 2
+        src.flows.note_started(_flow(response=False))
+        await _settle()
+        assert len(video.keyframes) == 2
+        await manager.stop(rec.id)
+
     async def test_an_action_just_after_a_request_still_gets_one(self, tmp_path, monkeypatch):
         """The action is the seek point that matters; requests yield to it,
         never the other way round."""
@@ -476,10 +496,17 @@ class TestRequestedBy:
                 assert r.status_code == 200, r.text
             every = client.get("/api/v1/recordings").json()["recordings"]
             assert sorted(str(r["requested_by"]) for r in every) == ["None", "agent", "ci"]
-            mine = client.get("/api/v1/recordings?requested_by=ci").json()["recordings"]
-            assert [r["output_dir"] for r in mine] == [str(tmp_path / "a")]
+            for asked in ("ci", "%20ci%20"):     # read as start stores it
+                mine = client.get(f"/api/v1/recordings?requested_by={asked}").json()
+                assert [r["output_dir"] for r in mine["recordings"]] == [str(tmp_path / "a")]
+            # Blank is no filter, as the CLI and the MCP tool send it.
+            assert len(client.get("/api/v1/recordings?requested_by=").json()["recordings"]) == 3
             assert client.post("/api/v1/recordings", json={
                 "udid": SIM, "requested_by": "x" * 201}).status_code == 422
+            # Stripped before the limit, as it is stored.
+            assert client.post("/api/v1/recordings", json={
+                "udid": SIM, "output_dir": str(tmp_path / "d"),
+                "requested_by": " " + "x" * 200 + " "}).status_code == 200
 
     def test_the_cli_sends_it_and_filters_by_it(self):
         from server.recording import cli

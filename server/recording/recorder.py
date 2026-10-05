@@ -872,8 +872,11 @@ class RecordingManager:
             raise RecordingNotFilming(f"{recording_id} is not recording video")
         if rec.state != "recording" or rec._segment is None or self._video is None:
             raise RecordingNotFilming(f"{recording_id} has no movie recording right now")
-        rec._last_keyframe = _monotonic()
         asked = await self._video.keyframe(rec._segment)
+        if asked:
+            # Only one that was made: a refused one is no seek point, and the
+            # requests after it would go without (review).
+            rec._last_keyframe = _monotonic()
         rec._pending.append(_line("mark", {
             "timestamp": _now().isoformat(), "label": label, "keyframe_requested": asked}))
         rec.counts["mark"] = rec.counts.get("mark", 0) + 1

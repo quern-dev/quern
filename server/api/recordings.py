@@ -214,6 +214,9 @@ async def list_recordings(
         "Only the recordings started with this `requested_by`"))] = None,
 ) -> dict:
     """The recordings this server is making or has made since it started."""
+    # Read as start stores it: " ci" was kept as "ci", and listing by what was
+    # passed found nothing; blank is no filter, as the CLI and MCP send it.
+    requested_by = (requested_by or "").strip() or None
     return {"recordings": [_with_rejections(request, r.summary())
                            for r in _manager(request).list()
                            if requested_by is None or r.requested_by == requested_by]}

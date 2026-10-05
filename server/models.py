@@ -15,6 +15,7 @@ from pydantic import (
     StrictFloat,
     StrictInt,
     StrictStr,
+    StringConstraints,
     field_validator,
     model_serializer,
     model_validator,
@@ -986,9 +987,10 @@ class RecordingStartRequest(BaseModel):
     exclude_content_types: list[str] | None = Field(default=None, description=(
         "Drop bodies whose Content-Type starts with any of these, e.g. `image/`, "
         "`text/html`. The flow itself is kept."))
-
-
-    requested_by: str | None = Field(default=None, max_length=200, description=(
+    #: Stripped before its length is checked, as the recorder stores it.
+    requested_by: Annotated[
+        str, StringConstraints(strip_whitespace=True, max_length=200),
+    ] | None = Field(default=None, description=(
         "Who is asking -- a CI job, an agent, a person -- e.g. `ci-ui-tests`. Kept "
         "with the recording, in its summary, manifest and first line, and "
         "`list_recordings` filters by it, so subsystems sharing a server can tell "
