@@ -148,6 +148,16 @@ class TestPanAndTaps:
         tft = gestures.plan("two_finger_tap", 200, 400, count=3, interval=0.15)
         assert (tft.count, tft.interval) == (3, 0.15)
 
+    @pytest.mark.parametrize("kind,extra", [
+        ("pinch", {"scale": 1e308}),                     # 60pt * 1e308
+        ("pan", {"dx": 1.7e308, "distance": 1e308}),     # 0.5e308 + 1.7e308
+    ])
+    def test_arithmetic_that_overflows_is_refused(self, kind, extra):
+        """Every argument finite, the fingers at infinity: it reached the
+        bridge as a token its JSON parser rejects, and came back as a 500."""
+        with pytest.raises(InvalidDeviceRequestError, match="infinity"):
+            gestures.plan(kind, 200, 400, **extra)
+
     @pytest.mark.parametrize("angle", [float("nan"), float("inf")])
     def test_an_angle_that_is_not_a_number_is_refused(self, angle):
         """NaN reached the bridge as a bare `NaN`, which its JSON parser

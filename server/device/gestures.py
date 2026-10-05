@@ -194,6 +194,20 @@ def plan(kind: str, x: float, y: float, *, scale: float | None = None,
     """The finger paths or tap points for one named gesture, or a refusal."""
     if not (math.isfinite(x) and math.isfinite(y)):
         raise _bad(f"x and y must be numbers, not {x!r}, {y!r}")
+    built = _plan(kind, x, y, scale=scale, degrees=degrees, dx=dx, dy=dy, distance=distance,
+                  angle=angle, duration=duration, count=count, interval=interval)
+    # Each argument can be finite and the arithmetic still not: scale=1e308
+    # spreads the fingers to infinity, which reached the bridge as a token its
+    # JSON parser rejects and came back as a 500 (review).
+    points = [p for path in built.paths or [] for p in path] + list(built.points or [])
+    if not all(math.isfinite(c) for p in points for c in p):
+        raise _bad(f"{kind} with these arguments puts the fingers at infinity")
+    return built
+
+
+def _plan(kind: str, x: float, y: float, *, scale: float | None, degrees: float | None,
+          dx: float | None, dy: float | None, distance: float | None, angle: float | None,
+          duration: float | None, count: int | None, interval: float | None) -> Plan:
     d = _positive("duration", duration, 0.6)
     a = 0.0 if angle is None else float(angle)
     # NaN went through to the bridge as a bare `NaN`, which its JSON parser
