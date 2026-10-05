@@ -287,6 +287,10 @@ class Recording:
     dir: Path
     filters: Filters
     started_at: datetime
+    #: Who asked for it -- a CI job, an agent, a person -- as they named
+    #: themselves, so subsystems sharing a server can tell their runs apart.
+    #: A label, not ownership: anyone can still stop any recording.
+    requested_by: str | None = None
     #: recording; interrupted (saved, but could not resume -- tried again at
     #: the next start, and stoppable); stopped; failed.
     state: str = "recording"
@@ -368,8 +372,8 @@ class Recording:
 
     def summary(self) -> dict:
         return {
-            "id": self.id, "udid": self.udid, "output_dir": str(self.dir),
-            "events": str(self.events), "manifest": str(self.manifest),
+            "id": self.id, "udid": self.udid, "requested_by": self.requested_by,
+            "output_dir": str(self.dir), "events": str(self.events), "manifest": str(self.manifest),
             "state": self.state, "error": self.error,
             "started_at": self.started_at.isoformat(),
             "stopped_at": self.stopped_at.isoformat() if self.stopped_at else None,
@@ -661,7 +665,8 @@ class RecordingManager:
             if holder is not None:
                 raise RecordingError(_already_filmed(udid, holder))
 
-    async def start(self, udid: str, output_dir: str | None, filters: Filters) -> Recording:
+    async def start(self, udid: str, output_dir: str | None, filters: Filters,
+                    requested_by: str | None = None) -> Recording:
         rec_id = f"rec_{uuid.uuid4().hex[:12]}"
         out = _output_dir(output_dir) if output_dir else (
             config_mod.CONFIG_DIR / "recordings" / rec_id)
@@ -669,7 +674,8 @@ class RecordingManager:
             out.mkdir(parents=True, exist_ok=True)
         except OSError as e:
             raise RecordingError(f"{out} could not be created: {e}") from e
-        rec = Recording(id=rec_id, udid=udid, dir=out, filters=filters, started_at=_now())
+        rec = Recording(id=rec_id, udid=udid, dir=out, filters=filters, started_at=_now(),
+                        requested_by=(requested_by or "").strip() or None)
         if filters.video:
             # Asked for and impossible is a refusal, not a recording that
             # quietly has no video.
@@ -731,6 +737,7 @@ class RecordingManager:
     def _begin_files(self, rec: Recording) -> None:
         with open(rec.events, "x") as f:
             f.write(_line("started", recording=rec.id, udid=rec.udid,
+                          requested_by=rec.requested_by,
                           filters=rec.filters.as_dict(), clock_anchor=_anchor(),
                           format_version=FORMAT_VERSION) + "\n")
         _write_json_atomic(rec.manifest, rec.manifest_body())
@@ -1057,7 +1064,8 @@ class RecordingManager:
         recordings there raced a start changing them (review)."""
         return {"recordings": [
             {"id": r.id, "udid": r.udid, "output_dir": str(r.dir),
-             "filters": r.filters.as_dict(), "started_at": r.started_at.isoformat()}
+             "filters": r.filters.as_dict(), "started_at": r.started_at.isoformat(),
+             "requested_by": r.requested_by}
             for r in self._recordings.values() if r.state in ("recording", "interrupted")]}
 
     async def _save(self) -> bool:
@@ -1221,7 +1229,8 @@ class RecordingManager:
             try:
                 rec = Recording(id=s["id"], udid=s["udid"], dir=Path(s["output_dir"]),
                                 filters=Filters.from_dict(s.get("filters") or {}),
-                                started_at=datetime.fromisoformat(s["started_at"]))
+                                started_at=datetime.fromisoformat(s["started_at"]),
+                                requested_by=s.get("requested_by"))
             except (KeyError, TypeError, ValueError, RecordingError) as e:
                 logger.error("Skipping a saved recording that cannot be read: %s (%r)", e, s)
                 continue

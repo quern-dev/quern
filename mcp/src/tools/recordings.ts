@@ -28,6 +28,7 @@ By default only work positively identified as this device's is recorded; include
       exclude_hosts: z.array(z.string()).optional().describe("Drop flows to these hosts and their subdomains, e.g. analytics. A glob matches the whole host: *.s3.*.amazonaws.com"),
       kinds: z.array(z.enum(["actions", "flows", "logs"])).optional().describe("What to collect: any of actions (quern's own), flows (full detail), logs (app logs and crash reports). Default all; [\"flows\"] for network calls only"),
       include_unattributed: z.boolean().optional().describe("Also record flows and log lines tied to no device (default false)"),
+      requested_by: z.string().max(200).optional().describe("Who is asking, e.g. ci-ui-tests or the agent's name: kept with the recording, and list_recordings filters by it, so subsystems sharing a server can tell their runs apart. A label, not ownership"),
       allow_passthrough: z.boolean().optional().describe("Recording flows from a simulator under local capture or the system proxy first asks whether it trusts quern's CA: it installs it if auto_install_cert is set, and otherwise refuses with 428 -- a run that records no HTTPS looks fine and holds nothing -- unless this is set. Then, under local capture, its apps work and its HTTPS is not recorded; under the system proxy its HTTPS requests fail for the whole run. The response's simulator_tls and warnings say what is in effect; ask the user before passing this rather than installing the CA."),
       keyframes: z.array(z.enum(["actions", "requests"])).optional().describe("With video: what makes a seek point in the movie -- quern's actions, and each request the device starts (none within a second of another keyframe, so the requests an action sets off add none). Default both; a run quern does not drive, such as XCUITest, has requests and no actions. Request keyframes need flows in kinds; [] asks for none"),
       bodies: z.enum(["all", "errors", "none"]).optional().describe("Which flow bodies to keep; every flow's metadata is kept regardless. errors keeps response bodies only for non-2xx and unanswered requests -- what a failure needs, at a fraction of the size; a request's own body stays on its start line (bound it with max_body_bytes). Default all"),
@@ -100,11 +101,13 @@ detail="summary" (the default here) gives one line per event: a flow's method, U
   });
 
   server.registerTool("list_recordings", {
-    description: "The recordings this server is making or has made since it started: device, directory, state, counts, drops and gaps.",
-    inputSchema: strictParams({}),
-  }, async () => {
+    description: "The recordings this server is making or has made since it started: device, who asked (requested_by), directory, state, counts, drops and gaps.",
+    inputSchema: strictParams({
+      requested_by: z.string().optional().describe("Only the recordings started with this requested_by"),
+    }),
+  }, async ({ requested_by }) => {
     try {
-      return answer(await apiRequest("GET", "/api/v1/recordings"));
+      return answer(await apiRequest("GET", "/api/v1/recordings", requested_by ? { requested_by } : undefined));
     } catch (e) {
       return failure(e);
     }

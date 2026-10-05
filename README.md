@@ -448,7 +448,8 @@ quern record start --udid UDID --kinds flows --bodies errors --max-body-bytes 40
 quern record stop ID [--require-complete]    # ...until stopped; exit 3 if anything was lost
 quern record keyframe ID [--label TEXT]   # Make this moment a seek point, and mark it in the recording
 quern record start --udid UDID --video --keyframes requests   # Seek points at requests only (default: actions and requests)
-quern record list            # Recordings running on this server
+quern record start --udid UDID --requested-by NAME   # Name who asked, so runs on a shared server tell apart
+quern record list [--requested-by NAME]   # Recordings running on this server (only NAME's)
 quern set-update-check [on|off]
                              # Show or set the automatic daily update check
                              #   (default: on). check-updates works either way.

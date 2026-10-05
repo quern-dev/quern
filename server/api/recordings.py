@@ -97,7 +97,8 @@ async def start_recording(request: Request, body: RecordingStartRequest) -> dict
             warnings.append(f"this simulator's HTTPS is passed through, not recorded: "
                             f"{simulator_tls.reason}")
     try:
-        rec = await manager.start(udid, body.output_dir, filters)
+        rec = await manager.start(udid, body.output_dir, filters,
+                                  requested_by=body.requested_by)
     except RecordingError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     if "flows" in rec.filters.kinds and not _proxy_is_running(request):
@@ -207,7 +208,12 @@ async def recording_events(
 
 
 @router.get("")
-async def list_recordings(request: Request) -> dict:
+async def list_recordings(
+    request: Request,
+    requested_by: Annotated[str | None, Query(description=(
+        "Only the recordings started with this `requested_by`"))] = None,
+) -> dict:
     """The recordings this server is making or has made since it started."""
     return {"recordings": [_with_rejections(request, r.summary())
-                           for r in _manager(request).list()]}
+                           for r in _manager(request).list()
+                           if requested_by is None or r.requested_by == requested_by]}

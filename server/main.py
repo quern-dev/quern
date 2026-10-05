@@ -2114,6 +2114,7 @@ def cli() -> None:
     record_start.add_argument("--include-unattributed", action="store_true")
     record_start.add_argument("--video", action="store_true")
     record_start.add_argument("--allow-passthrough", action="store_true")
+    record_start.add_argument("--requested-by")
     record_start.add_argument("--keyframes")
     record_start.add_argument("--bodies", choices=("all", "errors", "none"))
     record_start.add_argument("--max-body-bytes", type=int)
@@ -2124,7 +2125,8 @@ def cli() -> None:
     record_stop = record_sub.add_parser("stop")
     record_stop.add_argument("recording_id")
     record_stop.add_argument("--require-complete", action="store_true")
-    record_sub.add_parser("list")
+    record_list = record_sub.add_parser("list")
+    record_list.add_argument("--requested-by")
     subparsers.add_parser(
         "url", help="Print the running server's base URL")
     subparsers.add_parser(

@@ -988,6 +988,14 @@ class RecordingStartRequest(BaseModel):
         "`text/html`. The flow itself is kept."))
 
 
+    requested_by: str | None = Field(default=None, max_length=200, description=(
+        "Who is asking -- a CI job, an agent, a person -- e.g. `ci-ui-tests`. Kept "
+        "with the recording, in its summary, manifest and first line, and "
+        "`list_recordings` filters by it, so subsystems sharing a server can tell "
+        "their runs apart. A label, not ownership: any caller can still stop any "
+        "recording."))
+
+
 class RecordingKeyframeRequest(BaseModel):
     """Optional body for POST /api/v1/recordings/{id}/keyframe (#415)."""
 

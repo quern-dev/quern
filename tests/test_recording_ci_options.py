@@ -433,3 +433,68 @@ class TestTheReviewFindings:
             assert cli.main(["start", "--udid", SIM, "--keyframes", "taps"]) == 2
         err = capsys.readouterr().err
         assert "keyframes.0: Input should be" in err and "'loc'" not in err
+
+
+class TestRequestedBy:
+    """Subsystems sharing a server can tell their recordings apart."""
+
+    async def test_kept_everywhere_the_recording_says_what_it_is(self, tmp_path):
+        manager = Sources().manager()
+        rec = await manager.start(SIM, str(tmp_path / "r"), Filters(),
+                                  requested_by=" ci-ui-tests ")
+        assert rec.summary()["requested_by"] == "ci-ui-tests"
+        started = _events(tmp_path / "r")[0]
+        assert started["type"] == "started" and started["requested_by"] == "ci-ui-tests"
+        done = await manager.stop(rec.id)
+        manifest = json.loads((tmp_path / "r" / "manifest.json").read_text())
+        assert manifest["requested_by"] == done.requested_by == "ci-ui-tests"
+
+    async def test_blank_is_nobody(self, tmp_path):
+        manager = Sources().manager()
+        rec = await manager.start(SIM, str(tmp_path / "r"), Filters(), requested_by="  ")
+        assert rec.requested_by is None
+        await manager.stop(rec.id)
+
+    async def test_it_survives_a_restart(self, tmp_path):
+        """Resumed from the state file, which once held only what resuming
+        needed: a run that outlived a quern restart came back unnamed."""
+        first = Sources().manager()
+        rec = await first.start(SIM, str(tmp_path / "r"), Filters(), requested_by="ci")
+        await first.shutdown()
+        second = Sources().manager()
+        assert await second.resume_all() == [rec.id]
+        assert second.get(rec.id).requested_by == "ci"
+        await second.stop(rec.id)
+
+    def test_the_list_filters_by_it(self, tmp_path):
+        from tests.test_recording import _app
+
+        with TestClient(_app(Sources())) as client:
+            for who, d in (("ci", "a"), ("agent", "b"), (None, "c")):
+                r = client.post("/api/v1/recordings", json={
+                    "udid": SIM, "output_dir": str(tmp_path / d), "requested_by": who})
+                assert r.status_code == 200, r.text
+            every = client.get("/api/v1/recordings").json()["recordings"]
+            assert sorted(str(r["requested_by"]) for r in every) == ["None", "agent", "ci"]
+            mine = client.get("/api/v1/recordings?requested_by=ci").json()["recordings"]
+            assert [r["output_dir"] for r in mine] == [str(tmp_path / "a")]
+            assert client.post("/api/v1/recordings", json={
+                "udid": SIM, "requested_by": "x" * 201}).status_code == 422
+
+    def test_the_cli_sends_it_and_filters_by_it(self):
+        from server.recording import cli
+
+        calls = []
+
+        def call(method, path, body=None):
+            calls.append((method, path, body))
+            return 200, {"id": "rec_1", "udid": SIM, "output_dir": "/x", "warnings": [],
+                         "recordings": []}
+
+        with patch.object(cli, "_call", call):
+            assert cli.main(["start", "--udid", SIM, "--requested-by", "ci ui"]) == 0
+            assert cli.main(["list", "--requested-by", "ci ui"]) == 0
+            assert cli.main(["list"]) == 0
+        assert calls[0][2]["requested_by"] == "ci ui"
+        assert [c[1] for c in calls[1:]] == [
+            "/api/v1/recordings?requested_by=ci+ui", "/api/v1/recordings"]

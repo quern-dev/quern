@@ -15,17 +15,19 @@ import argparse
 import json
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 USAGE = """\
 Usage: quern record start --udid UDID [--out DIR] [--kinds actions,flows,logs]
                           [--host H]... [--exclude-host H]... [--include-unattributed]
-                          [--video] [--allow-passthrough] [--keyframes actions,requests]
+                          [--requested-by NAME] [--video] [--allow-passthrough]
+                          [--keyframes actions,requests]
                           [--bodies all|errors|none] [--max-body-bytes N]
                           [--exclude-content-type TYPE]...
        quern record stop RECORDING_ID [--require-complete]
        quern record keyframe RECORDING_ID [--label TEXT]
-       quern record list
+       quern record list [--requested-by NAME]
 
 A host is a domain and its subdomains, or a glob: --exclude-host '*.s3.*.amazonaws.com'.
 For a small recording of a long run, keep the flows and limit their bodies:
@@ -107,6 +109,7 @@ def main(argv: list[str]) -> int:
     start.add_argument("--include-unattributed", action="store_true")
     start.add_argument("--video", action="store_true")
     start.add_argument("--allow-passthrough", action="store_true")
+    start.add_argument("--requested-by")
     start.add_argument("--keyframes")
     start.add_argument("--bodies", choices=("all", "errors", "none"))
     start.add_argument("--max-body-bytes", type=int)
@@ -117,7 +120,8 @@ def main(argv: list[str]) -> int:
     stop = sub.add_parser("stop", add_help=False)
     stop.add_argument("recording_id")
     stop.add_argument("--require-complete", action="store_true")
-    sub.add_parser("list", add_help=False)
+    listing = sub.add_parser("list", add_help=False)
+    listing.add_argument("--requested-by")
     try:
         args = parser.parse_args(argv)
     except SystemExit:
@@ -131,6 +135,7 @@ def main(argv: list[str]) -> int:
                     "hosts": args.host, "exclude_hosts": args.exclude_host,
                     "include_unattributed": args.include_unattributed, "video": args.video,
                     "allow_passthrough": args.allow_passthrough,
+                    "requested_by": args.requested_by,
                     "max_body_bytes": args.max_body_bytes,
                     "exclude_content_types": args.exclude_content_type}
             if args.keyframes is not None:
@@ -144,7 +149,9 @@ def main(argv: list[str]) -> int:
         elif args.what == "stop":
             status, answer = _call("POST", f"/api/v1/recordings/{args.recording_id}/stop")
         else:
-            status, answer = _call("GET", "/api/v1/recordings")
+            query = (f"?{urllib.parse.urlencode({'requested_by': args.requested_by})}"
+                     if args.requested_by else "")
+            status, answer = _call("GET", f"/api/v1/recordings{query}")
     except ConnectionError as e:
         print(f"quern record: {e}", file=sys.stderr)
         return 1
