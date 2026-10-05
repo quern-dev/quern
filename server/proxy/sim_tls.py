@@ -401,6 +401,13 @@ def _system_proxy_configured() -> bool:
 UNCONFIRMED = ("the proxy has not yet confirmed it decrypts this simulator: its requests "
                "are passed through until it does")
 NOT_TAKEN = "the proxy did not take this simulator into its decrypted set"
+#: Why a simulator that has stopped trusting the CA may still be decrypted: the
+#: addon kept it, or has not confirmed the set without it yet.
+STILL_DECRYPTS = ("the proxy still decrypts this simulator, which no longer trusts the "
+                  "CA: its HTTPS requests fail until it stops")
+UNCONFIRMED_REMOVAL = ("the proxy has not yet confirmed it stopped decrypting this "
+                       "simulator, which no longer trusts the CA: its HTTPS requests fail "
+                       "until it does")
 
 
 async def ensure_capturable(
@@ -417,9 +424,11 @@ async def ensure_capturable(
     - otherwise refuse (`CaptureNotReady`, 428), unless the caller accepts the
       consequence with `allow_passthrough` -- passed through under local
       capture, failing under the system proxy;
-    - refresh the trusted set only when it is stale for this simulator, so a
-      start does not make the addon rebind every simulator it decrypts, and
-      report what the addon itself confirms, not what was sent.
+    - refresh the trusted set only when it is stale for this simulator -- left
+      out though it trusts the CA, or still in though it no longer does (the
+      latter even on a refusal) -- so a start does not make the addon rebind
+      every simulator it decrypts, and report what the addon itself confirms,
+      not what was sent.
 
     The check runs under local capture and under a configured system proxy --
     the two ways a simulator's traffic reaches quern. A check that cannot run
@@ -427,7 +436,9 @@ async def ensure_capturable(
     blocks capture over its own bug, and one that is silent reads as passed.
     """
     check = CaptureCheck()
-    unconfirmed: str | None = None
+    #: What the addon confirmed, where it differs from the set that was sent:
+    #: the report reads the sent set (review).
+    override: tuple[str, str] | None = None
     adapter = getattr(app.state, "proxy_adapter", None)
     controller = _controller(app)
     local = adapter is not None and bool(adapter.local_capture)
@@ -460,6 +471,12 @@ async def ensure_capturable(
         trusted = None
 
     installed = False
+    listed = adapter.trusted_simulators
+    # In the set the addon was given -- None is every simulator -- though the
+    # simulator has just said it does not trust the CA: trust removed under a
+    # running proxy, which until the next periodic check went on decrypting it,
+    # failing every request, whatever this start decides (review).
+    revoked = local and trusted is False and (listed is None or udid.upper() in listed)
     if trusted is False:
         from server.config import get_auto_install_cert
 
@@ -474,6 +491,9 @@ async def ensure_capturable(
                 install_error = str(e)
                 logger.warning("Installing the CA on %s failed: %s", udid[:8], e)
         if trusted is False and not allow_passthrough:
+            if revoked:
+                # Refused or not, it must stop being decrypted now.
+                await refresh_after(app, f"{udid[:8]} no longer trusting the CA")
             name = None
             with contextlib.suppress(Exception):
                 name = await cert_manager._get_device_name(controller, udid)
@@ -487,7 +507,7 @@ async def ensure_capturable(
                 "requests fail for as long as this runs")
 
     if local:
-        stale = (trusted is True and udid.upper() not in (adapter.trusted_simulators or []))
+        stale = (trusted is True and udid.upper() not in (listed or [])) or revoked
         if stale or installed:
             seq = adapter.addon_trust_seq
             try:
@@ -497,21 +517,26 @@ async def ensure_capturable(
                                  udid[:8])
             if adapter.is_running and trusted is True:
                 confirmed = await adapter.addon_decrypts(udid, after_seq=seq)
+                # Unconfirmed, "decrypted" is what was asked for, not what is in
+                # effect -- and passed through is the side that costs
+                # visibility, not requests.
                 if confirmed is None:
-                    unconfirmed = UNCONFIRMED
+                    override = ("passed_through", UNCONFIRMED)
                 elif confirmed is False:
-                    unconfirmed = NOT_TAKEN
-                if unconfirmed:
-                    check.warnings.append(unconfirmed)
+                    override = ("passed_through", NOT_TAKEN)
+            elif adapter.is_running and revoked:
+                confirmed = await adapter.addon_decrypts(udid, after_seq=seq)
+                if confirmed is True:
+                    override = ("decrypted", STILL_DECRYPTS)
+                elif confirmed is None:
+                    override = ("decrypted", UNCONFIRMED_REMOVAL)
+        if override:
+            check.warnings.append(override[1])
         check.entry = next((e for e in report(app) or []
                             if e.udid.upper() == udid.upper()), None)
-        if unconfirmed and check.entry is not None and check.entry.tls == "decrypted":
-            # The report reads the set that was sent; until the addon says it
-            # took it, "decrypted" is what was asked for, not what is in effect
-            # -- and passed through is the side that costs visibility, not
-            # requests (review).
+        if override and check.entry is not None:
             check.entry = check.entry.model_copy(
-                update={"tls": "passed_through", "reason": unconfirmed})
+                update={"tls": override[0], "reason": override[1]})
         if trusted is False and check.entry is None:
             # The report lists booted simulators only, so a start against one
             # that is shut down has no entry to warn from -- and once it boots,

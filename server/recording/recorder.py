@@ -516,14 +516,15 @@ class RecordingManager:
         return any(r.state == "recording" and r.dir == directory
                    for r in self._recordings.values())
 
-    def check_start(self, udid: str, output_dir: str | None, filters: Filters) -> None:
+    async def check_start(self, udid: str, output_dir: str | None, filters: Filters) -> None:
         """Refuse now what `start` would refuse, before a caller does anything
         that cannot be taken back: #414's CA check installs a CA, and a start
         refused after it had installed one for nothing (review). `start` checks
         again -- this moves the refusals first, it does not replace them."""
         if output_dir:
             out = _output_dir(output_dir)
-            if (out / EVENTS).exists():
+            # Off the loop: an unresponsive mount must not stall the server.
+            if await asyncio.to_thread((out / EVENTS).exists):
                 raise RecordingError(_holds_a_recording(out / EVENTS))
         if filters.video:
             if self._video is None:

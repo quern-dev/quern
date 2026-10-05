@@ -69,7 +69,7 @@ async def start_recording(request: Request, body: RecordingStartRequest) -> dict
             kinds=tuple(body.kinds or KINDS), hosts=body.hosts,
             exclude_hosts=body.exclude_hosts, include_unattributed=body.include_unattributed,
             video=body.video)
-        manager.check_start(udid, body.output_dir, filters)
+        await manager.check_start(udid, body.output_dir, filters)
     except RecordingError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     simulator_tls = None

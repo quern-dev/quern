@@ -123,6 +123,45 @@ class TestEnsureCapturable:
         assert check.warnings == [why]
         assert (check.entry.tls, check.entry.reason) == ("passed_through", why)
 
+    @pytest.mark.parametrize("confirms,expect", [
+        pytest.param(False, ("passed_through", None), id="the addon dropped it"),
+        pytest.param(True, ("decrypted", sim_tls.STILL_DECRYPTS), id="the addon kept it"),
+        pytest.param(None, ("decrypted", sim_tls.UNCONFIRMED_REMOVAL), id="no answer"),
+    ])
+    async def test_trust_revoked_under_a_running_proxy_is_refreshed(
+        self, device, confirms, expect,
+    ):
+        """Still in the decrypted set though it now says it does not trust the
+        CA. Only `trusted is True` was ever stale, so this went unrefreshed and
+        the start reported the old set's "decrypted" (review)."""
+        device.answers = [False]
+        app = _app(trusted=False, in_set=(SIM,), confirms=confirms)
+        sim_tls.refresh.side_effect = lambda _app: setattr(
+            app.state.proxy_adapter, "trusted_simulators", [])
+        check = await sim_tls.ensure_capturable(app, SIM, allow_passthrough=True)
+        sim_tls.refresh.assert_awaited_once_with(app)
+        tls, why = expect
+        assert check.entry.tls == tls
+        if why:
+            assert check.entry.reason == why and why in check.warnings
+        else:
+            assert not any("still" in w or "stopped decrypting" in w for w in check.warnings)
+
+    async def test_a_refusal_still_stops_decrypting_a_revoked_simulator(self, device):
+        """Refused or not, the addon must stop decrypting it now, not at the
+        next periodic check: every request from it is failing."""
+        device.answers = [False]
+        app = _app(trusted=False, in_set=(SIM,))
+        with pytest.raises(sim_tls.CaptureNotReady):
+            await sim_tls.ensure_capturable(app, SIM)
+        sim_tls.refresh.assert_awaited_once_with(app)
+
+    async def test_an_untrusting_simulator_not_decrypted_costs_no_refresh(self, device):
+        device.answers = [False]
+        with pytest.raises(sim_tls.CaptureNotReady):
+            await sim_tls.ensure_capturable(_app(trusted=False, in_set=()), SIM)
+        sim_tls.refresh.assert_not_awaited()
+
     async def test_a_confirmed_set_is_reported_decrypted(self, device):
         app = _app(in_set=(), confirms=True)
         sim_tls.refresh.side_effect = lambda _app: setattr(
