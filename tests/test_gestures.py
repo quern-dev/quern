@@ -70,10 +70,30 @@ class TestPinch:
 
 class TestRotate:
     def test_the_fingers_stay_on_the_circle(self):
-        plan = gestures.plan("rotate", 200, 400, degrees=270, distance=80)
+        # Not the default radius, so a plan that ignored `distance` fails.
+        plan = gestures.plan("rotate", 200, 400, degrees=270, distance=50)
         for path in plan.paths:
             for x, y in path:
-                assert math.hypot(x - 200, y - 400) == pytest.approx(80)
+                assert math.hypot(x - 200, y - 400) == pytest.approx(50)
+
+    def test_it_starts_where_angle_says(self):
+        plan = gestures.plan("rotate", 200, 400, degrees=45, angle=90, distance=80)
+        assert plan.paths[0][0] == pytest.approx((200, 320))   # above, not left
+        assert plan.paths[1][0] == pytest.approx((200, 480))
+
+    @pytest.mark.parametrize("degrees", [3601, -3601, 1e5])
+    def test_a_turn_beyond_ten_circles_is_refused(self, degrees):
+        """Unbounded, 1e5 degrees was 10,001 waypoints and at least 80s on the
+        bridge, past its 30s timeout -- killed mid-gesture, fingers down."""
+        with pytest.raises(InvalidDeviceRequestError, match="3600"):
+            gestures.plan("rotate", 200, 400, degrees=degrees)
+
+    def test_the_duration_said_is_the_one_the_bridge_takes(self):
+        """It never steps faster than 8ms, so ten circles take ~2.9s whatever
+        was asked; the response used to say 0.6."""
+        plan = gestures.plan("rotate", 200, 400, degrees=3600, duration=0.6)
+        assert plan.duration == pytest.approx(360 * gestures.MIN_STEP_SECONDS)
+        assert plan.geometry()["duration"] == plan.duration
 
     def test_positive_is_clockwise_on_screen(self):
         """y grows downward, so the left finger rising is clockwise -- the
@@ -93,7 +113,7 @@ class TestRotate:
             for a, b in zip(path, path[1:]):
                 assert math.dist(a, b) == pytest.approx(chord)
 
-    @pytest.mark.parametrize("degrees", [None, 0, float("nan")])
+    @pytest.mark.parametrize("degrees", [None, 0, float("nan"), float("inf")])
     def test_no_turn_is_refused(self, degrees):
         with pytest.raises(InvalidDeviceRequestError, match="degrees"):
             gestures.plan("rotate", 200, 400, degrees=degrees)
@@ -119,6 +139,21 @@ class TestPanAndTaps:
     def test_two_finger_tap(self):
         plan = gestures.plan("two_finger_tap", 200, 400, distance=50)
         assert plan.points == [(175, 400), (225, 400)] and plan.count == 1
+
+    def test_the_timing_arguments_are_used(self):
+        for kind, extra in (("pinch", {"scale": 2}), ("rotate", {"degrees": 30}),
+                            ("pan", {"dx": 5})):
+            assert gestures.plan(kind, 200, 400, duration=1.7, **extra).duration == 1.7
+        assert gestures.plan("double_tap", 200, 400, interval=0.2).interval == 0.2
+        tft = gestures.plan("two_finger_tap", 200, 400, count=3, interval=0.15)
+        assert (tft.count, tft.interval) == (3, 0.15)
+
+    @pytest.mark.parametrize("angle", [float("nan"), float("inf")])
+    def test_an_angle_that_is_not_a_number_is_refused(self, angle):
+        """NaN reached the bridge as a bare `NaN`, which its JSON parser
+        rejects, and came back as a 500."""
+        with pytest.raises(InvalidDeviceRequestError, match="angle"):
+            gestures.plan("pinch", 200, 400, scale=2, angle=angle)
 
     def test_an_unknown_gesture_is_refused(self):
         with pytest.raises(InvalidDeviceRequestError, match="unknown gesture"):
@@ -156,11 +191,32 @@ class TestTheController:
             await ctrl.gesture("pinch", x=1, y=2, scale=1)
         ctrl.resolve_udid.assert_not_awaited()
 
-    @pytest.mark.parametrize("where", [{}, {"x": 1, "y": 2, "identifier": "pad"}, {"x": 1}])
+    @pytest.mark.parametrize("where", [{}, {"x": 1, "y": 2, "identifier": "pad"}])
     async def test_it_needs_a_point_or_an_element_not_both(self, where):
         ctrl = _ctrl(_multitouch_backend())
         with pytest.raises(InvalidDeviceRequestError, match="one of the two"):
             await ctrl.gesture("double_tap", **where)
+
+    async def test_half_a_point_is_refused_not_ignored(self):
+        """`x` with a label used to be dropped, and the gesture centred on the
+        element without a word."""
+        ctrl = _ctrl(_multitouch_backend())
+        with pytest.raises(InvalidDeviceRequestError, match="both x and y"):
+            await ctrl.gesture("double_tap", x=10, label="Map")
+
+    async def test_an_element_without_a_frame_is_refused(self):
+        """A frameless match raised a TypeError: a bare 500."""
+        ctrl = _ctrl(_multitouch_backend())
+        ctrl.get_element = AsyncMock(return_value=({"label": "Map", "frame": None}, UDID))
+        with pytest.raises(InvalidDeviceRequestError, match="no frame"):
+            await ctrl.gesture("double_tap", label="Map")
+
+    async def test_the_element_query_is_passed_on(self):
+        ctrl = _ctrl(_multitouch_backend())
+        ctrl.get_element = AsyncMock(return_value=(
+            {"frame": {"x": 0, "y": 0, "width": 100, "height": 100}}, UDID))
+        await ctrl.gesture("double_tap", label="Map", element_type="Image")
+        assert ctrl.get_element.await_args.kwargs["element_type"] == "Image"
 
     async def test_a_backend_without_multitouch_refuses_rather_than_sending_one_finger(self):
         backend = MagicMock(spec=["TOOL_NAME", "swipe", "tap"])
@@ -215,9 +271,16 @@ class TestTheSimBridgeClient:
 
     async def test_a_tap_is_multi_tap(self):
         backend, sent = self._backend({"ok": True})
-        await backend.perform_gesture(UDID, gestures.plan("double_tap", 200, 400))
-        assert sent[0] == {"cmd": "multi-tap", "udid": UDID, "count": 2,
-                           "interval": 0.08, "points": [[200, 400]]}
+        await backend.perform_gesture(
+            UDID, gestures.plan("double_tap", 200, 400, count=3, interval=0.2))
+        assert sent[0] == {"cmd": "multi-tap", "udid": UDID, "count": 3,
+                           "interval": 0.2, "points": [[200, 400]]}
+
+    async def test_the_duration_reaches_the_wire(self):
+        backend, sent = self._backend({"ok": True})
+        await backend.perform_gesture(
+            UDID, gestures.plan("pinch", 200, 400, scale=2, duration=1.4))
+        assert sent[0]["duration"] == 1.4
 
     async def test_a_request_the_bridge_turned_down_is_invalid(self):
         backend, _ = self._backend({"ok": False, "code": "bad_request",
@@ -265,6 +328,31 @@ class TestTheRoute:
         backend.TOOL_NAME = "u2"
         resp = await self._post(app, _ctrl(backend), {"type": "two_finger_tap", "x": 1, "y": 2})
         assert resp.status_code == 400 and "u2 backend cannot" in resp.text
+
+    async def test_every_argument_reaches_the_plan(self, app):
+        backend = _multitouch_backend()
+        resp = await self._post(app, _ctrl(backend), {
+            "type": "two_finger_tap", "x": 200, "y": 400,
+            "distance": 50, "count": 3, "interval": 0.2})
+        assert resp.status_code == 200, resp.text
+        plan = backend.perform_gesture.await_args.args[1]
+        assert (plan.points, plan.count, plan.interval) == (
+            [(175, 400), (225, 400)], 3, 0.2)
+
+    async def test_a_non_finite_number_is_a_422(self, app):
+        app.state.device_controller = _ctrl(_multitouch_backend())
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            resp = await c.post(
+                "/api/v1/device/ui/gesture",
+                content=b'{"type": "pinch", "x": 1, "y": 2, "scale": 2, "angle": NaN}',
+                headers={"Authorization": "Bearer k", "content-type": "application/json"})
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"][0]["input"] == "nan"
+
+    async def test_a_huge_turn_is_a_422(self, app):
+        body = {"type": "rotate", "x": 1, "y": 2, "degrees": 1e5}
+        resp = await self._post(app, _ctrl(_multitouch_backend()), body)
+        assert resp.status_code == 422
 
     async def test_the_schema_refuses_an_unknown_type(self, app):
         body = {"type": "wiggle", "x": 1, "y": 2}

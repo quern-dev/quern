@@ -1448,8 +1448,15 @@ func doTouchPaths(udid: String, paths: [[CGPoint]], duration: Double) -> (Bool, 
     usleep(16_000)
     // Lifted even after a failed move: fingers left down would hold every
     // later touch on this simulator hostage.
-    let lifted = sendMultiFingerEvent(points: frame(steps - 1), identifiers: ids, isDown: false,
+    var lifted = sendMultiFingerEvent(points: frame(steps - 1), identifiers: ids, isDown: false,
                                       client: client)
+    if !lifted {
+        // Once more: the same builders just made every other event, and a
+        // contact left down holds the simulator's touch state hostage.
+        usleep(16_000)
+        lifted = sendMultiFingerEvent(points: frame(steps - 1), identifiers: ids, isDown: false,
+                                      client: client)
+    }
     if !lifted { return (false, "could not build the touch-up event", false) }
     if failed > (steps - 1) / 2 { return (false, "\(failed) of \(steps - 1) moves could not be built", false) }
     return (true, nil, false)
@@ -1483,12 +1490,14 @@ func doMultiTap(udid: String, points: [CGPoint], count: Int, interval: Double,
         }
         guard down else { return (false, "could not build tap \(n + 1)", false) }
         usleep(UInt32(max(0.02, hold) * 1_000_000))
-        let up: Bool
-        if normalised.count == 1 {
-            up = sendDigitizerEvent(point: normalised[0], identifier: ids[0], isDown: false, client: client)
-        } else {
-            up = sendMultiFingerEvent(points: normalised, identifiers: ids, isDown: false, client: client)
+        func lift() -> Bool {
+            normalised.count == 1
+                ? sendDigitizerEvent(point: normalised[0], identifier: ids[0], isDown: false, client: client)
+                : sendMultiFingerEvent(points: normalised, identifiers: ids, isDown: false, client: client)
         }
+        // Retried once, as in doTouchPaths: a finger left down is worse than a
+        // late one.
+        let up = lift() || { usleep(16_000); return lift() }()
         guard up else { return (false, "could not lift tap \(n + 1)", false) }
         if n < count - 1 { usleep(UInt32(max(0.0, interval) * 1_000_000)) }
     }

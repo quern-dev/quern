@@ -2300,22 +2300,24 @@ class GestureRequest(BaseModel):
     """
 
     type: Literal["pinch", "rotate", "pan", "double_tap", "two_finger_tap"]
-    x: float | None = None
-    y: float | None = None
+    x: float | None = Field(default=None, allow_inf_nan=False)
+    y: float | None = Field(default=None, allow_inf_nan=False)
     label: str | None = None
     identifier: str | None = None
     element_type: str | None = None
-    scale: float | None = Field(default=None, gt=0, description=(
+    scale: float | None = Field(default=None, gt=0, allow_inf_nan=False, description=(
         "pinch: end separation over start separation, as a pinch recogniser "
         "reports it. Above 1 spreads the fingers (zoom in), below 1 squeezes."))
-    degrees: float | None = Field(default=None, description=(
-        "rotate: how far to turn, positive clockwise."))
-    dx: float | None = Field(default=None, description="pan: points to move right.")
-    dy: float | None = Field(default=None, description="pan: points to move down.")
-    distance: float | None = Field(default=None, gt=0, description=(
+    degrees: float | None = Field(default=None, ge=-3600, le=3600, allow_inf_nan=False,
+                                  description="rotate: how far to turn, positive clockwise.")
+    dx: float | None = Field(default=None, allow_inf_nan=False,
+                             description="pan: points to move right.")
+    dy: float | None = Field(default=None, allow_inf_nan=False,
+                             description="pan: points to move down.")
+    distance: float | None = Field(default=None, gt=0, allow_inf_nan=False, description=(
         "pinch: separation at the narrow end (default 60). rotate: radius "
         "(default 80). pan, two_finger_tap: separation of the fingers (default 40)."))
-    angle: float | None = Field(default=None, description=(
+    angle: float | None = Field(default=None, allow_inf_nan=False, description=(
         "pinch: the line the fingers move along, in degrees from horizontal. "
         "rotate: where the fingers start, likewise."))
     duration: float | None = Field(default=None, gt=0, le=10, description=(

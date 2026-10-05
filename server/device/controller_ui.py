@@ -3044,7 +3044,10 @@ class DeviceControllerUI:
         params = {"scale": scale, "degrees": degrees, "dx": dx, "dy": dy,
                   "distance": distance, "angle": angle, "duration": duration,
                   "count": count, "interval": interval}
-        has_point = x is not None and y is not None
+        if (x is None) != (y is None):
+            raise InvalidDeviceRequestError(
+                "a gesture at a point needs both x and y", tool="quern")
+        has_point = x is not None
         has_target = bool(label or identifier)
         if has_point == has_target:
             raise InvalidDeviceRequestError(
@@ -3068,7 +3071,13 @@ class DeviceControllerUI:
         if has_target:
             element, resolved = await self.get_element(
                 label=label, identifier=identifier, element_type=element_type, udid=resolved)
-            frame = element["frame"]
+            frame = element.get("frame")
+            if not frame:
+                # A match with no frame -- a duplicate the tree lists without
+                # geometry -- has no centre. It raised a TypeError, a bare 500.
+                raise InvalidDeviceRequestError(
+                    f"the element matching {label or identifier!r} has no frame, so a "
+                    f"gesture cannot be centred on it; pass x and y", tool=name)
             x = frame["x"] + frame["width"] / 2
             y = frame["y"] + frame["height"] / 2
         laid_out = gestures.plan(kind, float(x), float(y), **params)

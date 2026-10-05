@@ -31,6 +31,14 @@ DEFAULT_PINCH_DISTANCE = 60.0
 DEFAULT_ROTATE_RADIUS = 80.0
 #: Separation of the fingers in a two-finger pan or tap.
 DEFAULT_FINGER_SPREAD = 40.0
+#: The largest turn a rotation takes, ten full circles. Each 10 degrees is a
+#: waypoint and each waypoint at least 8ms on the bridge, so this bounds the
+#: gesture near 3s; unbounded, a large enough angle outlasted the bridge's 30s
+#: command timeout, which kills it mid-gesture with the fingers still down.
+MAX_ROTATE_DEGREES = 3600.0
+#: The shortest step the bridge sends; a duration shorter than the steps allow
+#: takes this long per step anyway, and the plan says so.
+MIN_STEP_SECONDS = 0.008
 #: A double tap's taps must land inside the system's double-tap interval; two
 #: 0.08s apart read as one double tap on iOS 18.6, 0.6s apart as two singles.
 DEFAULT_TAP_INTERVAL = 0.08
@@ -53,6 +61,13 @@ class Plan:
     count: int = 1
     interval: float = DEFAULT_TAP_INTERVAL
     duration: float = 0.6
+
+    def __post_init__(self) -> None:
+        # What the bridge will actually take: it never steps faster than
+        # MIN_STEP_SECONDS, so a long path at a short duration runs longer, and
+        # the response should not claim otherwise.
+        if self.paths:
+            self.duration = max(self.duration, (len(self.paths[0]) - 1) * MIN_STEP_SECONDS)
 
     def geometry(self) -> dict:
         if self.paths is not None:
@@ -124,8 +139,9 @@ def rotate(x: float, y: float, degrees: float | None, *, radius: float | None = 
     """
     if degrees is None:
         raise _bad("rotate needs degrees: positive turns clockwise")
-    if not math.isfinite(degrees) or degrees == 0:
-        raise _bad(f"rotate degrees must be a non-zero number, not {degrees!r}")
+    if not math.isfinite(degrees) or degrees == 0 or abs(degrees) > MAX_ROTATE_DEGREES:
+        raise _bad(f"rotate degrees must be a non-zero number within "
+                   f"±{MAX_ROTATE_DEGREES:.0f}, not {degrees!r}")
     r = _positive("radius", radius, DEFAULT_ROTATE_RADIUS)
     steps = max(DEFAULT_STEPS, math.ceil(abs(degrees) / 10) + 1)
     paths: list[list[Point]] = [[], []]
@@ -180,6 +196,10 @@ def plan(kind: str, x: float, y: float, *, scale: float | None = None,
         raise _bad(f"x and y must be numbers, not {x!r}, {y!r}")
     d = _positive("duration", duration, 0.6)
     a = 0.0 if angle is None else float(angle)
+    # NaN went through to the bridge as a bare `NaN`, which its JSON parser
+    # rejects, and came back as a 500.
+    if not math.isfinite(a):
+        raise _bad(f"angle must be a number, not {angle!r}")
     if kind == "pinch":
         return pinch(x, y, scale, distance=distance, angle=a, duration=d)
     if kind == "rotate":
