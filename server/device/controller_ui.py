@@ -26,6 +26,7 @@ from server.device.web.web_probing import WebSweepResult
 from server.models import (
     DeviceError,
     DeviceOperationUnsupportedError,
+    DeviceType,
     InvalidDeviceRequestError,
     UIElement,
     WaitCondition,
@@ -3039,12 +3040,20 @@ class DeviceControllerUI:
             gestures.check_edge(edge)
         resolved = await self.resolve_udid(udid)
         backend = self._ui_backend(resolved)
+        name = getattr(backend, "TOOL_NAME", type(backend).__name__)
         if edge is not None and getattr(backend, "edge_swipes", False) is not True:
-            name = getattr(backend, "TOOL_NAME", type(backend).__name__)
             raise DeviceOperationUnsupportedError(
                 f"the {name} backend cannot send an edge swipe: a swipe from the edge "
                 f"of a simulator is only the system's when the event says so, and "
                 f"{name} has no way to (#251)", tool=name)
+        # An iOS simulator takes an edge swipe only from an event flagged as
+        # one, which only sim-bridge sets: WDA driving a simulator would drag
+        # from the edge, answer ok, and nothing would happen (review).
+        if (edge is not None and self._device_type(resolved) == DeviceType.SIMULATOR
+                and getattr(backend, "edge_flag", False) is not True):
+            raise DeviceOperationUnsupportedError(
+                f"an edge swipe on a simulator needs sim-bridge, which flags the event "
+                f"as one; the {name} backend cannot (#251)", tool=name)
         await self._warn_if_input_is_suppressed(resolved)
         extra = {"edge": edge} if edge is not None else {}
         await backend.swipe(resolved, start_x, start_y, end_x, end_y, duration, **extra)

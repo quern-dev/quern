@@ -520,6 +520,9 @@ class SimBridgeBackend:
 
     #: Swipes from a screen edge, by Indigo's edge flag on every event (#251).
     edge_swipes = True
+    #: The flag a simulator needs before it treats a swipe as an edge swipe.
+    #: A real device decides from the start position; a simulator does not.
+    edge_flag = True
 
     def __init__(self, manager: SimBridgeManager) -> None:
         self._mgr = manager

@@ -230,8 +230,8 @@ class TestEdgeSwipesInTheController:
         backend.swipe.assert_not_awaited()
 
     async def test_the_edge_reaches_the_backend_only_when_given(self):
-        backend = MagicMock(spec=["swipe", "TOOL_NAME", "edge_swipes"])
-        backend.edge_swipes = True
+        backend = MagicMock(spec=["swipe", "TOOL_NAME", "edge_swipes", "edge_flag"])
+        backend.edge_swipes = backend.edge_flag = True
         backend.swipe = AsyncMock()
         ctrl = _ctrl(backend)
         await ctrl.swipe(1, 500, 300, 500, edge="left")
@@ -328,8 +328,8 @@ class TestTheRoutes:
         assert resp.status_code == 422
 
     async def test_an_edge_swipe(self, app):
-        backend = MagicMock(spec=["swipe", "TOOL_NAME", "edge_swipes"])
-        backend.edge_swipes, backend.swipe = True, AsyncMock()
+        backend = MagicMock(spec=["swipe", "TOOL_NAME", "edge_swipes", "edge_flag"])
+        backend.edge_swipes, backend.edge_flag, backend.swipe = True, True, AsyncMock()
         resp = await self._post(app, _ctrl(backend), "/api/v1/device/ui/swipe",
                                 {"start_x": 1, "start_y": 500, "end_x": 300, "end_y": 500,
                                  "edge": "left"})
@@ -349,3 +349,146 @@ class TestTheRoutes:
                                  "edge": "left"})
         assert resp.status_code == 400 and "idb backend cannot" in resp.text
 
+
+
+
+# ---------------------------------------------------------------------------
+# What the review's mutants showed was untested (#251, second round)
+# ---------------------------------------------------------------------------
+
+
+class TestEveryTapElementPathHolds:
+    async def test_a_web_element(self):
+        backend = MagicMock(spec=["tap", "TOOL_NAME"])
+        backend.tap = AsyncMock()
+        ctrl = _ctrl(backend)
+        ctrl._is_android = MagicMock(return_value=False)
+        el = UIElement(type="Link", label="Buy", identifier=None,
+                       frame={"x": 0, "y": 0, "width": 100, "height": 40},
+                       extra_attrs={"source": "web-inspector"})
+        ctrl.get_ui_elements = AsyncMock(return_value=([el], UDID))
+        ctrl._web_element_still_there = AsyncMock(return_value=True)
+        await ctrl.tap_element(label="Buy", duration=1.5, skip_stability_check=True)
+        assert backend.tap.await_args.kwargs == {"hold": 1.5}
+
+    async def test_the_android_tap_after_scrolling_to_it(self):
+        """An element off screen: scrolled to, then tapped -- and that tap held
+        too, not an ordinary click that answered ok (review)."""
+        backend = MagicMock(spec=["tap_by_selector", "scroll_into_view", "TOOL_NAME"])
+        backend.tap_by_selector = AsyncMock(side_effect=[None, {"label": "Map"}])
+        backend.scroll_into_view = AsyncMock(return_value={"label": "Map"})
+        ctrl = _ctrl(backend, kind=DeviceType.ANDROID_EMULATOR)
+        ctrl._is_android = MagicMock(return_value=True)
+        await ctrl.tap_element(identifier="map", duration=1.0)
+        assert [c.kwargs.get("hold") for c in backend.tap_by_selector.await_args_list] == [
+            1.0, 1.0]
+
+    async def test_a_bad_duration_is_refused_before_any_device(self):
+        ctrl = _ctrl(MagicMock(spec=["tap", "TOOL_NAME"]))
+        with pytest.raises(InvalidDeviceRequestError, match="duration"):
+            await ctrl.tap_element(identifier="map", duration=0)
+        ctrl.resolve_udid.assert_not_awaited()
+
+
+class TestTheTapElementRoute:
+    @pytest.fixture
+    def app(self):
+        return create_app(config=ServerConfig(api_key="k"), enable_oslog=False,
+                          enable_crash=False, enable_proxy=False)
+
+    async def test_the_duration_reaches_the_controller_and_is_said_back(self, app):
+        ctrl = DeviceController()
+        ctrl.resolve_udid = AsyncMock(return_value=UDID)
+        ctrl.tap_element = AsyncMock(return_value={"status": "ok", "tapped": {"label": "Map"}})
+        ctrl.backend_that_served = MagicMock(return_value="sim-bridge")
+        app.state.device_controller = ctrl
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            resp = await c.post("/api/v1/device/ui/tap-element",
+                                json={"identifier": "map", "duration": 1.25},
+                                headers={"Authorization": "Bearer k"})
+        assert resp.status_code == 200, resp.text
+        assert ctrl.tap_element.await_args.kwargs["duration"] == 1.25
+        assert resp.json()["duration"] == 1.25
+
+
+class TestEdgeBoundariesAndAxes:
+    @pytest.mark.parametrize("edge,x,y", [
+        ("left", 1080 * 0.03, 1000), ("right", 1080 * 0.97, 1000),
+        ("top", 500, 2340 * 0.03), ("bottom", 500, 2340 * 0.97),
+    ])
+    def test_exactly_at_the_margin_counts(self, edge, x, y):
+        gestures.check_edge_start(edge, x, y, 1080, 2340, tool="t")
+
+    async def test_u2_checks_the_right_edge_against_the_width(self):
+        """Width and height swapped passed every other test (review)."""
+        device = MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        backend = TestEachBackendsLongPress._u2(device)
+        await backend.swipe("dev", 1070, 1300, 600, 1300, 0.3, edge="right")
+        device.swipe.assert_called_once()
+
+
+class TestU2NeverPressesTwice:
+    @staticmethod
+    def _selector(**obj_kwargs):
+        obj = MagicMock(**obj_kwargs)
+        obj.exists = True
+        obj.info = {"bounds": {"left": 0, "right": 100, "top": 0, "bottom": 50}}
+        return TestEachBackendsLongPress._u2(MagicMock(return_value=obj)), obj
+
+    async def test_a_press_that_failed_after_it_was_sent_is_not_retried(self):
+        """tap_element would fall through to the tree path and press again:
+        a context menu opened twice (#407)."""
+        backend, obj = self._selector()
+        obj.long_click.side_effect = TimeoutError("jsonrpc read timed out")
+        with pytest.raises(DeviceError, match="not sent again"):
+            await backend.tap_by_selector("dev", identifier="map", hold=1.0)
+
+    async def test_a_lookup_that_failed_still_falls_back(self):
+        from server.device.android.u2_client import U2Backend
+
+        backend = U2Backend()
+
+        def broken(serial):
+            raise ConnectionError("uiautomator not up")
+        backend._connect = broken
+        assert await backend.tap_by_selector("dev", identifier="map", hold=1.0) is None
+
+
+class TestSimulatorEdgeSwipesNeedTheFlag:
+    @staticmethod
+    def _backend(*, flag):
+        spec = ["swipe", "TOOL_NAME", "edge_swipes"] + (["edge_flag"] if flag else [])
+        backend = MagicMock(spec=spec)
+        backend.TOOL_NAME, backend.edge_swipes = ("sim-bridge" if flag else "wda"), True
+        if flag:
+            backend.edge_flag = True
+        backend.swipe = AsyncMock()
+        return backend
+
+    async def test_wda_on_a_simulator_refuses(self):
+        """It would drag from the edge, answer ok, and nothing would happen."""
+        backend = self._backend(flag=False)
+        with pytest.raises(DeviceOperationUnsupportedError, match="needs sim-bridge"):
+            await _ctrl(backend, kind=DeviceType.SIMULATOR).swipe(
+                1, 500, 300, 500, edge="left")
+        backend.swipe.assert_not_awaited()
+
+    async def test_wda_on_a_phone_needs_no_flag(self):
+        backend = self._backend(flag=False)
+        await _ctrl(backend, kind=DeviceType.DEVICE).swipe(1, 500, 300, 500, edge="left")
+        backend.swipe.assert_awaited_once()
+
+    async def test_sim_bridge_on_a_simulator_sends_it(self):
+        backend = self._backend(flag=True)
+        await _ctrl(backend, kind=DeviceType.SIMULATOR).swipe(1, 500, 300, 500, edge="left")
+        backend.swipe.assert_awaited_once()
+
+    def test_the_bridge_refuses_rather_than_skips_without_a_device(self):
+        from pathlib import Path
+
+        swift = (Path(__file__).resolve().parents[1] / "tools" / "sim-bridge.swift").read_text()
+        start = swift.index('case "swipe":')
+        block = swift[start:swift.index("case ", start + 10)]
+        assert "guard let device = resolveDevice(udid: udid) else {" in block
+        assert "if let device = resolveDevice" not in block

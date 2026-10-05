@@ -242,6 +242,10 @@ def _focused_text_and_hint(device: Any) -> tuple[str | None, str | None]:
             return (node.get("text", ""), node.get("hint", ""))
     return (None, None)
 
+class _PressMayHaveLanded(Exception):
+    """A selector's click or long click failed after it was sent (#251)."""
+
+
 #: A pinch's default narrow end on Android, past ScaleGestureDetector's 27mm.
 PINCH_NARROW_MM = 30.0
 
@@ -484,10 +488,16 @@ class U2Backend:
                 if not obj.exists:
                     continue
                 info = obj.info or {}
-                if hold is None:
-                    obj.click()
-                else:
-                    obj.long_click(float(hold))
+                try:
+                    if hold is None:
+                        obj.click()
+                    else:
+                        obj.long_click(float(hold))
+                except Exception as e:
+                    # Past this point the press may have reached the device: a
+                    # read timeout after it landed looks the same as one before.
+                    # Falling back to the tree path would press again (#407).
+                    raise _PressMayHaveLanded(e) from e
                 bounds = info.get("bounds") or {}
                 cx = (bounds.get("left", 0) + bounds.get("right", 0)) / 2
                 cy = (bounds.get("top", 0) + bounds.get("bottom", 0)) / 2
@@ -506,6 +516,12 @@ class U2Backend:
 
         try:
             return await asyncio.to_thread(_do)
+        except _PressMayHaveLanded as e:
+            what = "long press" if hold is not None else "tap"
+            raise DeviceError(
+                f"the {what} on {udid} failed after it was sent ({e.__cause__!r}); it "
+                f"may already have landed, so it was not sent again -- check the screen",
+                tool="u2") from e
         except Exception as e:
             logger.debug("tap_by_selector fell back (%s)", e)
             return None

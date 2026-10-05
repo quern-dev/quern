@@ -949,6 +949,12 @@ func doTap(udid: String, x: Double, y: Double, hold: Double = 0.05) -> Bool {
     return sendDigitizerEvent(point: point, identifier: id, isDown: false, client: client)
 }
 
+/// Indigo's screen-edge bits, as the guest reads them at 0x3b/0xdb (#251).
+/// The values baguette derived by sweeping IndigoHIDMessageForMouseNSEvent's
+/// edge argument and diffing the bytes; quern's offsets were reached
+/// independently and match.
+let edgeBits: [String: UInt8] = ["left": 0x02, "right": 0x04, "top": 0x08, "bottom": 0x01]
+
 /// `hold` keeps the finger down at the end point for that many seconds before
 /// lifting. With no hold a 0.3s swipe releases at speed and the list keeps
 /// going: measured on iOS 18.6 it travelled 1020pt for a 389pt drag, which is
@@ -959,12 +965,7 @@ func doTap(udid: String, x: Double, y: Double, hold: Double = 0.05) -> Bool {
 /// identical point was tried first and changed nothing -- the travel was the
 /// same 1000pt -- so the unchanged position is evidently not treated as the
 /// finger coming to rest.
-/// Indigo's screen-edge bits, as the guest reads them at 0x3b/0xdb (#251).
-/// The values baguette derived by sweeping IndigoHIDMessageForMouseNSEvent's
-/// edge argument and diffing the bytes; quern's offsets were reached
-/// independently and match.
-let edgeBits: [String: UInt8] = ["left": 0x02, "right": 0x04, "top": 0x08, "bottom": 0x01]
-
+///
 /// `edge` marks every event of the swipe -- down, each move, the hold and the
 /// lift -- as starting from that screen edge, which is what routes it to the
 /// system's edge gestures (back, home, Control Centre) instead of the app. A
@@ -1658,7 +1659,13 @@ func handleCommand(_ dict: [String: Any]) {
             // the start position, so `edge` from mid-screen would be a system
             // gesture here and an ordinary swipe on a phone (#251). The margin
             // is EDGE_MARGIN in server/device/gestures.py.
-            if let device = resolveDevice(udid: udid) {
+            // Refused rather than skipped when the device cannot be found: an
+            // unchecked edge swipe is the one this check exists to stop (review).
+            guard let device = resolveDevice(udid: udid) else {
+                respond(["ok": false, "error": "device not found: \(udid)"])
+                return
+            }
+            do {
                 let size = devicePointSize(for: device)
                 let w = Double(size.width), h = Double(size.height), m = 0.03
                 let atEdge: Bool

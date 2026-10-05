@@ -520,6 +520,11 @@ async def tap_element(request: Request, body: TapElementRequest):
             # when someone asks.
             if isinstance(result, dict) and "backend" not in result:
                 result["backend"] = controller.backend_that_served(resolved)
+            # Said back, as `tap` says it: a long press and a tap are different
+            # actions, and the response should say which one ran (review).
+            if (body.duration is not None and isinstance(result, dict)
+                    and result.get("status") == "ok"):
+                result["duration"] = body.duration
 
             # Element not found — return 404 with screen context. The 404 is
             # what tells _action this was `not_found` rather than a failure.
