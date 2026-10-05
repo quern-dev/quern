@@ -389,11 +389,19 @@ If coordinate taps are not landing on the expected element, use take_annotated_s
         .string()
         .optional()
         .describe("Target device UDID (defaults to active device)"),
+      duration: z
+        .coerce.number()
+        .finite()
+        .positive()
+        .max(10)
+        .optional()
+        .describe("Hold the touch this many seconds: a long press, for context menus, drag handles and press-and-hold controls. Omit for an ordinary tap. 1.0 clears the long-press threshold on iOS (0.5s) and Android (~0.4s)."),
     }),
-  }, async ({ x, y, udid }) => {
+  }, async ({ x, y, udid, duration }) => {
     try {
       const body: Record<string, unknown> = { x, y };
       if (udid) body.udid = udid;
+      if (duration !== undefined) body.duration = duration;
 
       const data = await apiRequest(
         "POST",
@@ -493,10 +501,18 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         .max(10)
         .optional()
         .describe("Seconds to wait before capturing after screenshot/screen context (default 1.0). Increase for slow devices or complex transitions."),
+      duration: z
+        .coerce.number()
+        .finite()
+        .positive()
+        .max(10)
+        .optional()
+        .describe("Hold the touch this many seconds: a long press, for context menus, drag handles and press-and-hold controls. Omit for an ordinary tap. 1.0 clears the long-press threshold on iOS (0.5s) and Android (~0.4s)."),
     }),
-  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value, scroll_to_find, include_screen_context, capture_screenshots, settle_delay, snapshot_depth }) => {
+  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value, scroll_to_find, include_screen_context, capture_screenshots, settle_delay, snapshot_depth, duration }) => {
     try {
       const body: Record<string, unknown> = {};
+      if (duration !== undefined) body.duration = duration;
       if (label) body.label = label;
       if (label_contains) body.label_contains = label_contains;
       if (label_prefix) body.label_prefix = label_prefix;
@@ -544,7 +560,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
   });
 
   server.registerTool("swipe", {
-    description: `Perform a swipe gesture from one point to another.`,
+    description: `Perform a swipe gesture from one point to another. With edge, a swipe from a screen edge that the system takes (back, home, Control Centre, notifications).`,
     inputSchema: strictParams({
       start_x: z.coerce.number().describe("Starting X coordinate"),
       start_y: z.coerce.number().describe("Starting Y coordinate"),
@@ -558,8 +574,12 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         .string()
         .optional()
         .describe("Target device UDID (defaults to active device)"),
+      edge: z
+        .enum(["left", "right", "top", "bottom"])
+        .optional()
+        .describe("Make it a swipe from this screen edge, which the system takes: back from the left, home from the bottom, Control Centre or the notification shade from the top. Start the swipe at that edge (within 3% of the screen) -- e.g. start_x 1 for the left; otherwise it is refused. Not on the idb backend."),
     }),
-  }, async ({ start_x, start_y, end_x, end_y, duration, udid }) => {
+  }, async ({ start_x, start_y, end_x, end_y, duration, udid, edge }) => {
     try {
       const body: Record<string, unknown> = {
         start_x,
@@ -569,6 +589,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         duration,
       };
       if (udid) body.udid = udid;
+      if (edge) body.edge = edge;
 
       const data = await apiRequest(
         "POST",

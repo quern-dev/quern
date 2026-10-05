@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from server.device.gestures import Plan, w3c_actions
+from server.device.gestures import Plan, check_edge_start, w3c_actions
 from server.device.ios.wda_selector import ElementSelector
 from server.models import (
     DeviceError,
@@ -316,6 +316,9 @@ class WdaBackend:
 
     #: W3C pointer actions carry one touch source per finger (#252).
     multitouch = True
+
+    #: A swipe from the screen edge is the system's on a real device (#251).
+    edge_swipes = True
 
     def __init__(self) -> None:
         self._connections: dict[str, _WdaConnection] = {}
@@ -1425,11 +1428,28 @@ class WdaBackend:
 
         return find_element_at_point(elements, x, y)
 
-    async def tap(self, udid: str, x: float, y: float) -> None:
-        """Tap at coordinates via WDA."""
-        await self._request("post", udid, "/wda/tap",
-                            use_session=True, json={"x": x, "y": y},
-                            timeout=ACTION_TIMEOUT)
+    async def tap(self, udid: str, x: float, y: float, hold: float | None = None) -> None:
+        """Tap at coordinates via WDA; with `hold`, a long press (#251).
+
+        A long press is XCUITest's press-for-duration, and is never re-sent: one
+        that WDA may already have performed would open a context menu twice,
+        or open it and then select from it (#407).
+        """
+        if hold is None:
+            await self._request("post", udid, "/wda/tap",
+                                use_session=True, json={"x": x, "y": y},
+                                timeout=ACTION_TIMEOUT)
+            return
+        try:
+            await self._request("post", udid, "/wda/touchAndHold", use_session=True,
+                                json={"x": x, "y": y, "duration": float(hold)},
+                                timeout=ACTION_TIMEOUT + float(hold),
+                                raise_if_maybe_delivered=True)
+        except httpx.HTTPError as exc:
+            raise DeviceError(
+                f"WDA did not answer the long press on {udid[:8]} ({type(exc).__name__}). "
+                "It may already have been performed, so it was not sent again; check "
+                "the screen.", tool="wda") from exc
 
     async def swipe(
         self,
@@ -1440,6 +1460,7 @@ class WdaBackend:
         end_y: float,
         duration: float = 0.5,
         hold: float = 0.0,
+        edge: str | None = None,
     ) -> None:
         """Swipe gesture via WDA.
 
@@ -1447,7 +1468,14 @@ class WdaBackend:
         XCUITest's press-then-drag, not a flick: measured on an iPhone 11, a
         358pt drag moved the list 349pt, and nothing was moving once the call
         returned, including at the end of a list.
+
+        An `edge` swipe needs nothing more than its start at that edge: the
+        device decides from there that it is the system's. Measured on an
+        iPhone 12: a drag from x=1 popped a navigation stack (#251).
         """
+        if edge is not None:
+            width, height = await self._window_size(udid)
+            check_edge_start(edge, start_x, start_y, width, height, tool="wda")
         await self._request("post", udid, "/wda/dragfromtoforduration",
                             use_session=True, timeout=ACTION_TIMEOUT,
                             json={

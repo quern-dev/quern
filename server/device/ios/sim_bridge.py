@@ -518,6 +518,9 @@ class SimBridgeBackend:
     #: those on a backend without it rather than sending one finger.
     multitouch = True
 
+    #: Swipes from a screen edge, by Indigo's edge flag on every event (#251).
+    edge_swipes = True
+
     def __init__(self, manager: SimBridgeManager) -> None:
         self._mgr = manager
 
@@ -728,8 +731,15 @@ class SimBridgeBackend:
             return tree
         return None
 
-    async def tap(self, udid: str, x: float, y: float) -> None:
-        await self._send({"cmd": "tap", "udid": udid, "x": x, "y": y})
+    async def tap(self, udid: str, x: float, y: float, hold: float | None = None) -> None:
+        """Tap, or with `hold` press for that many seconds: a long press (#251).
+
+        The bridge has read `hold` off the wire all along; nothing sent it.
+        """
+        cmd: dict = {"cmd": "tap", "udid": udid, "x": x, "y": y}
+        if hold is not None:
+            cmd["hold"] = float(hold)
+        await self._send(cmd)
 
     async def swipe(
         self,
@@ -740,13 +750,13 @@ class SimBridgeBackend:
         end_y: float,
         duration: float = 0.3,
         hold: float = 0.0,
+        edge: str | None = None,
     ) -> None:
         """Swipe, optionally holding at the end so the list does not fling.
 
         See `doSwipe` in sim-bridge.swift for the measurements behind `hold`.
         """
-        await self._send(
-            {
+        cmd = {
                 "cmd": "swipe",
                 "udid": udid,
                 "x1": start_x,
@@ -756,7 +766,11 @@ class SimBridgeBackend:
                 "duration": duration,
                 "hold": hold,
             }
-        )
+        if edge is not None:
+            # The bridge checks the start is at the edge: only it knows the
+            # simulator's screen size.
+            cmd["edge"] = edge
+        await self._send(cmd)
 
     async def perform_gesture(self, udid: str, plan: Plan) -> None:
         """Send a gesture `server.device.gestures` has already laid out."""

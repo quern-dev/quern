@@ -307,3 +307,38 @@ def w3c_actions(plan: Plan) -> list[dict]:
                 steps.append({"type": "pause", "duration": round(plan.interval * 1000)})
         sources.append(source(i, steps))
     return sources
+
+
+#: The screen edges a swipe can start from (#251).
+EDGES: tuple[str, ...] = ("left", "right", "top", "bottom")
+#: How close to its edge an edge swipe must start, as a fraction of the screen
+#: across that axis: 12pt on a 402pt iPhone, inside its back-swipe zone; 32px
+#: on a 1080px phone, inside gesture navigation's band.
+EDGE_MARGIN = 0.03
+
+
+def check_edge(edge: str) -> None:
+    if edge not in EDGES:
+        raise _bad(f"edge must be one of {', '.join(EDGES)}, not {edge!r}")
+
+
+def check_edge_start(edge: str, x: float, y: float, width: float, height: float,
+                     *, tool: str) -> None:
+    """Refuse an edge swipe that does not start at its edge.
+
+    A real device decides from where a touch starts whether it is the
+    system's, so an edge swipe there is a swipe from the edge; a simulator is
+    told by a flag, and would make one of a swipe from the middle. Requiring
+    the start at the edge everywhere means `edge` does the same thing on all
+    of them.
+    """
+    at = {"left": x <= width * EDGE_MARGIN,
+          "right": x >= width * (1 - EDGE_MARGIN),
+          "top": y <= height * EDGE_MARGIN,
+          "bottom": y >= height * (1 - EDGE_MARGIN)}[edge]
+    if not at:
+        span = width if edge in ("left", "right") else height
+        raise InvalidDeviceRequestError(
+            f"an edge swipe from the {edge} must start within {span * EDGE_MARGIN:.0f} of "
+            f"that edge of the {width:.0f}x{height:.0f} screen; ({x:.0f}, {y:.0f}) does not",
+            tool=tool)

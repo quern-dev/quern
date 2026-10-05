@@ -2,6 +2,7 @@ package com.quern.probe
 
 import android.content.Intent
 import android.os.Bundle
+import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
 import androidx.viewpager2.adapter.FragmentStateAdapter
@@ -39,6 +40,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Back gestures that reached the app while the Gestures tab was showing:
+     * a back swipe from the screen edge is the system's, so the app is where
+     * it can be seen (#251). Anywhere else back behaves as it always has.
+     */
+    object Backs {
+        var count: Int = 0
+        var listener: (() -> Unit)? = null
+    }
+
     private val tabs: List<Pair<String, () -> Fragment>> = listOf(
         "Text" to ::TextFragment,
         "Controls" to ::ControlsFragment,
@@ -73,6 +84,20 @@ class MainActivity : AppCompatActivity() {
             tab.text = tabs[position].first
             tab.contentDescription = "tab_${tabs[position].first.lowercase()}"
         }.attach()
+
+        val gestures = tabs.indexOfFirst { it.first == "Gestures" }
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (pager.currentItem == gestures) {
+                    Backs.count += 1
+                    Backs.listener?.invoke()
+                } else {
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                    isEnabled = true
+                }
+            }
+        })
     }
 
     override fun onNewIntent(intent: Intent) {

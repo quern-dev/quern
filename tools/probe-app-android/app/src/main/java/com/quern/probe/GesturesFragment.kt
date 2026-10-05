@@ -40,6 +40,9 @@ class GesturesFragment : Fragment() {
         labels["tap"] = root.findViewById(R.id.gesture_tap)
         labels["double_tap"] = root.findViewById(R.id.gesture_double_tap)
         labels["two_finger_tap"] = root.findViewById(R.id.gesture_two_finger_tap)
+        labels["long_press"] = root.findViewById(R.id.gesture_long_press)
+        labels["back"] = root.findViewById(R.id.gesture_back)
+        MainActivity.Backs.listener = { activity?.runOnUiThread { renderBacks() } }
         val pad = root.findViewById<GesturePadView>(R.id.gesture_pad)
         pad.onReport = { key, text -> labels[key]?.text = text }
         root.findViewById<Button>(R.id.gesture_reset).setOnClickListener {
@@ -57,6 +60,18 @@ class GesturesFragment : Fragment() {
         labels["tap"]?.text = "tap 0"
         labels["double_tap"]?.text = "double 0"
         labels["two_finger_tap"]?.text = "twofinger 0"
+        labels["long_press"]?.text = "long 0"
+        MainActivity.Backs.count = 0
+        renderBacks()
+    }
+
+    private fun renderBacks() {
+        labels["back"]?.text = "back ${MainActivity.Backs.count}"
+    }
+
+    override fun onDestroyView() {
+        MainActivity.Backs.listener = null
+        super.onDestroyView()
     }
 }
 
@@ -67,6 +82,7 @@ class GesturePadView(context: Context, attrs: AttributeSet?) : View(context, att
     private var taps = 0
     private var doubles = 0
     private var twoFingerTaps = 0
+    private var longPresses = 0
 
     private var scale = 1f
     private var scaling = false
@@ -100,6 +116,11 @@ class GesturePadView(context: Context, attrs: AttributeSet?) : View(context, att
                 return true
             }
 
+            override fun onLongPress(e: MotionEvent) {
+                longPresses += 1
+                report("long_press", "long $longPresses")
+            }
+
             override fun onDoubleTap(e: MotionEvent): Boolean {
                 doubles += 1
                 report("double_tap", "double $doubles")
@@ -122,6 +143,7 @@ class GesturePadView(context: Context, attrs: AttributeSet?) : View(context, att
     private var tracking = false
 
     fun reset() {
+        longPresses = 0
         taps = 0
         doubles = 0
         twoFingerTaps = 0

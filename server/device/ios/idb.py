@@ -413,12 +413,13 @@ class IdbBackend:
             return None
 
 
-    async def tap(self, udid: str, x: float, y: float) -> None:
+    async def tap(self, udid: str, x: float, y: float, hold: float | None = None) -> None:
         """Tap at coordinates. Runs: idb ui tap <x> <y> --duration 0.05 --udid <udid>
 
         Coordinates are rounded to integers as idb expects int values.
         A small explicit --duration is always passed because idb's default
         tap (no duration) fails to activate SwiftUI Toggle/Switch controls.
+        `hold` replaces it for a long press (#251).
         """
         import time
         start = time.perf_counter()
@@ -426,7 +427,7 @@ class IdbBackend:
 
         await self._run(
             "ui", "tap", str(int(round(x))), str(int(round(y))),
-            "--duration", "0.05", "--udid", udid,
+            "--duration", str(hold if hold is not None else 0.05), "--udid", udid,
         )
 
         end = time.perf_counter()
