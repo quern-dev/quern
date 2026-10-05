@@ -596,7 +596,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
   });
 
   server.registerTool("gesture", {
-    description: `Multi-finger gestures and timed taps on iOS (simulators and physical iPhones): pinch, rotate, two-finger pan, double tap, two-finger tap. For maps, photo viewers, zoomable canvases and anything that needs two fingers or a real double tap.
+    description: `Multi-finger gestures and timed taps on iOS and Android: pinch, rotate, two-finger pan, double tap, two-finger tap. For maps, photo viewers, zoomable canvases and anything that needs two fingers or a real double tap.
 
 Centre it on x/y, or on the element a label or identifier names (one of the two). Then, by type:
 - pinch: scale (above 1 spreads the fingers to zoom in, below 1 squeezes to zoom out); distance is the separation at the narrow end (default 60pt).
@@ -605,7 +605,7 @@ Centre it on x/y, or on the element a label or identifier names (one of the two)
 - double_tap: count taps (default 2, 3 for a triple) inside the system's double-tap interval -- two separate tap calls can miss it.
 - two_finger_tap: both fingers down and up together.
 
-Returns where the fingers went. An app's recogniser reports a little less than was sent (a pinch from 40pt to 240pt reads as about 5x, not 6x), because it starts measuring only once the fingers pass its threshold. iOS simulators and physical iPhones for now: an Android device or the idb backend answers 400 rather than sending one finger.`,
+Returns where the fingers went. An app's recogniser reports a little less than was sent (a pinch from 40pt to 240pt reads as about 5x, not 6x), because it starts measuring only once the fingers pass its threshold. Works on iOS simulators, physical iPhones, and Android (needs scrcpy installed; otherwise a 400 says how). On Android coordinates are pixels and a pinch defaults to 30mm apart along the long axis, since many apps ignore fingers closer than ~27mm; a large scale may then not fit, and the 400 names the point.`,
     inputSchema: strictParams({
       type: z.enum(["pinch", "rotate", "pan", "double_tap", "two_finger_tap"]).describe("Which gesture"),
       x: z.coerce.number().finite().optional().describe("Centre X, in points"),

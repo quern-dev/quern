@@ -3064,7 +3064,7 @@ class DeviceControllerUI:
             raise DeviceOperationUnsupportedError(
                 f"{kind} needs several fingers at once, and the {name} backend cannot "
                 f"send them. Multi-finger gestures are implemented for iOS simulators "
-                f"(sim-bridge) and physical iPhones (WDA) (#252).", tool=name)
+                f"(sim-bridge), physical iPhones (WDA) and Android (#252).", tool=name)
         await self._warn_if_input_is_suppressed(resolved)
 
         element = None
@@ -3080,7 +3080,10 @@ class DeviceControllerUI:
                     f"gesture cannot be centred on it; pass x and y", tool=name)
             x = frame["x"] + frame["width"] / 2
             y = frame["y"] + frame["height"] / 2
-        laid_out = gestures.plan(kind, float(x), float(y), **params)
+        defaults: dict = {}
+        if hasattr(backend, "gesture_defaults"):
+            defaults = await backend.gesture_defaults(resolved)
+        laid_out = gestures.plan(kind, float(x), float(y), **defaults, **params)
         await backend.perform_gesture(resolved, laid_out)
         self._invalidate_ui_cache(resolved)  # UI changed
 

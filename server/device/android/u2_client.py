@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import Any
 
 from server.config import CONFIG_DIR
-from server.models import DeviceError
+from server.device.android.scrcpy_input import ScrcpyInput
+from server.device.gestures import Plan
+from server.models import DeviceError, InvalidDeviceRequestError
 
 logger = logging.getLogger(__name__)
 
@@ -240,6 +242,10 @@ def _focused_text_and_hint(device: Any) -> tuple[str | None, str | None]:
             return (node.get("text", ""), node.get("hint", ""))
     return (None, None)
 
+#: A pinch's default narrow end on Android, past ScaleGestureDetector's 27mm.
+PINCH_NARROW_MM = 30.0
+
+
 class U2Backend:
     """Manages Android UI automation via uiautomator2.
 
@@ -252,8 +258,15 @@ class U2Backend:
     #: tool that was never involved (#186).
     TOOL_NAME = "u2"
 
+    #: Through scrcpy's server, which can inject more than one pointer
+    #: (#252); without scrcpy a gesture is refused with the install command.
+    multitouch = True
+
     def __init__(self) -> None:
         self._devices: dict[str, object] = {}  # serial → u2.Device
+        from server.device.android.adb import _find_sdk_tool
+
+        self._touch = ScrcpyInput(_find_sdk_tool("adb"))
 
     def _connect(self, serial: str):
         """Lazy, cached connection to a device.
@@ -286,6 +299,10 @@ class U2Backend:
     def _disconnect(self, serial: str) -> None:
         """Remove a cached connection."""
         self._devices.pop(serial, None)
+
+    async def close(self) -> None:
+        """Stop the gesture servers this backend started, and their forwards."""
+        await self._touch.close_all()
 
     async def describe_all(
         self,
@@ -355,6 +372,54 @@ class U2Backend:
                     best = el
                     best_area = area
         return best
+
+    async def perform_gesture(self, udid: str, plan: Plan) -> None:
+        """A gesture `server.device.gestures` laid out, through scrcpy (#252).
+
+        Checked against the screen first, in its current orientation: a
+        point off it is refused, as on iOS, rather than pinned to the edge.
+        """
+        def _size():
+            return self._connect(udid).window_size()
+
+        try:
+            width, height = await asyncio.to_thread(_size)
+        except Exception as e:
+            raise DeviceError(f"could not read the screen size of {udid}: {e}", tool="u2") from e
+        points = [p for path in plan.paths or [] for p in path] + list(plan.points or [])
+        for x, y in points:
+            if not (0 <= x <= width and 0 <= y <= height):
+                raise InvalidDeviceRequestError(
+                    f"point ({x:.0f}, {y:.0f}) is off the {width}x{height} screen", tool="u2")
+        await self._touch.perform(udid, plan, int(width), int(height))
+
+    async def gesture_defaults(self, udid: str) -> dict:
+        """The default finger distances for this screen, in its pixels.
+
+        `unit` is pixels per dp, which scales the defaults set in iOS points.
+        A pinch's narrow end is 30mm, not 60dp: ScaleGestureDetector ignores
+        fingers closer than `config_minScalingSpan` (27mm in AOSP), so a pinch
+        starting 60dp (~10mm) apart was measured reading 1.00 for a 3x spread,
+        and one starting 500px apart read 1.44 for 1.6x (emulator, 2.75x).
+        """
+        def _density():
+            info = self._connect(udid).info
+            return info["displayWidth"] / info["displaySizeDpX"]
+
+        try:
+            unit = float(await asyncio.to_thread(_density))
+        except Exception as e:
+            # A distance off by a factor is no reason to refuse the gesture,
+            # but it is not silent either.
+            logger.warning("Could not read the density of %s (%s); gesture defaults "
+                           "are in pixels", udid, e)
+            return {}
+        # Along the long axis: 30mm at 2x spans ~1040px, the whole width of a
+        # portrait phone, putting a finger in the side band where gesture
+        # navigation reads a touch as Back -- and, on the probe app, outside
+        # the view being pinched (measured: 0.5x read nothing).
+        return {"unit": unit, "pinch_distance": PINCH_NARROW_MM / 25.4 * 160 * unit,
+                "pinch_angle": 90.0}
 
     async def tap(self, udid: str, x: float, y: float) -> None:
         """Tap at coordinates."""

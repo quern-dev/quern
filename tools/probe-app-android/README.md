@@ -41,6 +41,7 @@ Package: `com.quern.probe`.
 | Web | a `WebView` with fixed local content and named DOM ids, for webview-automation work that currently depends on a third-party app |
 | Diag | crash (main and background thread) and ANR triggers |
 | Location | `set_location` readout mirroring iOS (`location_auth`, `location_lat`, `location_lon`, `location_count`); the permission is granted by the suite, never requested in-app, so no dialog sits over other tabs. Last in the strip, so adding it moved no tab |
+| Gestures | what a pinch, rotation, two-finger pan, double tap and two-finger tap did, as Android's detectors saw it, with the iOS probe's label text so one live test reads both: `gesture_pinch` (ScaleGestureDetector's factor), `gesture_rotate` (degrees, positive clockwise), `gesture_pan`, and counters `gesture_tap`, `gesture_double_tap`, `gesture_two_finger_tap`, all on `gesture_pad`; `gesture_reset` clears them. After Location, so it moved no tab; the strip scrolls, so reach it by swiping the tabs (#252) |
 
 The tab bar is itself a fixture for tab-selection probing.
 
