@@ -47,6 +47,8 @@ Use `tap_element` with a label and element type instead of `tap` with raw coordi
 
 **When coordinates are OK**: Gestures that aren't tied to specific elements (swipe to refresh, drag to reorder).
 
+**Two fingers, or a real double tap**: `gesture` does pinch (`scale`), rotate (`degrees`), two-finger pan, double tap and two-finger tap, centred on an element by `label`/`identifier` or on `x`/`y`. Use it for maps, photo viewers and zoomable canvases, and for a double tap: two `tap` calls each pay a round trip and can land outside the double-tap interval, reading as two single taps. Expect the app to report a little less than you sent -- a recogniser starts measuring only once the fingers pass its threshold, so `scale: 3` reads as about 2.6. Simulators only for now; elsewhere it answers 400 rather than sending one finger.
+
 ---
 
 ### 3. Summarize First, Drill Down Second
@@ -187,7 +189,7 @@ booted simulator, which disconnects the touch, button and keyboard services
 quern drives and never reconnects them. Everything else keeps working — tree
 reads, screenshots, `open_url`, app launches — so the device looks healthy
 while nothing you do reaches it. When quern has read that state, `tap`,
-`tap_element`, `swipe`, `type_text`, `clear_text` and `press_button` carry an
+`tap_element`, `swipe`, `gesture`, `type_text`, `clear_text` and `press_button` carry an
 advisory on the response. Do not treat the tap as landed because the status
 says `ok`: read the advisory, and if it is there, call
 `restore_simulator_input` before continuing. That restarts SpringBoard, so

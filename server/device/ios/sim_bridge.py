@@ -24,8 +24,9 @@ from pathlib import Path
 
 from server.config import CONFIG_DIR
 from server.device import probing
+from server.device.gestures import Plan
 from server.device.ios import ax_recovery
-from server.models import DeviceError, SimBridgeSaturatedError
+from server.models import DeviceError, InvalidDeviceRequestError, SimBridgeSaturatedError
 from server.tooling.tool_probe import probe_stdout
 
 logger = logging.getLogger(__name__)
@@ -512,6 +513,11 @@ class SimBridgeBackend:
     #: tool that was never involved (#186).
     TOOL_NAME = _TOOL
 
+    #: Moves several contacts at once (#252): pinch, rotate, two-finger pan,
+    #: and the taps that need the system's timing. The controller refuses
+    #: those on a backend without it rather than sending one finger.
+    multitouch = True
+
     def __init__(self, manager: SimBridgeManager) -> None:
         self._mgr = manager
 
@@ -523,7 +529,11 @@ class SimBridgeBackend:
         result = await self._mgr.send(cmd)
         if not result.get("ok", False):
             error = result.get("error", "unknown error")
-            raise DeviceError(f"sim-bridge: {error}", tool=_TOOL)
+            # The bridge marks a request it turned down for what it asked --
+            # a gesture point off the screen -- so it reads as a 400, not as
+            # the bridge failing.
+            cls = InvalidDeviceRequestError if result.get("code") == "bad_request" else DeviceError
+            raise cls(f"sim-bridge: {error}", tool=_TOOL)
         return result
 
     async def describe_all(
@@ -747,6 +757,19 @@ class SimBridgeBackend:
                 "hold": hold,
             }
         )
+
+    async def perform_gesture(self, udid: str, plan: Plan) -> None:
+        """Send a gesture `server.device.gestures` has already laid out."""
+        if plan.paths is not None:
+            await self._send({
+                "cmd": "touch-paths", "udid": udid, "duration": plan.duration,
+                "paths": [[[px, py] for px, py in path] for path in plan.paths],
+            })
+        else:
+            await self._send({
+                "cmd": "multi-tap", "udid": udid, "count": plan.count,
+                "interval": plan.interval, "points": [[px, py] for px, py in plan.points or []],
+            })
 
     async def type_text(self, udid: str, text: str) -> None:
         await self._send({"cmd": "type", "udid": udid, "text": text})

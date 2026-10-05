@@ -1348,6 +1348,213 @@ func doScreenshot(udid: String, quality: Double = 0.8, scale: Int = 1) -> (Data,
     return (data as Data, width, height)
 }
 
+
+// MARK: - Multi-finger input (#252)
+//
+// Pinch, rotate and two-finger pan are one primitive: two or more contacts,
+// each moving along its own path. Built the same way as a single touch -- an
+// IOHIDEvent digitizer parent, now with one finger child per contact, wrapped
+// by IndigoHIDMessageForTrackpadEventFromHIDEventRef -- so it needs no symbol
+// a tap does not already use. Measured against a pinch, rotation and pan
+// recogniser on iOS 18.6 (the probe app's Gestures tab): a spread from 40pt to
+// 240pt reads as scale 5.0, its reverse as 0.17, a 90 degree turn as 83, and a
+// 100pt two-finger drag as 90 -- the shortfalls are UIKit starting to measure
+// only once the fingers pass its threshold.
+//
+// baguette builds its two-finger gestures from IndigoHIDMessageForMouseNSEvent
+// instead; that path also pinches here, but needs a retry loop for a builder
+// that returns nil for ~50ms after a two-finger down. This one has no such
+// window.
+//
+// Not IndigoHIDMessageForScrollEvent: sent with the digitizer target it makes
+// backboardd assert in -[SimHIDVirtualServiceManager serviceForIndigoHIDData:]
+// and abort, every time (3 of 3 on iOS 18.6), which kills every app on the
+// simulator and drops its accessibility connection until the bridge is reset.
+
+func makeMultiFingerEvent(points: [CGPoint], identifiers: [UInt32], isDown: Bool) -> CFTypeRef? {
+    guard let createParent = createDigitizerFn,
+          let createFinger = createFingerFn,
+          let appendFn = appendEventFn,
+          !points.isEmpty, points.count == identifiers.count else { return nil }
+    let mask: UInt32 = isDown ? 0x07 : 0x06
+    let now = mach_absolute_time()
+    let transducerFinger: UInt32 = 2
+    // The parent sits at the contacts' centroid; each child carries its own.
+    let cx = points.map(\.x).reduce(0, +) / CGFloat(points.count)
+    let cy = points.map(\.y).reduce(0, +) / CGFloat(points.count)
+    guard let parentUM = createParent(nil, now, transducerFinger, 0, identifiers[0], mask, 0,
+                                      cx, cy, 0.0, 0.0, 0.0, isDown, isDown, 0)
+    else { return nil }
+    let parent = parentUM.takeRetainedValue()
+    for (index, point) in points.enumerated() {
+        guard let fingerUM = createFinger(nil, now, UInt32(index), identifiers[index], mask,
+                                          point.x, point.y, 0.0, 0.0, 0.0, isDown, isDown, 0)
+        else { return nil }
+        appendFn(parent, fingerUM.takeRetainedValue(), 0)
+    }
+    return parent
+}
+
+func sendMultiFingerEvent(points: [CGPoint], identifiers: [UInt32], isDown: Bool,
+                          client: AnyObject) -> Bool {
+    guard let event = makeMultiFingerEvent(points: points, identifiers: identifiers, isDown: isDown)
+    else { return false }
+    let msg: UnsafeMutableRawPointer? = withExtendedLifetime(event) { wrapAndPatch(event: event) }
+    guard let msg else { return false }
+    sendHIDMessage(msg, to: client)
+    return true
+}
+
+/// Last resort after a lift has failed twice: lift each contact on its own
+/// through the single-touch builder -- a different path from the one that
+/// just failed -- and drop the cached client, so the next command starts from
+/// a fresh connection rather than one with contacts it never released.
+///
+/// Sent checked, waiting for the simulator to confirm delivery, so `true`
+/// means every lift reached it rather than only that it was built: the
+/// unchecked send dispatches with no completion, and reporting a recovery on
+/// that would claim more than was known (review).
+func releaseContacts(points: [CGPoint], identifiers: [UInt32], udid: String,
+                     client: AnyObject) -> Bool {
+    var delivered = true
+    for (point, id) in zip(points, identifiers) {
+        guard let event = makeDigitizerEvent(point: point, identifier: id, isDown: false),
+              let msg = withExtendedLifetime(event, { wrapAndPatch(event: event) }),
+              sendHIDMessageChecked(msg, to: client) else {
+            delivered = false
+            continue
+        }
+    }
+    hidClients.removeValue(forKey: udid)
+    return delivered
+}
+
+/// Every contact down at the first point of its path, through each waypoint
+/// in step, and up at the last. `paths` are in points, one per finger, all the
+/// same length (at least two); the caller computes the geometry, so a pinch
+/// and a rotation differ only in the waypoints they hand over.
+/// Returns (ok, error, badRequest): `badRequest` marks a refusal of what was
+/// asked -- malformed paths, a point off the screen -- as against a failure.
+func doTouchPaths(udid: String, paths: [[CGPoint]], duration: Double) -> (Bool, String?, Bool) {
+    guard paths.count >= 2, let steps = paths.first?.count, steps >= 2,
+          paths.allSatisfy({ $0.count == steps }) else {
+        return (false, "touch-paths needs two or more paths of the same length, at least two points each", true)
+    }
+    guard let client = ensureHIDClient(udid: udid), let device = resolveDevice(udid: udid) else {
+        return (false, "no HID client for \(udid)", false)
+    }
+    let size = devicePointSize(for: device)
+    // Refused, not clamped: a finger pinned to the edge turns the scale or
+    // angle that was asked for into a different one, and says nothing.
+    for path in paths {
+        for p in path where p.x < 0 || p.y < 0 || p.x > size.width || p.y > size.height {
+            return (false, "point (\(Int(p.x)), \(Int(p.y))) is off the \(Int(size.width))x\(Int(size.height)) screen", true)
+        }
+    }
+    let normalised = paths.map { path in
+        path.map { CGPoint(x: CGFloat(clamp01(Double($0.x) / Double(size.width))),
+                           y: CGFloat(clamp01(Double($0.y) / Double(size.height)))) }
+    }
+    let ids = paths.map { _ in nextTouchId() }
+    let stepUs = UInt32(max(0.008, duration / Double(steps - 1)) * 1_000_000)
+    func frame(_ i: Int) -> [CGPoint] { normalised.map { $0[i] } }
+
+    guard sendMultiFingerEvent(points: frame(0), identifiers: ids, isDown: true, client: client) else {
+        return (false, "could not build the touch-down event", false)
+    }
+    var failed = 0
+    for i in 1..<steps {
+        usleep(stepUs)
+        if !sendMultiFingerEvent(points: frame(i), identifiers: ids, isDown: true, client: client) {
+            failed += 1
+        }
+    }
+    usleep(16_000)
+    // Lifted even after a failed move: fingers left down would hold every
+    // later touch on this simulator hostage.
+    var lifted = sendMultiFingerEvent(points: frame(steps - 1), identifiers: ids, isDown: false,
+                                      client: client)
+    if !lifted {
+        // Once more: the same builders just made every other event, and a
+        // contact left down holds the simulator's touch state hostage.
+        usleep(16_000)
+        lifted = sendMultiFingerEvent(points: frame(steps - 1), identifiers: ids, isDown: false,
+                                      client: client)
+    }
+    if !lifted {
+        let released = releaseContacts(points: frame(steps - 1), identifiers: ids, udid: udid,
+                                       client: client)
+        return (false, "could not build the touch-up event; " + (released
+            ? "a separate lift for each finger was delivered instead"
+            : "contacts may still be down until the simulator is next touched"), false)
+    }
+    // Any dropped waypoint fails the gesture: a rotation missing part of its
+    // arc is not the rotation asked for, and the response would report the
+    // planned destinations as reached (review). `doSwipe` tolerates half,
+    // where a missing step only coarsens a straight line.
+    if failed > 0 { return (false, "\(failed) of \(steps - 1) moves could not be built", false) }
+    return (true, nil, false)
+}
+
+/// `count` taps of `points.count` fingers at once, `interval` seconds apart.
+/// One call rather than several `tap`s, because a double tap has to land
+/// inside the system's double-tap interval and a round trip per tap can miss
+/// it: two taps 0.08s apart read as one double tap, 0.6s apart as two singles.
+func doMultiTap(udid: String, points: [CGPoint], count: Int, interval: Double,
+                hold: Double = 0.04) -> (Bool, String?, Bool) {
+    guard !points.isEmpty, count >= 1 else { return (false, "multi-tap needs a point and a count", true) }
+    guard let client = ensureHIDClient(udid: udid), let device = resolveDevice(udid: udid) else {
+        return (false, "no HID client for \(udid)", false)
+    }
+    let size = devicePointSize(for: device)
+    for p in points where p.x < 0 || p.y < 0 || p.x > size.width || p.y > size.height {
+        return (false, "point (\(Int(p.x)), \(Int(p.y))) is off the \(Int(size.width))x\(Int(size.height)) screen", true)
+    }
+    let normalised = points.map {
+        CGPoint(x: CGFloat(clamp01(Double($0.x) / Double(size.width))),
+                y: CGFloat(clamp01(Double($0.y) / Double(size.height))))
+    }
+    for n in 0..<count {
+        let ids = points.map { _ in nextTouchId() }
+        let down: Bool
+        if normalised.count == 1 {
+            down = sendDigitizerEvent(point: normalised[0], identifier: ids[0], isDown: true, client: client)
+        } else {
+            down = sendMultiFingerEvent(points: normalised, identifiers: ids, isDown: true, client: client)
+        }
+        guard down else { return (false, "could not build tap \(n + 1)", false) }
+        usleep(UInt32(max(0.02, hold) * 1_000_000))
+        func lift() -> Bool {
+            normalised.count == 1
+                ? sendDigitizerEvent(point: normalised[0], identifier: ids[0], isDown: false, client: client)
+                : sendMultiFingerEvent(points: normalised, identifiers: ids, isDown: false, client: client)
+        }
+        // Retried once, as in doTouchPaths: a finger left down is worse than a
+        // late one.
+        let up = lift() || { usleep(16_000); return lift() }()
+        guard up else {
+            let released = releaseContacts(points: normalised, identifiers: ids, udid: udid,
+                                           client: client)
+            return (false, "could not lift tap \(n + 1); " + (released
+                ? "a separate lift for each finger was delivered instead"
+                : "contacts may still be down until the simulator is next touched"), false)
+        }
+        if n < count - 1 { usleep(UInt32(max(0.0, interval) * 1_000_000)) }
+    }
+    return (true, nil, false)
+}
+
+/// A failed reply; `badRequest` tells the server it was the request that was
+/// wrong, so the caller gets a 400 rather than a bridge failure.
+func failure(_ error: String, badRequest: Bool) -> [String: Any] {
+    badRequest ? ["ok": false, "error": error, "code": "bad_request"] : ["ok": false, "error": error]
+}
+
+func points(from raw: Any?) -> [CGPoint]? {
+    guard let pairs = raw as? [[Double]], pairs.allSatisfy({ $0.count == 2 }) else { return nil }
+    return pairs.map { CGPoint(x: $0[0], y: $0[1]) }
+}
+
 // MARK: - JSON Lines Protocol
 
 func respond(_ dict: [String: Any]) {
@@ -1432,6 +1639,32 @@ func handleCommand(_ dict: [String: Any]) {
         } else {
             respond(["ok": false, "error": "swipe failed"])
         }
+
+    case "touch-paths":
+        guard let udid = dict["udid"] as? String,
+              let raw = dict["paths"] as? [Any] else {
+            respond(["ok": false, "error": "missing 'udid' or 'paths'"])
+            return
+        }
+        let paths = raw.compactMap { points(from: $0) }
+        guard paths.count == raw.count else {
+            respond(failure("each path must be a list of [x, y] pairs", badRequest: true))
+            return
+        }
+        let (ok, error, bad) = doTouchPaths(udid: udid, paths: paths,
+                                            duration: dict["duration"] as? Double ?? 0.6)
+        respond(ok ? ["ok": true] : failure(error ?? "touch-paths failed", badRequest: bad))
+
+    case "multi-tap":
+        guard let udid = dict["udid"] as? String,
+              let tapPoints = points(from: dict["points"]) else {
+            respond(["ok": false, "error": "missing 'udid' or 'points'"])
+            return
+        }
+        let (ok, error, bad) = doMultiTap(udid: udid, points: tapPoints,
+                                          count: dict["count"] as? Int ?? 2,
+                                          interval: dict["interval"] as? Double ?? 0.08)
+        respond(ok ? ["ok": true] : failure(error ?? "multi-tap failed", badRequest: bad))
 
     case "type":
         guard let udid = dict["udid"] as? String,

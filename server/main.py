@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import contextlib
 import logging
+import math
 import os
 import signal
 import sys
@@ -27,9 +28,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from server import get_version
 from server.api.app_state import router as app_state_router
@@ -627,6 +630,30 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Server stopped")
 
 
+def _json_safe(value):
+    """`value` with every non-finite float written as a string."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return repr(value)
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
+async def _validation_error(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    """FastAPI's own 422, made able to describe a NaN.
+
+    The default handler echoes each rejected input back, and a `NaN` or
+    `Infinity` in a request body cannot be written as JSON, so refusing one
+    crashed the handler and answered 500 -- a bad request reported as quern
+    breaking (#252's review). Same shape as the default, the offending values
+    as strings.
+    """
+    return JSONResponse(status_code=422,
+                        content={"detail": _json_safe(jsonable_encoder(exc.errors()))})
+
+
 def create_app(
     config: ServerConfig | None = None,
     process_filter: str | None = None,
@@ -652,6 +679,7 @@ def create_app(
         description="Debug log capture and AI context server",
         lifespan=lifespan,
     )
+    app.add_exception_handler(RequestValidationError, _validation_error)
 
     # Store shared state
     app.state.config = config

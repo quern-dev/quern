@@ -38,6 +38,9 @@ enum ProbeTabs {
             // five bar tabs the self-test drives are unchanged.
             (WidgetsViewController(), "Widgets", "slider.horizontal.3"),
             (ListsViewController(), "Lists", "list.dash"),
+            // Pinch, rotate, two-finger pan, multi-tap and scroll, each
+            // reported by a label (#252).
+            (GesturesViewController(), "Gestures", "hand.draw"),
         ]
 
         let tabBarController = UITabBarController()

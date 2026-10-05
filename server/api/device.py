@@ -21,6 +21,7 @@ from server.models import (
     EraseIncompleteError,
     GrantPermissionRequest,
     InstallAppRequest,
+    InvalidDeviceRequestError,
     LaunchAppRequest,
     OpenUrlRequest,
     PreviewStartRequest,
@@ -188,7 +189,7 @@ def _handle_device_error(e: DeviceError) -> HTTPException:
         return HTTPException(status_code=503, detail=msg)
     if isinstance(e, (WdaKeyboardNotPresentError, WdaElementNotInteractableError)):
         return HTTPException(status_code=400, detail=msg)
-    if isinstance(e, DeviceOperationUnsupportedError):
+    if isinstance(e, (DeviceOperationUnsupportedError, InvalidDeviceRequestError)):
         return HTTPException(status_code=400, detail=msg)
     if "No booted device" in msg or "Multiple devices booted" in msg:
         return HTTPException(status_code=400, detail=msg)

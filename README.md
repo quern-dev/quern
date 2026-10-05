@@ -408,7 +408,7 @@ Manage iOS simulators and physical devices, and interact with running apps.
      ![Annotated screenshot](docs/images/annotated-screenshot.png)
 -->
 - **UI inspection** — accessibility tree, element state queries, wait-for-element polling, screen summaries
-- **Interaction** — tap (by element label or coordinates), swipe, scroll a container until a target is in view, type text, clear text, press hardware buttons
+- **Interaction** — tap (by element label or coordinates), swipe, pinch, rotate, two-finger pan, double tap and two-finger tap (simulators), scroll a container until a target is in view, type text, clear text, press hardware buttons
 - **Configuration** — set GPS location, grant permissions, open URLs and deep links, attach or detach the simulated hardware keyboard (iOS), and set locale, font scale, and display density (Android)
 - **App state checkpoints** — save and restore a named snapshot of an app's data container and app groups, so a test can start from a seeded state instead of driving the UI there every time. Auth tokens live in the simulator keychain, *outside* every app container, so a checkpoint restores logged-out unless you pass `include_keychain` — which additionally requires the device to be shut down, since the keychain is a WAL-mode SQLite database held open by `securityd`
 - **Plist inspection** — read, diff, set, and delete defaults inside a simulator app's container, or watch a plist and have per-key changes land in the log pipeline alongside app logs and proxy flows
@@ -480,7 +480,7 @@ quern tunneld <cmd>          # Manage the tunneld LaunchDaemon (install/uninstal
 
 ## MCP Tools
 
-120 tools available via MCP. All tools are lazy-loaded and won't hog your context just by connecting the MCP. They are lightweight API wrappers and are easy for the Agent to use.
+121 tools available via MCP. All tools are lazy-loaded and won't hog your context just by connecting the MCP. They are lightweight API wrappers and are easy for the Agent to use.
 
 | Category | Tools |
 |----------|-------|
@@ -491,7 +491,7 @@ quern tunneld <cmd>          # Manage the tunneld LaunchDaemon (install/uninstal
 | System Proxy | `configure_system_proxy`, `unconfigure_system_proxy` |
 | Intercept & Mock | `set_intercept`, `clear_intercept`, `list_held_flows`, `release_flow`, `replay_flow`, `set_mock`, `list_mocks`, `update_mock`, `clear_mocks` |
 | Device | `list_devices`, `boot_device`, `shutdown_device`, `erase_device`, `install_app`, `launch_app`, `terminate_app`, `uninstall_app`, `list_apps`, `build_and_install`, `record_android_build` |
-| UI | `get_ui_tree`, `get_element_state`, `wait_for_element`, `get_screen_summary`, `tap`, `tap_element`, `swipe`, `scroll_to_element`, `type_text`, `clear_text`, `press_button`, `get_web_content`, `wait_for_settle`, `restore_simulator_input` |
+| UI | `get_ui_tree`, `get_element_state`, `wait_for_element`, `get_screen_summary`, `tap`, `tap_element`, `swipe`, `gesture`, `scroll_to_element`, `type_text`, `clear_text`, `press_button`, `get_web_content`, `wait_for_settle`, `restore_simulator_input` |
 | Screenshots | `take_screenshot`, `take_annotated_screenshot`, `start_screenshot_timeline`, `stop_screenshot_timeline`, `get_screenshot_timeline` |
 | Device Config | `set_location`, `open_url`, `grant_permission`, `set_locale`, `set_hardware_keyboard`, `set_font_scale`, `set_display_density` |
 | App State | `save_app_state`, `restore_app_state`, `list_app_states`, `delete_app_state` |
