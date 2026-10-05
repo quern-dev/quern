@@ -1458,7 +1458,11 @@ func doTouchPaths(udid: String, paths: [[CGPoint]], duration: Double) -> (Bool, 
                                       client: client)
     }
     if !lifted { return (false, "could not build the touch-up event", false) }
-    if failed > (steps - 1) / 2 { return (false, "\(failed) of \(steps - 1) moves could not be built", false) }
+    // Any dropped waypoint fails the gesture: a rotation missing part of its
+    // arc is not the rotation asked for, and the response would report the
+    // planned destinations as reached (review). `doSwipe` tolerates half,
+    // where a missing step only coarsens a straight line.
+    if failed > 0 { return (false, "\(failed) of \(steps - 1) moves could not be built", false) }
     return (true, nil, false)
 }
 
