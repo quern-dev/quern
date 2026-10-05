@@ -2311,9 +2311,13 @@ class GestureRequest(BaseModel):
     degrees: float | None = Field(default=None, ge=-3600, le=3600, allow_inf_nan=False,
                                   description="rotate: how far to turn, positive clockwise.")
     dx: float | None = Field(default=None, allow_inf_nan=False,
-                             description="pan: points to move right.")
+                             description=(
+                                 "pan: how far to move right, in the screen's coordinates "
+                                 "(points on iOS, pixels on Android)."))
     dy: float | None = Field(default=None, allow_inf_nan=False,
-                             description="pan: points to move down.")
+                             description=(
+                                 "pan: how far to move down, in the screen's coordinates "
+                                 "(points on iOS, pixels on Android)."))
     distance: float | None = Field(default=None, gt=0, allow_inf_nan=False, description=(
         "pinch: separation at the narrow end (default 60). rotate: radius "
         "(default 80). pan, two_finger_tap: separation of the fingers (default 40)."))

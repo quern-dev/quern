@@ -49,6 +49,8 @@ class MainActivity : AppCompatActivity() {
         "Diag" to ::DiagFragment,
         // Last, so adding it moved no existing tab.
         "Location" to ::LocationFragment,
+        // Pinch, rotate, two-finger pan and multi-tap, each reported (#252).
+        "Gestures" to ::GesturesFragment,
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {

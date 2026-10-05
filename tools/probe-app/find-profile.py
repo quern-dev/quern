@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Pick a development provisioning profile that can sign the probe app.
 
-Run by `build.sh --device`. Prints, on three lines: the profile's path, its
-team identifier, and the signing identity's common name.
+Run by `build.sh --device`. Prints, on four lines: the profile's path, its
+team identifier, the signing identity's common name, and the App ID prefix.
+
+The prefix is not always the team identifier. Older accounts were issued a
+separate one, so a team `8SSDY9WB6W` signs app ids `MZCZ5SMF8U.*`; matching on
+the team alone rejected that account's only wildcard profile, and the fixture
+could not be signed for a phone at all.
 
 Discovered rather than configured, because the alternative is a team id and a
 profile UUID pasted into the script, and both rotate -- a profile expires once
@@ -10,9 +15,9 @@ a year, and the UUID changes every time Xcode reissues one. A stale constant
 fails at `codesign` with "no identity found", which says nothing about which
 of the two moved.
 
-A wildcard profile (`TEAM.*`) is what makes this possible without an Xcode
+A wildcard profile (`PREFIX.*`) is what makes this possible without an Xcode
 project: it signs any bundle id in the team, so the fixture does not need one
-registered. An explicit `TEAM.com.quern.probe` profile is preferred over it
+registered. An explicit `PREFIX.com.quern.probe` profile is preferred over it
 when both are present, since that is the narrower grant.
 """
 
@@ -70,9 +75,9 @@ def _candidates(udid: str | None) -> list[tuple[int, Path, dict]]:
                 "application-identifier", "",
             )
             team = (profile.get("TeamIdentifier") or [""])[0]
-            if not team or not app_id.startswith(f"{team}."):
+            prefix, _, suffix = app_id.partition(".")
+            if not team or prefix not in (profile.get("ApplicationIdentifierPrefix") or [team]):
                 continue
-            suffix = app_id[len(team) + 1:]
             if suffix == BUNDLE_ID:
                 rank = 0
             elif suffix == "*":
@@ -154,6 +159,7 @@ def main() -> int:
     print(path)
     print(team)
     print(identity)
+    print((profile["Entitlements"]["application-identifier"]).partition(".")[0])
     return 0
 
 

@@ -41,7 +41,7 @@ same thing on both; the build adds `MinimumOSVersion` and
 
 Signing needs a **development** provisioning profile that lists the device.
 `find-profile.py` finds one, preferring a profile issued for `com.quern.probe`
-over a wildcard `TEAM.*` team profile, and rejecting any profile with no device
+over a wildcard `PREFIX.*` team profile (the App ID prefix, which an older account has apart from its team id), and rejecting any profile with no device
 list — that is a distribution profile, which signs and installs and then fails
 to launch. If nothing matches it says so and tells you the fix: open any iOS
 project in Xcode once with your account signed in, which is enough to get a

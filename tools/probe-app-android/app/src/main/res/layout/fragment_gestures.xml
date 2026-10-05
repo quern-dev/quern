@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical" android:padding="16dp"
+    android:layout_width="match_parent" android:layout_height="match_parent">
+    <TextView android:id="@+id/gesture_pinch" android:typeface="monospace"
+        android:layout_width="match_parent" android:layout_height="wrap_content" />
+    <TextView android:id="@+id/gesture_rotate" android:typeface="monospace"
+        android:layout_width="match_parent" android:layout_height="wrap_content" />
+    <TextView android:id="@+id/gesture_pan" android:typeface="monospace"
+        android:layout_width="match_parent" android:layout_height="wrap_content" />
+    <TextView android:id="@+id/gesture_tap" android:typeface="monospace"
+        android:layout_width="match_parent" android:layout_height="wrap_content" />
+    <TextView android:id="@+id/gesture_double_tap" android:typeface="monospace"
+        android:layout_width="match_parent" android:layout_height="wrap_content" />
+    <TextView android:id="@+id/gesture_two_finger_tap" android:typeface="monospace"
+        android:layout_width="match_parent" android:layout_height="wrap_content" />
+    <Button android:id="@+id/gesture_reset" android:text="Reset"
+        android:layout_width="wrap_content" android:layout_height="wrap_content" />
+    <com.quern.probe.GesturePadView android:id="@+id/gesture_pad"
+        android:contentDescription="Gesture pad"
+        android:background="#EEEEEE"
+        android:layout_width="match_parent" android:layout_height="0dp"
+        android:layout_weight="1" />
+</LinearLayout>

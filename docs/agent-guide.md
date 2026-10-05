@@ -47,7 +47,7 @@ Use `tap_element` with a label and element type instead of `tap` with raw coordi
 
 **When coordinates are OK**: Gestures that aren't tied to specific elements (swipe to refresh, drag to reorder).
 
-**Two fingers, or a real double tap**: `gesture` does pinch (`scale`), rotate (`degrees`), two-finger pan, double tap and two-finger tap, centred on an element by `label`/`identifier` or on `x`/`y`. Use it for maps, photo viewers and zoomable canvases, and for a double tap: two `tap` calls each pay a round trip and can land outside the double-tap interval, reading as two single taps. Expect the app to report a little less than you sent -- a recogniser starts measuring only once the fingers pass its threshold, so `scale: 3` reads as about 2.6. Simulators only for now; elsewhere it answers 400 rather than sending one finger.
+**Two fingers, or a real double tap**: `gesture` does pinch (`scale`), rotate (`degrees`), two-finger pan, double tap and two-finger tap, centred on an element by `label`/`identifier` or on `x`/`y`. Use it for maps, photo viewers and zoomable canvases, and for a double tap: two `tap` calls each pay a round trip and can land outside the double-tap interval, reading as two single taps. Expect the app to report a little less than you sent -- a recogniser starts measuring only once the fingers pass its threshold, so `scale: 3` reads as about 2.6. Works on iOS simulators, physical iPhones and Android (which needs scrcpy installed; without it the 400 says so). On Android a pinch defaults to starting 30mm apart along the long axis, since many apps ignore fingers closer than ~27mm -- so a 3x spread may not fit on a phone screen, and the 400 names the point that would leave it.
 
 ---
 

@@ -12,6 +12,7 @@ into a 400; the route maps all of it.
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -186,7 +187,9 @@ def _ctrl(backend):
 
 
 def _multitouch_backend():
-    backend = MagicMock()
+    # Specced: a bare MagicMock has every attribute, `gesture_defaults` among
+    # them, and the controller would await it.
+    backend = MagicMock(spec=["TOOL_NAME", "multitouch", "perform_gesture"])
     backend.TOOL_NAME = "sim-bridge"
     backend.multitouch = True
     backend.perform_gesture = AsyncMock()
@@ -246,6 +249,16 @@ class TestTheController:
         assert result["center"] == [200.0, 400.0] and result["backend"] == "sim-bridge"
         assert len(result["fingers"]) == 2
         ctrl._invalidate_ui_cache.assert_called_once_with(UDID)
+
+    async def test_a_backends_defaults_are_used(self):
+        backend = MagicMock(spec=["TOOL_NAME", "multitouch", "perform_gesture",
+                                  "gesture_defaults"])
+        backend.TOOL_NAME, backend.multitouch = "u2", True
+        backend.perform_gesture = AsyncMock()
+        backend.gesture_defaults = AsyncMock(return_value={"unit": 2.0})
+        await _ctrl(backend).gesture("two_finger_tap", x=500, y=1000)
+        plan = backend.perform_gesture.await_args.args[1]
+        assert plan.points == [(460, 1000), (540, 1000)]     # 40 * 2.0 apart
 
     async def test_it_centres_on_an_element(self):
         backend = _multitouch_backend()
@@ -370,17 +383,107 @@ class TestTheRoute:
         assert resp.status_code == 422
 
 
-def test_only_sim_bridge_claims_multitouch():
+def test_the_backends_that_claim_multitouch_can_send_it():
     """A backend that gains the attribute without the method would accept a
     gesture and fail it; one that loses it refuses a gesture it could send."""
     from server.device.android.u2_client import U2Backend
     from server.device.ios.idb import IdbBackend
     from server.device.ios.wda_client import WdaBackend
 
-    assert SimBridgeBackend.multitouch is True
-    assert callable(SimBridgeBackend.perform_gesture)
-    for cls in (IdbBackend, WdaBackend, U2Backend):
-        assert getattr(cls, "multitouch", False) is not True, cls.__name__
+    for cls in (SimBridgeBackend, WdaBackend, U2Backend):
+        assert cls.multitouch is True and callable(cls.perform_gesture), cls.__name__
+    assert getattr(IdbBackend, "multitouch", False) is not True
+
+
+class TestW3cActions:
+    """What WDA's /actions is sent: one touch source per finger, in one
+    timeline. Measured on an iPhone 12 (iOS 26.5): pinch x3 read 2.65, x0.5
+    read 0.54, rotate 90 read 85, -200 read -195 -- the simulator's numbers."""
+
+    def test_a_moving_gesture(self):
+        plan = gestures.plan("pinch", 200, 400, scale=2, duration=1.1)
+        sources = gestures.w3c_actions(plan)
+        assert [s["id"] for s in sources] == ["finger1", "finger2"]
+        assert all(s["parameters"] == {"pointerType": "touch"} for s in sources)
+        for source, path in zip(sources, plan.paths, strict=True):
+            steps = source["actions"]
+            assert steps[0] == {"type": "pointerMove", "duration": 0, "origin": "viewport",
+                                "x": round(path[0][0], 2), "y": round(path[0][1], 2)}
+            assert steps[1] == {"type": "pointerDown", "button": 0}
+            moves = steps[2:-1]
+            assert len(moves) == len(path) - 1
+            assert {m["duration"] for m in moves} == {round(1100 / (len(path) - 1))}
+            assert (moves[-1]["x"], moves[-1]["y"]) == (round(path[-1][0], 2),
+                                                        round(path[-1][1], 2))
+            assert steps[-1] == {"type": "pointerUp", "button": 0}
+
+    def test_taps_are_timed_on_the_device(self):
+        """The interval is a pause inside one action sequence, so it is the
+        device's clock that keeps it, not a round trip per tap."""
+        plan = gestures.plan("double_tap", 200, 400, count=3, interval=0.2)
+        (source,) = gestures.w3c_actions(plan)
+        kinds = [(a["type"], a.get("duration")) for a in source["actions"][1:]]
+        tap = [("pointerDown", None), ("pause", gestures.TAP_HOLD_MS), ("pointerUp", None)]
+        assert kinds == tap + [("pause", 200)] + tap + [("pause", 200)] + tap
+
+    def test_a_two_finger_tap_is_two_sources(self):
+        sources = gestures.w3c_actions(gestures.plan("two_finger_tap", 200, 400, distance=50))
+        assert [(s["actions"][0]["x"], s["actions"][0]["y"]) for s in sources] == [
+            (175, 400), (225, 400)]
+
+
+class TestTheWdaBackend:
+    @staticmethod
+    def _backend(actions_reply=None, size=(390, 844)):
+        from server.device.ios.wda_client import WdaBackend
+
+        backend = WdaBackend()
+        calls = []
+
+        async def request(method, udid, path, **kwargs):
+            calls.append((method, path, kwargs))
+            if path == "/window/size":
+                resp = MagicMock()
+                resp.json.return_value = {"value": {"width": size[0], "height": size[1]}}
+                return resp
+            if isinstance(actions_reply, Exception):
+                raise actions_reply
+            return MagicMock()
+        backend._request = request
+        return backend, calls
+
+    async def test_it_sends_the_actions_and_never_resends(self):
+        backend, calls = self._backend()
+        await backend.perform_gesture(UDID, gestures.plan("rotate", 195, 531, degrees=90))
+        method, path, kwargs = calls[-1]
+        assert (method, path) == ("post", "/actions")
+        assert kwargs["raise_if_maybe_delivered"] is True     # a second turn is twice as far
+        assert kwargs["use_session"] is True
+        assert len(kwargs["json"]["actions"]) == 2
+
+    async def test_a_point_off_the_screen_is_refused_before_anything_is_sent(self):
+        backend, calls = self._backend()
+        with pytest.raises(InvalidDeviceRequestError, match="off the 390x844 screen"):
+            await backend.perform_gesture(UDID, gestures.plan("pinch", 195, 531, scale=20))
+        assert [c[1] for c in calls] == ["/window/size"]
+
+    async def test_no_answer_is_reported_not_retried(self):
+        import httpx
+
+        backend, calls = self._backend(actions_reply=httpx.ReadTimeout("slow"))
+        with pytest.raises(DeviceError, match="not sent again"):
+            await backend.perform_gesture(UDID, gestures.plan("double_tap", 195, 531))
+        assert [c[1] for c in calls].count("/actions") == 1
+
+    async def test_an_unreadable_window_size_is_a_failure(self):
+        from server.device.ios.wda_client import WdaBackend
+
+        backend = WdaBackend()
+        resp = MagicMock()
+        resp.json.return_value = {"value": None}
+        backend._request = AsyncMock(return_value=resp)
+        with pytest.raises(DeviceError, match="window/size"):
+            await backend.perform_gesture(UDID, gestures.plan("double_tap", 195, 531))
 
 
 def test_element_frames_carry_through_ui_element():
@@ -398,3 +501,670 @@ def test_the_bridge_handles_what_the_client_sends():
     for command in ("touch-paths", "multi-tap"):
         assert f'case "{command}":' in swift, command
     assert '"code": "bad_request"' in swift
+
+
+
+class TestDeviceDefaults:
+    def test_unit_scales_the_defaults_and_only_the_defaults(self):
+        tft = gestures.plan("two_finger_tap", 500, 1000, unit=2.5)
+        assert tft.points == [(450, 1000), (550, 1000)]           # 40pt * 2.5
+        given = gestures.plan("two_finger_tap", 500, 1000, unit=2.5, distance=40)
+        assert given.points == [(480, 1000), (520, 1000)]         # the caller's, as given
+
+    def test_a_backend_pinch_default_and_axis(self):
+        plan = gestures.plan("pinch", 540, 1200, scale=2, unit=2.75,
+                             pinch_distance=519, pinch_angle=90)
+        starts, ends = _ends(plan)
+        assert _sep(starts) == pytest.approx(519) and _sep(ends) == pytest.approx(1038)
+        assert all(p[0] == pytest.approx(540) for p in starts + ends)   # vertical
+        across = gestures.plan("pinch", 540, 1200, scale=2, pinch_distance=519,
+                               pinch_angle=90, angle=0)
+        assert all(p[1] == pytest.approx(1200) for p in _ends(across)[1])  # caller's angle wins
+
+    def test_a_pinch_axis_does_not_turn_a_rotation(self):
+        plan = gestures.plan("rotate", 540, 1200, degrees=30, pinch_angle=90, distance=100)
+        assert plan.paths[0][0] == pytest.approx((440, 1200))
+
+    @pytest.mark.parametrize("unit", [0, -1, float("nan")])
+    def test_a_unit_that_is_not_a_scale_is_refused(self, unit):
+        with pytest.raises(InvalidDeviceRequestError, match="unit"):
+            gestures.plan("double_tap", 1, 2, unit=unit)
+
+
+class TestScrcpyMessages:
+    def test_a_touch_message_is_scrcpys_layout(self):
+        import struct
+
+        from server.device.android import scrcpy_input as sc
+
+        msg = sc.touch_message(sc._DOWN, 1, 100.4, 200.6, 1080, 2340, 1.0)
+        assert len(msg) == 32
+        assert struct.unpack(">BBqiiHHHII", msg) == (
+            2, 0, sc._POINTER_BASE + 1, 100, 201, 1080, 2340, 0xFFFF, 0, 0)
+        up = sc.touch_message(sc._UP, 0, 1, 2, 1080, 2340, 0.0)
+        assert struct.unpack(">BBqiiHHHII", up)[7] == 0
+
+    def test_a_moving_gesture_is_each_finger_in_turn(self):
+        from server.device.android import scrcpy_input as sc
+
+        plan = gestures.plan("pan", 500, 1000, dx=110, distance=100, duration=1.1)
+        out = sc.gesture_messages(plan, 1080, 2340)
+        actions = [(m[1], (int.from_bytes(m[2:10], "big", signed=True) - sc._POINTER_BASE))
+                   for m, _ in out]
+        n = len(plan.paths[0])
+        assert actions[:2] == [(sc._DOWN, 0), (sc._DOWN, 1)]
+        assert actions[2:-2] == [(sc._MOVE, f) for _ in range(n - 1) for f in (0, 1)]
+        assert actions[-2:] == [(sc._UP, 0), (sc._UP, 1)]
+        step = 1.1 / (n - 1)
+        waits = [w for _, w in out]
+        # one step's wait after each batch, before the next waypoint
+        assert waits[1] == pytest.approx(step) and waits[3] == pytest.approx(step)
+        assert waits[0] == waits[2] == 0
+        assert sum(waits) == pytest.approx(step * (n - 1) + 0.016)
+
+    def test_taps_hold_then_wait_the_interval(self):
+        from server.device.android import scrcpy_input as sc
+
+        out = sc.gesture_messages(gestures.plan("double_tap", 500, 1000, interval=0.2),
+                                  1080, 2340)
+        assert [m[1] for m, _ in out] == [sc._DOWN, sc._UP, sc._DOWN, sc._UP]
+        assert [w for _, w in out] == [gestures.TAP_HOLD_MS / 1000, 0.2,
+                                       gestures.TAP_HOLD_MS / 1000, 0.0]
+
+
+class TestFindingScrcpy:
+    def _run(self, monkeypatch, tmp_path, version_out="scrcpy 4.1 <https://...>", env=None):
+        from server.device.android import scrcpy_input as sc
+
+        cellar = tmp_path / "Cellar" / "scrcpy" / "4.1"
+        (cellar / "bin").mkdir(parents=True)
+        (cellar / "share" / "scrcpy").mkdir(parents=True)
+        binary = cellar / "bin" / "scrcpy"
+        binary.write_text("")
+        (cellar / "share" / "scrcpy" / "scrcpy-server").write_text("jar")
+        monkeypatch.setattr(sc.shutil, "which", lambda name: str(binary))
+        monkeypatch.setattr(sc.subprocess, "run", lambda *a, **k: MagicMock(stdout=version_out))
+        if env:
+            monkeypatch.setenv("SCRCPY_SERVER_PATH", env)
+        else:
+            monkeypatch.delenv("SCRCPY_SERVER_PATH", raising=False)
+        return sc.find_server(), cellar
+
+    def test_the_jar_beside_the_binary_and_its_version(self, monkeypatch, tmp_path):
+        found, cellar = self._run(monkeypatch, tmp_path)
+        assert found.version == "4.1"
+        assert found.jar == cellar / "share" / "scrcpy" / "scrcpy-server"
+
+    def test_scrcpy_server_path_wins(self, monkeypatch, tmp_path):
+        mine = tmp_path / "mine.jar"
+        mine.write_text("jar")
+        found, _ = self._run(monkeypatch, tmp_path, env=str(mine))
+        assert found.jar == mine
+
+    def test_an_unreadable_version_is_no_server(self, monkeypatch, tmp_path):
+        """The server refuses any version but its own, so a jar of unknown
+        version cannot be started at all."""
+        found, _ = self._run(monkeypatch, tmp_path, version_out="")
+        assert found is None
+
+    def test_no_scrcpy_is_no_server(self, monkeypatch):
+        from server.device.android import scrcpy_input as sc
+
+        monkeypatch.setattr(sc.shutil, "which", lambda name: None)
+        assert sc.find_server() is None
+
+
+class TestScrcpySessions:
+    @staticmethod
+    def _input(monkeypatch, *, send_error=None):
+        from server.device.android import scrcpy_input as sc
+
+        server = sc.ScrcpyServer(Path("/x.jar"), "4.1")
+        monkeypatch.setattr(sc, "find_server", lambda: server)
+        started, sent = [], []
+
+        class FakeSession:
+            def __init__(self, adb, serial, srv):
+                self.server = srv
+                self.alive = False
+
+            async def start(self):
+                started.append(1)
+                self.alive = True
+
+            async def send(self, messages):
+                if send_error:
+                    raise send_error
+                sent.append(len(messages))
+
+            async def close(self):
+                self.alive = False
+
+        monkeypatch.setattr(sc, "_Session", FakeSession)
+        return sc.ScrcpyInput("/usr/bin/adb"), started, sent
+
+    async def test_one_server_per_device_kept_for_the_next_gesture(self, monkeypatch):
+        touch, started, sent = self._input(monkeypatch)
+        plan = gestures.plan("double_tap", 10, 10)
+        await touch.perform("dev", plan, 1080, 2340)
+        await touch.perform("dev", plan, 1080, 2340)
+        assert started == [1] and sent == [4, 4]
+
+    async def test_without_scrcpy_the_refusal_says_how_to_get_it(self, monkeypatch):
+        from server.device.android import scrcpy_input as sc
+
+        monkeypatch.setattr(sc, "find_server", lambda: None)
+        with pytest.raises(DeviceOperationUnsupportedError, match="brew install scrcpy"):
+            await sc.ScrcpyInput("/usr/bin/adb").perform(
+                "dev", gestures.plan("double_tap", 1, 1), 1080, 2340)
+
+    async def test_an_interrupted_gesture_is_not_sent_again(self, monkeypatch):
+        touch, started, _ = self._input(monkeypatch, send_error=ConnectionResetError("gone"))
+        with pytest.raises(DeviceError, match="not sent again"):
+            await touch.perform("dev", gestures.plan("double_tap", 1, 1), 1080, 2340)
+        assert started == [1]
+        assert "dev" not in touch._sessions          # the next gesture starts a new server
+
+
+class TestTheU2Backend:
+    @staticmethod
+    def _backend(size=(1080, 2340), info=None):
+        from server.device.android.u2_client import U2Backend
+
+        backend = U2Backend()
+        device = MagicMock()
+        device.window_size.return_value = size
+        device.info = info or {"displayWidth": 1080, "displaySizeDpX": 393}
+        backend._connect = lambda serial: device
+        backend._touch = MagicMock()
+        backend._touch.perform = AsyncMock()
+        return backend
+
+    async def test_it_hands_the_screen_size_on(self):
+        backend = self._backend()
+        await backend.perform_gesture("dev", gestures.plan("double_tap", 540, 1170))
+        args = backend._touch.perform.await_args.args
+        assert args[0] == "dev" and args[2:] == (1080, 2340)
+
+    async def test_a_point_off_the_screen_is_refused(self):
+        backend = self._backend()
+        with pytest.raises(InvalidDeviceRequestError, match="off the 1080x2340 screen"):
+            await backend.perform_gesture("dev", gestures.plan("double_tap", 1100, 1170))
+        backend._touch.perform.assert_not_awaited()
+
+    async def test_the_defaults_come_from_the_density(self):
+        backend = self._backend()
+        d = await backend.gesture_defaults("dev")
+        assert d["unit"] == pytest.approx(1080 / 393)
+        assert d["pinch_distance"] == pytest.approx(30 / 25.4 * 160 * 1080 / 393)
+        assert d["pinch_angle"] == 90
+
+    async def test_an_unreadable_density_leaves_the_defaults_alone_and_says_so(self):
+        backend = self._backend(info={"displayWidth": 1080})   # no dp width
+        d = await backend.gesture_defaults("dev")
+        assert set(d) == {"warning"} and "density" in d["warning"]
+
+
+# ---------------------------------------------------------------------------
+# What the review's mutants showed was untested (#252, second round)
+# ---------------------------------------------------------------------------
+
+
+def _decode(message: bytes) -> tuple:
+    import struct
+
+    return struct.unpack(">BBqiiHHHII", message)
+
+
+class TestPositionsOnTheWire:
+    def test_each_scrcpy_finger_follows_its_own_path(self):
+        from server.device.android import scrcpy_input as sc
+
+        plan = gestures.plan("rotate", 540, 1200, degrees=120, distance=200)
+        out = [_decode(m) for m, _ in sc.gesture_messages(plan, 1080, 2340)]
+        fingers = len(plan.paths)
+        downs, moves, ups = out[:fingers], out[fingers:-fingers], out[-fingers:]
+        for f, path in enumerate(plan.paths):
+            assert downs[f][1] == sc._DOWN and downs[f][3:5] == (round(path[0][0]),
+                                                                  round(path[0][1]))
+            assert downs[f][7] == 0xFFFF
+            mine = [m for m in moves if m[2] == sc._POINTER_BASE + f]
+            assert [m[3:5] for m in mine] == [(round(x), round(y)) for x, y in path[1:]]
+            assert all(m[1] == sc._MOVE and m[7] == 0xFFFF for m in mine)
+            assert ups[f][1] == sc._UP and ups[f][3:5] == (round(path[-1][0]),
+                                                            round(path[-1][1]))
+            assert ups[f][7] == 0
+
+    def test_each_scrcpy_tap_finger_is_at_its_own_point(self):
+        from server.device.android import scrcpy_input as sc
+
+        plan = gestures.plan("two_finger_tap", 540, 1200, distance=100)
+        out = [_decode(m) for m, _ in sc.gesture_messages(plan, 1080, 2340)]
+        assert [(d[1], d[2] - sc._POINTER_BASE, d[3], d[4]) for d in out] == [
+            (sc._DOWN, 0, 490, 1200), (sc._DOWN, 1, 590, 1200),
+            (sc._UP, 0, 490, 1200), (sc._UP, 1, 590, 1200)]
+
+    def test_each_w3c_finger_follows_its_own_path(self):
+        """Every waypoint, not only the ends: moves that all jumped to the end
+        turned a rotation into a chord and passed (review)."""
+        plan = gestures.plan("rotate", 195, 531, degrees=120, distance=80)
+        for source, path in zip(gestures.w3c_actions(plan), plan.paths, strict=True):
+            moves = [a for a in source["actions"] if a["type"] == "pointerMove"]
+            assert [(m["x"], m["y"]) for m in moves] == [
+                (round(x, 2), round(y, 2)) for x, y in path]
+
+
+class TestPlanLimits:
+    @pytest.mark.parametrize("args,what", [
+        ({"kind": "double_tap", "count": 11}, "count"),
+        ({"kind": "double_tap", "interval": 1.5}, "interval"),
+        ({"kind": "pan", "dx": 5, "duration": 11}, "duration"),
+    ])
+    def test_timing_past_what_the_model_allows_is_refused(self, args, what):
+        """count=100000 built 400,000 W3C actions for a direct caller."""
+        kind = args.pop("kind")
+        with pytest.raises(InvalidDeviceRequestError, match=what):
+            gestures.plan(kind, 10, 10, **args)
+
+    def test_a_tap_plans_time_is_its_taps(self):
+        plan = gestures.plan("double_tap", 10, 10, count=3, interval=1.0)
+        assert plan.seconds == pytest.approx(3 * gestures.TAP_HOLD_MS / 1000 + 2 * 1.0)
+        assert gestures.plan("pan", 10, 10, dx=5, duration=2).seconds == 2
+
+    def test_unit_scales_every_default(self):
+        rot = gestures.plan("rotate", 500, 1000, degrees=30, unit=2)
+        assert math.dist(rot.paths[0][0], (500, 1000)) == pytest.approx(160)
+        pan = gestures.plan("pan", 500, 1000, dx=10, unit=2)
+        assert _sep(_ends(pan)[0]) == pytest.approx(80)
+        pinch = gestures.plan("pinch", 500, 1000, scale=2, unit=2)
+        assert _sep(_ends(pinch)[0]) == pytest.approx(120)
+
+
+class TestBoundsOnBothAxes:
+    async def test_wda_refuses_a_point_below_the_screen(self):
+        backend, calls = TestTheWdaBackend._backend()
+        with pytest.raises(InvalidDeviceRequestError, match="off the 390x844"):
+            await backend.perform_gesture(UDID, gestures.plan("double_tap", 195, 900))
+        assert [c[1] for c in calls] == ["/window/size"]
+
+    async def test_wda_timeout_covers_the_devices_time(self):
+        from server.device.ios.wda_client import ACTION_TIMEOUT
+
+        backend, calls = TestTheWdaBackend._backend()
+        plan = gestures.plan("double_tap", 195, 400, count=3, interval=1.0)
+        await backend.perform_gesture(UDID, plan)
+        assert calls[-1][2]["timeout"] == pytest.approx(ACTION_TIMEOUT + plan.seconds)
+
+    async def test_u2_refuses_a_path_below_the_screen(self):
+        backend = TestTheU2Backend._backend()
+        with pytest.raises(InvalidDeviceRequestError, match="off the 1080x2340"):
+            await backend.perform_gesture(
+                "dev", gestures.plan("pan", 540, 2300, dy=100, distance=100))
+        backend._touch.perform.assert_not_awaited()
+
+
+class TestAndroidDefaults:
+    async def test_a_landscape_pinch_runs_across(self):
+        backend = TestTheU2Backend._backend(size=(2340, 1080))
+        assert (await backend.gesture_defaults("dev"))["pinch_angle"] == 0.0
+
+    async def test_a_density_that_cannot_be_read_is_said_on_the_response(self):
+        """It was a log line, and the pinch reading 1.00 came back ok."""
+        backend = MagicMock(spec=["TOOL_NAME", "multitouch", "perform_gesture",
+                                  "gesture_defaults"])
+        backend.TOOL_NAME, backend.multitouch = "u2", True
+        backend.perform_gesture = AsyncMock()
+        backend.gesture_defaults = AsyncMock(return_value={"warning": "no density"})
+        result = await _ctrl(backend).gesture("two_finger_tap", x=500, y=1000)
+        assert result["warnings"] == ["no density"]
+        plan = backend.perform_gesture.await_args.args[1]
+        assert plan.points == [(480, 1000), (520, 1000)]       # the unscaled default
+
+    async def test_closing_the_backend_closes_its_servers(self):
+        from server.device.android.u2_client import U2Backend
+
+        backend = U2Backend()
+        backend._touch = MagicMock()
+        backend._touch.close_all = AsyncMock()
+        await backend.close()
+        backend._touch.close_all.assert_awaited_once()
+
+
+class TestFindingTheJarBesideALinkedBinary:
+    def _layout(self, tmp_path, *, linked_jar, cellar_jar):
+        prefix, cellar = tmp_path / "prefix", tmp_path / "Cellar" / "scrcpy" / "4.1"
+        (prefix / "bin").mkdir(parents=True)
+        (cellar / "bin").mkdir(parents=True)
+        real = cellar / "bin" / "scrcpy"
+        real.write_text("")
+        (prefix / "bin" / "scrcpy").symlink_to(real)
+        for root, wanted in ((prefix, linked_jar), (cellar, cellar_jar)):
+            if wanted:
+                (root / "share" / "scrcpy").mkdir(parents=True)
+                (root / "share" / "scrcpy" / "scrcpy-server").write_text("jar")
+        return prefix, cellar
+
+    def _find(self, monkeypatch, prefix):
+        from server.device.android import scrcpy_input as sc
+
+        monkeypatch.delenv("SCRCPY_SERVER_PATH", raising=False)
+        monkeypatch.setattr(sc.shutil, "which", lambda name: str(prefix / "bin" / "scrcpy"))
+        monkeypatch.setattr(sc.subprocess, "run", lambda *a, **k: MagicMock(stdout="scrcpy 4.1"))
+        return sc.find_server()
+
+    def test_beside_the_link(self, monkeypatch, tmp_path):
+        prefix, _ = self._layout(tmp_path, linked_jar=True, cellar_jar=False)
+        assert self._find(monkeypatch, prefix).jar == prefix / "share/scrcpy/scrcpy-server"
+
+    def test_beside_what_it_resolves_to(self, monkeypatch, tmp_path):
+        prefix, cellar = self._layout(tmp_path, linked_jar=False, cellar_jar=True)
+        assert self._find(monkeypatch, prefix).jar == cellar / "share/scrcpy/scrcpy-server"
+
+
+class _FakeProc:
+    """An adb subprocess: communicate() answers, or app_process stays up."""
+
+    def __init__(self, out=b"", rc=0, long_running=False):
+        self._out, self.returncode = out, (None if long_running else rc)
+        self.killed = False
+        self.stdout = self._lines() if long_running else None
+
+    async def _lines(self):
+        if False:
+            yield b""
+
+    async def communicate(self):
+        return self._out, b""
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+    async def wait(self):
+        return self.returncode
+
+
+class _FakeConn:
+    def __init__(self, first=b"\x00"):
+        self.first, self.closed, self.written = first, False, []
+        self.meta_read = None
+
+    async def read(self, n):
+        return self.first
+
+    async def readexactly(self, n):
+        self.meta_read = n
+        return b"m" * n
+
+    def write(self, data):
+        self.written.append(data)
+
+    async def drain(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+    def is_closing(self):
+        return self.closed
+
+    async def wait_closed(self):
+        pass
+
+
+class TestTheScrcpySessionItself:
+    """`_Session` against a fake adb and socket: the arguments it starts the
+    server with, the handshake it reads, and what it leaves behind."""
+
+    def _patch(self, monkeypatch, *, conns=None, connect_error=None):
+        from server.device.android import scrcpy_input as sc
+
+        calls, server_proc = [], _FakeProc(long_running=True)
+
+        async def exec_(*args, **kwargs):
+            calls.append(args)
+            if "app_process" in args:
+                return server_proc
+            if "forward" in args and "tcp:0" in args:
+                return _FakeProc(b"40404\n")
+            return _FakeProc()
+
+        queue = list(conns or [_FakeConn()])
+
+        async def open_connection(host, port):
+            if connect_error:
+                raise connect_error
+            return queue[0], queue.pop(0) if len(queue) > 1 else queue[0]
+
+        monkeypatch.setattr(sc.asyncio, "create_subprocess_exec", exec_)
+        monkeypatch.setattr(sc.asyncio, "open_connection", open_connection)
+        monkeypatch.setattr(sc, "CONNECT_TIMEOUT", 0.5)
+        session = sc._Session("/usr/bin/adb", "dev", sc.ScrcpyServer(Path("/x.jar"), "4.1"))
+        return session, calls, server_proc
+
+    async def test_it_starts_a_control_only_server_and_reads_the_handshake(self, monkeypatch):
+        conn = _FakeConn()
+        session, calls, _ = self._patch(monkeypatch, conns=[conn])
+        await session.start()
+        server = next(c for c in calls if "app_process" in c)
+        args = server[server.index("com.genymobile.scrcpy.Server") + 1:]
+        assert args[0] == "4.1"
+        for flag in ("video=false", "audio=false", "control=true",
+                     "clipboard_autosync=false", "send_dummy_byte=true",
+                     "tunnel_forward=true"):
+            assert flag in args, flag
+        assert conn.meta_read == 64 and session.alive and session.port == 40404
+
+    async def test_a_failed_start_leaves_nothing_behind(self, monkeypatch):
+        session, calls, server_proc = self._patch(
+            monkeypatch, connect_error=ConnectionRefusedError("no"))
+        with pytest.raises(DeviceError, match="did not answer"):
+            await session.start()
+        assert server_proc.killed
+        assert any("--remove" in c and "tcp:40404" in c for c in calls)
+
+    async def test_a_connection_made_too_early_is_closed_before_retrying(self, monkeypatch):
+        early, ready = _FakeConn(first=b""), _FakeConn()
+        session, _, _ = self._patch(monkeypatch, conns=[early, ready])
+        await session.start()
+        assert early.closed and session.writer is ready
+
+    async def test_closing_removes_the_forward(self, monkeypatch):
+        session, calls, server_proc = self._patch(monkeypatch)
+        await session.start()
+        await session.close()
+        assert server_proc.killed and any("--remove" in c for c in calls)
+        assert session.port is None
+
+    async def test_a_server_that_exited_is_not_alive(self, monkeypatch):
+        session, _, server_proc = self._patch(monkeypatch)
+        await session.start()
+        server_proc.returncode = 1
+        assert not session.alive
+
+
+class TestScrcpySessionReplacement:
+    @staticmethod
+    def _input(monkeypatch, *, start_error=None, send_error=None):
+        from server.device.android import scrcpy_input as sc
+
+        versions = iter(["4.1", "4.1", "4.2"])
+        monkeypatch.setattr(sc, "find_server",
+                            lambda: sc.ScrcpyServer(Path("/x.jar"), next(versions)))
+        made = []
+
+        class Session:
+            def __init__(self, adb, serial, server):
+                self.server, self.alive, self.closed = server, False, False
+                made.append(self)
+
+            async def start(self):
+                if start_error:
+                    raise start_error
+                self.alive = True
+
+            async def send(self, messages):
+                if send_error:
+                    raise send_error
+
+            async def close(self):
+                self.closed, self.alive = True, False
+
+        monkeypatch.setattr(sc, "_Session", Session)
+        return sc.ScrcpyInput("/usr/bin/adb"), made
+
+    async def test_a_dead_session_is_replaced(self, monkeypatch):
+        touch, made = self._input(monkeypatch)
+        plan = gestures.plan("double_tap", 1, 1)
+        await touch.perform("dev", plan, 1080, 2340)
+        made[0].alive = False
+        await touch.perform("dev", plan, 1080, 2340)
+        assert len(made) == 2 and made[0].closed
+
+    async def test_an_upgraded_scrcpy_gets_a_new_server(self, monkeypatch):
+        touch, made = self._input(monkeypatch)
+        plan = gestures.plan("double_tap", 1, 1)
+        for _ in range(3):                         # 4.1, 4.1, then 4.2
+            await touch.perform("dev", plan, 1080, 2340)
+        assert [m.server.version for m in made] == ["4.1", "4.2"]
+        assert made[0].closed
+
+    async def test_a_failed_start_is_not_kept(self, monkeypatch):
+        touch, _ = self._input(monkeypatch, start_error=DeviceError("no", tool="scrcpy"))
+        with pytest.raises(DeviceError):
+            await touch.perform("dev", gestures.plan("double_tap", 1, 1), 1080, 2340)
+        assert "dev" not in touch._sessions
+
+    async def test_a_cancelled_gesture_drops_its_session(self, monkeypatch):
+        """Fingers it left down belong to that server; the next gesture's
+        down would otherwise land on a pointer already down (review)."""
+        import asyncio
+
+        touch, made = self._input(monkeypatch, send_error=asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError):
+            await touch.perform("dev", gestures.plan("double_tap", 1, 1), 1080, 2340)
+        assert "dev" not in touch._sessions and made[0].closed
+
+    async def test_close_all_closes_every_session(self, monkeypatch):
+        touch, made = self._input(monkeypatch)
+        await touch.perform("dev", gestures.plan("double_tap", 1, 1), 1080, 2340)
+        await touch.close_all()
+        assert made[0].closed and touch._sessions == {}
+
+
+@pytest.fixture(autouse=True)
+def _no_cached_scrcpy():
+    """find_server caches a discovery module-wide; no test inherits one."""
+    from server.device.android import scrcpy_input as sc
+
+    sc._found = None
+    yield
+    sc._found = None
+
+
+class TestScrcpyDiscoveryCache:
+    """`scrcpy --version` ran before every gesture; a slow probe refused
+    gestures a live session could have sent (review)."""
+
+    def _setup(self, monkeypatch, tmp_path, outputs):
+        import os
+
+        from server.device.android import scrcpy_input as sc
+
+        prefix = tmp_path / "prefix"
+        (prefix / "bin").mkdir(parents=True)
+        (prefix / "share" / "scrcpy").mkdir(parents=True)
+        binary = prefix / "bin" / "scrcpy"
+        binary.write_text("v1")
+        (prefix / "share" / "scrcpy" / "scrcpy-server").write_text("jar")
+        runs = []
+
+        def run(*a, **k):
+            runs.append(1)
+            return MagicMock(stdout=outputs[min(len(runs), len(outputs)) - 1])
+        monkeypatch.setattr(sc.shutil, "which", lambda name: str(binary))
+        monkeypatch.setattr(sc.subprocess, "run", run)
+        monkeypatch.delenv("SCRCPY_SERVER_PATH", raising=False)
+        return sc, binary, runs, os
+
+    def test_an_unchanged_scrcpy_is_not_probed_again(self, monkeypatch, tmp_path):
+        sc, _, runs, _ = self._setup(monkeypatch, tmp_path, ["scrcpy 4.1"])
+        assert sc.find_server().version == "4.1"
+        assert sc.find_server().version == "4.1"
+        assert len(runs) == 1
+
+    def test_an_upgrade_is_seen(self, monkeypatch, tmp_path):
+        sc, binary, runs, os = self._setup(monkeypatch, tmp_path, ["scrcpy 4.1", "scrcpy 4.2"])
+        assert sc.find_server().version == "4.1"
+        st = binary.stat()
+        os.utime(binary, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+        assert sc.find_server().version == "4.2" and len(runs) == 2
+
+    def test_a_new_server_path_is_seen(self, monkeypatch, tmp_path):
+        sc, _, runs, _ = self._setup(monkeypatch, tmp_path, ["scrcpy 4.1"])
+        sc.find_server()
+        mine = tmp_path / "mine.jar"
+        mine.write_text("jar")
+        monkeypatch.setenv("SCRCPY_SERVER_PATH", str(mine))
+        assert sc.find_server().jar == mine and len(runs) == 2
+
+    def test_a_cached_jar_that_disappears_is_looked_for_again(self, monkeypatch, tmp_path):
+        sc, binary, runs, _ = self._setup(monkeypatch, tmp_path, ["scrcpy 4.1"])
+        first = sc.find_server().jar
+        other = tmp_path / "other.jar"
+        other.write_text("jar")
+        first.unlink()
+        monkeypatch.setattr(sc, "_probe", lambda b: sc.ScrcpyServer(other, "4.1"))
+        assert sc.find_server().jar == other
+
+    def test_a_failure_is_not_cached(self, monkeypatch, tmp_path):
+        sc, _, runs, _ = self._setup(monkeypatch, tmp_path, ["", "scrcpy 4.1"])
+        assert sc.find_server() is None
+        assert sc.find_server().version == "4.1" and len(runs) == 2
+
+
+class TestCancelledStartsLeaveNothing:
+    """A gesture request cancelled while its session started left the adb
+    process running and, past the forward, the forward in adb (review)."""
+
+    async def test_a_cancelled_adb_command_is_killed(self, monkeypatch):
+        import asyncio
+
+        from server.device.android import scrcpy_input as sc
+
+        class Hanging(_FakeProc):
+            async def communicate(self):
+                await asyncio.sleep(3600)
+
+        proc = Hanging()
+
+        async def exec_(*args, **kwargs):
+            return proc
+        monkeypatch.setattr(sc.asyncio, "create_subprocess_exec", exec_)
+        session = sc._Session("/usr/bin/adb", "dev", sc.ScrcpyServer(Path("/x.jar"), "4.1"))
+        task = asyncio.ensure_future(session._adb("push", "/x.jar", sc.REMOTE_JAR))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert proc.killed
+
+    async def test_a_forward_whose_port_was_never_read_is_found_by_name(self, monkeypatch):
+        from server.device.android import scrcpy_input as sc
+
+        session = sc._Session("/usr/bin/adb", "dev", sc.ScrcpyServer(Path("/x.jar"), "4.1"))
+        mine = f"localabstract:scrcpy_{session.scid:08x}"
+        listing = (f"dev tcp:5001 {mine}\n"
+                   f"other tcp:5002 {mine}\n"                       # another device
+                   f"dev tcp:5003 localabstract:scrcpy_deadbeef\n"  # another session
+                   ).encode()
+        calls = []
+
+        async def exec_(*args, **kwargs):
+            calls.append(args)
+            return _FakeProc(listing if "--list" in args else b"")
+        monkeypatch.setattr(sc.asyncio, "create_subprocess_exec", exec_)
+        assert session.port is None
+        await session.close()
+        removed = [c[c.index("--remove") + 1] for c in calls if "--remove" in c]
+        assert removed == ["tcp:5001"]

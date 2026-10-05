@@ -109,6 +109,9 @@ ignore = ["UP042"]
 # old enough interpreter is present to run the check.
 "server/lifecycle/capture_env.py" = ["UP017", "UP040", "UP041"]
 "scripts/capture-env.py" = ["UP017", "UP040", "UP041"]
+# Run as `./find-profile.py` by the probe app's build.sh, under the same
+# whatever-`python3`-is-around, so the same three.
+"tools/probe-app/find-profile.py" = ["UP017", "UP040", "UP041"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

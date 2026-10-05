@@ -596,28 +596,28 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
   });
 
   server.registerTool("gesture", {
-    description: `Multi-finger gestures and timed taps on an iOS simulator: pinch, rotate, two-finger pan, double tap, two-finger tap. For maps, photo viewers, zoomable canvases and anything that needs two fingers or a real double tap.
+    description: `Multi-finger gestures and timed taps on iOS and Android: pinch, rotate, two-finger pan, double tap, two-finger tap. For maps, photo viewers, zoomable canvases and anything that needs two fingers or a real double tap.
 
 Centre it on x/y, or on the element a label or identifier names (one of the two). Then, by type:
 - pinch: scale (above 1 spreads the fingers to zoom in, below 1 squeezes to zoom out); distance is the separation at the narrow end (default 60pt).
 - rotate: degrees, positive clockwise; distance is the radius (default 80pt).
-- pan: dx/dy in points, both fingers together.
+- pan: dx/dy in the screen's coordinates (points on iOS, pixels on Android), both fingers together.
 - double_tap: count taps (default 2, 3 for a triple) inside the system's double-tap interval -- two separate tap calls can miss it.
 - two_finger_tap: both fingers down and up together.
 
-Returns where the fingers went. An app's recogniser reports a little less than was sent (a pinch from 40pt to 240pt reads as about 5x, not 6x), because it starts measuring only once the fingers pass its threshold. Simulators only for now: a physical iPhone, Android device or the idb backend answers 400 rather than sending one finger.`,
+Returns where the fingers went. An app's recogniser reports a little less than was sent (a pinch from 40pt to 240pt reads as about 5x, not 6x), because it starts measuring only once the fingers pass its threshold. Works on iOS simulators, physical iPhones, and Android (needs scrcpy installed; otherwise a 400 says how). On Android coordinates are pixels and a pinch defaults to 30mm apart along the long axis, since many apps ignore fingers closer than ~27mm; a large scale may then not fit, and the 400 names the point.`,
     inputSchema: strictParams({
       type: z.enum(["pinch", "rotate", "pan", "double_tap", "two_finger_tap"]).describe("Which gesture"),
-      x: z.coerce.number().finite().optional().describe("Centre X, in points"),
-      y: z.coerce.number().finite().optional().describe("Centre Y, in points"),
+      x: z.coerce.number().finite().optional().describe("Centre X, in the screen's coordinates: points on iOS, pixels on Android"),
+      y: z.coerce.number().finite().optional().describe("Centre Y, in the screen's coordinates: points on iOS, pixels on Android"),
       label: z.string().optional().describe("Centre on the element with this label"),
       identifier: z.string().optional().describe("Centre on the element with this accessibility identifier"),
       element_type: z.string().optional().describe("Narrow a label or identifier match by element type"),
       scale: z.coerce.number().finite().positive().optional().describe("pinch: end separation over start; >1 zooms in, <1 zooms out"),
       degrees: z.coerce.number().finite().min(-3600).max(3600).optional().describe("rotate: degrees to turn, positive clockwise (at most 3600 either way)"),
-      dx: z.coerce.number().finite().optional().describe("pan: points to move right"),
-      dy: z.coerce.number().finite().optional().describe("pan: points to move down"),
-      distance: z.coerce.number().finite().positive().optional().describe("pinch: narrow-end separation (60). rotate: radius (80). pan, two_finger_tap: finger separation (40)"),
+      dx: z.coerce.number().finite().optional().describe("pan: how far to move right, in the screen's coordinates (points on iOS, pixels on Android)"),
+      dy: z.coerce.number().finite().optional().describe("pan: how far to move down, in the screen's coordinates (points on iOS, pixels on Android)"),
+      distance: z.coerce.number().finite().positive().optional().describe("In the screen's coordinates. pinch: narrow-end separation (60pt; 30mm on Android). rotate: radius (80pt). pan, two_finger_tap: finger separation (40pt). Android scales the pt defaults by density"),
       angle: z.coerce.number().finite().optional().describe("pinch: the fingers' line, degrees from horizontal. rotate: where the fingers start"),
       duration: z.coerce.number().positive().max(10).optional().describe("pinch, rotate, pan: seconds from touch-down to lift (default 0.6)"),
       count: z.coerce.number().int().min(1).max(10).optional().describe("double_tap: taps (default 2). two_finger_tap: taps (default 1)"),

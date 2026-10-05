@@ -97,11 +97,14 @@ if [ -n "$DEVICE_UDID" ]; then
   PROFILE=$(echo "$PROFILE_INFO" | sed -n 1p)
   TEAM=$(echo "$PROFILE_INFO" | sed -n 2p)
   IDENTITY=$(echo "$PROFILE_INFO" | sed -n 3p)
+  # The App ID prefix, which an older account has apart from its team id.
+  PREFIX=$(echo "$PROFILE_INFO" | sed -n 4p)
+  PREFIX=${PREFIX:-$TEAM}
 
   cp "$PROFILE" "$OUT/embedded.mobileprovision"
 
   # Entitlements are not copied from the profile wholesale: a wildcard profile
-  # grants `TEAM.*`, and an app signed with that literal identifier gets a
+  # grants `PREFIX.*`, and an app signed with that literal identifier gets a
   # keychain and container shared with every other app signed the same way.
   # Naming the bundle id keeps this fixture's state its own.
   ENTITLEMENTS=$(mktemp -t quernprobe-entitlements).plist
@@ -111,7 +114,7 @@ if [ -n "$DEVICE_UDID" ]; then
 <plist version="1.0">
 <dict>
     <key>application-identifier</key>
-    <string>${TEAM}.${BUNDLE}</string>
+    <string>${PREFIX}.${BUNDLE}</string>
     <key>com.apple.developer.team-identifier</key>
     <string>${TEAM}</string>
     <key>get-task-allow</key>
