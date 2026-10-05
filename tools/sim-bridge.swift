@@ -1409,16 +1409,24 @@ func sendMultiFingerEvent(points: [CGPoint], identifiers: [UInt32], isDown: Bool
 /// through the single-touch builder -- a different path from the one that
 /// just failed -- and drop the cached client, so the next command starts from
 /// a fresh connection rather than one with contacts it never released.
+///
+/// Sent checked, waiting for the simulator to confirm delivery, so `true`
+/// means every lift reached it rather than only that it was built: the
+/// unchecked send dispatches with no completion, and reporting a recovery on
+/// that would claim more than was known (review).
 func releaseContacts(points: [CGPoint], identifiers: [UInt32], udid: String,
                      client: AnyObject) -> Bool {
-    var released = true
+    var delivered = true
     for (point, id) in zip(points, identifiers) {
-        if !sendDigitizerEvent(point: point, identifier: id, isDown: false, client: client) {
-            released = false
+        guard let event = makeDigitizerEvent(point: point, identifier: id, isDown: false),
+              let msg = withExtendedLifetime(event, { wrapAndPatch(event: event) }),
+              sendHIDMessageChecked(msg, to: client) else {
+            delivered = false
+            continue
         }
     }
     hidClients.removeValue(forKey: udid)
-    return released
+    return delivered
 }
 
 /// Every contact down at the first point of its path, through each waypoint
@@ -1477,7 +1485,7 @@ func doTouchPaths(udid: String, paths: [[CGPoint]], duration: Double) -> (Bool, 
         let released = releaseContacts(points: frame(steps - 1), identifiers: ids, udid: udid,
                                        client: client)
         return (false, "could not build the touch-up event; " + (released
-            ? "each finger was lifted separately instead"
+            ? "a separate lift for each finger was delivered instead"
             : "contacts may still be down until the simulator is next touched"), false)
     }
     // Any dropped waypoint fails the gesture: a rotation missing part of its
@@ -1528,7 +1536,7 @@ func doMultiTap(udid: String, points: [CGPoint], count: Int, interval: Double,
             let released = releaseContacts(points: normalised, identifiers: ids, udid: udid,
                                            client: client)
             return (false, "could not lift tap \(n + 1); " + (released
-                ? "each finger was lifted separately instead"
+                ? "a separate lift for each finger was delivered instead"
                 : "contacts may still be down until the simulator is next touched"), false)
         }
         if n < count - 1 { usleep(UInt32(max(0.0, interval) * 1_000_000)) }
