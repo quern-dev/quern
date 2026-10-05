@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0-beta.2] - 2026-10-04
+
 ### Added
 - **Recordings of runs quern does not drive can be kept small, and given seek points (#415, #416).** For a CI pipeline that records each XCUITest run and publishes the recording when a build fails, where 911 flows came to 18 MB, two thirds of it one API's response bodies:
   - **Body limits:** `bodies` (`all`, `errors` or `none`), `max_body_bytes` and `exclude_content_types` shape each flow as it is written. Every flow keeps its metadata and `body_size`, and a dropped body says why in `body_omitted`.
@@ -736,7 +738,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.24.0-beta.1...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.24.0-beta.2...main
+[0.24.0-beta.2]: https://github.com/quern-dev/quern/releases/tag/v0.24.0-beta.2
 [0.24.0-beta.1]: https://github.com/quern-dev/quern/releases/tag/v0.24.0-beta.1
 [0.23.0]: https://github.com/quern-dev/quern/releases/tag/v0.23.0
 [0.22.1]: https://github.com/quern-dev/quern/releases/tag/v0.22.1
