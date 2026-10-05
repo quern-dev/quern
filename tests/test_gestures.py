@@ -1050,3 +1050,65 @@ class TestScrcpySessionReplacement:
         await touch.perform("dev", gestures.plan("double_tap", 1, 1), 1080, 2340)
         await touch.close_all()
         assert made[0].closed and touch._sessions == {}
+
+
+@pytest.fixture(autouse=True)
+def _no_cached_scrcpy():
+    """find_server caches a discovery module-wide; no test inherits one."""
+    from server.device.android import scrcpy_input as sc
+
+    sc._found = None
+    yield
+    sc._found = None
+
+
+class TestScrcpyDiscoveryCache:
+    """`scrcpy --version` ran before every gesture; a slow probe refused
+    gestures a live session could have sent (review)."""
+
+    def _setup(self, monkeypatch, tmp_path, outputs):
+        import os
+
+        from server.device.android import scrcpy_input as sc
+
+        prefix = tmp_path / "prefix"
+        (prefix / "bin").mkdir(parents=True)
+        (prefix / "share" / "scrcpy").mkdir(parents=True)
+        binary = prefix / "bin" / "scrcpy"
+        binary.write_text("v1")
+        (prefix / "share" / "scrcpy" / "scrcpy-server").write_text("jar")
+        runs = []
+
+        def run(*a, **k):
+            runs.append(1)
+            return MagicMock(stdout=outputs[min(len(runs), len(outputs)) - 1])
+        monkeypatch.setattr(sc.shutil, "which", lambda name: str(binary))
+        monkeypatch.setattr(sc.subprocess, "run", run)
+        monkeypatch.delenv("SCRCPY_SERVER_PATH", raising=False)
+        return sc, binary, runs, os
+
+    def test_an_unchanged_scrcpy_is_not_probed_again(self, monkeypatch, tmp_path):
+        sc, _, runs, _ = self._setup(monkeypatch, tmp_path, ["scrcpy 4.1"])
+        assert sc.find_server().version == "4.1"
+        assert sc.find_server().version == "4.1"
+        assert len(runs) == 1
+
+    def test_an_upgrade_is_seen(self, monkeypatch, tmp_path):
+        sc, binary, runs, os = self._setup(monkeypatch, tmp_path, ["scrcpy 4.1", "scrcpy 4.2"])
+        assert sc.find_server().version == "4.1"
+        st = binary.stat()
+        os.utime(binary, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+        assert sc.find_server().version == "4.2" and len(runs) == 2
+
+    def test_a_new_server_path_is_seen(self, monkeypatch, tmp_path):
+        sc, _, runs, _ = self._setup(monkeypatch, tmp_path, ["scrcpy 4.1"])
+        sc.find_server()
+        mine = tmp_path / "mine.jar"
+        mine.write_text("jar")
+        monkeypatch.setenv("SCRCPY_SERVER_PATH", str(mine))
+        assert sc.find_server().jar == mine and len(runs) == 2
+
+    def test_a_failure_is_not_cached(self, monkeypatch, tmp_path):
+        sc, _, runs, _ = self._setup(monkeypatch, tmp_path, ["", "scrcpy 4.1"])
+        assert sc.find_server() is None
+        assert sc.find_server().version == "4.1" and len(runs) == 2

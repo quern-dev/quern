@@ -60,6 +60,13 @@ class ScrcpyServer:
     version: str
 
 
+#: The last successful discovery and what it was keyed on. Probing runs
+#: `scrcpy --version`, which a gesture should not wait on when nothing has
+#: changed -- a slow probe refused gestures a live session could have sent
+#: (review).
+_found: tuple[tuple, ScrcpyServer] | None = None
+
+
 def find_server() -> ScrcpyServer | None:
     """The scrcpy-server jar and the version it must be started with.
 
@@ -67,10 +74,30 @@ def find_server() -> ScrcpyServer | None:
     installed beside the `scrcpy` binary. None when either half is missing --
     a jar of unknown version cannot be started, since the server refuses a
     version that is not its own.
+
+    Cached while the binary (by path, resolved path, size and modification
+    time) and `SCRCPY_SERVER_PATH` are unchanged, so an upgrade is still
+    seen. A failure is never cached: installing scrcpy takes effect on the
+    next gesture.
     """
+    global _found
     binary = shutil.which("scrcpy")
     if binary is None:
         return None
+    try:
+        real = os.path.realpath(binary)
+        st = os.stat(real)
+    except OSError:
+        return None
+    key = (binary, real, st.st_size, st.st_mtime_ns, os.environ.get("SCRCPY_SERVER_PATH"))
+    if _found is not None and _found[0] == key:
+        return _found[1]
+    found = _probe(binary)
+    _found = (key, found) if found is not None else None
+    return found
+
+
+def _probe(binary: str) -> ScrcpyServer | None:
     try:
         out = subprocess.run([binary, "--version"], capture_output=True, text=True,
                              timeout=10).stdout

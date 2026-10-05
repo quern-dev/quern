@@ -601,7 +601,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
 Centre it on x/y, or on the element a label or identifier names (one of the two). Then, by type:
 - pinch: scale (above 1 spreads the fingers to zoom in, below 1 squeezes to zoom out); distance is the separation at the narrow end (default 60pt).
 - rotate: degrees, positive clockwise; distance is the radius (default 80pt).
-- pan: dx/dy in points, both fingers together.
+- pan: dx/dy in the screen's coordinates (points on iOS, pixels on Android), both fingers together.
 - double_tap: count taps (default 2, 3 for a triple) inside the system's double-tap interval -- two separate tap calls can miss it.
 - two_finger_tap: both fingers down and up together.
 
@@ -615,8 +615,8 @@ Returns where the fingers went. An app's recogniser reports a little less than w
       element_type: z.string().optional().describe("Narrow a label or identifier match by element type"),
       scale: z.coerce.number().finite().positive().optional().describe("pinch: end separation over start; >1 zooms in, <1 zooms out"),
       degrees: z.coerce.number().finite().min(-3600).max(3600).optional().describe("rotate: degrees to turn, positive clockwise (at most 3600 either way)"),
-      dx: z.coerce.number().finite().optional().describe("pan: points to move right"),
-      dy: z.coerce.number().finite().optional().describe("pan: points to move down"),
+      dx: z.coerce.number().finite().optional().describe("pan: how far to move right, in the screen's coordinates (points on iOS, pixels on Android)"),
+      dy: z.coerce.number().finite().optional().describe("pan: how far to move down, in the screen's coordinates (points on iOS, pixels on Android)"),
       distance: z.coerce.number().finite().positive().optional().describe("In the screen's coordinates. pinch: narrow-end separation (60pt; 30mm on Android). rotate: radius (80pt). pan, two_finger_tap: finger separation (40pt). Android scales the pt defaults by density"),
       angle: z.coerce.number().finite().optional().describe("pinch: the fingers' line, degrees from horizontal. rotate: where the fingers start"),
       duration: z.coerce.number().positive().max(10).optional().describe("pinch, rotate, pan: seconds from touch-down to lift (default 0.6)"),
