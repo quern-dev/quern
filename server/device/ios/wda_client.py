@@ -20,9 +20,11 @@ from dataclasses import dataclass
 
 import httpx
 
+from server.device.gestures import Plan, w3c_actions
 from server.device.ios.wda_selector import ElementSelector
 from server.models import (
     DeviceError,
+    InvalidDeviceRequestError,
     WdaAppCrashedError,
     WdaElementNotFoundError,
     WdaElementNotInteractableError,
@@ -311,6 +313,9 @@ class WdaBackend:
     #: A WDA swipe returns once the app is idle, so a read straight after it
     #: is at rest. Measured on an iPhone 11, including at the end of a list.
     swipe_returns_at_rest = True
+
+    #: W3C pointer actions carry one touch source per finger (#252).
+    multitouch = True
 
     def __init__(self) -> None:
         self._connections: dict[str, _WdaConnection] = {}
@@ -1452,6 +1457,47 @@ class WdaBackend:
             "toY": end_y,
             "duration": duration,
         })
+
+    async def perform_gesture(self, udid: str, plan: Plan) -> None:
+        """A gesture `server.device.gestures` laid out, as W3C pointer actions.
+
+        One touch source per finger, synthesised by XCUITest as one event
+        record, so the fingers move in step (#252). Points off the screen are
+        refused, as sim-bridge refuses them, rather than left to XCUITest.
+
+        Never re-sent: a pinch WDA may already have performed would be
+        performed twice, and a second rotation turns twice as far (#74, #407).
+        """
+        width, height = await self._window_size(udid)
+        points = [p for path in plan.paths or [] for p in path] + list(plan.points or [])
+        for x, y in points:
+            if not (0 <= x <= width and 0 <= y <= height):
+                raise InvalidDeviceRequestError(
+                    f"point ({x:.0f}, {y:.0f}) is off the {width:.0f}x{height:.0f} screen",
+                    tool="wda")
+        try:
+            await self._request("post", udid, "/actions", use_session=True,
+                                timeout=max(ACTION_TIMEOUT, plan.duration + 15),
+                                raise_if_maybe_delivered=True,
+                                json={"actions": w3c_actions(plan)})
+        except httpx.HTTPError as exc:
+            raise DeviceError(
+                f"WDA did not answer the {plan.kind} on {udid[:8]} "
+                f"({type(exc).__name__}). It may already have been performed, so it "
+                "was not sent again; check the screen.",
+                tool="wda",
+            ) from exc
+
+    async def _window_size(self, udid: str) -> tuple[float, float]:
+        """The screen in points, as WDA's coordinates are."""
+        resp = await self._request("get", udid, "/window/size", use_session=True,
+                                   timeout=ACTION_TIMEOUT)
+        try:
+            value = resp.json()["value"]
+            return float(value["width"]), float(value["height"])
+        except (ValueError, KeyError, TypeError) as exc:
+            raise DeviceError(f"WDA window/size on {udid[:8]} answered something unreadable",
+                              tool="wda") from exc
 
     async def type_text(self, udid: str, text: str) -> None:
         """Type text via WDA."""

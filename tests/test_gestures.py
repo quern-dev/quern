@@ -370,17 +370,108 @@ class TestTheRoute:
         assert resp.status_code == 422
 
 
-def test_only_sim_bridge_claims_multitouch():
+def test_the_backends_that_claim_multitouch_can_send_it():
     """A backend that gains the attribute without the method would accept a
     gesture and fail it; one that loses it refuses a gesture it could send."""
     from server.device.android.u2_client import U2Backend
     from server.device.ios.idb import IdbBackend
     from server.device.ios.wda_client import WdaBackend
 
-    assert SimBridgeBackend.multitouch is True
-    assert callable(SimBridgeBackend.perform_gesture)
-    for cls in (IdbBackend, WdaBackend, U2Backend):
+    for cls in (SimBridgeBackend, WdaBackend):
+        assert cls.multitouch is True and callable(cls.perform_gesture), cls.__name__
+    for cls in (IdbBackend, U2Backend):
         assert getattr(cls, "multitouch", False) is not True, cls.__name__
+
+
+class TestW3cActions:
+    """What WDA's /actions is sent: one touch source per finger, in one
+    timeline. Measured on an iPhone 12 (iOS 26.5): pinch x3 read 2.65, x0.5
+    read 0.54, rotate 90 read 85, -200 read -195 -- the simulator's numbers."""
+
+    def test_a_moving_gesture(self):
+        plan = gestures.plan("pinch", 200, 400, scale=2, duration=1.1)
+        sources = gestures.w3c_actions(plan)
+        assert [s["id"] for s in sources] == ["finger1", "finger2"]
+        assert all(s["parameters"] == {"pointerType": "touch"} for s in sources)
+        for source, path in zip(sources, plan.paths, strict=True):
+            steps = source["actions"]
+            assert steps[0] == {"type": "pointerMove", "duration": 0, "origin": "viewport",
+                                "x": round(path[0][0], 2), "y": round(path[0][1], 2)}
+            assert steps[1] == {"type": "pointerDown", "button": 0}
+            moves = steps[2:-1]
+            assert len(moves) == len(path) - 1
+            assert {m["duration"] for m in moves} == {round(1100 / (len(path) - 1))}
+            assert (moves[-1]["x"], moves[-1]["y"]) == (round(path[-1][0], 2),
+                                                        round(path[-1][1], 2))
+            assert steps[-1] == {"type": "pointerUp", "button": 0}
+
+    def test_taps_are_timed_on_the_device(self):
+        """The interval is a pause inside one action sequence, so it is the
+        device's clock that keeps it, not a round trip per tap."""
+        plan = gestures.plan("double_tap", 200, 400, count=3, interval=0.2)
+        (source,) = gestures.w3c_actions(plan)
+        kinds = [(a["type"], a.get("duration")) for a in source["actions"][1:]]
+        tap = [("pointerDown", None), ("pause", gestures.TAP_HOLD_MS), ("pointerUp", None)]
+        assert kinds == tap + [("pause", 200)] + tap + [("pause", 200)] + tap
+
+    def test_a_two_finger_tap_is_two_sources(self):
+        sources = gestures.w3c_actions(gestures.plan("two_finger_tap", 200, 400, distance=50))
+        assert [(s["actions"][0]["x"], s["actions"][0]["y"]) for s in sources] == [
+            (175, 400), (225, 400)]
+
+
+class TestTheWdaBackend:
+    @staticmethod
+    def _backend(actions_reply=None, size=(390, 844)):
+        from server.device.ios.wda_client import WdaBackend
+
+        backend = WdaBackend()
+        calls = []
+
+        async def request(method, udid, path, **kwargs):
+            calls.append((method, path, kwargs))
+            if path == "/window/size":
+                resp = MagicMock()
+                resp.json.return_value = {"value": {"width": size[0], "height": size[1]}}
+                return resp
+            if isinstance(actions_reply, Exception):
+                raise actions_reply
+            return MagicMock()
+        backend._request = request
+        return backend, calls
+
+    async def test_it_sends_the_actions_and_never_resends(self):
+        backend, calls = self._backend()
+        await backend.perform_gesture(UDID, gestures.plan("rotate", 195, 531, degrees=90))
+        method, path, kwargs = calls[-1]
+        assert (method, path) == ("post", "/actions")
+        assert kwargs["raise_if_maybe_delivered"] is True     # a second turn is twice as far
+        assert kwargs["use_session"] is True
+        assert len(kwargs["json"]["actions"]) == 2
+
+    async def test_a_point_off_the_screen_is_refused_before_anything_is_sent(self):
+        backend, calls = self._backend()
+        with pytest.raises(InvalidDeviceRequestError, match="off the 390x844 screen"):
+            await backend.perform_gesture(UDID, gestures.plan("pinch", 195, 531, scale=20))
+        assert [c[1] for c in calls] == ["/window/size"]
+
+    async def test_no_answer_is_reported_not_retried(self):
+        import httpx
+
+        backend, calls = self._backend(actions_reply=httpx.ReadTimeout("slow"))
+        with pytest.raises(DeviceError, match="not sent again"):
+            await backend.perform_gesture(UDID, gestures.plan("double_tap", 195, 531))
+        assert [c[1] for c in calls].count("/actions") == 1
+
+    async def test_an_unreadable_window_size_is_a_failure(self):
+        from server.device.ios.wda_client import WdaBackend
+
+        backend = WdaBackend()
+        resp = MagicMock()
+        resp.json.return_value = {"value": None}
+        backend._request = AsyncMock(return_value=resp)
+        with pytest.raises(DeviceError, match="window/size"):
+            await backend.perform_gesture(UDID, gestures.plan("double_tap", 195, 531))
 
 
 def test_element_frames_carry_through_ui_element():

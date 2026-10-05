@@ -408,7 +408,7 @@ Manage iOS simulators and physical devices, and interact with running apps.
      ![Annotated screenshot](docs/images/annotated-screenshot.png)
 -->
 - **UI inspection** — accessibility tree, element state queries, wait-for-element polling, screen summaries
-- **Interaction** — tap (by element label or coordinates), swipe, pinch, rotate, two-finger pan, double tap and two-finger tap (simulators), scroll a container until a target is in view, type text, clear text, press hardware buttons
+- **Interaction** — tap (by element label or coordinates), swipe, pinch, rotate, two-finger pan, double tap and two-finger tap (iOS simulators and iPhones), scroll a container until a target is in view, type text, clear text, press hardware buttons
 - **Configuration** — set GPS location, grant permissions, open URLs and deep links, attach or detach the simulated hardware keyboard (iOS), and set locale, font scale, and display density (Android)
 - **App state checkpoints** — save and restore a named snapshot of an app's data container and app groups, so a test can start from a seeded state instead of driving the UI there every time. Auth tokens live in the simulator keychain, *outside* every app container, so a checkpoint restores logged-out unless you pass `include_keychain` — which additionally requires the device to be shut down, since the keychain is a WAL-mode SQLite database held open by `securityd`
 - **Plist inspection** — read, diff, set, and delete defaults inside a simulator app's container, or watch a plist and have per-key changes land in the log pipeline alongside app logs and proxy flows

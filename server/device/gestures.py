@@ -225,3 +225,42 @@ def _plan(kind: str, x: float, y: float, *, scale: float | None, degrees: float 
     if kind == "two_finger_tap":
         return two_finger_tap(x, y, distance=distance, count=count, interval=interval)
     raise _bad(f"unknown gesture {kind!r}: one of {', '.join(GESTURE_TYPES)}")
+
+
+#: How long each finger stays down in a tap, as `multi-tap` holds it.
+TAP_HOLD_MS = 40
+
+
+def w3c_actions(plan: Plan) -> list[dict]:
+    """The plan as W3C WebDriver pointer actions: one touch source per finger.
+
+    What WDA's `/actions` takes, and what XCUITest synthesises into one event
+    record, so every finger moves in the same timeline. A moving gesture is a
+    move to the first waypoint, a press, a timed move to each waypoint after
+    it, and a release; a tap is a press, a hold and a release per tap, with
+    the interval as a pause between them.
+    """
+    def move(p: Point, ms: int) -> dict:
+        return {"type": "pointerMove", "duration": ms, "origin": "viewport",
+                "x": round(p[0], 2), "y": round(p[1], 2)}
+
+    def source(i: int, steps: list[dict]) -> dict:
+        return {"type": "pointer", "id": f"finger{i + 1}",
+                "parameters": {"pointerType": "touch"}, "actions": steps}
+
+    down = {"type": "pointerDown", "button": 0}
+    up = {"type": "pointerUp", "button": 0}
+    if plan.paths is not None:
+        step_ms = round(plan.duration * 1000 / (len(plan.paths[0]) - 1))
+        return [source(i, [move(path[0], 0), down,
+                           *(move(p, step_ms) for p in path[1:]), up])
+                for i, path in enumerate(plan.paths)]
+    sources = []
+    for i, point in enumerate(plan.points or []):
+        steps: list[dict] = [move(point, 0)]
+        for n in range(plan.count):
+            steps += [down, {"type": "pause", "duration": TAP_HOLD_MS}, up]
+            if n < plan.count - 1:
+                steps.append({"type": "pause", "duration": round(plan.interval * 1000)})
+        sources.append(source(i, steps))
+    return sources
