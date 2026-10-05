@@ -15,9 +15,16 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from server.api.actions import logged_action
 from server.api.trace import _proxy_is_running
 from server.device.ios.devicectl import canonical_device_id
-from server.models import DeviceType, RecordingStartRequest, UtcDatetime
+from server.models import DeviceType, RecordingKeyframeRequest, RecordingStartRequest, UtcDatetime
 from server.recording import recorder as recording_mod
-from server.recording.recorder import KINDS, Filters, RecordingError, RecordingManager
+from server.recording.recorder import (
+    KEYFRAME_TRIGGERS,
+    KINDS,
+    Filters,
+    RecordingError,
+    RecordingManager,
+    RecordingNotFilming,
+)
 
 router = APIRouter(prefix="/api/v1/recordings", tags=["recordings"])
 
@@ -68,7 +75,10 @@ async def start_recording(request: Request, body: RecordingStartRequest) -> dict
         filters = Filters(
             kinds=tuple(body.kinds or KINDS), hosts=body.hosts,
             exclude_hosts=body.exclude_hosts, include_unattributed=body.include_unattributed,
-            video=body.video)
+            video=body.video, bodies=body.bodies, max_body_bytes=body.max_body_bytes,
+            exclude_content_types=body.exclude_content_types,
+            keyframes=tuple(body.keyframes) if body.keyframes is not None
+            else KEYFRAME_TRIGGERS)
         await manager.check_start(udid, body.output_dir, filters)
     except RecordingError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -87,7 +97,8 @@ async def start_recording(request: Request, body: RecordingStartRequest) -> dict
             warnings.append(f"this simulator's HTTPS is passed through, not recorded: "
                             f"{simulator_tls.reason}")
     try:
-        rec = await manager.start(udid, body.output_dir, filters)
+        rec = await manager.start(udid, body.output_dir, filters,
+                                  requested_by=body.requested_by)
     except RecordingError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     if "flows" in rec.filters.kinds and not _proxy_is_running(request):
@@ -119,6 +130,24 @@ async def stop_recording(request: Request, recording_id: str) -> dict:
     except RecordingError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     return _with_rejections(request, rec.summary())
+
+
+@router.post("/{recording_id}/keyframe")
+@logged_action("recording_keyframe", category="proxy")
+async def recording_keyframe(request: Request, recording_id: str,
+                             body: RecordingKeyframeRequest | None = None) -> dict:
+    """Ask the recording's movie for a keyframe now, so this moment is a seek
+    point (#415) -- for a driver quern does not see, such as a CI step or a
+    test marking the moment it cares about. The moment is written into the
+    recording as a `mark`, with the label if one is given."""
+    try:
+        asked = await _manager(request).keyframe(recording_id,
+                                                 label=body.label if body else None)
+    except RecordingNotFilming as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except RecordingError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return {"recording_id": recording_id, "requested": asked}
 
 
 def recording_dir(request: Request, ref: str) -> Path:
@@ -179,7 +208,15 @@ async def recording_events(
 
 
 @router.get("")
-async def list_recordings(request: Request) -> dict:
+async def list_recordings(
+    request: Request,
+    requested_by: Annotated[str | None, Query(description=(
+        "Only the recordings started with this `requested_by`"))] = None,
+) -> dict:
     """The recordings this server is making or has made since it started."""
+    # Read as start stores it: " ci" was kept as "ci", and listing by what was
+    # passed found nothing; blank is no filter, as the CLI and MCP send it.
+    requested_by = (requested_by or "").strip() or None
     return {"recordings": [_with_rejections(request, r.summary())
-                           for r in _manager(request).list()]}
+                           for r in _manager(request).list()
+                           if requested_by is None or r.requested_by == requested_by]}

@@ -24,12 +24,17 @@ By default only work positively identified as this device's is recorded; include
     inputSchema: strictParams({
       udid: z.string().describe("The device to record: simulator UDID, Android serial, or physical device UDID"),
       output_dir: z.string().optional().describe("Absolute directory to write into (created if missing; refused if it holds a recording). Default ~/.quern/recordings/<id>"),
-      hosts: z.array(z.string()).optional().describe("Only flows to these hosts and their subdomains"),
-      exclude_hosts: z.array(z.string()).optional().describe("Drop flows to these hosts and their subdomains, e.g. analytics"),
+      hosts: z.array(z.string()).optional().describe("Only flows to these hosts and their subdomains, or matching a glob over the whole host: *.s3.*.amazonaws.com"),
+      exclude_hosts: z.array(z.string()).optional().describe("Drop flows to these hosts and their subdomains, e.g. analytics. A glob matches the whole host: *.s3.*.amazonaws.com"),
       kinds: z.array(z.enum(["actions", "flows", "logs"])).optional().describe("What to collect: any of actions (quern's own), flows (full detail), logs (app logs and crash reports). Default all; [\"flows\"] for network calls only"),
       include_unattributed: z.boolean().optional().describe("Also record flows and log lines tied to no device (default false)"),
+      requested_by: z.string().trim().max(200).optional().describe("Who is asking, e.g. ci-ui-tests or the agent's name: kept with the recording, and list_recordings filters by it, so subsystems sharing a server can tell their runs apart. A label, not ownership"),
       allow_passthrough: z.boolean().optional().describe("Recording flows from a simulator under local capture or the system proxy first asks whether it trusts quern's CA: it installs it if auto_install_cert is set, and otherwise refuses with 428 -- a run that records no HTTPS looks fine and holds nothing -- unless this is set. Then, under local capture, its apps work and its HTTPS is not recorded; under the system proxy its HTTPS requests fail for the whole run. The response's simulator_tls and warnings say what is in effect; ask the user before passing this rather than installing the CA."),
-      video: z.boolean().optional().describe("Simulators only: also record the screen to <output_dir>/video-<n>.mp4 (one movie per quern run), with a keyframe at each action; get_trace(recording=...) then gives each action and flow its {path, offset_s} in the movie. Refused, before anything is written, if the simulator is not booted or is already being filmed by another recording"),
+      keyframes: z.array(z.enum(["actions", "requests"])).optional().describe("With video: what makes a seek point in the movie -- quern's actions, and each request the device starts (none within a second of another keyframe, so the requests an action sets off add none). Default both; a run quern does not drive, such as XCUITest, has requests and no actions. Request keyframes need flows in kinds; [] asks for none"),
+      bodies: z.enum(["all", "errors", "none"]).optional().describe("Which flow bodies to keep; every flow's metadata is kept regardless. errors keeps response bodies only for non-2xx and unanswered requests -- what a failure needs, at a fraction of the size; a request's own body stays on its start line (bound it with max_body_bytes). Default all"),
+      max_body_bytes: z.number().int().min(0).optional().describe("Keep at most this many bytes of each body; body_size still gives the full size"),
+      exclude_content_types: z.array(z.string()).optional().describe("Drop bodies whose Content-Type starts with any of these, e.g. image/, text/html; the flows are kept"),
+      video: z.boolean().optional().describe("Simulators only: also record the screen to <output_dir>/video-<n>.mp4 (one movie per quern run), with keyframes at actions and requests (see keyframes); get_trace(recording=...) then gives each action and flow its {path, offset_s} in the movie. Refused, before anything is written, if the simulator is not booted or is already being filmed by another recording"),
     }),
   }, async (args) => {
     try {
@@ -47,6 +52,21 @@ By default only work positively identified as this device's is recorded; include
   }, async ({ recording_id }) => {
     try {
       return answer(await apiRequest("POST", `/api/v1/recordings/${encodeURIComponent(recording_id)}/stop`));
+    } catch (e) {
+      return failure(e);
+    }
+  });
+
+  server.registerTool("recording_keyframe", {
+    description: `Ask a recording's movie for a keyframe now, so this moment is a seek point in it. For a moment quern does not see on its own -- a test reaching the step that matters, or something on screen worth jumping to later. Quern's actions and the device's requests already make seek points (see start_recording's keyframes). 409 when the recording is not filming.`,
+    inputSchema: strictParams({
+      recording_id: z.string().describe("The recording's id, from start_recording"),
+      label: z.string().optional().describe("What this moment is, e.g. a test step; written into the recording as a mark"),
+    }),
+  }, async ({ recording_id, label }) => {
+    try {
+      return answer(await apiRequest("POST", `/api/v1/recordings/${encodeURIComponent(recording_id)}/keyframe`,
+        undefined, label === undefined ? undefined : { label }));
     } catch (e) {
       return failure(e);
     }
@@ -81,11 +101,13 @@ detail="summary" (the default here) gives one line per event: a flow's method, U
   });
 
   server.registerTool("list_recordings", {
-    description: "The recordings this server is making or has made since it started: device, directory, state, counts, drops and gaps.",
-    inputSchema: strictParams({}),
-  }, async () => {
+    description: "The recordings this server is making or has made since it started: device, who asked (requested_by), directory, state, counts, drops and gaps.",
+    inputSchema: strictParams({
+      requested_by: z.string().optional().describe("Only the recordings started with this requested_by"),
+    }),
+  }, async ({ requested_by }) => {
     try {
-      return answer(await apiRequest("GET", "/api/v1/recordings"));
+      return answer(await apiRequest("GET", "/api/v1/recordings", requested_by ? { requested_by } : undefined));
     } catch (e) {
       return failure(e);
     }
