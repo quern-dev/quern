@@ -1108,6 +1108,15 @@ class TestScrcpyDiscoveryCache:
         monkeypatch.setenv("SCRCPY_SERVER_PATH", str(mine))
         assert sc.find_server().jar == mine and len(runs) == 2
 
+    def test_a_cached_jar_that_disappears_is_looked_for_again(self, monkeypatch, tmp_path):
+        sc, binary, runs, _ = self._setup(monkeypatch, tmp_path, ["scrcpy 4.1"])
+        first = sc.find_server().jar
+        other = tmp_path / "other.jar"
+        other.write_text("jar")
+        first.unlink()
+        monkeypatch.setattr(sc, "_probe", lambda b: sc.ScrcpyServer(other, "4.1"))
+        assert sc.find_server().jar == other
+
     def test_a_failure_is_not_cached(self, monkeypatch, tmp_path):
         sc, _, runs, _ = self._setup(monkeypatch, tmp_path, ["", "scrcpy 4.1"])
         assert sc.find_server() is None

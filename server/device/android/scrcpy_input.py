@@ -90,7 +90,10 @@ def find_server() -> ScrcpyServer | None:
     except OSError:
         return None
     key = (binary, real, st.st_size, st.st_mtime_ns, os.environ.get("SCRCPY_SERVER_PATH"))
-    if _found is not None and _found[0] == key:
+    # The jar is checked too: one removed under an unchanged binary would
+    # otherwise be handed out until the push failed, though another
+    # candidate was there (review).
+    if _found is not None and _found[0] == key and _found[1].jar.is_file():
         return _found[1]
     found = _probe(binary)
     _found = (key, found) if found is not None else None
