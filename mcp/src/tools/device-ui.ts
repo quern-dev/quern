@@ -595,6 +595,58 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
     }
   });
 
+  server.registerTool("gesture", {
+    description: `Multi-finger gestures and timed taps on an iOS simulator: pinch, rotate, two-finger pan, double tap, two-finger tap. For maps, photo viewers, zoomable canvases and anything that needs two fingers or a real double tap.
+
+Centre it on x/y, or on the element a label or identifier names (one of the two). Then, by type:
+- pinch: scale (above 1 spreads the fingers to zoom in, below 1 squeezes to zoom out); distance is the separation at the narrow end (default 60pt).
+- rotate: degrees, positive clockwise; distance is the radius (default 80pt).
+- pan: dx/dy in points, both fingers together.
+- double_tap: count taps (default 2, 3 for a triple) inside the system's double-tap interval -- two separate tap calls can miss it.
+- two_finger_tap: both fingers down and up together.
+
+Returns where the fingers went. An app's recogniser reports a little less than was sent (a pinch from 40pt to 240pt reads as about 5x, not 6x), because it starts measuring only once the fingers pass its threshold. Simulators only for now: a physical iPhone, Android device or the idb backend answers 400 rather than sending one finger.`,
+    inputSchema: strictParams({
+      type: z.enum(["pinch", "rotate", "pan", "double_tap", "two_finger_tap"]).describe("Which gesture"),
+      x: z.coerce.number().optional().describe("Centre X, in points"),
+      y: z.coerce.number().optional().describe("Centre Y, in points"),
+      label: z.string().optional().describe("Centre on the element with this label"),
+      identifier: z.string().optional().describe("Centre on the element with this accessibility identifier"),
+      element_type: z.string().optional().describe("Narrow a label or identifier match by element type"),
+      scale: z.coerce.number().positive().optional().describe("pinch: end separation over start; >1 zooms in, <1 zooms out"),
+      degrees: z.coerce.number().optional().describe("rotate: degrees to turn, positive clockwise"),
+      dx: z.coerce.number().optional().describe("pan: points to move right"),
+      dy: z.coerce.number().optional().describe("pan: points to move down"),
+      distance: z.coerce.number().positive().optional().describe("pinch: narrow-end separation (60). rotate: radius (80). pan, two_finger_tap: finger separation (40)"),
+      angle: z.coerce.number().optional().describe("pinch: the fingers' line, degrees from horizontal. rotate: where the fingers start"),
+      duration: z.coerce.number().positive().max(10).optional().describe("pinch, rotate, pan: seconds from touch-down to lift (default 0.6)"),
+      count: z.coerce.number().int().min(1).max(10).optional().describe("double_tap: taps (default 2). two_finger_tap: taps (default 1)"),
+      interval: z.coerce.number().positive().max(1).optional().describe("Seconds between taps (default 0.08)"),
+      udid: z.string().optional().describe("Target device UDID (defaults to active device)"),
+    }),
+  }, async (args) => {
+    try {
+      const body: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(args)) if (v !== undefined) body[k] = v;
+      const data = await apiRequest("POST", "/api/v1/device/ui/gesture", undefined, body);
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  });
+
   server.registerTool("wait_for_settle", {
     description: `Wait until the screen stops changing — the answer no sleep can give. Compares successive screenshots and returns once consecutive frames are effectively identical, so it adapts to whatever the screen is actually doing instead of guessing a duration. Use it after any action that starts a transition or an animation, and before interacting with a web view: web content is invisible to the accessibility tree, so nothing else can tell you it has finished drawing. It answers "has drawing stopped", NOT "has content arrived" -- a blank page still loading is perfectly still, and this will call it settled in under two seconds (measured against a stalled request: settled=true after 1.6s with a white screen). Raising the timeout does not help, because nothing is moving. For a slow load, wait for the content itself -- poll get_web_content until it returns elements, or wait_for_element for a native one -- and use this afterwards to let the result stop moving. Measured on a web form where typing is silently lost if it arrives early — a 0.2s sleep landed the keystroke 1 time in 5, a 1.0s sleep landed 5 of 5, and this landed 5 of 5 in about 0.67s. Returns settled=false with a reason when the timeout expires, which means something is animating rather than loading (a spinner, a video, a carousel) and will never settle — treat that as a signal about the screen, not a failure of the wait. Also reports last_change, the fraction of pixels that differed on the final comparison, which distinguishes "nearly settled" from "moving steadily".`,
     inputSchema: strictParams({

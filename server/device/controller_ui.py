@@ -9,6 +9,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from server.device import gestures
 from server.device.element_types import equivalence, related_type_names
 from server.device.media.screenshots import annotate_screenshot
 from server.device.probing import frame_key
@@ -21,7 +22,13 @@ from server.device.ui_elements import (
     parse_elements,
 )
 from server.device.web.web_probing import WebSweepResult
-from server.models import DeviceError, UIElement, WaitCondition
+from server.models import (
+    DeviceError,
+    DeviceOperationUnsupportedError,
+    InvalidDeviceRequestError,
+    UIElement,
+    WaitCondition,
+)
 
 
 def _scroll_report(sweep: dict, requested: bool | None) -> dict:
@@ -3001,6 +3008,80 @@ class DeviceControllerUI:
         await self._ui_backend(resolved).swipe(resolved, start_x, start_y, end_x, end_y, duration)
         self._invalidate_ui_cache(resolved)  # UI changed
         return resolved
+
+    async def gesture(
+        self,
+        kind: str,
+        *,
+        x: float | None = None,
+        y: float | None = None,
+        label: str | None = None,
+        identifier: str | None = None,
+        element_type: str | None = None,
+        scale: float | None = None,
+        degrees: float | None = None,
+        dx: float | None = None,
+        dy: float | None = None,
+        distance: float | None = None,
+        angle: float | None = None,
+        duration: float | None = None,
+        count: int | None = None,
+        interval: float | None = None,
+        udid: str | None = None,
+    ) -> dict:
+        """Pinch, rotate, two-finger pan, double tap or two-finger tap (#252).
+
+        Centred on (x, y), or on the element `label` / `identifier` names.
+        The geometry is laid out by `server.device.gestures`; the backend only
+        moves fingers, and one that cannot move several at once refuses rather
+        than sending one -- a pinch that silently arrives as a drag is worse
+        than a refusal.
+
+        Returns where the fingers went, so a caller that asked for a scale or
+        an angle can see what was sent: a recogniser reports a little less,
+        since it starts measuring only once the fingers pass its threshold.
+        """
+        params = {"scale": scale, "degrees": degrees, "dx": dx, "dy": dy,
+                  "distance": distance, "angle": angle, "duration": duration,
+                  "count": count, "interval": interval}
+        has_point = x is not None and y is not None
+        has_target = bool(label or identifier)
+        if has_point == has_target:
+            raise InvalidDeviceRequestError(
+                "a gesture needs x and y, or the label or identifier of the element "
+                "to centre it on -- one of the two, not both", tool="quern")
+        # Every argument is checked before a device is looked for: a bad scale
+        # is a fact about the call, whatever is plugged in.
+        gestures.plan(kind, 0.0, 0.0, **params)
+
+        resolved = await self.resolve_udid(udid)
+        backend = self._ui_backend(resolved)
+        name = getattr(backend, "TOOL_NAME", type(backend).__name__)
+        if getattr(backend, "multitouch", False) is not True:
+            raise DeviceOperationUnsupportedError(
+                f"{kind} needs several fingers at once, and the {name} backend cannot "
+                f"send them. Multi-finger gestures are implemented for iOS simulators "
+                f"through sim-bridge (#252).", tool=name)
+        await self._warn_if_input_is_suppressed(resolved)
+
+        element = None
+        if has_target:
+            element, resolved = await self.get_element(
+                label=label, identifier=identifier, element_type=element_type, udid=resolved)
+            frame = element["frame"]
+            x = frame["x"] + frame["width"] / 2
+            y = frame["y"] + frame["height"] / 2
+        laid_out = gestures.plan(kind, float(x), float(y), **params)
+        await backend.perform_gesture(resolved, laid_out)
+        self._invalidate_ui_cache(resolved)  # UI changed
+
+        result = {"udid": resolved, "gesture": kind, "backend": name,
+                  "center": [round(float(x), 1), round(float(y), 1)], **laid_out.geometry()}
+        if element is not None:
+            result["element"] = {k: element.get(k) for k in
+                                 ("label", "identifier", "type", "frame", "match_count")
+                                 if element.get(k) is not None}
+        return result
 
     async def scroll_to_element(
         self,

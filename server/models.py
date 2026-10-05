@@ -1824,6 +1824,16 @@ class DeviceOperationUnsupportedError(DeviceError):
     """
 
 
+class InvalidDeviceRequestError(DeviceError):
+    """The request cannot be carried out as given: a 400, not a fault.
+
+    A malformed argument, or one the device turns down for what it says --
+    a gesture whose fingers would leave the screen. Typed for the same reason
+    as `DeviceOperationUnsupportedError`: without it a bad argument fell through
+    to a 500 that reads as quern having broken.
+    """
+
+
 class WdaNotSetUpError(DeviceOperationUnsupportedError):
     """WDA has not been built for physical devices on this Mac yet.
 
@@ -2278,6 +2288,44 @@ class SwipeRequest(BaseModel):
     end_x: float
     end_y: float
     duration: float = 0.5
+    udid: str | None = None
+
+
+class GestureRequest(BaseModel):
+    """Request body for POST /device/ui/gesture (#252).
+
+    Centred on `x`/`y`, or on the element `label` or `identifier` names -- one
+    of the two. Which other fields apply depends on `type`; the rest are
+    ignored.
+    """
+
+    type: Literal["pinch", "rotate", "pan", "double_tap", "two_finger_tap"]
+    x: float | None = None
+    y: float | None = None
+    label: str | None = None
+    identifier: str | None = None
+    element_type: str | None = None
+    scale: float | None = Field(default=None, gt=0, description=(
+        "pinch: end separation over start separation, as a pinch recogniser "
+        "reports it. Above 1 spreads the fingers (zoom in), below 1 squeezes."))
+    degrees: float | None = Field(default=None, description=(
+        "rotate: how far to turn, positive clockwise."))
+    dx: float | None = Field(default=None, description="pan: points to move right.")
+    dy: float | None = Field(default=None, description="pan: points to move down.")
+    distance: float | None = Field(default=None, gt=0, description=(
+        "pinch: separation at the narrow end (default 60). rotate: radius "
+        "(default 80). pan, two_finger_tap: separation of the fingers (default 40)."))
+    angle: float | None = Field(default=None, description=(
+        "pinch: the line the fingers move along, in degrees from horizontal. "
+        "rotate: where the fingers start, likewise."))
+    duration: float | None = Field(default=None, gt=0, le=10, description=(
+        "pinch, rotate, pan: seconds from touch-down to lift (default 0.6)."))
+    count: int | None = Field(default=None, ge=1, le=10, description=(
+        "double_tap: taps (default 2; 3 is a triple tap). two_finger_tap: "
+        "taps (default 1)."))
+    interval: float | None = Field(default=None, gt=0, le=1, description=(
+        "double_tap, two_finger_tap: seconds between taps (default 0.08, inside "
+        "the double-tap interval)."))
     udid: str | None = None
 
 

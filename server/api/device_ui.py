@@ -23,6 +23,7 @@ from server.knowledge.landmarks import needs_page_urls
 from server.models import (
     ClearTextRequest,
     DeviceError,
+    GestureRequest,
     PressButtonRequest,
     RestoreInputRequest,
     ScrollToElementRequest,
@@ -633,6 +634,28 @@ async def swipe(request: Request, body: SwipeRequest):
         except DeviceError as e:
             raise _handle_device_error(e)
 
+
+@router.post("/ui/gesture")
+async def gesture(request: Request, body: GestureRequest):
+    """Pinch, rotate, two-finger pan, double tap or two-finger tap (#252)."""
+    controller = _get_controller(request)
+    with _action("gesture") as act:
+        where = (f"({body.x}, {body.y})" if body.x is not None and body.y is not None
+                 else f"identifier={body.identifier}" if body.identifier
+                 else f"label={body.label}")
+        act.detail = f"{body.type} at {where}"
+        try:
+            result = await controller.gesture(
+                body.type, x=body.x, y=body.y, label=body.label,
+                identifier=body.identifier, element_type=body.element_type,
+                scale=body.scale, degrees=body.degrees, dx=body.dx, dy=body.dy,
+                distance=body.distance, angle=body.angle, duration=body.duration,
+                count=body.count, interval=body.interval, udid=body.udid,
+            )
+            act.udid = result["udid"]
+            return _with_input_warning(controller, result["udid"], {"status": "ok", **result})
+        except DeviceError as e:
+            raise _handle_device_error(e)
 
 
 #: What the wrapped coroutine returns, so a caller keeps its own type
