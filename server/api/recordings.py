@@ -62,9 +62,18 @@ async def start_recording(request: Request, body: RecordingStartRequest) -> dict
                                        f"{kind.value if kind else 'not a device quern knows'}")
     # Before anything is written: a recording of flows from a simulator that
     # cannot capture them is refused or made able to, not started and empty (#414).
+    # What the recording would refuse is refused first: a refusal after the CA
+    # check below could follow a CA it had installed for nothing (review).
+    try:
+        filters = Filters(
+            kinds=tuple(body.kinds or KINDS), hosts=body.hosts,
+            exclude_hosts=body.exclude_hosts, include_unattributed=body.include_unattributed,
+            video=body.video)
+        manager.check_start(udid, body.output_dir, filters)
+    except RecordingError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     simulator_tls = None
-    kinds = tuple(body.kinds or KINDS)
-    if "flows" in kinds:
+    if "flows" in filters.kinds:
         from server.proxy import sim_tls
         try:
             check = await sim_tls.ensure_capturable(
@@ -73,14 +82,12 @@ async def start_recording(request: Request, body: RecordingStartRequest) -> dict
             raise HTTPException(status_code=e.status_code, detail=e.detail) from e
         simulator_tls = check.entry
         warnings.extend(check.warnings)
-        if simulator_tls is not None and simulator_tls.tls != "decrypted":
+        if (simulator_tls is not None and simulator_tls.tls != "decrypted"
+                and simulator_tls.reason not in check.warnings):
             warnings.append(f"this simulator's HTTPS is passed through, not recorded: "
                             f"{simulator_tls.reason}")
     try:
-        rec = await manager.start(udid, body.output_dir, Filters(
-            kinds=tuple(body.kinds or KINDS), hosts=body.hosts,
-            exclude_hosts=body.exclude_hosts, include_unattributed=body.include_unattributed,
-            video=body.video))
+        rec = await manager.start(udid, body.output_dir, filters)
     except RecordingError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     if "flows" in rec.filters.kinds and not _proxy_is_running(request):

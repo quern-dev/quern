@@ -957,8 +957,9 @@ class RecordingStartRequest(BaseModel):
         "quern run, with a keyframe at each action's start. Simulators only. Refused, "
         "rather than recorded without video, if video cannot start."))
     allow_passthrough: bool = Field(default=False, description=(
-        "Start even if this simulator does not trust quern's CA. Its apps work and its "
-        "HTTPS is not recorded. Without it such a start is refused (428) unless "
+        "Start even if this simulator does not trust quern's CA. Under local capture "
+        "its apps work and its HTTPS is not recorded; under the system proxy its HTTPS "
+        "requests fail for the whole run. Without it such a start is refused (428) unless "
         "auto_install_cert installs the CA first: recording flows that cannot be "
         "captured is a run that looks fine and holds nothing."))
 
@@ -976,7 +977,8 @@ class CaptureStartRequest(BaseModel):
     client_ip: str | None = None
     detail: Literal["full", "summary"] = "full"
     #: As on `RecordingStartRequest`: start even if `simulator_udid` does not
-    #: trust the CA, accepting that its HTTPS is passed through, not captured.
+    #: trust the CA, accepting that its HTTPS is passed through, not captured --
+    #: or, under the system proxy, fails.
     allow_passthrough: bool = False
 
 

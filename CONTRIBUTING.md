@@ -358,6 +358,10 @@ to that helper because it decides about one simulator, not every booted one,
 and reports what the addon confirmed for it -- which is why it is named here:
 a change to one must be weighed against the other. `skip_cert_check` is
 deprecated, and no longer decrypts a simulator known not to trust the CA.
+Because the check may install a CA, whatever the start would refuse anyway --
+a relative `output_dir`, a directory that holds a recording, a simulator
+already being filmed -- is refused before it (`RecordingManager.check_start`).
+A start refused after the check installed a CA for a recording that never ran.
 
 **`auto_install_cert` means the same thing at all five.** A setting honoured in
 four of five places is worse than one honoured nowhere: it works until the day

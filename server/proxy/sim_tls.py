@@ -396,6 +396,13 @@ def _system_proxy_configured() -> bool:
         return False
 
 
+#: Why a simulator the server meant to decrypt is reported passed through: the
+#: addon has not confirmed the set yet, or confirmed one without it.
+UNCONFIRMED = ("the proxy has not yet confirmed it decrypts this simulator: its requests "
+               "are passed through until it does")
+NOT_TAKEN = "the proxy did not take this simulator into its decrypted set"
+
+
 async def ensure_capturable(
     app: Any, udid: str, *, allow_passthrough: bool = False,
 ) -> CaptureCheck:
@@ -420,6 +427,7 @@ async def ensure_capturable(
     blocks capture over its own bug, and one that is silent reads as passed.
     """
     check = CaptureCheck()
+    unconfirmed: str | None = None
     adapter = getattr(app.state, "proxy_adapter", None)
     controller = _controller(app)
     local = adapter is not None and bool(adapter.local_capture)
@@ -490,14 +498,20 @@ async def ensure_capturable(
             if adapter.is_running and trusted is True:
                 confirmed = await adapter.addon_decrypts(udid, after_seq=seq)
                 if confirmed is None:
-                    check.warnings.append(
-                        "the proxy has not yet confirmed it decrypts this simulator; "
-                        "requests in the next moments may be passed through")
+                    unconfirmed = UNCONFIRMED
                 elif confirmed is False:
-                    check.warnings.append(
-                        "the proxy did not take this simulator into its decrypted set")
+                    unconfirmed = NOT_TAKEN
+                if unconfirmed:
+                    check.warnings.append(unconfirmed)
         check.entry = next((e for e in report(app) or []
                             if e.udid.upper() == udid.upper()), None)
+        if unconfirmed and check.entry is not None and check.entry.tls == "decrypted":
+            # The report reads the set that was sent; until the addon says it
+            # took it, "decrypted" is what was asked for, not what is in effect
+            # -- and passed through is the side that costs visibility, not
+            # requests (review).
+            check.entry = check.entry.model_copy(
+                update={"tls": "passed_through", "reason": unconfirmed})
         if trusted is False and check.entry is None:
             # The report lists booted simulators only, so a start against one
             # that is shut down has no entry to warn from -- and once it boots,

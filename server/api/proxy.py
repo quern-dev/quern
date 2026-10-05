@@ -1168,9 +1168,9 @@ async def set_local_capture(
     it has its TLS passed through, undecrypted, instead of failing every HTTPS
     request; `simulator_tls` on the response says which simulators are
     decrypted and which are not. With `auto_install_cert` set it installs the
-    CA first, so every simulator is decrypted. `skip_cert_check` decrypts every
-    simulator regardless, for exercising TLS failure. Disabling capture
-    is never refused.
+    CA first, so every simulator is decrypted. `skip_cert_check` is deprecated
+    (#414): it widens decryption to simulators the check could not vouch for,
+    never to one known not to trust the CA. Disabling capture is never refused.
     """
     # FastAPI rejects a missing or non-list `processes` with 422 before this
     # runs; only the empty-string filtering is left to do.

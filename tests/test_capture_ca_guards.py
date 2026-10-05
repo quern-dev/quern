@@ -106,9 +106,29 @@ class TestEnsureCapturable:
         sim_tls.refresh.assert_awaited_once_with(app)
         app.state.proxy_adapter.addon_decrypts.assert_awaited_once()
 
-    async def test_an_unconfirmed_set_is_said(self, device):
-        check = await sim_tls.ensure_capturable(_app(in_set=(), confirms=None), SIM)
-        assert any("not yet confirmed" in w for w in check.warnings)
+    @pytest.mark.parametrize("confirms,why", [
+        pytest.param(None, sim_tls.UNCONFIRMED, id="no answer in time"),
+        pytest.param(False, sim_tls.NOT_TAKEN, id="a set without it"),
+    ])
+    async def test_what_the_addon_has_not_confirmed_is_not_reported_decrypted(
+        self, device, confirms, why,
+    ):
+        """The report reads the set that was sent. Unconfirmed, that said
+        "decrypted" for what was only asked for (review)."""
+        app = _app(in_set=(), confirms=confirms)
+        # As refresh leaves it: sent, so the report would read it as in effect.
+        sim_tls.refresh.side_effect = lambda _app: setattr(
+            app.state.proxy_adapter, "trusted_simulators", [SIM])
+        check = await sim_tls.ensure_capturable(app, SIM)
+        assert check.warnings == [why]
+        assert (check.entry.tls, check.entry.reason) == ("passed_through", why)
+
+    async def test_a_confirmed_set_is_reported_decrypted(self, device):
+        app = _app(in_set=(), confirms=True)
+        sim_tls.refresh.side_effect = lambda _app: setattr(
+            app.state.proxy_adapter, "trusted_simulators", [SIM])
+        check = await sim_tls.ensure_capturable(app, SIM)
+        assert check.entry.tls == "decrypted" and check.warnings == []
 
     async def test_an_untrusting_one_is_refused_with_the_ways_out(self, device):
         device.answers = [False]
@@ -276,6 +296,40 @@ class TestTheRecordingRoute:
             assert r.json()["detail"]["error"] == "capture_without_cert"
             assert not (tmp_path / "r").exists(), "a refused recording left files behind"
             assert client.get("/api/v1/recordings").json()["recordings"] == []
+
+    @pytest.mark.parametrize("why", ["relative dir", "dir holds a recording", "no video"])
+    def test_a_start_refused_anyway_installs_no_ca(self, device, monkeypatch, tmp_path, why):
+        """Each of these used to be refused after the CA check, which with
+        auto_install_cert had already installed a CA for a recording that
+        never started (review)."""
+        device.auto = True
+        device.answers = [False, True]
+        body = {"udid": SIM, "output_dir": str(tmp_path / "r")}
+        if why == "relative dir":
+            body["output_dir"] = "rel/dir"
+        elif why == "dir holds a recording":
+            (tmp_path / "r").mkdir()
+            (tmp_path / "r" / "events.jsonl").write_text("")
+        else:
+            body["video"] = True                 # this server has no quern-media
+        app, client = _recording_client(monkeypatch, trusted=False)
+        with client:
+            r = client.post("/api/v1/recordings", json=body)
+            assert r.status_code == 400, r.text
+        assert device.installs == []
+
+    def test_an_unconfirmed_simulator_is_said_once(self, device, monkeypatch, tmp_path):
+        app, client = _recording_client(monkeypatch, trusted=True)
+        app.state.proxy_adapter.addon_decrypts.return_value = None
+        sim_tls.refresh.side_effect = lambda _app: setattr(
+            app.state.proxy_adapter, "trusted_simulators", [SIM])
+        with client:
+            r = client.post("/api/v1/recordings", json={
+                "udid": SIM, "output_dir": str(tmp_path / "r"), "kinds": ["flows"]})
+            assert r.status_code == 200, r.text
+            assert r.json()["simulator_tls"]["tls"] == "passed_through"
+            said = [w for w in r.json()["warnings"] if "not yet confirmed" in w]
+            assert len(said) == 1, r.json()["warnings"]
 
     def test_allow_passthrough_is_what_lets_it_start(self, device, monkeypatch, tmp_path):
         device.answers = [False]

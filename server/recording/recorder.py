@@ -288,6 +288,22 @@ def _unbegin(rec: Recording) -> None:
             path.unlink()
 
 
+def _output_dir(output_dir: str) -> Path:
+    out = Path(os.path.expanduser(output_dir))
+    if not out.is_absolute():
+        raise RecordingError(f"output_dir must be an absolute path, not {output_dir!r}")
+    return out
+
+
+def _holds_a_recording(events: Path) -> str:
+    return (f"{events} already exists: pass a new output_dir, so one recording never "
+            f"appends to another's")
+
+
+def _already_filmed(udid: str, holder: str) -> str:
+    return f"{udid} is already being filmed by recording {holder}: one movie per simulator"
+
+
 def _line(kind: str, data: dict | None = None, **extra) -> str:
     """One event: what it is, when quern received it on both clocks, and the
     record itself in the shape `/trace` reads."""
@@ -500,12 +516,26 @@ class RecordingManager:
         return any(r.state == "recording" and r.dir == directory
                    for r in self._recordings.values())
 
+    def check_start(self, udid: str, output_dir: str | None, filters: Filters) -> None:
+        """Refuse now what `start` would refuse, before a caller does anything
+        that cannot be taken back: #414's CA check installs a CA, and a start
+        refused after it had installed one for nothing (review). `start` checks
+        again -- this moves the refusals first, it does not replace them."""
+        if output_dir:
+            out = _output_dir(output_dir)
+            if (out / EVENTS).exists():
+                raise RecordingError(_holds_a_recording(out / EVENTS))
+        if filters.video:
+            if self._video is None:
+                raise RecordingError("video cannot be recorded on this server")
+            holder = self._filming.get(udid)
+            if holder is not None:
+                raise RecordingError(_already_filmed(udid, holder))
+
     async def start(self, udid: str, output_dir: str | None, filters: Filters) -> Recording:
         rec_id = f"rec_{uuid.uuid4().hex[:12]}"
-        out = Path(os.path.expanduser(output_dir)) if output_dir else (
+        out = _output_dir(output_dir) if output_dir else (
             config_mod.CONFIG_DIR / "recordings" / rec_id)
-        if not out.is_absolute():
-            raise RecordingError(f"output_dir must be an absolute path, not {output_dir!r}")
         try:
             out.mkdir(parents=True, exist_ok=True)
         except OSError as e:
@@ -526,8 +556,7 @@ class RecordingManager:
             # And before the video, which a loser would otherwise start on
             # the winner's movie -- quern-media replaces the file it is
             # given (review).
-            raise RecordingError(f"{rec.events} already exists: pass a new output_dir, so "
-                                 f"one recording never appends to another's") from e
+            raise RecordingError(_holds_a_recording(rec.events)) from e
         except OSError as e:
             self._release_screen(rec)
             raise RecordingError(f"{out} could not be written: {e}") from e
@@ -580,8 +609,7 @@ class RecordingManager:
     def _reserve_screen(self, rec: Recording) -> None:
         holder = self._filming.get(rec.udid)
         if holder is not None and holder != rec.id:
-            raise RecordingError(f"{rec.udid} is already being filmed by recording {holder}: "
-                                 f"one movie per simulator")
+            raise RecordingError(_already_filmed(rec.udid, holder))
         self._filming[rec.udid] = rec.id
 
     def _release_screen(self, rec: Recording) -> None:
