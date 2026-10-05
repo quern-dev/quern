@@ -612,8 +612,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await device_controller.wda_client.close()
         # The gesture servers' adb forwards outlive this process otherwise:
         # adb keeps them until it restarts, one per run (#252).
-        with contextlib.suppress(Exception):
+        try:
             await device_controller.u2.close()
+        except Exception:
+            logger.warning("Stopping the Android gesture servers failed", exc_info=True)
 
     for adapter in adapters.values():
         await adapter.stop()

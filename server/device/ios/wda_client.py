@@ -1477,7 +1477,9 @@ class WdaBackend:
                     tool="wda")
         try:
             await self._request("post", udid, "/actions", use_session=True,
-                                timeout=max(ACTION_TIMEOUT, plan.duration + 15),
+                                # The device's own time on top of the usual
+                                # allowance, so a long gesture is not cut off.
+                                timeout=ACTION_TIMEOUT + plan.seconds,
                                 raise_if_maybe_delivered=True,
                                 json={"actions": w3c_actions(plan)})
         except httpx.HTTPError as exc:

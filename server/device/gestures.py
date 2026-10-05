@@ -39,6 +39,12 @@ MAX_ROTATE_DEGREES = 3600.0
 #: The shortest step the bridge sends; a duration shorter than the steps allow
 #: takes this long per step anyway, and the plan says so.
 MIN_STEP_SECONDS = 0.008
+#: Bounds on the timing a caller can ask for, as the HTTP model states them,
+#: so a direct caller cannot build a gesture longer than any backend waits:
+#: count=100000 was 400,000 W3C actions (review).
+MAX_DURATION = 10.0
+MAX_TAP_COUNT = 10
+MAX_TAP_INTERVAL = 1.0
 #: A double tap's taps must land inside the system's double-tap interval; two
 #: 0.08s apart read as one double tap on iOS 18.6, 0.6s apart as two singles.
 DEFAULT_TAP_INTERVAL = 0.08
@@ -68,6 +74,15 @@ class Plan:
         # the response should not claim otherwise.
         if self.paths:
             self.duration = max(self.duration, (len(self.paths[0]) - 1) * MIN_STEP_SECONDS)
+
+    @property
+    def seconds(self) -> float:
+        """How long the device spends on it: the duration of a moving gesture,
+        or every tap's hold and the intervals between them. What a backend's
+        timeout has to cover -- a tap plan's `duration` is unused."""
+        if self.paths is not None:
+            return self.duration
+        return self.count * TAP_HOLD_MS / 1000 + (self.count - 1) * self.interval
 
     def geometry(self) -> dict:
         if self.paths is not None:
@@ -229,6 +244,12 @@ def _plan(kind: str, x: float, y: float, *, scale: float | None, degrees: float 
           duration: float | None, count: int | None, interval: float | None,
           unit: float, pinch_distance: float | None) -> Plan:
     d = _positive("duration", duration, 0.6)
+    if d > MAX_DURATION:
+        raise _bad(f"duration must be at most {MAX_DURATION:g}s, not {d!r}")
+    if count is not None and count > MAX_TAP_COUNT:
+        raise _bad(f"count must be at most {MAX_TAP_COUNT}, not {count!r}")
+    if interval is not None and math.isfinite(interval) and interval > MAX_TAP_INTERVAL:
+        raise _bad(f"interval must be at most {MAX_TAP_INTERVAL:g}s, not {interval!r}")
     a = 0.0 if angle is None else float(angle)
     # NaN went through to the bridge as a bare `NaN`, which its JSON parser
     # rejects, and came back as a 500.

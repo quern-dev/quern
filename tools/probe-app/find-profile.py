@@ -15,9 +15,9 @@ a year, and the UUID changes every time Xcode reissues one. A stale constant
 fails at `codesign` with "no identity found", which says nothing about which
 of the two moved.
 
-A wildcard profile (`TEAM.*`) is what makes this possible without an Xcode
+A wildcard profile (`PREFIX.*`) is what makes this possible without an Xcode
 project: it signs any bundle id in the team, so the fixture does not need one
-registered. An explicit `TEAM.com.quern.probe` profile is preferred over it
+registered. An explicit `PREFIX.com.quern.probe` profile is preferred over it
 when both are present, since that is the narrower grant.
 """
 

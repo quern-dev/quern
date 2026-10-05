@@ -3082,13 +3082,16 @@ class DeviceControllerUI:
             y = frame["y"] + frame["height"] / 2
         defaults: dict = {}
         if hasattr(backend, "gesture_defaults"):
-            defaults = await backend.gesture_defaults(resolved)
+            defaults = dict(await backend.gesture_defaults(resolved))
+        warning = defaults.pop("warning", None)
         laid_out = gestures.plan(kind, float(x), float(y), **defaults, **params)
         await backend.perform_gesture(resolved, laid_out)
         self._invalidate_ui_cache(resolved)  # UI changed
 
         result = {"udid": resolved, "gesture": kind, "backend": name,
                   "center": [round(float(x), 1), round(float(y), 1)], **laid_out.geometry()}
+        if warning:
+            result["warnings"] = [warning]
         if element is not None:
             result["element"] = {k: element.get(k) for k in
                                  ("label", "identifier", "type", "frame", "match_count")

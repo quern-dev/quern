@@ -402,24 +402,30 @@ class U2Backend:
         starting 60dp (~10mm) apart was measured reading 1.00 for a 3x spread,
         and one starting 500px apart read 1.44 for 1.6x (emulator, 2.75x).
         """
-        def _density():
-            info = self._connect(udid).info
-            return info["displayWidth"] / info["displaySizeDpX"]
+        def _screen():
+            device = self._connect(udid)
+            info = device.info
+            width, height = device.window_size()
+            return info["displayWidth"] / info["displaySizeDpX"], width, height
 
         try:
-            unit = float(await asyncio.to_thread(_density))
+            unit, width, height = await asyncio.to_thread(_screen)
+            unit = float(unit)
         except Exception as e:
             # A distance off by a factor is no reason to refuse the gesture,
-            # but it is not silent either.
-            logger.warning("Could not read the density of %s (%s); gesture defaults "
-                           "are in pixels", udid, e)
-            return {}
-        # Along the long axis: 30mm at 2x spans ~1040px, the whole width of a
-        # portrait phone, putting a finger in the side band where gesture
-        # navigation reads a touch as Back -- and, on the probe app, outside
-        # the view being pinched (measured: 0.5x read nothing).
+            # but the caller is told, not only the log: a pinch starting 60px
+            # apart reads 1.00 here, and an ok that says nothing about it is
+            # the failure CONTRIBUTING describes (review).
+            return {"warning": f"could not read this screen's density ({e}), so the "
+                               f"gesture's default distances are in raw pixels and a "
+                               f"pinch may read too small; pass distance to set them"}
+        # Along the long axis, whichever way the device is held: 30mm at 2x
+        # spans ~1040px, the whole width of a portrait phone, putting a
+        # finger in the side band where gesture navigation reads a touch as
+        # Back -- and, on the probe app, outside the view being pinched
+        # (measured: 0.5x read nothing).
         return {"unit": unit, "pinch_distance": PINCH_NARROW_MM / 25.4 * 160 * unit,
-                "pinch_angle": 90.0}
+                "pinch_angle": 90.0 if height >= width else 0.0}
 
     async def tap(self, udid: str, x: float, y: float) -> None:
         """Tap at coordinates."""
