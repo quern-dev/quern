@@ -2301,7 +2301,9 @@ class SwipeRequest(BaseModel):
         "A swipe from this screen edge, which the system takes: back from the left, "
         "home from the bottom, Control Centre or the notification shade from the top "
         "(#251). The swipe must start at the edge -- within 3% of the screen across "
-        "that axis. Not available on the idb backend."))
+        "that axis. On a simulator it needs sim-bridge, the default backend, which "
+        "flags the touch as an edge swipe; idb, or WDA after start_driver, answers 400. "
+        "Physical iPhones and Android need no flag."))
 
 
 class GestureRequest(BaseModel):

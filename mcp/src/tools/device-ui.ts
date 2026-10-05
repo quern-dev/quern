@@ -577,7 +577,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
       edge: z
         .enum(["left", "right", "top", "bottom"])
         .optional()
-        .describe("Make it a swipe from this screen edge, which the system takes: back from the left, home from the bottom, Control Centre or the notification shade from the top. Start the swipe at that edge (within 3% of the screen) -- e.g. start_x 1 for the left; otherwise it is refused. Not on the idb backend."),
+        .describe("Make it a swipe from this screen edge, which the system takes: back from the left, home from the bottom, Control Centre or the notification shade from the top. Start the swipe at that edge (within 3% of the screen) -- e.g. start_x 1 for the left; otherwise it is refused. On a simulator it needs sim-bridge, the default backend, which flags the touch as an edge swipe: idb, or WDA after start_driver, answers 400. Physical iPhones and Android need no flag."),
     }),
   }, async ({ start_x, start_y, end_x, end_y, duration, udid, edge }) => {
     try {
