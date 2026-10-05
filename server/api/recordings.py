@@ -60,16 +60,54 @@ async def start_recording(request: Request, body: RecordingStartRequest) -> dict
             raise HTTPException(status_code=400,
                                 detail=f"video records simulators; {udid} is "
                                        f"{kind.value if kind else 'not a device quern knows'}")
+    # Before anything is written: a recording of flows from a simulator that
+    # cannot capture them is refused or made able to, not started and empty (#414).
+    # What the recording would refuse is refused first: a refusal after the CA
+    # check below could follow a CA it had installed for nothing (review).
     try:
-        rec = await manager.start(udid, body.output_dir, Filters(
+        filters = Filters(
             kinds=tuple(body.kinds or KINDS), hosts=body.hosts,
             exclude_hosts=body.exclude_hosts, include_unattributed=body.include_unattributed,
-            video=body.video))
+            video=body.video)
+        await manager.check_start(udid, body.output_dir, filters)
+    except RecordingError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    simulator_tls = None
+    if "flows" in filters.kinds:
+        from server.proxy import sim_tls
+        try:
+            check = await sim_tls.ensure_capturable(
+                request.app, udid, allow_passthrough=body.allow_passthrough)
+        except sim_tls.CaptureNotReady as e:
+            raise HTTPException(status_code=e.status_code, detail=e.detail) from e
+        simulator_tls = check.entry
+        warnings.extend(check.warnings)
+        if (simulator_tls is not None and simulator_tls.tls != "decrypted"
+                and simulator_tls.reason not in check.warnings):
+            warnings.append(f"this simulator's HTTPS is passed through, not recorded: "
+                            f"{simulator_tls.reason}")
+    try:
+        rec = await manager.start(udid, body.output_dir, filters)
     except RecordingError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     if "flows" in rec.filters.kinds and not _proxy_is_running(request):
         warnings.append("the proxy is not running, so no flows will be recorded until it is")
-    return {**rec.summary(), "warnings": [*warnings, *rec.warnings]}
+    return {**rec.summary(), "warnings": [*warnings, *rec.warnings],
+            # What is in effect for this simulator now, not what was asked for.
+            "simulator_tls": simulator_tls.model_dump() if simulator_tls else None}
+
+
+def _with_rejections(request: Request, summary: dict) -> dict:
+    """A recording whose simulator refused the proxy's certificate says so (#414):
+    those requests failed in the app and never became flows, so the recording
+    alone reads as a quiet run."""
+    from server.proxy import sim_tls
+    note = sim_tls.rejection_note(request.app, summary.get("udid"),
+                                  since=summary.get("started_at"),
+                                  until=summary.get("stopped_at"))
+    if note:
+        summary = {**summary, "warnings": [*summary.get("warnings", []), note]}
+    return summary
 
 
 @router.post("/{recording_id}/stop")
@@ -80,7 +118,7 @@ async def stop_recording(request: Request, recording_id: str) -> dict:
         rec = await _manager(request).stop(recording_id)
     except RecordingError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
-    return rec.summary()
+    return _with_rejections(request, rec.summary())
 
 
 def recording_dir(request: Request, ref: str) -> Path:
@@ -143,4 +181,5 @@ async def recording_events(
 @router.get("")
 async def list_recordings(request: Request) -> dict:
     """The recordings this server is making or has made since it started."""
-    return {"recordings": [r.summary() for r in _manager(request).list()]}
+    return {"recordings": [_with_rejections(request, r.summary())
+                           for r in _manager(request).list()]}

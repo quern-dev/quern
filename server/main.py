@@ -1923,6 +1923,9 @@ def _cmd_enable_local_capture(
     whole_mac: bool = False,
 ) -> None:
     """Enable local capture mode for specific processes."""
+    if skip_cert_check:
+        from server.proxy.cert_preflight import SKIP_CERT_CHECK_DEPRECATION
+        print(f"Warning: {SKIP_CERT_CHECK_DEPRECATION}", file=sys.stderr)
     from server.config import leading_exclusion, whole_mac_refusal
 
     # First, before anything is widened, gated or written -- the same refusal
@@ -2110,6 +2113,7 @@ def cli() -> None:
     record_start.add_argument("--kinds")
     record_start.add_argument("--include-unattributed", action="store_true")
     record_start.add_argument("--video", action="store_true")
+    record_start.add_argument("--allow-passthrough", action="store_true")
     record_stop = record_sub.add_parser("stop")
     record_stop.add_argument("recording_id")
     record_stop.add_argument("--require-complete", action="store_true")
@@ -2152,10 +2156,9 @@ def cli() -> None:
         "--skip-cert-check",
         action="store_true",
         help=(
-            "Skip the CA check, and the install auto_install_cert would do. "
-            "Simulators that do not trust the CA still have their TLS passed "
-            "through: to decrypt them anyway, use skip_cert_check on the HTTP "
-            "endpoint or MCP tool, which applies to the running server."
+            "Deprecated (#414) and to be removed: install the CA "
+            "(install_proxy_cert) or set auto_install_cert instead. Skips the "
+            "CA check and the install auto_install_cert would do."
         ),
     )
     enable_lc.add_argument(

@@ -337,11 +337,17 @@ same detail if no such rule exists.
   "id": "my-session",            // optional session ID
   "hosts": ["api.example.com"],  // filter to these hosts
   "exclude_hosts": ["analytics.example.com"],
-  "simulator_udid": "string",    // filter by simulator
+  "simulator_udid": "string",    // filter by simulator; under local capture or the
+                                 // system proxy it must trust quern's CA, else 428
   "client_ip": "string",
-  "detail": "full"               // default: full (full|summary|minimal)
+  "detail": "full",              // default: full (full|summary|minimal)
+  "allow_passthrough": false     // start even if simulator_udid lacks the CA
 }
 ```
+A **428** names the simulator and the ways out (install_proxy_cert, auto_install_cert,
+allow_passthrough). With `auto_install_cert` set the CA is installed instead, and a
+failed install is a **500**. `POST /api/v1/recordings` with flows takes the same
+check and the same `allow_passthrough`.
 
 ### POST /api/v1/proxy/capture/stop
 ```json

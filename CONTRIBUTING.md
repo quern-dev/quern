@@ -269,9 +269,11 @@ is a *larger* commitment than a system-proxy toggle, not a smaller one: it
 persists across sessions, outlives the capture window that motivated it, and
 the user has to know it happened in order to undo it. So enabling the system
 proxy refuses with 428 when a booted simulator does not trust the CA, names the
-devices, and offers three ways out rather than one -- offering only "install
-the certificate" railroads every user into trusting a CA, which is the outcome
-the refusal exists to make deliberate. (Local capture used to refuse too, and
+devices, and offers ways out that do not trust anything as well as the install
+-- offering only "install the certificate" railroads every user into trusting a
+CA, which is the outcome the refusal exists to make deliberate. Those are local
+capture, which passes such a simulator through, and shutting it down;
+`skip_cert_check`, which used to be the third, is deprecated (#414). (Local capture used to refuse too, and
 now passes such a simulator through instead -- see below.)
 
 Every path that begins routing a device's traffic through the proxy shares one
@@ -343,6 +345,23 @@ is the only report that person gets. Server startup cannot refuse at all: the de
 earlier process and failing to boot over one device's certificate is worse than
 the state it prevents, so it warns, and installs when `auto_install_cert` says
 to.
+
+**Starting a capture of one simulator is gated too** (#414). A recording with
+flows, or a capture session with `simulator_udid`, asks that simulator whether
+it trusts the CA before saying started -- under local capture, where it would
+otherwise be passed through and record nothing, and under the system proxy,
+where every request from it would fail. `sim_tls.ensure_capturable` holds it.
+It installs when `auto_install_cert` says to, refuses with 428 otherwise unless
+the caller passes `allow_passthrough`, and answers 500 for a failed install, as
+`_ensure_ca_is_trusted` does. It is a second implementation rather than a call
+to that helper because it decides about one simulator, not every booted one,
+and reports what the addon confirmed for it -- which is why it is named here:
+a change to one must be weighed against the other. `skip_cert_check` is
+deprecated, and no longer decrypts a simulator known not to trust the CA.
+Because the check may install a CA, whatever the start would refuse anyway --
+a relative `output_dir`, a directory that holds a recording, a simulator
+already being filmed -- is refused before it (`RecordingManager.check_start`).
+A start refused after the check installed a CA for a recording that never ran.
 
 **`auto_install_cert` means the same thing at all five.** A setting honoured in
 four of five places is worse than one honoured nowhere: it works until the day

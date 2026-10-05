@@ -151,7 +151,8 @@ Use exclude_hosts to filter out analytics/SDK noise (Firebase, AppsFlyer, Facebo
       id: z.string().optional().describe("Custom session ID (auto-generated if omitted)"),
       hosts: z.array(z.string()).optional().describe("Only capture flows to these hosts"),
       exclude_hosts: z.array(z.string()).optional().describe("Exclude flows to these hosts (analytics, SDKs, etc.)"),
-      simulator_udid: z.string().optional().describe("Filter to flows from this simulator. If its TLS is passed through (it does not trust the CA), the response carries simulator_tls_note now -- before you drive the app, so you can install the CA first if you need its HTTPS -- and stop_capture_session's result carries it again."),
+      simulator_udid: z.string().optional().describe("Filter to flows from this simulator. Under local capture or the system proxy the start first asks the simulator whether it trusts quern's CA: it installs it if auto_install_cert is set, and otherwise refuses with 428 -- capturing a simulator whose HTTPS cannot be read records nothing -- unless allow_passthrough is set. simulator_tls_note says when its TLS is passed through, or when it has refused the proxy's certificate (those requests failed and are not flows)."),
+      allow_passthrough: z.boolean().optional().describe("Start even if simulator_udid does not trust the CA. Under local capture its apps work and its HTTPS is not captured; under the system proxy its HTTPS requests fail for as long as the session runs. Ask the user before passing this rather than installing the CA."),
       device_serial: z.string().optional().describe("Filter to flows from this Android emulator (e.g. emulator-5554)"),
       client_ip: z.string().optional().describe("Filter by client IP (physical devices). Does not narrow to one Android emulator."),
       detail: z
@@ -159,7 +160,7 @@ Use exclude_hosts to filter out analytics/SDK noise (Firebase, AppsFlyer, Facebo
         .default("summary")
         .describe("Detail level for flows on stop: 'summary' (default, compact) or 'full' (includes headers/bodies)"),
     }),
-  }, async ({ id, hosts, exclude_hosts, simulator_udid, device_serial, client_ip, detail }) => {
+  }, async ({ id, hosts, exclude_hosts, simulator_udid, device_serial, client_ip, detail, allow_passthrough }) => {
     try {
       const body: Record<string, unknown> = { detail };
       if (id !== undefined) body.id = id;
@@ -168,6 +169,7 @@ Use exclude_hosts to filter out analytics/SDK noise (Firebase, AppsFlyer, Facebo
       if (simulator_udid !== undefined) body.simulator_udid = simulator_udid;
       if (device_serial !== undefined) body.device_serial = device_serial;
       if (client_ip !== undefined) body.client_ip = client_ip;
+      if (allow_passthrough !== undefined) body.allow_passthrough = allow_passthrough;
       const data = await apiRequest("POST", "/api/v1/proxy/capture/start", undefined, body);
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
@@ -621,10 +623,10 @@ refusal exists to prevent.`,
         .boolean()
         .optional()
         .describe(
-          "Start and configure the system proxy even when a booted simulator " +
-          "does not trust the mitmproxy CA. Only applies with system_proxy: " +
-          "true, and only pass it when the user has said so. Correct when " +
-          "deliberately exercising TLS-failure paths."
+          "DEPRECATED (#414), to be removed -- install the CA (install_proxy_cert) or set " +
+          "auto_install_cert instead; the response carries a deprecations note when it is used. " +
+          "Starts and configures the system proxy even when a booted simulator " +
+          "does not trust the mitmproxy CA. Only applies with system_proxy: true."
         ),
     }),
   }, async ({ port, listen_host, system_proxy, skip_cert_check: skipCertCheck }) => {
@@ -779,9 +781,9 @@ Remember to call unconfigure_system_proxy when done to restore the user's browse
 
 NOTE: The proxy must be running first (call start_proxy).
 
-CERTIFICATE CHECK. This refuses with HTTP 428 when a booted simulator does not trust the mitmproxy CA, because capturing in that state fails every HTTPS request from that device with no indication the proxy is the cause -- what the user sees is a blank screen or an app with no network, and the natural next move is to debug the app. The refusal is NOT a transient error and retrying will not clear it. The response body names the affected devices and three resolutions: install_proxy_cert on each device, set auto_install_cert so Quern handles it from now on, or pass skip_cert_check to proceed anyway.
+CERTIFICATE CHECK. This refuses with HTTP 428 when a booted simulator does not trust the mitmproxy CA, because capturing in that state fails every HTTPS request from that device with no indication the proxy is the cause -- what the user sees is a blank screen or an app with no network, and the natural next move is to debug the app. The refusal is NOT a transient error and retrying will not clear it. The response body names the affected devices and the resolutions: install_proxy_cert on each device, set auto_install_cert so Quern handles it from now on, capture with set_local_capture instead (which passes such a simulator through), or shut the simulator down.
 
-Ask the user which they want before acting -- installing a root certificate authority is a larger and longer-lived commitment than enabling capture, so it needs their consent, the same way update_quern does. skip_cert_check is the right answer when they are deliberately exercising TLS-failure paths.`,
+Ask the user which they want before acting -- installing a root certificate authority is a larger and longer-lived commitment than enabling capture, so it needs their consent, the same way update_quern does. (skip_cert_check, which proceeded anyway, is deprecated.)`,
     inputSchema: strictParams({
       interface: z
         .string()
@@ -791,11 +793,10 @@ Ask the user which they want before acting -- installing a root certificate auth
         .boolean()
         .optional()
         .describe(
-          "Configure the proxy even when a booted simulator does not trust the " +
-          "mitmproxy CA. Only pass this when the user has said so: capturing in " +
-          "that state fails every HTTPS request from that device with nothing " +
-          "pointing at the proxy. Correct when deliberately exercising " +
-          "TLS-failure paths."
+          "DEPRECATED (#414), to be removed -- install the CA (install_proxy_cert) or set " +
+          "auto_install_cert instead; the response carries a deprecations note when it is used. " +
+          "Configures the proxy even when a booted simulator does not trust the " +
+          "mitmproxy CA, which fails every HTTPS request from that device."
         ),
     }),
   }, async ({ interface: iface, skip_cert_check: skipCertCheck }) => {
@@ -1087,11 +1088,10 @@ extension in System Settings > Privacy & Security.`,
         .boolean()
         .optional()
         .describe(
-          "Decrypt EVERY simulator, including ones that do not trust the " +
-          "mitmproxy CA -- whose HTTPS then fails, with nothing pointing at " +
-          "the proxy. Without it those simulators are passed through instead. " +
-          "Only pass this when the user has said so; correct when deliberately " +
-          "exercising TLS-failure paths."
+          "DEPRECATED (#414), to be removed -- install the CA (install_proxy_cert) or set " +
+          "auto_install_cert instead; the response carries a deprecations note when it is used. " +
+          "Also decrypts simulators the trust check could not vouch for. Never " +
+          "one known not to trust the CA: that one is always passed through."
         ),
       whole_mac: z
         .boolean()

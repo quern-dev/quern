@@ -20,7 +20,7 @@ import urllib.request
 USAGE = """\
 Usage: quern record start --udid UDID [--out DIR] [--kinds actions,flows,logs]
                           [--host H]... [--exclude-host H]... [--include-unattributed]
-                          [--video]
+                          [--video] [--allow-passthrough]
        quern record stop RECORDING_ID [--require-complete]
        quern record list
 
@@ -65,6 +65,17 @@ def _call(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
         raise ConnectionError(f"the server did not answer: {e}") from e
 
 
+def _detail(detail) -> str:
+    """A refusal in words. Some are structured -- a message and the ways out
+    of it, like a capture whose simulator does not trust the CA (#414) -- and
+    a dict printed as Python is the least useful way to say that."""
+    if isinstance(detail, dict):
+        ways = [r.get("action") for r in detail.get("resolutions") or [] if r.get("action")]
+        return detail.get("message", str(detail)) + (
+            f" Ways out: {', '.join(ways)}." if ways else "")
+    return str(detail)
+
+
 def main(argv: list[str]) -> int:
     if not argv or argv[0] in ("-h", "--help", "help"):
         print(USAGE)
@@ -79,6 +90,7 @@ def main(argv: list[str]) -> int:
     start.add_argument("--kinds")
     start.add_argument("--include-unattributed", action="store_true")
     start.add_argument("--video", action="store_true")
+    start.add_argument("--allow-passthrough", action="store_true")
     stop = sub.add_parser("stop", add_help=False)
     stop.add_argument("recording_id")
     stop.add_argument("--require-complete", action="store_true")
@@ -94,7 +106,8 @@ def main(argv: list[str]) -> int:
                 else None
             body = {"udid": args.udid, "output_dir": args.out, "kinds": kinds,
                     "hosts": args.host, "exclude_hosts": args.exclude_host,
-                    "include_unattributed": args.include_unattributed, "video": args.video}
+                    "include_unattributed": args.include_unattributed, "video": args.video,
+                    "allow_passthrough": args.allow_passthrough}
             status, answer = _call("POST", "/api/v1/recordings", body)
         elif args.what == "stop":
             status, answer = _call("POST", f"/api/v1/recordings/{args.recording_id}/stop")
@@ -104,7 +117,7 @@ def main(argv: list[str]) -> int:
         print(f"quern record: {e}", file=sys.stderr)
         return 1
     if status >= 400:
-        print(f"quern record {args.what}: {answer.get('detail')}", file=sys.stderr)
+        print(f"quern record {args.what}: {_detail(answer.get('detail'))}", file=sys.stderr)
         return 2
     if args.what == "start":
         print(answer["id"])

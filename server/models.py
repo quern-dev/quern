@@ -956,6 +956,12 @@ class RecordingStartRequest(BaseModel):
         "Also record the simulator's screen to <output_dir>/video-<n>.mp4, one movie per "
         "quern run, with a keyframe at each action's start. Simulators only. Refused, "
         "rather than recorded without video, if video cannot start."))
+    allow_passthrough: bool = Field(default=False, description=(
+        "Start even if this simulator does not trust quern's CA. Under local capture "
+        "its apps work and its HTTPS is not recorded; under the system proxy its HTTPS "
+        "requests fail for the whole run. Without it such a start is refused (428) unless "
+        "auto_install_cert installs the CA first: recording flows that cannot be "
+        "captured is a run that looks fine and holds nothing."))
 
 
 class CaptureStartRequest(BaseModel):
@@ -970,6 +976,10 @@ class CaptureStartRequest(BaseModel):
     device_serial: str | None = None
     client_ip: str | None = None
     detail: Literal["full", "summary"] = "full"
+    #: As on `RecordingStartRequest`: start even if `simulator_udid` does not
+    #: trust the CA, accepting that its HTTPS is passed through, not captured --
+    #: or, under the system proxy, fails.
+    allow_passthrough: bool = False
 
 
 class CaptureStartResponse(SimulatorTlsNote):
@@ -1077,10 +1087,12 @@ class LocalCaptureRequest(BaseModel):
     refused unless asked for by name: it is far larger than any list of
     includes, and ``["!12345"]`` reads like a narrowing rather than a widening.
     """
-    skip_cert_check: bool = False
-    """Enable capture even when a booted simulator does not trust the CA.
+    skip_cert_check: bool = Field(default=False, json_schema_extra={"deprecated": True})
+    """Deprecated (#414; see `SKIP_CERT_CHECK_DEPRECATION`). Widens decryption
+    to simulators the trust check could not vouch for -- never one known not
+    to trust the CA, which is always passed through.
 
-    A model rather than a raw dict because this field disables a safety gate,
+    A model rather than a raw dict because this field relaxes a safety gate,
     and ``bool("false")`` is ``True`` -- an untyped body let the string
     ``"false"`` switch the check off, meaning the opposite of what was sent.
     """
@@ -1110,9 +1122,10 @@ class StartProxyRequest(BaseModel):
     `configure_system` does, so it is the same routing boundary and takes the
     same cert preflight.
     """
-    skip_cert_check: bool = False
-    """Start and configure the system proxy even when a booted simulator does
-    not trust the CA."""
+    skip_cert_check: bool = Field(default=False, json_schema_extra={"deprecated": True})
+    """Deprecated (#414; see `SKIP_CERT_CHECK_DEPRECATION`). Starts and
+    configures the system proxy even when a booted simulator does not trust
+    the CA, whose HTTPS then fails."""
 
 
 class ConfigureSystemProxyRequest(BaseModel):
@@ -1120,10 +1133,11 @@ class ConfigureSystemProxyRequest(BaseModel):
 
     interface: str | None = None
     """Network service to configure. Auto-detected when omitted."""
-    skip_cert_check: bool = False
-    """Configure the proxy even when a booted simulator does not trust the
-    mitmproxy CA. Correct when deliberately exercising TLS-failure paths;
-    otherwise the request is refused with 428 and the devices are named.
+    skip_cert_check: bool = Field(default=False, json_schema_extra={"deprecated": True})
+    """Deprecated (#414; see `SKIP_CERT_CHECK_DEPRECATION`). Configures the
+    proxy even when a booted simulator does not trust the mitmproxy CA, whose
+    HTTPS then fails; without it the request is refused with 428 and the
+    devices are named.
 
     Typed rather than read off a raw dict: ``bool("false")`` is True, so a
     caller sending the string would have silently skipped the check."""
@@ -1313,6 +1327,8 @@ class ProxyStatusResponse(BaseModel):
     """Response from GET /api/v1/proxy/status."""
 
     status: str  # "running", "stopped", "error"
+    #: Deprecated options the request that produced this used (`skip_cert_check`).
+    deprecations: list[str] | None = None
     #: What `POST /proxy/local-capture` just changed, and nothing on the
     #: plain status read. The caller who made the change is the one who needs
     #: to see it, and a server log entry is not where they are looking: an
@@ -1387,6 +1403,8 @@ class SystemProxyInfo(BaseModel):
     configured: bool
     interface: str | None = None
     original_state: str | None = None  # "enabled" or "disabled"
+    #: Deprecated options this request used, each with what to use instead.
+    deprecations: list[str] | None = None
 
 
 class SystemProxyRestoreInfo(BaseModel):

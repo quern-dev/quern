@@ -22,7 +22,7 @@ import sys
 import time
 import uuid
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -124,7 +124,7 @@ def _human_size(nbytes: int) -> str:
     return f"{nbytes / (1024 * 1024):.1f}MB"
 
 
-def _signal(process, method: str) -> None:
+def _signal(process: asyncio.subprocess.Process, method: str) -> None:
     """Send a process a signal, treating "it is already gone" as done.
 
     asyncio raises ProcessLookupError once it has torn the subprocess transport
@@ -195,6 +195,11 @@ class ProxyAdapter(BaseSourceAdapter):
         self.trust_provider: Callable[[], Awaitable[list[str] | None]] | None = None
         #: Connections passed through, per simulator, since the proxy started.
         self._passthrough: dict[str, dict] = {}
+        # What the addon itself last confirmed it decrypts, and how many
+        # confirmations have arrived -- so a caller can tell "sent" from
+        # "in effect" (#414).
+        self._addon_trusted: list[str] | None = None
+        self._addon_trust_seq = 0
         #: Told about each passed-through connection, so the server can re-check
         #: a simulator it has not confirmed rather than wait for the next tick.
         self.on_passthrough: Callable[[str], None] | None = None
@@ -508,6 +513,25 @@ class ProxyAdapter(BaseSourceAdapter):
             "udids": self._trusted_simulators,
         })
 
+    @property
+    def addon_trust_seq(self) -> int:
+        """How many trusted-set confirmations the addon has sent."""
+        return self._addon_trust_seq
+
+    async def addon_decrypts(self, udid: str, *, after_seq: int,
+                             timeout: float = 3.0) -> bool | None:
+        """Whether the addon decrypts `udid`, by its own confirmation of a set
+        sent after `after_seq`. None when no such confirmation came in time:
+        what was sent is not yet known to be in effect."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while self._addon_trust_seq <= after_seq:
+            if loop.time() >= deadline or not self.is_running:
+                return None
+            await asyncio.sleep(0.05)
+        confirmed = self._addon_trusted
+        return confirmed is None or udid.upper() in confirmed
+
     def passthrough_counts(self) -> dict[str, dict]:
         """Connections passed through since start, keyed by simulator UDID."""
         return {k: dict(v) for k, v in self._passthrough.items()}
@@ -735,7 +759,11 @@ class ProxyAdapter(BaseSourceAdapter):
     # Read loop and event handlers
     # -------------------------------------------------------------------
 
-    async def _lines(self, stream, on_overlong):
+    async def _lines(
+        self,
+        stream: asyncio.StreamReader | AsyncIterable[bytes],
+        on_overlong: Callable[[], None],
+    ) -> AsyncIterator[bytes]:
         """Raw lines from a stream, skipping any line past its reader's limit.
 
         StreamReader raises for an over-long line, and an `async for` over it
@@ -757,7 +785,7 @@ class ProxyAdapter(BaseSourceAdapter):
                 return
             yield raw_line
 
-    async def _event_lines(self):
+    async def _event_lines(self) -> AsyncIterator[bytes]:
         """Raw lines from the addon: its events pipe, or stdout without one.
 
         A line past EVENT_LINE_LIMIT is skipped, not fatal. StreamReader raises
@@ -853,7 +881,7 @@ class ProxyAdapter(BaseSourceAdapter):
             if unexpected:
                 await self._end_unexpected_run(process)
 
-    async def _end_unexpected_run(self, process) -> None:
+    async def _end_unexpected_run(self, process: asyncio.subprocess.Process) -> None:
         """The loop ended without `stop()`: report it, and leave nothing half-alive.
 
         A mitmdump nobody reads is worse than none. Local capture keeps routing
@@ -1106,6 +1134,10 @@ class ProxyAdapter(BaseSourceAdapter):
             await asyncio.to_thread(update_state, proxy_status="running")
         elif event == "stopped":
             await asyncio.to_thread(update_state, proxy_status="stopped")
+        elif event == "trusted_simulators_updated":
+            udids = data.get("udids")
+            self._addon_trusted = None if udids is None else [str(u).upper() for u in udids]
+            self._addon_trust_seq += 1
         elif event == "intercept_set":
             self._intercept_pattern = data.get("pattern")
         elif event == "intercept_cleared":
