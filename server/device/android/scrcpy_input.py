@@ -192,12 +192,17 @@ class _Session:
             raise DeviceError(f"could not run adb {args[0]}: {e}", tool=_TOOL) from e
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout)
-        except TimeoutError:
-            proc.kill()
+        except BaseException as e:
+            # A timeout or a cancelled request alike: the adb process is not
+            # left running behind it (review).
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
             with contextlib.suppress(Exception):
                 await proc.wait()
-            raise DeviceError(f"adb {args[0]} did not answer within {timeout:g}s",
-                              tool=_TOOL) from None
+            if isinstance(e, TimeoutError):
+                raise DeviceError(f"adb {args[0]} did not answer within {timeout:g}s",
+                                  tool=_TOOL) from None
+            raise
         if proc.returncode != 0:
             raise DeviceError(f"adb {args[0]} failed: {err.decode(errors='replace').strip()}",
                               tool=_TOOL)
@@ -292,11 +297,31 @@ class _Session:
                 await asyncio.wait_for(self.process.wait(), 2.0)
         if self._drain is not None:
             self._drain.cancel()
-        if self.port is not None:
-            with contextlib.suppress(Exception):
-                await self._adb("forward", "--remove", f"tcp:{self.port}", timeout=5)
-            self.port = None
+        with contextlib.suppress(Exception):
+            for port in await self._forward_ports():
+                await self._adb("forward", "--remove", f"tcp:{port}", timeout=5)
+        self.port = None
         self.writer = self.reader = None
+
+    async def _forward_ports(self) -> list[int]:
+        """The local ports forwarded to this session's socket.
+
+        Looked up by the socket's name, which carries this session's scid,
+        rather than taken from `self.port` alone: a start cancelled after adb
+        made the forward but before its port was read left `self.port` unset,
+        and the forward in adb until it restarted (review).
+        """
+        if self.port is not None:
+            return [self.port]
+        name = f"localabstract:scrcpy_{self.scid:08x}"
+        listing = await self._adb("forward", "--list", timeout=5)
+        ports = []
+        for line in listing.splitlines():
+            parts = line.split()
+            if len(parts) == 3 and parts[0] == self.serial and parts[2] == name \
+                    and parts[1].startswith("tcp:"):
+                ports.append(int(parts[1][4:]))
+        return ports
 
 
 def server_args(version: str, scid: int) -> list[str]:

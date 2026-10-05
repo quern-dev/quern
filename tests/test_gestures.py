@@ -1121,3 +1121,50 @@ class TestScrcpyDiscoveryCache:
         sc, _, runs, _ = self._setup(monkeypatch, tmp_path, ["", "scrcpy 4.1"])
         assert sc.find_server() is None
         assert sc.find_server().version == "4.1" and len(runs) == 2
+
+
+class TestCancelledStartsLeaveNothing:
+    """A gesture request cancelled while its session started left the adb
+    process running and, past the forward, the forward in adb (review)."""
+
+    async def test_a_cancelled_adb_command_is_killed(self, monkeypatch):
+        import asyncio
+
+        from server.device.android import scrcpy_input as sc
+
+        class Hanging(_FakeProc):
+            async def communicate(self):
+                await asyncio.sleep(3600)
+
+        proc = Hanging()
+
+        async def exec_(*args, **kwargs):
+            return proc
+        monkeypatch.setattr(sc.asyncio, "create_subprocess_exec", exec_)
+        session = sc._Session("/usr/bin/adb", "dev", sc.ScrcpyServer(Path("/x.jar"), "4.1"))
+        task = asyncio.ensure_future(session._adb("push", "/x.jar", sc.REMOTE_JAR))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert proc.killed
+
+    async def test_a_forward_whose_port_was_never_read_is_found_by_name(self, monkeypatch):
+        from server.device.android import scrcpy_input as sc
+
+        session = sc._Session("/usr/bin/adb", "dev", sc.ScrcpyServer(Path("/x.jar"), "4.1"))
+        mine = f"localabstract:scrcpy_{session.scid:08x}"
+        listing = (f"dev tcp:5001 {mine}\n"
+                   f"other tcp:5002 {mine}\n"                       # another device
+                   f"dev tcp:5003 localabstract:scrcpy_deadbeef\n"  # another session
+                   ).encode()
+        calls = []
+
+        async def exec_(*args, **kwargs):
+            calls.append(args)
+            return _FakeProc(listing if "--list" in args else b"")
+        monkeypatch.setattr(sc.asyncio, "create_subprocess_exec", exec_)
+        assert session.port is None
+        await session.close()
+        removed = [c[c.index("--remove") + 1] for c in calls if "--remove" in c]
+        assert removed == ["tcp:5001"]
