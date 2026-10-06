@@ -559,8 +559,8 @@ public final class HTTPStreamServer: FrameSink {
             // Content-Length, which is a malformed response, not a harmless
             // extra.
             let page = method == "HEAD"
-                ? HTTPWire.indexHeaders(for: codec)
-                : HTTPWire.indexPage(for: codec)
+                ? HTTPWire.indexHeaders(for: codec, sourceID: sourceID)
+                : HTTPWire.indexPage(for: codec, sourceID: sourceID)
             client.connection.send(
                 content: page,
                 completion: .contentProcessed { _ in client.connection.cancel() }
@@ -573,9 +573,13 @@ public final class HTTPStreamServer: FrameSink {
         // are reused: a window waiting out a restart could otherwise attach
         // to whichever quern-media took its port meanwhile -- another
         // simulator, from another quern -- and show it under the wrong name.
-        if let asked = HTTPWire.queryValue(path, "source"), let sourceID, asked != sourceID {
+        // A server with no source identity -- a capture device -- cannot
+        // confirm a named source, so it refuses rather than assume a match.
+        if let asked = HTTPWire.queryValue(path, "source"), asked != sourceID {
             client.connection.send(
-                content: HTTPWire.wrongSourceResponse(serving: sourceID, asked: asked),
+                content: HTTPWire.wrongSourceResponse(
+                    serving: sourceID ?? "a capture device", asked: asked
+                ),
                 completion: .contentProcessed { _ in client.connection.cancel() }
             )
             return

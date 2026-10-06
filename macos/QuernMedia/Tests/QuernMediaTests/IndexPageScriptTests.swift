@@ -234,7 +234,17 @@ function element() {
 const elements = { screen: element(), status: element(), stats: element() };
 globalThis.document = { getElementById: id => elements[id], body: element() };
 globalThis.location = { search: "", host: "127.0.0.1:8422" };
-globalThis.URLSearchParams = class { constructor(s) { this.s = s; } has(k) { return this.s.includes(k); } };
+globalThis.URLSearchParams = class {
+  constructor(s) { this.s = s.replace(/^[?]/, ""); }
+  get(k) {
+    for (const pair of this.s.split("&")) {
+      const [key, value] = pair.split("=");
+      if (key === k) return value === undefined ? "" : value;
+    }
+    return null;
+  }
+  has(k) { return this.get(k) !== null; }
+};
 globalThis.isSecureContext = true;
 globalThis.Blob = class { constructor(parts) { this.parts = parts; } };
 globalThis.TextDecoder = class {
@@ -255,8 +265,10 @@ function part(type, body) {
 // abort signal returning what fetch resolves to, or throwing to refuse.
 const answers = [];
 const fetches = [];
+const urls = [];
 globalThis.fetch = async (url, options) => {
   fetches.push(now);
+  urls.push(url);
   const answer = answers.shift() || refused;
   return answer(options.signal);
 };
@@ -434,4 +446,28 @@ func anOlderServerIsNamed() throws {
         """)
     #expect(outcome?.toString().contains("does not serve /frames") == true,
             "got: \(outcome?.toString() ?? "")")
+}
+
+
+@Test("every connect asks for the page's own source")
+func reconnectsAskForTheSameSource() throws {
+    // Ports are reused. Asking by name is what makes the server answer 409
+    // instead of handing a reconnecting tab another simulator's stream.
+    let script = try pageScript().replacingOccurrences(
+        of: HTTPWire.sourcePlaceholder, with: #""SIM-A""#
+    )
+    let context = try #require(JSContext())
+    var exception: String?
+    context.exceptionHandler = { _, value in exception = value?.toString() }
+    context.evaluateScript(browserStub)
+    context.evaluateScript(script)
+    context.evaluateScript("""
+        globalThis.outcome = undefined;
+        (async () => { await advance(3000); return urls.join(" "); })()
+          .then(r => { globalThis.outcome = r; });
+        """)
+    #expect(exception == nil, "\(exception ?? "")")
+    let urls = context.objectForKeyedSubscript("outcome")?.toString() ?? ""
+    #expect(urls.contains("/frames?source=SIM-A"))
+    #expect(!urls.split(separator: " ").contains { $0 == "/frames" }, "a connect went out unnamed: \(urls)")
 }

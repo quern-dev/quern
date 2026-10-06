@@ -212,23 +212,23 @@ public enum HTTPWire {
     /// For `HEAD`, which must carry the headers a `GET` would — including the
     /// real `Content-Length` — and no body. Handing the whole page to `send`
     /// put the body on the wire, which is what this used to do.
-    public static func indexHeaders(for codec: StreamPipeline.Codec) -> Data {
-        Data(indexHead(for: codec).utf8)
+    public static func indexHeaders(for codec: StreamPipeline.Codec, sourceID: String? = nil) -> Data {
+        Data(indexHead(for: codec, sourceID: sourceID).utf8)
     }
 
-    private static func indexHead(for codec: StreamPipeline.Codec) -> String {
+    private static func indexHead(for codec: StreamPipeline.Codec, sourceID: String?) -> String {
         """
         HTTP/1.1 200 OK\r
         Content-Type: text/html; charset=utf-8\r
-        Content-Length: \(indexBody(for: codec).utf8.count)\r
+        Content-Length: \(indexBody(for: codec, sourceID: sourceID).utf8.count)\r
         Connection: close\r
         \r
 
         """
     }
 
-    public static func indexPage(for codec: StreamPipeline.Codec) -> Data {
-        Data((indexHead(for: codec) + indexBody(for: codec)).utf8)
+    public static func indexPage(for codec: StreamPipeline.Codec, sourceID: String? = nil) -> Data {
+        Data((indexHead(for: codec, sourceID: sourceID) + indexBody(for: codec, sourceID: sourceID)).utf8)
     }
 
     /// One page for both codecs. It reads `/frames` and dispatches on each
@@ -244,9 +244,24 @@ public enum HTTPWire {
     /// third player beside the preview app and this page, and one that
     /// stalled on a still screen. Where `VideoDecoder` is missing the page
     /// now says what to use instead.
-    private static func indexBody(for codec: StreamPipeline.Codec) -> String {
-        indexHTML
+    ///
+    /// The page is told which source this server is streaming, and asks for
+    /// it by name on every connect -- so a tab reconnecting after a restart
+    /// cannot attach to another simulator that has taken the port. JSON-
+    /// encoded into the script, never interpolated raw.
+    private static func indexBody(for codec: StreamPipeline.Codec, sourceID: String?) -> String {
+        let literal = sourceID
+            .flatMap { try? JSONSerialization.data(withJSONObject: [$0]) }
+            .map { String(decoding: $0, as: UTF8.self).dropFirst().dropLast() }
+            .map(String.init)
+            // `<` escaped too, so nothing in it can close the script tag.
+            .map { $0.replacingOccurrences(of: "<", with: "\\u003c") } ?? "null"
+        return indexHTML.replacingOccurrences(of: sourcePlaceholder, with: literal)
     }
+
+    /// Valid JavaScript as it stands, so the script still loads in a test
+    /// that reads `indexHTML` without a source.
+    static let sourcePlaceholder = "/*quern-source*/null"
 
     static let indexHTML = #"""
     <!doctype html><meta charset=utf-8><title>Quern preview</title>
@@ -275,6 +290,12 @@ public enum HTTPWire {
     "use strict";
     // Null outside a page, so a test can load this script and exercise the
     // parser without a DOM.
+    // The stream this page was served by, so a reconnect asks for that one.
+    // A `?source=` on the page's own address wins.
+    const SOURCE = (typeof location === "object"
+      && new URLSearchParams(location.search).get("source")) || /*quern-source*/null;
+    const FRAMES = "/frames" + (SOURCE ? "?source=" + encodeURIComponent(SOURCE) : "");
+
     const page = typeof document === "object" ? {
       canvas: document.getElementById("screen"),
       ctx: document.getElementById("screen").getContext("2d"),
@@ -499,8 +520,14 @@ public enum HTTPWire {
       watch(FIRST_FRAME_MS);
       const firstFrame = setTimeout(() => { if (!shown) stall(); }, FIRST_FRAME_MS);
       try {
-        const response = await fetch("/frames", { cache: "no-store", signal: abort.signal });
+        const response = await fetch(FRAMES, { cache: "no-store", signal: abort.signal });
         reached = true;
+        if (response.status === 409) {
+          // Another source is on this port now. Reconnecting will not help
+          // until this one is back, so say whose stream it is.
+          const why = (await response.text()).trim();
+          return "This address is streaming something else now (" + why + ").";
+        }
         if (response.status === 503) {
           // quern-media is up and its source is not: a simulator that has
           // shut down. The body says what state it is in.

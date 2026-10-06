@@ -65,7 +65,7 @@ func contentTypes() {
 ])
 func indexPagePlaysFrames(codec: StreamPipeline.Codec) {
     let page = String(decoding: HTTPWire.indexPage(for: codec), as: UTF8.self)
-    #expect(page.contains("fetch(\"/frames\""), "the page should read the framed stream")
+    #expect(page.contains("fetch(FRAMES"), "the page should read the framed stream")
     #expect(page.contains("VideoDecoder"), "H.264 should play in the page")
     // An <img> could not tell a still screen from a dead stream, and the old
     // H.264 page sent viewers to ffplay with a literal PORT in the command.
@@ -157,4 +157,18 @@ func keyframePathMatching(path: String, expected: HTTPWire.ControlMatch) {
 ])
 func readsQueryValues(path: String, name: String, expected: String?) {
     #expect(HTTPWire.queryValue(path, name) == expected)
+}
+
+
+@Test("the page is told its source, encoded so nothing in it can break out")
+func indexPageCarriesItsSource() {
+    let page = String(decoding: HTTPWire.indexPage(for: .mjpeg, sourceID: "6401A02A-FCAC"), as: UTF8.self)
+    #expect(page.contains(#"|| "6401A02A-FCAC";"#))
+    #expect(!page.contains(HTTPWire.sourcePlaceholder))
+
+    let hostile = String(decoding: HTTPWire.indexPage(for: .mjpeg, sourceID: #"x"</script><script>alert(1)//"#), as: UTF8.self)
+    #expect(!hostile.contains("</script><script>"), "a source closed the script tag")
+
+    let none = String(decoding: HTTPWire.indexPage(for: .mjpeg), as: UTF8.self)
+    #expect(none.contains("|| null;"))
 }

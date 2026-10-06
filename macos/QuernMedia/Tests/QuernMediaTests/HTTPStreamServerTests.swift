@@ -198,7 +198,7 @@ func servesIndex() async throws {
 
     let page = await rawGet(path: "/", port: port, limit: 65_536, timeout: 20)
     let text = String(decoding: page, as: UTF8.self)
-    #expect(text.contains("fetch(\"/frames\""), "got: \(text.prefix(120))")
+    #expect(text.contains("fetch(FRAMES"), "got: \(text.prefix(120))")
 }
 
 @Test("no viewer means the sink declines frames")
@@ -888,4 +888,18 @@ func aStreamForAnotherSourceIsRefused() async throws {
         let text = String(decoding: await rawGetWhile(path: path, port: port, timeout: 0.4) {}, as: UTF8.self)
         #expect(text.hasPrefix("HTTP/1.1 200"), "\(path): got \(text.prefix(40))")
     }
+}
+
+
+@Test("a server with no source identity refuses a named source rather than assume it")
+func aDeviceServerRefusesANamedSource() async throws {
+    let port = freePort()
+    let server = HTTPStreamServer(port: port, bindAll: false, codec: .mjpeg)
+    try server.start()
+    defer { server.stop() }
+
+    let text = String(decoding: await rawRequest(method: "GET", path: "/frames?source=SIM-A", port: port), as: UTF8.self)
+    #expect(text.hasPrefix("HTTP/1.1 409"), "got: \(text.prefix(40))")
+    let plain = String(decoding: await rawGetWhile(path: "/frames", port: port, timeout: 0.4) {}, as: UTF8.self)
+    #expect(plain.hasPrefix("HTTP/1.1 200"), "an unnamed request should still stream")
 }
