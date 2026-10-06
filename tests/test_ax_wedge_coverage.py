@@ -114,6 +114,8 @@ class TestTheRecoveryWatchesRatherThanWaits:
         assert ax_recovery.looks_poisoned(out)
 
     async def test_a_failed_reset_is_not_re_read(self, monkeypatch):
+        # The pid snapshot taken before the reset ran the real `pgrep`.
+        _respawning_pids(monkeypatch)
         monkeypatch.setattr(ax_recovery, "reset_bridge", lambda _u: _false())
         reads = []
 
@@ -260,12 +262,20 @@ class TestSimBridgeNestedHealsToo:
             return seq.pop(0)
 
         monkeypatch.setattr(SimBridgeBackend, "_fetch_nested", fetch)
-        _respawning_pids(monkeypatch)
+        state = _respawning_pids(monkeypatch)
         resets = []
-        monkeypatch.setattr(ax_recovery, "reset_bridge",
-                            lambda u: resets.append(u) or _true())
 
-        out = await backend.describe_all_nested(UDID)
+        # The kill is what brings the replacement up. Without it the pid wait
+        # spun for the whole budget and the test passed through the fallback
+        # read instead, four seconds later.
+        async def kill(udid):
+            resets.append(udid)
+            state["killed"] = True
+            return True
+
+        monkeypatch.setattr(ax_recovery, "reset_bridge", kill)
+
+        out = await _bounded(backend.describe_all_nested(UDID), 1.0)
 
         assert resets == [UDID]
         assert not ax_recovery.looks_poisoned(out)

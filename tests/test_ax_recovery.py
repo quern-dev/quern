@@ -9,6 +9,7 @@ people go and edit knowledge bases that were never wrong.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -102,8 +103,13 @@ async def test_recovery_is_attempted_once_and_not_looped():
         calls["fetch"] += 1
         return [_app()]
 
+    # No replacement bridge ever appears, so the budget runs out watching and
+    # exactly one read follows the reset. Shortened, because nothing here is
+    # waiting for anything real.
     with patch.object(backend, "_fetch_nested", side_effect=always_poisoned), \
-         patch.object(ax_recovery, "reset_bridge", AsyncMock(return_value=True)) as reset:
+         patch.object(ax_recovery, "reset_bridge", AsyncMock(return_value=True)) as reset, \
+         patch.object(ax_recovery, "bridge_pids_for", AsyncMock(return_value=[100])), \
+         patch.object(ax_recovery, "_RESPAWN_BUDGET", 0.2):
         result = await backend.describe_all(SIM_A)
 
     assert reset.await_count == 1, "recovery must not loop"
@@ -121,12 +127,69 @@ async def test_a_healthy_tree_after_recovery_is_returned(healthy_second_read):
     async def two_reads(_udid):
         return next(reads)
 
+    # The bridge is replaced after the reset. Faked, like every lookup here:
+    # the real `pgrep` and `lsof` made this test depend on the machine, and on
+    # a slow runner the recovery's deadline cancelled a `pgrep` that had just
+    # exited, which is how the race `_kill` handles was found.
+    pids = AsyncMock(side_effect=[[100], [101]])
     with patch.object(backend, "_fetch_nested", side_effect=two_reads), \
-         patch.object(ax_recovery, "reset_bridge", AsyncMock(return_value=True)):
+         patch.object(ax_recovery, "reset_bridge", AsyncMock(return_value=True)), \
+         patch.object(ax_recovery, "bridge_pids_for", pids):
         result = await backend.describe_all(SIM_A)
 
     assert not ax_recovery.looks_poisoned(result)
     assert result[0]["AXLabel"] == "Probe"
+
+
+class _ExitedProcess:
+    """A child that has exited by the time it is killed: `kill` raises, as
+    asyncio's does once the transport has seen the exit."""
+
+    returncode = 1
+
+    def __init__(self):
+        self.started = asyncio.Event()
+
+    async def communicate(self):
+        self.started.set()
+        await asyncio.Event().wait()
+
+    def kill(self):
+        raise ProcessLookupError
+
+    async def wait(self):
+        return 1
+
+
+class TestAKillAfterExitIsNotAnError:
+    async def test_a_cancel_stays_a_cancel(self):
+        """The CI failure on #422: the recovery's deadline cancelled a `pgrep`
+        that had just exited, and `ProcessLookupError` replaced the cancel --
+        so `asyncio.timeout` never got its cancellation back, and the read
+        raised `ProcessLookupError` to the caller."""
+        proc = _ExitedProcess()
+        with patch.object(asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)):
+            task = asyncio.create_task(ax_recovery._run("pgrep", "-x", "CoreSimulatorBridge"))
+            # Bounded: a `_run` that never reaches `communicate` would
+            # otherwise hang this test rather than fail it.
+            await asyncio.wait_for(proc.started.wait(), timeout=2.0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    async def test_the_deadline_still_reads_as_a_timeout(self):
+        """What the caller actually sees: `asyncio.timeout` turns its own
+        cancel into `TimeoutError`, which `reread_after_recovery` handles."""
+        proc = _ExitedProcess()
+        with patch.object(asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)):
+            with pytest.raises(TimeoutError):
+                async with asyncio.timeout(0.05):
+                    await ax_recovery._run("pgrep", "-x", "CoreSimulatorBridge")
+
+    async def test_a_timed_out_command_is_a_failed_one(self):
+        proc = _ExitedProcess()
+        with patch.object(asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)):
+            assert await ax_recovery._run("pgrep", timeout=0.05) == (1, "")
 
 
 async def test_an_empty_udid_kills_nothing():
