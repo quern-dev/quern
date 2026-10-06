@@ -1789,6 +1789,20 @@ class TestStreamRestart:
         assert stream.restarts == 0
 
 
+async def _bounded(task, seconds=2.0):
+    """Await a restart loop that should stop, failing rather than hanging if
+    it does not. Without the bound, removing the check that stops it turns
+    the test into a stalled suite instead of a failure."""
+    # `asyncio.wait`, not `wait_for`: on timeout `wait_for` cancels the task,
+    # and the restart loop treats a cancel as "stop" and returns normally --
+    # which `wait_for` then reports as success, so a loop that never stopped
+    # on its own passed.
+    _, pending = await asyncio.wait({task}, timeout=seconds)
+    if pending:
+        task.cancel()
+        pytest.fail("the restart loop did not stop after the preview went away")
+
+
 class TestStreamRestartSchedule:
     """The review of #424 found the re-check after the backoff and the
     schedule itself untested: both "not restarted" tests changed state before
@@ -1830,7 +1844,7 @@ class TestStreamRestartSchedule:
             task = asyncio.create_task(mgr._drain_stream("SIM", stream))
             await asyncio.sleep(0.01)          # inside the backoff
             mgr._active.pop("SIM")             # the window closes
-            await task
+            await _bounded(task)
 
         asyncio.run(run())
         assert spawned == [], "restarted a stream whose window had closed"
@@ -1896,7 +1910,7 @@ class TestStreamRestartSchedule:
             await asyncio.sleep(0.01)
             status = mgr.status()["active"]["SIM"]
             mgr._active.pop("SIM")             # end the retries
-            await task
+            await _bounded(task)
             return status
 
         status = asyncio.run(run())
