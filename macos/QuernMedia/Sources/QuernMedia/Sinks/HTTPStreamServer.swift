@@ -563,9 +563,28 @@ public final class HTTPStreamServer: FrameSink {
             return
         }
 
+        let contentType = framing == .parts
+            ? HTTPWire.framesContentType
+            : HTTPWire.contentType(for: codec)
+
+        // One lock section for the check and the attach. Read separately, a
+        // `setSourceAvailable(false)` landing between them missed this client
+        // -- not streaming yet -- and it then attached to a source that was
+        // gone. The header is queued inside it too, so no frame from
+        // `receive` can be queued ahead of it.
         lock.lock()
         let down = sourceDown
+        if down == nil {
+            client.connection.send(
+                content: HTTPWire.streamHeader(contentType: contentType),
+                completion: .contentProcessed { _ in }
+            )
+            client.framing = framing
+            client.streaming = true
+        }
+        let total = clients.values.filter(\.streaming).count
         lock.unlock()
+
         if let down {
             client.connection.send(
                 content: HTTPWire.sourceUnavailableResponse(reason: down),
@@ -573,19 +592,6 @@ public final class HTTPStreamServer: FrameSink {
             )
             return
         }
-
-        let contentType = framing == .parts
-            ? HTTPWire.framesContentType
-            : HTTPWire.contentType(for: codec)
-        client.connection.send(
-            content: HTTPWire.streamHeader(contentType: contentType),
-            completion: .contentProcessed { _ in }
-        )
-        lock.lock()
-        client.framing = framing
-        client.streaming = true
-        let total = clients.values.filter(\.streaming).count
-        lock.unlock()
 
         watchForHangup(client)
         startKeepaliveIfNeeded()
