@@ -125,8 +125,10 @@ class IdbBackend:
         except asyncio.CancelledError:
             # A read can now be cancelled by the recovery deadline, which this
             # never had to survive before. Without the kill the `idb` child
-            # outlives the request that asked for it (review of #343).
-            proc.kill()
+            # outlives the request that asked for it (review of #343). Through
+            # `_kill`, because the child may have exited already, and a bare
+            # `kill` then replaced the cancel with `ProcessLookupError`.
+            ax_recovery._kill(proc)
             await ax_recovery._reap(proc)
             raise
         t4 = time.perf_counter()

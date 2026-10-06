@@ -117,6 +117,19 @@ async def _reap(proc: asyncio.subprocess.Process) -> None:
         await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=1.0)
 
 
+def _kill(proc: asyncio.subprocess.Process) -> None:
+    """Kill a child that may already have exited.
+
+    The deadline can land after `pgrep` has exited but before `communicate`
+    has returned, and `kill` then raises `ProcessLookupError`. On the cancel
+    path that replaced the `CancelledError`, so `asyncio.timeout` never saw
+    its own cancellation come back, and `describe_all` raised
+    `ProcessLookupError` to its caller. Seen in CI on #422.
+    """
+    with contextlib.suppress(OSError):
+        proc.kill()
+
+
 async def _run(*args: str, timeout: float = 5.0) -> tuple[int, str]:
     proc = await asyncio.create_subprocess_exec(
         *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
@@ -124,14 +137,15 @@ async def _run(*args: str, timeout: float = 5.0) -> tuple[int, str]:
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except TimeoutError:
-        proc.kill()
+        _kill(proc)
+        await _reap(proc)
         return 1, ""
     except asyncio.CancelledError:
         # `reread_after_recovery` runs this under a deadline, so a cancel here
         # is routine rather than exceptional -- and a cancel left the `pgrep`
         # or `lsof` running, once per poll, on the path that fires when a
         # simulator is already unwell (review of #343).
-        proc.kill()
+        _kill(proc)
         await _reap(proc)
         raise
     return proc.returncode or 0, out.decode(errors="replace")

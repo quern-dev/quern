@@ -114,6 +114,8 @@ class TestTheRecoveryWatchesRatherThanWaits:
         assert ax_recovery.looks_poisoned(out)
 
     async def test_a_failed_reset_is_not_re_read(self, monkeypatch):
+        # The pid snapshot taken before the reset ran the real `pgrep`.
+        _respawning_pids(monkeypatch)
         monkeypatch.setattr(ax_recovery, "reset_bridge", lambda _u: _false())
         reads = []
 
@@ -194,7 +196,9 @@ class TestIdbHealsOnEveryReader:
         monkeypatch.setattr("server.device.probing.probe_container",
                             lambda *a, **k: _empty())
 
-        out = await getattr(backend, method)(UDID)
+        # Bounded: if the replacement were never seen, this passed anyway
+        # through the fallback read, four seconds later.
+        out = await _bounded(getattr(backend, method)(UDID), 1.0)
 
         assert resets == [UDID], f"{method} never reset the bridge"
         assert not ax_recovery.looks_poisoned(out), f"{method} returned the wedge"
@@ -260,12 +264,20 @@ class TestSimBridgeNestedHealsToo:
             return seq.pop(0)
 
         monkeypatch.setattr(SimBridgeBackend, "_fetch_nested", fetch)
-        _respawning_pids(monkeypatch)
+        state = _respawning_pids(monkeypatch)
         resets = []
-        monkeypatch.setattr(ax_recovery, "reset_bridge",
-                            lambda u: resets.append(u) or _true())
 
-        out = await backend.describe_all_nested(UDID)
+        # The kill is what brings the replacement up. Without it the pid wait
+        # spun for the whole budget and the test passed through the fallback
+        # read instead, four seconds later.
+        async def kill(udid):
+            resets.append(udid)
+            state["killed"] = True
+            return True
+
+        monkeypatch.setattr(ax_recovery, "reset_bridge", kill)
+
+        out = await _bounded(backend.describe_all_nested(UDID), 1.0)
 
         assert resets == [UDID]
         assert not ax_recovery.looks_poisoned(out)
@@ -329,7 +341,7 @@ class TestACancelledReadDoesNotLeakItsChild:
     """
 
     @staticmethod
-    def _fake_proc(entered, release):
+    def _fake_proc(entered, release, exited=False):
         class FakeProc:
             returncode = None
 
@@ -344,6 +356,10 @@ class TestACancelledReadDoesNotLeakItsChild:
 
             def kill(self):
                 self.killed = True
+                if exited:
+                    # What asyncio does once the transport has seen the exit:
+                    # a deadline landing just after `pgrep` exits gets this.
+                    raise ProcessLookupError
 
             async def wait(self):
                 self.waited = True
@@ -351,10 +367,10 @@ class TestACancelledReadDoesNotLeakItsChild:
 
         return FakeProc()
 
-    async def _cancel_while_communicating(self, monkeypatch, module, call):
+    async def _cancel_while_communicating(self, monkeypatch, module, call, exited=False):
         """Start `call`, wait until the fake is inside `communicate()`, cancel."""
         entered, release = asyncio.Event(), asyncio.Event()
-        proc = self._fake_proc(entered, release)
+        proc = self._fake_proc(entered, release, exited)
 
         async def fake_exec(*_a, **_k):
             return proc
@@ -384,16 +400,22 @@ class TestACancelledReadDoesNotLeakItsChild:
             task.cancel()
         return proc
 
-    async def test_ax_recovery_run_kills_and_reaps_on_cancel(self, monkeypatch):
+    @pytest.mark.parametrize("exited", [False, True], ids=["running", "already-exited"])
+    async def test_ax_recovery_run_kills_and_reaps_on_cancel(self, monkeypatch, exited):
         from server.device.ios import ax_recovery as axr
 
         proc = await self._cancel_while_communicating(
             monkeypatch, axr, lambda: axr._run("/bin/sleep", "30", timeout=30),
+            exited=exited,
         )
         assert proc.killed, "the cancelled child was never killed"
         assert proc.waited, "the killed child was never reaped"
 
-    async def test_idb_run_kills_and_reaps_on_cancel(self, monkeypatch):
+    @pytest.mark.parametrize("exited", [False, True], ids=["running", "already-exited"])
+    async def test_idb_run_kills_and_reaps_on_cancel(self, monkeypatch, exited):
+        """`already-exited` is the race the recovery deadline hits: the read
+        finishes as the deadline fires, `kill` raises, and the cancel must
+        still be what comes out."""
         from server.device.ios import idb as idb_module
 
         backend = IdbBackend()
@@ -402,6 +424,7 @@ class TestACancelledReadDoesNotLeakItsChild:
 
         proc = await self._cancel_while_communicating(
             monkeypatch, idb_module, lambda: backend._run("ui", "describe-all"),
+            exited=exited,
         )
         assert proc.killed, "the cancelled idb child was never killed"
         assert proc.waited, "the killed idb child was never reaped"
