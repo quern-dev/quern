@@ -119,6 +119,14 @@ public enum HTTPWire {
             .appending("Connection: close\r\n\r\n").utf8)
     }
 
+    /// The source is not producing -- a simulator that has shut down. The
+    /// reason goes in the body for whoever reads it; the page shows it.
+    public static func sourceUnavailableResponse(reason: String) -> Data {
+        let body = Data(reason.utf8)
+        return Data("HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain; charset=utf-8\r\n"
+            .appending("Content-Length: \(body.count)\r\nConnection: close\r\n\r\n").utf8) + body
+    }
+
     public static func notFoundResponse() -> Data {
         Data("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n"
             .appending("Connection: close\r\n\r\n").utf8)
@@ -269,10 +277,11 @@ public enum HTTPWire {
         stats.maxGap = 0;
       }, 1000);
     }
-    // MJPEG repeats its last frame every 5s when the screen is still, so a
-    // longer silence means the stream is gone. H.264 has no such repeat, and
-    // silence there is only a still screen, so the watchdog stops once the
-    // first H.264 frame arrives.
+    // The server sends something at least every 5s on a still screen -- the
+    // last JPEG again, or an empty H.264 part -- so a longer silence means
+    // the stream is gone. A picture must also arrive within FIRST_FRAME_MS:
+    // parts that keep coming without one (H.264 waiting on a keyframe that
+    // never comes) are a stream that is not working either.
     const STALL_MS = 12000;
     const FIRST_FRAME_MS = 15000;
 
@@ -337,6 +346,11 @@ public enum HTTPWire {
     }
 
     let shown = false;
+    // Bumped when a connection starts and when it ends. A JPEG still decoding
+    // when its stream died would otherwise be drawn after the page had gone
+    // off air, and clear it: a dead frame shown as live until the next
+    // reconnect failed.
+    let generation = 0;
     function draw(source, width, height) {
       if (page.canvas.width !== width || page.canvas.height !== height) {
         page.canvas.width = width;
@@ -356,17 +370,17 @@ public enum HTTPWire {
     let pendingJPEG = null;
     let decodingJPEG = false;
     function showJPEG(bytes) {
-      pendingJPEG = bytes;
+      pendingJPEG = { bytes, generation };
       if (!decodingJPEG) pumpJPEG();
     }
     async function pumpJPEG() {
       decodingJPEG = true;
       while (pendingJPEG) {
-        const bytes = pendingJPEG;
+        const { bytes, generation: from } = pendingJPEG;
         pendingJPEG = null;
         try {
           const image = await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
-          draw(image, image.width, image.height);
+          if (from === generation) draw(image, image.width, image.height);
           image.close();
         } catch (e) {
           console.warn("undecodable JPEG", e);
@@ -438,47 +452,76 @@ public enum HTTPWire {
     };
 
     function showUnsupported() {
-      say("This browser cannot decode H.264. Open this page in a current "
-        + "Safari or Chrome, or run quern-media without --h264.");
+      // WebCodecs exists only on a secure page, and http://127.0.0.1 is one
+      // while http://<this Mac's address> is not -- so over --bind-all the
+      // browser is fine and the address is the problem.
+      if (!globalThis.isSecureContext) {
+        say("Browsers decode H.264 only on a secure page. Open this one at "
+          + "http://127.0.0.1 (through an SSH tunnel from another machine), "
+          + "or run quern-media without --h264.");
+      } else {
+        say("This browser cannot decode H.264. Open this page in a current "
+          + "Safari or Chrome, or run quern-media without --h264.");
+      }
     }
 
     async function playOnce() {
       const abort = new AbortController();
+      const mine = ++generation;
       let stalled = false;
+      let reached = false;
       let watchdog = 0;
+      const stall = () => { stalled = true; abort.abort(); };
       const watch = ms => {
         clearTimeout(watchdog);
-        watchdog = setTimeout(() => { stalled = true; abort.abort(); }, ms);
+        watchdog = setTimeout(stall, ms);
       };
       watch(FIRST_FRAME_MS);
+      const firstFrame = setTimeout(() => { if (!shown) stall(); }, FIRST_FRAME_MS);
       try {
         const response = await fetch("/frames", { cache: "no-store", signal: abort.signal });
+        reached = true;
+        if (response.status === 503) {
+          // quern-media is up and its source is not: a simulator that has
+          // shut down. The body says what state it is in.
+          const why = (await response.text()).trim();
+          return "Off air" + (why ? ": " + why : "") + ".";
+        }
         if (!response.ok || !response.body) return "quern-media answered " + response.status + ".";
+        if (!(response.headers.get("content-type") || "").startsWith("multipart/")) {
+          // An older quern-media serves its index page for any path it does
+          // not know, /frames included.
+          return "This quern-media does not serve /frames; update quern.";
+        }
         const parts = new Parts(response.body.getReader());
         for (;;) {
           const part = await parts.next();
           if (!part) return "The stream ended.";
+          watch(STALL_MS);
+          if (part.body.length === 0) continue;  // a keepalive
           if (part.type === "image/jpeg") {
-            watch(STALL_MS);
             showJPEG(part.body);
           } else if (part.type === "video/h264") {
-            clearTimeout(watchdog);
             await h264.push(part.body);
           }
         }
       } catch (e) {
         if (e instanceof Unsupported) throw e;
         if (stalled) return shown ? "No frames for 12 seconds." : "No picture arrived.";
-        return "Cannot reach quern-media.";
+        if (!reached) return "Cannot reach quern-media.";
+        return "The stream broke: " + (e && e.message ? e.message : String(e)) + ".";
       } finally {
         clearTimeout(watchdog);
+        clearTimeout(firstFrame);
+        if (generation === mine) generation++;
         abort.abort();
         h264.reset();
       }
     }
 
     async function run() {
-      for (let failures = 0; ; failures++) {
+      let failures = 0;
+      for (;;) {
         let reason;
         try {
           reason = await playOnce();
@@ -486,10 +529,14 @@ public enum HTTPWire {
           if (e instanceof Unsupported) { showUnsupported(); return; }
           reason = String(e);
         }
+        // A connection that showed a picture was working, so the next
+        // attempt starts quick again. Counting every failure for the life
+        // of the tab left each restart after the fourth waiting 5 seconds.
+        failures = shown ? 0 : failures + 1;
         shown = false;
         offAir(true);
         say(reason + " Reconnecting…");
-        await sleep(Math.min(5000, 500 * 2 ** Math.min(failures, 4)));
+        await sleep(Math.min(5000, 500 * 2 ** Math.min(Math.max(failures - 1, 0), 4)));
       }
     }
     if (page) run();

@@ -780,8 +780,9 @@ func aViewerThatLeavesIsReleased() async throws {
     // Counting viewers cannot see that -- the list was right -- which is how
     // the first version of this test passed with the fix removed.
     //
-    // A plain socket and close(), which sends FIN, the way a viewer process
-    // exiting does.
+    // A plain socket that reads its response header and then closes, which
+    // sends FIN, the way a viewer process exiting does. (Closing with the
+    // header unread sends RST instead; main leaked on both.)
     let port = freePort()
     let server = HTTPStreamServer(port: port, bindAll: false, codec: .h264)
     try server.start()
@@ -804,6 +805,8 @@ func aViewerThatLeavesIsReleased() async throws {
     try #require(write(fd, request, request.count) == request.count)
     await waitFor("the viewer to attach") { server.viewers == 1 }
     #expect(openDescriptors() == baseline + 2, "expected our socket and the server's")
+    var header = [UInt8](repeating: 0, count: 512)
+    #expect(read(fd, &header, header.count) > 0, "the response header never arrived")
 
     close(fd)
     await waitFor("the server to release the connection", timeout: 3) {
@@ -812,4 +815,52 @@ func aViewerThatLeavesIsReleased() async throws {
     #expect(openDescriptors() == baseline, "the departed viewer's connection was kept open")
     #expect(server.viewers == 0)
     #expect(server.framesSent == 0, "released by a send, not by the hangup itself")
+}
+
+
+@Test("while the source is down, viewers are dropped and new ones refused with the reason")
+func anUnavailableSourceDropsAndRefuses() async throws {
+    // A simulator that shut down used to leave its viewers attached, shown
+    // its last frame again every 5 seconds by the keepalive: a stream that
+    // looked live and was not.
+    let port = freePort()
+    let server = HTTPStreamServer(port: port, bindAll: false, codec: .mjpeg)
+    try server.start()
+    defer { server.stop() }
+
+    let dropped = await rawGetWhile(path: "/frames", port: port, timeout: 2) {
+        server.setSourceAvailable(false, reason: "the simulator is shutdown")
+    }
+    #expect(String(decoding: dropped, as: UTF8.self).hasPrefix("HTTP/1.1 200"))
+    await waitFor("the viewer to be dropped") { server.viewers == 0 }
+
+    let refused = await rawRequest(method: "GET", path: "/frames", port: port)
+    let text = String(decoding: refused, as: UTF8.self)
+    #expect(text.hasPrefix("HTTP/1.1 503"), "got: \(text.prefix(40))")
+    #expect(text.hasSuffix("the simulator is shutdown"), "the reason should be the body")
+    let index = String(decoding: await rawRequest(method: "GET", path: "/", port: port), as: UTF8.self)
+    #expect(index.hasPrefix("HTTP/1.1 200"), "the page itself should still load")
+
+    server.setSourceAvailable(true, reason: "the simulator is booted")
+    let back = await rawGetWhile(path: "/frames", port: port, timeout: 0.5) {}
+    #expect(String(decoding: back, as: UTF8.self).hasPrefix("HTTP/1.1 200"))
+}
+
+@Test("an H.264 viewer on /frames hears from a quiet stream; a raw one does not")
+func h264FramesGetAnEmptyKeepalive() async throws {
+    // Without it the page cannot tell a still screen from a dropped network
+    // under H.264. A raw /stream viewer gets nothing: an elementary stream
+    // has no empty unit to send.
+    let port = freePort()
+    let server = HTTPStreamServer(port: port, bindAll: false, codec: .h264, keepalive: 0.3)
+    try server.start()
+    defer { server.stop() }
+
+    let framed = await rawGetWhile(path: "/frames", port: port, timeout: 1.5) {}
+    let text = String(decoding: framed, as: UTF8.self)
+    #expect(text.contains("Content-Type: video/h264\r\nContent-Length: 0\r\n"), "no empty part arrived")
+
+    let raw = await rawGetWhile(path: "/stream", port: port, timeout: 1.5) {}
+    let rawBody = try #require(raw.range(of: Data("\r\n\r\n".utf8))).upperBound
+    #expect(raw.distance(from: rawBody, to: raw.endIndex) == 0, "a raw H.264 viewer was sent keepalive bytes")
 }

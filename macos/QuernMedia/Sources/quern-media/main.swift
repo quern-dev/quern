@@ -142,7 +142,16 @@ if let port = options.servePort {
 var source: FrameSource
 switch options.source {
 case .simulator(let udid):
-    source = SimulatorFramebuffer(udid: udid) { pipeline.consume($0) }
+    let simulator = SimulatorFramebuffer(udid: udid) { pipeline.consume($0) }
+    // A simulator can shut down under a running stream, and come back. Its
+    // viewers have to see that rather than a frozen last frame.
+    simulator.onAvailability = { available, reason in
+        server?.setSourceAvailable(available, reason: reason)
+        // A keyframe opens whatever follows the reattach, for a recording
+        // and for any viewer that reconnects.
+        if available { pipeline.requestKeyframe() }
+    }
+    source = simulator
     do { try source.start() } catch { fail("\(error)") }
     MediaLog.log("[capture] streaming simulator \(udid)")
 

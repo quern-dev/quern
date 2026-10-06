@@ -31,6 +31,14 @@ public enum SimulatorFramebufferError: Error, CustomStringConvertible {
 /// No Simulator.app involved: `simctl boot` is enough, and the framebuffer
 /// composites regardless. Event-driven, so an idle screen produces nothing
 /// and costs nothing.
+///
+/// The simulator is watched for as long as this runs, because it can shut
+/// down underneath it -- quitting Simulator.app shuts down every simulator,
+/// headless ones included. Nothing in the framebuffer says so: the callbacks
+/// simply stop, which looks exactly like a still screen, and a viewer was
+/// left showing the last frame as if it were live. Now a shutdown detaches
+/// and reports itself through `onAvailability`, and a reboot reattaches to
+/// the new framebuffer.
 public final class SimulatorFramebuffer: FrameSource {
     private let udid: String
     private let queue = DispatchQueue(label: "quern.media.simulator", qos: .userInteractive)
@@ -41,6 +49,20 @@ public final class SimulatorFramebuffer: FrameSource {
     private var ioClient: NSObject?
     private var descriptors: [NSObject] = []
     private var callbackUUIDs: [ObjectIdentifier: NSUUID] = [:]
+
+    /// The resolved `SimDevice`, kept to read its state. Capture queue only.
+    private var device: NSObject?
+    /// Whether the framebuffer callbacks are registered. Capture queue only.
+    private var attached = false
+    private var monitor: DispatchSourceTimer?
+
+    /// How often the simulator's state is read while streaming.
+    public var stateCheckInterval: TimeInterval = 1
+
+    /// Called on the capture queue when the simulator goes away (false, with
+    /// the reason) and when it is back and attached again (true). Set before
+    /// `start()`.
+    public var onAvailability: ((Bool, String) -> Void)?
 
     /// Marks `queue` with *this instance's* identity.
     ///
@@ -68,12 +90,26 @@ public final class SimulatorFramebuffer: FrameSource {
         // A shut-down device still resolves and still hands back an `io`
         // client; it simply never composites. Failing here beats a window that
         // stays black with no explanation.
-        let raw = (device.value(forKey: "state") as? NSNumber)?.intValue ?? -1
+        let raw = Self.state(of: device)
         guard raw == SimDeviceState.booted.rawValue else {
             let name = SimDeviceState(rawValue: raw)?.name ?? "unknown(\(raw))"
             throw SimulatorFramebufferError.notBooted(name)
         }
 
+        try queue.sync {
+            self.device = device
+            try self.attach(device)
+        }
+        startMonitor()
+    }
+
+    private static func state(of device: NSObject) -> Int {
+        (device.value(forKey: "state") as? NSNumber)?.intValue ?? -1
+    }
+
+    /// Finds the display descriptors and registers for their frames. Capture
+    /// queue only. Throws with nothing registered.
+    private func attach(_ device: NSObject) throws {
         guard let io = device.perform(NSSelectorFromString("io"))?
             .takeUnretainedValue() as? NSObject else {
             throw SimulatorFramebufferError.ioUnavailable
@@ -103,15 +139,76 @@ public final class SimulatorFramebuffer: FrameSource {
                   desc.responds(to: surfSel) else { continue }
             descriptors.append(desc)
         }
-        guard !descriptors.isEmpty else { throw SimulatorFramebufferError.noFramebuffer }
+        guard !descriptors.isEmpty else {
+            ioClient = nil
+            throw SimulatorFramebufferError.noFramebuffer
+        }
         MediaLog.log("[capture] framebuffer descriptors: \(descriptors.count)")
 
-        for desc in descriptors { try register(on: desc) }
+        do {
+            for desc in descriptors { try register(on: desc) }
+        } catch {
+            detach()
+            throw error
+        }
+        attached = true
 
         // Nothing composites on an idle screen, so the callback alone can
         // leave a consumer with no frames at all until the user touches
         // something. Prime it with whatever is on screen now.
         queue.async { [weak self] in self?.captureLatest() }
+    }
+
+    /// Unregisters every callback and drops the framebuffer. Capture queue
+    /// only, and safe to call when nothing is attached.
+    private func detach() {
+        let unregSel = NSSelectorFromString("unregisterScreenCallbacksWithUUID:")
+        for desc in descriptors {
+            if let uuid = callbackUUIDs[ObjectIdentifier(desc)], desc.responds(to: unregSel) {
+                desc.perform(unregSel, with: uuid)
+            }
+        }
+        descriptors.removeAll()
+        callbackUUIDs.removeAll()
+        ioClient = nil
+        attached = false
+    }
+
+    private func startMonitor() {
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + stateCheckInterval, repeating: stateCheckInterval)
+        timer.setEventHandler { [weak self] in self?.checkState() }
+        stateLock.lock()
+        monitor = timer
+        stateLock.unlock()
+        timer.resume()
+    }
+
+    /// Detaches when the simulator stops being booted, and reattaches when it
+    /// is booted again. A reattach that fails -- the framebuffer can lag the
+    /// state by a moment during boot -- is simply tried again next tick.
+    private func checkState() {
+        stateLock.lock()
+        let done = stopped
+        stateLock.unlock()
+        guard !done, let device else { return }
+
+        let raw = Self.state(of: device)
+        let booted = raw == SimDeviceState.booted.rawValue
+        if attached && !booted {
+            detach()
+            let name = SimDeviceState(rawValue: raw)?.name ?? "unknown(\(raw))"
+            MediaLog.log("[capture] simulator \(udid) is no longer booted (\(name))")
+            onAvailability?(false, "the simulator is \(name.lowercased())")
+        } else if !attached && booted {
+            do {
+                try attach(device)
+                MediaLog.log("[capture] simulator \(udid) is booted again; streaming")
+                onAvailability?(true, "the simulator is booted")
+            } catch {
+                // Not yet. The next tick tries again.
+            }
+        }
     }
 
     /// Re-delivers the current framebuffer surface, exactly as `start()`
@@ -146,24 +243,19 @@ public final class SimulatorFramebuffer: FrameSource {
         stateLock.lock()
         let already = stopped
         stopped = true
+        let timer = monitor
+        monitor = nil
         stateLock.unlock()
         guard !already else { return }
+        timer?.cancel()
 
         // The rest runs on the capture queue, because `captureLatest` reads
         // `descriptors` there. Clearing it from the caller's thread raced a
         // callback that had already been enqueued: a torn read at best, a
         // frame delivered after stop() returned at worst.
         let cleanup = {
-            let unregSel = NSSelectorFromString("unregisterScreenCallbacksWithUUID:")
-            for desc in self.descriptors {
-                if let uuid = self.callbackUUIDs[ObjectIdentifier(desc)],
-                   desc.responds(to: unregSel) {
-                    desc.perform(unregSel, with: uuid)
-                }
-            }
-            self.descriptors.removeAll()
-            self.callbackUUIDs.removeAll()
-            self.ioClient = nil
+            self.detach()
+            self.device = nil
         }
 
         // `onFrame` runs on this queue, so a consumer that stops the source

@@ -92,6 +92,9 @@ public final class HTTPStreamServer: FrameSink {
 
     private let keepalive: TimeInterval
     private var keepaliveTimer: DispatchSourceTimer?
+    /// Why the source is unavailable, or nil while it is producing. Set by
+    /// `setSourceAvailable`; streams are refused with 503 while it is set.
+    private var sourceDown: String?
     /// The last MJPEG part written, replayed when the stream goes quiet.
     private var lastPart: Data?
     private var lastSendAt = Date.distantPast
@@ -157,9 +160,12 @@ public final class HTTPStreamServer: FrameSink {
     ///   and the window sits on its last frame while the server reports the
     ///   preview as live.
     ///
-    ///   MJPEG only. Every JPEG stands alone, so repeating one is valid and a
-    ///   browser redraws the same picture. An H.264 stream cannot have frames
-    ///   replayed into it, so it is left alone.
+    ///   Under MJPEG the last frame is repeated: every JPEG stands alone, so
+    ///   that is valid and a browser redraws the same picture. An H.264
+    ///   stream cannot have frames replayed into it, so a `/frames` viewer
+    ///   gets an empty part instead, which says "still here" and nothing
+    ///   else. A raw `/stream` viewer of H.264 gets nothing: there is no
+    ///   empty unit to send in an elementary stream.
     public init(
         port: UInt16,
         bindAll: Bool,
@@ -231,6 +237,25 @@ public final class HTTPStreamServer: FrameSink {
         if bindAll {
             MediaLog.log("[http] WARNING: all interfaces, no authentication — "
                 + "anyone on this network can watch the screen")
+        }
+    }
+
+    /// The source has gone away, or come back.
+    ///
+    /// Going away drops every streaming viewer, so each one sees its stream
+    /// end, and refuses new streams with 503 until the source returns. The
+    /// alternative -- keeping viewers attached -- left them showing the last
+    /// frame of a simulator that had shut down, refreshed every few seconds
+    /// by the keepalive, which is a stream that looks live and is not.
+    public func setSourceAvailable(_ available: Bool, reason: String) {
+        lock.lock()
+        sourceDown = available ? nil : reason
+        let dropped = available ? [] : clients.values.filter(\.streaming)
+        if !available { lastPart = nil }
+        lock.unlock()
+        for client in dropped { client.connection.cancel() }
+        if !available {
+            MediaLog.log("[http] source unavailable (\(reason)); dropped \(dropped.count) viewer(s)")
         }
     }
 
@@ -340,6 +365,10 @@ public final class HTTPStreamServer: FrameSink {
         conn.stateUpdateHandler = { [weak self] state in
             switch state {
             case .failed, .cancelled:
+                // A failed connection holds its descriptor until cancelled.
+                // Today the pending read in `watchForHangup` cancels it first,
+                // but that is an ordering this should not depend on.
+                if case .failed = state { conn.cancel() }
                 guard let self else { return }
                 self.lock.lock()
                 self.clients.removeValue(forKey: ObjectIdentifier(conn))
@@ -370,7 +399,7 @@ public final class HTTPStreamServer: FrameSink {
     private func startKeepaliveIfNeeded() {
         lock.lock()
         defer { lock.unlock() }
-        guard keepaliveTimer == nil, keepalive > 0, codec == .mjpeg else { return }
+        guard keepaliveTimer == nil, keepalive > 0 else { return }
 
         let timer = DispatchSource.makeTimerSource(queue: queue)
         // Checked more often than the interval so the gap between a quiet
@@ -385,17 +414,23 @@ public final class HTTPStreamServer: FrameSink {
         lock.lock()
         let quiet = Date().timeIntervalSince(lastSendAt) >= keepalive
         let watchers = clients.values.filter { $0.streaming && !$0.inFlight }
-        guard quiet, !watchers.isEmpty, let part = lastPart else {
+        let sends: [(Client, Data)] = watchers.compactMap { client in
+            switch codec {
+            case .mjpeg: return lastPart.map { (client, $0) }
+            case .h264: return client.framing == .parts ? (client, Self.emptyH264Part) : nil
+            }
+        }
+        guard quiet, !sends.isEmpty else {
             lock.unlock()
             return
         }
-        for client in watchers { client.inFlight = true }
+        for (client, _) in sends { client.inFlight = true }
         _keepalivesSent += 1
-        _bytesSent += part.count * watchers.count
+        _bytesSent += sends.reduce(0) { $0 + $1.1.count }
         lastSendAt = Date()
         lock.unlock()
 
-        for client in watchers {
+        for (client, part) in sends {
             client.connection.send(content: part, completion: .contentProcessed {
                 [weak self, weak client] _ in
                 guard let self, let client else { return }
@@ -528,6 +563,17 @@ public final class HTTPStreamServer: FrameSink {
             return
         }
 
+        lock.lock()
+        let down = sourceDown
+        lock.unlock()
+        if let down {
+            client.connection.send(
+                content: HTTPWire.sourceUnavailableResponse(reason: down),
+                completion: .contentProcessed { _ in client.connection.cancel() }
+            )
+            return
+        }
+
         let contentType = framing == .parts
             ? HTTPWire.framesContentType
             : HTTPWire.contentType(for: codec)
@@ -548,6 +594,8 @@ public final class HTTPStreamServer: FrameSink {
         // periodic one.
         onKeyframeNeeded?()
     }
+
+    private static let emptyH264Part = HTTPWire.h264Part(Data())
 
     /// Streaming clients currently attached. Internal, for tests.
     var viewers: Int {

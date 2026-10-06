@@ -54,6 +54,11 @@ time; the stall was in the decoder. Software decoding had no stalls but managed
 only about 20fps. So MJPEG is the codec for a local preview, and H.264 is for
 when bandwidth matters more than smoothness.
 
+A streaming viewer must keep its sending side open: the server reads from each
+stream to notice a viewer leaving, so one that half-closes after its request is
+taken to have gone. While a simulator is shut down, streams are refused with 503
+and the reason, and they work again once it has booted.
+
 `--bind-all` serves these on every interface and is **unauthenticated** by
 design; it is opt-in and the usage text says so.
 
