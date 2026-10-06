@@ -254,7 +254,7 @@ public final class HTTPStreamServer: FrameSink {
         if !available { lastPart = nil }
         lock.unlock()
         for client in dropped { client.connection.cancel() }
-        if !available {
+        if !available && !dropped.isEmpty {
             MediaLog.log("[http] source unavailable (\(reason)); dropped \(dropped.count) viewer(s)")
         }
     }

@@ -54,6 +54,9 @@ public final class SimulatorFramebuffer: FrameSource {
     private var device: NSObject?
     /// Whether the framebuffer callbacks are registered. Capture queue only.
     private var attached = false
+    /// The state last reported while detached, so a change -- "shutting
+    /// down" becoming "shutdown" -- is reported too. Capture queue only.
+    private var reportedState: Int?
     private var monitor: DispatchSourceTimer?
 
     /// How often the simulator's state is read while streaming.
@@ -195,14 +198,22 @@ public final class SimulatorFramebuffer: FrameSource {
 
         let raw = Self.state(of: device)
         let booted = raw == SimDeviceState.booted.rawValue
+        let name = SimDeviceState(rawValue: raw)?.name ?? "unknown(\(raw))"
         if attached && !booted {
             detach()
-            let name = SimDeviceState(rawValue: raw)?.name ?? "unknown(\(raw))"
+            reportedState = raw
             MediaLog.log("[capture] simulator \(udid) is no longer booted (\(name))")
+            onAvailability?(false, "the simulator is \(name.lowercased())")
+        } else if !attached && !booted && reportedState != raw {
+            // Still down, in a new state. The reason a viewer is shown is
+            // the one reported last, so it would otherwise keep saying
+            // "shutting down" long after the shutdown finished.
+            reportedState = raw
             onAvailability?(false, "the simulator is \(name.lowercased())")
         } else if !attached && booted {
             do {
                 try attach(device)
+                reportedState = nil
                 MediaLog.log("[capture] simulator \(udid) is booted again; streaming")
                 onAvailability?(true, "the simulator is booted")
             } catch {
