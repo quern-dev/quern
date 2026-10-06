@@ -937,7 +937,13 @@ class TestTheManager:
         manager = Sources().manager(video)
         rec = await manager.start(SIM, str(tmp_path / "r"), Filters(video=True))
         await manager._fail(rec, "disk full")
-        await asyncio.wait(list(manager._background))
+        # The stop runs in the background and drops itself from the set when
+        # it finishes, so the set can be empty by now -- and asyncio.wait
+        # raises on an empty one. Failed that way once on the Linux runner.
+        # Bounded, so a stop that never finishes fails the assertion below
+        # rather than hanging the suite.
+        if manager._background:
+            await asyncio.wait(list(manager._background), timeout=5)
         assert video.stopped == [tmp_path / "r" / "video-1.mp4"]
         [seg] = json.loads((tmp_path / "r" / "manifest.json").read_text())["video"]
         assert seg["start_host_time"] == 1000.0
