@@ -12,7 +12,7 @@ from typing import Any
 
 from server.config import CONFIG_DIR
 from server.device.android.scrcpy_input import ScrcpyInput
-from server.device.gestures import Plan
+from server.device.gestures import Plan, check_edge_start
 from server.models import DeviceError, InvalidDeviceRequestError
 
 logger = logging.getLogger(__name__)
@@ -242,6 +242,10 @@ def _focused_text_and_hint(device: Any) -> tuple[str | None, str | None]:
             return (node.get("text", ""), node.get("hint", ""))
     return (None, None)
 
+class _PressMayHaveLanded(Exception):
+    """A selector's click or long click failed after it was sent (#251)."""
+
+
 #: A pinch's default narrow end on Android, past ScaleGestureDetector's 27mm.
 PINCH_NARROW_MM = 30.0
 
@@ -261,6 +265,9 @@ class U2Backend:
     #: Through scrcpy's server, which can inject more than one pointer
     #: (#252); without scrcpy a gesture is refused with the install command.
     multitouch = True
+
+    #: A swipe from the screen edge is the system's under gesture navigation.
+    edge_swipes = True
 
     def __init__(self) -> None:
         self._devices: dict[str, object] = {}  # serial → u2.Device
@@ -427,12 +434,15 @@ class U2Backend:
         return {"unit": unit, "pinch_distance": PINCH_NARROW_MM / 25.4 * 160 * unit,
                 "pinch_angle": 90.0 if height >= width else 0.0}
 
-    async def tap(self, udid: str, x: float, y: float) -> None:
-        """Tap at coordinates."""
+    async def tap(self, udid: str, x: float, y: float, hold: float | None = None) -> None:
+        """Tap at coordinates; with `hold`, a long press of that many seconds (#251)."""
 
         def _do():
             device = self._connect(udid)
-            device.click(int(x), int(y))
+            if hold is None:
+                device.click(int(x), int(y))
+            else:
+                device.long_click(int(x), int(y), float(hold))
 
         try:
             await asyncio.to_thread(_do)
@@ -444,6 +454,7 @@ class U2Backend:
         udid: str,
         identifier: str | None = None,
         label: str | None = None,
+        hold: float | None = None,
     ) -> dict | None:
         """Tap an element by native uiautomator2 selector — WITHOUT dumping the
         full hierarchy.
@@ -477,7 +488,16 @@ class U2Backend:
                 if not obj.exists:
                     continue
                 info = obj.info or {}
-                obj.click()
+                try:
+                    if hold is None:
+                        obj.click()
+                    else:
+                        obj.long_click(float(hold))
+                except Exception as e:
+                    # Past this point the press may have reached the device: a
+                    # read timeout after it landed looks the same as one before.
+                    # Falling back to the tree path would press again (#407).
+                    raise _PressMayHaveLanded(e) from e
                 bounds = info.get("bounds") or {}
                 cx = (bounds.get("left", 0) + bounds.get("right", 0)) / 2
                 cy = (bounds.get("top", 0) + bounds.get("bottom", 0)) / 2
@@ -496,6 +516,12 @@ class U2Backend:
 
         try:
             return await asyncio.to_thread(_do)
+        except _PressMayHaveLanded as e:
+            what = "long press" if hold is not None else "tap"
+            raise DeviceError(
+                f"the {what} on {udid} failed after it was sent ({e.__cause__!r}); it "
+                f"may already have landed, so it was not sent again -- check the screen",
+                tool="u2") from e
         except Exception as e:
             logger.debug("tap_by_selector fell back (%s)", e)
             return None
@@ -602,15 +628,23 @@ class U2Backend:
         end_x: float,
         end_y: float,
         duration: float = 0.5,
+        edge: str | None = None,
     ) -> None:
-        """Swipe gesture."""
+        """Swipe gesture. An `edge` swipe must start at that edge, where
+        gesture navigation reads it as the system's: measured on the emulator
+        and a Pixel 5, a swipe from x=1 was a back gesture (#251)."""
 
         def _do():
             device = self._connect(udid)
+            if edge is not None:
+                width, height = device.window_size()
+                check_edge_start(edge, start_x, start_y, width, height, tool="u2")
             device.swipe(int(start_x), int(start_y), int(end_x), int(end_y), duration=duration)
 
         try:
             await asyncio.to_thread(_do)
+        except InvalidDeviceRequestError:
+            raise
         except Exception as e:
             raise DeviceError(f"Swipe failed: {e}", tool="u2") from e
 

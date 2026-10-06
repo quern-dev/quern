@@ -27,10 +27,12 @@ final class GesturesViewController: UIViewController, UIGestureRecognizerDelegat
     private let tapLabel = UILabel()
     private let doubleTapLabel = UILabel()
     private let twoFingerTapLabel = UILabel()
+    private let longPressLabel = UILabel()
 
     private var taps = 0
     private var doubleTaps = 0
     private var twoFingerTaps = 0
+    private var longPresses = 0
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -43,6 +45,7 @@ final class GesturesViewController: UIViewController, UIGestureRecognizerDelegat
             (panLabel, "gesture_pan"), (scrollLabel, "gesture_scroll"),
             (tapLabel, "gesture_tap"), (doubleTapLabel, "gesture_double_tap"),
             (twoFingerTapLabel, "gesture_two_finger_tap"),
+            (longPressLabel, "gesture_long_press"),
         ] {
             label.frame = CGRect(x: 20, y: y, width: width, height: 22)
             label.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
@@ -82,8 +85,11 @@ final class GesturesViewController: UIViewController, UIGestureRecognizerDelegat
         doubleTap.numberOfTapsRequired = 2
         let twoFingerTap = UITapGestureRecognizer(target: self, action: #selector(twoFingerTapped))
         twoFingerTap.numberOfTouchesRequired = 2
+        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(longPressed(_:)))
         let tap = UITapGestureRecognizer(target: self, action: #selector(tapped))
         tap.require(toFail: doubleTap)
+        // A long press is not also a tap (#251).
+        tap.require(toFail: longPress)
         // UIKit's two-finger tap also accepts a quick pinch or turn -- measured
         // here up to a 1s pinch, and with the fingers' midpoint moving 20pt --
         // so it waits for the moving gestures to fail, as an app with both
@@ -92,7 +98,8 @@ final class GesturesViewController: UIViewController, UIGestureRecognizerDelegat
             twoFingerTap.require(toFail: moving)
         }
 
-        for recogniser in [pinch, rotate, pan, scroll, doubleTap, twoFingerTap, tap] as [UIGestureRecognizer] {
+        for recogniser in [pinch, rotate, pan, scroll, doubleTap, twoFingerTap, tap,
+                           longPress] as [UIGestureRecognizer] {
             recogniser.delegate = self
             pad.addGestureRecognizer(recogniser)
         }
@@ -148,7 +155,16 @@ final class GesturesViewController: UIViewController, UIGestureRecognizerDelegat
         twoFingerTapLabel.text = "twofinger \(twoFingerTaps)"
     }
 
+    @objc private func longPressed(_ g: UILongPressGestureRecognizer) {
+        // Counted once, when it is recognised, not on every movement after.
+        guard g.state == .began else { return }
+        longPresses += 1
+        longPressLabel.text = "long \(longPresses)"
+    }
+
     @objc private func resetAll() {
+        longPresses = 0
+        longPressLabel.text = "long 0"
         taps = 0
         doubleTaps = 0
         twoFingerTaps = 0

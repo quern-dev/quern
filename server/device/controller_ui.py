@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,11 +26,29 @@ from server.device.web.web_probing import WebSweepResult
 from server.models import (
     DeviceError,
     DeviceOperationUnsupportedError,
+    DeviceType,
     InvalidDeviceRequestError,
     UIElement,
     WaitCondition,
 )
 
+#: The longest press a tap can hold, as for the timed gestures (#252).
+MAX_HOLD_SECONDS = 10.0
+
+
+def _hold(duration: float | None) -> dict:
+    """`hold=` for a backend's tap, or nothing for an ordinary tap (#251).
+
+    Checked before any device is looked for: a bad duration is a fact about
+    the call. Passed only when given, so a backend's own tap stays the default.
+    """
+    if duration is None:
+        return {}
+    if not math.isfinite(duration) or duration <= 0 or duration > MAX_HOLD_SECONDS:
+        raise InvalidDeviceRequestError(
+            f"duration must be a number of seconds above 0 and at most "
+            f"{MAX_HOLD_SECONDS:g}, not {duration!r}", tool="quern")
+    return {"hold": float(duration)}
 
 def _scroll_report(sweep: dict, requested: bool | None) -> dict:
     """What happened about scrolling, said positively either way.
@@ -2115,11 +2134,13 @@ class DeviceControllerUI:
 
         return sim_input.suppressed_input_warning(udid)
 
-    async def tap(self, x: float, y: float, udid: str | None = None) -> str:
-        """Tap at coordinates. Returns the resolved udid."""
+    async def tap(self, x: float, y: float, udid: str | None = None,
+                  duration: float | None = None) -> str:
+        """Tap at coordinates; with `duration`, a long press. Returns the udid."""
+        hold = _hold(duration)
         resolved = await self.resolve_udid(udid)
         await self._warn_if_input_is_suppressed(resolved)
-        await self._ui_backend(resolved).tap(resolved, x, y)
+        await self._ui_backend(resolved).tap(resolved, x, y, **hold)
         self._invalidate_ui_cache(resolved)  # UI changed
         return resolved
 
@@ -2136,8 +2157,13 @@ class DeviceControllerUI:
         value: str | None = None,
         scroll_to_find: bool | None = None,
         snapshot_depth: int | None = None,
+        duration: float | None = None,
     ) -> dict:
         """Find an element by label/identifier and tap its center.
+
+        With `duration`, the tap is a long press of that many seconds (#251),
+        on every path below: the selector fast path, a web element, and the
+        tree.
 
         Uses adaptive timing with stability checking to handle animations:
         - Checks element position after 100ms
@@ -2150,6 +2176,7 @@ class DeviceControllerUI:
         Raises:
             DeviceError for 0 matches
         """
+        hold = _hold(duration)
         any_label = label or label_contains or label_prefix
         if not any_label and not identifier:
             raise DeviceError(
@@ -2191,7 +2218,7 @@ class DeviceControllerUI:
         ):
             backend = self._ui_backend(resolved_fast)
             tapped = await backend.tap_by_selector(
-                resolved_fast, identifier=identifier, label=label,
+                resolved_fast, identifier=identifier, label=label, **hold,
             )
             # Not in the current view — auto-scroll to it and retry. Uses the
             # selector-based swipe loop (no dump_hierarchy), so it inherits the
@@ -2226,7 +2253,7 @@ class DeviceControllerUI:
                     # Android path slower rather than more reliable. See #100.
                     await asyncio.sleep(0.4)
                     tapped = await backend.tap_by_selector(
-                        resolved_fast, identifier=identifier, label=label,
+                        resolved_fast, identifier=identifier, label=label, **hold,
                     )
             if tapped is not None:
                 self._invalidate_ui_cache(resolved_fast)
@@ -2447,7 +2474,7 @@ class DeviceControllerUI:
                         ),
                     }
                 cx, cy = get_tap_point(el)
-                await self._ui_backend(resolved).tap(resolved, cx, cy)
+                await self._ui_backend(resolved).tap(resolved, cx, cy, **hold)
                 self._invalidate_ui_cache(resolved)
                 result = {
                     "status": "ok",
@@ -2597,7 +2624,7 @@ class DeviceControllerUI:
                         if matches_final:
                             cx, cy = get_tap_point(matches_final[0])
 
-            await self._ui_backend(resolved).tap(resolved, cx, cy)
+            await self._ui_backend(resolved).tap(resolved, cx, cy, **hold)
             self._invalidate_ui_cache(resolved)  # UI changed
 
             # Future enhancement: Post-tap verification
@@ -3001,11 +3028,35 @@ class DeviceControllerUI:
         end_y: float,
         duration: float = 0.5,
         udid: str | None = None,
+        edge: str | None = None,
     ) -> str:
-        """Swipe gesture. Returns the resolved udid."""
+        """Swipe gesture. Returns the resolved udid.
+
+        With `edge`, a swipe from that screen edge -- back, home, Control
+        Centre, the notification shade (#251). It must start at the edge, on
+        every backend, so it means the same thing on each.
+        """
+        if edge is not None:
+            gestures.check_edge(edge)
         resolved = await self.resolve_udid(udid)
+        backend = self._ui_backend(resolved)
+        name = getattr(backend, "TOOL_NAME", type(backend).__name__)
+        if edge is not None and getattr(backend, "edge_swipes", False) is not True:
+            raise DeviceOperationUnsupportedError(
+                f"the {name} backend cannot send an edge swipe: a swipe from the edge "
+                f"of a simulator is only the system's when the event says so, and "
+                f"{name} has no way to (#251)", tool=name)
+        # An iOS simulator takes an edge swipe only from an event flagged as
+        # one, which only sim-bridge sets: WDA driving a simulator would drag
+        # from the edge, answer ok, and nothing would happen (review).
+        if (edge is not None and self._device_type(resolved) == DeviceType.SIMULATOR
+                and getattr(backend, "edge_flag", False) is not True):
+            raise DeviceOperationUnsupportedError(
+                f"an edge swipe on a simulator needs sim-bridge, which flags the event "
+                f"as one; the {name} backend cannot (#251)", tool=name)
         await self._warn_if_input_is_suppressed(resolved)
-        await self._ui_backend(resolved).swipe(resolved, start_x, start_y, end_x, end_y, duration)
+        extra = {"edge": edge} if edge is not None else {}
+        await backend.swipe(resolved, start_x, start_y, end_x, end_y, duration, **extra)
         self._invalidate_ui_cache(resolved)  # UI changed
         return resolved
 

@@ -949,6 +949,12 @@ func doTap(udid: String, x: Double, y: Double, hold: Double = 0.05) -> Bool {
     return sendDigitizerEvent(point: point, identifier: id, isDown: false, client: client)
 }
 
+/// Indigo's screen-edge bits, as the guest reads them at 0x3b/0xdb (#251).
+/// The values baguette derived by sweeping IndigoHIDMessageForMouseNSEvent's
+/// edge argument and diffing the bytes; quern's offsets were reached
+/// independently and match.
+let edgeBits: [String: UInt8] = ["left": 0x02, "right": 0x04, "top": 0x08, "bottom": 0x01]
+
 /// `hold` keeps the finger down at the end point for that many seconds before
 /// lifting. With no hold a 0.3s swipe releases at speed and the list keeps
 /// going: measured on iOS 18.6 it travelled 1020pt for a 389pt drag, which is
@@ -959,7 +965,14 @@ func doTap(udid: String, x: Double, y: Double, hold: Double = 0.05) -> Bool {
 /// identical point was tried first and changed nothing -- the travel was the
 /// same 1000pt -- so the unchanged position is evidently not treated as the
 /// finger coming to rest.
-func doSwipe(udid: String, x1: Double, y1: Double, x2: Double, y2: Double, duration: Double = 0.3, hold: Double = 0) -> Bool {
+///
+/// `edge` marks every event of the swipe -- down, each move, the hold and the
+/// lift -- as starting from that screen edge, which is what routes it to the
+/// system's edge gestures (back, home, Control Centre) instead of the app. A
+/// gesture that announced its edge only on touch-down would read as an
+/// ordinary drag from its second sample on.
+func doSwipe(udid: String, x1: Double, y1: Double, x2: Double, y2: Double, duration: Double = 0.3,
+             hold: Double = 0, edge: UInt8 = 0) -> Bool {
     guard let client = ensureHIDClient(udid: udid) else { return false }
     let size = devicePointSize(for: resolveDevice(udid: udid)!)
     let start = CGPoint(x: CGFloat(clamp01(x1 / Double(size.width))),
@@ -970,7 +983,7 @@ func doSwipe(udid: String, x1: Double, y1: Double, x2: Double, y2: Double, durat
     let stepMs = UInt32(max(8, (duration * 1000) / Double(steps + 2)))
     let id = nextTouchId()
 
-    guard sendDigitizerEvent(point: start, identifier: id, isDown: true, client: client) else { return false }
+    guard sendDigitizerEvent(point: start, identifier: id, isDown: true, edgeBit: edge, client: client) else { return false }
     var ok = 0
     for i in 1...steps {
         usleep(stepMs * 1000)
@@ -978,18 +991,18 @@ func doSwipe(udid: String, x1: Double, y1: Double, x2: Double, y2: Double, durat
         let p = CGPoint(x: start.x + (end.x - start.x) * CGFloat(t),
                         y: start.y + (end.y - start.y) * CGFloat(t))
         // Move events: use isDown=true for sustained touch (mask 0x07)
-        if sendDigitizerEvent(point: p, identifier: id, isDown: true, client: client) { ok += 1 }
+        if sendDigitizerEvent(point: p, identifier: id, isDown: true, edgeBit: edge, client: client) { ok += 1 }
     }
     usleep(stepMs * 1000)
     if hold > 0 {
         let holdSteps = max(1, Int(hold * 1000 / 16))
         for k in 0..<holdSteps {
             let p = CGPoint(x: end.x, y: end.y + CGFloat(k % 2) * 0.0005)
-            _ = sendDigitizerEvent(point: p, identifier: id, isDown: true, client: client)
+            _ = sendDigitizerEvent(point: p, identifier: id, isDown: true, edgeBit: edge, client: client)
             usleep(16_000)
         }
     }
-    return sendDigitizerEvent(point: end, identifier: id, isDown: false, client: client) && ok >= steps / 2
+    return sendDigitizerEvent(point: end, identifier: id, isDown: false, edgeBit: edge, client: client) && ok >= steps / 2
 }
 
 func doButton(udid: String, name: String) -> Bool {
@@ -1634,7 +1647,44 @@ func handleCommand(_ dict: [String: Any]) {
         }
         let duration = dict["duration"] as? Double ?? 0.3
         let hold = dict["hold"] as? Double ?? 0
-        if doSwipe(udid: udid, x1: x1, y1: y1, x2: x2, y2: y2, duration: duration, hold: hold) {
+        var edge: UInt8 = 0
+        if let name = dict["edge"] as? String {
+            guard let bit = edgeBits[name] else {
+                respond(failure("edge must be one of left, right, top, bottom, not \(name)",
+                                badRequest: true))
+                return
+            }
+            edge = bit
+            // Only a swipe that starts at its edge: a real device decides from
+            // the start position, so `edge` from mid-screen would be a system
+            // gesture here and an ordinary swipe on a phone (#251). The margin
+            // is EDGE_MARGIN in server/device/gestures.py.
+            // Refused rather than skipped when the device cannot be found: an
+            // unchecked edge swipe is the one this check exists to stop (review).
+            guard let device = resolveDevice(udid: udid) else {
+                respond(["ok": false, "error": "device not found: \(udid)"])
+                return
+            }
+            do {
+                let size = devicePointSize(for: device)
+                let w = Double(size.width), h = Double(size.height), m = 0.03
+                let atEdge: Bool
+                switch name {
+                case "left": atEdge = x1 <= w * m
+                case "right": atEdge = x1 >= w * (1 - m)
+                case "top": atEdge = y1 <= h * m
+                default: atEdge = y1 >= h * (1 - m)
+                }
+                if !atEdge {
+                    let span = (name == "left" || name == "right") ? w : h
+                    respond(failure("an edge swipe from the \(name) must start within \(Int((span * m).rounded())) of that edge of the \(Int(w))x\(Int(h)) screen; (\(Int(x1)), \(Int(y1))) does not",
+                                    badRequest: true))
+                    return
+                }
+            }
+        }
+        if doSwipe(udid: udid, x1: x1, y1: y1, x2: x2, y2: y2, duration: duration, hold: hold,
+                   edge: edge) {
             respond(["ok": true])
         } else {
             respond(["ok": false, "error": "swipe failed"])

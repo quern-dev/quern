@@ -450,14 +450,16 @@ async def tap(request: Request, body: TapRequest):
     """Tap at specific coordinates."""
     controller = _get_controller(request)
     with _action("tap") as act:
-        act.detail = f"({body.x}, {body.y})"
+        act.detail = f"({body.x}, {body.y})" + (
+            f" held {body.duration:g}s" if body.duration else "")
         try:
-            udid = await controller.tap(x=body.x, y=body.y, udid=body.udid)
+            udid = await controller.tap(x=body.x, y=body.y, udid=body.udid,
+                                        duration=body.duration)
             act.udid = udid
-            return _with_input_warning(
-                controller, udid,
-                {"status": "ok", "udid": udid, "x": body.x, "y": body.y},
-            )
+            payload = {"status": "ok", "udid": udid, "x": body.x, "y": body.y}
+            if body.duration is not None:
+                payload["duration"] = body.duration
+            return _with_input_warning(controller, udid, payload)
         except DeviceError as e:
             raise _handle_device_error(e)
 
@@ -507,6 +509,7 @@ async def tap_element(request: Request, body: TapElementRequest):
                     value=body.value,
                     scroll_to_find=body.scroll_to_find,
                     snapshot_depth=body.snapshot_depth,
+                    duration=body.duration,
                 ),
                 what="tap_element",
             )
@@ -517,6 +520,11 @@ async def tap_element(request: Request, body: TapElementRequest):
             # when someone asks.
             if isinstance(result, dict) and "backend" not in result:
                 result["backend"] = controller.backend_that_served(resolved)
+            # Said back, as `tap` says it: a long press and a tap are different
+            # actions, and the response should say which one ran (review).
+            if (body.duration is not None and isinstance(result, dict)
+                    and result.get("status") == "ok"):
+                result["duration"] = body.duration
 
             # Element not found — return 404 with screen context. The 404 is
             # what tells _action this was `not_found` rather than a failure.
@@ -626,11 +634,13 @@ async def swipe(request: Request, body: SwipeRequest):
                 end_y=body.end_y,
                 duration=body.duration,
                 udid=body.udid,
+                edge=body.edge,
             )
             act.udid = udid
-            return _with_input_warning(
-                controller, udid, {"status": "ok", "udid": udid},
-            )
+            payload = {"status": "ok", "udid": udid}
+            if body.edge is not None:
+                payload["edge"] = body.edge
+            return _with_input_warning(controller, udid, payload)
         except DeviceError as e:
             raise _handle_device_error(e)
 

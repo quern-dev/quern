@@ -14,6 +14,10 @@
         android:layout_width="match_parent" android:layout_height="wrap_content" />
     <TextView android:id="@+id/gesture_two_finger_tap" android:typeface="monospace"
         android:layout_width="match_parent" android:layout_height="wrap_content" />
+    <TextView android:id="@+id/gesture_long_press" android:typeface="monospace"
+        android:layout_width="match_parent" android:layout_height="wrap_content" />
+    <TextView android:id="@+id/gesture_back" android:typeface="monospace"
+        android:layout_width="match_parent" android:layout_height="wrap_content" />
     <Button android:id="@+id/gesture_reset" android:text="Reset"
         android:layout_width="wrap_content" android:layout_height="wrap_content" />
     <com.quern.probe.GesturePadView android:id="@+id/gesture_pad"

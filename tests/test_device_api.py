@@ -593,6 +593,7 @@ class TestTapElement:
             # request's value straight through, so this pins the default.
             scroll_to_find=None,
             snapshot_depth=None,
+            duration=None,
         )
 
     async def test_tap_element_by_identifier(self, app, auth_headers, mock_controller):
@@ -619,6 +620,7 @@ class TestTapElement:
             # request's value straight through, so this pins the default.
             scroll_to_find=None,
             snapshot_depth=None,
+            duration=None,
         )
 
     async def test_tap_element_with_type_filter(self, app, auth_headers, mock_controller):
@@ -645,6 +647,7 @@ class TestTapElement:
             # request's value straight through, so this pins the default.
             scroll_to_find=None,
             snapshot_depth=None,
+            duration=None,
         )
 
     async def test_tap_element_ambiguous(self, app, auth_headers, mock_controller):
@@ -719,7 +722,7 @@ class TestTap:
         assert data["status"] == "ok"
         assert data["x"] == 100.0
         assert data["y"] == 200.0
-        mock_controller.tap.assert_called_once_with(x=100.0, y=200.0, udid=None)
+        mock_controller.tap.assert_called_once_with(x=100.0, y=200.0, udid=None, duration=None)
 
     async def test_tap_no_auth(self, app):
         transport = ASGITransport(app=app)
@@ -767,6 +770,7 @@ class TestSwipe:
             end_y=100,
             duration=0.5,
             udid=None,
+            edge=None,
         )
 
     async def test_swipe_with_duration(self, app, auth_headers, mock_controller):
@@ -785,6 +789,7 @@ class TestSwipe:
             end_y=500,
             duration=1.5,
             udid=None,
+            edge=None,
         )
 
     async def test_swipe_no_auth(self, app):

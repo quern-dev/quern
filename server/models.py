@@ -2231,6 +2231,10 @@ class TapRequest(BaseModel):
     x: float
     y: float
     udid: str | None = None
+    duration: float | None = Field(default=None, gt=0, le=10, allow_inf_nan=False, description=(
+        "Hold the touch this many seconds: a long press (#251). Omit for an ordinary "
+        "tap. Above an app's long-press threshold -- 0.5s on iOS, ~0.4s on Android "
+        "-- so 1.0 is a safe long press."))
 
 
 class RestoreInputRequest(BaseModel):
@@ -2255,6 +2259,10 @@ class TapElementRequest(BaseModel):
     #: asks the knowledge base and sweeps only on a screen recorded as
     #: `scrollable: true`. Previously defaulted to `True`, which swiped screens
     #: that cannot scroll -- see #274 and `ScreenLandmarks.scrollable`.
+    duration: float | None = Field(default=None, gt=0, le=10, allow_inf_nan=False, description=(
+        "Hold the touch this many seconds: a long press (#251). Omit for an ordinary "
+        "tap. Above an app's long-press threshold -- 0.5s on iOS, ~0.4s on Android "
+        "-- so 1.0 is a safe long press."))
     scroll_to_find: bool | None = None
     snapshot_depth: int | None = Field(
         default=None, ge=1, le=50,
@@ -2289,6 +2297,13 @@ class SwipeRequest(BaseModel):
     end_y: float
     duration: float = 0.5
     udid: str | None = None
+    edge: Literal["left", "right", "top", "bottom"] | None = Field(default=None, description=(
+        "A swipe from this screen edge, which the system takes: back from the left, "
+        "home from the bottom, Control Centre or the notification shade from the top "
+        "(#251). The swipe must start at the edge -- within 3% of the screen across "
+        "that axis. On a simulator it needs sim-bridge, the default backend, which "
+        "flags the touch as an edge swipe; idb, or WDA after start_driver, answers 400. "
+        "Physical iPhones and Android need no flag."))
 
 
 class GestureRequest(BaseModel):
