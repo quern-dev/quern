@@ -149,6 +149,7 @@ class _ExitedProcess:
 
     def __init__(self):
         self.started = asyncio.Event()
+        self.waited = False
 
     async def communicate(self):
         self.started.set()
@@ -158,6 +159,7 @@ class _ExitedProcess:
         raise ProcessLookupError
 
     async def wait(self):
+        self.waited = True
         return 1
 
 
@@ -190,6 +192,7 @@ class TestAKillAfterExitIsNotAnError:
         proc = _ExitedProcess()
         with patch.object(asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)):
             assert await ax_recovery._run("pgrep", timeout=0.05) == (1, "")
+        assert proc.waited, "the timed-out child was never reaped"
 
 
 async def test_an_empty_udid_kills_nothing():
