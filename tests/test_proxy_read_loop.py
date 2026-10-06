@@ -283,6 +283,26 @@ def _open_fds() -> int:
     return len(os.listdir("/dev/fd"))
 
 
+async def _settled_fds(expected: int, timeout: float = 2.0) -> int:
+    """The process's open descriptors once closes already under way are done.
+
+    The count is process-wide, so in a full suite it moves with whatever else
+    is finishing; and a transport's close completes on a later loop turn. One
+    reading straight after the call failed on a loaded CI runner, three high.
+    A real leak never closes, so it still fails, only up to `timeout` later.
+    """
+    import gc
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        gc.collect()
+        count = _open_fds()
+        if count == expected or loop.time() >= deadline:
+            return count
+        await asyncio.sleep(0.05)
+
+
 class TestTheReviewFindings:
     async def test_a_mitmdump_that_exits_is_noticed(self, tmp_path):
         """EOF on the events pipe needs the parent's copy of the write end
@@ -331,7 +351,7 @@ class TestTheReviewFindings:
         ):
             await a.start()
         assert a._process is None and "no pipe" in (a._error or "")
-        assert _open_fds() == before
+        assert await _settled_fds(before) == before
 
     async def test_a_drain_survives_an_over_long_line(self, caplog):
         """One line past the limit ended the stdout drain; nobody read stdout

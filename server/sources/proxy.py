@@ -407,6 +407,15 @@ class ProxyAdapter(BaseSourceAdapter):
             logger.error(self._error)
             _signal(self._process, "kill")
             await self._process.wait()
+            # Its own pipes too, not left to asyncio and the collector: stdin
+            # in particular reaches no EOF, and a count of open descriptors
+            # taken straight after read three high on a loaded CI runner.
+            for stream in (self._process.stdin, self._process.stdout, self._process.stderr):
+                transport = (getattr(stream, "_transport", None)
+                             or getattr(stream, "transport", None))
+                if transport is not None:
+                    transport.close()
+            await asyncio.sleep(0)
             self._process = None
             return
 
