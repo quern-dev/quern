@@ -24,6 +24,8 @@ OUTPUT (at least one required; they combine)
                          GET  /          a page that plays the stream
                          GET  /frames    the video, one part per frame
                          GET  /stream    the video itself (raw under --h264)
+                         ?source=<UDID>  on either: 409 unless this is the
+                                         simulator being streamed
                          POST /keyframe  force an IDR now, answers 204
   --record <path>        write an .mp4. Implies --h264.
 
@@ -37,6 +39,11 @@ TUNING
                          ImageIO's scale — VideoToolbox runs larger.
   --bind-all             listen on all interfaces instead of loopback.
                          UNAUTHENTICATED: anyone on the network can watch.
+
+LIFETIME
+  --exit-with-parent     exit when the process that started this one does.
+                         For an owner whose crash would otherwise leave this
+                         running, holding its port and the framebuffer.
 
 EXAMPLES
   quern-media --sim-udid <UDID> --serve 8422
@@ -128,8 +135,10 @@ if let port = options.servePort {
     // box: the server accepts the moment it binds, while the source is still
     // coming up, and a caller arriving in that window must not silently lose
     // its request.
+    let sourceID: String?
+    if case .simulator(let udid) = options.source { sourceID = udid } else { sourceID = nil }
     let s = HTTPStreamServer(
-        port: port, bindAll: options.bindAll, codec: options.codec
+        port: port, bindAll: options.bindAll, codec: options.codec, sourceID: sourceID
     ) {
         pipeline.requestKeyframe()
         attachPrimer.fire()
@@ -264,6 +273,27 @@ for sig in [SIGINT, SIGTERM] {
 // Cleanup only. A callback here cannot change a status already being
 // returned, so the signal handlers above are what carry a failure out.
 atexit_b { shutdownOnce.run() }
+
+// An owner that dies without stopping this -- a crash, a force quit, Ctrl+C
+// on the preview app -- left it running for good: nothing it does on its own
+// would ever fail, so nothing told it. Watched with a process source rather
+// than polled, and checked once first, because a parent that died before the
+// watch was set up has already handed this process to launchd.
+var parentWatch: DispatchSourceProcess?
+if options.exitWithParent {
+    let parent = getppid()
+    if parent == 1 {
+        MediaLog.log("[lifetime] started without a parent; stopping")
+        exit(shutdownOnce.run())
+    }
+    let watch = DispatchSource.makeProcessSource(identifier: parent, eventMask: .exit, queue: .main)
+    watch.setEventHandler {
+        MediaLog.log("[lifetime] parent \(parent) exited; stopping")
+        exit(shutdownOnce.run())
+    }
+    watch.resume()
+    parentWatch = watch
+}
 
 // A CFRunLoop rather than dispatchMain: CoreMediaIO publishes device changes
 // through run-loop sources, and AVFoundation expects one on the main thread.

@@ -59,6 +59,12 @@ stream to notice a viewer leaving, so one that half-closes after its request is
 taken to have gone. While a simulator is shut down, streams are refused with 503
 and the reason, and they work again once it has booted.
 
+`?source=<UDID>` on `/stream` or `/frames` asks for a particular simulator and
+gets 409 from a server streaming another. Viewers reconnect by port, ports are
+reused, and this is what stops a reconnecting window attaching to someone
+else's simulator. `--exit-with-parent` ends quern-media when the process that
+started it exits, for owners whose crash would otherwise leave it running.
+
 `--bind-all` serves these on every interface and is **unauthenticated** by
 design; it is opt-in and the usage text says so.
 

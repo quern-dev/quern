@@ -73,6 +73,9 @@ public final class HTTPStreamServer: FrameSink {
     private let port: NWEndpoint.Port
     private let bindAll: Bool
     private let codec: StreamPipeline.Codec
+    /// What this server is streaming -- a simulator's udid -- or nil when it
+    /// has no stable identity to offer. See `route`.
+    private let sourceID: String?
     private let onKeyframeNeeded: (() -> Void)?
 
     private var listener: NWListener?
@@ -170,12 +173,14 @@ public final class HTTPStreamServer: FrameSink {
         port: UInt16,
         bindAll: Bool,
         codec: StreamPipeline.Codec,
+        sourceID: String? = nil,
         keepalive: TimeInterval = 5,
         onKeyframeNeeded: (() -> Void)? = nil
     ) {
         self.port = NWEndpoint.Port(rawValue: port) ?? 8422
         self.bindAll = bindAll
         self.codec = codec
+        self.sourceID = sourceID
         self.keepalive = keepalive
         self.onKeyframeNeeded = onKeyframeNeeded
     }
@@ -558,6 +563,19 @@ public final class HTTPStreamServer: FrameSink {
                 : HTTPWire.indexPage(for: codec)
             client.connection.send(
                 content: page,
+                completion: .contentProcessed { _ in client.connection.cancel() }
+            )
+            return
+        }
+
+        // `?source=<udid>` asks for a particular simulator, and gets 409 from
+        // a server streaming another. A viewer reconnects by port, and ports
+        // are reused: a window waiting out a restart could otherwise attach
+        // to whichever quern-media took its port meanwhile -- another
+        // simulator, from another quern -- and show it under the wrong name.
+        if let asked = HTTPWire.queryValue(path, "source"), let sourceID, asked != sourceID {
+            client.connection.send(
+                content: HTTPWire.wrongSourceResponse(serving: sourceID, asked: asked),
                 completion: .contentProcessed { _ in client.connection.cancel() }
             )
             return

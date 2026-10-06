@@ -127,6 +127,26 @@ public enum HTTPWire {
             .appending("Content-Length: \(body.count)\r\nConnection: close\r\n\r\n").utf8) + body
     }
 
+    /// The value of `name` in a request path's query string, or nil. No
+    /// percent-decoding: the only value read this way is a UDID.
+    public static func queryValue(_ path: String, _ name: String) -> String? {
+        guard let q = path.firstIndex(of: "?") else { return nil }
+        for pair in path[path.index(after: q)...].split(separator: "&") {
+            let kv = pair.split(separator: "=", maxSplits: 1)
+            if kv.first.map(String.init) == name {
+                return kv.count > 1 ? String(kv[1]) : ""
+            }
+        }
+        return nil
+    }
+
+    /// A stream asked for by source, from a server serving another one.
+    public static func wrongSourceResponse(serving: String, asked: String) -> Data {
+        let body = Data("this stream is \(serving), not \(asked)".utf8)
+        return Data("HTTP/1.1 409 Conflict\r\nContent-Type: text/plain; charset=utf-8\r\n"
+            .appending("Content-Length: \(body.count)\r\nConnection: close\r\n\r\n").utf8) + body
+    }
+
     public static func notFoundResponse() -> Data {
         Data("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n"
             .appending("Connection: close\r\n\r\n").utf8)

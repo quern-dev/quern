@@ -147,3 +147,14 @@ func keyframePathMatching(path: String, expected: HTTPWire.ControlMatch) {
     #expect(HTTPWire.keyframePathMatch(path) == expected)
     #expect(HTTPWire.isKeyframePath(path) == (expected == .exact))
 }
+
+@Test("a query value is read by name, and absent when it is not there", arguments: [
+    ("/stream?source=ABC", "source", "ABC" as String?),
+    ("/frames?x=1&source=ABC-123&y=2", "source", "ABC-123"),
+    ("/frames?source=", "source", ""),
+    ("/frames?sourcex=ABC", "source", nil),
+    ("/frames", "source", nil),
+])
+func readsQueryValues(path: String, name: String, expected: String?) {
+    #expect(HTTPWire.queryValue(path, name) == expected)
+}

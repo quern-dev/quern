@@ -868,3 +868,24 @@ func h264FramesGetAnEmptyKeepalive() async throws {
     let rawBody = try #require(raw.range(of: Data("\r\n\r\n".utf8))).upperBound
     #expect(raw.distance(from: rawBody, to: raw.endIndex) == 0, "a raw H.264 viewer was sent keepalive bytes")
 }
+
+@Test("a stream asked for by source is refused by a server streaming another")
+func aStreamForAnotherSourceIsRefused() async throws {
+    // A viewer reconnects by port, and ports are reused. A window waiting
+    // out a restart could otherwise attach to whichever quern-media took its
+    // port meanwhile and show another simulator under its own name.
+    let port = freePort()
+    let server = HTTPStreamServer(port: port, bindAll: false, codec: .mjpeg, sourceID: "SIM-A")
+    try server.start()
+    defer { server.stop() }
+
+    for path in ["/stream?source=SIM-B", "/frames?source=SIM-B"] {
+        let text = String(decoding: await rawRequest(method: "GET", path: path, port: port), as: UTF8.self)
+        #expect(text.hasPrefix("HTTP/1.1 409"), "\(path): got \(text.prefix(40))")
+        #expect(text.hasSuffix("this stream is SIM-A, not SIM-B"))
+    }
+    for path in ["/frames?source=SIM-A", "/frames"] {
+        let text = String(decoding: await rawGetWhile(path: path, port: port, timeout: 0.4) {}, as: UTF8.self)
+        #expect(text.hasPrefix("HTTP/1.1 200"), "\(path): got \(text.prefix(40))")
+    }
+}
