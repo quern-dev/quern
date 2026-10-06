@@ -1025,6 +1025,16 @@ class PreviewManager:
                 self._mark_off_air(udid, why)
                 continue
             fresh.restarts = attempt
+            # Listening again, so the hold on the server's reason has done
+            # its job: it covered the stretch when the window could only say
+            # "quern-media is not running". What the window reports from now
+            # on comes from the new quern-media -- a 503 naming a simulator
+            # that is still shut down, say -- and is current, so it applies.
+            # Kept, the hold would show the old exit for as long as the
+            # simulator stayed down, since no picture arrives to end it.
+            preview = self._active.get(udid)
+            if preview is not None:
+                preview.off_air_by_server = False
             return
 
     def _mark_off_air(self, udid: str, reason: str) -> None:

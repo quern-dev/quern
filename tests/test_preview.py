@@ -1951,3 +1951,47 @@ class TestStreamRestartSchedule:
         status = asyncio.run(run())
         assert status["on_air"] is False
         assert status["off_air_reason"] == "quern-media exited: [capture] gone"
+
+
+
+class TestServerReasonHoldIsReleased:
+    def test_a_restarted_stream_lets_a_current_reason_through(self, monkeypatch):
+        """quern-media crashed while its simulator was also shut down. The
+        restart succeeds, but the new one only refuses with 503 -- the
+        simulator is still down -- so no picture arrives and nothing would
+        end the hold. Its reason must reach preview_status."""
+        from server.device.media import preview
+        from server.device.media.preview import ActivePreview
+
+        async def _build():
+            return "/tmp/quern-media"
+
+        async def _spawn(*_args, **_kwargs):
+            return _LiveStreamProcess()
+
+        monkeypatch.setattr(preview, "STREAM_RESTART_DELAYS", (0.0,))
+        monkeypatch.setattr(preview, "build_media_engine", _build)
+        monkeypatch.setattr(preview.asyncio, "create_subprocess_exec", _spawn)
+
+        mgr = PreviewManager()
+        stream = preview._StreamProcess(
+            process=_FakeStreamProcess(stderr_lines=["[capture] crashed"], exit_code=1),
+            port=8424, log=deque(maxlen=20),
+        )
+        mgr._streams["SIM"] = stream
+        mgr._active["SIM"] = ActivePreview(
+            name="SIM", position=0, kind="simulator", stream_port=8424
+        )
+
+        async def run():
+            await mgr._drain_stream("SIM", stream)        # exits, restarts
+            mgr._dispatch_event(
+                {"event": "off_air", "key": "SIM", "reason": "the simulator is shutdown"}
+            )
+            status = mgr.status()["active"]["SIM"]
+            await mgr._stop_stream("SIM")
+            return status
+
+        status = asyncio.run(run())
+        assert status["on_air"] is False
+        assert status["off_air_reason"] == "the simulator is shutdown"
