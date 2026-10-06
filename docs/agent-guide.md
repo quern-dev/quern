@@ -345,6 +345,10 @@ Open real-time video windows to see what's happening on USB-connected physical d
 
 **Limitations**: a simulator must already be booted, and `preview_device` with no UDID previews USB-connected physical devices only — it does not sweep up simulators, which would open a window for every booted one.
 
+**OFF AIR.** A simulator window whose stream drops — the simulator shut down or rebooted, or `quern-media` restarted — stays open, greys out under an OFF AIR label, and reconnects on its own. While it is off air, `preview_status` reports `"on_air": false` for that simulator, so a frozen last frame is never reported as a live preview. Quitting Simulator.app shuts down every simulator, headless ones included.
+
+**The person at the Mac can open simulators too.** The preview app's Devices menu lists the booted simulators alongside USB devices, and keeps the list current as simulators boot and shut down. A simulator picked there is opened by the server, so it appears in `preview_status` and `stop_preview` closes it like any other.
+
 ---
 
 ### Reproducing Bug Reports

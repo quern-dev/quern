@@ -53,6 +53,8 @@ _SOURCE_CANDIDATES = [
 _SHARED_SOURCE_CANDIDATES = [
     _PROJECT_ROOT / "macos" / "QuernMedia" / "Sources" / "QuernMedia"
     / "Encode" / "JPEGFraming.swift",
+    _PROJECT_ROOT / "macos" / "QuernMedia" / "Sources" / "QuernMedia"
+    / "Capture" / "SimulatorList.swift",
 ]
 _RESOURCES_DIR = Path(__file__).resolve().parents[1] / "resources"  # server/device/resources
 
@@ -60,6 +62,27 @@ _RESOURCES_DIR = Path(__file__).resolve().parents[1] / "resources"  # server/dev
 # hardcoded into anything that outlives the process -- the window is told the
 # URL it should open, so nothing else has to agree on the number.
 STREAM_BASE_PORT = 8422
+#: How quern-media serves a simulator preview: native resolution, JPEG quality
+#: 0.85, up to 60fps. Its defaults are 900px, 0.6 and 15fps, which read as
+#: fuzzy and choppy next to the simulator itself. Measured on an iPhone 17 Pro
+#: simulator panning Maps (#424): 59fps delivered with no gap over 65ms, about
+#: 20 Mbit/s while the screen moves -- loopback, so not a constraint -- and
+#: nothing at all while it is still. MJPEG rather than H.264 on purpose: H.264
+#: at these settings delivered under 50fps, and in a browser its hardware
+#: decoder stalled for 250ms at a time.
+#:
+#: `--exit-with-parent` so a server that dies without stopping its streams
+#: does not leave them running, holding their ports and framebuffers.
+#:
+#: The preview app starts quern-media itself in standalone mode, with the same
+#: arguments; `tests/test_preview.py` checks the two copies agree.
+STREAM_ARGS = (
+    "--max-dim", "0", "--quality", "0.85", "--fps", "60", "--exit-with-parent",
+)
+#: Seconds before restarting a stream's quern-media that exited while its
+#: window was open, by attempt; the last repeats. A module constant so tests
+#: can make it zero.
+STREAM_RESTART_DELAYS = (1.0, 2.0, 4.0, 5.0)
 # A cold `quern-media` has to attach to the simulator framebuffer first.
 STREAM_START_TIMEOUT = 20.0
 # Gap between consecutive adds. CoreMediaIO races when several capture
@@ -270,6 +293,12 @@ class ActivePreview:
     stream_port: int | None = None
     #: Human-readable name, for reporting. Not an identity.
     label: str | None = None
+    #: False while a simulator window shows OFF AIR: its stream dropped and
+    #: the window is retrying. Reported, because an agent reading a preview as
+    #: live while it shows a frozen frame would be the false all-clear.
+    on_air: bool = True
+    #: Why it is off air, while it is.
+    off_air_reason: str | None = None
 
 
 @dataclass
@@ -281,6 +310,8 @@ class _StreamProcess:
     #: Last few stderr lines, for reporting why a stream stopped.
     log: deque[str]
     drain: asyncio.Task | None = None
+    #: Restarts since the window last showed a picture; picks the backoff.
+    restarts: int = 0
 
 
 class PreviewManager:
@@ -537,6 +568,31 @@ class PreviewManager:
                     self._stop_stream(name), name=f"stop-stream[{name}]"
                 )
                 task.add_done_callback(self._report_background_failure)
+
+        elif evt_type == "open_simulator":
+            # Picked from the app's Devices menu. Opened here rather than by
+            # the app, so the stream is one the server owns: preview_status
+            # reports it, and stop_preview and a closed window both stop it.
+            task = asyncio.create_task(
+                self._open_from_menu(name, event.get("name")),
+                name=f"open-simulator[{name}]",
+            )
+            task.add_done_callback(self._report_background_failure)
+
+        elif evt_type in ("off_air", "on_air"):
+            preview = self._active.get(name)
+            if preview is not None:
+                preview.on_air = evt_type == "on_air"
+                preview.off_air_reason = None if preview.on_air else (
+                    event.get("reason") or "stream lost"
+                )
+            if evt_type == "on_air" and name in self._streams:
+                # Back on air: a later exit starts its backoff from the top.
+                self._streams[name].restarts = 0
+            logger.info(
+                "Preview %s: %s%s", name, evt_type.replace("_", " "),
+                f" ({event['reason']})" if event.get("reason") else "",
+            )
 
         elif evt_type == "devices":
             devices = event.get("devices", [])
@@ -844,7 +900,10 @@ class PreviewManager:
                     "cmd": "add_stream",
                     "key": udid,
                     "title": title or udid,
-                    "url": f"http://127.0.0.1:{port}/stream",
+                    # By source as well as port: the window reconnects to
+                    # this URL when the stream drops, and the port may belong
+                    # to another simulator by then. quern-media answers 409.
+                    "url": f"http://127.0.0.1:{port}/stream?source={udid}",
                     "position": position,
                     "id": cid,
                 })
@@ -873,7 +932,7 @@ class PreviewManager:
     ) -> _StreamProcess:
         """Launch quern-media against a simulator, draining its stderr."""
         process = await asyncio.create_subprocess_exec(
-            str(binary), "--sim-udid", udid, "--serve", str(port),
+            str(binary), "--sim-udid", udid, "--serve", str(port), *STREAM_ARGS,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -896,13 +955,74 @@ class PreviewManager:
             while True:
                 line = await stream.process.stderr.readline()
                 if not line:
-                    return
+                    break
                 text = line.decode(errors="replace").rstrip()
                 if text:
                     stream.log.append(text)
                     logger.debug("quern-media[%s]: %s", udid[:8], text)
         except asyncio.CancelledError:
             return
+        await self._restart_if_still_wanted(udid, stream)
+
+    async def _restart_if_still_wanted(self, udid: str, stream: _StreamProcess) -> None:
+        """Bring back a quern-media that exited while its window was open.
+
+        The window goes OFF AIR and keeps reconnecting to the same port, so a
+        fresh quern-media there puts it back on air. Without this it stayed
+        off air until someone closed it: the standalone app restarts its own
+        quern-media, and the server, which owns this one, did not.
+
+        Not restarted when the stream was stopped on purpose --
+        `_stop_stream` takes it out of `_streams` first -- or when its
+        preview is gone. Either can change during a backoff, so both are
+        checked again after every one. A restart that fails to start is
+        tried again on the same schedule rather than abandoned, and the
+        reason is kept for `preview_status`.
+        """
+        def wanted() -> bool:
+            return self._streams.get(udid) is stream and udid in self._active
+
+        if not wanted():
+            return
+        try:
+            await stream.process.wait()
+        except asyncio.CancelledError:
+            return
+        # Marked here rather than left to the window's off_air event: the
+        # event can be lost -- it can land before the add is recorded -- and
+        # then status would go on saying on air for a window that is not.
+        why = stream.log[-1] if stream.log else f"exit status {stream.process.returncode}"
+        self._mark_off_air(udid, f"quern-media exited: {why}")
+
+        attempt = stream.restarts
+        while True:
+            delays = STREAM_RESTART_DELAYS
+            delay = delays[min(attempt, len(delays) - 1)]
+            logger.warning(
+                "quern-media for %s exited; restarting in %.0fs: %s", udid[:8], delay, why,
+            )
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                return
+            if not wanted():
+                return
+            attempt += 1
+            try:
+                binary = await build_media_engine()
+                fresh = await self._start_stream(udid, binary, stream.port)
+            except (OSError, RuntimeError) as exc:
+                why = f"could not restart quern-media: {exc}"
+                self._mark_off_air(udid, why)
+                continue
+            fresh.restarts = attempt
+            return
+
+    def _mark_off_air(self, udid: str, reason: str) -> None:
+        preview = self._active.get(udid)
+        if preview is not None:
+            preview.on_air = False
+            preview.off_air_reason = reason
 
     async def _wait_until_serving(self, udid: str, stream: _StreamProcess) -> None:
         """Wait until quern-media accepts a connection, or say why it will not.
@@ -935,6 +1055,22 @@ class PreviewManager:
             f"quern-media did not serve {udid[:8]} on port {stream.port} "
             f"within {STREAM_START_TIMEOUT}s"
         )
+
+    async def _open_from_menu(self, udid: str, title: str | None) -> None:
+        """Open a simulator someone picked from the app's Devices menu.
+
+        Nobody is waiting on a result, so a failure goes back to the app,
+        which shows it: the person who picked the item is looking at the app,
+        not the server log.
+        """
+        try:
+            await self.add_simulator(udid, title=title)
+        except Exception as exc:
+            logger.warning("Could not open %s from the Devices menu: %s", udid, exc)
+            try:
+                await self._send({"cmd": "open_failed", "key": udid, "error": str(exc)})
+            except (OSError, RuntimeError) as send_exc:
+                logger.warning("Could not tell the preview app: %s", send_exc)
 
     @staticmethod
     def _report_background_failure(task: asyncio.Task) -> None:
@@ -1106,6 +1242,9 @@ class PreviewManager:
                 "kind": p.kind,
                 **({"name": p.label} if p.label else {}),
                 **({"stream_port": p.stream_port} if p.stream_port else {}),
+                **({"on_air": p.on_air} if p.kind == "simulator" else {}),
+                **({"off_air_reason": p.off_air_reason}
+                   if p.kind == "simulator" and not p.on_air and p.off_air_reason else {}),
             }
             for name, p in self._active.items()
         }
