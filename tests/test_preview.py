@@ -2060,3 +2060,66 @@ class TestServerReasonHeldUntilServing:
 
         status = asyncio.run(run())
         assert status["off_air_reason"].startswith("restarted quern-media is not serving")
+
+    def test_a_restart_that_never_serves_is_stopped_so_the_schedule_goes_on(self, monkeypatch):
+        """Alive and not listening, the replacement would never exit, and
+        only an exit hands the schedule to its drain: the preview stayed off
+        air for good."""
+        from server.device.media import preview
+        from server.device.media.preview import ActivePreview
+
+        spawned: list = []
+
+        async def _build():
+            return "/tmp/quern-media"
+
+        class _EndsWhenStopped(_LiveStreamProcess):
+            """Its output ends when it is terminated, as a real process's
+            pipe does -- which is how its drain learns it has gone."""
+
+            def __init__(self):
+                super().__init__()
+                self._gone = asyncio.Event()
+
+            async def readline(self) -> bytes:
+                await self._gone.wait()
+                return b""
+
+            def terminate(self) -> None:
+                super().terminate()
+                self._gone.set()
+
+        async def _spawn(*_args, **_kwargs):
+            process = _EndsWhenStopped()
+            spawned.append(process)
+            return process
+
+        monkeypatch.setattr(preview, "STREAM_RESTART_DELAYS", (0.0,))
+        monkeypatch.setattr(preview, "STREAM_START_TIMEOUT", 0.2)
+        monkeypatch.setattr(preview, "build_media_engine", _build)
+        monkeypatch.setattr(preview.asyncio, "create_subprocess_exec", _spawn)
+        monkeypatch.setattr(preview.asyncio, "open_connection", self.dial)
+
+        mgr = PreviewManager()
+        stream = preview._StreamProcess(
+            process=_FakeStreamProcess(stderr_lines=["[capture] crashed"], exit_code=1),
+            port=8424, log=deque(maxlen=20),
+        )
+        mgr._streams["SIM"] = stream
+        mgr._active["SIM"] = ActivePreview(
+            name="SIM", position=0, kind="simulator", stream_port=8424
+        )
+
+        async def run():
+            await mgr._drain_stream("SIM", stream)
+            # The first replacement was stopped; its drain restarts it again.
+            for _ in range(50):
+                if len(spawned) >= 2:
+                    break
+                await asyncio.sleep(0.02)
+            mgr._active.pop("SIM")                        # end the schedule
+            await mgr._stop_stream("SIM")
+
+        asyncio.run(run())
+        assert spawned and spawned[0].terminated, "the unresponsive replacement was left running"
+        assert len(spawned) >= 2, "the schedule stopped after a replacement that never served"

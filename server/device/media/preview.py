@@ -1033,11 +1033,17 @@ class PreviewManager:
             except asyncio.CancelledError:
                 return
             except RuntimeError as exc:
-                # It exited, or never served. An exit is restarted by its own
-                # drain, so this loop stops rather than run a second one for
-                # the same stream. The window still cannot reach it, so the
-                # server's reason stays, saying so.
+                # It exited, or never served. The window still cannot reach
+                # it, so the server's reason stays, saying so. An exit is
+                # restarted by the new stream's own drain, so this loop stops
+                # rather than run a second one for the same stream -- and one
+                # that is alive but not serving is stopped, so that drain sees
+                # it exit and carries the schedule on. Left running, nothing
+                # would ever retry it.
                 self._mark_off_air(udid, f"restarted quern-media is not serving: {exc}")
+                if fresh.process.returncode is None:
+                    with contextlib.suppress(ProcessLookupError, OSError):
+                        fresh.process.terminate()
                 return
             if self._streams.get(udid) is not fresh:
                 return  # stopped or replaced while it came up
