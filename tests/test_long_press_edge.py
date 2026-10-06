@@ -442,7 +442,10 @@ class TestU2NeverPressesTwice:
         backend, obj = self._selector()
         obj.long_click.side_effect = TimeoutError("jsonrpc read timed out")
         with pytest.raises(DeviceError, match="not sent again"):
-            await backend.tap_by_selector("dev", identifier="map", hold=1.0)
+            await backend.tap_by_selector("dev", identifier="map", label="Map", hold=1.0)
+        # Once: neither the next selector nor a retry pressed again. Every call
+        # raises the same error, so the message alone would not tell (review).
+        obj.long_click.assert_called_once_with(1.0)
 
     async def test_a_lookup_that_failed_still_falls_back(self):
         from server.device.android.u2_client import U2Backend
