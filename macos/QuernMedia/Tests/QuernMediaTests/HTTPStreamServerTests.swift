@@ -828,11 +828,15 @@ func anUnavailableSourceDropsAndRefuses() async throws {
     try server.start()
     defer { server.stop() }
 
-    let dropped = await rawGetWhile(path: "/frames", port: port, timeout: 2) {
+    // Timed, because the read ending at its own deadline would also leave
+    // `viewers` at zero: the server has to be the one that closed it.
+    let began = Date()
+    let dropped = await rawGetWhile(path: "/frames", port: port, timeout: 8) {
         server.setSourceAvailable(false, reason: "the simulator is shutdown")
     }
     #expect(String(decoding: dropped, as: UTF8.self).hasPrefix("HTTP/1.1 200"))
-    await waitFor("the viewer to be dropped") { server.viewers == 0 }
+    #expect(Date().timeIntervalSince(began) < 4, "the viewer was not dropped; its read ran out")
+    #expect(server.viewers == 0)
 
     let refused = await rawRequest(method: "GET", path: "/frames", port: port)
     let text = String(decoding: refused, as: UTF8.self)

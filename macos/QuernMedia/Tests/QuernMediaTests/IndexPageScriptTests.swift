@@ -114,6 +114,23 @@ func pageParsesPartsAtAnyChunking(chunkSize: Int) throws {
     #expect(page.exception == nil)
 }
 
+@Test("an empty part whose header ends the bytes so far is still delivered")
+func pageDeliversAnEmptyPartAtTheEnd() throws {
+    // The keepalive on a still screen: its header is the last thing to
+    // arrive until the next one, seconds later. A search that stops one byte
+    // short of the end holds it back until then -- or forever, if the stream
+    // ends there.
+    let page = try Page()
+    let first = payload(40, seed: 4)
+    var wire = HTTPWire.mjpegPart(first) + HTTPWire.h264Part(Data())
+    wire.removeLast(2)  // the trailing CRLF, which arrives with the next part
+
+    let parts = try page.parts(wire, chunkSize: 1460)
+
+    #expect(parts.count == 2)
+    #expect(parts.last?.1 == Data())
+}
+
 @Test("a stream cut off mid-part yields only the parts that arrived whole")
 func pageDropsATruncatedPart() throws {
     // What the page sees when quern-media goes away: the reader ends. A part
