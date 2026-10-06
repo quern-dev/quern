@@ -196,9 +196,9 @@ func servesIndex() async throws {
     try server.start()
     defer { server.stop() }
 
-    let page = await rawGet(path: "/", port: port, limit: 4096, timeout: 20)
+    let page = await rawGet(path: "/", port: port, limit: 65_536, timeout: 20)
     let text = String(decoding: page, as: UTF8.self)
-    #expect(text.contains("<img src=\"/stream\">"), "got: \(text.prefix(120))")
+    #expect(text.contains("fetch(FRAMES"), "got: \(text.prefix(120))")
 }
 
 @Test("no viewer means the sink declines frames")
@@ -586,7 +586,7 @@ func keyframeEndpointLeavesTheStreamAlone() async throws {
     defer { server.stop() }
 
     let page = await rawGet(path: "/", port: port, limit: 4096, timeout: 20)
-    #expect(String(decoding: page, as: UTF8.self).contains("<img src=\"/stream\">"))
+    #expect(String(decoding: page, as: UTF8.self).contains("<canvas id=screen"))
     #expect(server.keyframeRequests == 0)
 }
 
@@ -619,7 +619,7 @@ func keyframeNearMissIsRefused() async throws {
         #expect(text.hasPrefix("HTTP/1.1 404"), "\(method) got: \(text.prefix(40))")
         // Asserted explicitly rather than trusting the status line: serving
         // the page *is* the bug, so its absence is the property under test.
-        #expect(!text.contains("<img src="), "\(method) got the index page")
+        #expect(!text.contains("<canvas id=screen"), "\(method) got the index page")
     }
     #expect(calls.count == 0, "a near miss fired the encoder")
     #expect(server.keyframeRequests == 0)
@@ -677,12 +677,12 @@ func indexPageOnlyAnswersBrowserMethods() async throws {
     let page = await rawRequest(method: "GET", path: "/nope", port: port)
     let pageText = String(decoding: page, as: UTF8.self)
     #expect(pageText.hasPrefix("HTTP/1.1 200"), "got: \(pageText.prefix(40))")
-    #expect(pageText.contains("<img src="), "a browser stopped getting the page")
+    #expect(pageText.contains("<canvas id=screen"), "a browser stopped getting the page")
 
     let posted = await rawRequest(method: "POST", path: "/nope", port: port)
     let postText = String(decoding: posted, as: UTF8.self)
     #expect(postText.hasPrefix("HTTP/1.1 404"), "got: \(postText.prefix(40))")
-    #expect(!postText.contains("<img src="), "HTML served to a POST")
+    #expect(!postText.contains("<canvas id=screen"), "HTML served to a POST")
 }
 
 
@@ -718,12 +718,188 @@ func headSendsNoBody() async throws {
     #expect(headText.hasPrefix("HTTP/1.1 200"), "got: \(headText.prefix(40))")
     // The body is what must be absent, so assert on the body -- not on a
     // byte count, which a header change would move.
-    #expect(!headText.contains("<img src="), "HEAD sent the page body")
-    #expect(getText.contains("<img src="), "GET stopped sending the page")
+    #expect(!headText.contains("<canvas id=screen"), "HEAD sent the page body")
+    #expect(getText.contains("<canvas id=screen"), "GET stopped sending the page")
 
     // Same headers, including the real Content-Length of the body GET sends.
     let headHeaders = headText.components(separatedBy: "\r\n\r\n")[0]
     let getHeaders = getText.components(separatedBy: "\r\n\r\n")[0]
     #expect(headHeaders == getHeaders, "HEAD and GET disagree on headers")
     #expect(headHeaders.contains("Content-Length: \(getText.components(separatedBy: "\r\n\r\n")[1].utf8.count)"))
+}
+
+
+@Test("H.264 on /frames arrives one part per access unit, and /stream stays raw")
+func h264FramesArePartsAndStreamIsRaw() async throws {
+    // A raw elementary stream gives a live reader no way to know an access
+    // unit has ended until the next one starts, so the one keyframe a still
+    // screen sends was never shown. `/frames` delimits each one; `/stream`
+    // keeps the raw form for tools that read it.
+    let port = freePort()
+    let server = HTTPStreamServer(port: port, bindAll: false, codec: .h264)
+    try server.start()
+    defer { server.stop() }
+
+    let key = try h264(bytes: 700, keyframe: true)
+    let delta = try h264(bytes: 300, keyframe: false)
+    // One frame in flight per viewer: a frame offered while the last is
+    // still being written is skipped, by design. Wait it out between the two.
+    let push: @Sendable () -> Void = {
+        server.receive(key)
+        for _ in 0..<500 where server.sendsInFlight > 0 { usleep(2_000) }
+        server.receive(delta)
+    }
+
+    let framed = await rawGetWhile(path: "/frames", port: port, timeout: 1.5, whileAttached: push)
+    let text = String(decoding: framed, as: UTF8.self)
+    #expect(text.contains("Content-Type: multipart/x-mixed-replace; boundary=\(HTTPWire.mjpegBoundary)"))
+    #expect(text.components(separatedBy: "Content-Type: video/h264").count - 1 == 2)
+    #expect(text.contains("Content-Length: 700"))
+    #expect(text.contains("Content-Length: 300"))
+
+    let raw = await rawGetWhile(path: "/stream", port: port, timeout: 1.5, whileAttached: push)
+    let rawText = String(decoding: raw, as: UTF8.self)
+    #expect(rawText.contains("Content-Type: video/h264"))
+    #expect(!rawText.contains("--\(HTTPWire.mjpegBoundary)"), "/stream must stay a bare elementary stream")
+    let bodyStart = try #require(raw.range(of: Data("\r\n\r\n".utf8))).upperBound
+    #expect(raw.distance(from: bodyStart, to: raw.endIndex) == 1000)
+}
+
+/// Descriptors this process has open. The suite runs `--no-parallel`, so
+/// nothing else in the process opens or closes one while a test watches.
+private func openDescriptors() -> Int {
+    (try? FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count) ?? -1
+}
+
+@Test("a viewer that hangs up on a still screen has its connection released")
+func aViewerThatLeavesIsReleased() async throws {
+    // Nothing is sent on a still screen -- ever, under H.264 -- and nothing
+    // read from a streaming connection, so a viewer that closed its end was
+    // dropped from the client list without its connection being cancelled:
+    // one leaked descriptor per departed viewer, shown by lsof as CLOSED.
+    // Counting viewers cannot see that -- the list was right -- which is how
+    // the first version of this test passed with the fix removed.
+    //
+    // A plain socket that reads its response header and then closes, which
+    // sends FIN, the way a viewer process exiting does. (Closing with the
+    // header unread sends RST instead; main leaked on both.)
+    let port = freePort()
+    let server = HTTPStreamServer(port: port, bindAll: false, codec: .h264)
+    try server.start()
+    defer { server.stop() }
+    let baseline = openDescriptors()
+
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    try #require(fd >= 0)
+    var addr = sockaddr_in()
+    addr.sin_family = sa_family_t(AF_INET)
+    addr.sin_port = port.bigEndian
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+    let connected = withUnsafePointer(to: &addr) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+        }
+    }
+    try #require(connected == 0)
+    let request = Array("GET /stream HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".utf8)
+    try #require(write(fd, request, request.count) == request.count)
+    await waitFor("the viewer to attach") { server.viewers == 1 }
+    #expect(openDescriptors() == baseline + 2, "expected our socket and the server's")
+    var header = [UInt8](repeating: 0, count: 512)
+    #expect(read(fd, &header, header.count) > 0, "the response header never arrived")
+
+    close(fd)
+    await waitFor("the server to release the connection", timeout: 3) {
+        openDescriptors() == baseline
+    }
+    #expect(openDescriptors() == baseline, "the departed viewer's connection was kept open")
+    #expect(server.viewers == 0)
+    #expect(server.framesSent == 0, "released by a send, not by the hangup itself")
+}
+
+
+@Test("while the source is down, viewers are dropped and new ones refused with the reason")
+func anUnavailableSourceDropsAndRefuses() async throws {
+    // A simulator that shut down used to leave its viewers attached, shown
+    // its last frame again every 5 seconds by the keepalive: a stream that
+    // looked live and was not.
+    let port = freePort()
+    let server = HTTPStreamServer(port: port, bindAll: false, codec: .mjpeg)
+    try server.start()
+    defer { server.stop() }
+
+    // Timed, because the read ending at its own deadline would also leave
+    // `viewers` at zero: the server has to be the one that closed it.
+    let began = Date()
+    let dropped = await rawGetWhile(path: "/frames", port: port, timeout: 8) {
+        server.setSourceAvailable(false, reason: "the simulator is shutdown")
+    }
+    #expect(String(decoding: dropped, as: UTF8.self).hasPrefix("HTTP/1.1 200"))
+    #expect(Date().timeIntervalSince(began) < 4, "the viewer was not dropped; its read ran out")
+    #expect(server.viewers == 0)
+
+    let refused = await rawRequest(method: "GET", path: "/frames", port: port)
+    let text = String(decoding: refused, as: UTF8.self)
+    #expect(text.hasPrefix("HTTP/1.1 503"), "got: \(text.prefix(40))")
+    #expect(text.hasSuffix("the simulator is shutdown"), "the reason should be the body")
+    let index = String(decoding: await rawRequest(method: "GET", path: "/", port: port), as: UTF8.self)
+    #expect(index.hasPrefix("HTTP/1.1 200"), "the page itself should still load")
+
+    server.setSourceAvailable(true, reason: "the simulator is booted")
+    let back = await rawGetWhile(path: "/frames", port: port, timeout: 0.5) {}
+    #expect(String(decoding: back, as: UTF8.self).hasPrefix("HTTP/1.1 200"))
+}
+
+@Test("an H.264 viewer on /frames hears from a quiet stream; a raw one does not")
+func h264FramesGetAnEmptyKeepalive() async throws {
+    // Without it the page cannot tell a still screen from a dropped network
+    // under H.264. A raw /stream viewer gets nothing: an elementary stream
+    // has no empty unit to send.
+    let port = freePort()
+    let server = HTTPStreamServer(port: port, bindAll: false, codec: .h264, keepalive: 0.3)
+    try server.start()
+    defer { server.stop() }
+
+    let framed = await rawGetWhile(path: "/frames", port: port, timeout: 1.5) {}
+    let text = String(decoding: framed, as: UTF8.self)
+    #expect(text.contains("Content-Type: video/h264\r\nContent-Length: 0\r\n"), "no empty part arrived")
+
+    let raw = await rawGetWhile(path: "/stream", port: port, timeout: 1.5) {}
+    let rawBody = try #require(raw.range(of: Data("\r\n\r\n".utf8))).upperBound
+    #expect(raw.distance(from: rawBody, to: raw.endIndex) == 0, "a raw H.264 viewer was sent keepalive bytes")
+}
+
+@Test("a stream asked for by source is refused by a server streaming another")
+func aStreamForAnotherSourceIsRefused() async throws {
+    // A viewer reconnects by port, and ports are reused. A window waiting
+    // out a restart could otherwise attach to whichever quern-media took its
+    // port meanwhile and show another simulator under its own name.
+    let port = freePort()
+    let server = HTTPStreamServer(port: port, bindAll: false, codec: .mjpeg, sourceID: "SIM-A")
+    try server.start()
+    defer { server.stop() }
+
+    for path in ["/stream?source=SIM-B", "/frames?source=SIM-B"] {
+        let text = String(decoding: await rawRequest(method: "GET", path: path, port: port), as: UTF8.self)
+        #expect(text.hasPrefix("HTTP/1.1 409"), "\(path): got \(text.prefix(40))")
+        #expect(text.hasSuffix("this stream is SIM-A, not SIM-B"))
+    }
+    for path in ["/frames?source=SIM-A", "/frames"] {
+        let text = String(decoding: await rawGetWhile(path: path, port: port, timeout: 0.4) {}, as: UTF8.self)
+        #expect(text.hasPrefix("HTTP/1.1 200"), "\(path): got \(text.prefix(40))")
+    }
+}
+
+
+@Test("a server with no source identity refuses a named source rather than assume it")
+func aDeviceServerRefusesANamedSource() async throws {
+    let port = freePort()
+    let server = HTTPStreamServer(port: port, bindAll: false, codec: .mjpeg)
+    try server.start()
+    defer { server.stop() }
+
+    let text = String(decoding: await rawRequest(method: "GET", path: "/frames?source=SIM-A", port: port), as: UTF8.self)
+    #expect(text.hasPrefix("HTTP/1.1 409"), "got: \(text.prefix(40))")
+    let plain = String(decoding: await rawGetWhile(path: "/frames", port: port, timeout: 0.4) {}, as: UTF8.self)
+    #expect(plain.hasPrefix("HTTP/1.1 200"), "an unnamed request should still stream")
 }

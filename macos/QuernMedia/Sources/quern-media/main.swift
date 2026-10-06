@@ -11,8 +11,8 @@ import QuernMedia
 let usage = """
 quern-media — headless screen capture for iOS simulators and devices.
 
-Produces video. Does not display it: point a browser, ffplay, or the preview
-app at the stream, or record to a file.
+Produces video. Does not display it: open the page it serves in a browser,
+point the preview app at the stream, or record to a file.
 
 SOURCE (exactly one required)
   --sim-udid <UDID>      a booted simulator, no Simulator.app needed
@@ -22,20 +22,28 @@ SOURCE (exactly one required)
 OUTPUT (at least one required; they combine)
   --serve <port>         HTTP server; open http://127.0.0.1:<port>/
                          GET  /          a page that plays the stream
-                         GET  /stream    the video itself
+                         GET  /frames    the video, one part per frame
+                         GET  /stream    the video itself (raw under --h264)
+                         ?source=<UDID>  on either: 409 unless this is the
+                                         simulator being streamed
                          POST /keyframe  force an IDR now, answers 204
   --record <path>        write an .mp4. Implies --h264.
 
 TUNING
   --fps <n>              max frames encoded per second (default 15)
   --max-dim <px>         downscale longest side (default 900, 0 = native)
-  --h264                 H.264 instead of MJPEG. ~12x less data, but a
-                         browser cannot play the raw stream — use ffplay.
+  --h264                 H.264 instead of MJPEG. ~12x less data; the page
+                         plays it in browsers with WebCodecs.
   --bitrate <bps>        H.264 target bitrate (default 2000000)
   --quality <0..1>       JPEG quality (default 0.6). Not comparable to
                          ImageIO's scale — VideoToolbox runs larger.
   --bind-all             listen on all interfaces instead of loopback.
                          UNAUTHENTICATED: anyone on the network can watch.
+
+LIFETIME
+  --exit-with-parent     exit when the process that started this one does.
+                         For an owner whose crash would otherwise leave this
+                         running, holding its port and the framebuffer.
 
 EXAMPLES
   quern-media --sim-udid <UDID> --serve 8422
@@ -127,8 +135,10 @@ if let port = options.servePort {
     // box: the server accepts the moment it binds, while the source is still
     // coming up, and a caller arriving in that window must not silently lose
     // its request.
+    let sourceID: String?
+    if case .simulator(let udid) = options.source { sourceID = udid } else { sourceID = nil }
     let s = HTTPStreamServer(
-        port: port, bindAll: options.bindAll, codec: options.codec
+        port: port, bindAll: options.bindAll, codec: options.codec, sourceID: sourceID
     ) {
         pipeline.requestKeyframe()
         attachPrimer.fire()
@@ -141,7 +151,16 @@ if let port = options.servePort {
 var source: FrameSource
 switch options.source {
 case .simulator(let udid):
-    source = SimulatorFramebuffer(udid: udid) { pipeline.consume($0) }
+    let simulator = SimulatorFramebuffer(udid: udid) { pipeline.consume($0) }
+    // A simulator can shut down under a running stream, and come back. Its
+    // viewers have to see that rather than a frozen last frame.
+    simulator.onAvailability = { available, reason in
+        server?.setSourceAvailable(available, reason: reason)
+        // A keyframe opens whatever follows the reattach, for a recording
+        // and for any viewer that reconnects.
+        if available { pipeline.requestKeyframe() }
+    }
+    source = simulator
     do { try source.start() } catch { fail("\(error)") }
     MediaLog.log("[capture] streaming simulator \(udid)")
 
@@ -254,6 +273,27 @@ for sig in [SIGINT, SIGTERM] {
 // Cleanup only. A callback here cannot change a status already being
 // returned, so the signal handlers above are what carry a failure out.
 atexit_b { shutdownOnce.run() }
+
+// An owner that dies without stopping this -- a crash, a force quit, Ctrl+C
+// on the preview app -- left it running for good: nothing it does on its own
+// would ever fail, so nothing told it. Watched with a process source rather
+// than polled, and checked once first, because a parent that died before the
+// watch was set up has already handed this process to launchd.
+var parentWatch: DispatchSourceProcess?
+if options.exitWithParent {
+    let parent = getppid()
+    if parent == 1 {
+        MediaLog.log("[lifetime] started without a parent; stopping")
+        exit(shutdownOnce.run())
+    }
+    let watch = DispatchSource.makeProcessSource(identifier: parent, eventMask: .exit, queue: .main)
+    watch.setEventHandler {
+        MediaLog.log("[lifetime] parent \(parent) exited; stopping")
+        exit(shutdownOnce.run())
+    }
+    watch.resume()
+    parentWatch = watch
+}
 
 // A CFRunLoop rather than dispatchMain: CoreMediaIO publishes device changes
 // through run-loop sources, and AVFoundation expects one on the main thread.

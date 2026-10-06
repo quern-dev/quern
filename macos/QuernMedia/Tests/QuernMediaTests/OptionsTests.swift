@@ -198,3 +198,12 @@ func maxDimZeroIsNative() throws {
     )
     #expect(options.maxDimension == 0)
 }
+
+@Test("--exit-with-parent is off unless asked for")
+func exitWithParentIsOptIn() throws {
+    // On by default it would end a quern-media started from a shell that
+    // exits, which is not what someone running it by hand expects.
+    #expect(try OptionsParser.parse(["--sim-udid", "X", "--serve", "8422"]).exitWithParent == false)
+    let o = try OptionsParser.parse(["--sim-udid", "X", "--serve", "8422", "--exit-with-parent"])
+    #expect(o.exitWithParent)
+}

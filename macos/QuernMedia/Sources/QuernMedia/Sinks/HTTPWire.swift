@@ -23,6 +23,18 @@ public enum HTTPWire {
         path == "/stream" || path.hasPrefix("/stream?")
     }
 
+    /// The stream with every frame in its own length-prefixed part.
+    ///
+    /// For the index page. Under MJPEG it is byte-for-byte `/stream`, which is
+    /// already multipart. Under H.264 `/stream` is a bare elementary stream,
+    /// and a reader cannot tell where one access unit ends until the next one
+    /// starts -- so a still screen, which sends one keyframe and then nothing,
+    /// never shows at all. A part's `Content-Length` says where it ends.
+    /// `/stream` stays as it was, for tools that read a raw elementary stream.
+    public static func isFramesPath(_ path: String) -> Bool {
+        path == "/frames" || path.hasPrefix("/frames?")
+    }
+
     /// Method from a request head, verbatim. Empty when unparseable.
     ///
     /// Not uppercased. HTTP methods are case-sensitive (RFC 9110 section 9.1),
@@ -107,6 +119,34 @@ public enum HTTPWire {
             .appending("Connection: close\r\n\r\n").utf8)
     }
 
+    /// The source is not producing -- a simulator that has shut down. The
+    /// reason goes in the body for whoever reads it; the page shows it.
+    public static func sourceUnavailableResponse(reason: String) -> Data {
+        let body = Data(reason.utf8)
+        return Data("HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain; charset=utf-8\r\n"
+            .appending("Content-Length: \(body.count)\r\nConnection: close\r\n\r\n").utf8) + body
+    }
+
+    /// The value of `name` in a request path's query string, or nil. No
+    /// percent-decoding: the only value read this way is a UDID.
+    public static func queryValue(_ path: String, _ name: String) -> String? {
+        guard let q = path.firstIndex(of: "?") else { return nil }
+        for pair in path[path.index(after: q)...].split(separator: "&") {
+            let kv = pair.split(separator: "=", maxSplits: 1)
+            if kv.first.map(String.init) == name {
+                return kv.count > 1 ? String(kv[1]) : ""
+            }
+        }
+        return nil
+    }
+
+    /// A stream asked for by source, from a server serving another one.
+    public static func wrongSourceResponse(serving: String, asked: String) -> Data {
+        let body = Data("this stream is \(serving), not \(asked)".utf8)
+        return Data("HTTP/1.1 409 Conflict\r\nContent-Type: text/plain; charset=utf-8\r\n"
+            .appending("Content-Length: \(body.count)\r\nConnection: close\r\n\r\n").utf8) + body
+    }
+
     public static func notFoundResponse() -> Data {
         Data("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n"
             .appending("Connection: close\r\n\r\n").utf8)
@@ -123,17 +163,30 @@ public enum HTTPWire {
 
     /// One MJPEG part: boundary, headers, payload.
     ///
-    /// `multipart/x-mixed-replace` is why the MJPEG path needs no client-side
-    /// code at all -- a browser renders it from a bare `<img>`.
+    /// `multipart/x-mixed-replace` is why `/stream` needs no client-side code
+    /// at all -- a browser renders it from a bare `<img>`.
     public static func mjpegPart(_ jpeg: Data) -> Data {
+        part(jpeg, contentType: "image/jpeg")
+    }
+
+    /// One H.264 access unit as a part, for `/frames`.
+    public static func h264Part(_ annexB: Data) -> Data {
+        part(annexB, contentType: "video/h264")
+    }
+
+    private static func part(_ payload: Data, contentType: String) -> Data {
         var part = Data()
         part.append(Data("--\(mjpegBoundary)\r\n".utf8))
-        part.append(Data("Content-Type: image/jpeg\r\n".utf8))
-        part.append(Data("Content-Length: \(jpeg.count)\r\n\r\n".utf8))
-        part.append(jpeg)
+        part.append(Data("Content-Type: \(contentType)\r\n".utf8))
+        part.append(Data("Content-Length: \(payload.count)\r\n\r\n".utf8))
+        part.append(payload)
         part.append(Data("\r\n".utf8))
         return part
     }
+
+    /// `/frames` is multipart for either codec; each part names its own type.
+    public static let framesContentType =
+        "multipart/x-mixed-replace; boundary=\(mjpegBoundary)"
 
     public static func streamHeader(contentType: String) -> Data {
         Data("""
@@ -148,8 +201,8 @@ public enum HTTPWire {
     public static func contentType(for codec: StreamPipeline.Codec) -> String {
         switch codec {
         case .mjpeg: return "multipart/x-mixed-replace; boundary=\(mjpegBoundary)"
-        // A raw elementary stream. ffplay and ffprobe read it; a browser does
-        // not, which is the price H.264 charges over MJPEG.
+        // A raw elementary stream, for tools that read one. The page reads
+        // `/frames` instead, which delimits each access unit.
         case .h264: return "video/h264"
         }
     }
@@ -159,45 +212,382 @@ public enum HTTPWire {
     /// For `HEAD`, which must carry the headers a `GET` would — including the
     /// real `Content-Length` — and no body. Handing the whole page to `send`
     /// put the body on the wire, which is what this used to do.
-    public static func indexHeaders(for codec: StreamPipeline.Codec) -> Data {
-        Data(indexHead(for: codec).utf8)
+    public static func indexHeaders(for codec: StreamPipeline.Codec, sourceID: String? = nil) -> Data {
+        Data(indexHead(for: codec, sourceID: sourceID).utf8)
     }
 
-    private static func indexHead(for codec: StreamPipeline.Codec) -> String {
+    private static func indexHead(for codec: StreamPipeline.Codec, sourceID: String?) -> String {
         """
         HTTP/1.1 200 OK\r
         Content-Type: text/html; charset=utf-8\r
-        Content-Length: \(indexBody(for: codec).utf8.count)\r
+        Content-Length: \(indexBody(for: codec, sourceID: sourceID).utf8.count)\r
         Connection: close\r
         \r
 
         """
     }
 
-    public static func indexPage(for codec: StreamPipeline.Codec) -> Data {
-        Data((indexHead(for: codec) + indexBody(for: codec)).utf8)
+    public static func indexPage(for codec: StreamPipeline.Codec, sourceID: String? = nil) -> Data {
+        Data((indexHead(for: codec, sourceID: sourceID) + indexBody(for: codec, sourceID: sourceID)).utf8)
     }
 
-    private static func indexBody(for codec: StreamPipeline.Codec) -> String {
-        let body: String
-        switch codec {
-        case .mjpeg:
-            body = """
-            <!doctype html><meta charset=utf-8><title>Quern preview</title>
-            <style>body{margin:0;background:#111;display:grid;place-items:center;
-            height:100vh}img{max-height:100vh;max-width:100vw}</style>
-            <img src="/stream">
-            """
-        case .h264:
-            body = """
-            <!doctype html><meta charset=utf-8><title>Quern preview</title>
-            <style>body{margin:0;background:#111;color:#ccc;font:14px system-ui;
-            display:grid;place-items:center;height:100vh;text-align:center}
-            code{color:#8bf}</style>
-            <div><p>This stream is raw H.264, which a browser cannot play directly.</p>
-            <p><code>ffplay -fflags nobuffer http://127.0.0.1:PORT/stream</code></p></div>
-            """
-        }
-        return body
+    /// One page for both codecs. It reads `/frames` and dispatches on each
+    /// part's type, so it keeps working if the process behind the port is
+    /// restarted with the other codec.
+    ///
+    /// Script rather than `<img src="/stream">`, which could not tell a
+    /// still screen from a stream that had ended: the image kept its last
+    /// frame, with no message and no reconnect, after `quern-media` was gone.
+    /// The script sees the stream end, says so, and reconnects. H.264 plays
+    /// through WebCodecs, which takes Annex B as-is. This page used to send
+    /// H.264 viewers to `ffplay`, with a literal `PORT` in the command: a
+    /// third player beside the preview app and this page, and one that
+    /// stalled on a still screen. Where `VideoDecoder` is missing the page
+    /// now says what to use instead.
+    ///
+    /// The page is told which source this server is streaming, and asks for
+    /// it by name on every connect -- so a tab reconnecting after a restart
+    /// cannot attach to another simulator that has taken the port. JSON-
+    /// encoded into the script, never interpolated raw.
+    private static func indexBody(for codec: StreamPipeline.Codec, sourceID: String?) -> String {
+        let literal = sourceID
+            .flatMap { try? JSONSerialization.data(withJSONObject: [$0]) }
+            .map { String(decoding: $0, as: UTF8.self).dropFirst().dropLast() }
+            .map(String.init)
+            // `<` escaped too, so nothing in it can close the script tag.
+            .map { $0.replacingOccurrences(of: "<", with: "\\u003c") } ?? "null"
+        return indexHTML.replacingOccurrences(of: sourcePlaceholder, with: literal)
     }
+
+    /// Valid JavaScript as it stands, so the script still loads in a test
+    /// that reads `indexHTML` without a source.
+    static let sourcePlaceholder = "/*quern-source*/null"
+
+    static let indexHTML = #"""
+    <!doctype html><meta charset=utf-8><title>Quern preview</title>
+    <meta name=viewport content="width=device-width">
+    <style>
+    html,body{margin:0;height:100%;background:#111;color:#ccc;font:14px system-ui}
+    body{display:grid;place-items:center;overflow:hidden}
+    canvas{display:block;max-width:100vw;max-height:100vh;transition:filter .3s}
+    #offair{position:fixed;inset:0;display:none;place-items:center;pointer-events:none}
+    #offair span{padding:10px 22px;border:3px solid #e33;border-radius:8px;color:#e33;
+    font:800 clamp(24px,7vw,56px)/1 system-ui;letter-spacing:.12em;background:#000a}
+    body.offair canvas{filter:grayscale(1) brightness(.35)}
+    body.offair #offair{display:grid}
+    #status{position:fixed;left:0;right:0;bottom:0;padding:8px 12px;
+    background:#000c;text-align:center}
+    #status:empty{display:none}
+    #stats{position:fixed;top:0;right:0;padding:4px 8px;background:#000c;
+    font:12px ui-monospace,monospace;white-space:pre}
+    #stats:empty{display:none}
+    </style>
+    <canvas id=screen width=0 height=0></canvas>
+    <div id=offair><span>OFF AIR</span></div>
+    <div id=status>Connecting…</div>
+    <div id=stats></div>
+    <script>
+    "use strict";
+    // Null outside a page, so a test can load this script and exercise the
+    // parser without a DOM.
+    // The stream this page was served by, so a reconnect asks for that one.
+    // A `?source=` on the page's own address wins.
+    const SOURCE = (typeof location === "object"
+      && new URLSearchParams(location.search).get("source")) || /*quern-source*/null;
+    const FRAMES = "/frames" + (SOURCE ? "?source=" + encodeURIComponent(SOURCE) : "");
+
+    const page = typeof document === "object" ? {
+      canvas: document.getElementById("screen"),
+      ctx: document.getElementById("screen").getContext("2d"),
+      status: document.getElementById("status"),
+      stats: document.getElementById("stats"),
+    } : null;
+
+    // `?stats` shows what the viewer is getting: frames drawn per second, the
+    // longest gap between two of them, and how many H.264 frames are queued
+    // in the decoder. A lurch is a long gap; a growing queue is the decoder
+    // falling behind rather than the stream arriving late.
+    const stats = page && new URLSearchParams(location.search).has("stats")
+      ? { drawn: 0, lastDraw: 0, maxGap: 0 } : null;
+    if (stats) {
+      setInterval(() => {
+        const queue = h264.decoder ? h264.decoder.decodeQueueSize : "-";
+        page.stats.textContent = stats.drawn + " fps  max gap " + Math.round(stats.maxGap)
+          + " ms  decode queue " + queue;
+        stats.drawn = 0;
+        stats.maxGap = 0;
+      }, 1000);
+    }
+    // The server sends something at least every 5s on a still screen -- the
+    // last JPEG again, or an empty H.264 part -- so a longer silence means
+    // the stream is gone. A picture must also arrive within FIRST_FRAME_MS:
+    // parts that keep coming without one (H.264 waiting on a keyframe that
+    // never comes) are a stream that is not working either.
+    const STALL_MS = 12000;
+    const FIRST_FRAME_MS = 15000;
+
+    function say(text) { page.status.textContent = text; }
+    // The last frame stays, greyed and dimmed under a label, so nobody takes a
+    // picture of a stream that has ended for the screen as it is now.
+    function offAir(on) { document.body.classList.toggle("offair", on); }
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+    // Reads `--boundary` / headers / Content-Length body parts off a stream.
+    class Parts {
+      constructor(reader) {
+        this.reader = reader;
+        this.buf = new Uint8Array(1 << 16);
+        this.start = 0;
+        this.end = 0;
+      }
+      async fill() {
+        const { value, done } = await this.reader.read();
+        if (done) return false;
+        if (this.end + value.length > this.buf.length) {
+          const live = this.buf.subarray(this.start, this.end);
+          const size = Math.max(this.buf.length, (live.length + value.length) * 2);
+          const next = new Uint8Array(size);
+          next.set(live);
+          this.buf = next;
+          this.start = 0;
+          this.end = live.length;
+        }
+        this.buf.set(value, this.end);
+        this.end += value.length;
+        return true;
+      }
+      headerEnd() {
+        const b = this.buf;
+        for (let i = this.start; i + 4 <= this.end; i++) {
+          if (b[i] === 13 && b[i + 1] === 10 && b[i + 2] === 13 && b[i + 3] === 10) {
+            return i - this.start;
+          }
+        }
+        return -1;
+      }
+      async next() {
+        let h;
+        while ((h = this.headerEnd()) < 0) {
+          if (this.end - this.start > 4096) throw new Error("malformed part header");
+          if (!(await this.fill())) return null;
+        }
+        const head = new TextDecoder().decode(this.buf.subarray(this.start, this.start + h));
+        const len = /content-length:\s*(\d+)/i.exec(head);
+        const type = /content-type:\s*([^\r\n;]+)/i.exec(head);
+        if (!len) throw new Error("part without a Content-Length");
+        const from = h + 4;
+        const length = Number(len[1]);
+        while (this.end - this.start < from + length) {
+          if (!(await this.fill())) return null;
+        }
+        const body = this.buf.slice(this.start + from, this.start + from + length);
+        this.start += from + length;
+        return { type: type ? type[1].trim().toLowerCase() : "", body };
+      }
+    }
+
+    let shown = false;
+    // Bumped when a connection starts and when it ends. A JPEG still decoding
+    // when its stream died would otherwise be drawn after the page had gone
+    // off air, and clear it: a dead frame shown as live until the next
+    // reconnect failed.
+    let generation = 0;
+    function draw(source, width, height) {
+      if (page.canvas.width !== width || page.canvas.height !== height) {
+        page.canvas.width = width;
+        page.canvas.height = height;
+      }
+      page.ctx.drawImage(source, 0, 0);
+      if (!shown) { shown = true; say(""); offAir(false); }
+      if (stats) {
+        const now = performance.now();
+        if (stats.lastDraw) stats.maxGap = Math.max(stats.maxGap, now - stats.lastDraw);
+        stats.lastDraw = now;
+        stats.drawn += 1;
+      }
+    }
+
+    // One JPEG decoding at a time; a newer one replaces any still waiting.
+    let pendingJPEG = null;
+    let decodingJPEG = false;
+    function showJPEG(bytes) {
+      pendingJPEG = { bytes, generation };
+      if (!decodingJPEG) pumpJPEG();
+    }
+    async function pumpJPEG() {
+      decodingJPEG = true;
+      while (pendingJPEG) {
+        const { bytes, generation: from } = pendingJPEG;
+        pendingJPEG = null;
+        try {
+          const image = await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
+          if (from === generation) draw(image, image.width, image.height);
+          image.close();
+        } catch (e) {
+          console.warn("undecodable JPEG", e);
+        }
+      }
+      decodingJPEG = false;
+    }
+
+    class Unsupported extends Error {}
+
+    function nalUnits(au) {
+      const units = [];
+      for (let i = 0; i + 3 < au.length; i++) {
+        if (au[i] === 0 && au[i + 1] === 0 && au[i + 2] === 1) {
+          units.push(i + 3);
+          i += 2;
+        }
+      }
+      return units;
+    }
+    const hex = n => n.toString(16).padStart(2, "0");
+    // The WebCodecs name for the stream, from its SPS: profile, constraint
+    // flags and level, as in "avc1.640032".
+    function avcCodec(au, units, types) {
+      const at = units[types.indexOf(7)];
+      if (at === undefined) return null;
+      return "avc1." + hex(au[at + 1]) + hex(au[at + 2]) + hex(au[at + 3]);
+    }
+
+    const h264 = {
+      decoder: null,
+      timestamp: 0,
+      reset() {
+        if (this.decoder && this.decoder.state !== "closed") this.decoder.close();
+        this.decoder = null;
+      },
+      async push(au) {
+        const units = nalUnits(au);
+        const types = units.map(i => au[i] & 0x1f);
+        const key = types.includes(5);
+        if (!this.decoder) {
+          // Everything before the first IDR references pictures this viewer
+          // never had, so it waits. The server sends one on attach.
+          if (!key) return;
+          const codec = avcCodec(au, units, types);
+          if (!codec) return;
+          if (typeof VideoDecoder === "undefined") throw new Unsupported();
+          const config = { codec, optimizeForLatency: true };
+          const { supported } = await VideoDecoder.isConfigSupported(config);
+          if (!supported) throw new Unsupported();
+          this.decoder = new VideoDecoder({
+            output: frame => {
+              draw(frame, frame.displayWidth, frame.displayHeight);
+              frame.close();
+            },
+            error: e => {
+              console.warn("H.264 decode failed; waiting for a keyframe", e);
+              this.reset();
+              fetch("/keyframe", { method: "POST" }).catch(() => {});
+            },
+          });
+          this.decoder.configure(config);
+        }
+        this.timestamp += 33333;
+        this.decoder.decode(new EncodedVideoChunk({
+          type: key ? "key" : "delta", timestamp: this.timestamp, data: au,
+        }));
+      },
+    };
+
+    function showUnsupported() {
+      // WebCodecs exists only on a secure page, and http://127.0.0.1 is one
+      // while http://<this Mac's address> is not -- so over --bind-all the
+      // browser is fine and the address is the problem.
+      if (!globalThis.isSecureContext) {
+        say("Browsers decode H.264 only on a secure page. Open this one at "
+          + "http://127.0.0.1 (through an SSH tunnel from another machine), "
+          + "or run quern-media without --h264.");
+      } else {
+        say("This browser cannot decode H.264. Open this page in a current "
+          + "Safari or Chrome, or run quern-media without --h264.");
+      }
+    }
+
+    async function playOnce() {
+      const abort = new AbortController();
+      const mine = ++generation;
+      let stalled = false;
+      let reached = false;
+      let watchdog = 0;
+      const stall = () => { stalled = true; abort.abort(); };
+      const watch = ms => {
+        clearTimeout(watchdog);
+        watchdog = setTimeout(stall, ms);
+      };
+      watch(FIRST_FRAME_MS);
+      const firstFrame = setTimeout(() => { if (!shown) stall(); }, FIRST_FRAME_MS);
+      try {
+        const response = await fetch(FRAMES, { cache: "no-store", signal: abort.signal });
+        reached = true;
+        if (response.status === 409) {
+          // Another source is on this port now. Reconnecting will not help
+          // until this one is back, so say whose stream it is.
+          const why = (await response.text()).trim();
+          return "This address is streaming something else now (" + why + ").";
+        }
+        if (response.status === 503) {
+          // quern-media is up and its source is not: a simulator that has
+          // shut down. The body says what state it is in.
+          const why = (await response.text()).trim();
+          return "Off air" + (why ? ": " + why : "") + ".";
+        }
+        if (!response.ok || !response.body) return "quern-media answered " + response.status + ".";
+        if (!(response.headers.get("content-type") || "").startsWith("multipart/")) {
+          // An older quern-media serves its index page for any path it does
+          // not know, /frames included.
+          return "This quern-media does not serve /frames; update quern.";
+        }
+        const parts = new Parts(response.body.getReader());
+        for (;;) {
+          const part = await parts.next();
+          if (!part) return "The stream ended.";
+          watch(STALL_MS);
+          if (part.body.length === 0) continue;  // a keepalive
+          if (part.type === "image/jpeg") {
+            showJPEG(part.body);
+          } else if (part.type === "video/h264") {
+            await h264.push(part.body);
+          }
+        }
+      } catch (e) {
+        if (e instanceof Unsupported) throw e;
+        if (stalled) return shown ? "No frames for 12 seconds." : "No picture arrived.";
+        if (!reached) return "Cannot reach quern-media.";
+        return "The stream broke: " + (e && e.message ? e.message : String(e)) + ".";
+      } finally {
+        clearTimeout(watchdog);
+        clearTimeout(firstFrame);
+        if (generation === mine) generation++;
+        abort.abort();
+        h264.reset();
+      }
+    }
+
+    async function run() {
+      let failures = 0;
+      for (;;) {
+        let reason;
+        try {
+          reason = await playOnce();
+        } catch (e) {
+          if (e instanceof Unsupported) { showUnsupported(); return; }
+          reason = String(e);
+        }
+        // A connection that showed a picture was working, so the next
+        // attempt starts quick again. Counting every failure for the life
+        // of the tab left each restart after the fourth waiting 5 seconds.
+        failures = shown ? 0 : failures + 1;
+        shown = false;
+        offAir(true);
+        say(reason + " Reconnecting…");
+        await sleep(Math.min(5000, 500 * 2 ** Math.min(Math.max(failures - 1, 0), 4)));
+      }
+    }
+    if (page) run();
+    </script>
+    """#
+
 }

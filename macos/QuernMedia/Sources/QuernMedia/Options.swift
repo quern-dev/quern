@@ -16,6 +16,10 @@ public struct Options: Equatable {
     public var maxDimension: Int
     public var quality: Double
     public var bitrate: Int
+    /// Exit when the process that started this one exits. For an owner --
+    /// the quern server, the preview app -- whose quern-media would otherwise
+    /// outlive a crash or a Ctrl+C, holding its port and the framebuffer.
+    public var exitWithParent: Bool = false
 
     public static let defaultPort: UInt16 = 8422
 }
@@ -53,7 +57,7 @@ public enum OptionsParser {
         "--quality", "--bitrate", "--record",
     ]
     private static let boolFlags: Set<String> = [
-        "--bind-all", "--h264", "--list", "--help", "-h",
+        "--bind-all", "--h264", "--list", "--help", "-h", "--exit-with-parent",
     ]
 
     public static func parse(_ args: [String]) throws -> Options {
@@ -163,7 +167,8 @@ public enum OptionsParser {
             fps: fps,
             maxDimension: maxDimension,
             quality: quality,
-            bitrate: bitrate
+            bitrate: bitrate,
+            exitWithParent: flags.contains("--exit-with-parent")
         )
 
         // A headless producer with no sink would capture frames and discard

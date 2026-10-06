@@ -60,16 +60,43 @@ func contentTypes() {
     #expect(HTTPWire.contentType(for: .h264) == "video/h264")
 }
 
-@Test("the index page tells an H.264 viewer what to do instead")
-func h264IndexExplainsItself() {
-    // A browser cannot play a raw elementary stream, so the page should say
-    // so rather than render a broken video element.
-    let page = String(decoding: HTTPWire.indexPage(for: .h264), as: UTF8.self)
-    #expect(page.contains("ffplay"))
+@Test("the index page plays /frames for either codec, with no third player", arguments: [
+    StreamPipeline.Codec.mjpeg, StreamPipeline.Codec.h264,
+])
+func indexPagePlaysFrames(codec: StreamPipeline.Codec) {
+    let page = String(decoding: HTTPWire.indexPage(for: codec), as: UTF8.self)
+    #expect(page.contains("fetch(FRAMES"), "the page should read the framed stream")
+    #expect(page.contains("VideoDecoder"), "H.264 should play in the page")
+    // An <img> could not tell a still screen from a dead stream, and the old
+    // H.264 page sent viewers to ffplay with a literal PORT in the command.
     #expect(!page.contains("<img"))
+    #expect(!page.contains("ffplay"))
+    #expect(!page.contains("PORT"))
+    // A stream that has ended must not look live: the last frame is greyed
+    // under a label rather than left on screen as if it were current.
+    #expect(page.contains("OFF AIR"))
+}
 
-    let mjpeg = String(decoding: HTTPWire.indexPage(for: .mjpeg), as: UTF8.self)
-    #expect(mjpeg.contains("<img src=\"/stream\">"))
+@Test("the framed path is recognised exactly, including query strings")
+func recognisesFramesPaths() {
+    #expect(HTTPWire.isFramesPath("/frames"))
+    #expect(HTTPWire.isFramesPath("/frames?x=1"))
+    #expect(!HTTPWire.isFramesPath("/framesx"), "a bare prefix test would claim this")
+    #expect(!HTTPWire.isFramesPath("/stream"))
+    #expect(!HTTPWire.isStreamPath("/frames"))
+}
+
+@Test("an H.264 part declares its type and its exact length")
+func h264PartIsFramed() throws {
+    let au = Data([0, 0, 0, 1, 0x65, 0x88, 0, 0, 1, 0x41])
+    let part = HTTPWire.h264Part(au)
+    let headEnd = try #require(part.range(of: Data("\r\n\r\n".utf8)))
+    let head = String(decoding: part[..<headEnd.lowerBound], as: UTF8.self)
+    #expect(head.hasPrefix("--\(HTTPWire.mjpegBoundary)\r\n"))
+    #expect(head.contains("Content-Type: video/h264"))
+    #expect(head.contains("Content-Length: \(au.count)"))
+    #expect(part[headEnd.upperBound..<headEnd.upperBound + au.count] == au)
+    #expect(HTTPWire.framesContentType.contains(HTTPWire.mjpegBoundary))
 }
 
 @Test("index responses declare an accurate Content-Length", arguments: [
@@ -119,4 +146,29 @@ func requestMethodIsParsed(head: String, expected: String) {
 func keyframePathMatching(path: String, expected: HTTPWire.ControlMatch) {
     #expect(HTTPWire.keyframePathMatch(path) == expected)
     #expect(HTTPWire.isKeyframePath(path) == (expected == .exact))
+}
+
+@Test("a query value is read by name, and absent when it is not there", arguments: [
+    ("/stream?source=ABC", "source", "ABC" as String?),
+    ("/frames?x=1&source=ABC-123&y=2", "source", "ABC-123"),
+    ("/frames?source=", "source", ""),
+    ("/frames?sourcex=ABC", "source", nil),
+    ("/frames", "source", nil),
+])
+func readsQueryValues(path: String, name: String, expected: String?) {
+    #expect(HTTPWire.queryValue(path, name) == expected)
+}
+
+
+@Test("the page is told its source, encoded so nothing in it can break out")
+func indexPageCarriesItsSource() {
+    let page = String(decoding: HTTPWire.indexPage(for: .mjpeg, sourceID: "6401A02A-FCAC"), as: UTF8.self)
+    #expect(page.contains(#"|| "6401A02A-FCAC";"#))
+    #expect(!page.contains(HTTPWire.sourcePlaceholder))
+
+    let hostile = String(decoding: HTTPWire.indexPage(for: .mjpeg, sourceID: #"x"</script><script>alert(1)//"#), as: UTF8.self)
+    #expect(!hostile.contains("</script><script>"), "a source closed the script tag")
+
+    let none = String(decoding: HTTPWire.indexPage(for: .mjpeg), as: UTF8.self)
+    #expect(none.contains("|| null;"))
 }
