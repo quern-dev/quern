@@ -11,8 +11,8 @@ import QuernMedia
 let usage = """
 quern-media — headless screen capture for iOS simulators and devices.
 
-Produces video. Does not display it: point a browser, ffplay, or the preview
-app at the stream, or record to a file.
+Produces video. Does not display it: open the page it serves in a browser,
+point the preview app at the stream, or record to a file.
 
 SOURCE (exactly one required)
   --sim-udid <UDID>      a booted simulator, no Simulator.app needed
@@ -22,15 +22,16 @@ SOURCE (exactly one required)
 OUTPUT (at least one required; they combine)
   --serve <port>         HTTP server; open http://127.0.0.1:<port>/
                          GET  /          a page that plays the stream
-                         GET  /stream    the video itself
+                         GET  /frames    the video, one part per frame
+                         GET  /stream    the video itself (raw under --h264)
                          POST /keyframe  force an IDR now, answers 204
   --record <path>        write an .mp4. Implies --h264.
 
 TUNING
   --fps <n>              max frames encoded per second (default 15)
   --max-dim <px>         downscale longest side (default 900, 0 = native)
-  --h264                 H.264 instead of MJPEG. ~12x less data, but a
-                         browser cannot play the raw stream — use ffplay.
+  --h264                 H.264 instead of MJPEG. ~12x less data; the page
+                         plays it in browsers with WebCodecs.
   --bitrate <bps>        H.264 target bitrate (default 2000000)
   --quality <0..1>       JPEG quality (default 0.6). Not comparable to
                          ImageIO's scale — VideoToolbox runs larger.

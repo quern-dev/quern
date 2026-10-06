@@ -37,9 +37,19 @@ public final class HTTPStreamServer: FrameSink {
     private static let maxHeadBytes = 8192
     private static let headTimeout: TimeInterval = 10
 
+    /// How a streaming client wants each frame wrapped.
+    enum Framing {
+        /// `/stream`: the codec's native form -- multipart for MJPEG, a bare
+        /// elementary stream for H.264.
+        case raw
+        /// `/frames`: one length-prefixed part per frame, for either codec.
+        case parts
+    }
+
     private final class Client {
         let connection: NWConnection
         var streaming = false
+        var framing = Framing.raw
         /// Request bytes so far. Touched only on the connection queue.
         var head = Data()
         /// Dropped-frame gate. A viewer on wifi cannot absorb 60 fps of JPEG,
@@ -149,8 +159,7 @@ public final class HTTPStreamServer: FrameSink {
     ///
     ///   MJPEG only. Every JPEG stands alone, so repeating one is valid and a
     ///   browser redraws the same picture. An H.264 stream cannot have frames
-    ///   replayed into it, and its consumers are ffplay and the recorder
-    ///   rather than the preview window, so they are left alone.
+    ///   replayed into it, so it is left alone.
     public init(
         port: UInt16,
         bindAll: Bool,
@@ -249,14 +258,20 @@ public final class HTTPStreamServer: FrameSink {
     }
 
     public func receive(_ payload: EncodedPayload) {
-        let bytes: Data
+        // `raw` for `/stream`, `parts` for `/frames`. Identical under MJPEG,
+        // which is multipart either way.
+        let raw: Data
+        let parts: Data
         switch (codec, payload) {
         case (.mjpeg, .jpeg(let jpeg)):
-            bytes = HTTPWire.mjpegPart(jpeg)
+            raw = HTTPWire.mjpegPart(jpeg)
+            parts = raw
         case (.h264, .h264(let out)):
             // An elementary stream needs no envelope: the NAL start codes are
-            // the framing.
-            bytes = out.annexB
+            // the framing. That is enough for a tool reading a file, and not
+            // for a live reader -- see `HTTPWire.isFramesPath`.
+            raw = out.annexB
+            parts = HTTPWire.h264Part(out.annexB)
         default:
             return  // codec mismatch: the pipeline was configured differently
         }
@@ -285,8 +300,9 @@ public final class HTTPStreamServer: FrameSink {
         _framesSkipped += stalled.count
         _keyframeResyncs += resynced
         _framesHeldForKeyframe += held
-        _bytesSent += bytes.count * targets.count
-        if codec == .mjpeg { lastPart = bytes }
+        let sends = targets.map { ($0, $0.framing == .parts ? parts : raw) }
+        _bytesSent += sends.reduce(0) { $0 + $1.1.count }
+        if codec == .mjpeg { lastPart = raw }
         lastSendAt = Date()
         let wantKeyframe = watching.contains(where: \.desynced)
         lock.unlock()
@@ -295,7 +311,7 @@ public final class HTTPStreamServer: FrameSink {
         // is the deadlock the rest of this file is careful to avoid.
         if wantKeyframe { onKeyframeNeeded?() }
 
-        for client in targets {
+        for (client, bytes) in sends {
             client.connection.send(content: bytes, completion: .contentProcessed {
                 [weak self, weak client] _ in
                 guard let self, let client else { return }
@@ -480,7 +496,12 @@ public final class HTTPStreamServer: FrameSink {
             return
         }
 
-        guard HTTPWire.isStreamPath(path) else {
+        let framing: Framing
+        if HTTPWire.isStreamPath(path) {
+            framing = .raw
+        } else if HTTPWire.isFramesPath(path) {
+            framing = .parts
+        } else {
             // The index page is a page, so it answers the methods a browser
             // uses and nothing else. `POST /anything` used to get 200 and an
             // HTML body -- harmless for a person typing a URL, and for a
@@ -507,19 +528,51 @@ public final class HTTPStreamServer: FrameSink {
             return
         }
 
+        let contentType = framing == .parts
+            ? HTTPWire.framesContentType
+            : HTTPWire.contentType(for: codec)
         client.connection.send(
-            content: HTTPWire.streamHeader(contentType: HTTPWire.contentType(for: codec)),
+            content: HTTPWire.streamHeader(contentType: contentType),
             completion: .contentProcessed { _ in }
         )
         lock.lock()
+        client.framing = framing
         client.streaming = true
         let total = clients.values.filter(\.streaming).count
         lock.unlock()
 
+        watchForHangup(client)
         startKeepaliveIfNeeded()
         MediaLog.log("[http] viewer attached (\(total) total)")
         // Ask for a keyframe now rather than making this viewer wait for the
         // periodic one.
         onKeyframeNeeded?()
+    }
+
+    /// Streaming clients currently attached. Internal, for tests.
+    var viewers: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return clients.values.filter(\.streaming).count
+    }
+
+    /// Notices a streaming client closing its end.
+    ///
+    /// A viewer sends its request and then only reads, so nothing here was
+    /// reading from the connection, and a closed peer was found only when a
+    /// send to it failed. On a still screen nothing is sent -- never, under
+    /// H.264, which has no keepalive -- so a viewer that had gone stayed in
+    /// `clients`, holding one of the 32 slots and its socket in `CLOSE_WAIT`.
+    /// Anything a viewer sends after its request is ignored.
+    private func watchForHangup(_ client: Client) {
+        client.connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) {
+            [weak self, weak client] _, _, isComplete, error in
+            guard let self, let client else { return }
+            if isComplete || error != nil {
+                client.connection.cancel()
+            } else {
+                self.watchForHangup(client)
+            }
+        }
     }
 }
