@@ -44,7 +44,8 @@ GET  /stream    the video itself: multipart under MJPEG, raw Annex B under H.264
 POST /keyframe  force an IDR now, answers 204
 ```
 
-The page plays either codec from `/frames`. H.264 goes through WebCodecs, and
+The page plays either codec from `/frames`. When the stream ends it greys the
+last frame under an OFF AIR label and reconnects. H.264 goes through WebCodecs, and
 `?stats` overlays frames per second, the longest gap between frames, and the
 decoder's queue. Measured in Chrome on a Mac at native resolution: MJPEG held
 60fps with gaps of 23-25 ms, while H.264 through the hardware decoder stalled

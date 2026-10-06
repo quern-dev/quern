@@ -226,7 +226,12 @@ public enum HTTPWire {
     <style>
     html,body{margin:0;height:100%;background:#111;color:#ccc;font:14px system-ui}
     body{display:grid;place-items:center;overflow:hidden}
-    canvas{display:block;max-width:100vw;max-height:100vh}
+    canvas{display:block;max-width:100vw;max-height:100vh;transition:filter .3s}
+    #offair{position:fixed;inset:0;display:none;place-items:center;pointer-events:none}
+    #offair span{padding:10px 22px;border:3px solid #e33;border-radius:8px;color:#e33;
+    font:800 clamp(24px,7vw,56px)/1 system-ui;letter-spacing:.12em;background:#000a}
+    body.offair canvas{filter:grayscale(1) brightness(.35)}
+    body.offair #offair{display:grid}
     #status{position:fixed;left:0;right:0;bottom:0;padding:8px 12px;
     background:#000c;text-align:center}
     #status:empty{display:none}
@@ -235,6 +240,7 @@ public enum HTTPWire {
     #stats:empty{display:none}
     </style>
     <canvas id=screen width=0 height=0></canvas>
+    <div id=offair><span>OFF AIR</span></div>
     <div id=status>Connecting…</div>
     <div id=stats></div>
     <script>
@@ -271,6 +277,9 @@ public enum HTTPWire {
     const FIRST_FRAME_MS = 15000;
 
     function say(text) { page.status.textContent = text; }
+    // The last frame stays, greyed and dimmed under a label, so nobody takes a
+    // picture of a stream that has ended for the screen as it is now.
+    function offAir(on) { document.body.classList.toggle("offair", on); }
     const sleep = ms => new Promise(r => setTimeout(r, ms));
 
     // Reads `--boundary` / headers / Content-Length body parts off a stream.
@@ -334,7 +343,7 @@ public enum HTTPWire {
         page.canvas.height = height;
       }
       page.ctx.drawImage(source, 0, 0);
-      if (!shown) { shown = true; say(""); }
+      if (!shown) { shown = true; say(""); offAir(false); }
       if (stats) {
         const now = performance.now();
         if (stats.lastDraw) stats.maxGap = Math.max(stats.maxGap, now - stats.lastDraw);
@@ -478,6 +487,7 @@ public enum HTTPWire {
           reason = String(e);
         }
         shown = false;
+        offAir(true);
         say(reason + " Reconnecting…");
         await sleep(Math.min(5000, 500 * 2 ** Math.min(failures, 4)));
       }

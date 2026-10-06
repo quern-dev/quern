@@ -72,6 +72,9 @@ func indexPagePlaysFrames(codec: StreamPipeline.Codec) {
     #expect(!page.contains("<img"))
     #expect(!page.contains("ffplay"))
     #expect(!page.contains("PORT"))
+    // A stream that has ended must not look live: the last frame is greyed
+    // under a label rather than left on screen as if it were current.
+    #expect(page.contains("OFF AIR"))
 }
 
 @Test("the framed path is recognised exactly, including query strings")
