@@ -149,11 +149,13 @@ class _ExitedProcess:
 
     def __init__(self):
         self.started = asyncio.Event()
+        self.release = asyncio.Event()
         self.waited = False
 
     async def communicate(self):
         self.started.set()
-        await asyncio.Event().wait()
+        await self.release.wait()          # never, unless cleanup lets it go
+        return b"", b""
 
     def kill(self):
         raise ProcessLookupError
@@ -161,6 +163,21 @@ class _ExitedProcess:
     async def wait(self):
         self.waited = True
         return 1
+
+
+async def _settle(task, proc):
+    """Wait for `task`, bounded, then let the fake go whatever happened.
+
+    `asyncio.wait` rather than `await task` or `wait_for`: a `_run` that
+    swallowed the cancel and kept waiting would hang either of those, and
+    `wait_for` cancels on its own timeout and then awaits the task anyway.
+    """
+    try:
+        _, pending = await asyncio.wait({task}, timeout=2.0)
+        assert not pending, "_run did not finish within 2s"
+    finally:
+        proc.release.set()
+        task.cancel()
 
 
 class TestAKillAfterExitIsNotAnError:
@@ -172,26 +189,37 @@ class TestAKillAfterExitIsNotAnError:
         proc = _ExitedProcess()
         with patch.object(asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)):
             task = asyncio.create_task(ax_recovery._run("pgrep", "-x", "CoreSimulatorBridge"))
-            # Bounded: a `_run` that never reaches `communicate` would
-            # otherwise hang this test rather than fail it.
-            await asyncio.wait_for(proc.started.wait(), timeout=2.0)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
+            try:
+                # Bounded: a `_run` that never reaches `communicate` would
+                # otherwise hang this test rather than fail it.
+                await asyncio.wait_for(proc.started.wait(), timeout=2.0)
+                task.cancel()
+            finally:
+                await _settle(task, proc)
+        with pytest.raises(asyncio.CancelledError):
+            task.result()
 
     async def test_the_deadline_still_reads_as_a_timeout(self):
         """What the caller actually sees: `asyncio.timeout` turns its own
         cancel into `TimeoutError`, which `reread_after_recovery` handles."""
         proc = _ExitedProcess()
+
+        async def under_deadline():
+            async with asyncio.timeout(0.05):
+                await ax_recovery._run("pgrep", "-x", "CoreSimulatorBridge")
+
         with patch.object(asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)):
-            with pytest.raises(TimeoutError):
-                async with asyncio.timeout(0.05):
-                    await ax_recovery._run("pgrep", "-x", "CoreSimulatorBridge")
+            task = asyncio.create_task(under_deadline())
+            await _settle(task, proc)
+        with pytest.raises(TimeoutError):
+            task.result()
 
     async def test_a_timed_out_command_is_a_failed_one(self):
         proc = _ExitedProcess()
         with patch.object(asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)):
-            assert await ax_recovery._run("pgrep", timeout=0.05) == (1, "")
+            task = asyncio.create_task(ax_recovery._run("pgrep", timeout=0.05))
+            await _settle(task, proc)
+        assert task.result() == (1, "")
         assert proc.waited, "the timed-out child was never reaped"
 
 
