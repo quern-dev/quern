@@ -435,7 +435,7 @@ class TestSimulatorStreams:
             return "/tmp/quern-media"
 
         async def _spawn(*args, **_kwargs):
-            launched["port"] = int(args[-1])
+            launched["port"] = int(args[args.index("--serve") + 1])
             return _LiveStreamProcess()
 
         async def _connect(*_args, **_kwargs):
@@ -448,7 +448,10 @@ class TestSimulatorStreams:
 
             return None, _Writer()
 
+        sent: list = []
+
         async def _send(cmd):
+            sent.append(cmd)
             mgr._dispatch_event(
                 {"event": "added", "key": cmd["key"], "id": cmd["id"]}
             )
@@ -469,6 +472,9 @@ class TestSimulatorStreams:
         # passes with the exclude set removed entirely -- verified.
         assert asked["exclude"] == {preview.STREAM_BASE_PORT}
         assert record.stream_port == launched["port"]
+        # By source as well as port: the window reconnects to this URL, and
+        # by then the port may be another simulator's (#424).
+        assert sent[0]["url"] == f"http://127.0.0.1:{launched['port']}/stream?source=SIM2"
 
 
 class TestIdentityResolution:
@@ -1575,3 +1581,341 @@ class TestEverySingleDeviceResponseSaysItsKind:
 
         result = asyncio.run(preview_stop(_Request(), PreviewStopRequest()))
         assert "kind" not in result, result
+
+
+
+class TestSharperSimulatorStreams:
+    """#424: quern-media's defaults (900px, quality 0.6, 15fps) read as fuzzy
+    and choppy next to the simulator itself."""
+
+    def test_the_stream_is_started_with_the_preview_settings(self, monkeypatch):
+        from server.device.media import preview
+
+        spawned: dict = {}
+
+        async def _spawn(*args, **_kwargs):
+            spawned["args"] = list(args)
+            return _LiveStreamProcess()
+
+        monkeypatch.setattr(preview.asyncio, "create_subprocess_exec", _spawn)
+        mgr = PreviewManager()
+
+        async def run():
+            await mgr._start_stream("SIM", "/tmp/quern-media", 8430)
+            await mgr._stop_stream("SIM")
+
+        asyncio.run(run())
+        args = spawned["args"]
+        assert args[args.index("--serve") + 1] == "8430"
+        for flag, value in (("--max-dim", "0"), ("--quality", "0.85"), ("--fps", "60")):
+            assert args[args.index(flag) + 1] == value, f"{flag} not passed"
+
+    def test_the_app_starts_quern_media_with_the_same_settings(self):
+        """The standalone app runs its own quern-media when there is no server,
+        and a preview must not look different depending on who started it."""
+        import re
+
+        from server.device.media import preview
+
+        source = preview._SOURCE_CANDIDATES[0].read_text()
+        match = re.search(r"static let streamArguments = \[([^\]]*)\]", source)
+        assert match, "LocalSimulatorPreview.streamArguments not found"
+        swift = tuple(re.findall(r'"([^"]*)"', match.group(1)))
+        assert swift == preview.STREAM_ARGS
+
+
+class TestSimulatorsFromTheDevicesMenu:
+    """The app lists booted simulators; picking one asks the server to open
+    it, so the server owns the stream and preview_status reports it."""
+
+    def test_picking_a_simulator_opens_it_with_its_name(self, monkeypatch):
+        opened: list = []
+
+        async def _add(udid, title=None):
+            opened.append((udid, title))
+
+        async def run():
+            mgr = PreviewManager()
+            monkeypatch.setattr(mgr, "add_simulator", _add)
+            mgr._dispatch_event({"event": "open_simulator", "key": "SIM", "name": "iPhone 17 Pro"})
+            for _ in range(5):
+                await asyncio.sleep(0)
+
+        asyncio.run(run())
+        assert opened == [("SIM", "iPhone 17 Pro")]
+
+    def test_a_simulator_that_cannot_open_is_reported_to_the_app(self, monkeypatch):
+        """Nobody awaits a menu pick, so a failure that only reached the
+        server log would leave the person clicking with nothing happening."""
+        sent: list = []
+
+        async def _add(udid, title=None):
+            raise RuntimeError("quern-media exited (2) before serving: no such simulator")
+
+        async def _send(cmd):
+            sent.append(cmd)
+
+        async def run():
+            mgr = PreviewManager()
+            monkeypatch.setattr(mgr, "add_simulator", _add)
+            monkeypatch.setattr(mgr, "_send", _send)
+            mgr._dispatch_event({"event": "open_simulator", "key": "SIM", "name": "iPhone 16"})
+            for _ in range(5):
+                await asyncio.sleep(0)
+
+        asyncio.run(run())
+        assert sent and sent[0]["cmd"] == "open_failed"
+        assert sent[0]["key"] == "SIM"
+        assert "no such simulator" in sent[0]["error"]
+
+
+class TestOffAir:
+    """A simulator window whose stream drops stays open under OFF AIR and
+    reconnects. preview_status says so: a frozen frame reported as a live
+    preview is the false all-clear."""
+
+    def _manager_with_simulator(self):
+        from server.device.media.preview import ActivePreview
+
+        mgr = PreviewManager()
+        mgr._active["SIM"] = ActivePreview(
+            name="SIM", position=0, kind="simulator", stream_port=8422
+        )
+        mgr._active["PHONE"] = ActivePreview(name="PHONE", position=1, kind="device")
+        return mgr
+
+    def test_off_air_and_back_are_reported(self):
+        mgr = self._manager_with_simulator()
+        assert mgr.status()["active"]["SIM"]["on_air"] is True
+
+        mgr._dispatch_event({"event": "off_air", "key": "SIM", "reason": "no data for 20s"})
+        assert mgr.status()["active"]["SIM"]["on_air"] is False
+
+        mgr._dispatch_event({"event": "on_air", "key": "SIM"})
+        assert mgr.status()["active"]["SIM"]["on_air"] is True
+
+    def test_a_capture_device_has_no_on_air_field(self):
+        """CoreMediaIO previews have no OFF AIR state; reporting on_air: true
+        for them would be a claim nothing checked."""
+        mgr = self._manager_with_simulator()
+        assert "on_air" not in mgr.status()["active"]["PHONE"]
+
+    def test_off_air_for_an_unknown_preview_is_ignored(self):
+        mgr = self._manager_with_simulator()
+        mgr._dispatch_event({"event": "off_air", "key": "GONE"})
+        assert set(mgr.status()["active"]) == {"SIM", "PHONE"}
+
+
+
+class TestStreamRestart:
+    """A quern-media that exits while its window is open is restarted on the
+    same port, which the window -- off air and reconnecting -- picks up."""
+
+    def _manager(self, monkeypatch, spawned):
+        from server.device.media import preview
+
+        async def _build():
+            return "/tmp/quern-media"
+
+        async def _spawn(*args, **_kwargs):
+            spawned.append(list(args))
+            return _LiveStreamProcess()
+
+        monkeypatch.setattr(preview, "STREAM_RESTART_DELAYS", (0.0,))
+        monkeypatch.setattr(preview, "build_media_engine", _build)
+        monkeypatch.setattr(preview.asyncio, "create_subprocess_exec", _spawn)
+        return PreviewManager()
+
+    def _dead_stream(self, mgr, udid, port=8424):
+        from server.device.media import preview
+        from server.device.media.preview import ActivePreview
+
+        stream = preview._StreamProcess(
+            process=_FakeStreamProcess(stderr_lines=["[capture] gone"], exit_code=1),
+            port=port, log=deque(maxlen=20),
+        )
+        mgr._streams[udid] = stream
+        mgr._active[udid] = ActivePreview(name=udid, position=0, kind="simulator", stream_port=port)
+        return stream
+
+    def test_an_exit_with_the_window_open_restarts_on_the_same_port(self, monkeypatch):
+        spawned: list = []
+        mgr = self._manager(monkeypatch, spawned)
+
+        async def run():
+            stream = self._dead_stream(mgr, "SIM")
+            await mgr._drain_stream("SIM", stream)
+            fresh = mgr._streams["SIM"]
+            assert fresh is not stream
+            assert fresh.restarts == 1
+            await mgr._stop_stream("SIM")
+
+        asyncio.run(run())
+        assert len(spawned) == 1, "quern-media was not restarted"
+        args = spawned[0]
+        assert args[args.index("--serve") + 1] == "8424", "restarted on a different port"
+        assert args[args.index("--sim-udid") + 1] == "SIM"
+
+    def test_a_stream_stopped_on_purpose_is_not_restarted(self, monkeypatch):
+        spawned: list = []
+        mgr = self._manager(monkeypatch, spawned)
+
+        async def run():
+            stream = self._dead_stream(mgr, "SIM")
+            mgr._streams.pop("SIM")          # what _stop_stream does first
+            await mgr._drain_stream("SIM", stream)
+
+        asyncio.run(run())
+        assert spawned == []
+
+    def test_a_stream_whose_window_closed_is_not_restarted(self, monkeypatch):
+        spawned: list = []
+        mgr = self._manager(monkeypatch, spawned)
+
+        async def run():
+            stream = self._dead_stream(mgr, "SIM")
+            mgr._active.pop("SIM")
+            await mgr._drain_stream("SIM", stream)
+
+        asyncio.run(run())
+        assert spawned == []
+
+    def test_back_on_air_resets_the_backoff(self, monkeypatch):
+        spawned: list = []
+        mgr = self._manager(monkeypatch, spawned)
+        stream = self._dead_stream(mgr, "SIM")
+        stream.restarts = 3
+        mgr._dispatch_event({"event": "on_air", "key": "SIM"})
+        assert stream.restarts == 0
+
+
+async def _bounded(task, seconds=2.0):
+    """Await a restart loop that should stop, failing rather than hanging if
+    it does not. Without the bound, removing the check that stops it turns
+    the test into a stalled suite instead of a failure."""
+    # `asyncio.wait`, not `wait_for`: on timeout `wait_for` cancels the task,
+    # and the restart loop treats a cancel as "stop" and returns normally --
+    # which `wait_for` then reports as success, so a loop that never stopped
+    # on its own passed.
+    _, pending = await asyncio.wait({task}, timeout=seconds)
+    if pending:
+        task.cancel()
+        pytest.fail("the restart loop did not stop after the preview went away")
+    # Done, so this returns at once -- and raises whatever the loop raised,
+    # which `asyncio.wait` reports as finished without saying how.
+    await task
+
+
+class TestStreamRestartSchedule:
+    """The review of #424 found the re-check after the backoff and the
+    schedule itself untested: both "not restarted" tests changed state before
+    the drain began, so only the first check was ever exercised."""
+
+    def _setup(self, monkeypatch, spawn):
+        from server.device.media import preview
+        from server.device.media.preview import ActivePreview
+
+        async def _build():
+            return "/tmp/quern-media"
+
+        monkeypatch.setattr(preview, "build_media_engine", _build)
+        monkeypatch.setattr(preview.asyncio, "create_subprocess_exec", spawn)
+        mgr = PreviewManager()
+        stream = preview._StreamProcess(
+            process=_FakeStreamProcess(stderr_lines=["[capture] gone"], exit_code=1),
+            port=8424, log=deque(maxlen=20),
+        )
+        mgr._streams["SIM"] = stream
+        mgr._active["SIM"] = ActivePreview(
+            name="SIM", position=0, kind="simulator", stream_port=8424
+        )
+        return mgr, stream
+
+    def test_a_window_closed_during_the_backoff_is_not_restarted(self, monkeypatch):
+        from server.device.media import preview
+
+        spawned: list = []
+
+        async def _spawn(*args, **_kwargs):
+            spawned.append(args)
+            return _LiveStreamProcess()
+
+        monkeypatch.setattr(preview, "STREAM_RESTART_DELAYS", (0.05,))
+        mgr, stream = self._setup(monkeypatch, _spawn)
+
+        async def run():
+            task = asyncio.create_task(mgr._drain_stream("SIM", stream))
+            await asyncio.sleep(0.01)          # inside the backoff
+            mgr._active.pop("SIM")             # the window closes
+            await _bounded(task)
+
+        asyncio.run(run())
+        assert spawned == [], "restarted a stream whose window had closed"
+
+    def test_the_backoff_follows_the_schedule_and_a_failed_restart_is_retried(self, monkeypatch):
+        """A spawn that fails used to end the restarts for good, leaving the
+        window off air with nothing in preview_status to say why."""
+        from server.device.media import preview
+
+        slept: list = []
+        attempts: list = []
+
+        async def _sleep(seconds):
+            slept.append(seconds)
+
+        async def _spawn(*args, **_kwargs):
+            attempts.append(args)
+            if len(attempts) == 1:
+                raise OSError("Address already in use")
+            return _LiveStreamProcess()
+
+        monkeypatch.setattr(preview, "STREAM_RESTART_DELAYS", (1.0, 2.0, 4.0, 5.0))
+        mgr, stream = self._setup(monkeypatch, _spawn)
+        stream.restarts = 2
+        seen: dict = {}
+
+        real_start = mgr._start_stream
+
+        async def _start(udid, binary, port):
+            if len(attempts) == 1:
+                status = mgr.status()["active"]["SIM"]
+                seen.update(status)
+            return await real_start(udid, binary, port)
+
+        monkeypatch.setattr(mgr, "_start_stream", _start)
+
+        async def run():
+            monkeypatch.setattr(preview.asyncio, "sleep", _sleep)
+            await mgr._drain_stream("SIM", stream)
+            monkeypatch.undo()
+            await mgr._stop_stream("SIM")
+
+        asyncio.run(run())
+        assert slept == [4.0, 5.0], "the backoff did not follow the schedule"
+        assert len(attempts) == 2, "a failed restart was not retried"
+        assert seen.get("on_air") is False
+        assert "could not restart" in seen.get("off_air_reason", "")
+
+    def test_an_exit_marks_the_preview_off_air_without_waiting_for_the_app(self, monkeypatch):
+        """The window's off_air event can be lost -- it can land before the
+        add is recorded -- and status would then say on air for a window
+        showing OFF AIR."""
+        from server.device.media import preview
+
+        async def _spawn(*args, **_kwargs):
+            raise OSError("no")
+
+        mgr, stream = self._setup(monkeypatch, _spawn)
+        monkeypatch.setattr(preview, "STREAM_RESTART_DELAYS", (0.05,))
+
+        async def run():
+            task = asyncio.create_task(mgr._drain_stream("SIM", stream))
+            await asyncio.sleep(0.01)
+            status = mgr.status()["active"]["SIM"]
+            mgr._active.pop("SIM")             # end the retries
+            await _bounded(task)
+            return status
+
+        status = asyncio.run(run())
+        assert status["on_air"] is False
+        assert status["off_air_reason"] == "quern-media exited: [capture] gone"

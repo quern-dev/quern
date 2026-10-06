@@ -12,6 +12,7 @@
 //
 // Build: swiftc -o ios-preview tools/ios-preview/main.swift \
 //          macos/QuernMedia/Sources/QuernMedia/Encode/JPEGFraming.swift \
+//          macos/QuernMedia/Sources/QuernMedia/Capture/SimulatorList.swift \
 //          -framework AVFoundation -framework CoreMediaIO -framework AppKit
 //
 // Named main.swift because it is top-level code: Swift allows that only
@@ -20,6 +21,7 @@
 
 import AVFoundation
 import AppKit
+import CoreImage
 import CoreMediaIO
 import ImageIO
 import Foundation
@@ -96,6 +98,81 @@ func discoverDevices() -> [AVCaptureDevice] {
         }
     }
     return result
+}
+
+// MARK: - Booted simulators
+
+/// Keeps the list of booted simulators current.
+///
+/// A simulator is not a capture device, so a `DiscoverySession` never sees
+/// one -- which is why the Devices menu used to list only USB phones. Nothing
+/// announces a boot or a shutdown to this process either, so the list is
+/// polled: every few seconds in the background, so it is already right when
+/// the menu opens, and again as it opens, so a change made in the last few
+/// seconds still appears while the menu is up.
+final class SimulatorWatcher {
+    /// Main thread only.
+    private(set) var booted: [BootedSimulator] = []
+    /// Called on the main thread when `booted` changes.
+    var onChange: (() -> Void)?
+
+    private var timer: Timer?
+    private var refreshing = false
+    private var reportedFailure = false
+
+    func start(every interval: TimeInterval = 4) {
+        refresh()
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            self?.refresh()
+        }
+    }
+
+    /// Asks `simctl` again, off the main thread. A failed ask keeps the last
+    /// answer rather than emptying the list: "could not ask" is not "nothing
+    /// is booted", and treating it as such would make every simulator vanish
+    /// from the menu on one slow `simctl`.
+    func refresh() {
+        guard !refreshing else { return }
+        refreshing = true
+        DispatchQueue.global(qos: .utility).async {
+            let found = Self.query()
+            DispatchQueue.main.async {
+                self.refreshing = false
+                guard let found else {
+                    if !self.reportedFailure {
+                        self.reportedFailure = true
+                        fputs("Could not list booted simulators with simctl\n", stderr)
+                    }
+                    return
+                }
+                self.reportedFailure = false
+                guard found != self.booted else { return }
+                self.booted = found
+                self.onChange?()
+            }
+        }
+    }
+
+    /// The booted simulators, or nil if `simctl` could not be asked.
+    static func query() -> [BootedSimulator]? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        process.arguments = ["simctl", "list", "devices", "booted", "-j"]
+        let out = Pipe()
+        process.standardOutput = out
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return nil }
+        // Bounded: a hung simctl would otherwise leave `refreshing` set for
+        // good, freezing the list, and hang the launch check that calls this
+        // on the main thread.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 10) {
+            if process.isRunning { process.terminate() }
+        }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationReason == .exit, process.terminationStatus == 0 else { return nil }
+        return SimulatorList.parse(data)
+    }
 }
 
 // MARK: - Device attach / detach
@@ -258,7 +335,11 @@ func loadAppIcon() {
 protocol PreviewController: AnyObject {
     var allDevices: [AVCaptureDevice] { get set }
     var activeSessionKeys: Set<String> { get }
+    var simulators: SimulatorWatcher { get }
     func togglePreview(key: String, position: Int)
+    /// Opens or closes a simulator's preview. Keyed by udid, like every
+    /// simulator session.
+    func toggleSimulator(_ simulator: BootedSimulator, position: Int)
     func nextPosition() -> Int
 }
 
@@ -266,27 +347,63 @@ protocol PreviewController: AnyObject {
 
 class DevicesMenuDelegate: NSObject, NSMenuDelegate {
     weak var controller: PreviewController?
+    /// The menu while it is open, so a change in the simulator list can be
+    /// shown without the person closing and reopening it.
+    private weak var openMenu: NSMenu?
 
     func menuNeedsUpdate(_ menu: NSMenu) {
-        menu.removeAllItems()
-
         guard let controller = controller else { return }
-
         // Re-discover devices every time the menu opens — AVCaptureDevice
         // references go stale after capture sessions are torn down.
         enableScreenCaptureDevices()
         controller.allDevices = discoverDevices()
+        populate(menu)
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        openMenu = menu
+        controller?.simulators.refresh()
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        openMenu = nil
+    }
+
+    /// The simulator list changed. Rebuilds the menu in place if it is open.
+    func simulatorsChanged() {
+        if let menu = openMenu { populate(menu) }
+    }
+
+    private func populate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        guard let controller = controller else { return }
+
         let devices = controller.allDevices
-        if devices.isEmpty {
-            let noDevices = NSMenuItem(title: "No Devices Found", action: nil, keyEquivalent: "")
-            noDevices.isEnabled = false
-            menu.addItem(noDevices)
-        } else {
-            for device in devices {
-                let item = NSMenuItem(title: device.localizedName, action: #selector(DevicesMenuDelegate.toggleDevice(_:)), keyEquivalent: "")
+        let simulators = controller.simulators.booted
+        if devices.isEmpty && simulators.isEmpty {
+            let none = NSMenuItem(title: "No Devices Found", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            menu.addItem(none)
+        }
+        for device in devices {
+            let item = NSMenuItem(title: device.localizedName, action: #selector(toggleDevice(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = device.uniqueID
+            if controller.activeSessionKeys.contains(device.uniqueID) {
+                item.state = .on
+            }
+            menu.addItem(item)
+        }
+        if !simulators.isEmpty {
+            if !devices.isEmpty { menu.addItem(.separator()) }
+            let header = NSMenuItem(title: "Simulators", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            for simulator in simulators {
+                let item = NSMenuItem(title: simulator.menuTitle, action: #selector(toggleSimulator(_:)), keyEquivalent: "")
                 item.target = self
-                item.representedObject = device.uniqueID
-                if controller.activeSessionKeys.contains(device.uniqueID) {
+                item.representedObject = simulator.udid
+                if controller.activeSessionKeys.contains(simulator.udid) {
                     item.state = .on
                 }
                 menu.addItem(item)
@@ -305,10 +422,19 @@ class DevicesMenuDelegate: NSObject, NSMenuDelegate {
         controller.togglePreview(key: key, position: controller.nextPosition())
     }
 
+    @objc func toggleSimulator(_ sender: NSMenuItem) {
+        guard let controller = controller,
+              let udid = sender.representedObject as? String,
+              let simulator = controller.simulators.booted.first(where: { $0.udid == udid })
+        else { return }
+        controller.toggleSimulator(simulator, position: controller.nextPosition())
+    }
+
     @objc func refreshDevices(_ sender: NSMenuItem) {
         guard let controller = controller else { return }
         enableScreenCaptureDevices()
         controller.allDevices = discoverDevices()
+        controller.simulators.refresh()
     }
 }
 
@@ -472,17 +598,249 @@ class PreviewWindow: NSObject, NSWindowDelegate {
     }
 }
 
+// MARK: - Simulator preview without a server
+
+/// A simulator preview this process runs itself: its own `quern-media`, and
+/// a stream window on it.
+///
+/// For when there is no quern server to ask -- the standalone app the menu
+/// bar's Screen Mirror opens, or an interactive one whose server has gone.
+/// With a server, the server starts `quern-media` instead, so it can report
+/// and stop the stream. The arguments are the server's (`STREAM_ARGS` in
+/// server/device/media/preview.py), and tests/test_preview.py checks the two
+/// copies agree.
+final class LocalSimulatorPreview {
+    static let streamArguments = [
+        "--max-dim", "0", "--quality", "0.85", "--fps", "60", "--exit-with-parent",
+    ]
+
+    /// Installed beside this bundle, in quern's bin directory.
+    static var binary: URL {
+        Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("quern-media")
+    }
+
+    let simulator: BootedSimulator
+    let position: Int
+    private var port: UInt16 = 0
+    private var process: Process?
+    private var stderrPipe: Pipe?
+    private var stderrTail: [String] = []
+    private(set) var session: StreamPreviewSession?
+    private var stopped = false
+    private var relaunches = 0
+
+    /// Called once, on the main queue, when the preview is gone: its window
+    /// closed, or it could not start (with the reason).
+    var onEnded: ((String, String?) -> Void)?
+
+    init(simulator: BootedSimulator, position: Int) {
+        self.simulator = simulator
+        self.position = position
+    }
+
+    func start() {
+        guard FileManager.default.isExecutableFile(atPath: Self.binary.path) else {
+            // Not "run quern setup": setup does not build it. The server
+            // builds it the first time it previews or records a simulator.
+            end(error: "quern-media has not been built on this Mac yet. Quern builds it "
+                + "the first time it previews a simulator: start quern and open this "
+                + "simulator with preview_device, then try again.")
+            return
+        }
+        guard let port = Self.freeLoopbackPort() else {
+            end(error: "No free loopback port for the stream.")
+            return
+        }
+        self.port = port
+        launch()
+        waitUntilServing(deadline: Date().addingTimeInterval(20))
+    }
+
+    func stop() {
+        guard !stopped else { return }
+        stopped = true
+        session?.onWindowClosed = nil
+        session?.stop()
+        session = nil
+        process?.terminationHandler = nil
+        process?.terminate()
+        process = nil
+        // Cleared here as well as at EOF: with the termination handler gone
+        // nothing else would, and a readability handler on a closed pipe is
+        // called over and over with nothing -- a core spinning per preview.
+        stderrPipe?.fileHandleForReading.readabilityHandler = nil
+        stderrPipe = nil
+    }
+
+    private func launch() {
+        let process = Process()
+        process.executableURL = Self.binary
+        process.arguments = ["--sim-udid", simulator.udid, "--serve", String(port)]
+            + Self.streamArguments
+        let err = Pipe()
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = err
+        err.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            // End of file. Left installed, the handler is called again at
+            // once with nothing, forever.
+            guard !data.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
+            self?.appendStderr(data)
+        }
+        process.terminationHandler = { [weak self] ended in
+            // Whatever it said last is usually why it exited, and can still
+            // be in the pipe when this runs.
+            err.fileHandleForReading.readabilityHandler = nil
+            let rest = err.fileHandleForReading.readDataToEndOfFile()
+            if !rest.isEmpty { self?.appendStderr(rest) }
+            DispatchQueue.main.async { self?.exited(ended) }
+        }
+        do {
+            try process.run()
+            self.process = process
+            stderrPipe = err
+        } catch {
+            end(error: "Could not start quern-media: \(error.localizedDescription)")
+        }
+    }
+
+    /// quern-media exited. Before the window opened, that is the reason the
+    /// preview failed. After, the window is off air and reconnecting, so a
+    /// fresh quern-media on the same port brings it back -- after a simulator
+    /// reboot, say. Retried with backoff for as long as the window is open,
+    /// which is cheap while the simulator stays shut down: each attempt
+    /// exits at once.
+    private func exited(_ ended: Process) {
+        guard !stopped, ended === process else { return }
+        process = nil
+        guard session != nil else {
+            let why = stderrTail.last ?? "exit status \(ended.terminationStatus)"
+            end(error: "quern-media stopped before serving: \(why)")
+            return
+        }
+        let delay = min(5.0, 1.0 * pow(2.0, Double(min(relaunches, 3))))
+        relaunches += 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, !self.stopped, self.process == nil, self.session != nil else { return }
+            self.launch()
+        }
+    }
+
+    private func appendStderr(_ data: Data) {
+        let lines = String(decoding: data, as: UTF8.self).split(separator: "\n").map(String.init)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.stderrTail = Array((self.stderrTail + lines).suffix(5))
+        }
+    }
+
+    private func waitUntilServing(deadline: Date) {
+        let port = self.port
+        DispatchQueue.global(qos: .userInitiated).async {
+            let serving = Self.accepts(port: port)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.stopped else { return }
+                if serving {
+                    self.openWindow()
+                } else if self.process == nil {
+                    return  // exited(_:) has reported it
+                } else if Date() >= deadline {
+                    self.end(error: "quern-media did not start serving within 20s.")
+                } else {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        self.waitUntilServing(deadline: deadline)
+                    }
+                }
+            }
+        }
+    }
+
+    private func openWindow() {
+        // By source as well as port, so a reconnect cannot land on another
+        // simulator that has taken the port meanwhile: quern-media says 409.
+        let url = URL(string: "http://127.0.0.1:\(port)/stream?source=\(simulator.udid)")!
+        let session = StreamPreviewSession(
+            sessionKey: simulator.udid, title: simulator.name, url: url, position: position
+        )
+        session.onWindowClosed = { [weak self] _ in self?.end(error: nil) }
+        session.onFailed = { [weak self] message in self?.end(error: message) }
+        session.onOffAir = { [weak self] reason in
+            if reason == nil { self?.relaunches = 0 }
+        }
+        self.session = session
+        session.start()
+    }
+
+    private func end(error: String?) {
+        let wasStopped = stopped
+        stop()
+        guard !wasStopped else { return }
+        onEnded?(simulator.udid, error)
+    }
+
+    /// A loopback port nothing is using, from the kernel. Closed again before
+    /// quern-media binds it, so another process could take it in between;
+    /// quern-media then fails to bind and says so, which is reported.
+    static func freeLoopbackPort() -> UInt16? {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = 0
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let bound = withUnsafeMutablePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, len) == 0 && getsockname(fd, $0, &len) == 0
+            }
+        }
+        return bound ? UInt16(bigEndian: addr.sin_port) : nil
+    }
+
+    static func accepts(port: UInt16) -> Bool {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        return withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+            }
+        }
+    }
+}
+
+/// Tells the person why a simulator preview they asked for did not open.
+func reportPreviewFailure(_ simulator: String, _ message: String) {
+    fputs("  could not preview \(simulator): \(message)\n", stderr)
+    let alert = NSAlert()
+    alert.messageText = "Could not preview \(simulator)"
+    alert.informativeText = message
+    alert.alertStyle = .warning
+    alert.runModal()
+}
+
 // MARK: - App delegate (standalone mode)
 
 class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
     var allDevices: [AVCaptureDevice] = []
     var activePreviews: [String: PreviewWindow] = [:]
+    /// Simulator previews, each with its own quern-media. Keyed by udid.
+    var simulatorPreviews: [String: LocalSimulatorPreview] = [:]
+    let simulators = SimulatorWatcher()
     let devicesMenuDelegate = DevicesMenuDelegate()
     let mode: FilterMode
     private var deviceObservers: [NSObjectProtocol] = []
 
     var activeSessionKeys: Set<String> {
-        return Set(activePreviews.keys)
+        return Set(activePreviews.keys).union(simulatorPreviews.keys)
     }
 
     init(mode: FilterMode) {
@@ -494,6 +852,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
         loadAppIcon()
         devicesMenuDelegate.controller = self
         setupMenuBar(devicesMenuDelegate: devicesMenuDelegate)
+        simulators.onChange = { [weak self] in self?.devicesMenuDelegate.simulatorsChanged() }
+        simulators.start()
         enableScreenCaptureDevices()
         watchForDeviceChanges()
         fputs("Waiting for devices...\n", stderr)
@@ -554,9 +914,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
     func onDevicesReady() {
         allDevices = discoverDevices()
 
+        // Opened with no phone attached but a simulator booted, the app stays
+        // up: the simulators are in the Devices menu. Quitting there is what
+        // made the menu bar's Screen Mirror useless without a cable.
+        if allDevices.isEmpty, case .all = mode {
+            // Could not ask is not "none booted": staying up costs nothing,
+            // and the watcher fills the menu if there are any.
+            let booted = SimulatorWatcher.query()
+            if booted == nil || booted?.isEmpty == false {
+                fputs("No USB devices. Booted simulators are in the Devices menu.\n", stderr)
+                return
+            }
+        }
         if allDevices.isEmpty {
             fputs("No iOS devices found.\n", stderr)
-            fputs("Make sure your iPhone is connected via USB, unlocked, and trusted.\n", stderr)
+            fputs("Make sure your iPhone is connected via USB, unlocked, and trusted, "
+                + "or boot a simulator.\n", stderr)
             NSApplication.shared.terminate(nil)
             return
         }
@@ -629,15 +1002,38 @@ class AppDelegate: NSObject, NSApplicationDelegate, PreviewController {
         }
     }
 
+    func toggleSimulator(_ simulator: BootedSimulator, position: Int) {
+        if let preview = simulatorPreviews.removeValue(forKey: simulator.udid) {
+            preview.stop()
+            return
+        }
+        let preview = LocalSimulatorPreview(simulator: simulator, position: position)
+        preview.onEnded = { [weak self] udid, error in
+            self?.simulatorPreviews.removeValue(forKey: udid)
+            if let error { reportPreviewFailure(simulator.name, error) }
+        }
+        simulatorPreviews[simulator.udid] = preview
+        preview.start()
+    }
+
     func nextPosition() -> Int {
         var pos = 0
+        // Simulator previews by the position they were given, so one still
+        // starting -- no window yet -- is not handed out twice.
         let used = Set(activePreviews.values.map { Int(($0.window.frame.origin.x - 50) / 420) })
+            .union(simulatorPreviews.values.map(\.position))
         while used.contains(pos) { pos += 1 }
         return pos
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         return false  // User quits via ⌘Q or menu
+    }
+
+    /// A quern-media this app started would otherwise outlive it.
+    func applicationWillTerminate(_ notification: Notification) {
+        for preview in simulatorPreviews.values { preview.stop() }
+        simulatorPreviews.removeAll()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -870,21 +1266,38 @@ final class MJPEGClient: NSObject, URLSessionDataDelegate {
 /// the stream's own proportions from the first frame that arrives -- the
 /// stream advertises no dimensions before then, which is the same problem
 /// `StreamAspectSizer` solves for capture devices by polling the input port.
+///
+/// A stream that drops after it has been working leaves the window open,
+/// greyed under an OFF AIR label, and reconnects until it comes back or the
+/// window is closed. It used to close the window: a simulator rebooting, or
+/// quern-media restarting, took the preview away along with the person's
+/// window position, and a frozen last frame left on screen would have read
+/// as a live one. A stream that never worked still fails the add.
 final class StreamPreviewSession: NSObject, NSWindowDelegate, PreviewSessionKind {
     let sessionKey: String
     let window: NSWindow
     var onWindowClosed: ((String) -> Void)?
 
     private let url: URL
+    private let title: String
     private let imageLayer = CALayer()
+    private let offAirLayer = CALayer()
     private var client: MJPEGClient?
     private var haveSized = false
     private var connected = false
-    private var reported = false
+    private var closed = false
+    private(set) var isOffAir = false
+    private var retries = 0
+    private var retry: DispatchWorkItem?
+    /// Which connection's callbacks are current. A counter rather than the
+    /// client itself: capturing the client in its own callbacks made each
+    /// one keep itself alive, and an off-air window leaked one per retry.
+    private var generation = 0
 
     init(sessionKey: String, title: String, url: URL, position: Int) {
         self.sessionKey = sessionKey
         self.url = url
+        self.title = title
 
         let screenFrame = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
         let windowWidth: CGFloat = 400
@@ -901,16 +1314,22 @@ final class StreamPreviewSession: NSObject, NSWindowDelegate, PreviewSessionKind
         window.title = title
         window.isReleasedWhenClosed = false
 
-        imageLayer.frame = NSRect(x: 0, y: 0, width: windowWidth, height: windowHeight)
+        let bounds = NSRect(x: 0, y: 0, width: windowWidth, height: windowHeight)
+        imageLayer.frame = bounds
         imageLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
         // Matches AVCaptureVideoPreviewLayer's .resizeAspect, so a stream
         // whose window has not been sized yet letterboxes rather than stretches.
         imageLayer.contentsGravity = .resizeAspect
         imageLayer.backgroundColor = NSColor.black.cgColor
 
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: windowWidth, height: windowHeight))
+        let view = NSView(frame: bounds)
         view.wantsLayer = true
+        // The greyscale filter below is a Core Image filter on a layer, which
+        // AppKit only applies to a view that opts in.
+        view.layerUsesCoreImageFilters = true
         view.layer?.addSublayer(imageLayer)
+        Self.buildOffAirLayer(offAirLayer, bounds: bounds, scale: window.backingScaleFactor)
+        view.layer?.addSublayer(offAirLayer)
         window.contentView = view
 
         super.init()
@@ -918,40 +1337,82 @@ final class StreamPreviewSession: NSObject, NSWindowDelegate, PreviewSessionKind
         window.makeKeyAndOrderFront(nil)
     }
 
-    /// Called once the stream's HTTP response arrives, on the main queue.
+    /// A dimming layer over the picture, with "OFF AIR" in a red box centred
+    /// on it. Hidden until the stream drops.
+    private static func buildOffAirLayer(_ layer: CALayer, bounds: NSRect, scale: CGFloat) {
+        layer.frame = bounds
+        layer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        layer.backgroundColor = NSColor.black.withAlphaComponent(0.6).cgColor
+        layer.isHidden = true
+        layer.layoutManager = CAConstraintLayoutManager()
+
+        let red = NSColor(calibratedRed: 0.89, green: 0.2, blue: 0.2, alpha: 1)
+        let font = NSFont.systemFont(ofSize: 34, weight: .heavy)
+        let text = NSAttributedString(string: "OFF AIR", attributes: [
+            .font: font, .foregroundColor: red, .kern: 4,
+        ])
+        let size = text.size()
+
+        let label = CATextLayer()
+        label.string = text
+        label.contentsScale = scale
+        label.alignmentMode = .center
+        label.bounds = CGRect(x: 0, y: 0, width: ceil(size.width), height: ceil(size.height))
+
+        let box = CALayer()
+        box.bounds = CGRect(x: 0, y: 0, width: label.bounds.width + 44, height: label.bounds.height + 20)
+        box.borderColor = red.cgColor
+        box.borderWidth = 3
+        box.cornerRadius = 8
+        box.backgroundColor = NSColor.black.withAlphaComponent(0.6).cgColor
+        box.layoutManager = CAConstraintLayoutManager()
+        for layer in [label, box] {
+            layer.addConstraint(CAConstraint(attribute: .midX, relativeTo: "superlayer", attribute: .midX))
+            layer.addConstraint(CAConstraint(attribute: .midY, relativeTo: "superlayer", attribute: .midY))
+        }
+        box.addSublayer(label)
+        layer.addSublayer(box)
+    }
+
+    /// Called once the stream's HTTP response first arrives, on the main
+    /// queue. Not again after a reconnect: the add was acknowledged once.
     var onConnected: (() -> Void)?
 
-    /// Called once, on the main queue, when the stream ends or fails. The
-    /// flag says whether the add had already been acknowledged, which decides
-    /// whether the server hears a failed add or a closed window.
-    var onFailed: ((Bool, String) -> Void)?
+    /// Called once, on the main queue, if the stream fails before it ever
+    /// connected. The window has closed itself by then.
+    var onFailed: ((String) -> Void)?
+
+    /// Called on the main queue when the window goes off air (with the
+    /// reason) and when it comes back (with nil).
+    var onOffAir: ((String?) -> Void)?
 
     func start() {
+        connect()
+    }
+
+    private func connect() {
+        generation += 1
+        let mine = generation
         let client = MJPEGClient(
             url: url,
             onConnected: { [weak self] in
                 DispatchQueue.main.async {
-                    guard let self else { return }
+                    guard let self, !self.closed, self.generation == mine else { return }
+                    guard !self.connected else { return }
                     self.connected = true
                     self.onConnected?()
                 }
             },
             onFrame: { [weak self] image in
-                DispatchQueue.main.async { self?.show(image) }
+                DispatchQueue.main.async {
+                    guard let self, !self.closed, self.generation == mine else { return }
+                    self.show(image)
+                }
             },
             onError: { [weak self] message in
-                // A dead stream used to be logged and nothing else: the
-                // window stayed on screen showing its last frame, the
-                // URLSession kept the delegate alive, and the server went on
-                // believing the preview was running -- the same failure the
-                // capture path handles in deviceVanished.
                 DispatchQueue.main.async {
-                    guard let self, !self.reported else { return }
-                    self.reported = true
-                    fputs("  stream \(self.sessionKey): \(message)\n", stderr)
-                    let wasAcknowledged = self.connected
-                    self.stop()
-                    self.onFailed?(wasAcknowledged, message)
+                    guard let self, !self.closed, self.generation == mine else { return }
+                    self.streamFailed(message)
                 }
             }
         )
@@ -959,7 +1420,51 @@ final class StreamPreviewSession: NSObject, NSWindowDelegate, PreviewSessionKind
         client.start()
     }
 
+    /// A stream that never connected fails the add, as it always has. One
+    /// that had been working goes off air and is retried.
+    private func streamFailed(_ message: String) {
+        client?.stop()
+        client = nil
+        generation += 1  // nothing more from the client just stopped
+        fputs("  stream \(sessionKey): \(message)\n", stderr)
+        guard connected else {
+            closed = true
+            window.delegate = nil
+            window.close()
+            onFailed?(message)
+            return
+        }
+        setOffAir(true, reason: message)
+        // 0.5s doubling to 5s: quick enough to catch a restart, slow enough
+        // that a simulator left shut down costs almost nothing.
+        let delay = min(5.0, 0.5 * pow(2.0, Double(min(retries, 4))))
+        retries += 1
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.closed else { return }
+            self.connect()
+        }
+        retry = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func setOffAir(_ off: Bool, reason: String? = nil) {
+        guard off != isOffAir else { return }
+        isOffAir = off
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        offAirLayer.isHidden = !off
+        imageLayer.filters = off
+            ? [CIFilter(name: "CIColorControls", parameters: [kCIInputSaturationKey: 0])].compactMap { $0 }
+            : nil
+        CATransaction.commit()
+        window.title = off ? "\(title) — Off Air" : title
+        onOffAir?(off ? (reason ?? "stream lost") : nil)
+    }
+
     func stop() {
+        closed = true
+        retry?.cancel()
+        retry = nil
         client?.stop()
         client = nil
         window.delegate = nil
@@ -967,6 +1472,10 @@ final class StreamPreviewSession: NSObject, NSWindowDelegate, PreviewSessionKind
     }
 
     private func show(_ image: CGImage) {
+        if isOffAir {
+            retries = 0
+            setOffAir(false)
+        }
         // Layer contents are not animatable here; without this every frame
         // cross-fades into the last and the preview smears.
         CATransaction.begin()
@@ -984,11 +1493,15 @@ final class StreamPreviewSession: NSObject, NSWindowDelegate, PreviewSessionKind
     }
 
     func windowWillClose(_ notification: Notification) {
+        closed = true
+        retry?.cancel()
+        retry = nil
         client?.stop()
         client = nil
         onWindowClosed?(sessionKey)
     }
 }
+
 
 class PreviewSession: NSObject, NSWindowDelegate, PreviewSessionKind {
     let deviceName: String
@@ -1075,11 +1588,19 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
     var allDevices: [AVCaptureDevice] = []
     var positions: Set<Int> = []
     var stdinConnected = true
+    let simulators = SimulatorWatcher()
+    /// Simulator previews opened from the menu after the server went away,
+    /// each with its own quern-media. Keyed by udid.
+    var localSimulators: [String: LocalSimulatorPreview] = [:]
+    /// Previews the person closed while the server may still be opening
+    /// them. Closing one mid-add fails that add, and the person should not
+    /// then be told their own close was an error.
+    var closedByPerson: Set<String> = []
     let devicesMenuDelegate = DevicesMenuDelegate()
     private var deviceObservers: [NSObjectProtocol] = []
 
     var activeSessionKeys: Set<String> {
-        return Set(sessions.keys)
+        return Set(sessions.keys).union(localSimulators.keys)
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -1087,6 +1608,8 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
         loadAppIcon()
         devicesMenuDelegate.controller = self
         setupMenuBar(devicesMenuDelegate: devicesMenuDelegate, quitTarget: self, quitAction: #selector(menuQuit(_:)))
+        simulators.onChange = { [weak self] in self?.devicesMenuDelegate.simulatorsChanged() }
+        simulators.start()
         enableScreenCaptureDevices()
         deviceObservers = observeDeviceChanges(
             onConnect: { [weak self] device in self?.deviceAppeared(device) },
@@ -1185,6 +1708,14 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
                 return
             }
             handleRemove(key: key, id: id)
+
+        case "open_failed":
+            // A simulator picked from the Devices menu that the server could
+            // not open. The person is looking at this app, not the server log.
+            let key = (json["key"] as? String) ?? ""
+            if closedByPerson.remove(key) != nil { break }
+            let name = simulators.booted.first(where: { $0.udid == key })?.name ?? key
+            reportPreviewFailure(name, json["error"] as? String ?? "unknown error")
 
         case "list":
             handleList()
@@ -1327,21 +1858,24 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
             self?.onWindowClosed(name: closedKey)
         }
 
-        // `stop()` clears the window delegate, so a stream that dies reports
-        // itself here rather than through windowWillClose. Before the
-        // acknowledgement it is a failed add; after it, the window is simply
-        // gone, and the server tears down quern-media on that.
-        session.onFailed = { [weak self, weak session] wasAcknowledged, message in
+        // A stream that fails before it ever connected closes its window and
+        // fails the add. One that drops later goes off air and reconnects;
+        // the server hears about it so preview_status can say so.
+        session.onFailed = { [weak self, weak session] message in
             guard let self, let session, self.sessions[key] === session else { return }
             self.sessions.removeValue(forKey: key)
             self.rebuildPositions()
-            if wasAcknowledged {
-                self.emit(["event": "window_closed", "key": key])
+            self.emit([
+                "event": "add_failed", "key": key,
+                "error": message, "id": id as Any,
+            ])
+        }
+        session.onOffAir = { [weak self, weak session] reason in
+            guard let self, let session, self.sessions[key] === session else { return }
+            if let reason {
+                self.emit(["event": "off_air", "key": key, "reason": reason])
             } else {
-                self.emit([
-                    "event": "add_failed", "key": key,
-                    "error": message, "id": id as Any,
-                ])
+                self.emit(["event": "on_air", "key": key])
             }
         }
 
@@ -1390,6 +1924,8 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
             session.stop()
         }
         sessions.removeAll()
+        for preview in localSimulators.values { preview.stop() }
+        localSimulators.removeAll()
         NSApplication.shared.terminate(nil)
     }
 
@@ -1399,9 +1935,43 @@ class InteractiveDelegate: NSObject, NSApplicationDelegate, PreviewController {
 
     func togglePreview(key: String, position: Int) {
         if sessions[key] != nil {
-            handleRemove(key: key)
+            closeFromMenu(key)
         } else {
             handleAdd(name: key, position: position)
+        }
+    }
+
+    /// A preview unticked in the Devices menu is reported as a closed window,
+    /// which is what it is to the server. `handleRemove` answers the server's
+    /// own remove with `removed`, and the server drops an unsolicited one --
+    /// so a capture preview closed this way stayed in preview_status, and a
+    /// simulator's quern-media kept running.
+    private func closeFromMenu(_ key: String) {
+        guard let session = sessions[key] else { return }
+        session.onWindowClosed = nil
+        session.stop()
+        closedByPerson.insert(key)
+        onWindowClosed(name: key)
+    }
+
+    func toggleSimulator(_ simulator: BootedSimulator, position: Int) {
+        if sessions[simulator.udid] != nil {
+            closeFromMenu(simulator.udid)
+        } else if let local = localSimulators.removeValue(forKey: simulator.udid) {
+            local.stop()
+        } else if stdinConnected {
+            // The server opens it, so it owns the stream; the window arrives
+            // as an ordinary add_stream.
+            closedByPerson.remove(simulator.udid)
+            emit(["event": "open_simulator", "key": simulator.udid, "name": simulator.name])
+        } else {
+            let preview = LocalSimulatorPreview(simulator: simulator, position: position)
+            preview.onEnded = { [weak self] udid, error in
+                self?.localSimulators.removeValue(forKey: udid)
+                if let error { reportPreviewFailure(simulator.name, error) }
+            }
+            localSimulators[simulator.udid] = preview
+            preview.start()
         }
     }
 
