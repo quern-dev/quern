@@ -1694,6 +1694,38 @@ class TestOffAir:
         mgr._dispatch_event({"event": "on_air", "key": "SIM"})
         assert mgr.status()["active"]["SIM"]["on_air"] is True
 
+    def test_a_later_reason_replaces_the_first(self):
+        """A window off air reports again when the reason changes -- "the
+        stream ended" giving way to "the simulator is shutdown" once its
+        reconnects are refused. The status must show the current one."""
+        mgr = self._manager_with_simulator()
+        mgr._dispatch_event({"event": "off_air", "key": "SIM", "reason": "the stream ended"})
+        mgr._dispatch_event(
+            {"event": "off_air", "key": "SIM", "reason": "the simulator is shutdown"}
+        )
+        status = mgr.status()["active"]["SIM"]
+        assert status["on_air"] is False
+        assert status["off_air_reason"] == "the simulator is shutdown"
+
+    def test_the_server_s_own_reason_is_not_replaced_by_the_window_s(self):
+        """When quern-media crashes the server records why -- its last log
+        line, the only diagnostic -- and restarts it after a backoff. The
+        window's retries meanwhile find nothing listening and report "quern-
+        media is not running", which used to replace that reason in
+        preview_status for exactly the stretch an agent would read it."""
+        mgr = self._manager_with_simulator()
+        mgr._mark_off_air("SIM", "quern-media exited: [capture] lost the framebuffer")
+        mgr._dispatch_event(
+            {"event": "off_air", "key": "SIM", "reason": "quern-media is not running"}
+        )
+        status = mgr.status()["active"]["SIM"]
+        assert status["off_air_reason"] == "quern-media exited: [capture] lost the framebuffer"
+
+        mgr._dispatch_event({"event": "on_air", "key": "SIM"})
+        mgr._dispatch_event({"event": "off_air", "key": "SIM", "reason": "the stream ended"})
+        status = mgr.status()["active"]["SIM"]
+        assert status["off_air_reason"] == "the stream ended", "the hold outlived the restart"
+
     def test_a_capture_device_has_no_on_air_field(self):
         """CoreMediaIO previews have no OFF AIR state; reporting on_air: true
         for them would be a claim nothing checked."""

@@ -13,6 +13,7 @@
 // Build: swiftc -o ios-preview tools/ios-preview/main.swift \
 //          macos/QuernMedia/Sources/QuernMedia/Encode/JPEGFraming.swift \
 //          macos/QuernMedia/Sources/QuernMedia/Capture/SimulatorList.swift \
+//          macos/QuernMedia/Sources/QuernMedia/Sinks/StreamRefusal.swift \
 //          -framework AVFoundation -framework CoreMediaIO -framework AppKit
 //
 // Named main.swift because it is top-level code: Swift allows that only
@@ -1109,6 +1110,11 @@ final class MJPEGClient: NSObject, URLSessionDataDelegate {
     /// not once per stream. Measured: the acknowledgement fired on every frame
     /// until this gate went in.
     private var announced = false
+    /// A response other than 200, and what it said. quern-media puts the
+    /// reason in the body -- "the simulator is shutdown" with a 503 -- and
+    /// cancelling on the status alone threw that away, so a window off air
+    /// could only say "HTTP 503". Delegate queue only.
+    private var refusal: (code: Int, body: Data)?
 
     init(
         url: URL,
@@ -1220,17 +1226,22 @@ final class MJPEGClient: NSObject, URLSessionDataDelegate {
                 announced = true
                 onConnected()
             }
-            completionHandler(.allow)
         } else {
-            onError("stream returned HTTP \(code)")
-            completionHandler(.cancel)
+            // Read the body before reporting: it is the reason.
+            refusal = (code, Data())
         }
+        completionHandler(.allow)
     }
 
     func urlSession(
         _ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data
     ) {
         guard !isStopped else { return }
+        if let refused = refusal {
+            // Short by construction; capped so a stray large body cannot grow.
+            refusal = (refused.code, refused.body + data.prefix(max(0, 1024 - refused.body.count)))
+            return
+        }
         lock.lock()
         lastDataAt = Date()
         lock.unlock()
@@ -1253,7 +1264,13 @@ final class MJPEGClient: NSObject, URLSessionDataDelegate {
         _ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?
     ) {
         guard !isStopped else { return }
-        onError(error?.localizedDescription ?? "stream ended")
+        if let refusal {
+            onError(StreamRefusal.describe(code: refusal.code, body: refusal.body))
+        } else if let error = error as? URLError, error.code == .cannotConnectToHost {
+            onError("quern-media is not running")
+        } else {
+            onError(error?.localizedDescription ?? "the stream ended")
+        }
     }
 
 }
@@ -1282,6 +1299,9 @@ final class StreamPreviewSession: NSObject, NSWindowDelegate, PreviewSessionKind
     private let title: String
     private let imageLayer = CALayer()
     private let offAirLayer = CALayer()
+    private let reasonLabel = CATextLayer()
+    /// The reason last reported while off air, so a change is reported too.
+    private var offAirReason: String?
     private var client: MJPEGClient?
     private var haveSized = false
     private var connected = false
@@ -1313,6 +1333,8 @@ final class StreamPreviewSession: NSObject, NSWindowDelegate, PreviewSessionKind
         )
         window.title = title
         window.isReleasedWhenClosed = false
+        // Below this the OFF AIR box and its reason no longer fit.
+        window.contentMinSize = NSSize(width: 220, height: 300)
 
         let bounds = NSRect(x: 0, y: 0, width: windowWidth, height: windowHeight)
         imageLayer.frame = bounds
@@ -1328,7 +1350,9 @@ final class StreamPreviewSession: NSObject, NSWindowDelegate, PreviewSessionKind
         // AppKit only applies to a view that opts in.
         view.layerUsesCoreImageFilters = true
         view.layer?.addSublayer(imageLayer)
-        Self.buildOffAirLayer(offAirLayer, bounds: bounds, scale: window.backingScaleFactor)
+        Self.buildOffAirLayer(
+            offAirLayer, reason: reasonLabel, bounds: bounds, scale: window.backingScaleFactor
+        )
         view.layer?.addSublayer(offAirLayer)
         window.contentView = view
 
@@ -1338,8 +1362,10 @@ final class StreamPreviewSession: NSObject, NSWindowDelegate, PreviewSessionKind
     }
 
     /// A dimming layer over the picture, with "OFF AIR" in a red box centred
-    /// on it. Hidden until the stream drops.
-    private static func buildOffAirLayer(_ layer: CALayer, bounds: NSRect, scale: CGFloat) {
+    /// on it and the reason underneath. Hidden until the stream drops.
+    private static func buildOffAirLayer(
+        _ layer: CALayer, reason: CATextLayer, bounds: NSRect, scale: CGFloat
+    ) {
         layer.frame = bounds
         layer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
         layer.backgroundColor = NSColor.black.withAlphaComponent(0.6).cgColor
@@ -1371,7 +1397,37 @@ final class StreamPreviewSession: NSObject, NSWindowDelegate, PreviewSessionKind
             layer.addConstraint(CAConstraint(attribute: .midY, relativeTo: "superlayer", attribute: .midY))
         }
         box.addSublayer(label)
+        box.name = "box"
         layer.addSublayer(box)
+
+        // Under the box, wrapping to the window's width. Layer coordinates
+        // here run upward, so "under" is a maxY below the box's minY.
+        //
+        // Every dimension is constrained. A constraint layout manager sizes
+        // anything left open to the layer's preferred size, which for a text
+        // layer is the font size -- 13pt for 13pt text, with nowhere for a
+        // descender to go -- so the "g" of "shutting down" lost its tail and
+        // every line its bottom pixel or two, whatever `bounds` had said.
+        reason.fontSize = 13
+        reason.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        reason.foregroundColor = NSColor.white.withAlphaComponent(0.85).cgColor
+        reason.alignmentMode = .center
+        reason.isWrapped = true
+        // A narrow window still says something, and says it was cut.
+        reason.truncationMode = .end
+        reason.contentsScale = scale
+        reason.bounds = CGRect(x: 0, y: 0, width: bounds.width - 40, height: 36)
+        reason.addConstraint(CAConstraint(attribute: .midX, relativeTo: "superlayer", attribute: .midX))
+        reason.addConstraint(CAConstraint(attribute: .maxY, relativeTo: "box", attribute: .minY, offset: -12))
+        reason.addConstraint(CAConstraint(
+            attribute: .width, relativeTo: "superlayer", attribute: .width, offset: -40
+        ))
+        // Two lines of 13pt with room below the baseline; scale 0 makes it a
+        // constant.
+        reason.addConstraint(CAConstraint(
+            attribute: .height, relativeTo: "superlayer", attribute: .height, scale: 0, offset: 40
+        ))
+        layer.addSublayer(reason)
     }
 
     /// Called once the stream's HTTP response first arrives, on the main
@@ -1448,8 +1504,21 @@ final class StreamPreviewSession: NSObject, NSWindowDelegate, PreviewSessionKind
     }
 
     private func setOffAir(_ off: Bool, reason: String? = nil) {
+        if off && isOffAir {
+            // Already off air, for a different reason now -- "the stream
+            // ended" giving way to "the simulator is shutdown" once the
+            // reconnects start being refused. Reported, or the window and
+            // preview_status keep the first reason for as long as it lasts.
+            guard let reason, reason != offAirReason else { return }
+            offAirReason = reason
+            reasonLabel.string = StreamRefusal.short(reason)
+            onOffAir?(reason)
+            return
+        }
         guard off != isOffAir else { return }
         isOffAir = off
+        offAirReason = off ? (reason ?? "stream lost") : nil
+        reasonLabel.string = offAirReason.map(StreamRefusal.short) ?? ""
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         offAirLayer.isHidden = !off
@@ -1458,7 +1527,7 @@ final class StreamPreviewSession: NSObject, NSWindowDelegate, PreviewSessionKind
             : nil
         CATransaction.commit()
         window.title = off ? "\(title) — Off Air" : title
-        onOffAir?(off ? (reason ?? "stream lost") : nil)
+        onOffAir?(offAirReason)
     }
 
     func stop() {

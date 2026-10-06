@@ -55,6 +55,8 @@ _SHARED_SOURCE_CANDIDATES = [
     / "Encode" / "JPEGFraming.swift",
     _PROJECT_ROOT / "macos" / "QuernMedia" / "Sources" / "QuernMedia"
     / "Capture" / "SimulatorList.swift",
+    _PROJECT_ROOT / "macos" / "QuernMedia" / "Sources" / "QuernMedia"
+    / "Sinks" / "StreamRefusal.swift",
 ]
 _RESOURCES_DIR = Path(__file__).resolve().parents[1] / "resources"  # server/device/resources
 
@@ -299,6 +301,11 @@ class ActivePreview:
     on_air: bool = True
     #: Why it is off air, while it is.
     off_air_reason: str | None = None
+    #: Set when the server recorded the reason itself -- quern-media exited,
+    #: or a restart failed -- which says more than the window can. The
+    #: window's own reports while it retries ("quern-media is not running",
+    #: until the restart lands) must not replace it.
+    off_air_by_server: bool = False
 
 
 @dataclass
@@ -583,9 +590,11 @@ class PreviewManager:
             preview = self._active.get(name)
             if preview is not None:
                 preview.on_air = evt_type == "on_air"
-                preview.off_air_reason = None if preview.on_air else (
-                    event.get("reason") or "stream lost"
-                )
+                if preview.on_air:
+                    preview.off_air_reason = None
+                    preview.off_air_by_server = False
+                elif not preview.off_air_by_server:
+                    preview.off_air_reason = event.get("reason") or "stream lost"
             if evt_type == "on_air" and name in self._streams:
                 # Back on air: a later exit starts its backoff from the top.
                 self._streams[name].restarts = 0
@@ -1023,6 +1032,7 @@ class PreviewManager:
         if preview is not None:
             preview.on_air = False
             preview.off_air_reason = reason
+            preview.off_air_by_server = True
 
     async def _wait_until_serving(self, udid: str, stream: _StreamProcess) -> None:
         """Wait until quern-media accepts a connection, or say why it will not.

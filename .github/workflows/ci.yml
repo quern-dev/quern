@@ -203,15 +203,17 @@ jobs:
       - name: Compile ios-preview
         working-directory: .
         # Nothing else builds this. It is a swiftc invocation outside SwiftPM
-        # -- the script plus the files it shares with the package, the frame
-        # parser and the simulator list -- so `swift build` and `swift test`
-        # stay green while an edit to one of those breaks `quern setup` for
-        # every user. Mirrors the command in build_preview_bundle.
+        # -- the script plus the files it shares with the package: the frame
+        # parser, the simulator list and the stream refusal wording -- so
+        # `swift build` and `swift test` stay green while an edit to one of
+        # those breaks `quern setup` for every user. Mirrors the command in
+        # build_preview_bundle.
         run: |
           swiftc -o /tmp/ios-preview \
             tools/ios-preview/main.swift \
             macos/QuernMedia/Sources/QuernMedia/Encode/JPEGFraming.swift \
             macos/QuernMedia/Sources/QuernMedia/Capture/SimulatorList.swift \
+            macos/QuernMedia/Sources/QuernMedia/Sinks/StreamRefusal.swift \
             -framework AVFoundation -framework CoreMediaIO -framework AppKit
 
   mcp-build:
