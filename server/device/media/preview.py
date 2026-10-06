@@ -1025,13 +1025,29 @@ class PreviewManager:
                 self._mark_off_air(udid, why)
                 continue
             fresh.restarts = attempt
-            # Listening again, so the hold on the server's reason has done
-            # its job: it covered the stretch when the window could only say
-            # "quern-media is not running". What the window reports from now
-            # on comes from the new quern-media -- a 503 naming a simulator
-            # that is still shut down, say -- and is current, so it applies.
-            # Kept, the hold would show the old exit for as long as the
-            # simulator stayed down, since no picture arrives to end it.
+            # Spawned is not listening. Released before the port accepts, the
+            # hold let a retry landing in between -- "quern-media is not
+            # running" -- replace the server's reason all over again.
+            try:
+                await self._wait_until_serving(udid, fresh)
+            except asyncio.CancelledError:
+                return
+            except RuntimeError as exc:
+                # It exited, or never served. An exit is restarted by its own
+                # drain, so this loop stops rather than run a second one for
+                # the same stream. The window still cannot reach it, so the
+                # server's reason stays, saying so.
+                self._mark_off_air(udid, f"restarted quern-media is not serving: {exc}")
+                return
+            if self._streams.get(udid) is not fresh:
+                return  # stopped or replaced while it came up
+            # Listening, so the hold has done its job: it covered the stretch
+            # when the window could only say "quern-media is not running".
+            # What the window reports from now on comes from the new
+            # quern-media -- a 503 naming a simulator that is still shut down,
+            # say -- and is current, so it applies. Kept, the hold would show
+            # the old exit for as long as the simulator stayed down, since no
+            # picture arrives to end it.
             preview = self._active.get(udid)
             if preview is not None:
                 preview.off_air_by_server = False

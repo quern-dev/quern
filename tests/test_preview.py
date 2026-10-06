@@ -1739,6 +1739,18 @@ class TestOffAir:
 
 
 
+async def _serving(*_args, **_kwargs):
+    """Stands in for asyncio.open_connection when quern-media is listening."""
+    class _Writer:
+        def close(self):
+            pass
+
+        async def wait_closed(self):
+            pass
+
+    return None, _Writer()
+
+
 class TestStreamRestart:
     """A quern-media that exits while its window is open is restarted on the
     same port, which the window -- off air and reconnecting -- picks up."""
@@ -1756,6 +1768,7 @@ class TestStreamRestart:
         monkeypatch.setattr(preview, "STREAM_RESTART_DELAYS", (0.0,))
         monkeypatch.setattr(preview, "build_media_engine", _build)
         monkeypatch.setattr(preview.asyncio, "create_subprocess_exec", _spawn)
+        monkeypatch.setattr(preview.asyncio, "open_connection", _serving)
         return PreviewManager()
 
     def _dead_stream(self, mgr, udid, port=8424):
@@ -1852,6 +1865,7 @@ class TestStreamRestartSchedule:
 
         monkeypatch.setattr(preview, "build_media_engine", _build)
         monkeypatch.setattr(preview.asyncio, "create_subprocess_exec", spawn)
+        monkeypatch.setattr(preview.asyncio, "open_connection", _serving)
         mgr = PreviewManager()
         stream = preview._StreamProcess(
             process=_FakeStreamProcess(stderr_lines=["[capture] gone"], exit_code=1),
@@ -1955,6 +1969,8 @@ class TestStreamRestartSchedule:
 
 
 class TestServerReasonHoldIsReleased:
+    dial = staticmethod(_serving)
+
     def test_a_restarted_stream_lets_a_current_reason_through(self, monkeypatch):
         """quern-media crashed while its simulator was also shut down. The
         restart succeeds, but the new one only refuses with 503 -- the
@@ -1972,6 +1988,7 @@ class TestServerReasonHoldIsReleased:
         monkeypatch.setattr(preview, "STREAM_RESTART_DELAYS", (0.0,))
         monkeypatch.setattr(preview, "build_media_engine", _build)
         monkeypatch.setattr(preview.asyncio, "create_subprocess_exec", _spawn)
+        monkeypatch.setattr(preview.asyncio, "open_connection", self.dial)
 
         mgr = PreviewManager()
         stream = preview._StreamProcess(
@@ -1995,3 +2012,51 @@ class TestServerReasonHoldIsReleased:
         status = asyncio.run(run())
         assert status["on_air"] is False
         assert status["off_air_reason"] == "the simulator is shutdown"
+
+
+class TestServerReasonHeldUntilServing:
+    """Spawned is not listening. A retry that lands before the restarted
+    quern-media accepts finds nothing there, and its "not running" must not
+    replace the server's reason."""
+
+    @staticmethod
+    async def dial(*_args, **_kwargs):
+        raise ConnectionRefusedError("not yet")
+
+    def test_a_retry_before_the_restart_serves_keeps_the_server_s_reason(self, monkeypatch):
+        from server.device.media import preview
+        from server.device.media.preview import ActivePreview
+
+        async def _build():
+            return "/tmp/quern-media"
+
+        async def _spawn(*_args, **_kwargs):
+            return _LiveStreamProcess()
+
+        monkeypatch.setattr(preview, "STREAM_RESTART_DELAYS", (0.0,))
+        monkeypatch.setattr(preview, "STREAM_START_TIMEOUT", 0.3)
+        monkeypatch.setattr(preview, "build_media_engine", _build)
+        monkeypatch.setattr(preview.asyncio, "create_subprocess_exec", _spawn)
+        monkeypatch.setattr(preview.asyncio, "open_connection", self.dial)
+
+        mgr = PreviewManager()
+        stream = preview._StreamProcess(
+            process=_FakeStreamProcess(stderr_lines=["[capture] crashed"], exit_code=1),
+            port=8424, log=deque(maxlen=20),
+        )
+        mgr._streams["SIM"] = stream
+        mgr._active["SIM"] = ActivePreview(
+            name="SIM", position=0, kind="simulator", stream_port=8424
+        )
+
+        async def run():
+            await mgr._drain_stream("SIM", stream)        # restarts; never serves
+            mgr._dispatch_event(
+                {"event": "off_air", "key": "SIM", "reason": "quern-media is not running"}
+            )
+            status = mgr.status()["active"]["SIM"]
+            await mgr._stop_stream("SIM")
+            return status
+
+        status = asyncio.run(run())
+        assert status["off_air_reason"].startswith("restarted quern-media is not serving")
