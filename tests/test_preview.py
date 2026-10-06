@@ -1801,6 +1801,9 @@ async def _bounded(task, seconds=2.0):
     if pending:
         task.cancel()
         pytest.fail("the restart loop did not stop after the preview went away")
+    # Done, so this returns at once -- and raises whatever the loop raised,
+    # which `asyncio.wait` reports as finished without saying how.
+    await task
 
 
 class TestStreamRestartSchedule:
