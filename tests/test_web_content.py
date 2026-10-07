@@ -630,3 +630,36 @@ def test_a_probed_field_keeps_its_value():
                            "frame": {"x": 0, "y": 0, "width": 10, "height": 10}}])[0]
     assert element["value"] == "someone@example.test"
     assert element["interactive"] is True
+
+
+def test_a_password_input_never_reports_its_value():
+    """The page script reads `n.value`, which for a password input is the real
+    password; projected as a plain TextField with that value, it came back from
+    type_text in `value` and in a mismatch error, and stood in for the label in
+    the tree. It is a SecureTextField reporting dots -- whatever the page script
+    sent, so an older script cannot leak it either."""
+    from server.device.web.web_content import project
+
+    raw = {"tag": "input", "type": "password", "text": "hunter2", "value": "hunter2",
+           "x": 10, "y": 10, "width": 200, "height": 40, "interactive": True}
+    [element] = project({"elements": [raw]}, Anchor(dx=0, dy=0))
+    assert element["type"] == "SecureTextField"
+    assert element["value"] == "•" * 7
+    assert "hunter2" not in repr(element)
+
+    plain = dict(raw, type="text", text="hello", value="hello")
+    [element] = project({"elements": [plain]}, Anchor(dx=0, dy=0))
+    assert element["type"] == "TextField"
+    assert element["value"] == "hello"
+
+
+def test_the_page_script_redacts_a_password_before_it_leaves_the_page():
+    """The first guard is in the page: the value is dots and never the label."""
+    from pathlib import Path
+
+    from server.device.web import webinspector
+
+    source = Path(webinspector.__file__).read_text()
+    assert "var secret = tag === 'input'" in source
+    assert "(secret ? '' : n.value)" in source
+    assert "secret ? ('\\u2022'.repeat(" in source

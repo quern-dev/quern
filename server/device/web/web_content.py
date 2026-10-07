@@ -75,11 +75,28 @@ def _element_type(element: dict) -> str:
         return "Button"
     if tag == "a":
         return "Link"
+    if tag == "input" and _is_password(element):
+        return "SecureTextField"
     if tag in ("input", "textarea", "select"):
         return "TextField"
     if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
         return "Heading"
     return "StaticText"
+
+
+def _is_password(element: dict) -> bool:
+    return (element.get("type") or "").lower() == "password"
+
+
+def _redacted_value(element: dict):
+    """A password input's value as dots, the way a native secure field reports
+    itself. The page script already does this; repeated here so a page script
+    from before that change, or a future one that forgets, cannot put a
+    password into the tree, a typing result or an error message."""
+    value = element.get("value")
+    if value and _is_password(element) and set(value) != {"\u2022"}:
+        return "\u2022" * len(value)
+    return value
 
 
 def project(contents: dict, anchor: Anchor, *, page_id: int | None = None) -> list[dict]:
@@ -91,7 +108,8 @@ def project(contents: dict, anchor: Anchor, *, page_id: int | None = None) -> li
             continue
         projected.append({
             "type": _element_type(element),
-            "AXLabel": normalise(element.get("text")),
+            "AXLabel": normalise(element.get("text")) if not _is_password(element)
+            or element.get("text") != element.get("value") else "",
             "frame": frame,
             "enabled": True,
             "source": "web-inspector",
@@ -99,7 +117,7 @@ def project(contents: dict, anchor: Anchor, *, page_id: int | None = None) -> li
             "tag": element.get("tag"),
             "href": element.get("href"),
             "interactive": bool(element.get("interactive")),
-            "value": element.get("value"),
+            "value": _redacted_value(element),
             "page_id": page_id,
         })
     return projected

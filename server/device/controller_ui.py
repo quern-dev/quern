@@ -3281,23 +3281,37 @@ class DeviceControllerUI:
         await asyncio.sleep(0.3)
 
         after = await self._read_field_value(resolved, target, label, identifier)
-        outcome = self._typing_outcome(before, after, text, target.type)
+        secure = self._is_secure_field(target)
+        outcome = self._typing_outcome(before, after, text, secure)
         if outcome != "landed":
             raise DeviceError(
-                self._typing_failure(
-                    outcome, before, after, text, label or identifier, target.type,
-                ),
+                self._typing_failure(outcome, before, after, text, label or identifier, secure),
                 tool=self._backend_name(resolved),
             )
         result: dict = {"udid": resolved, "verified": True}
-        if target.type != "SecureTextField":
+        if not secure:
             # What the field holds now, so a caller can compare for itself.
             # Never for a secure field, which reports dots.
             result["value"] = after
         return result
 
     @staticmethod
-    def _typing_outcome(before: str, after: str | None, text: str, kind: str) -> str:
+    def _is_secure_field(target) -> bool:
+        """A password field, however the backend names it.
+
+        WDA reports `SecureTextField`. The accessibility tree that sim-bridge
+        and idb read reports a plain `TextField` with the subrole
+        `AXSecureTextField` (element_types.py records that pairing), and the
+        web reader maps `<input type="password">` to `SecureTextField`.
+        Checking the type alone missed the simulator's, whose dots can never
+        contain the typed text, and blamed auto-capitalization for it.
+        """
+        if target.type == "SecureTextField":
+            return True
+        return "securetextfield" in (target.role_description or "").lower()
+
+    @staticmethod
+    def _typing_outcome(before: str, after: str | None, text: str, secure: bool) -> str:
         """How the field's value moved: "landed", "unreadable", "unchanged",
         "short" (a secure field that did not grow by the text's length) or
         "mismatch" (it changed, but does not contain the text).
@@ -3312,15 +3326,18 @@ class DeviceControllerUI:
             return "unreadable"
         if after == before:
             return "unchanged"
-        if kind == "SecureTextField":
+        if secure:
             # A secure field reports dots, so the text itself is never visible;
-            # the length is the only evidence available.
-            return "landed" if len(after) >= len(before) + len(text) else "short"
+            # the length is the only evidence available. iOS clears a secure
+            # field when typing resumes after it regained focus, so holding
+            # exactly the typed length is a landing too, not a loss.
+            grew = len(after) >= len(before) + len(text)
+            return "landed" if grew or len(after) == len(text) else "short"
         return "landed" if text in after else "mismatch"
 
     @staticmethod
     def _typing_failure(
-        outcome: str, before: str, after: str | None, text: str, field: str, kind: str,
+        outcome: str, before: str, after: str | None, text: str, field: str, secure: bool,
     ) -> str:
         """Says what happened, for each way it can go wrong.
 
@@ -3342,12 +3359,16 @@ class DeviceControllerUI:
                     "characters). The tap may not have taken focus, or the field may "
                     "be read-only.")
         if outcome == "short":
-            return (f"{typed} but the secure field grew by only {len(after) - len(before)} "
-                    "characters. Keystrokes were lost, or focus moved while typing.")
+            return (f"{typed} but the secure field now holds {len(after)} characters "
+                    f"(it held {len(before)}). Keystrokes were lost, or focus moved while "
+                    "typing.")
         shown = after if len(after) <= 200 else after[:200] + "…"
         where = ""
         added = after[len(before):] if after.startswith(before) else None
-        if added is not None:
+        if added is not None and text.startswith(added):
+            # Every character that arrived was right; the rest never did.
+            where = f" It received only the first {len(added)} of the {len(text)} characters."
+        elif added is not None:
             differs = next(
                 (i for i, (a, b) in enumerate(zip(added, text)) if a != b),
                 min(len(added), len(text)),

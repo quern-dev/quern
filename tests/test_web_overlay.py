@@ -870,12 +870,24 @@ def test_a_secure_field_is_verified_by_length_not_content():
     """A password field reports dots, so the typed text is never visible in the
     value and a containment check would fail every time."""
     outcome = DeviceController._typing_outcome
-    assert outcome("", "•" * 5, "hello", "SecureTextField") == "landed"
-    assert outcome("", "", "hello", "SecureTextField") == "unchanged"
-    assert outcome("", "••", "hello", "SecureTextField") == "short"
+    assert outcome("", "•" * 5, "hello", True) == "landed"
+    assert outcome("", "", "hello", True) == "unchanged"
+    assert outcome("", "••", "hello", True) == "short"
     # And an ordinary field still checks the content, so text landing in some
     # other field cannot pass.
-    assert outcome("", "goodbye", "hello", "TextField") == "mismatch"
+    assert outcome("", "goodbye", "hello", False) == "mismatch"
+
+
+def test_a_secure_field_cleared_on_refocus_still_counts():
+    """iOS clears a secure field when typing resumes after it regained focus,
+    so eight dots becoming three after typing three characters is a landing --
+    and was reported as "grew by only -5 characters"."""
+    outcome = DeviceController._typing_outcome
+    assert outcome("•" * 8, "•" * 3, "abc", True) == "landed"
+    assert outcome("•" * 8, "•" * 2, "abc", True) == "short"
+    message = DeviceController._typing_failure("short", "•" * 8, "••", "abc", "pw", True)
+    assert "-" not in message.split("characters")[0], message
+    assert "now holds 2 characters" in message
 
 
 def test_the_comparison_stays_exact():
@@ -883,9 +895,38 @@ def test_the_comparison_stays_exact():
     also forgive it in a case-sensitive field -- a username, a code -- where the
     rewrite is the bug. So it is a mismatch, reported as one."""
     outcome = DeviceController._typing_outcome
-    assert outcome("", "Qft found it 0001", "qft found it 0001", "TextArea") == "mismatch"
-    assert outcome("", "qft found it 0001", "qft found it 0001", "TextArea") == "landed"
-    assert outcome("abc ", "abc def", "def", "TextArea") == "landed"
+    assert outcome("", "Qft found it 0001", "qft found it 0001", False) == "mismatch"
+    assert outcome("", "qft found it 0001", "qft found it 0001", False) == "landed"
+    assert outcome("abc ", "abc def", "def", False) == "landed"
+
+
+def test_lost_keystrokes_say_how_many_arrived():
+    """Six of seven characters arriving used to read "differs from character
+    7" -- one past the end of what arrived, rather than "the rest are missing"."""
+    message = DeviceController._typing_failure("mismatch", "", "abcdef", "abcdefg", "f", False)
+    assert "received only the first 6 of the 7 characters" in message
+    assert "differs" not in message
+
+
+def test_a_long_value_is_cut_short_in_the_message():
+    long_value = "x" * 500
+    message = DeviceController._typing_failure("mismatch", "", long_value, "y", "f", False)
+    assert "x" * 201 not in message
+    assert "500 characters" in message
+
+
+async def test_a_simulator_password_field_is_treated_as_secure():
+    """The accessibility tree sim-bridge reads calls a password field a
+    TextField with the subrole AXSecureTextField. Checked by type alone, its
+    dots could never contain the typed text, and the failure was blamed on
+    auto-capitalization."""
+    field = _native_field("")
+    field.type = "TextField"
+    field.role_description = "AXSecureTextField"
+    ctrl, _ = _type_controller(field, "•" * 7)
+    result = await ctrl.type_text("hunter2", identifier="composition.text")
+    assert result["verified"] is True
+    assert "value" not in result
 
 
 async def test_a_rewritten_value_is_reported_as_a_mismatch_not_as_no_change():
