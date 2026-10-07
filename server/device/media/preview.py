@@ -55,6 +55,8 @@ _SHARED_SOURCE_CANDIDATES = [
     / "Encode" / "JPEGFraming.swift",
     _PROJECT_ROOT / "macos" / "QuernMedia" / "Sources" / "QuernMedia"
     / "Capture" / "SimulatorList.swift",
+    _PROJECT_ROOT / "macos" / "QuernMedia" / "Sources" / "QuernMedia"
+    / "Sinks" / "StreamRefusal.swift",
 ]
 _RESOURCES_DIR = Path(__file__).resolve().parents[1] / "resources"  # server/device/resources
 
@@ -299,6 +301,11 @@ class ActivePreview:
     on_air: bool = True
     #: Why it is off air, while it is.
     off_air_reason: str | None = None
+    #: Set when the server recorded the reason itself -- quern-media exited,
+    #: or a restart failed -- which says more than the window can. The
+    #: window's own reports while it retries ("quern-media is not running",
+    #: until the restart lands) must not replace it.
+    off_air_by_server: bool = False
 
 
 @dataclass
@@ -583,9 +590,11 @@ class PreviewManager:
             preview = self._active.get(name)
             if preview is not None:
                 preview.on_air = evt_type == "on_air"
-                preview.off_air_reason = None if preview.on_air else (
-                    event.get("reason") or "stream lost"
-                )
+                if preview.on_air:
+                    preview.off_air_reason = None
+                    preview.off_air_by_server = False
+                elif not preview.off_air_by_server:
+                    preview.off_air_reason = event.get("reason") or "stream lost"
             if evt_type == "on_air" and name in self._streams:
                 # Back on air: a later exit starts its backoff from the top.
                 self._streams[name].restarts = 0
@@ -1016,6 +1025,38 @@ class PreviewManager:
                 self._mark_off_air(udid, why)
                 continue
             fresh.restarts = attempt
+            # Spawned is not listening. Released before the port accepts, the
+            # hold let a retry landing in between -- "quern-media is not
+            # running" -- replace the server's reason all over again.
+            try:
+                await self._wait_until_serving(udid, fresh)
+            except asyncio.CancelledError:
+                return
+            except RuntimeError as exc:
+                # It exited, or never served. The window still cannot reach
+                # it, so the server's reason stays, saying so. An exit is
+                # restarted by the new stream's own drain, so this loop stops
+                # rather than run a second one for the same stream -- and one
+                # that is alive but not serving is stopped, so that drain sees
+                # it exit and carries the schedule on. Left running, nothing
+                # would ever retry it.
+                self._mark_off_air(udid, f"restarted quern-media is not serving: {exc}")
+                if fresh.process.returncode is None:
+                    with contextlib.suppress(ProcessLookupError, OSError):
+                        fresh.process.terminate()
+                return
+            if self._streams.get(udid) is not fresh:
+                return  # stopped or replaced while it came up
+            # Listening, so the hold has done its job: it covered the stretch
+            # when the window could only say "quern-media is not running".
+            # What the window reports from now on comes from the new
+            # quern-media -- a 503 naming a simulator that is still shut down,
+            # say -- and is current, so it applies. Kept, the hold would show
+            # the old exit for as long as the simulator stayed down, since no
+            # picture arrives to end it.
+            preview = self._active.get(udid)
+            if preview is not None:
+                preview.off_air_by_server = False
             return
 
     def _mark_off_air(self, udid: str, reason: str) -> None:
@@ -1023,6 +1064,7 @@ class PreviewManager:
         if preview is not None:
             preview.on_air = False
             preview.off_air_reason = reason
+            preview.off_air_by_server = True
 
     async def _wait_until_serving(self, udid: str, stream: _StreamProcess) -> None:
         """Wait until quern-media accepts a connection, or say why it will not.

@@ -1694,6 +1694,38 @@ class TestOffAir:
         mgr._dispatch_event({"event": "on_air", "key": "SIM"})
         assert mgr.status()["active"]["SIM"]["on_air"] is True
 
+    def test_a_later_reason_replaces_the_first(self):
+        """A window off air reports again when the reason changes -- "the
+        stream ended" giving way to "the simulator is shutdown" once its
+        reconnects are refused. The status must show the current one."""
+        mgr = self._manager_with_simulator()
+        mgr._dispatch_event({"event": "off_air", "key": "SIM", "reason": "the stream ended"})
+        mgr._dispatch_event(
+            {"event": "off_air", "key": "SIM", "reason": "the simulator is shutdown"}
+        )
+        status = mgr.status()["active"]["SIM"]
+        assert status["on_air"] is False
+        assert status["off_air_reason"] == "the simulator is shutdown"
+
+    def test_the_server_s_own_reason_is_not_replaced_by_the_window_s(self):
+        """When quern-media crashes the server records why -- its last log
+        line, the only diagnostic -- and restarts it after a backoff. The
+        window's retries meanwhile find nothing listening and report "quern-
+        media is not running", which used to replace that reason in
+        preview_status for exactly the stretch an agent would read it."""
+        mgr = self._manager_with_simulator()
+        mgr._mark_off_air("SIM", "quern-media exited: [capture] lost the framebuffer")
+        mgr._dispatch_event(
+            {"event": "off_air", "key": "SIM", "reason": "quern-media is not running"}
+        )
+        status = mgr.status()["active"]["SIM"]
+        assert status["off_air_reason"] == "quern-media exited: [capture] lost the framebuffer"
+
+        mgr._dispatch_event({"event": "on_air", "key": "SIM"})
+        mgr._dispatch_event({"event": "off_air", "key": "SIM", "reason": "the stream ended"})
+        status = mgr.status()["active"]["SIM"]
+        assert status["off_air_reason"] == "the stream ended", "the hold outlived the restart"
+
     def test_a_capture_device_has_no_on_air_field(self):
         """CoreMediaIO previews have no OFF AIR state; reporting on_air: true
         for them would be a claim nothing checked."""
@@ -1705,6 +1737,18 @@ class TestOffAir:
         mgr._dispatch_event({"event": "off_air", "key": "GONE"})
         assert set(mgr.status()["active"]) == {"SIM", "PHONE"}
 
+
+
+async def _serving(*_args, **_kwargs):
+    """Stands in for asyncio.open_connection when quern-media is listening."""
+    class _Writer:
+        def close(self):
+            pass
+
+        async def wait_closed(self):
+            pass
+
+    return None, _Writer()
 
 
 class TestStreamRestart:
@@ -1724,6 +1768,7 @@ class TestStreamRestart:
         monkeypatch.setattr(preview, "STREAM_RESTART_DELAYS", (0.0,))
         monkeypatch.setattr(preview, "build_media_engine", _build)
         monkeypatch.setattr(preview.asyncio, "create_subprocess_exec", _spawn)
+        monkeypatch.setattr(preview.asyncio, "open_connection", _serving)
         return PreviewManager()
 
     def _dead_stream(self, mgr, udid, port=8424):
@@ -1820,6 +1865,7 @@ class TestStreamRestartSchedule:
 
         monkeypatch.setattr(preview, "build_media_engine", _build)
         monkeypatch.setattr(preview.asyncio, "create_subprocess_exec", spawn)
+        monkeypatch.setattr(preview.asyncio, "open_connection", _serving)
         mgr = PreviewManager()
         stream = preview._StreamProcess(
             process=_FakeStreamProcess(stderr_lines=["[capture] gone"], exit_code=1),
@@ -1919,3 +1965,161 @@ class TestStreamRestartSchedule:
         status = asyncio.run(run())
         assert status["on_air"] is False
         assert status["off_air_reason"] == "quern-media exited: [capture] gone"
+
+
+
+class TestServerReasonHoldIsReleased:
+    dial = staticmethod(_serving)
+
+    def test_a_restarted_stream_lets_a_current_reason_through(self, monkeypatch):
+        """quern-media crashed while its simulator was also shut down. The
+        restart succeeds, but the new one only refuses with 503 -- the
+        simulator is still down -- so no picture arrives and nothing would
+        end the hold. Its reason must reach preview_status."""
+        from server.device.media import preview
+        from server.device.media.preview import ActivePreview
+
+        async def _build():
+            return "/tmp/quern-media"
+
+        async def _spawn(*_args, **_kwargs):
+            return _LiveStreamProcess()
+
+        monkeypatch.setattr(preview, "STREAM_RESTART_DELAYS", (0.0,))
+        monkeypatch.setattr(preview, "build_media_engine", _build)
+        monkeypatch.setattr(preview.asyncio, "create_subprocess_exec", _spawn)
+        monkeypatch.setattr(preview.asyncio, "open_connection", self.dial)
+
+        mgr = PreviewManager()
+        stream = preview._StreamProcess(
+            process=_FakeStreamProcess(stderr_lines=["[capture] crashed"], exit_code=1),
+            port=8424, log=deque(maxlen=20),
+        )
+        mgr._streams["SIM"] = stream
+        mgr._active["SIM"] = ActivePreview(
+            name="SIM", position=0, kind="simulator", stream_port=8424
+        )
+
+        async def run():
+            await mgr._drain_stream("SIM", stream)        # exits, restarts
+            mgr._dispatch_event(
+                {"event": "off_air", "key": "SIM", "reason": "the simulator is shutdown"}
+            )
+            status = mgr.status()["active"]["SIM"]
+            await mgr._stop_stream("SIM")
+            return status
+
+        status = asyncio.run(run())
+        assert status["on_air"] is False
+        assert status["off_air_reason"] == "the simulator is shutdown"
+
+
+class TestServerReasonHeldUntilServing:
+    """Spawned is not listening. A retry that lands before the restarted
+    quern-media accepts finds nothing there, and its "not running" must not
+    replace the server's reason."""
+
+    @staticmethod
+    async def dial(*_args, **_kwargs):
+        raise ConnectionRefusedError("not yet")
+
+    def test_a_retry_before_the_restart_serves_keeps_the_server_s_reason(self, monkeypatch):
+        from server.device.media import preview
+        from server.device.media.preview import ActivePreview
+
+        async def _build():
+            return "/tmp/quern-media"
+
+        async def _spawn(*_args, **_kwargs):
+            return _LiveStreamProcess()
+
+        monkeypatch.setattr(preview, "STREAM_RESTART_DELAYS", (0.0,))
+        monkeypatch.setattr(preview, "STREAM_START_TIMEOUT", 0.3)
+        monkeypatch.setattr(preview, "build_media_engine", _build)
+        monkeypatch.setattr(preview.asyncio, "create_subprocess_exec", _spawn)
+        monkeypatch.setattr(preview.asyncio, "open_connection", self.dial)
+
+        mgr = PreviewManager()
+        stream = preview._StreamProcess(
+            process=_FakeStreamProcess(stderr_lines=["[capture] crashed"], exit_code=1),
+            port=8424, log=deque(maxlen=20),
+        )
+        mgr._streams["SIM"] = stream
+        mgr._active["SIM"] = ActivePreview(
+            name="SIM", position=0, kind="simulator", stream_port=8424
+        )
+
+        async def run():
+            await mgr._drain_stream("SIM", stream)        # restarts; never serves
+            mgr._dispatch_event(
+                {"event": "off_air", "key": "SIM", "reason": "quern-media is not running"}
+            )
+            status = mgr.status()["active"]["SIM"]
+            await mgr._stop_stream("SIM")
+            return status
+
+        status = asyncio.run(run())
+        assert status["off_air_reason"].startswith("restarted quern-media is not serving")
+
+    def test_a_restart_that_never_serves_is_stopped_so_the_schedule_goes_on(self, monkeypatch):
+        """Alive and not listening, the replacement would never exit, and
+        only an exit hands the schedule to its drain: the preview stayed off
+        air for good."""
+        from server.device.media import preview
+        from server.device.media.preview import ActivePreview
+
+        spawned: list = []
+
+        async def _build():
+            return "/tmp/quern-media"
+
+        class _EndsWhenStopped(_LiveStreamProcess):
+            """Its output ends when it is terminated, as a real process's
+            pipe does -- which is how its drain learns it has gone."""
+
+            def __init__(self):
+                super().__init__()
+                self._gone = asyncio.Event()
+
+            async def readline(self) -> bytes:
+                await self._gone.wait()
+                return b""
+
+            def terminate(self) -> None:
+                super().terminate()
+                self._gone.set()
+
+        async def _spawn(*_args, **_kwargs):
+            process = _EndsWhenStopped()
+            spawned.append(process)
+            return process
+
+        monkeypatch.setattr(preview, "STREAM_RESTART_DELAYS", (0.0,))
+        monkeypatch.setattr(preview, "STREAM_START_TIMEOUT", 0.2)
+        monkeypatch.setattr(preview, "build_media_engine", _build)
+        monkeypatch.setattr(preview.asyncio, "create_subprocess_exec", _spawn)
+        monkeypatch.setattr(preview.asyncio, "open_connection", self.dial)
+
+        mgr = PreviewManager()
+        stream = preview._StreamProcess(
+            process=_FakeStreamProcess(stderr_lines=["[capture] crashed"], exit_code=1),
+            port=8424, log=deque(maxlen=20),
+        )
+        mgr._streams["SIM"] = stream
+        mgr._active["SIM"] = ActivePreview(
+            name="SIM", position=0, kind="simulator", stream_port=8424
+        )
+
+        async def run():
+            await mgr._drain_stream("SIM", stream)
+            # The first replacement was stopped; its drain restarts it again.
+            for _ in range(50):
+                if len(spawned) >= 2:
+                    break
+                await asyncio.sleep(0.02)
+            mgr._active.pop("SIM")                        # end the schedule
+            await mgr._stop_stream("SIM")
+
+        asyncio.run(run())
+        assert spawned and spawned[0].terminated, "the unresponsive replacement was left running"
+        assert len(spawned) >= 2, "the schedule stopped after a replacement that never served"
