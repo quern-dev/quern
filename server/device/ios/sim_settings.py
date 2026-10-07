@@ -1,0 +1,267 @@
+"""Simulator settings written to disk directly, instead of through the Settings app.
+
+Driving the Settings app works, but it is slow, its steps differ by iOS
+version, and it breaks whenever Apple moves a row. Every agent that needed
+auto-correction or password AutoFill off was working that out for itself, so
+the settings that matter for automation live in a catalog here
+(sim_settings_catalog.json), each with where it is stored and how it was
+verified.
+
+Two kinds of storage, both inside the simulator's data directory:
+
+- **Configuration-profile restrictions** in `UserSettings.plist`, the same
+  mechanism an MDM profile uses. ManagedConfiguration recomputes its effective
+  settings from this file at boot, so it is only read then.
+- **Keyboard preferences** in `com.apple.keyboard.preferences.plist`, which the
+  keyboard caches.
+
+Both are therefore written with the simulator shut down, and a booted one is
+rebooted to apply them. A reboot ends whatever app is running, so it happens
+only when the caller says so: `reboot=False` on a booted simulator that needs a
+change is a `RebootRequiredError`, not a silent restart in the middle of a test.
+A setting that is already right, or a simulator that is shut down, needs no
+reboot and never gets one.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import os
+import plistlib
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from server.models import DeviceError, RebootRequiredError
+
+CATALOG_PATH = Path(__file__).with_name("sim_settings_catalog.json")
+#: Where CoreSimulator keeps each simulator's directory. A module attribute so
+#: tests point it at a temporary directory.
+DEVICES_DIR = Path.home() / "Library/Developer/CoreSimulator/Devices"
+
+STATES = ("on", "off")
+
+
+def catalog() -> dict:
+    return json.loads(CATALOG_PATH.read_text())
+
+
+@dataclass
+class _Write:
+    file: str
+    key_path: list[str]
+    values: dict[str, Any]
+    read: str | None
+    absent: str | None
+
+
+def _writes(entry: dict) -> list[_Write]:
+    return [
+        _Write(w["file"], w["key_path"], w["values"], w.get("read"), w.get("absent"))
+        for w in entry["writes"]
+    ]
+
+
+def device_dir(udid: str) -> Path:
+    return DEVICES_DIR / udid
+
+
+def runtime_of(udid: str) -> str | None:
+    """"iOS 26.5", from the simulator's device.plist, or None if unreadable."""
+    try:
+        raw = plistlib.loads((device_dir(udid) / "device.plist").read_bytes())["runtime"]
+    except (OSError, KeyError, plistlib.InvalidFileException, ValueError):
+        return None
+    tail = str(raw).rsplit(".", 1)[-1]          # "iOS-26-5"
+    platform, _, version = tail.partition("-")
+    return f"{platform} {version.replace('-', '.')}" if version else tail
+
+
+def _file_path(udid: str, alias: str) -> Path:
+    return device_dir(udid) / catalog()["files"][alias]
+
+
+def _load(path: Path) -> dict | None:
+    """The plist's contents; {} when the file does not exist; None when it
+    exists and cannot be read -- "could not ask" is not "nothing set"."""
+    if not path.exists():
+        return {}
+    try:
+        data = plistlib.loads(path.read_bytes())
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _dig(data: dict, key_path: list[str]):
+    for key in key_path:
+        if not isinstance(data, dict) or key not in data:
+            return None
+        data = data[key]
+    return data
+
+
+def _place(data: dict, key_path: list[str], value) -> None:
+    for key in key_path[:-1]:
+        child = data.get(key)
+        if not isinstance(child, dict):
+            child = data[key] = {}
+        data = child
+    data[key_path[-1]] = value
+
+
+def _state_of(write: _Write, stored) -> str:
+    """Which state a stored value means: "on", "off", or "unknown"."""
+    if stored is None:
+        return write.absent or "unknown"
+    for state, value in write.values.items():
+        if write.read:
+            if isinstance(stored, dict) and isinstance(value, dict) \
+                    and stored.get(write.read) == value.get(write.read):
+                return state
+        elif stored == value:
+            return state
+    return "unknown"
+
+
+def read_state(udid: str, name: str) -> str | None:
+    """The setting's state: "on", "off", "unknown" for a value the catalog does
+    not recognise, or None when its file could not be read."""
+    entry = _entry(name)
+    primary = _writes(entry)[0]
+    data = _load(_file_path(udid, primary.file))
+    if data is None:
+        return None
+    return _state_of(primary, _dig(data, primary.key_path))
+
+
+def _entry(name: str) -> dict:
+    settings = catalog()["settings"]
+    if name not in settings:
+        raise DeviceError(
+            f"no simulator setting named {name!r}; known: {', '.join(sorted(settings))}",
+            tool="quern",
+        )
+    return settings[name]
+
+
+def verified_runtimes(entry: dict) -> tuple[list[str], list[str]]:
+    """(runtimes verified by effect, runtimes where only the storage is known)."""
+    full = [v["runtime"] for v in entry.get("verified", []) if not v.get("storage_only")]
+    storage = [v["runtime"] for v in entry.get("verified", []) if v.get("storage_only")]
+    return full, storage
+
+
+def describe(udid: str) -> dict:
+    """Every catalog setting's state on this simulator."""
+    runtime = runtime_of(udid)
+    out = {}
+    for name, entry in catalog()["settings"].items():
+        full, storage = verified_runtimes(entry)
+        out[name] = {
+            "title": entry["title"],
+            "state": read_state(udid, name),
+            "verified_on": full,
+            "storage_known_on": storage,
+            "verified_here": runtime in full,
+        }
+    return {"udid": udid, "runtime": runtime, "settings": out}
+
+
+def _write_plist(path: Path, data: dict) -> None:
+    """Binary, as the system writes them, and atomically: a reader -- the
+    simulator booting -- must never see half a file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(plistlib.dumps(data, fmt=plistlib.FMT_BINARY))
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def write_state(udid: str, name: str, state: str) -> None:
+    """Write every key the setting covers. The simulator must be shut down."""
+    entry = _entry(name)
+    writes = _writes(entry)
+    by_file: dict[str, list[_Write]] = {}
+    for w in writes:
+        by_file.setdefault(w.file, []).append(w)
+    for alias, group in by_file.items():
+        path = _file_path(udid, alias)
+        if alias == "restrictions" and not path.exists():
+            # Created at first boot. Writing a fresh one would replace a file
+            # whose other contents the system expects, so refuse instead.
+            raise DeviceError(
+                f"{path.name} does not exist yet: boot this simulator once so iOS "
+                f"creates it, then set {name}",
+                tool="quern",
+            )
+        data = _load(path)
+        if data is None:
+            raise DeviceError(f"cannot read {path}; not changing {name}", tool="quern")
+        for w in group:
+            _place(data, w.key_path, w.values[state])
+        _write_plist(path, data)
+
+
+async def set_setting(simctl, udid: str, name: str, state: str, *, reboot: bool) -> dict:
+    """Set one setting. Returns what happened: changed, rebooted, and whether
+    this runtime is one the entry was verified on."""
+    if state not in STATES:
+        raise DeviceError(f"state must be 'on' or 'off', not {state!r}", tool="quern")
+    entry = _entry(name)
+    if not device_dir(udid).is_dir():
+        raise DeviceError(f"no simulator directory for {udid}", tool="quern")
+    runtime = runtime_of(udid)
+    full, storage = verified_runtimes(entry)
+    result: dict = {"udid": udid, "name": name, "state": state, "runtime": runtime,
+                    "changed": False, "rebooted": False, "verified_here": runtime in full}
+    if runtime not in full:
+        result["warning"] = (
+            f"{name} is verified on {', '.join(full) or 'no runtime'}"
+            + (f" (storage only on {', '.join(storage)})" if storage else "")
+            + f", not {runtime or 'this runtime'}; check the effect before relying on it."
+        )
+
+    current = read_state(udid, name)
+    if current == state:
+        return result
+
+    booted = await is_booted(simctl, udid)
+    if booted and not reboot:
+        raise RebootRequiredError(
+            f"{entry['title']} is {current or 'unreadable'} and changing it needs this "
+            f"simulator rebooted, which ends whatever app is running. Pass reboot: true "
+            f"to allow it, or set it while the simulator is shut down.",
+            tool="quern",
+        )
+    if booted:
+        await simctl.shutdown(udid)
+    write_state(udid, name, state)
+    if booted:
+        await simctl.boot(udid)
+        await simctl.wait_until_booted(udid)
+        result["rebooted"] = True
+    result["changed"] = True
+
+    now = read_state(udid, name)
+    if now != state:
+        # The write went somewhere nothing reads, or the boot rewrote it.
+        raise DeviceError(
+            f"wrote {name} as {state}, but it reads back as {now or 'unreadable'}",
+            tool="quern",
+        )
+    return result
+
+
+async def is_booted(simctl, udid: str) -> bool:
+    for device in await simctl.list_devices():
+        if device.udid == udid:
+            return str(getattr(device.state, "value", device.state)).lower() == "booted"
+    raise DeviceError(f"simctl does not list a simulator {udid}", tool="simctl")

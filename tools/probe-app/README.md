@@ -61,7 +61,7 @@ does, and the mismatch surfaces at install as a signature error.
 
 | Tab | Identifier | Exercises |
 |---|---|---|
-| Text | `tab_text` | Typing fidelity per keyboard type (`field_default`, `field_url`, `field_email`, `field_secure`); `text_event_log` echoes the last UITextField delegate event |
+| Text | `tab_text` | Typing fidelity per keyboard type (`field_default`, `field_url`, `field_email`, `field_secure`), all with iOS's text rewriting turned off; `field_natural` leaves every text trait at its default, so auto-capitalization, auto-correction and smart punctuation apply (for checking simulator settings); `text_event_log` echoes the last UITextField delegate event |
 | Controls | `tab_controls` | Element state and value-aware taps: `control_switch`, `control_slider`, `control_segment`, `control_stepper`; alert/sheet dismissal via `control_show_alert` / `control_show_sheet` |
 | Scroll | `tab_scroll` | Scroll/swipe and scroll-to-element against 200 stable rows (`row_0` … `row_199`) |
 | Links | `tab_links` | Deep link landing surface — `link_count`, `link_last_uri` |

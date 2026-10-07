@@ -480,7 +480,7 @@ quern tunneld <cmd>          # Manage the tunneld LaunchDaemon (install/uninstal
 
 ## MCP Tools
 
-121 tools available via MCP. All tools are lazy-loaded and won't hog your context just by connecting the MCP. They are lightweight API wrappers and are easy for the Agent to use.
+123 tools available via MCP. All tools are lazy-loaded and won't hog your context just by connecting the MCP. They are lightweight API wrappers and are easy for the Agent to use.
 
 | Category | Tools |
 |----------|-------|
@@ -493,7 +493,7 @@ quern tunneld <cmd>          # Manage the tunneld LaunchDaemon (install/uninstal
 | Device | `list_devices`, `boot_device`, `shutdown_device`, `erase_device`, `install_app`, `launch_app`, `terminate_app`, `uninstall_app`, `list_apps`, `build_and_install`, `record_android_build` |
 | UI | `get_ui_tree`, `get_element_state`, `wait_for_element`, `get_screen_summary`, `tap`, `tap_element`, `swipe`, `gesture`, `scroll_to_element`, `type_text`, `clear_text`, `press_button`, `get_web_content`, `wait_for_settle`, `restore_simulator_input` |
 | Screenshots | `take_screenshot`, `take_annotated_screenshot`, `start_screenshot_timeline`, `stop_screenshot_timeline`, `get_screenshot_timeline` |
-| Device Config | `set_location`, `open_url`, `grant_permission`, `set_locale`, `set_hardware_keyboard`, `set_font_scale`, `set_display_density` |
+| Device Config | `set_location`, `open_url`, `grant_permission`, `set_locale`, `set_hardware_keyboard`, `get_simulator_settings`, `set_simulator_setting`, `set_font_scale`, `set_display_density` |
 | App State | `save_app_state`, `restore_app_state`, `list_app_states`, `delete_app_state` |
 | Plist | `read_app_plist`, `set_app_plist_value`, `set_app_plist_values`, `diff_app_plist`, `delete_app_plist_key`, `start_plist_watch`, `stop_plist_watch`, `configure_plist_watch`, `get_plist_watch_config`, `unconfigure_plist_watch` |
 | Device Pool | `resolve_device`, `ensure_devices` |

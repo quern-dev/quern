@@ -38,6 +38,7 @@ _NOT_ACTIONS: frozenset[str] = frozenset({
     "device.py:tool_sites",
     "device.py:video_stream",
     "device.py:preview_status",
+    "device.py:get_simulator_settings",  # a read of the simulator's settings files
     "device.py:preview_devices",
     "device.py:get_timeline",
     "landmarks.py:list_landmarks",

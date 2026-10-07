@@ -1,0 +1,378 @@
+{
+  "_comment": [
+    "Simulator settings quern writes directly to disk instead of driving the Settings app.",
+    "These are undocumented internals: every entry records where it was found and how it was",
+    "verified, by runtime. set_simulator_setting applies an entry on any iOS runtime but says so",
+    "in its response when that runtime is not under `verified`. scripts/sim-settings-diff.py finds",
+    "new ones; see CONTRIBUTING.md and docs/agent-guide.md.",
+    "",
+    "Files are named by alias (see `files`). Each write's `values` maps a state to what is stored;",
+    "`read` names the field inside a stored dict that carries the state; `absent` is the state a",
+    "missing key means on a fresh simulator. The first write is the one the state is read from;",
+    "the rest are the other keys Settings writes for the same toggle, kept in step so nothing",
+    "reads a stale copy. Every write happens with the simulator shut down: configuration-profile",
+    "restrictions are recomputed at boot, and the keyboard caches its preferences."
+  ],
+  "files": {
+    "restrictions": "data/Containers/Shared/SystemGroup/systemgroup.com.apple.configurationprofiles/Library/ConfigurationProfiles/UserSettings.plist",
+    "keyboard": "data/Library/Preferences/com.apple.keyboard.preferences.plist"
+  },
+  "settings": {
+    "password_autofill": {
+      "title": "Password AutoFill",
+      "why": "When on, iOS offers \"Save Password?\" after a sign-in: system UI with nothing in the app's accessibility tree, which covers the app and can take the next tap.",
+      "settings_ui": "Settings > General > AutoFill & Passwords > AutoFill Passwords and Passkeys",
+      "writes": [
+        {
+          "file": "restrictions",
+          "key_path": [
+            "restrictedBool",
+            "allowPasswordAutoFill"
+          ],
+          "values": {
+            "off": {
+              "ask": false,
+              "value": false
+            },
+            "on": {
+              "value": true
+            }
+          },
+          "read": "value",
+          "absent": "on"
+        }
+      ],
+      "verified": [
+        {
+          "runtime": "iOS 26.5",
+          "date": "2026-10-04",
+          "by": "Geocaching iOS team",
+          "method": "Written while shut down; Settings showed it off across two reboots, and a first sign-in produced no \"Save Password?\" sheet."
+        },
+        {
+          "runtime": "iOS 26.5",
+          "date": "2026-10-07",
+          "by": "quern",
+          "method": "set_simulator_setting while shut down, then booted: Settings > General > AutoFill & Passwords showed AutoFill Passwords and Passkeys off, where it had been on."
+        },
+        {
+          "runtime": "iOS 18.5",
+          "date": "2026-10-04",
+          "by": "Geocaching iOS team",
+          "storage_only": true,
+          "method": "Two simulators switched off through Settings hold the same file, key and value; a direct write was not tried."
+        }
+      ],
+      "does_not_work": [
+        "defaults write -g AutoFillPasswords: wrong domain, no effect",
+        "defaults write com.apple.WebUI AutoFillPasswords NO: persists, but the Settings toggle stays on",
+        "patching Library/UserConfigurationProfiles/EffectiveUserSettings.plist: recomputed at boot"
+      ]
+    },
+    "auto_correction": {
+      "title": "Auto-Correction",
+      "why": "The keyboard rewrites words it does not know (\"qft list\" became \"qty list\"), so typed text stops matching what a test expects and nothing reports it.",
+      "settings_ui": "Settings > General > Keyboard > Auto-Correction, and > Hardware Keyboard > Auto-Correction",
+      "writes": [
+        {
+          "file": "restrictions",
+          "key_path": [
+            "restrictedBool",
+            "allowAutoCorrection"
+          ],
+          "values": {
+            "off": {
+              "ask": false,
+              "value": false
+            },
+            "on": {
+              "value": true
+            }
+          },
+          "read": "value",
+          "absent": "on"
+        },
+        {
+          "file": "keyboard",
+          "key_path": [
+            "KeyboardAutocorrection"
+          ],
+          "values": {
+            "off": false,
+            "on": true
+          }
+        },
+        {
+          "file": "keyboard",
+          "key_path": [
+            "HWKeyboardAutocorrection"
+          ],
+          "values": {
+            "off": false,
+            "on": true
+          },
+          "note": "The hardware-keyboard switch. Quern types through the simulated hardware keyboard, so this is the one that governs quern's own typing."
+        }
+      ],
+      "verified": [
+        {
+          "runtime": "iOS 26.5",
+          "date": "2026-10-04",
+          "by": "Geocaching iOS team",
+          "method": "Written while shut down; in a create-list field \"qft list 1 \" became \"qty list 1 \" with it on and stayed with it off (software keyboard). The hardware-keyboard key was found by quern's diff on 2026-10-07."
+        },
+        {
+          "runtime": "iOS 26.5",
+          "date": "2026-10-07",
+          "by": "quern",
+          "method": "set_simulator_setting while shut down, booted, then typed into QuernProbe's field_natural (all text traits at their defaults) through quern, i.e. the hardware-keyboard path: \"teh cat \" became \"the cat \" and \"qft\" became \"aft\" with it on; both stayed as typed with it off."
+        },
+        {
+          "runtime": "iOS 18.6",
+          "date": "2026-10-07",
+          "by": "quern",
+          "method": "Same procedure as on iOS 26.5 (iPhone 16 Pro simulator), same results: on rewrote the trigger, off left it as typed."
+        }
+      ]
+    },
+    "auto_capitalization": {
+      "title": "Auto-Capitalization",
+      "why": "iOS capitalizes the start of a sentence, so lowercase text typed into a sentence-style field comes back with a capital (\"qft\" became \"Qft\").",
+      "settings_ui": "Settings > General > Keyboard > Auto-Capitalization, and > Hardware Keyboard > Auto-Capitalization",
+      "writes": [
+        {
+          "file": "keyboard",
+          "key_path": [
+            "KeyboardAutocapitalization"
+          ],
+          "values": {
+            "off": false,
+            "on": true
+          },
+          "absent": "on"
+        },
+        {
+          "file": "keyboard",
+          "key_path": [
+            "HWKeyboardAutocapitalization"
+          ],
+          "values": {
+            "off": false,
+            "on": true
+          }
+        }
+      ],
+      "verified": [
+        {
+          "runtime": "iOS 26.5",
+          "date": "2026-10-07",
+          "by": "quern",
+          "method": "set_simulator_setting while shut down, booted, then typed into QuernProbe's field_natural (all text traits at their defaults) through quern, i.e. the hardware-keyboard path: with every other setting off, \"hi. there\" became \"hi. There\" with it on and stayed with it off. The first letter of a field was not capitalized either way on this path; the on-screen keyboard capitalizes it."
+        },
+        {
+          "runtime": "iOS 18.6",
+          "date": "2026-10-07",
+          "by": "quern",
+          "method": "Same procedure as on iOS 26.5 (iPhone 16 Pro simulator), same results: on rewrote the trigger, off left it as typed."
+        }
+      ]
+    },
+    "smart_punctuation": {
+      "title": "Smart Punctuation",
+      "why": "Straight quotes become curly and double hyphens become dashes, so typed punctuation stops matching.",
+      "settings_ui": "Settings > General > Keyboard > Smart Punctuation",
+      "writes": [
+        {
+          "file": "restrictions",
+          "key_path": [
+            "restrictedBool",
+            "allowSmartPunctuation"
+          ],
+          "values": {
+            "off": {
+              "ask": false,
+              "value": false
+            },
+            "on": {
+              "value": true
+            }
+          },
+          "read": "value",
+          "absent": "on"
+        },
+        {
+          "file": "keyboard",
+          "key_path": [
+            "SmartDashesEnabled"
+          ],
+          "values": {
+            "off": false,
+            "on": true
+          }
+        },
+        {
+          "file": "keyboard",
+          "key_path": [
+            "SmartQuotesEnabled"
+          ],
+          "values": {
+            "off": false,
+            "on": true
+          }
+        }
+      ],
+      "verified": [
+        {
+          "runtime": "iOS 26.5",
+          "date": "2026-10-07",
+          "by": "quern",
+          "method": "set_simulator_setting while shut down, booted, then typed into QuernProbe's field_natural (all text traits at their defaults) through quern, i.e. the hardware-keyboard path: 'say \"hi\" -- ok' became 'say “hi” — ok' with it on, and stayed as typed with it off."
+        },
+        {
+          "runtime": "iOS 18.6",
+          "date": "2026-10-07",
+          "by": "quern",
+          "method": "Same procedure as on iOS 26.5 (iPhone 16 Pro simulator), same results: on rewrote the trigger, off left it as typed."
+        }
+      ]
+    },
+    "period_shortcut": {
+      "title": "\".\" Shortcut",
+      "why": "A double space becomes \". \", so text containing two spaces in a row comes back changed.",
+      "settings_ui": "Settings > General > Keyboard > \".\" Shortcut, and > Hardware Keyboard > \".\" Shortcut",
+      "writes": [
+        {
+          "file": "keyboard",
+          "key_path": [
+            "KeyboardPeriodShortcut"
+          ],
+          "values": {
+            "off": false,
+            "on": true
+          },
+          "absent": "on"
+        },
+        {
+          "file": "keyboard",
+          "key_path": [
+            "HWKeyboardPeriodShortcut"
+          ],
+          "values": {
+            "off": false,
+            "on": true
+          }
+        }
+      ],
+      "verified": [
+        {
+          "runtime": "iOS 26.5",
+          "date": "2026-10-07",
+          "by": "quern",
+          "method": "set_simulator_setting while shut down, booted, then typed into QuernProbe's field_natural (all text traits at their defaults) through quern, i.e. the hardware-keyboard path: \"hi  there\" became \"hi. There\" (with auto-capitalization on) and stayed as typed with it off."
+        },
+        {
+          "runtime": "iOS 18.6",
+          "date": "2026-10-07",
+          "by": "quern",
+          "method": "Same procedure as on iOS 26.5 (iPhone 16 Pro simulator), same results: on rewrote the trigger, off left it as typed."
+        }
+      ]
+    },
+    "predictive_text": {
+      "title": "Predictive Text",
+      "why": "Shows the suggestion bar above the software keyboard, which covers part of the screen and can take taps aimed under it.",
+      "settings_ui": "Settings > General > Keyboard > Predictive Text",
+      "writes": [
+        {
+          "file": "restrictions",
+          "key_path": [
+            "restrictedBool",
+            "allowPredictiveKeyboard"
+          ],
+          "values": {
+            "off": {
+              "ask": false,
+              "value": false
+            },
+            "on": {
+              "value": true
+            }
+          },
+          "read": "value",
+          "absent": "on"
+        },
+        {
+          "file": "keyboard",
+          "key_path": [
+            "KeyboardPrediction"
+          ],
+          "values": {
+            "off": false,
+            "on": true
+          }
+        },
+        {
+          "file": "keyboard",
+          "key_path": [
+            "KeyboardShowPredictionBar"
+          ],
+          "values": {
+            "off": false,
+            "on": true
+          }
+        }
+      ],
+      "verified": [
+        {
+          "runtime": "iOS 26.5",
+          "date": "2026-10-07",
+          "by": "quern",
+          "method": "set_simulator_setting while shut down, then booted: Settings > General > Keyboard showed Predictive Text on and off as written. Its effect is on the software keyboard's suggestion bar, which was not inspected."
+        }
+      ]
+    },
+    "spell_check": {
+      "title": "Check Spelling",
+      "why": "Underlines words it does not know, which changes how text fields look in screenshots.",
+      "settings_ui": "Settings > General > Keyboard > Check Spelling",
+      "writes": [
+        {
+          "file": "restrictions",
+          "key_path": [
+            "restrictedBool",
+            "allowSpellCheck"
+          ],
+          "values": {
+            "off": {
+              "ask": false,
+              "value": false
+            },
+            "on": {
+              "value": true
+            }
+          },
+          "read": "value",
+          "absent": "on"
+        },
+        {
+          "file": "keyboard",
+          "key_path": [
+            "KeyboardCheckSpelling"
+          ],
+          "values": {
+            "off": false,
+            "on": true
+          }
+        }
+      ],
+      "verified": [
+        {
+          "runtime": "iOS 26.5",
+          "date": "2026-10-07",
+          "by": "quern",
+          "method": "set_simulator_setting while shut down, then booted: Settings > General > Keyboard showed Check Spelling off as written. The on state was not read back on screen, and its effect (underlining) was not inspected."
+        }
+      ]
+    }
+  }
+}
