@@ -277,6 +277,18 @@ def _note_equivalence(result: dict, element_type: str | None, element: UIElement
 _BACKEND_FAILURE_TOOLS = frozenset({"sim-bridge", "idb", "wda", "u2"})
 
 
+def _inserted_into(before: str, after: str, text: str) -> bool:
+    """Whether `after` is exactly `before` with `text` inserted at one place."""
+    if len(after) != len(before) + len(text):
+        return False
+    start = after.find(text)
+    while start != -1:
+        if after[:start] + after[start + len(text):] == before:
+            return True
+        start = after.find(text, start + 1)
+    return False
+
+
 class DeviceControllerUI:
     """Mixin providing UI inspection and interaction methods.
 
@@ -3281,28 +3293,116 @@ class DeviceControllerUI:
         await asyncio.sleep(0.3)
 
         after = await self._read_field_value(resolved, target, label, identifier)
-        if not self._text_landed(before, after, text, target.type):
+        secure = self._is_secure_field(target)
+        outcome = self._typing_outcome(before, after, text, secure)
+        if outcome != "landed":
             raise DeviceError(
-                f"typed {len(text)} characters into "
-                f"'{label or identifier}' but its value did not change "
-                f"({len(before)} characters before, "
-                f"{'unreadable' if after is None else str(len(after)) + ' after'}). "
-                "The tap may not have taken focus, or the field may be "
-                "read-only.",
+                self._typing_failure(outcome, before, after, text, label or identifier, secure),
                 tool=self._backend_name(resolved),
             )
-        return {"udid": resolved, "verified": True}
+        result: dict = {"udid": resolved, "verified": True}
+        if not secure:
+            # What the field holds now, so a caller can compare for itself.
+            # Never for a secure field, which reports dots.
+            result["value"] = after
+        return result
 
     @staticmethod
-    def _text_landed(before: str, after: str | None, text: str, kind: str) -> bool:
-        """Whether the value moved the way typing `text` would move it."""
+    def _is_secure_field(target: UIElement) -> bool:
+        """A password field, however the backend names it.
+
+        WDA reports `SecureTextField`. The accessibility tree that sim-bridge
+        and idb read reports a plain `TextField` with the subrole
+        `AXSecureTextField` (element_types.py records that pairing), and the
+        web reader maps `<input type="password">` to `SecureTextField`.
+        Checking the type alone missed the simulator's, whose dots can never
+        contain the typed text, and blamed auto-capitalization for it.
+        """
+        if target.type == "SecureTextField":
+            return True
+        return "securetextfield" in (target.role_description or "").lower()
+
+    @staticmethod
+    def _typing_outcome(before: str, after: str | None, text: str, secure: bool) -> str:
+        """How the field's value moved: "landed", "unreadable", "unchanged",
+        "short" (a secure field that did not grow by the text's length) or
+        "mismatch" (it changed, but not to the old value with the text in it).
+
+        The comparison is exact. iOS may rewrite typed text -- auto-
+        capitalization made "qft" into "Qft" -- and that is reported as a
+        mismatch rather than forgiven: in a case-sensitive field, a username
+        or a code, the rewrite is the bug. Turn the rewriting off on the
+        simulator instead.
+        """
         if after is None:
-            return False
-        if kind == "SecureTextField":
+            return "unreadable"
+        if not text:
+            # Nothing to type is nothing to miss; "did not change" would be a
+            # failure reported for a no-op.
+            return "landed"
+        if after == before:
+            return "unchanged"
+        if secure:
             # A secure field reports dots, so the text itself is never visible;
-            # the length is the only evidence available.
-            return len(after) >= len(before) + len(text)
-        return text in after and after != before
+            # the length is the only evidence available. iOS clears a secure
+            # field when typing resumes after it regained focus, so holding
+            # exactly the typed length is a landing too, not a loss.
+            grew = len(after) >= len(before) + len(text)
+            return "landed" if grew or len(after) == len(text) else "short"
+        # Exactly the old value with the text inserted at one place -- the
+        # caret can be anywhere -- or exactly the text. The second is an empty
+        # field whose placeholder read as its value, or one the app cleared.
+        # Containment, and then a rising occurrence count, each passed fields
+        # that held something else: "hello" became "helloX" with "hello"
+        # typed, and "ab" became "axa" with "a".
+        if after == text or _inserted_into(before, after, text):
+            return "landed"
+        return "mismatch"
+
+    @staticmethod
+    def _typing_failure(
+        outcome: str, before: str, after: str | None, text: str, field: str, secure: bool,
+    ) -> str:
+        """Says what happened, for each way it can go wrong.
+
+        One message used to cover all of them, so a field that took the text
+        and had iOS capitalize its first letter was reported as "its value did
+        not change (0 characters before, 17 after)" -- contradicting itself.
+
+        The typed text is never quoted: this is how passwords are entered, and
+        error messages end up in logs and bug reports. The field's own value
+        is shown instead, which is on screen anyway -- except for a secure
+        field, which only ever reports dots.
+        """
+        typed = f"typed {len(text)} characters into '{field}'"
+        if outcome == "unreadable":
+            return (f"{typed} but could not read its value back afterwards, "
+                    "so whether the text arrived is unknown.")
+        if outcome == "unchanged":
+            return (f"{typed} but its value did not change (still {len(before)} "
+                    "characters). The tap may not have taken focus, or the field may "
+                    "be read-only.")
+        if outcome == "short":
+            return (f"{typed} but the secure field now holds {len(after)} characters "
+                    f"(it held {len(before)}). Keystrokes were lost, or focus moved while "
+                    "typing.")
+        shown = after if len(after) <= 200 else after[:200] + "…"
+        where = ""
+        added = after[len(before):] if after.startswith(before) else None
+        if added is not None and text.startswith(added):
+            # Every character that arrived was right; the rest never did.
+            where = f" It received only the first {len(added)} of the {len(text)} characters."
+        elif added is not None:
+            differs = next(
+                (i for i, (a, b) in enumerate(zip(added, text)) if a != b),
+                min(len(added), len(text)),
+            )
+            where = f" The text it added differs from what was typed from character {differs + 1}."
+        return (f"{typed} and its value changed, but not to its old value with the text "
+                f"inserted: it now "
+                f"holds {shown!r} ({len(after)} characters).{where} iOS may have rewritten "
+                "it (auto-capitalization, auto-correction or smart punctuation), or "
+                "keystrokes were lost.")
 
     def _matching_fields(self, elements, label: str | None, identifier: str | None):
         """Text fields matching every selector given."""

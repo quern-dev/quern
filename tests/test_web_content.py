@@ -630,3 +630,70 @@ def test_a_probed_field_keeps_its_value():
                            "frame": {"x": 0, "y": 0, "width": 10, "height": 10}}])[0]
     assert element["value"] == "someone@example.test"
     assert element["interactive"] is True
+
+
+def test_a_password_input_never_reports_its_value():
+    """The page script reads `n.value`, which for a password input is the real
+    password; projected as a plain TextField with that value, it came back from
+    type_text in `value` and in a mismatch error, and stood in for the label in
+    the tree. It is a SecureTextField reporting dots -- whatever the page script
+    sent, so an older script cannot leak it either."""
+    from server.device.web.web_content import project
+
+    raw = {"tag": "input", "type": "password", "text": "hunter2", "value": "hunter2",
+           "x": 10, "y": 10, "width": 200, "height": 40, "interactive": True}
+    [element] = project({"elements": [raw]}, Anchor(dx=0, dy=0))
+    assert element["type"] == "SecureTextField"
+    assert element["value"] == "•" * 7
+    assert "hunter2" not in repr(element)
+
+    with_role = dict(raw, role="textbox")
+    [element] = project({"elements": [with_role]}, Anchor(dx=0, dy=0))
+    assert element["type"] == "SecureTextField", "an ARIA role hid the password type"
+
+    labelled = dict(raw, text="Password (hunter2)")
+    [element] = project({"elements": [labelled]}, Anchor(dx=0, dy=0))
+    assert "hunter2" not in repr(element), "a label repeating the password kept it"
+    assert element["AXLabel"] == "Password ()"
+
+    plain = dict(raw, type="text", text="hello", value="hello")
+    [element] = project({"elements": [plain]}, Anchor(dx=0, dy=0))
+    assert element["type"] == "TextField"
+    assert element["value"] == "hello"
+
+
+def test_a_probed_password_field_is_secure_and_redacted():
+    """The sweep reads the accessibility tree, which names a password field a
+    TextField with the subrole AXSecureTextField. Taking the type alone made it
+    an ordinary field, and copied AXValue straight through."""
+    from server.device.web.web_content import from_probe
+
+    frame = {"x": 0, "y": 0, "width": 10, "height": 10}
+    [element] = from_probe([{"type": "TextField", "subrole": "AXSecureTextField",
+                             "AXLabel": "Password", "AXValue": "hunter2", "frame": frame}])
+    assert element["type"] == "SecureTextField"
+    assert element["value"] == "\u2022" * 7
+    assert element["interactive"] is True
+    # What the simulator's tree actually reports, read from QuernProbe's
+    # field_secure on iOS 26.5.
+    [element] = from_probe([{"type": "TextField", "role": "AXTextField",
+                             "role_description": "AXSecureTextField",
+                             "AXValue": "hunter2", "frame": frame}])
+    assert element["type"] == "SecureTextField"
+    assert "hunter2" not in repr(element)
+    [element] = from_probe([{"type": "TextField", "role_description": "AXSecureTextField",
+                             "AXLabel": "Password hunter2", "AXValue": "hunter2",
+                             "frame": frame}])
+    assert "hunter2" not in repr(element), "a label repeating the password kept it"
+    [element] = from_probe([{"type": "TextField", "AXValue": "hello", "frame": frame}])
+    assert element["type"] == "TextField" and element["value"] == "hello"
+
+
+def test_the_page_script_redacts_a_password_before_it_leaves_the_page():
+    """The first guard is in the page: the value is dots and never the label."""
+    from server.device.web.webinspector import _COLLECT_JS as source
+
+    assert "var secret = tag === 'input'" in source
+    assert "(secret ? '' : n.value)" in source
+    assert "if (secret && n.value) text = text.split(n.value).join('');" in source
+    assert "secret ? ('\u2022'.repeat(" in source

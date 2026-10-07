@@ -152,6 +152,13 @@ _COLLECT_JS = """
       if (n.labels && n.labels.length) named = (n.labels[0].innerText || '').trim();
       if (!named) named = n.getAttribute('aria-label') || n.getAttribute('placeholder') || '';
     }
+    // A password input's value never leaves the page: it is reported as dots
+    // of the same length, as a native secure field reports itself, and never
+    // stands in for the label.
+    var secret = tag === 'input' && (n.getAttribute('type') || '').toLowerCase() === 'password';
+    var text = named || own || n.getAttribute('aria-label') || (secret ? '' : n.value) || '';
+    // Nor inside it: a label or aria-label that repeats the password.
+    if (secret && n.value) text = text.split(n.value).join('');
     out.push({
       tag: tag,
       id: n.id || null,
@@ -159,8 +166,9 @@ _COLLECT_JS = """
       role: n.getAttribute('role'),
       type: n.getAttribute('type'),
       href: tag === 'a' ? n.getAttribute('href') : null,
-      text: (named || own || n.getAttribute('aria-label') || n.value || '').slice(0, 200),
-      value: (tag === 'input' || tag === 'textarea' || tag === 'select')
+      text: text.slice(0, 200),
+      value: secret ? ('\u2022'.repeat((n.value || '').length) || null)
+        : (tag === 'input' || tag === 'textarea' || tag === 'select')
         ? (n.value || null) : null,
       x: box.left, y: box.top, width: box.width, height: box.height,
       interactive: !!interactive

@@ -65,6 +65,11 @@ def _element_type(element: dict) -> str:
     """
     role = (element.get("role") or "").lower()
     tag = (element.get("tag") or "").lower()
+    # Before the role: `<input type="password" role="textbox">` is still a
+    # password field, and classed as a TextField its dots were compared with
+    # the typed text and reported as a mismatch.
+    if tag == "input" and _is_password(element):
+        return "SecureTextField"
     if role in ("button", "link", "heading", "textbox", "checkbox", "radio", "tab"):
         return {
             "button": "Button", "link": "Link", "heading": "Heading",
@@ -82,6 +87,38 @@ def _element_type(element: dict) -> str:
     return "StaticText"
 
 
+def _is_password(element: dict) -> bool:
+    return (element.get("type") or "").lower() == "password"
+
+
+def _is_secure(element: dict) -> bool:
+    """A password input from the page script, or a field the accessibility
+    tree marks secure -- the two routes into the element list."""
+    return _is_password(element) or element.get("type") == "SecureTextField"
+
+
+def _redacted_value(element: dict) -> str | None:
+    """A password input's value as dots, the way a native secure field reports
+    itself. The page script already does this; repeated here so a page script
+    from before that change, or a future one that forgets, cannot put a
+    password into the tree, a typing result or an error message."""
+    value = element.get("value")
+    if value and _is_secure(element) and set(value) != {"\u2022"}:
+        return "\u2022" * len(value)
+    return value
+
+
+def _label(element: dict) -> str | None:
+    """The element's text, without a password's value anywhere in it -- a page
+    script from before the page-side guard sends the real value, and a label
+    can repeat it."""
+    text = element.get("text")
+    value = element.get("value")
+    if text and value and _is_secure(element) and set(value) != {"\u2022"}:
+        return text.replace(value, "")
+    return text
+
+
 def project(contents: dict, anchor: Anchor, *, page_id: int | None = None) -> list[dict]:
     """Every element of a page as a Quern element dict in screen coordinates."""
     projected: list[dict] = []
@@ -91,7 +128,7 @@ def project(contents: dict, anchor: Anchor, *, page_id: int | None = None) -> li
             continue
         projected.append({
             "type": _element_type(element),
-            "AXLabel": normalise(element.get("text")),
+            "AXLabel": normalise(_label(element)),
             "frame": frame,
             "enabled": True,
             "source": "web-inspector",
@@ -99,7 +136,7 @@ def project(contents: dict, anchor: Anchor, *, page_id: int | None = None) -> li
             "tag": element.get("tag"),
             "href": element.get("href"),
             "interactive": bool(element.get("interactive")),
-            "value": element.get("value"),
+            "value": _redacted_value(element),
             "page_id": page_id,
         })
     return projected
@@ -412,9 +449,22 @@ def _contains(frame: dict | None, x: float, y: float) -> bool:
 # Accessibility types that answer a tap. A probed element carries no DOM, so
 # interactivity has to be read off the type the platform reports.
 _INTERACTIVE_TYPES = frozenset({
-    "Button", "Link", "TextField", "SearchField", "TextArea", "Switch",
+    "Button", "Link", "TextField", "SecureTextField", "SearchField", "TextArea", "Switch",
     "Slider", "RadioButton", "CheckBox", "SegmentedControl", "Cell", "MenuItem",
 })
+
+
+def _probe_type(hit: dict) -> str:
+    """The hit's type, with a password field named as one. The accessibility
+    tree reports it as a plain TextField whose subrole is AXSecureTextField;
+    taking the type alone dropped that, and the field was read back and
+    reported as an ordinary one."""
+    element_type = hit.get("type") or "Other"
+    markers = (str(hit.get(key) or "").lower()
+               for key in ("type", "subrole", "role_description"))
+    if any("securetextfield" in m for m in markers):
+        return "SecureTextField"
+    return element_type
 
 
 def from_probe(hits: list[dict]) -> list[dict]:
@@ -430,10 +480,11 @@ def from_probe(hits: list[dict]) -> list[dict]:
         frame = hit.get("frame") or {}
         if not frame.get("width") or not frame.get("height"):
             continue
-        element_type = hit.get("type") or "Other"
+        element_type = _probe_type(hit)
         elements.append({
             "type": element_type,
-            "AXLabel": normalise(hit.get("AXLabel")),
+            "AXLabel": normalise(_label({"type": element_type, "text": hit.get("AXLabel"),
+                                         "value": hit.get("AXValue")})),
             "frame": frame,
             "enabled": bool(hit.get("enabled", True)),
             "source": "web-probe",
@@ -442,7 +493,7 @@ def from_probe(hits: list[dict]) -> list[dict]:
             "href": None,
             "interactive": element_type in _INTERACTIVE_TYPES,
             "page_id": None,
-            "value": hit.get("AXValue"),
+            "value": _redacted_value({"type": element_type, "value": hit.get("AXValue")}),
         })
     return elements
 
