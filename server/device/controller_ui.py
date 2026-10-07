@@ -3336,6 +3336,10 @@ class DeviceControllerUI:
         """
         if after is None:
             return "unreadable"
+        if not text:
+            # Nothing to type is nothing to miss; "did not change" would be a
+            # failure reported for a no-op.
+            return "landed"
         if after == before:
             return "unchanged"
         if secure:

@@ -911,6 +911,15 @@ def test_text_the_field_already_held_does_not_count_as_landing():
     assert outcome("Search", "qft", "qft", False) == "landed"
 
 
+def test_typing_nothing_is_not_a_failure():
+    """An empty string changes nothing, and "did not change" would report that
+    as a failure; with something else changing, `count("")` would also pass
+    anything that grew."""
+    outcome = DeviceController._typing_outcome
+    assert outcome("abc", "abc", "", False) == "landed"
+    assert outcome("abc", None, "", False) == "unreadable"
+
+
 def test_typing_into_the_middle_of_an_earlier_occurrence_still_lands():
     """Inserting "ab" at index 1 of "abab" gives "aabbab": still two
     occurrences, so the count alone would call it a mismatch."""

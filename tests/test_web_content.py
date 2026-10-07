@@ -664,12 +664,9 @@ def test_a_password_input_never_reports_its_value():
 
 def test_the_page_script_redacts_a_password_before_it_leaves_the_page():
     """The first guard is in the page: the value is dots and never the label."""
-    from pathlib import Path
+    from server.device.web.webinspector import _COLLECT_JS as source
 
-    from server.device.web import webinspector
-
-    source = Path(webinspector.__file__).read_text()
     assert "var secret = tag === 'input'" in source
     assert "(secret ? '' : n.value)" in source
     assert "if (secret && n.value) text = text.split(n.value).join('');" in source
-    assert "secret ? ('\\u2022'.repeat(" in source
+    assert "secret ? ('\u2022'.repeat(" in source
