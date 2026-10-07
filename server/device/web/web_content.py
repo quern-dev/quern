@@ -102,6 +102,17 @@ def _redacted_value(element: dict) -> str | None:
     return value
 
 
+def _label(element: dict) -> str | None:
+    """The element's text, without a password's value anywhere in it -- a page
+    script from before the page-side guard sends the real value, and a label
+    can repeat it."""
+    text = element.get("text")
+    value = element.get("value")
+    if text and value and _is_password(element) and set(value) != {"\u2022"}:
+        return text.replace(value, "")
+    return text
+
+
 def project(contents: dict, anchor: Anchor, *, page_id: int | None = None) -> list[dict]:
     """Every element of a page as a Quern element dict in screen coordinates."""
     projected: list[dict] = []
@@ -111,8 +122,7 @@ def project(contents: dict, anchor: Anchor, *, page_id: int | None = None) -> li
             continue
         projected.append({
             "type": _element_type(element),
-            "AXLabel": normalise(element.get("text")) if not _is_password(element)
-            or element.get("text") != element.get("value") else "",
+            "AXLabel": normalise(_label(element)),
             "frame": frame,
             "enabled": True,
             "source": "web-inspector",

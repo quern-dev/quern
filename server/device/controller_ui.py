@@ -277,6 +277,18 @@ def _note_equivalence(result: dict, element_type: str | None, element: UIElement
 _BACKEND_FAILURE_TOOLS = frozenset({"sim-bridge", "idb", "wda", "u2"})
 
 
+def _inserted_into(before: str, after: str, text: str) -> bool:
+    """Whether `after` is exactly `before` with `text` inserted at one place."""
+    if len(after) != len(before) + len(text):
+        return False
+    start = after.find(text)
+    while start != -1:
+        if after[:start] + after[start + len(text):] == before:
+            return True
+        start = after.find(text, start + 1)
+    return False
+
+
 class DeviceControllerUI:
     """Mixin providing UI inspection and interaction methods.
 
@@ -3333,7 +3345,15 @@ class DeviceControllerUI:
             # exactly the typed length is a landing too, not a loss.
             grew = len(after) >= len(before) + len(text)
             return "landed" if grew or len(after) == len(text) else "short"
-        return "landed" if text in after else "mismatch"
+        # The text must be new: a value that already held it before the call
+        # still holds it whatever happened, so containment alone passed a
+        # field where only something else changed. One more occurrence than
+        # before covers typing at the end; `before` with the text inserted
+        # somewhere covers typing into the middle of an earlier occurrence,
+        # which can leave the count unchanged.
+        if after.count(text) > before.count(text):
+            return "landed"
+        return "landed" if _inserted_into(before, after, text) else "mismatch"
 
     @staticmethod
     def _typing_failure(

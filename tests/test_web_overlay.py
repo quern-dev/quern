@@ -900,6 +900,25 @@ def test_the_comparison_stays_exact():
     assert outcome("abc ", "abc def", "def", False) == "landed"
 
 
+def test_text_the_field_already_held_does_not_count_as_landing():
+    """The field held "hello" before the call; afterwards it holds "helloX".
+    Containment called that a landing, though the typing put in only an X."""
+    outcome = DeviceController._typing_outcome
+    assert outcome("hello", "helloX", "hello", False) == "mismatch"
+    assert outcome("hello", "hellohello", "hello", False) == "landed"
+    # A placeholder reads as the value of an empty field and is replaced, not
+    # appended to.
+    assert outcome("Search", "qft", "qft", False) == "landed"
+
+
+def test_typing_into_the_middle_of_an_earlier_occurrence_still_lands():
+    """Inserting "ab" at index 1 of "abab" gives "aabbab": still two
+    occurrences, so the count alone would call it a mismatch."""
+    outcome = DeviceController._typing_outcome
+    assert outcome("abab", "aabbab", "ab", False) == "landed"
+    assert outcome("abab", "aabbac", "ab", False) == "mismatch"
+
+
 def test_lost_keystrokes_say_how_many_arrived():
     """Six of seven characters arriving used to read "differs from character
     7" -- one past the end of what arrived, rather than "the rest are missing"."""

@@ -651,6 +651,11 @@ def test_a_password_input_never_reports_its_value():
     [element] = project({"elements": [with_role]}, Anchor(dx=0, dy=0))
     assert element["type"] == "SecureTextField", "an ARIA role hid the password type"
 
+    labelled = dict(raw, text="Password (hunter2)")
+    [element] = project({"elements": [labelled]}, Anchor(dx=0, dy=0))
+    assert "hunter2" not in repr(element), "a label repeating the password kept it"
+    assert element["AXLabel"] == "Password ()"
+
     plain = dict(raw, type="text", text="hello", value="hello")
     [element] = project({"elements": [plain]}, Anchor(dx=0, dy=0))
     assert element["type"] == "TextField"
@@ -666,4 +671,5 @@ def test_the_page_script_redacts_a_password_before_it_leaves_the_page():
     source = Path(webinspector.__file__).read_text()
     assert "var secret = tag === 'input'" in source
     assert "(secret ? '' : n.value)" in source
+    assert "if (secret && n.value) text = text.split(n.value).join('');" in source
     assert "secret ? ('\\u2022'.repeat(" in source
