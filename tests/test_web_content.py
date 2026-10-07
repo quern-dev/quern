@@ -647,6 +647,10 @@ def test_a_password_input_never_reports_its_value():
     assert element["value"] == "•" * 7
     assert "hunter2" not in repr(element)
 
+    with_role = dict(raw, role="textbox")
+    [element] = project({"elements": [with_role]}, Anchor(dx=0, dy=0))
+    assert element["type"] == "SecureTextField", "an ARIA role hid the password type"
+
     plain = dict(raw, type="text", text="hello", value="hello")
     [element] = project({"elements": [plain]}, Anchor(dx=0, dy=0))
     assert element["type"] == "TextField"

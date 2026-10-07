@@ -3296,7 +3296,7 @@ class DeviceControllerUI:
         return result
 
     @staticmethod
-    def _is_secure_field(target) -> bool:
+    def _is_secure_field(target: UIElement) -> bool:
         """A password field, however the backend names it.
 
         WDA reports `SecureTextField`. The accessibility tree that sim-bridge

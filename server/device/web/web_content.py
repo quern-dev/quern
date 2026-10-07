@@ -65,6 +65,11 @@ def _element_type(element: dict) -> str:
     """
     role = (element.get("role") or "").lower()
     tag = (element.get("tag") or "").lower()
+    # Before the role: `<input type="password" role="textbox">` is still a
+    # password field, and classed as a TextField its dots were compared with
+    # the typed text and reported as a mismatch.
+    if tag == "input" and _is_password(element):
+        return "SecureTextField"
     if role in ("button", "link", "heading", "textbox", "checkbox", "radio", "tab"):
         return {
             "button": "Button", "link": "Link", "heading": "Heading",
@@ -75,8 +80,6 @@ def _element_type(element: dict) -> str:
         return "Button"
     if tag == "a":
         return "Link"
-    if tag == "input" and _is_password(element):
-        return "SecureTextField"
     if tag in ("input", "textarea", "select"):
         return "TextField"
     if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
@@ -88,7 +91,7 @@ def _is_password(element: dict) -> bool:
     return (element.get("type") or "").lower() == "password"
 
 
-def _redacted_value(element: dict):
+def _redacted_value(element: dict) -> str | None:
     """A password input's value as dots, the way a native secure field reports
     itself. The page script already does this; repeated here so a page script
     from before that change, or a future one that forgets, cannot put a
