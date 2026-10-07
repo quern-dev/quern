@@ -97,7 +97,8 @@ def _redacted_value(element: dict) -> str | None:
     from before that change, or a future one that forgets, cannot put a
     password into the tree, a typing result or an error message."""
     value = element.get("value")
-    if value and _is_password(element) and set(value) != {"\u2022"}:
+    secure = _is_password(element) or element.get("type") == "SecureTextField"
+    if value and secure and set(value) != {"\u2022"}:
         return "\u2022" * len(value)
     return value
 
@@ -443,9 +444,22 @@ def _contains(frame: dict | None, x: float, y: float) -> bool:
 # Accessibility types that answer a tap. A probed element carries no DOM, so
 # interactivity has to be read off the type the platform reports.
 _INTERACTIVE_TYPES = frozenset({
-    "Button", "Link", "TextField", "SearchField", "TextArea", "Switch",
+    "Button", "Link", "TextField", "SecureTextField", "SearchField", "TextArea", "Switch",
     "Slider", "RadioButton", "CheckBox", "SegmentedControl", "Cell", "MenuItem",
 })
+
+
+def _probe_type(hit: dict) -> str:
+    """The hit's type, with a password field named as one. The accessibility
+    tree reports it as a plain TextField whose subrole is AXSecureTextField;
+    taking the type alone dropped that, and the field was read back and
+    reported as an ordinary one."""
+    element_type = hit.get("type") or "Other"
+    markers = (str(hit.get(key) or "").lower()
+               for key in ("type", "subrole", "role_description"))
+    if any("securetextfield" in m for m in markers):
+        return "SecureTextField"
+    return element_type
 
 
 def from_probe(hits: list[dict]) -> list[dict]:
@@ -461,7 +475,7 @@ def from_probe(hits: list[dict]) -> list[dict]:
         frame = hit.get("frame") or {}
         if not frame.get("width") or not frame.get("height"):
             continue
-        element_type = hit.get("type") or "Other"
+        element_type = _probe_type(hit)
         elements.append({
             "type": element_type,
             "AXLabel": normalise(hit.get("AXLabel")),
@@ -473,7 +487,7 @@ def from_probe(hits: list[dict]) -> list[dict]:
             "href": None,
             "interactive": element_type in _INTERACTIVE_TYPES,
             "page_id": None,
-            "value": hit.get("AXValue"),
+            "value": _redacted_value({"type": element_type, "value": hit.get("AXValue")}),
         })
     return elements
 

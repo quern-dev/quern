@@ -928,6 +928,14 @@ def test_typing_into_the_middle_of_an_earlier_occurrence_still_lands():
     assert outcome("abab", "aabbac", "ab", False) == "mismatch"
 
 
+def test_a_higher_count_is_not_a_landing_on_its_own():
+    """"ab" became "axa" with "a" typed: one more "a" than before, but not
+    the old value with the text in it."""
+    outcome = DeviceController._typing_outcome
+    assert outcome("ab", "axa", "a", False) == "mismatch"
+    assert outcome("ab", "aab", "a", False) == "landed"
+
+
 def test_lost_keystrokes_say_how_many_arrived():
     """Six of seven characters arriving used to read "differs from character
     7" -- one past the end of what arrived, rather than "the rest are missing"."""

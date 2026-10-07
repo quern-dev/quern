@@ -662,6 +662,29 @@ def test_a_password_input_never_reports_its_value():
     assert element["value"] == "hello"
 
 
+def test_a_probed_password_field_is_secure_and_redacted():
+    """The sweep reads the accessibility tree, which names a password field a
+    TextField with the subrole AXSecureTextField. Taking the type alone made it
+    an ordinary field, and copied AXValue straight through."""
+    from server.device.web.web_content import from_probe
+
+    frame = {"x": 0, "y": 0, "width": 10, "height": 10}
+    [element] = from_probe([{"type": "TextField", "subrole": "AXSecureTextField",
+                             "AXLabel": "Password", "AXValue": "hunter2", "frame": frame}])
+    assert element["type"] == "SecureTextField"
+    assert element["value"] == "\u2022" * 7
+    assert element["interactive"] is True
+    # What the simulator's tree actually reports, read from QuernProbe's
+    # field_secure on iOS 26.5.
+    [element] = from_probe([{"type": "TextField", "role": "AXTextField",
+                             "role_description": "AXSecureTextField",
+                             "AXValue": "hunter2", "frame": frame}])
+    assert element["type"] == "SecureTextField"
+    assert "hunter2" not in repr(element)
+    [element] = from_probe([{"type": "TextField", "AXValue": "hello", "frame": frame}])
+    assert element["type"] == "TextField" and element["value"] == "hello"
+
+
 def test_the_page_script_redacts_a_password_before_it_leaves_the_page():
     """The first guard is in the page: the value is dots and never the label."""
     from server.device.web.webinspector import _COLLECT_JS as source

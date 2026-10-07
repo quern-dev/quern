@@ -3349,15 +3349,15 @@ class DeviceControllerUI:
             # exactly the typed length is a landing too, not a loss.
             grew = len(after) >= len(before) + len(text)
             return "landed" if grew or len(after) == len(text) else "short"
-        # The text must be new: a value that already held it before the call
-        # still holds it whatever happened, so containment alone passed a
-        # field where only something else changed. One more occurrence than
-        # before covers typing at the end; `before` with the text inserted
-        # somewhere covers typing into the middle of an earlier occurrence,
-        # which can leave the count unchanged.
-        if after.count(text) > before.count(text):
+        # Exactly the old value with the text inserted at one place -- the
+        # caret can be anywhere -- or exactly the text. The second is an empty
+        # field whose placeholder read as its value, or one the app cleared.
+        # Containment, and then a rising occurrence count, each passed fields
+        # that held something else: "hello" became "helloX" with "hello"
+        # typed, and "ab" became "axa" with "a".
+        if after == text or _inserted_into(before, after, text):
             return "landed"
-        return "landed" if _inserted_into(before, after, text) else "mismatch"
+        return "mismatch"
 
     @staticmethod
     def _typing_failure(
