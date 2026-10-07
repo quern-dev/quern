@@ -824,6 +824,24 @@ class TestTypeText:
             text="hello world", udid="AAAA-1111", label=None, identifier=None,
         )
 
+    async def test_a_verified_type_returns_the_field_s_value(
+        self, app, auth_headers, mock_controller,
+    ):
+        """So a caller can see what the field holds -- iOS may have rewritten
+        it -- without a second read."""
+        mock_controller.type_text.return_value = {
+            "udid": "AAAA-1111", "verified": True, "value": "Qft found it",
+        }
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/ui/type",
+                json={"text": "Qft found it", "identifier": "_Post log view"},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        assert resp.json()["value"] == "Qft found it"
+
     async def test_type_text_no_auth(self, app):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:

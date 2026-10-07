@@ -790,6 +790,8 @@ async def type_text(request: Request, body: TypeTextRequest):
                 act.outcome = "suspect"
                 act.detail += ", unverified"
             result: dict = {"status": "ok", "udid": udid, "verified": typed["verified"]}
+            if "value" in typed:
+                result["value"] = typed["value"]
             if body.capture_screenshots:
                 await asyncio.sleep(body.settle_delay)
                 after = await _capture_action_screenshot(controller, udid, "type_after")

@@ -826,6 +826,7 @@ def _type_controller(field, after_value, backend=None):
             updated.identifier = field.identifier
             updated.label = field.label
             updated.extra_attrs = field.extra_attrs
+            updated.type = field.type
             return [updated], "SIM"
         return [field], "SIM"
 
@@ -868,12 +869,66 @@ async def test_a_named_field_that_is_not_there_is_an_error():
 def test_a_secure_field_is_verified_by_length_not_content():
     """A password field reports dots, so the typed text is never visible in the
     value and a containment check would fail every time."""
-    landed = DeviceController._text_landed
-    assert landed("", "•" * 5, "hello", "SecureTextField") is True
-    assert landed("", "", "hello", "SecureTextField") is False
+    outcome = DeviceController._typing_outcome
+    assert outcome("", "•" * 5, "hello", "SecureTextField") == "landed"
+    assert outcome("", "", "hello", "SecureTextField") == "unchanged"
+    assert outcome("", "••", "hello", "SecureTextField") == "short"
     # And an ordinary field still checks the content, so text landing in some
     # other field cannot pass.
-    assert landed("", "goodbye", "hello", "TextField") is False
+    assert outcome("", "goodbye", "hello", "TextField") == "mismatch"
+
+
+def test_the_comparison_stays_exact():
+    """iOS auto-capitalized "qft" to "Qft" in a log field. Forgiving that would
+    also forgive it in a case-sensitive field -- a username, a code -- where the
+    rewrite is the bug. So it is a mismatch, reported as one."""
+    outcome = DeviceController._typing_outcome
+    assert outcome("", "Qft found it 0001", "qft found it 0001", "TextArea") == "mismatch"
+    assert outcome("", "qft found it 0001", "qft found it 0001", "TextArea") == "landed"
+    assert outcome("abc ", "abc def", "def", "TextArea") == "landed"
+
+
+async def test_a_rewritten_value_is_reported_as_a_mismatch_not_as_no_change():
+    """The report: 17 characters typed, the field holding 17, and the error
+    saying the value "did not change (0 characters before, 17 after)"."""
+    ctrl, _ = _type_controller(_native_field(""), "Qft found it 0001")
+    with pytest.raises(DeviceError) as caught:
+        await ctrl.type_text("qft found it 0001", identifier="composition.text")
+    message = str(caught.value)
+    assert "did not change" not in message
+    assert "'Qft found it 0001'" in message, "the field's value is what to look at"
+    assert "from character 1" in message
+    assert "auto-capitalization" in message
+
+
+async def test_a_field_that_did_not_change_says_so():
+    ctrl, _ = _type_controller(_native_field("draft"), "draft")
+    with pytest.raises(DeviceError, match="did not change"):
+        await ctrl.type_text("hello", identifier="composition.text")
+
+
+async def test_the_typed_text_is_never_quoted_in_an_error():
+    """type_text is how passwords go in, and error messages reach logs and bug
+    reports. The field's value is on screen anyway; the typed text is not."""
+    ctrl, _ = _type_controller(_native_field(""), "Hunter2")
+    with pytest.raises(DeviceError) as caught:
+        await ctrl.type_text("hunter2", identifier="composition.text")
+    assert "hunter2" not in str(caught.value)
+
+
+async def test_a_verified_type_returns_what_the_field_holds():
+    ctrl, _ = _type_controller(_native_field("abc "), "abc def")
+    result = await ctrl.type_text("def", identifier="composition.text")
+    assert result == {"udid": "SIM", "verified": True, "value": "abc def"}
+
+
+async def test_a_secure_field_s_value_is_not_returned():
+    field = _native_field("")
+    field.type = "SecureTextField"
+    ctrl, _ = _type_controller(field, "•••••")
+    result = await ctrl.type_text("hello", identifier="composition.text")
+    assert result["verified"] is True
+    assert "value" not in result
 
 
 async def test_typing_reads_the_screen_fresh_before_tapping():
