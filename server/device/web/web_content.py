@@ -91,14 +91,19 @@ def _is_password(element: dict) -> bool:
     return (element.get("type") or "").lower() == "password"
 
 
+def _is_secure(element: dict) -> bool:
+    """A password input from the page script, or a field the accessibility
+    tree marks secure -- the two routes into the element list."""
+    return _is_password(element) or element.get("type") == "SecureTextField"
+
+
 def _redacted_value(element: dict) -> str | None:
     """A password input's value as dots, the way a native secure field reports
     itself. The page script already does this; repeated here so a page script
     from before that change, or a future one that forgets, cannot put a
     password into the tree, a typing result or an error message."""
     value = element.get("value")
-    secure = _is_password(element) or element.get("type") == "SecureTextField"
-    if value and secure and set(value) != {"\u2022"}:
+    if value and _is_secure(element) and set(value) != {"\u2022"}:
         return "\u2022" * len(value)
     return value
 
@@ -109,7 +114,7 @@ def _label(element: dict) -> str | None:
     can repeat it."""
     text = element.get("text")
     value = element.get("value")
-    if text and value and _is_password(element) and set(value) != {"\u2022"}:
+    if text and value and _is_secure(element) and set(value) != {"\u2022"}:
         return text.replace(value, "")
     return text
 
@@ -478,7 +483,8 @@ def from_probe(hits: list[dict]) -> list[dict]:
         element_type = _probe_type(hit)
         elements.append({
             "type": element_type,
-            "AXLabel": normalise(hit.get("AXLabel")),
+            "AXLabel": normalise(_label({"type": element_type, "text": hit.get("AXLabel"),
+                                         "value": hit.get("AXValue")})),
             "frame": frame,
             "enabled": bool(hit.get("enabled", True)),
             "source": "web-probe",

@@ -934,6 +934,9 @@ def test_a_higher_count_is_not_a_landing_on_its_own():
     outcome = DeviceController._typing_outcome
     assert outcome("ab", "axa", "a", False) == "mismatch"
     assert outcome("ab", "aab", "a", False) == "landed"
+    message = DeviceController._typing_failure("mismatch", "ab", "axa", "a", "f", False)
+    assert "does not contain" not in message, "the value does contain the text"
+    assert "inserted" in message
 
 
 def test_lost_keystrokes_say_how_many_arrived():

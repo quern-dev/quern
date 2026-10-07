@@ -681,6 +681,10 @@ def test_a_probed_password_field_is_secure_and_redacted():
                              "AXValue": "hunter2", "frame": frame}])
     assert element["type"] == "SecureTextField"
     assert "hunter2" not in repr(element)
+    [element] = from_probe([{"type": "TextField", "role_description": "AXSecureTextField",
+                             "AXLabel": "Password hunter2", "AXValue": "hunter2",
+                             "frame": frame}])
+    assert "hunter2" not in repr(element), "a label repeating the password kept it"
     [element] = from_probe([{"type": "TextField", "AXValue": "hello", "frame": frame}])
     assert element["type"] == "TextField" and element["value"] == "hello"
 

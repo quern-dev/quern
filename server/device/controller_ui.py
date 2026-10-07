@@ -3326,7 +3326,7 @@ class DeviceControllerUI:
     def _typing_outcome(before: str, after: str | None, text: str, secure: bool) -> str:
         """How the field's value moved: "landed", "unreadable", "unchanged",
         "short" (a secure field that did not grow by the text's length) or
-        "mismatch" (it changed, but does not contain the text).
+        "mismatch" (it changed, but not to the old value with the text in it).
 
         The comparison is exact. iOS may rewrite typed text -- auto-
         capitalization made "qft" into "Qft" -- and that is reported as a
@@ -3398,7 +3398,8 @@ class DeviceControllerUI:
                 min(len(added), len(text)),
             )
             where = f" The text it added differs from what was typed from character {differs + 1}."
-        return (f"{typed} and its value changed, but does not contain the text: it now "
+        return (f"{typed} and its value changed, but not to its old value with the text "
+                f"inserted: it now "
                 f"holds {shown!r} ({len(after)} characters).{where} iOS may have rewritten "
                 "it (auto-capitalization, auto-correction or smart punctuation), or "
                 "keystrokes were lost.")
