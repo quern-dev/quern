@@ -869,6 +869,9 @@ async def set_simulator_setting(request: Request, body: SetSimulatorSettingReque
     controller = request.app.state.device_controller
     act = current_action()
     act.detail = f"{body.name} {body.value}"
+    # Set before the call so a failure is attributed too; replaced by the
+    # resolved udid when there is one.
+    act.udid = body.udid
     try:
         result = await controller.set_simulator_setting(
             body.name, body.value, udid=body.udid, reboot=body.reboot,

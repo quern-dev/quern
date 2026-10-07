@@ -840,7 +840,7 @@ bundle_id names the app the link should open in, and quern reports whether it di
   });
 
   server.registerTool("get_simulator_settings", {
-    description: `Read the iOS simulator settings quern can change with set_simulator_setting -- password_autofill, auto_correction, auto_capitalization, smart_punctuation, period_shortcut, predictive_text, spell_check -- and whether each is on or off. Each entry says which runtimes it was verified on and whether that includes this simulator's (verified_here): the storage is undocumented, so an unverified runtime is reported rather than assumed.`,
+    description: `Read the iOS simulator settings quern can change with set_simulator_setting -- password_autofill, auto_correction, auto_capitalization, smart_punctuation, period_shortcut, predictive_text, spell_check -- and whether each is on or off ("mixed" when the keys it covers disagree, which set_simulator_setting rewrites; null when its file could not be read). Each entry says which runtimes it was verified on and whether that includes this simulator's (verified_here): the storage is undocumented, so an unverified runtime is reported rather than assumed.`,
     inputSchema: strictParams({
       udid: z.string().optional().describe("Target simulator UDID (defaults to active device)"),
     }),

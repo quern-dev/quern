@@ -55,6 +55,17 @@ def _display_name(name: str | None, kind: str | None) -> str | None:
     return name.replace("_", " ")
 
 
+async def _simctl_state(udid: str) -> str:
+    """simctl's own state string for a simulator, or "unknown" when it cannot
+    be read -- never a guess at "Shutdown"."""
+    from server.device.app_state import get_device_state
+
+    try:
+        return await get_device_state(udid)
+    except OSError:
+        return "unknown"
+
+
 class DeviceController(DeviceControllerUI):
     """High-level device management: resolves active device, delegates to backends."""
 
@@ -1911,13 +1922,18 @@ class DeviceController(DeviceControllerUI):
         """
         resolved = await self.resolve_udid(udid)
         self._require_simulator(resolved, "Simulator settings")
-        result = await sim_settings.set_setting(
+
+        async def after_boot(booted: str) -> None:
+            # Everything read from the old boot describes a process that is
+            # gone, and a fresh boot is where Device Hub takes the input
+            # services -- the same repair `boot()` makes.
+            self._invalidate_ui_cache(booted)
+            await self._restore_input_after_boot(booted)
+
+        return await sim_settings.set_setting(
             self.simctl, resolved, name, value, reboot=reboot,
+            device_state=_simctl_state, after_boot=after_boot,
         )
-        if result["rebooted"]:
-            # Everything read from the old boot describes a process that is gone.
-            self._invalidate_ui_cache(resolved)
-        return result
 
     async def set_font_scale(
         self, scale: float, udid: str | None = None,

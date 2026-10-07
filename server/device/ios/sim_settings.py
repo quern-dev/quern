@@ -25,16 +25,23 @@ reboot and never gets one.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import os
 import plistlib
 import tempfile
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from server.models import DeviceError, RebootRequiredError
+from server.models import (
+    DeviceError,
+    DeviceOperationUnsupportedError,
+    InvalidDeviceRequestError,
+    RebootRequiredError,
+)
 
 CATALOG_PATH = Path(__file__).with_name("sim_settings_catalog.json")
 #: Where CoreSimulator keeps each simulator's directory. A module attribute so
@@ -127,20 +134,36 @@ def _state_of(write: _Write, stored) -> str:
 
 
 def read_state(udid: str, name: str) -> str | None:
-    """The setting's state: "on", "off", "unknown" for a value the catalog does
-    not recognise, or None when its file could not be read."""
-    entry = _entry(name)
-    primary = _writes(entry)[0]
-    data = _load(_file_path(udid, primary.file))
-    if data is None:
-        return None
-    return _state_of(primary, _dig(data, primary.key_path))
+    """The setting's state: "on" or "off" when every key it covers agrees,
+    "mixed" when they do not, "unknown" for a value the catalog does not
+    recognise, or None when a file could not be read.
+
+    Every key, not only the first: the restriction can say off while the
+    hardware-keyboard switch -- the one quern's own typing goes through --
+    says on, and reading only the restriction reported that as already off.
+    A key that is absent agrees with whatever the rest say, unless it is the
+    first, whose `absent` is what a fresh simulator means.
+    """
+    seen: set[str] = set()
+    for i, write in enumerate(_writes(_entry(name))):
+        data = _load(_file_path(udid, write.file))
+        if data is None:
+            return None
+        stored = _dig(data, write.key_path)
+        if stored is None and i > 0:
+            continue
+        seen.add(_state_of(write, stored))
+    if "unknown" in seen:
+        return "unknown"
+    if len(seen) > 1:
+        return "mixed"
+    return seen.pop() if seen else "unknown"
 
 
 def _entry(name: str) -> dict:
     settings = catalog()["settings"]
     if name not in settings:
-        raise DeviceError(
+        raise InvalidDeviceRequestError(
             f"no simulator setting named {name!r}; known: {', '.join(sorted(settings))}",
             tool="quern",
         )
@@ -185,23 +208,41 @@ def _write_plist(path: Path, data: dict) -> None:
         raise
 
 
-def write_state(udid: str, name: str, state: str) -> None:
-    """Write every key the setting covers. The simulator must be shut down."""
-    entry = _entry(name)
-    writes = _writes(entry)
+def _files_for(name: str) -> dict[str, list[_Write]]:
     by_file: dict[str, list[_Write]] = {}
-    for w in writes:
+    for w in _writes(_entry(name)):
         by_file.setdefault(w.file, []).append(w)
-    for alias, group in by_file.items():
+    return by_file
+
+
+def check_writable(udid: str, name: str) -> None:
+    """Refuse now anything `write_state` would refuse, so it is refused before
+    a booted simulator is shut down rather than after."""
+    for alias in _files_for(name):
         path = _file_path(udid, alias)
         if alias == "restrictions" and not path.exists():
             # Created at first boot. Writing a fresh one would replace a file
             # whose other contents the system expects, so refuse instead.
-            raise DeviceError(
+            raise InvalidDeviceRequestError(
                 f"{path.name} does not exist yet: boot this simulator once so iOS "
                 f"creates it, then set {name}",
                 tool="quern",
             )
+        if _load(path) is None:
+            raise DeviceError(f"cannot read {path}; not changing {name}", tool="quern")
+
+
+def write_state(udid: str, name: str, state: str) -> None:
+    """Write every key the setting covers. The simulator must be shut down.
+
+    The files are read again here rather than reusing what `check_writable`
+    read while the simulator was up: the keyboard caches its preferences and
+    writes them late, so a copy taken before the shutdown can be older than
+    the file is after it.
+    """
+    check_writable(udid, name)
+    for alias, group in _files_for(name).items():
+        path = _file_path(udid, alias)
         data = _load(path)
         if data is None:
             raise DeviceError(f"cannot read {path}; not changing {name}", tool="quern")
@@ -210,15 +251,50 @@ def write_state(udid: str, name: str, state: str) -> None:
         _write_plist(path, data)
 
 
-async def set_setting(simctl, udid: str, name: str, state: str, *, reboot: bool) -> dict:
+#: One change at a time per simulator. Two calls racing would each see the
+#: other's shutdown or boot in progress -- measured by the review: the second
+#: wrote while the first was shutting down and reported no reboot.
+_locks: dict[str, asyncio.Lock] = {}
+
+
+def _lock_for(udid: str) -> asyncio.Lock:
+    return _locks.setdefault(udid, asyncio.Lock())
+
+
+async def set_setting(
+    simctl,
+    udid: str,
+    name: str,
+    state: str,
+    *,
+    reboot: bool,
+    device_state: Callable[[str], Awaitable[str]],
+    after_boot: Callable[[str], Awaitable[None]] | None = None,
+) -> dict:
     """Set one setting. Returns what happened: changed, rebooted, and whether
-    this runtime is one the entry was verified on."""
+    this runtime is one the entry was verified on.
+
+    `device_state` returns simctl's own state string ("Booted", "Shutdown",
+    "Shutting Down"...). Only the first two are acted on: a simulator part way
+    through either transition is still running, and writing to it then is the
+    write-under-a-running-system this module exists to avoid. `after_boot`
+    runs once a reboot has finished, for what a fresh boot needs -- the
+    controller passes its input-service repair.
+    """
     if state not in STATES:
-        raise DeviceError(f"state must be 'on' or 'off', not {state!r}", tool="quern")
+        raise InvalidDeviceRequestError(
+            f"state must be 'on' or 'off', not {state!r}", tool="quern",
+        )
     entry = _entry(name)
     if not device_dir(udid).is_dir():
-        raise DeviceError(f"no simulator directory for {udid}", tool="quern")
+        raise InvalidDeviceRequestError(f"no simulator directory for {udid}", tool="quern")
     runtime = runtime_of(udid)
+    if runtime is None or not runtime.startswith("iOS "):
+        raise DeviceOperationUnsupportedError(
+            f"simulator settings are catalogued for iOS simulators only; {udid[:8]} runs "
+            f"{runtime or 'an unreadable runtime'}",
+            tool="quern",
+        )
     full, storage = verified_runtimes(entry)
     result: dict = {"udid": udid, "name": name, "state": state, "runtime": runtime,
                     "changed": False, "rebooted": False, "verified_here": runtime in full}
@@ -226,42 +302,70 @@ async def set_setting(simctl, udid: str, name: str, state: str, *, reboot: bool)
         result["warning"] = (
             f"{name} is verified on {', '.join(full) or 'no runtime'}"
             + (f" (storage only on {', '.join(storage)})" if storage else "")
-            + f", not {runtime or 'this runtime'}; check the effect before relying on it."
+            + f", not {runtime}; check the effect before relying on it."
         )
 
-    current = read_state(udid, name)
-    if current == state:
+    async with _lock_for(udid):
+        current = read_state(udid, name)
+        if current == state:
+            return result
+
+        sim_state = await device_state(udid)
+        if sim_state == "unknown":
+            # Not "shut down": a simulator whose state could not be read may
+            # be running, and writing under it is what this refuses.
+            raise DeviceError(
+                f"could not read the state of simulator {udid[:8]}; not changing {name}",
+                tool="simctl",
+            )
+        if sim_state not in ("Booted", "Shutdown"):
+            raise InvalidDeviceRequestError(
+                f"simulator {udid[:8]} is {sim_state!r}; set {name} once it has finished "
+                "booting or shutting down",
+                tool="simctl",
+            )
+        booted = sim_state == "Booted"
+        if booted and not reboot:
+            raise RebootRequiredError(
+                f"{entry['title']} is {current or 'unreadable'} and changing it needs this "
+                f"simulator rebooted, which ends whatever app is running. Pass reboot: true "
+                f"to allow it, or set it while the simulator is shut down.",
+                tool="quern",
+            )
+        # Everything that can be refused is refused here, while the simulator
+        # is still up: found after the shutdown, it left a booted simulator
+        # shut down with nothing written.
+        check_writable(udid, name)
+
+        if booted:
+            await simctl.shutdown(udid)
+        written = False
+        try:
+            write_state(udid, name, state)
+            written = True
+        finally:
+            if booted:
+                # Booted again whatever happened above, so a failed write does
+                # not leave a simulator down that the caller had running.
+                try:
+                    await simctl.boot(udid)
+                    await simctl.wait_until_booted(udid)
+                except DeviceError as e:
+                    done = (f"{name} was written as {state}" if written
+                            else f"{name} was not changed")
+                    raise DeviceError(
+                        f"{done}, but the simulator did not come back up: {e}", tool=e.tool,
+                    ) from e
+                result["rebooted"] = True
+                if after_boot is not None:
+                    await after_boot(udid)
+        result["changed"] = True
+
+        now = read_state(udid, name)
+        if now != state:
+            # The write went somewhere nothing reads, or the boot rewrote it.
+            raise DeviceError(
+                f"wrote {name} as {state}, but it reads back as {now or 'unreadable'}",
+                tool="quern",
+            )
         return result
-
-    booted = await is_booted(simctl, udid)
-    if booted and not reboot:
-        raise RebootRequiredError(
-            f"{entry['title']} is {current or 'unreadable'} and changing it needs this "
-            f"simulator rebooted, which ends whatever app is running. Pass reboot: true "
-            f"to allow it, or set it while the simulator is shut down.",
-            tool="quern",
-        )
-    if booted:
-        await simctl.shutdown(udid)
-    write_state(udid, name, state)
-    if booted:
-        await simctl.boot(udid)
-        await simctl.wait_until_booted(udid)
-        result["rebooted"] = True
-    result["changed"] = True
-
-    now = read_state(udid, name)
-    if now != state:
-        # The write went somewhere nothing reads, or the boot rewrote it.
-        raise DeviceError(
-            f"wrote {name} as {state}, but it reads back as {now or 'unreadable'}",
-            tool="quern",
-        )
-    return result
-
-
-async def is_booted(simctl, udid: str) -> bool:
-    for device in await simctl.list_devices():
-        if device.udid == udid:
-            return str(getattr(device.state, "value", device.state)).lower() == "booted"
-    raise DeviceError(f"simctl does not list a simulator {udid}", tool="simctl")

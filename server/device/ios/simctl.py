@@ -203,10 +203,13 @@ class SimctlBackend:
         waits for the system to be up. Unbounded, a simulator that never
         finishes would hang the request that asked for the boot.
         """
-        proc = await asyncio.create_subprocess_exec(
-            "xcrun", "simctl", "bootstatus", udid, "-b",
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "xcrun", "simctl", "bootstatus", udid, "-b",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as e:
+            raise DeviceError(f"could not run simctl bootstatus: {e}", tool="simctl") from e
         try:
             _, stderr = await asyncio.wait_for(proc.communicate(), timeout)
         except TimeoutError:
