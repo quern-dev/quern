@@ -436,6 +436,37 @@ def test_a_bootstatus_that_cannot_run_is_a_device_error(monkeypatch):
         asyncio.run(backend.wait_until_booted(UDID))
 
 
+def test_a_killed_bootstatus_that_will_not_exit_does_not_hang(monkeypatch):
+    """The kill can fail, or the process ignore it. Waiting for it with no
+    bound hung the request -- holding the simulator's settings lock."""
+    from server.device.ios import simctl as simctl_module
+
+    class Stuck:
+        returncode = None
+
+        async def communicate(self):
+            await asyncio.Event().wait()
+
+        def kill(self):
+            raise ProcessLookupError
+
+        async def wait(self):
+            await asyncio.Event().wait()
+
+    async def spawn(*_args, **_kwargs):
+        return Stuck()
+
+    monkeypatch.setattr(simctl_module.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(simctl_module.SimctlBackend, "REAP_TIMEOUT", 0.05)
+
+    async def bounded():
+        await asyncio.wait_for(
+            simctl_module.SimctlBackend().wait_until_booted(UDID, timeout=0.05), 2)
+
+    with pytest.raises(DeviceError, match="did not finish booting"):
+        asyncio.run(bounded())
+
+
 def test_a_finished_bootstatus_returns(monkeypatch):
     asyncio.run(_bootstatus(monkeypatch).wait_until_booted(UDID))
 
@@ -479,3 +510,34 @@ def test_the_state_lookup_reports_unknown_rather_than_raising(monkeypatch):
 
     monkeypatch.setattr(app_state, "get_device_state", broken)
     assert asyncio.run(controller_module._simctl_state(UDID)) == "unknown"
+
+
+# -- the diff script ---------------------------------------------------------------
+
+
+def _diff_script():
+    import importlib.util
+
+    path = Path(__file__).parent.parent / "scripts/sim-settings-diff.py"
+    spec = importlib.util.spec_from_file_location("sim_settings_diff", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_diff_sees_a_change_past_the_cut_and_inside_a_blob():
+    """Truncated at 300 characters and blobs recorded by length, both of these
+    read as "no changes" -- the setting being looked for, missed."""
+    script = _diff_script()
+
+    def flat(value):
+        out: dict = {}
+        script._flatten(value, "f", out)
+        return out
+
+    long_before = flat({"list": ["x" * 400 + "a"], "blob": b"\x00\x01"})
+    long_after = flat({"list": ["x" * 400 + "b"], "blob": b"\x00\x02"})
+    changes = script.diff(long_before, long_after)
+    assert any(line.startswith("f/list") for line in changes), changes
+    assert any(line.startswith("f/blob") for line in changes), changes
+    assert script.diff(long_before, dict(long_before)) == []

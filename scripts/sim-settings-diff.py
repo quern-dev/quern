@@ -22,6 +22,7 @@ Adapted from a snapshot-diff harness an app team wrote for the same purpose.
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import plistlib
 import sys
@@ -44,14 +45,24 @@ NOISE_KEY_PARTS = ("timestamp", "Timestamp", "LastUpdate", "lastUpdate", "Date",
                    "Count", "count", "timesince", "AuditTokens")
 
 
+def _short(text: str, limit: int = 300) -> str:
+    """Readable but still comparable: cut long, with a digest of the whole,
+    so two values that differ only past the cut do not read as the same."""
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}... sha256:{hashlib.sha256(text.encode()).hexdigest()[:16]}"
+
+
 def _flatten(value, prefix: str, out: dict) -> None:
     if isinstance(value, dict):
         for key, child in value.items():
             _flatten(child, f"{prefix}/{key}", out)
     elif isinstance(value, list):
-        out[prefix] = json.dumps(value, default=str)[:300]
+        out[prefix] = _short(json.dumps(value, default=str))
     elif isinstance(value, (bytes, bytearray)):
-        out[prefix] = f"<{len(value)} bytes>"
+        # The digest, not only the length: a blob that changes in place is
+        # as likely a home for a setting as one that grows.
+        out[prefix] = f"<{len(value)} bytes {hashlib.sha256(value).hexdigest()[:16]}>"
     elif isinstance(value, (datetime.datetime, datetime.date)):
         return
     else:
@@ -97,8 +108,6 @@ def diff(before: dict, after: dict, noise: set[str] | None = None) -> list[str]:
         if any(part in key.rsplit("/", 1)[-1] for part in NOISE_KEY_PARTS):
             continue
         old, new = before.get(key, "<absent>"), after.get(key, "<absent>")
-        if isinstance(old, str) and isinstance(new, str) and "bytes>" in old and "bytes>" in new:
-            continue
         lines.append(f"{key}: {old!r} -> {new!r}")
     return lines
 

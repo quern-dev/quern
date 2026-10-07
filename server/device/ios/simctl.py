@@ -196,6 +196,11 @@ class SimctlBackend:
         """Shutdown a simulator."""
         await self._run_simctl("shutdown", udid)
 
+    #: How long to wait for a killed `bootstatus` to exit. Bounded too: a kill
+    #: that failed, or a process that ignores it, would otherwise hang the
+    #: request -- and hold the simulator's settings lock -- all the same.
+    REAP_TIMEOUT = 5.0
+
     async def wait_until_booted(self, udid: str, timeout: float = 180.0) -> None:
         """Wait for a booting simulator to finish, bounded.
 
@@ -215,7 +220,8 @@ class SimctlBackend:
         except TimeoutError:
             with contextlib.suppress(ProcessLookupError, OSError):
                 proc.kill()
-            await proc.wait()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(proc.wait(), self.REAP_TIMEOUT)
             raise DeviceError(
                 f"simulator {udid[:8]} did not finish booting within {timeout:.0f}s",
                 tool="simctl",
