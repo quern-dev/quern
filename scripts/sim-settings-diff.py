@@ -16,7 +16,7 @@ restriction shows up in UserSettings.plist and again in the effective copies
 (EffectiveUserSettings.plist and friends); only UserSettings.plist survives a
 boot, because the rest are recomputed from it.
 
-Adapted from the Geocaching iOS team's harness/sim_diff.py.
+Adapted from a snapshot-diff harness an app team wrote for the same purpose.
 """
 
 from __future__ import annotations

@@ -46,7 +46,7 @@
         {
           "runtime": "iOS 26.5",
           "date": "2026-10-04",
-          "by": "Geocaching iOS team",
+          "by": "an app team using quern",
           "method": "Written while shut down; Settings showed it off across two reboots, and a first sign-in produced no \"Save Password?\" sheet."
         },
         {
@@ -58,7 +58,7 @@
         {
           "runtime": "iOS 18.5",
           "date": "2026-10-04",
-          "by": "Geocaching iOS team",
+          "by": "an app team using quern",
           "storage_only": true,
           "method": "Two simulators switched off through Settings hold the same file, key and value; a direct write was not tried."
         }
@@ -118,8 +118,8 @@
         {
           "runtime": "iOS 26.5",
           "date": "2026-10-04",
-          "by": "Geocaching iOS team",
-          "method": "Written while shut down; in a create-list field \"qft list 1 \" became \"qty list 1 \" with it on and stayed with it off (software keyboard). The hardware-keyboard key was found by quern's diff on 2026-10-07."
+          "by": "an app team using quern",
+          "method": "Written while shut down; in an app's text field \"qft list 1 \" became \"qty list 1 \" with it on and stayed with it off (software keyboard). The hardware-keyboard key was found by quern's diff on 2026-10-07."
         },
         {
           "runtime": "iOS 26.5",
