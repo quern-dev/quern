@@ -672,7 +672,7 @@ def test_a_probed_password_field_is_secure_and_redacted():
     [element] = from_probe([{"type": "TextField", "subrole": "AXSecureTextField",
                              "AXLabel": "Password", "AXValue": "hunter2", "frame": frame}])
     assert element["type"] == "SecureTextField"
-    assert element["value"] == "\u2022" * 7
+    assert "hunter2" not in repr(element)
     assert element["interactive"] is True
     # What the simulator's tree actually reports, read from QuernProbe's
     # field_secure on iOS 26.5.
@@ -687,6 +687,25 @@ def test_a_probed_password_field_is_secure_and_redacted():
     assert "hunter2" not in repr(element), "a label repeating the password kept it"
     [element] = from_probe([{"type": "TextField", "AXValue": "hello", "frame": frame}])
     assert element["type"] == "TextField" and element["value"] == "hello"
+
+
+def test_an_empty_probed_password_field_keeps_its_label():
+    """Measured in Safari on iOS 26.5: an empty password field reports its
+    placeholder as AXValue -- AXLabel "Password", AXValue "Password" -- and a
+    filled one reports dots, even when the password is "Password". Treating
+    the placeholder as the secret stripped the label to nothing, so the field
+    could not be found by label, and reported eight characters in it."""
+    from server.device.web.web_content import from_probe
+
+    frame = {"x": 0, "y": 0, "width": 10, "height": 10}
+    [empty] = from_probe([{"type": "TextField", "role_description": "AXSecureTextField",
+                           "AXLabel": "Password", "AXValue": "Password", "frame": frame}])
+    assert empty["AXLabel"] == "Password"
+    assert empty["value"] == "", "the placeholder is not content"
+    [filled] = from_probe([{"type": "TextField", "role_description": "AXSecureTextField",
+                            "AXLabel": "Password", "AXValue": "\u2022" * 8, "frame": frame}])
+    assert filled["AXLabel"] == "Password"
+    assert filled["value"] == "\u2022" * 8
 
 
 def test_the_page_script_redacts_a_password_before_it_leaves_the_page():

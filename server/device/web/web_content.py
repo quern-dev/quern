@@ -481,10 +481,21 @@ def from_probe(hits: list[dict]) -> list[dict]:
         if not frame.get("width") or not frame.get("height"):
             continue
         element_type = _probe_type(hit)
+        label, value = hit.get("AXLabel"), hit.get("AXValue")
+        if element_type == "SecureTextField" and value and set(value) != {"\u2022"}:
+            # Not the password: a filled secure field reports dots -- measured
+            # in Safari on iOS 26.5, even with a password equal to its label --
+            # so anything else is the placeholder of an empty field. Stripping
+            # that from the label emptied "Password" whenever the placeholder
+            # matched it, and redacting it reported eight characters in a
+            # field holding none. Still stripped from a label that merely
+            # contains it, in case some backend does expose the text.
+            if value != label:
+                label = _label({"type": element_type, "text": label, "value": value})
+            value = ""
         elements.append({
             "type": element_type,
-            "AXLabel": normalise(_label({"type": element_type, "text": hit.get("AXLabel"),
-                                         "value": hit.get("AXValue")})),
+            "AXLabel": normalise(label),
             "frame": frame,
             "enabled": bool(hit.get("enabled", True)),
             "source": "web-probe",
@@ -493,7 +504,7 @@ def from_probe(hits: list[dict]) -> list[dict]:
             "href": None,
             "interactive": element_type in _INTERACTIVE_TYPES,
             "page_id": None,
-            "value": _redacted_value({"type": element_type, "value": hit.get("AXValue")}),
+            "value": _redacted_value({"type": element_type, "value": value}),
         })
     return elements
 
