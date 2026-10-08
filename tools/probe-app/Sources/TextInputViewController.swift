@@ -45,6 +45,19 @@ final class TextInputViewController: UIViewController {
             y += 60
         }
 
+        // The one field iOS is allowed to rewrite: every text trait left at
+        // its default, so auto-capitalization, auto-correction, smart
+        // punctuation and the "." shortcut all apply. The fields above turn
+        // them off to test typing fidelity; this one is how a simulator
+        // setting that turns them off is checked (set_simulator_setting).
+        let natural = UITextField(frame: CGRect(x: 20, y: y, width: view.bounds.width - 40, height: 40))
+        natural.borderStyle = .roundedRect
+        natural.placeholder = "field_natural"
+        natural.accessibilityIdentifier = "field_natural"
+        natural.delegate = self
+        view.addSubview(natural)
+        y += 60
+
         eventLabel.frame = CGRect(x: 20, y: y + 10, width: view.bounds.width - 40, height: 80)
         eventLabel.numberOfLines = 4
         eventLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)

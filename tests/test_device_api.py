@@ -1293,3 +1293,67 @@ class TestEveryUiResponseNamesItsBackend:
         body = resp.json()
         assert body["matched"] is False
         assert body.get("backend") == "sim-bridge", body
+
+
+class TestSimulatorSettings:
+    async def test_a_refused_reboot_is_a_409_and_says_how_to_allow_it(
+        self, app, auth_headers, mock_controller,
+    ):
+        """The request was valid; carrying it out would end the running app,
+        so it is refused until the caller says so -- not a 500."""
+        from server.models import RebootRequiredError
+
+        mock_controller.set_simulator_setting = AsyncMock(side_effect=RebootRequiredError(
+            "Auto-Correction is on and changing it needs this simulator rebooted. "
+            "Pass reboot: true to allow it.", tool="quern",
+        ))
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/settings",
+                json={"name": "auto_correction", "value": "off"},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 409
+        assert "reboot: true" in resp.json()["detail"]
+        mock_controller.set_simulator_setting.assert_awaited_once_with(
+            "auto_correction", "off", udid=None, reboot=False,
+        )
+
+    async def test_a_change_reports_what_happened(self, app, auth_headers, mock_controller):
+        mock_controller.set_simulator_setting = AsyncMock(return_value={
+            "udid": "AAAA-1111", "name": "auto_correction", "state": "off",
+            "changed": True, "rebooted": True, "verified_here": True,
+        })
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/settings",
+                json={"name": "auto_correction", "value": "off", "reboot": True},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        assert resp.json()["rebooted"] is True
+        mock_controller.set_simulator_setting.assert_awaited_once_with(
+            "auto_correction", "off", udid=None, reboot=True,
+        )
+
+    async def test_a_value_other_than_on_or_off_is_refused(self, app, auth_headers):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/settings",
+                json={"name": "auto_correction", "value": "disabled"},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 422
+
+    async def test_settings_are_listed(self, app, auth_headers, mock_controller):
+        mock_controller.get_simulator_settings = AsyncMock(return_value={
+            "udid": "AAAA-1111", "runtime": "iOS 26.5", "settings": {},
+        })
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/v1/device/settings", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json()["runtime"] == "iOS 26.5"

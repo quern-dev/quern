@@ -10,6 +10,7 @@ from server import logging_ext
 from server.device.android.adb import AdbBackend
 from server.device.android.u2_client import U2Backend
 from server.device.controller_ui import DeviceControllerUI
+from server.device.ios import sim_settings
 from server.device.ios.devicectl import DevicectlBackend, canonical_device_id, spellings_of
 from server.device.ios.idb import IdbBackend
 from server.device.ios.pmd3 import Pmd3Backend
@@ -52,6 +53,17 @@ def _display_name(name: str | None, kind: str | None) -> str | None:
     if not name or kind != DeviceType.ANDROID_EMULATOR.value:
         return name
     return name.replace("_", " ")
+
+
+async def _simctl_state(udid: str) -> str:
+    """simctl's own state string for a simulator, or "unknown" when it cannot
+    be read -- never a guess at "Shutdown"."""
+    from server.device.app_state import get_device_state
+
+    try:
+        return await get_device_state(udid)
+    except OSError:
+        return "unknown"
 
 
 class DeviceController(DeviceControllerUI):
@@ -481,6 +493,11 @@ class DeviceController(DeviceControllerUI):
         # are fixed" for work that was never part of it.
         "Set hardware keyboard": (
             "the hardware-keyboard setting", "the hw.keyboard AVD property", 356,
+        ),
+        # Autofill is a system setting there, but keyboard rewriting belongs
+        # to whichever input method the device runs. #432 holds the question.
+        "Simulator settings": (
+            "autofill and the keyboard's text rewriting", "adb shell settings", 432,
         ),
     }
 
@@ -1886,6 +1903,37 @@ class DeviceController(DeviceControllerUI):
             )
         await self.sim_bridge.set_hardware_keyboard(resolved, enabled)
         return resolved
+
+    async def get_simulator_settings(self, udid: str | None = None) -> dict:
+        """Every catalog setting's state on a simulator. See ios/sim_settings.py."""
+        resolved = await self.resolve_udid(udid)
+        self._require_simulator(resolved, "Simulator settings")
+        return sim_settings.describe(resolved)
+
+    async def set_simulator_setting(
+        self, name: str, value: str, udid: str | None = None, reboot: bool = False,
+    ) -> dict:
+        """Set one setting from the catalog on a simulator.
+
+        A change to a booted simulator needs a reboot, which ends the running
+        app, so it happens only with `reboot=True`; without it the call raises
+        `RebootRequiredError`. A setting already in place, or a shut-down
+        simulator, needs no reboot.
+        """
+        resolved = await self.resolve_udid(udid)
+        self._require_simulator(resolved, "Simulator settings")
+
+        async def after_boot(booted: str) -> None:
+            # Everything read from the old boot describes a process that is
+            # gone, and a fresh boot is where Device Hub takes the input
+            # services -- the same repair `boot()` makes.
+            self._invalidate_ui_cache(booted)
+            await self._restore_input_after_boot(booted)
+
+        return await sim_settings.set_setting(
+            self.simctl, resolved, name, value, reboot=reboot,
+            device_state=_simctl_state, after_boot=after_boot,
+        )
 
     async def set_font_scale(
         self, scale: float, udid: str | None = None,

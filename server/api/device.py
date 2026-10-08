@@ -26,11 +26,13 @@ from server.models import (
     OpenUrlRequest,
     PreviewStartRequest,
     PreviewStopRequest,
+    RebootRequiredError,
     SetDisplayDensityRequest,
     SetFontScaleRequest,
     SetHardwareKeyboardRequest,
     SetLocaleRequest,
     SetLocationRequest,
+    SetSimulatorSettingRequest,
     ShutdownDeviceRequest,
     SimBridgeSaturatedError,
     StartDeviceLogRequest,
@@ -191,6 +193,10 @@ def _handle_device_error(e: DeviceError) -> HTTPException:
         return HTTPException(status_code=400, detail=msg)
     if isinstance(e, (DeviceOperationUnsupportedError, InvalidDeviceRequestError)):
         return HTTPException(status_code=400, detail=msg)
+    if isinstance(e, RebootRequiredError):
+        # The request was valid; doing it would end the running app, so it is
+        # refused until the caller says so.
+        return HTTPException(status_code=409, detail=msg)
     if "No booted device" in msg or "Multiple devices booted" in msg:
         return HTTPException(status_code=400, detail=msg)
     if "only supported on simulators" in msg:
@@ -832,6 +838,46 @@ async def set_locale(request: Request, body: SetLocaleRequest):
         )
         locale_tag = f"{body.lang}-{body.country}" if body.country else body.lang
         return {"status": "ok", "udid": udid, "locale": locale_tag}
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+@router.get("/settings")
+async def get_simulator_settings(request: Request, udid: str | None = None):
+    """The state of every setting quern can change on a simulator.
+
+    Each entry says whether it was verified on this simulator's runtime:
+    the storage is undocumented, so an unverified runtime is reported rather
+    than assumed.
+    """
+    controller = request.app.state.device_controller
+    try:
+        return await controller.get_simulator_settings(udid=udid)
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+@router.post("/settings")
+@logged_action("set_simulator_setting", category="device.action")
+async def set_simulator_setting(request: Request, body: SetSimulatorSettingRequest):
+    """Turn a simulator setting on or off: auto-correction, password AutoFill...
+
+    Written to the simulator's own storage rather than through the Settings
+    app. A booted simulator is rebooted to apply it only with `reboot: true`;
+    without it the call answers 409 and changes nothing.
+    """
+    controller = request.app.state.device_controller
+    act = current_action()
+    act.detail = f"{body.name} {body.value}"
+    # Set before the call so a failure is attributed too; replaced by the
+    # resolved udid when there is one.
+    act.udid = body.udid
+    try:
+        result = await controller.set_simulator_setting(
+            body.name, body.value, udid=body.udid, reboot=body.reboot,
+        )
+        act.udid = result["udid"]
+        return {"status": "ok", **result}
     except DeviceError as e:
         raise _handle_device_error(e)
 

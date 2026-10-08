@@ -1865,6 +1865,15 @@ class InvalidAppStatePathError(DeviceError):
     """
 
 
+class RebootRequiredError(DeviceError):
+    """A change needs the simulator rebooted, and the caller did not allow it.
+
+    409 rather than a silent restart: a reboot ends whatever app is running,
+    and a setting changed in the middle of a test would otherwise take the
+    test's app state with it. The caller passes `reboot: true` to allow it.
+    """
+
+
 class BootIncompleteError(DeviceError):
     """An emulator came up -- adb lists it -- but Android did not finish starting.
 
@@ -2498,6 +2507,17 @@ class SetLocaleRequest(BaseModel):
 
     lang: str
     country: str = ""
+    udid: str | None = None
+
+
+class SetSimulatorSettingRequest(BaseModel):
+    """Request body for POST /device/settings."""
+
+    name: str = Field(min_length=1)
+    value: Literal["on", "off"]
+    #: Allow rebooting a booted simulator to apply the change. A reboot ends
+    #: whatever app is running, so it is never done without this.
+    reboot: bool = False
     udid: str | None = None
 
 

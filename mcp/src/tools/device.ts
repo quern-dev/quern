@@ -839,6 +839,47 @@ bundle_id names the app the link should open in, and quern reports whether it di
     }
   });
 
+  server.registerTool("get_simulator_settings", {
+    description: `Read the iOS simulator settings quern can change with set_simulator_setting -- password_autofill, auto_correction, auto_capitalization, smart_punctuation, period_shortcut, predictive_text, spell_check -- and whether each is on or off ("mixed" when the keys it covers disagree, which set_simulator_setting rewrites; null when its file could not be read). Each entry says which runtimes it was verified on and whether that includes this simulator's (verified_here): the storage is undocumented, so an unverified runtime is reported rather than assumed.`,
+    inputSchema: strictParams({
+      udid: z.string().optional().describe("Target simulator UDID (defaults to active device)"),
+    }),
+  }, async ({ udid }) => {
+    try {
+      const data = await apiRequest("GET", "/api/v1/device/settings", udid ? { udid } : undefined);
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      };
+    }
+  });
+
+  server.registerTool("set_simulator_setting", {
+    description: `Turn an iOS simulator setting on or off without driving the Settings app. The ones that break automation: password_autofill (iOS's "Save Password?" sheet after a sign-in, invisible in the app's UI tree), auto_correction ("qft" becoming "qty"), auto_capitalization ("qft" becoming "Qft"), smart_punctuation (curly quotes, dashes), period_shortcut (double space becoming ". "), predictive_text, spell_check. Turning the text ones off is how to make type_text's exact read-back hold in fields iOS would otherwise rewrite.
+
+Applying a change needs the simulator rebooted, which ENDS THE RUNNING APP. On a booted simulator the call therefore refuses with an error unless reboot=true -- so call it before launching the app under test, not in the middle of a test. A setting already in place, or a shut-down simulator, needs no reboot. The response says changed and rebooted, and carries a warning when this runtime is not one the setting was verified on. The change lasts until the simulator is erased.`,
+    inputSchema: strictParams({
+      name: z.enum(["password_autofill", "auto_correction", "auto_capitalization", "smart_punctuation", "period_shortcut", "predictive_text", "spell_check"]).describe("Which setting"),
+      value: z.enum(["on", "off"]).describe("The state to set"),
+      reboot: z.boolean().default(false).describe("Allow rebooting a booted simulator to apply the change. A reboot ends the running app."),
+      udid: z.string().optional().describe("Target simulator UDID (defaults to active device)"),
+    }),
+  }, async ({ name, value, reboot, udid }) => {
+    try {
+      const body: Record<string, unknown> = { name, value, reboot };
+      if (udid) body.udid = udid;
+      const data = await apiRequest("POST", "/api/v1/device/settings", undefined, body);
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        isError: true,
+      };
+    }
+  });
+
   server.registerTool("set_font_scale", {
     description: `Set the font scale on an Android device or emulator. Takes effect immediately. Standard values: 0.85 (small), 1.0 (default), 1.15 (large), 1.30 (largest). Any float value is accepted.`,
     inputSchema: strictParams({

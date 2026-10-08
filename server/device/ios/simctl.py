@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -194,6 +195,42 @@ class SimctlBackend:
     async def shutdown(self, udid: str) -> None:
         """Shutdown a simulator."""
         await self._run_simctl("shutdown", udid)
+
+    #: How long to wait for a killed `bootstatus` to exit. Bounded too: a kill
+    #: that failed, or a process that ignores it, would otherwise hang the
+    #: request -- and hold the simulator's settings lock -- all the same.
+    REAP_TIMEOUT = 5.0
+
+    async def wait_until_booted(self, udid: str, timeout: float = 180.0) -> None:
+        """Wait for a booting simulator to finish, bounded.
+
+        `simctl boot` returns as soon as the boot starts; `bootstatus -b`
+        waits for the system to be up. Unbounded, a simulator that never
+        finishes would hang the request that asked for the boot.
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "xcrun", "simctl", "bootstatus", udid, "-b",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as e:
+            raise DeviceError(f"could not run simctl bootstatus: {e}", tool="simctl") from e
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout)
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                proc.kill()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(proc.wait(), self.REAP_TIMEOUT)
+            raise DeviceError(
+                f"simulator {udid[:8]} did not finish booting within {timeout:.0f}s",
+                tool="simctl",
+            ) from None
+        if proc.returncode != 0:
+            raise DeviceError(
+                f"simctl bootstatus failed: {stderr.decode(errors='replace').strip()}",
+                tool="simctl",
+            )
 
     async def erase(self, udid: str) -> None:
         """Erase a simulator, resetting it to factory state. Must be shutdown first."""

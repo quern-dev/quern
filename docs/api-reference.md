@@ -361,6 +361,8 @@ holds in `flow_store`. `flows_captured` is only what survived.
 | `grant_permission` | POST | `/api/v1/device/permission` | Grant app permission |
 | `set_locale` | POST | `/api/v1/device/locale` | Set the system locale (Android) |
 | `set_hardware_keyboard` | POST | `/api/v1/device/keyboard` | Attach/detach the simulated hardware keyboard (iOS simulators) |
+| `get_simulator_settings` | GET | `/api/v1/device/settings` | State of each simulator setting quern can change, and which runtimes each is verified on |
+| `set_simulator_setting` | POST | `/api/v1/device/settings` | Turn auto-correction, auto-capitalization, password AutoFill and other simulator settings on or off; 409 on a booted simulator unless `reboot: true` |
 | `set_font_scale` | POST | `/api/v1/device/font-scale` | Set the font scale (Android) |
 | `set_display_density` | POST | `/api/v1/device/display-density` | Set the display density / DPI (Android) |
 
