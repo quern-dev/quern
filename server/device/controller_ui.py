@@ -207,6 +207,39 @@ def _build_screen_context(elements: list[UIElement]) -> dict:
         return {}  # best-effort — don't mask the original error
 
 
+
+def _web_content_hint(elements: list[UIElement]) -> str | None:
+    """Why a lookup may have missed: the screen is web content the
+    accessibility tree cannot see, and `get_web_content` is what reads it.
+
+    Said only on a sign the tree is blind here, so it is not noise on every
+    miss. Two signs, both from the native tree (docs/proposals/
+    webview-automation-approach.md): Safari is in front, or the tree has
+    collapsed to a bare Application that still has its name and a real frame --
+    a presented web modal. Measured on iOS 26.5: after get_web_content, a
+    Safari field was found and typed into by label. A tree collapsed by a
+    poisoned bridge (#66) has a null label and a 0x0 frame, and gets no hint:
+    get_web_content would not help there. Pass the whole tree; a filtered list
+    of one looks collapsed.
+    """
+    apps = [e for e in elements if e.type == "Application"]
+    if not apps:
+        return None
+    app = apps[0]
+    if (app.label or "") == "Safari":
+        why = "Safari is in front"
+    elif len(elements) == 1 and app.label and app.frame \
+            and app.frame.get("width") and app.frame.get("height"):
+        why = "the accessibility tree holds nothing but the app itself"
+    else:
+        return None
+    return (
+        f"This looks like web content ({why}), which the accessibility tree "
+        "does not include. Call get_web_content to read the page; its elements "
+        "can then be found by label."
+    )
+
+
 _SCREENSHOT_DIR = Path("/tmp/quern/screenshots")
 
 
@@ -1833,8 +1866,9 @@ class DeviceControllerUI:
             )
             if element_type:
                 search_desc += f", type='{element_type}'"
+            hint = self._web_hint_for(resolved, elements)
             raise DeviceError(
-                f"No element found matching {search_desc}",
+                f"No element found matching {search_desc}" + (f". {hint}" if hint else ""),
                 tool=self._last_read_backend.get(resolved, backend),
             )
 
@@ -2446,6 +2480,11 @@ class DeviceControllerUI:
                 # an unknown screen and worthless on one recorded as fixed.
                 "scroll": _scroll_report(sweep, scroll_to_find),
             }
+            # Only against the whole tree, for the reason given above.
+            hint = self._web_hint_for(resolved, all_elements) if all_elements_complete else None
+            if hint:
+                result["web_content_hint"] = hint
+                result["detail"] += f". {hint}"
             if read_depth is not None and self._served_by_wda(resolved):
                 # A shallow read is a reason something can be missing, so the
                 # answer says how deep it looked and how to look deeper --
@@ -3404,6 +3443,16 @@ class DeviceControllerUI:
                 "it (auto-capitalization, auto-correction or smart punctuation), or "
                 "keystrokes were lost.")
 
+    def _web_hint_for(self, udid: str, elements: list[UIElement]) -> str | None:
+        """`_web_content_hint`, where get_web_content can act on it: an iOS
+        simulator not served by WDA, whose web content was not already part
+        of the search."""
+        if self._device_type(udid) != DeviceType.SIMULATOR or self._served_by_wda(udid):
+            return None
+        if self._web_overlay.get(udid):
+            return None
+        return _web_content_hint(elements)
+
     def _matching_fields(self, elements, label: str | None, identifier: str | None):
         """Text fields matching every selector given."""
         fields = [e for e in elements if e.type.lower() in self._TEXT_FIELD_TYPES and e.frame]
@@ -3424,11 +3473,12 @@ class DeviceControllerUI:
         elements, read_udid = await self.get_ui_elements(udid=udid, use_cache=False)
         matches = self._matching_fields(elements, label, identifier)
         if not matches:
+            hint = self._web_hint_for(read_udid, elements)
             raise DeviceError(
                 # Phrased for the 404 mapping: anything else surfaces as a 500,
                 # which reads as a broken server rather than a missing field.
                 f"No element found: no text field matching "
-                f"{label or identifier!r} to type into",
+                f"{label or identifier!r} to type into" + (f". {hint}" if hint else ""),
                 tool=self._last_read_backend.get(read_udid, backend),
             )
         return matches[0]
