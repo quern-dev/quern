@@ -159,19 +159,19 @@ def test_different_udids_get_different_ids():
 @pytest.mark.asyncio
 async def test_start_stop_lifecycle():
     """Start spawns subprocess, stop terminates it."""
-    mock_proc = AsyncMock()
-    mock_proc.returncode = None
-    mock_proc.stdout = AsyncMock()
-    mock_proc.stdout.__aiter__ = MagicMock(return_value=iter([]))
-    mock_proc.terminate = MagicMock()
-    mock_proc.wait = AsyncMock()
-    mock_proc.kill = MagicMock()
+    # A stream that stays open, as a live one does. The mock this replaced
+    # made the read loop crash at once, and the test passed only because it
+    # looked before the loop ran and never looked at the error.
+    mock_proc, _ = _stream(eof=False)
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
         adapter = SimulatorLogAdapter(udid=SAMPLE_UDID)
         await adapter.start()
+        import asyncio
 
+        await asyncio.sleep(0.05)
         assert adapter.is_running
+        assert adapter._error is None
         assert adapter.started_at is not None
         mock_exec.assert_called_once()
 
@@ -200,11 +200,14 @@ async def test_start_xcrun_not_found():
         assert "xcrun" in adapter._error
 
 
-def _stream(*chunks: bytes, eof: bool = True):
-    """A process whose stdout is a real StreamReader, as asyncio gives it.
+def _stream(*chunks: bytes, eof: bool = True, stderr: bytes = b"", code: int = 0,
+            on_terminate=None):
+    """A process whose stdout and stderr are real StreamReaders, as asyncio
+    gives them.
 
     Terminating it ends the stream, as terminating `log stream` closes its
-    stdout. Chunks are written as-is, newline or not.
+    stdout -- or runs `on_terminate(reader)` instead, for a stream that still
+    has output to deliver. Chunks are written as-is, newline or not.
     """
     import asyncio
 
@@ -213,17 +216,23 @@ def _stream(*chunks: bytes, eof: bool = True):
         reader.feed_data(chunk)
     if eof:
         reader.feed_eof()
+    err = asyncio.StreamReader()
+    err.feed_data(stderr)
+    err.feed_eof()
 
-    proc = AsyncMock()
+    proc = MagicMock()
     proc.returncode = None
     proc.stdout = reader
+    proc.stderr = err
 
     def terminate():
-        if not reader.at_eof():
+        if on_terminate is not None:
+            on_terminate(reader)
+        elif not reader.at_eof():
             reader.feed_eof()
 
     proc.terminate = MagicMock(side_effect=terminate)
-    proc.wait = AsyncMock()
+    proc.wait = AsyncMock(return_value=code)
     proc.kill = MagicMock()
     return proc, reader
 
@@ -347,6 +356,94 @@ async def test_a_character_split_across_reads_is_kept_whole():
     assert [e.message for e in emitted] == ["caf\u00e9 \u2713"]
 
 
+@pytest.mark.asyncio
+async def test_stopping_drains_output_still_arriving():
+    """The stream can still be delivering when stop() is called. Everything up
+    to its end is kept, not only what one read happened to get."""
+    import asyncio
+
+    async def trickle(reader):
+        for message in ("one", "two", "three"):
+            reader.feed_data(b"," + _pretty(message))
+            await asyncio.sleep(0.02)
+        reader.feed_eof()
+
+    pending = []
+    proc, reader = _stream(b"[", eof=False,
+                           on_terminate=lambda r: pending.append(asyncio.ensure_future(trickle(r))))
+    adapter, emitted = await _collect(proc)
+    await adapter.stop()
+
+    assert [e.message for e in emitted] == ["one", "two", "three"]
+
+
+@pytest.mark.asyncio
+async def test_two_stops_at_once_both_return():
+    """/logs/filter restarts the adapter without the logging lock, so a stop
+    can overlap another. The second used to re-read the task the first had
+    already cleared, and raised AttributeError -- a 500."""
+    import asyncio
+
+    proc, _ = _stream(b"[" + _pretty("x"), eof=False)
+    adapter, _ = await _collect(proc)
+    results = await asyncio.gather(adapter.stop(), adapter.stop(), return_exceptions=True)
+    assert results == [None, None]
+
+
+@pytest.mark.asyncio
+async def test_an_escape_split_across_reads_is_kept():
+    """A read can end on the backslash of an escaped quote. Forgetting the
+    escape across the read takes the quote for the string's end, and the brace
+    after it then closes the object early."""
+    import asyncio
+
+    entry = b"[" + _pretty('say \\"}\\" ok')
+    cut = entry.index(b"\\") + 1                     # right after the backslash
+    proc, reader = _stream(entry[:cut], eof=False)
+    adapter, emitted = await _collect(proc)
+    reader.feed_data(entry[cut:])
+    await asyncio.sleep(0.1)
+    await adapter.stop()
+
+    assert [e.message for e in emitted] == ['say "}" ok']
+
+
+@pytest.mark.asyncio
+async def test_a_stream_that_ends_on_its_own_says_why():
+    """simctl exiting -- a simulator that is not booted -- read as a clean
+    stop: status "stopped", no error."""
+    proc, _ = _stream(stderr=b"Unable to locate device set\n", code=148)
+    adapter, _ = await _collect(proc)
+
+    assert not adapter.is_running
+    assert adapter.status().status == "error"
+    assert "exited (148)" in adapter._error
+    assert "Unable to locate device set" in adapter._error
+
+
+@pytest.mark.asyncio
+async def test_a_failure_while_draining_is_logged(caplog):
+    """The drain runs after _running is cleared, where errors used to be
+    recorded only while running -- so one there vanished."""
+    import asyncio
+    import logging
+
+    proc, reader = _stream(eof=False)
+
+    async def on_entry(_entry):
+        raise RuntimeError("downstream broke")
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        adapter = SimulatorLogAdapter(udid=SAMPLE_UDID, on_entry=on_entry)
+        await adapter.start()
+        await asyncio.sleep(0)
+        reader.feed_data(b"[" + _pretty("late"))
+        with caplog.at_level(logging.ERROR, logger="server.sources.simulator_log"):
+            await adapter.stop()
+
+    assert any("read loop failed" in r.getMessage() for r in caplog.records)
+
+
 # ---------------------------------------------------------------------------
 # Reconfigure
 # ---------------------------------------------------------------------------
@@ -355,15 +452,12 @@ async def test_a_character_split_across_reads_is_kept_whole():
 @pytest.mark.asyncio
 async def test_reconfigure_updates_filters_and_restarts():
     """reconfigure() stops, updates filters, restarts with new command."""
-    mock_proc = AsyncMock()
-    mock_proc.returncode = None
-    mock_proc.stdout = AsyncMock()
-    mock_proc.stdout.__aiter__ = MagicMock(return_value=iter([]))
-    mock_proc.terminate = MagicMock()
-    mock_proc.wait = AsyncMock()
-    mock_proc.kill = MagicMock()
+    import asyncio
 
-    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+    # A fresh, open stream per spawn, as a real restart gets. The mock this
+    # replaced crashed the read loop at once; the test looked too early to see.
+    with patch("asyncio.create_subprocess_exec",
+               side_effect=lambda *a, **k: _stream(eof=False)[0]) as mock_exec:
         adapter = SimulatorLogAdapter(
             udid=SAMPLE_UDID,
             process_filter="OldApp",
@@ -372,20 +466,17 @@ async def test_reconfigure_updates_filters_and_restarts():
         await adapter.start()
         assert adapter.is_running
 
-        # Reconfigure with new process filter
-        mock_proc.returncode = None
         await adapter.reconfigure(process_filter="NewApp")
+        await asyncio.sleep(0.05)
 
         assert adapter.process_filter == "NewApp"
         # subsystem_filter unchanged (sentinel default)
         assert adapter.subsystem_filter == "com.old"
         assert adapter.entries_captured == 0
-        assert adapter.is_running
+        assert adapter.is_running and adapter._error is None
 
-        # Verify the new command uses the updated filter
-        cmd = adapter._build_command()
-        assert "--predicate" in cmd
-        predicate = cmd[-1]
+        # The restart spawned the updated command.
+        predicate = mock_exec.call_args_list[-1][0][-1]
         assert 'process == "NewApp"' in predicate
         assert 'subsystem == "com.old"' in predicate
 

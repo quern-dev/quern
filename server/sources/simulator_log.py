@@ -133,19 +133,22 @@ class SimulatorLogAdapter(BaseSourceAdapter):
             except TimeoutError:
                 self._process.kill()
 
-        if self._read_task and not self._read_task.done():
+        # Held locally: an overlapping stop() clears the attribute while this
+        # one is awaiting, and re-reading it then raised AttributeError.
+        task = self._read_task
+        if task and not task.done():
             # Terminating the stream closes its stdout, so the read loop reaches
             # EOF on its own after parsing what was already written -- an entry
             # logged just before stop is kept, not cancelled away. Bounded, so
             # a stream that does not close cannot hold up the stop.
             try:
-                await asyncio.wait_for(asyncio.shield(self._read_task), self._DRAIN_TIMEOUT)
+                await asyncio.wait_for(asyncio.shield(task), self._DRAIN_TIMEOUT)
             except TimeoutError:
                 pass
-            if not self._read_task.done():
-                self._read_task.cancel()
+            if not task.done():
+                task.cancel()
                 try:
-                    await self._read_task
+                    await task
                 except asyncio.CancelledError:
                     pass
 
@@ -177,6 +180,10 @@ class SimulatorLogAdapter(BaseSourceAdapter):
         """
         assert self._process is not None
         assert self._process.stdout is not None
+        # Bound once: after a cancelled stop and a restart, re-reading the
+        # attribute would hand this loop the new process's output.
+        process = self._process
+        stdout = process.stdout
 
         # A UTF-8 character can be split across two reads.
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -189,7 +196,7 @@ class SimulatorLogAdapter(BaseSourceAdapter):
 
         try:
             while True:
-                chunk = await self._process.stdout.read(self._READ_SIZE)
+                chunk = await stdout.read(self._READ_SIZE)
                 if not chunk:
                     break
 
@@ -237,14 +244,43 @@ class SimulatorLogAdapter(BaseSourceAdapter):
                         obj_chars.append(ch)
                     # else: outside object, skip (array brackets, commas, preamble)
 
+            if self._running:
+                # The output ended while nobody asked it to: simctl exited --
+                # a simulator that is not booted, a bad predicate. Say why,
+                # rather than reading as a clean stop.
+                self._error = await self._exit_reason(process)
         except asyncio.CancelledError:
             raise
         except Exception as e:
             if self._running:
                 self._error = f"Read loop error: {e}"
-                logger.exception("SimulatorLog read loop failed")
+            # Logged during stop's drain too, which is a processing phase now:
+            # an entry that fails there would otherwise vanish without a trace.
+            logger.exception("SimulatorLog read loop failed")
         finally:
             self._running = False
+
+    @staticmethod
+    async def _exit_reason(process: asyncio.subprocess.Process) -> str:
+        """What simctl said as it ended its output on its own."""
+        code = None
+        try:
+            code = await asyncio.wait_for(process.wait(), 5)
+        except TimeoutError:
+            pass
+        tail = ""
+        if process.stderr is not None:
+            try:
+                raw = await asyncio.wait_for(process.stderr.read(), 2)
+                # The start says what went wrong ("device is not booted");
+                # the end is an underlying-error dump. One line, the start.
+                lines = raw.decode("utf-8", errors="replace").splitlines()
+                tail = " / ".join(ln.strip() for ln in lines if ln.strip())[:300]
+            except (TimeoutError, OSError):
+                pass
+        status = (f"exited ({code})" if code is not None
+                  else "closed its output but has not exited")
+        return f"simctl log stream {status}" + (f": {tail}" if tail else "")
 
     def _parse_json_line(self, line: str) -> LogEntry | None:
         """Parse a JSON object from simctl log stream output.
