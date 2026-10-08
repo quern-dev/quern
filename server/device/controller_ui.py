@@ -348,18 +348,29 @@ def _covering_element(target: UIElement, hit: dict | None) -> dict | None:
     search field, a field under the edit menu as a menu item. No answer, or
     no frame, is inconclusive -- the backends return None for a miss and for
     a failed ask alike, and a check that could not run must not refuse a tap.
+
+    A pass is not proof. Something on top that fits entirely inside a large
+    target -- a floating button over the middle of a card -- reads as a child.
     """
     if not hit or not target.frame:
         return None
-    label = hit.get("AXLabel") or ""
+    label = str(hit.get("AXLabel") or "")
     frame = hit.get("frame") or {}
     covering = {"type": hit.get("type"), "label": label,
                 "identifier": hit.get("AXUniqueId"), "frame": frame or None}
+    try:
+        frame = {k: float(frame[k]) for k in ("x", "y", "width", "height")}
+        tframe = {k: float(target.frame[k]) for k in ("x", "y", "width", "height")}
+    except (KeyError, TypeError, ValueError):
+        return None  # a frame that cannot be compared says nothing
+    inside, around = _contains(tframe, frame), _contains(frame, tframe)
+    if inside and around:
+        # The target itself -- checked before the overlay labels, or tapping
+        # a "dismiss popup" layer by name was refused as covered by itself.
+        return None
     if label.strip().lower() in _OVERLAY_LABELS:
         return covering
-    if not all(k in frame for k in ("x", "y", "width", "height")):
-        return None
-    if _contains(target.frame, frame) or _contains(frame, target.frame):
+    if inside or around:
         return None
     return covering
 
@@ -378,6 +389,8 @@ class DeviceControllerUI:
     - self._device_type_cache: dict[str, DeviceType]
     - self._input_checked: dict[str, bool]
     - self._input_probe_cooldown: dict[str, float]
+    - self._last_ui_change: dict[str, float]
+    - self._screen_bounds: dict[str, tuple[float, float, float, float]]
     - self.resolve_udid(udid) -> str
     - self._invalidate_ui_cache(udid) -> None
     - self._is_physical(udid) -> bool
@@ -566,20 +579,32 @@ class DeviceControllerUI:
         says it would not."""
         name = target.label or target.identifier or target.type
         bounds = self._screen_bounds.get(udid)
-        if bounds and not (0 <= x <= bounds[0] and 0 <= y <= bounds[1]):
-            return {
-                "reason": "off_screen",
-                "detail": (f"'{name}' is off screen at ({x:.0f}, {y:.0f}); the screen is "
-                           f"{bounds[0]:.0f}x{bounds[1]:.0f}. Scroll it into view "
-                           "(scroll_to_element, or scroll_to_find=true) and tap again."),
-            }
+        if bounds:
+            # The app's own frame, origin included: on iPad Split View or a
+            # windowed app it does not start at (0, 0), and checking from the
+            # origin refused everything right of the window's width.
+            ox, oy, w, h = bounds
+            if not (ox <= x <= ox + w and oy <= y <= oy + h):
+                return {
+                    "reason": "off_screen",
+                    "detail": (f"'{name}' is off screen at ({x:.0f}, {y:.0f}); the app spans "
+                               f"({ox:.0f}, {oy:.0f}) to ({ox + w:.0f}, {oy + h:.0f}). Scroll "
+                               "it into view (scroll_to_element, or scroll_to_find=true) "
+                               "and tap again."),
+                }
         try:
             hit = await self._ui_backend(udid).describe_point(udid, x, y)
         except Exception:
             # Could not ask is not "something is there": tap as before.
             logger.debug("hit-test before tap failed", exc_info=True)
             return None
-        covering = _covering_element(target, hit)
+        try:
+            covering = _covering_element(target, hit)
+        except Exception:
+            # A shape the comparison did not expect is a check that could not
+            # run, and that must not refuse a tap any more than a failed ask.
+            logger.debug("could not compare the hit-test result", exc_info=True)
+            return None
         if covering is None:
             return None
         what = f"{covering['type'] or 'an element'} '{covering['label']}'".replace(" ''", "")
@@ -597,8 +622,12 @@ class DeviceControllerUI:
         for item in raw or []:
             if isinstance(item, dict) and item.get("type") == "Application":
                 frame = item.get("frame") or {}
-                if frame.get("width") and frame.get("height"):
-                    self._screen_bounds[udid] = (float(frame["width"]), float(frame["height"]))
+                try:
+                    bounds = tuple(float(frame[k]) for k in ("x", "y", "width", "height"))
+                except (KeyError, TypeError, ValueError):
+                    return
+                if bounds[2] > 0 and bounds[3] > 0:
+                    self._screen_bounds[udid] = bounds
                 return
 
     def _get_screen_height_from_elements(self, elements: list) -> float | None:
@@ -2308,7 +2337,8 @@ class DeviceControllerUI:
         return sim_input.suppressed_input_warning(udid)
 
     async def tap_and_report(self, x: float, y: float, udid: str | None = None,
-                             duration: float | None = None) -> dict:
+                             duration: float | None = None,
+                             skip_settle: bool = False) -> dict:
         """Tap at coordinates, saying what was there.
 
         A coordinate has no target to compare against, so nothing is refused;
@@ -2322,7 +2352,9 @@ class DeviceControllerUI:
         await self._warn_if_input_is_suppressed(resolved)
         report: dict = {"udid": resolved}
         if self._checks_landing(resolved):
-            settled_ms = await self._settle_if_just_changed(resolved)
+            # Skippable: on a screen that never stops moving (a pulsing location
+            # dot, a spinner) every wait runs to its timeout.
+            settled_ms = None if skip_settle else await self._settle_if_just_changed(resolved)
             if settled_ms is not None:
                 report["waited_for_settle_ms"] = settled_ms
             try:
@@ -2683,6 +2715,11 @@ class DeviceControllerUI:
                         ),
                     }
                 cx, cy = get_tap_point(el)
+                # A transition still running swallows a tap on web content as
+                # surely as on native; the position check above cannot see it.
+                web_settled_ms = None
+                if self._checks_landing(resolved) and not skip_stability_check:
+                    web_settled_ms = await self._settle_if_just_changed(resolved)
                 await self._ui_backend(resolved).tap(resolved, cx, cy, **hold)
                 self._invalidate_ui_cache(resolved)
                 result = {
@@ -2693,6 +2730,8 @@ class DeviceControllerUI:
                         "source": (el.extra_attrs or {}).get("source"),
                     },
                 }
+                if web_settled_ms is not None:
+                    result["waited_for_settle_ms"] = web_settled_ms
                 _note_equivalence(result, element_type, el)
                 if sweep.get("attempted"):
                     result["scroll"] = _scroll_report(sweep, scroll_to_find)
@@ -2849,6 +2888,8 @@ class DeviceControllerUI:
                                    "identifier": el.identifier, "x": cx, "y": cy},
                         **obstruction,
                     }
+                    if settled_ms is not None:
+                        result["waited_for_settle_ms"] = settled_ms
                     if sweep.get("attempted"):
                         result["scroll"] = _scroll_report(sweep, scroll_to_find)
                     return result
@@ -3834,6 +3875,9 @@ class DeviceControllerUI:
         resolved = await self.resolve_udid(udid)
         await self._warn_if_input_is_suppressed(resolved)
         await self._ui_backend(resolved).press_button(resolved, button)
+        # Home, lock, volume: the screen changed (and a tap straight after a
+        # Home press lands mid-transition), so the cached tree is stale.
+        self._invalidate_ui_cache(resolved)
         return resolved
 
     async def screenshot_annotated(

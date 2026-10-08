@@ -2244,6 +2244,9 @@ class TapRequest(BaseModel):
         "Hold the touch this many seconds: a long press (#251). Omit for an ordinary "
         "tap. Above an app's long-press threshold -- 0.5s on iOS, ~0.4s on Android "
         "-- so 1.0 is a safe long press."))
+    skip_settle: bool = Field(default=False, description=(
+        "Do not wait for the screen to settle when an action changed it moments "
+        "ago (iOS simulators). For a screen that never stops moving."))
 
 
 class RestoreInputRequest(BaseModel):

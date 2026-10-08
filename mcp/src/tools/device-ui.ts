@@ -385,6 +385,10 @@ If coordinate taps are not landing on the expected element, use take_annotated_s
     inputSchema: strictParams({
       x: z.coerce.number().describe("X coordinate"),
       y: z.coerce.number().describe("Y coordinate"),
+      skip_settle: z
+        .boolean()
+        .optional()
+        .describe("Do not wait for the screen to settle after a recent action (iOS simulators). For a screen that never stops moving -- a pulsing location dot, a spinner."),
       udid: z
         .string()
         .optional()
@@ -397,11 +401,12 @@ If coordinate taps are not landing on the expected element, use take_annotated_s
         .optional()
         .describe("Hold the touch this many seconds: a long press, for context menus, drag handles and press-and-hold controls. Omit for an ordinary tap. 1.0 clears the long-press threshold on iOS (0.5s) and Android (~0.4s)."),
     }),
-  }, async ({ x, y, udid, duration }) => {
+  }, async ({ x, y, udid, duration, skip_settle }) => {
     try {
       const body: Record<string, unknown> = { x, y };
       if (udid) body.udid = udid;
       if (duration !== undefined) body.duration = duration;
+      if (skip_settle !== undefined) body.skip_settle = skip_settle;
 
       const data = await apiRequest(
         "POST",
@@ -458,6 +463,10 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         .string()
         .optional()
         .describe("Accessibility identifier to search for"),
+      skip_stability_check: z
+        .boolean()
+        .optional()
+        .describe("Skip the wait for a moving element or screen to stop before tapping. For a screen that never stops moving -- a pulsing location dot, a spinner -- where every wait would run to its timeout."),
       element_type: z
         .string()
         .optional()
@@ -509,10 +518,11 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         .optional()
         .describe("Hold the touch this many seconds: a long press, for context menus, drag handles and press-and-hold controls. Omit for an ordinary tap. 1.0 clears the long-press threshold on iOS (0.5s) and Android (~0.4s)."),
     }),
-  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value, scroll_to_find, include_screen_context, capture_screenshots, settle_delay, snapshot_depth, duration }) => {
+  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value, scroll_to_find, include_screen_context, capture_screenshots, settle_delay, snapshot_depth, duration, skip_stability_check }) => {
     try {
       const body: Record<string, unknown> = {};
       if (duration !== undefined) body.duration = duration;
+      if (skip_stability_check !== undefined) body.skip_stability_check = skip_stability_check;
       if (label) body.label = label;
       if (label_contains) body.label_contains = label_contains;
       if (label_prefix) body.label_prefix = label_prefix;

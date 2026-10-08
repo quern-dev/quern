@@ -76,6 +76,30 @@ def test_a_popover_dimming_view_is_covering_though_it_encloses_everything():
     assert covering["label"] == "dismiss popup"
 
 
+def test_a_dismiss_popup_layer_can_itself_be_tapped():
+    """Tapping the layer by name is how a caller dismisses it; the label check
+    once ran before the identity check and refused it as covered by itself."""
+    layer = element("dismiss popup", 0, 0, 393, 852, "Group")
+    assert _covering_element(layer, hit("dismiss popup", 0, 0, 393, 852, "Group")) is None
+
+
+def test_frames_half_a_point_apart_are_the_same_element():
+    """The tree and the hit-test round frames differently."""
+    assert _covering_element(ROW, hit("Sound", 36.5, 53, 320.5, 28, "CheckBox")) is None
+
+
+def test_an_element_just_past_the_target_is_covering():
+    """Slack is a point, not a licence: shifted two points, it neither sits
+    inside the target nor encloses it."""
+    assert _covering_element(ROW, hit("Bar", 34, 53, 321, 28, "Heading"))
+
+
+def test_a_frame_that_is_not_numbers_is_not_covering():
+    bad = {"type": "Button", "AXLabel": "x",
+           "frame": {"x": "a", "y": None, "width": 1, "height": 1}}
+    assert _covering_element(FIELD, bad) is None
+
+
 def test_no_answer_is_not_covering():
     """The backends return None for a miss and for a failed ask alike; a check
     that could not run must not refuse a tap."""
@@ -128,7 +152,7 @@ async def test_an_element_off_screen_is_not_tapped():
     """Rows below the screen were tapped at a point outside it, and "ok"."""
     below = element("Passcode", 16, 900, 361, 52)
     ctrl, backend = _controller(target=below)
-    ctrl._screen_bounds[SIM] = (393.0, 852.0)
+    ctrl._screen_bounds[SIM] = (0.0, 0.0, 393.0, 852.0)
     result = await _tap(ctrl, label="Passcode")
 
     assert result["status"] == "obstructed" and result["reason"] == "off_screen"
@@ -156,6 +180,76 @@ async def test_a_physical_device_is_not_hit_tested():
     result = await _tap(ctrl, identifier="field_secure")
     assert result["status"] == "ok"
     backend.describe_point.assert_not_called()
+
+
+async def test_a_hit_test_with_an_unexpected_shape_does_not_stop_the_tap():
+    """A label that is not a string, say: the comparison cannot run, so it
+    cannot refuse."""
+    ctrl, backend = _controller(describe=lambda *a: ["not", "a", "dict"])
+    result = await _tap(ctrl, identifier="field_secure")
+    assert result["status"] == "ok"
+    backend.tap.assert_awaited_once()
+
+
+@pytest.mark.parametrize("kind", [DeviceType.DEVICE, DeviceType.ANDROID_EMULATOR,
+                                  DeviceType.ANDROID_DEVICE])
+async def test_only_a_simulator_is_hit_tested(kind):
+    """Not WDA alone: no other backend's hit-testing was measured."""
+    ctrl, _ = _controller(kind=kind)
+    ctrl._served_by_wda = lambda _udid: False
+    assert ctrl._checks_landing(SIM) is False
+
+
+async def test_a_simulator_is_hit_tested():
+    ctrl, _ = _controller()
+    assert ctrl._checks_landing(SIM) is True
+
+
+@pytest.mark.parametrize("x,y,inside", [
+    (393, 852, True),     # the far edge is on screen
+    (393.5, 400, False),
+    (0, 0, True),
+    (-0.5, 400, False),
+])
+async def test_the_screen_edge(x, y, inside):
+    target = element("Edge", x - 1, y - 1, 2, 2)
+    ctrl, backend = _controller(target=target)
+    ctrl._screen_bounds[SIM] = (0.0, 0.0, 393.0, 852.0)
+    result = await _tap(ctrl, label="Edge")
+    assert (result["status"] == "ok") is inside
+
+
+async def test_an_app_window_that_does_not_start_at_the_origin():
+    """iPad Split View: the right-hand app's frame starts at x=678, and a
+    check from (0, 0) refused every element in it."""
+    target = element("Done", 900, 40, 60, 30)
+    ctrl, backend = _controller(target=target)
+    ctrl._screen_bounds[SIM] = (678.0, 0.0, 516.0, 834.0)
+    result = await _tap(ctrl, label="Done")
+    assert result["status"] == "ok"
+    backend.tap.assert_awaited_once()
+
+    left_of_it = element("Back", 300, 40, 60, 30)
+    ctrl, backend = _controller(target=left_of_it)
+    ctrl._screen_bounds[SIM] = (678.0, 0.0, 516.0, 834.0)
+    assert (await _tap(ctrl, label="Back"))["reason"] == "off_screen"
+
+
+def test_the_first_application_is_the_one_kept():
+    """An alert or a keyboard host can be a second Application after the app."""
+    ctrl = DeviceController()
+    ctrl._remember_screen(SIM, [
+        {"type": "Application", "frame": {"x": 0, "y": 0, "width": 393, "height": 852}},
+        {"type": "Application", "frame": {"x": 0, "y": 500, "width": 393, "height": 352}},
+    ])
+    assert ctrl._screen_bounds[SIM] == (0.0, 0.0, 393.0, 852.0)
+
+
+def test_an_application_with_no_size_is_not_kept():
+    ctrl = DeviceController()
+    ctrl._remember_screen(SIM, [{"type": "Application",
+                                 "frame": {"x": 0, "y": 0, "width": 0, "height": 0}}])
+    assert SIM not in ctrl._screen_bounds
 
 
 # -- settling first -------------------------------------------------------------------
@@ -197,6 +291,54 @@ async def test_a_settle_that_fails_does_not_stop_the_tap():
     backend.tap.assert_awaited_once()
 
 
+async def test_the_wait_comes_before_the_hit_test():
+    """Hit-testing a screen mid-transition answers for frames it has not
+    reached yet; the wait has to come first."""
+    order = []
+    ctrl, backend = _controller(describe=lambda *a: order.append("hit-test") or
+                                hit("", 20, 300, 353, 40, "TextField"))
+
+    async def settle(*_a, **_k):
+        order.append("settle")
+        return {"settled": True}
+
+    ctrl.wait_for_settle = AsyncMock(side_effect=settle)
+    ctrl._last_ui_change[SIM] = time.monotonic()
+    await _tap(ctrl, identifier="field_secure", skip=False)
+    assert order == ["settle", "hit-test"]
+
+
+async def test_a_refusal_after_a_wait_says_it_waited():
+    ctrl, backend = _controller(describe=lambda *a: hit("AutoFill", 192, 296, 83, 44, "StaticText"))
+    ctrl._last_ui_change[SIM] = time.monotonic()
+    result = await _tap(ctrl, identifier="field_secure", skip=False)
+    assert result["status"] == "obstructed" and "waited_for_settle_ms" in result
+
+
+@pytest.mark.parametrize("action", ["press_button", "terminate_app", "set_hardware_keyboard"])
+async def test_other_screen_changing_actions_count_as_a_change(action):
+    """A tap straight after Home, a terminate or a keyboard toggle landed
+    mid-transition as surely as one after a tap."""
+    ctrl = DeviceController()
+    ctrl._device_type_cache[SIM] = DeviceType.SIMULATOR
+    ctrl.resolve_udid = AsyncMock(return_value=SIM)
+    backend = MagicMock()
+    backend.press_button = AsyncMock()
+    ctrl._ui_backend = MagicMock(return_value=backend)
+    ctrl.simctl = MagicMock()
+    ctrl.simctl.terminate_app = AsyncMock()
+    ctrl.sim_bridge = MagicMock()
+    ctrl.sim_bridge.set_hardware_keyboard = AsyncMock()
+    ctrl._sim_bridge_ok = True
+    ctrl._warn_if_input_is_suppressed = AsyncMock()
+    args = {"press_button": ("home",), "terminate_app": ("com.example.app",),
+            "set_hardware_keyboard": (True,)}[action]
+    with patch.object(ctrl, "_invalidate_ui_cache", wraps=ctrl._invalidate_ui_cache) as noted:
+        await getattr(ctrl, action)(*args, udid=SIM)
+    noted.assert_called_with(SIM)
+    assert SIM in ctrl._last_ui_change
+
+
 def test_an_action_that_changes_the_screen_is_noted():
     ctrl = DeviceController()
     before = time.monotonic()
@@ -211,7 +353,7 @@ def test_the_screen_size_is_kept_from_a_raw_read():
     ctrl._remember_screen(SIM, [{"type": "Application", "frame": {"x": 0, "y": 0,
                                                                   "width": 393, "height": 852}},
                                 {"type": "Button", "frame": {}}])
-    assert ctrl._screen_bounds[SIM] == (393.0, 852.0)
+    assert ctrl._screen_bounds[SIM] == (0.0, 0.0, 393.0, 852.0)
 
 
 # -- coordinates ------------------------------------------------------------------------
@@ -223,6 +365,23 @@ async def test_a_coordinate_tap_says_what_it_landed_on():
 
     assert report["udid"] == SIM
     assert report["landed_on"]["label"] == "AutoFill"
+    backend.tap.assert_awaited_once()
+
+
+async def test_a_coordinate_tap_waits_after_a_change():
+    ctrl, _ = _controller()
+    ctrl._last_ui_change[SIM] = time.monotonic()
+    report = await ctrl.tap_and_report(100, 100, udid=SIM)
+    ctrl.wait_for_settle.assert_awaited_once()
+    assert "waited_for_settle_ms" in report
+
+
+async def test_a_coordinate_tap_can_skip_the_wait():
+    ctrl, backend = _controller()
+    ctrl._last_ui_change[SIM] = time.monotonic()
+    report = await ctrl.tap_and_report(100, 100, udid=SIM, skip_settle=True)
+    ctrl.wait_for_settle.assert_not_called()
+    assert "waited_for_settle_ms" not in report
     backend.tap.assert_awaited_once()
 
 
@@ -294,4 +453,4 @@ async def test_a_filtered_read_still_records_the_screen_size():
     elements, _ = await ctrl.get_ui_elements(SIM, filter_label="General", use_cache=False)
 
     assert [e.label for e in elements] == ["General"], "the read was not filtered"
-    assert ctrl._screen_bounds[SIM] == (393.0, 852.0)
+    assert ctrl._screen_bounds[SIM] == (0.0, 0.0, 393.0, 852.0)

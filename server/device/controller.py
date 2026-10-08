@@ -126,7 +126,7 @@ class DeviceController(DeviceControllerUI):
         self._last_ui_change: dict[str, float] = {}
         # Each device's screen size, from the Application element of the last
         # tree read that had one: a filtered read does not carry it.
-        self._screen_bounds: dict[str, tuple[float, float]] = {}
+        self._screen_bounds: dict[str, tuple[float, float, float, float]] = {}
         # One long-lived Web Inspector connection. Reconnecting per request cost
         # ~3.4s of handshake, and webinspectord did not re-report its connected
         # applications to a connection opened immediately after the previous one
@@ -714,7 +714,8 @@ class DeviceController(DeviceControllerUI):
         """Invalidate UI tree cache for a device (or all devices if udid=None)."""
         if udid:
             self._ui_cache.pop(udid, None)
-            # Every action that changes the screen comes through here, which
+            # The actions that change the screen come through here (tap, swipe,
+            # type, launch, terminate, buttons, the hardware keyboard), which
             # makes it the one place to note that it just changed.
             self._last_ui_change[udid] = time.monotonic()
             # Anything that changed the native tree can have moved, replaced or
@@ -1507,6 +1508,7 @@ class DeviceController(DeviceControllerUI):
             await self.wda_client.terminate_app(resolved, bundle_id)
         else:
             await self.simctl.terminate_app(resolved, bundle_id)
+        self._invalidate_ui_cache(resolved)  # the app's screen is gone
         return resolved
 
     async def uninstall_app(self, bundle_id: str, udid: str | None = None) -> str:
@@ -1911,6 +1913,7 @@ class DeviceController(DeviceControllerUI):
                 tool="sim-bridge",
             )
         await self.sim_bridge.set_hardware_keyboard(resolved, enabled)
+        self._invalidate_ui_cache(resolved)  # the software keyboard came or went
         return resolved
 
     async def get_simulator_settings(self, udid: str | None = None) -> dict:
