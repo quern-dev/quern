@@ -283,6 +283,7 @@ worth stating:
 | `suspect` | **WARNING** | quern did it and the result is not to be trusted |
 | `not_found` | INFO | an answer, not a fault — the element was not there |
 | `ambiguous` | INFO | several matches; also an answer |
+| `obstructed` | INFO | the element is there but something else would take its tap, so it was not tapped; an answer (#435) |
 | `started` | DEBUG | a begin entry, carrying no duration |
 
 `suspect` is the level policy's WARNING row made queryable. Typing that

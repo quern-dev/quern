@@ -453,10 +453,12 @@ async def tap(request: Request, body: TapRequest):
         act.detail = f"({body.x}, {body.y})" + (
             f" held {body.duration:g}s" if body.duration else "")
         try:
-            udid = await controller.tap(x=body.x, y=body.y, udid=body.udid,
-                                        duration=body.duration)
+            report = await controller.tap_and_report(x=body.x, y=body.y, udid=body.udid,
+                                                     duration=body.duration,
+                                                     skip_settle=body.skip_settle)
+            udid = report["udid"]
             act.udid = udid
-            payload = {"status": "ok", "udid": udid, "x": body.x, "y": body.y}
+            payload = {"status": "ok", "x": body.x, "y": body.y, **report}
             if body.duration is not None:
                 payload["duration"] = body.duration
             return _with_input_warning(controller, udid, payload)
@@ -472,6 +474,8 @@ async def tap_element(request: Request, body: TapElementRequest):
     - 200 with status "ok" and tapped element info for single match
     - 200 with status "ambiguous" and match list for multiple matches
     - 404 when no element matches
+    - 409 with status "obstructed" when something else would take the tap, or
+      the element is off screen -- nothing was tapped (iOS simulators, #435)
     """
     controller = _get_controller(request)
     with _action("tap_element") as act:
@@ -533,6 +537,12 @@ async def tap_element(request: Request, body: TapElementRequest):
 
             if result.get("status") == "ambiguous":
                 act.outcome = "ambiguous"
+
+            # Not tapped, because something else is where the tap would land
+            # (#435): a 409 with what that is, so it does not read as success.
+            if result.get("status") == "obstructed":
+                act.outcome = "obstructed"
+                raise HTTPException(status_code=409, detail=result)
 
             if body.capture_screenshots:
                 await asyncio.sleep(body.settle_delay)

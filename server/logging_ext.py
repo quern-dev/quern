@@ -48,7 +48,8 @@ _PREFIX: Final[str] = "quern_"
 #: What an action can have done. `not_found` and `ambiguous` are answers, not
 #: failures -- an element that is not on screen is a true result for the
 #: question asked, and logging it as an error trains the reader to ignore
-#: errors.
+#: errors. `obstructed` is the same kind: the element is there, something else
+#: is where its tap would land, and quern declined to tap it (#435).
 #: `started` is the odd one out: it marks a *begin* entry, which carries no
 #: duration because the action has not finished. It exists so that an action
 #: that hangs still leaves a trace -- the completion entry never arrives, so
@@ -66,7 +67,8 @@ _PREFIX: Final[str] = "quern_"
 #: since input is not idempotent, so it is reported at WARNING rather than
 #: INFO: something happened and the result is not to be trusted.
 OUTCOMES: Final[tuple[str, ...]] = (
-    "ok", "failed", "suspect", "cancelled", "not_found", "ambiguous", "started",
+    "ok", "failed", "suspect", "cancelled", "not_found", "ambiguous", "obstructed",
+    "started",
 )
 
 

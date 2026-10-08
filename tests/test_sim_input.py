@@ -883,7 +883,7 @@ class TestTheAdvisoryReachesTheCaller:
         from server.models import TapRequest
 
         controller = self._controller()
-        controller.tap = AsyncMock(return_value="SIM")
+        controller.tap_and_report = AsyncMock(return_value={"udid": "SIM"})
         controller._input_checked["SIM"] = False
 
         with patch.object(device_ui, "_get_controller", lambda request: controller):
@@ -903,7 +903,7 @@ class TestTheAdvisoryReachesTheCaller:
         from server.models import TapRequest
 
         controller = self._controller()
-        controller.tap = AsyncMock(return_value="SIM")
+        controller.tap_and_report = AsyncMock(return_value={"udid": "SIM"})
         controller._input_checked["SIM"] = True
 
         with patch.object(device_ui, "_get_controller", lambda request: controller):

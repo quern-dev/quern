@@ -379,12 +379,16 @@ Not needed for a simulator quern booted itself — that path restores the servic
   server.registerTool("tap", {
     description: `Tap at specific screen coordinates on the simulator.
 
-PREFER tap_element over this tool. Use get_screen_summary to find element labels/identifiers, then tap_element to tap by name. Only use coordinate tap as a last resort when tap_element cannot find the element.
+PREFER tap_element over this tool. Use get_screen_summary to find element labels/identifiers, then tap_element to tap by name. Only use coordinate tap as a last resort when tap_element cannot find the element. On an iOS simulator the response carries landed_on: what a hit-test found at the point just before the tap (a bar, a menu, the element you meant), and a tap moments after another action waits for the screen to stop moving (waited_for_settle_ms).
 
 If coordinate taps are not landing on the expected element, use take_annotated_screenshot to see exact element bounding boxes overlaid on the screen. Read the element's position as a fraction of the screen (e.g. iPhone 12: 390×844 pt, iPhone 15 Pro: 393×852 pt) to calculate correct tap coordinates, then retry.`,
     inputSchema: strictParams({
       x: z.coerce.number().describe("X coordinate"),
       y: z.coerce.number().describe("Y coordinate"),
+      skip_settle: z
+        .boolean()
+        .optional()
+        .describe("Do not wait for the screen to settle after a recent action (iOS simulators). For a screen that never stops moving -- a pulsing location dot, a spinner."),
       udid: z
         .string()
         .optional()
@@ -397,11 +401,12 @@ If coordinate taps are not landing on the expected element, use take_annotated_s
         .optional()
         .describe("Hold the touch this many seconds: a long press, for context menus, drag handles and press-and-hold controls. Omit for an ordinary tap. 1.0 clears the long-press threshold on iOS (0.5s) and Android (~0.4s)."),
     }),
-  }, async ({ x, y, udid, duration }) => {
+  }, async ({ x, y, udid, duration, skip_settle }) => {
     try {
       const body: Record<string, unknown> = { x, y };
       if (udid) body.udid = udid;
       if (duration !== undefined) body.duration = duration;
+      if (skip_settle !== undefined) body.skip_settle = skip_settle;
 
       const data = await apiRequest(
         "POST",
@@ -431,7 +436,7 @@ If coordinate taps are not landing on the expected element, use take_annotated_s
   server.registerTool("tap_element", {
     description: `Find a UI element by label or accessibility identifier and tap its center. Returns "ambiguous" with match list if multiple elements match — use element_type (e.g., "Button", "TextField", "StaticText") to narrow results.
 
-This is the PREFERRED way to tap UI elements. Use get_screen_summary first to discover element labels/identifiers, then use this tool. On an iOS simulator, elements on a web page (Safari, or a WKWebView in an app) are not in the accessibility tree until get_web_content has read the page. A miss there carries web_content_hint when the screen shows a sign of web content and the page has not already been read; its absence does not mean there is none. Avoid using coordinate-based tap unless this tool cannot find the element.
+This is the PREFERRED way to tap UI elements. Use get_screen_summary first to discover element labels/identifiers, then use this tool. On an iOS simulator it confirms what the tap will land on before tapping: if another element is in the way (a row scrolled under the navigation bar, a field under a menu or keyboard) or the element is off screen, it does not tap and answers 409 with status "obstructed", reason "covered" (with covered_by) or "off_screen", and a detail saying what to do -- usually scroll_to_element or dismissing what is on top. A tap moments after another action first waits for the screen to stop moving (waited_for_settle_ms), since a transition still running swallows taps; skip_stability_check skips that wait. On an iOS simulator, elements on a web page (Safari, or a WKWebView in an app) are not in the accessibility tree until get_web_content has read the page. A miss there carries web_content_hint when the screen shows a sign of web content and the page has not already been read; its absence does not mean there is none. Avoid using coordinate-based tap unless this tool cannot find the element.
 
 Success and not-found responses both carry "backend", naming which of quern's UI backends did the work ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone or a simulator after start_driver, 'u2' on Android). With scroll_to_find this runs the same held-swipe sweep as scroll_to_element, where the two simulator backends differ, so it is worth checking before concluding the element is absent.
 
@@ -458,6 +463,10 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         .string()
         .optional()
         .describe("Accessibility identifier to search for"),
+      skip_stability_check: z
+        .boolean()
+        .optional()
+        .describe("Skip the wait for a moving element or screen to stop before tapping. For a screen that never stops moving -- a pulsing location dot, a spinner -- where every wait would run to its timeout."),
       element_type: z
         .string()
         .optional()
@@ -509,10 +518,11 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         .optional()
         .describe("Hold the touch this many seconds: a long press, for context menus, drag handles and press-and-hold controls. Omit for an ordinary tap. 1.0 clears the long-press threshold on iOS (0.5s) and Android (~0.4s)."),
     }),
-  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value, scroll_to_find, include_screen_context, capture_screenshots, settle_delay, snapshot_depth, duration }) => {
+  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value, scroll_to_find, include_screen_context, capture_screenshots, settle_delay, snapshot_depth, duration, skip_stability_check }) => {
     try {
       const body: Record<string, unknown> = {};
       if (duration !== undefined) body.duration = duration;
+      if (skip_stability_check !== undefined) body.skip_stability_check = skip_stability_check;
       if (label) body.label = label;
       if (label_contains) body.label_contains = label_contains;
       if (label_prefix) body.label_prefix = label_prefix;

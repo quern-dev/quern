@@ -101,7 +101,10 @@ def action(
     except HTTPException as exc:
         # A 404 from a find-style call is an answer, not a fault: the element
         # genuinely was not there. Anything else is a failure.
-        scope.outcome = "not_found" if exc.status_code == 404 else "failed"
+        if exc.status_code == 404:
+            scope.outcome = "not_found"
+        elif scope.outcome != "obstructed":   # set by the route: also an answer
+            scope.outcome = "failed"
         raise
     except asyncio.CancelledError:
         # CancelledError is a BaseException, so `except Exception` misses it
