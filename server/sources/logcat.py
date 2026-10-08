@@ -185,23 +185,26 @@ class LogcatAdapter(BaseSourceAdapter):
     async def stop(self) -> None:
         """Terminate the adb logcat subprocess and clean up."""
         self._running = False
+        # Held before any await: an overlapping stop, or a restart meanwhile,
+        # must neither re-read these after another stop cleared them nor have
+        # this stop clear a newer run's.
+        process, task = self._process, self._read_task
 
-        if self._process and self._process.returncode is None:
-            self._process.terminate()
+        if process and process.returncode is None:
+            process.terminate()
             try:
-                await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                await asyncio.wait_for(process.wait(), timeout=5.0)
             except TimeoutError:
-                self._process.kill()
+                process.kill()
 
-        if self._read_task and not self._read_task.done():
-            self._read_task.cancel()
-            try:
-                await self._read_task
-            except asyncio.CancelledError:
-                pass
+        # The loop runs to EOF, which terminating produces, so lines written
+        # before the stop are kept rather than cancelled away.
+        await self._drain(task)
 
-        self._process = None
-        self._read_task = None
+        if self._process is process:
+            self._process = None
+        if self._read_task is task:
+            self._read_task = None
         logger.info("Logcat adapter stopped (serial=%s)", self.serial[:8])
 
     async def _read_loop(self) -> None:
@@ -211,9 +214,6 @@ class LogcatAdapter(BaseSourceAdapter):
 
         try:
             async for raw_line in self._process.stdout:
-                if not self._running:
-                    break
-
                 line = raw_line.decode("utf-8", errors="replace").rstrip()
                 if not line:
                     continue
@@ -244,7 +244,9 @@ class LogcatAdapter(BaseSourceAdapter):
         except Exception as e:
             if self._running:
                 self._error = f"Read loop error: {e}"
-                logger.exception("Logcat read loop failed")
+            # Logged during stop's drain too, which processes what the stream
+            # had already written; a failure there would otherwise leave no trace.
+            logger.exception("Logcat read loop failed")
         finally:
             self._running = False
             # A crash whose last line never came is still a crash.

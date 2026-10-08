@@ -1,5 +1,6 @@
 """Tests for the SimulatorLogAdapter."""
 
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -9,6 +10,14 @@ from server.models import LogLevel, LogSource
 from server.sources.simulator_log import SimulatorLogAdapter
 
 SAMPLE_UDID = "43B500A9-1234-5678-9ABC-DEF012345678"
+
+
+@pytest.fixture(autouse=True)
+def _short_startup_grace(monkeypatch):
+    """start() waits to see whether simctl exits at once; the fakes here
+    answer immediately either way, so the wait need not be the real one."""
+    from server.sources import simulator_log
+    monkeypatch.setattr(simulator_log, "STARTUP_GRACE_S", 0.01)
 
 
 @pytest.fixture
@@ -224,16 +233,27 @@ def _stream(*chunks: bytes, eof: bool = True, stderr: bytes = b"", code: int = 0
     proc.returncode = None
     proc.stdout = reader
     proc.stderr = err
+    # A live process's wait() returns once it has been terminated; one whose
+    # stream already ended (eof=True) has exited, and returns at once -- which
+    # start() now checks for.
+    exited = asyncio.Event()
+    if eof:
+        exited.set()
 
     def terminate():
         if on_terminate is not None:
             on_terminate(reader)
         elif not reader.at_eof():
             reader.feed_eof()
+        exited.set()
+
+    async def wait():
+        await exited.wait()
+        return code
 
     proc.terminate = MagicMock(side_effect=terminate)
-    proc.wait = AsyncMock(return_value=code)
-    proc.kill = MagicMock()
+    proc.wait = AsyncMock(side_effect=wait)
+    proc.kill = MagicMock(side_effect=terminate)
     return proc, reader
 
 
@@ -277,7 +297,8 @@ async def test_read_loop_emits_entries():
         b'"subsystem":"com.test","category":"test",'
         b'"timestamp":"2026-02-07 14:23:01.000000-0800",'
         b'"messageType":"Default","processID":42,'
-        b'"processImagePath":"/path/to/TestApp"}\n'
+        b'"processImagePath":"/path/to/TestApp"}\n',
+        eof=False,
     )
     adapter, emitted = await _collect(proc)
     await adapter.stop()
@@ -294,6 +315,7 @@ async def test_read_loop_pretty_printed_json():
     proc, _ = _stream(
         b'Filtering the log data using "process == \\"TestApp\\""\n',
         b"[" + _pretty("hello pretty") + b"]\n",
+        eof=False,
     )
     adapter, emitted = await _collect(proc)
     await adapter.stop()
@@ -476,6 +498,33 @@ async def test_a_failure_while_draining_is_logged(caplog):
             await asyncio.wait_for(adapter.stop(), timeout=10)
 
     assert any("read loop failed" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_stream_that_dies_as_it_starts_is_not_reported_running():
+    """simctl exits at once for a simulator that is not booted. start() used
+    to report success; it now waits a moment, sees the exit, and says why."""
+    proc, _ = _stream(stderr=b"Process spawn via launchd failed because device is not booted.\n",
+                      code=149)                         # eof=True: already exited
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        adapter = SimulatorLogAdapter(udid=SAMPLE_UDID)
+        await adapter.start()
+
+    assert not adapter.is_running
+    assert adapter.exited_at_start
+    assert "exited (149)" in adapter._error and "not booted" in adapter._error
+    assert adapter._read_task is None
+
+
+@pytest.mark.asyncio
+async def test_a_live_stream_is_not_mistaken_for_one_that_died():
+    proc, _ = _stream(eof=False)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        adapter = SimulatorLogAdapter(udid=SAMPLE_UDID)
+        await adapter.start()
+
+    assert adapter.is_running and not adapter.exited_at_start and adapter._error is None
+    await asyncio.wait_for(adapter.stop(), timeout=10)
 
 
 # ---------------------------------------------------------------------------

@@ -284,25 +284,25 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
     async def stop(self) -> None:
         """Terminate the pymobiledevice3 subprocess and clean up."""
         self._running = False
+        # Held before any await, for the reasons given in SimulatorLogAdapter.
+        process, read_task, stderr_task = self._process, self._read_task, self._stderr_task
 
-        if self._process and self._process.returncode is None:
-            self._process.terminate()
+        if process and process.returncode is None:
+            process.terminate()
             try:
-                await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                await asyncio.wait_for(process.wait(), timeout=5.0)
             except TimeoutError:
-                self._process.kill()
+                process.kill()
 
-        for task in (self._read_task, self._stderr_task):
-            if task and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+        # Both loops run to EOF, so what was written before the stop is kept.
+        await self._drain(read_task, stderr_task)
 
-        self._process = None
-        self._read_task = None
-        self._stderr_task = None
+        if self._process is process:
+            self._process = None
+        if self._read_task is read_task:
+            self._read_task = None
+        if self._stderr_task is stderr_task:
+            self._stderr_task = None
         logger.info("PhysicalDeviceLog adapter stopped (udid=%s)", self.udid[:8])
 
     async def _read_loop(self) -> None:
@@ -312,9 +312,6 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
 
         try:
             async for raw_line in self._process.stdout:
-                if not self._running:
-                    break
-
                 line = raw_line.decode("utf-8", errors="replace").rstrip()
                 if not line:
                     continue
@@ -336,7 +333,9 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
         except Exception as e:
             if self._running:
                 self._error = f"Read loop error: {e}"
-                logger.exception("PhysicalDeviceLog read loop failed")
+            # Logged during stop's drain too, which processes what the stream
+            # had already written; a failure there would otherwise leave no trace.
+            logger.exception("PhysicalDeviceLog read loop failed")
         finally:
             self._running = False
 

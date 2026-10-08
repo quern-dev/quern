@@ -454,26 +454,29 @@ class ProxyAdapter(BaseSourceAdapter):
     async def stop(self) -> None:
         """Terminate the mitmdump subprocess and clean up."""
         self._running = False
+        # Held before any await, so an overlapping stop never re-reads what
+        # another has cleared.
+        process = self._process
+        tasks = (self._read_task, self._stderr_task, self._stdout_task)
+
         # Also written here, not only from the addon's "stopped" event: a hard
         # kill gives the addon no chance to emit, and the state file would then
         # keep claiming the proxy is running. Off-thread for the same reason as
         # the handler -- this runs on the event loop.
         await asyncio.to_thread(update_state, proxy_status="stopped")
 
-        if self._process and self._process.returncode is None:
-            _signal(self._process, "terminate")
+        if process and process.returncode is None:
+            _signal(process, "terminate")
             try:
-                await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                await asyncio.wait_for(process.wait(), timeout=5.0)
             except TimeoutError:
-                _signal(self._process, "kill")
+                _signal(process, "kill")
 
-        for task in (self._read_task, self._stderr_task, self._stdout_task):
-            if task and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+        # mitmdump exiting closes the events pipe, so the read loop -- which
+        # runs to EOF -- dispatches the events written before the stop: a flow
+        # that completed just then is kept, not cancelled away. Before the
+        # intercept and mock state below is cleared, which those events may use.
+        await self._drain(*tasks)
 
         if self._events_transport is not None:
             self._events_transport.close()
@@ -852,9 +855,6 @@ class ProxyAdapter(BaseSourceAdapter):
         process = self._process
         try:
             async for raw_line in self._event_lines():
-                if not self._running:
-                    break
-
                 line = raw_line.decode("utf-8", errors="replace").rstrip()
                 if not line:
                     continue
@@ -879,7 +879,9 @@ class ProxyAdapter(BaseSourceAdapter):
         except Exception as e:
             if self._running:
                 self._error = f"Read loop error: {e}"
-                logger.exception("Proxy read loop failed")
+            # Logged during stop's drain too, which processes what the stream
+            # had already written; a failure there would otherwise leave no trace.
+            logger.exception("Proxy read loop failed")
         finally:
             unexpected = self._running
             self._running = False

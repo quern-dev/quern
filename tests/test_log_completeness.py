@@ -488,3 +488,43 @@ async def test_a_start_during_a_stop_leaves_the_new_capture_registered(app, monk
     assert registered is not None and registered.is_running, (
         "the new capture is running but no longer registered, so it cannot be stopped"
     )
+
+
+async def _start_with(app, monkeypatch, start):
+    from types import SimpleNamespace
+
+    from server.sources.simulator_log import SimulatorLogAdapter
+
+    async def _resolve(udid):
+        return udid
+
+    app.state.device_controller = SimpleNamespace(resolve_udid=_resolve)
+    app.state.deduplicator = SimpleNamespace(process=lambda entry: None)
+    monkeypatch.setattr(SimulatorLogAdapter, "start", start)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        return await client.post(
+            "/api/v1/device/logging/start", headers=HEADERS, json={"udid": "SIM-A"},
+        )
+
+
+async def test_a_stream_that_dies_at_start_is_a_409_with_its_reason(app, monkeypatch):
+    """A simulator that is not booted: simctl exits at once. That answered
+    "started", and the error surfaced only later on the adapter's status."""
+    async def _dies(self):
+        self.exited_at_start = True
+        self._error = ("simctl log stream exited (149): Process spawn via launchd "
+                       "failed because device is not booted.")
+
+    resp = await _start_with(app, monkeypatch, _dies)
+    assert resp.status_code == 409, resp.text
+    assert "not booted" in resp.json()["detail"]
+    assert "SIM-A" not in app.state.sim_log_adapters, "registered a dead capture"
+
+
+async def test_failing_to_spawn_stays_a_500(app, monkeypatch):
+    async def _cannot_spawn(self):
+        self._error = "xcrun not found. Install Xcode Command Line Tools."
+
+    resp = await _start_with(app, monkeypatch, _cannot_spawn)
+    assert resp.status_code == 500, resp.text
