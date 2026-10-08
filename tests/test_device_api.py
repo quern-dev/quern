@@ -724,8 +724,19 @@ class TestTap:
         assert data["x"] == 100.0
         assert data["y"] == 200.0
         mock_controller.tap_and_report.assert_called_once_with(
-            x=100.0, y=200.0, udid=None, duration=None)
+            x=100.0, y=200.0, udid=None, duration=None, skip_settle=False)
         assert "landed_on" not in data, "no hit-test result to report"
+
+    async def test_tap_passes_skip_settle(self, app, auth_headers, mock_controller):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/ui/tap",
+                json={"x": 100.0, "y": 200.0, "skip_settle": True},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        assert mock_controller.tap_and_report.call_args.kwargs["skip_settle"] is True
 
     async def test_a_tap_says_what_it_landed_on(self, app, auth_headers, mock_controller):
         """A coordinate has no target to check, but the caller can see what was
