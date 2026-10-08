@@ -125,17 +125,20 @@ class SimulatorLogAdapter(BaseSourceAdapter):
     async def stop(self) -> None:
         """Terminate the simctl log stream subprocess and clean up."""
         self._running = False
-
-        if self._process and self._process.returncode is None:
-            self._process.terminate()
-            try:
-                await asyncio.wait_for(self._process.wait(), timeout=5.0)
-            except TimeoutError:
-                self._process.kill()
-
-        # Held locally: an overlapping stop() clears the attribute while this
-        # one is awaiting, and re-reading it then raised AttributeError.
+        # Both held from the start, before any await: an overlapping stop()
+        # clears the attributes while this one waits (re-reading them raised
+        # AttributeError), and a reconfigure can start a new run meanwhile,
+        # whose handles this stop must not touch.
+        process = self._process
         task = self._read_task
+
+        if process and process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5.0)
+            except TimeoutError:
+                process.kill()
+
         if task and not task.done():
             # Terminating the stream closes its stdout, so the read loop reaches
             # EOF on its own after parsing what was already written -- an entry
@@ -152,8 +155,12 @@ class SimulatorLogAdapter(BaseSourceAdapter):
                 except asyncio.CancelledError:
                     pass
 
-        self._process = None
-        self._read_task = None
+        # Only if they are still this run's: clearing a newer run's handles
+        # left its subprocess with nothing able to stop it.
+        if self._process is process:
+            self._process = None
+        if self._read_task is task:
+            self._read_task = None
         logger.info("SimulatorLog adapter stopped (udid=%s)", self.udid[:8])
 
     #: Bytes per read. Any size works; a read returns whatever is waiting.

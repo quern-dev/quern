@@ -334,7 +334,7 @@ async def test_stopping_keeps_what_was_already_written():
         await asyncio.sleep(0)
         # Written, and stop called, before the reader runs again.
         reader.feed_data(b"[" + _pretty("logged just before stop"))
-        await adapter.stop()
+        await asyncio.wait_for(adapter.stop(), timeout=10)
 
     assert [e.message for e in emitted] == ["logged just before stop"]
 
@@ -372,7 +372,7 @@ async def test_stopping_drains_output_still_arriving():
     proc, reader = _stream(b"[", eof=False,
                            on_terminate=lambda r: pending.append(asyncio.ensure_future(trickle(r))))
     adapter, emitted = await _collect(proc)
-    await adapter.stop()
+    await asyncio.wait_for(adapter.stop(), timeout=10)
 
     assert [e.message for e in emitted] == ["one", "two", "three"]
 
@@ -386,8 +386,42 @@ async def test_two_stops_at_once_both_return():
 
     proc, _ = _stream(b"[" + _pretty("x"), eof=False)
     adapter, _ = await _collect(proc)
-    results = await asyncio.gather(adapter.stop(), adapter.stop(), return_exceptions=True)
+    results = await asyncio.wait_for(
+        asyncio.gather(adapter.stop(), adapter.stop(), return_exceptions=True), timeout=10)
     assert results == [None, None]
+
+
+@pytest.mark.asyncio
+async def test_a_stop_overlapping_a_restart_leaves_the_new_run_alone():
+    """A filter change restarts the adapter while another stop is still
+    waiting on the old process. That stop used to clear the new run's
+    handles on its way out, leaving its subprocess with nothing to stop it."""
+    import asyncio
+
+    release = asyncio.Event()
+    old, _ = _stream(b"[", eof=False)
+
+    async def slow_wait():
+        await release.wait()
+        return 0
+
+    old.wait = AsyncMock(side_effect=slow_wait)
+    new, _ = _stream(b"[", eof=False)
+    procs = iter([old, new])
+
+    with patch("asyncio.create_subprocess_exec", side_effect=lambda *a, **k: next(procs)):
+        adapter = SimulatorLogAdapter(udid=SAMPLE_UDID)
+        await adapter.start()
+        stopping = asyncio.ensure_future(adapter.stop())   # waits on the old process
+        await asyncio.sleep(0.05)
+        await adapter.start()                               # the restart's new run
+        new_task = adapter._read_task
+        release.set()
+        await asyncio.wait_for(stopping, timeout=10)
+
+        assert adapter._process is new, "the old stop cleared the new run's process"
+        assert adapter._read_task is new_task
+        await asyncio.wait_for(adapter.stop(), timeout=10)
 
 
 @pytest.mark.asyncio
@@ -439,7 +473,7 @@ async def test_a_failure_while_draining_is_logged(caplog):
         await asyncio.sleep(0)
         reader.feed_data(b"[" + _pretty("late"))
         with caplog.at_level(logging.ERROR, logger="server.sources.simulator_log"):
-            await adapter.stop()
+            await asyncio.wait_for(adapter.stop(), timeout=10)
 
     assert any("read loop failed" in r.getMessage() for r in caplog.records)
 
