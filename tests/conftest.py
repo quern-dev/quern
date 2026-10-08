@@ -1,6 +1,7 @@
 """Global test fixtures — runs before any test module is imported."""
 
 import functools
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -28,7 +29,7 @@ os.environ["QUERN_STATE_DIR"] = _test_state_dir
 #: the device pool or the install manifest.
 #:
 #: The list below is not a substitute for redirection; it is what catches the
-#: next path nobody redirected. Two strengths, because a machine running quern
+#: next path nobody redirected. Three strengths, because a machine running quern
 #: is not idle: a live daemon appends to its log, a live server rewrites its own
 #: state, and an editor rewrites its config, all while the suite runs. Watching
 #: those for *modification* reports the machine working rather than a test
@@ -48,8 +49,6 @@ _WATCH_EXACTLY: dict[str, list[Path]] = {
     "another tool's configuration": [
         Path.home() / ".claude" / "settings.json",
         Path.home() / ".claude" / "skills" / "quern-api",
-        Path.home() / "Library" / "Application Support" / "Claude"
-        / "claude_desktop_config.json",
         Path.home() / ".cursor" / "mcp.json",
         Path.home() / ".codex" / "config.toml",
         Path.home() / ".config" / "opencode" / "opencode.json",
@@ -97,6 +96,18 @@ _WATCH_EXISTENCE: dict[str, list[Path]] = {
     ],
 }
 
+#: Watched for their `mcpServers` section only. The app that owns the file
+#: rewrites the rest of it while it runs -- Claude Desktop keeps its window and
+#: session state under `preferences`, and saved it mid-run four times in one
+#: suite, each failing whichever unrelated test was running. The section is all
+#: quern's registration code touches, so it is all a misbehaving test could.
+_WATCH_MCP_SERVERS: dict[str, list[Path]] = {
+    "another tool's configuration": [
+        Path.home() / "Library" / "Application Support" / "Claude"
+        / "claude_desktop_config.json",
+    ],
+}
+
 #: Sentinel for a path that could not be read. Distinct from "does not exist":
 #: `/etc/sudoers.d` is commonly 0750 root:wheel, and returning "absent" there
 #: made the entry a permanent quiet pass -- a failed check reading as one that
@@ -112,6 +123,22 @@ def _exact(path: Path) -> tuple:
     except OSError:
         return _UNREADABLE
     return (True, st.st_mtime_ns, st.st_size)
+
+
+def _mcp_servers(path: Path) -> tuple:
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return (False, None)
+    except OSError:
+        return _UNREADABLE
+    try:
+        servers = json.loads(text).get("mcpServers")
+    except (ValueError, AttributeError):
+        # Not JSON (or not an object): reported as content, so a test that
+        # corrupts the file is still caught.
+        return (True, "unparseable", len(text))
+    return (True, json.dumps(servers, sort_keys=True))
 
 
 def _exists(path: Path) -> tuple:
@@ -139,6 +166,8 @@ _WATCHED: list[tuple] = [
     (kind, path, _exact) for kind, paths in _WATCH_EXACTLY.items() for path in paths
 ] + [
     (kind, path, _exists) for kind, paths in _WATCH_EXISTENCE.items() for path in paths
+] + [
+    (kind, path, _mcp_servers) for kind, paths in _WATCH_MCP_SERVERS.items() for path in paths
 ]
 
 # Keyed by path, so the same path in both dicts would have one reading silently
