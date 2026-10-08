@@ -11,6 +11,7 @@ simulator app logs, unlike the always-running OSLog adapter.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import json
 import logging
 import uuid
@@ -124,35 +125,75 @@ class SimulatorLogAdapter(BaseSourceAdapter):
     async def stop(self) -> None:
         """Terminate the simctl log stream subprocess and clean up."""
         self._running = False
+        # Both held from the start, before any await: an overlapping stop()
+        # clears the attributes while this one waits (re-reading them raised
+        # AttributeError), and a reconfigure can start a new run meanwhile,
+        # whose handles this stop must not touch.
+        process = self._process
+        task = self._read_task
 
-        if self._process and self._process.returncode is None:
-            self._process.terminate()
+        if process and process.returncode is None:
+            process.terminate()
             try:
-                await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                await asyncio.wait_for(process.wait(), timeout=5.0)
             except TimeoutError:
-                self._process.kill()
+                process.kill()
 
-        if self._read_task and not self._read_task.done():
-            self._read_task.cancel()
+        if task and not task.done():
+            # Terminating the stream closes its stdout, so the read loop reaches
+            # EOF on its own after parsing what was already written -- an entry
+            # logged just before stop is kept, not cancelled away. Bounded, so
+            # a stream that does not close cannot hold up the stop.
             try:
-                await self._read_task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(asyncio.shield(task), self._DRAIN_TIMEOUT)
+            except TimeoutError:
                 pass
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
-        self._process = None
-        self._read_task = None
+        # Only if they are still this run's: clearing a newer run's handles
+        # left its subprocess with nothing able to stop it.
+        if self._process is process:
+            self._process = None
+        if self._read_task is task:
+            self._read_task = None
         logger.info("SimulatorLog adapter stopped (udid=%s)", self.udid[:8])
 
+    #: Bytes per read. Any size works; a read returns whatever is waiting.
+    _READ_SIZE = 65536
+    #: How long stop() lets the read loop finish what the stream already wrote.
+    _DRAIN_TIMEOUT = 2.0
+
     async def _read_loop(self) -> None:
-        """Read lines from simctl log stream stdout and parse JSON objects.
+        """Read simctl log stream stdout and parse JSON objects as they close.
 
         simctl spawn's log stream outputs pretty-printed JSON in an array,
         unlike host-side `log stream` which outputs compact single-line JSON.
         We accumulate characters and track brace depth (outside JSON strings)
         to detect complete objects. Handles `},{` separators correctly.
+
+        Read in chunks, not lines. Each object's closing `}` is written with
+        no newline after it -- the `,` and newline come with the *next* entry
+        -- so a line reader held the newest entry until another one arrived,
+        and for good when the app went quiet (measured on iOS 26.5: every
+        write ends in `\n}`). An entry is emitted at its `}`, whatever follows.
+
+        The loop ends at EOF rather than when `stop()` clears `_running`, so
+        whatever the stream wrote before it was terminated is still parsed.
         """
         assert self._process is not None
         assert self._process.stdout is not None
+        # Bound once: after a cancelled stop and a restart, re-reading the
+        # attribute would hand this loop the new process's output.
+        process = self._process
+        stdout = process.stdout
+
+        # A UTF-8 character can be split across two reads.
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
         # Character-level accumulator for pretty-printed JSON
         obj_chars: list[str] = []
@@ -161,13 +202,12 @@ class SimulatorLogAdapter(BaseSourceAdapter):
         escape_next = False
 
         try:
-            async for raw_line in self._process.stdout:
-                if not self._running:
+            while True:
+                chunk = await stdout.read(self._READ_SIZE)
+                if not chunk:
                     break
 
-                line = raw_line.decode("utf-8", errors="replace").rstrip()
-
-                for ch in line:
+                for ch in decoder.decode(chunk):
                     if escape_next:
                         escape_next = False
                         if brace_depth > 0:
@@ -211,18 +251,43 @@ class SimulatorLogAdapter(BaseSourceAdapter):
                         obj_chars.append(ch)
                     # else: outside object, skip (array brackets, commas, preamble)
 
-                # Add newline to preserve multi-line structure for JSON parsing
-                if brace_depth > 0:
-                    obj_chars.append("\n")
-
+            if self._running:
+                # The output ended while nobody asked it to: simctl exited --
+                # a simulator that is not booted, a bad predicate. Say why,
+                # rather than reading as a clean stop.
+                self._error = await self._exit_reason(process)
         except asyncio.CancelledError:
             raise
         except Exception as e:
             if self._running:
                 self._error = f"Read loop error: {e}"
-                logger.exception("SimulatorLog read loop failed")
+            # Logged during stop's drain too, which is a processing phase now:
+            # an entry that fails there would otherwise vanish without a trace.
+            logger.exception("SimulatorLog read loop failed")
         finally:
             self._running = False
+
+    @staticmethod
+    async def _exit_reason(process: asyncio.subprocess.Process) -> str:
+        """What simctl said as it ended its output on its own."""
+        code = None
+        try:
+            code = await asyncio.wait_for(process.wait(), 5)
+        except TimeoutError:
+            pass
+        tail = ""
+        if process.stderr is not None:
+            try:
+                raw = await asyncio.wait_for(process.stderr.read(), 2)
+                # The start says what went wrong ("device is not booted");
+                # the end is an underlying-error dump. One line, the start.
+                lines = raw.decode("utf-8", errors="replace").splitlines()
+                tail = " / ".join(ln.strip() for ln in lines if ln.strip())[:300]
+            except (TimeoutError, OSError):
+                pass
+        status = (f"exited ({code})" if code is not None
+                  else "closed its output but has not exited")
+        return f"simctl log stream {status}" + (f": {tail}" if tail else "")
 
     def _parse_json_line(self, line: str) -> LogEntry | None:
         """Parse a JSON object from simctl log stream output.
