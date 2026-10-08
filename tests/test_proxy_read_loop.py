@@ -357,6 +357,23 @@ class TestTheReviewFindings:
                 await a.stop()
             assert await _quiet_fds() == before, "each start/stop cycle leaked a descriptor"
 
+    async def test_the_read_loop_is_bound_to_its_run_when_created(self, tmp_path):
+        """create_task can defer the loop's first step; binding the process
+        and stream there let a start in between hand this run's loop the next
+        run's stream."""
+        a = ProxyAdapter(listen_port=1)
+        with (
+            patch.object(a, "_find_mitmdump", return_value=_fake(tmp_path, FAKE_MITMDUMP)),
+            patch.object(a, "_kill_stale_mitmdump"),
+        ):
+            await a.start()
+            try:
+                bound = a._read_task.get_coro().cr_frame.f_locals
+                assert bound["process"] is a._process
+                assert bound["stream"] is (a._events or a._process.stdout)
+            finally:
+                await a.stop()
+
     async def test_a_failed_pipe_setup_closes_only_what_it_owns(self, tmp_path):
         # The events pipe's protocol only: asyncio's own subprocess plumbing
         # calls connect_read_pipe too, so failing that would fail the spawn.

@@ -577,7 +577,17 @@ async def set_filter(request: Request, filter_req: FilterRequest) -> dict:
                 async with _logging_lock(request, udid):
                     if registry.get(udid) is not adapter or not adapter.is_running:
                         continue
-                    await adapter.reconfigure(process_filter=config.process)
+                    try:
+                        await adapter.reconfigure(process_filter=config.process)
+                    except Exception as e:
+                        # A start can raise before its own handling (building
+                        # the physical-device command, say); that is this
+                        # capture's failure, not the whole request's.
+                        restart_errors.append({
+                            "adapter_id": adapter.adapter_id,
+                            "error": adapter._error or f"restart raised {type(e).__name__}: {e}",
+                        })
+                        continue
                 if adapter.is_running:
                     adapter_restarted = True
                 else:

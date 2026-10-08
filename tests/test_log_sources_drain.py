@@ -371,3 +371,29 @@ async def test_a_proxy_stop_overlapping_a_start_leaves_the_new_run_alone():
 
     assert adapter._process is new
     assert adapter._mock_rules == [rule]
+
+
+
+@pytest.mark.asyncio
+async def test_an_old_proxy_loop_finishing_after_a_restart_leaves_the_new_run_alone():
+    """start_proxy and stop_proxy share no lock. A loop still draining when a
+    new run starts must not mark it stopped, drop its in-flight flows, or end
+    it."""
+    from server.sources import proxy as proxy_mod
+    from server.sources.proxy import ProxyAdapter
+
+    old = _process()
+    adapter = ProxyAdapter()
+    adapter.flow_store = MagicMock()
+    adapter._process = old
+    adapter._running = True
+    with patch.object(proxy_mod, "update_state"):
+        task = asyncio.create_task(adapter._read_loop(old, old.stdout))
+        await asyncio.sleep(0)
+        adapter._process = _process()        # the new run, as start() leaves it
+        old.terminate()                      # the old stream ends
+        await asyncio.wait_for(task, timeout=10)
+
+    assert adapter.is_running
+    assert adapter._error is None
+    adapter.flow_store.drop_pending.assert_not_called()

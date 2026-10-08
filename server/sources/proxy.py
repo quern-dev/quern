@@ -442,7 +442,12 @@ class ProxyAdapter(BaseSourceAdapter):
                 "action": "set_trusted_simulators",
                 "udids": self._trusted_simulators,
             })
-        self._read_task = asyncio.create_task(self._read_loop())
+        # Bound here, not when the task first runs: a start replacing
+        # `_process` and `_events` before then would have this run's loop read
+        # the next run's stream.
+        process = self._process
+        stream = self._events if self._events is not None else process.stdout
+        self._read_task = asyncio.create_task(self._read_loop(process, stream))
         self._stderr_task = asyncio.create_task(self._drain_stderr())
         self._stdout_task = asyncio.create_task(self._drain_stdout())
         logger.info(
@@ -805,15 +810,16 @@ class ProxyAdapter(BaseSourceAdapter):
                 return
             yield raw_line
 
-    async def _event_lines(self) -> AsyncIterator[bytes]:
+    async def _event_lines(self, stream=None) -> AsyncIterator[bytes]:
         """Raw lines from the addon: its events pipe, or stdout without one.
 
         A line past EVENT_LINE_LIMIT is skipped, not fatal. StreamReader raises
         for it and discards what it buffered, and an `async for` would have
         ended there -- the same death as a bad line, by another road.
         """
-        assert self._process is not None
-        stream = self._events if self._events is not None else self._process.stdout
+        if stream is None:
+            assert self._process is not None
+            stream = self._events if self._events is not None else self._process.stdout
         assert stream is not None
         async for raw_line in self._lines(
             stream,
@@ -849,7 +855,7 @@ class ProxyAdapter(BaseSourceAdapter):
         elif msg_type == "error":
             logger.warning("Addon error: %s", data)
 
-    async def _read_loop(self) -> None:
+    async def _read_loop(self, process=None, stream=None) -> None:
         """Read the addon's events and dispatch them, one line at a time.
 
         Nothing a single line holds may end this loop. It did, twice in one
@@ -859,10 +865,13 @@ class ProxyAdapter(BaseSourceAdapter):
         stalled, and every request failed until someone restarted the proxy.
         A bad line now costs that line, and a handler's bug costs its event.
         """
-        assert self._process is not None
-        process = self._process
+        # start() passes this run's process and stream; a direct call reads the
+        # adapter's current ones.
+        if process is None:
+            assert self._process is not None
+            process = self._process
         try:
-            async for raw_line in self._event_lines():
+            async for raw_line in self._event_lines(stream):
                 line = raw_line.decode("utf-8", errors="replace").rstrip()
                 if not line:
                     continue
@@ -885,18 +894,23 @@ class ProxyAdapter(BaseSourceAdapter):
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            if self._running:
+            if self._running and self._process is process:
                 self._error = f"Read loop error: {e}"
             # Logged during stop's drain too, which processes what the stream
             # had already written; a failure there would otherwise leave no trace.
             logger.exception("Proxy read loop failed")
         finally:
-            unexpected = self._running
-            self._running = False
-            # Nothing mitmdump was carrying will finish now. Left in place,
-            # they would read as in flight forever.
-            if dropped := self.flow_store.drop_pending():
-                logger.info("Proxy stopped with %d request(s) in flight", dropped)
+            # Only this run's: start_proxy and stop_proxy share no lock, so a
+            # loop still draining can outlive its run. It must not mark the new
+            # run stopped, drop the new run's in-flight flows, or end it.
+            mine = self._process is process
+            unexpected = self._running and mine
+            if mine:
+                self._running = False
+                # Nothing mitmdump was carrying will finish now. Left in place,
+                # they would read as in flight forever.
+                if dropped := self.flow_store.drop_pending():
+                    logger.info("Proxy stopped with %d request(s) in flight", dropped)
             if unexpected:
                 await self._end_unexpected_run(process)
 

@@ -540,6 +540,9 @@ class _Capture:
         self._restarts = restarts
 
     async def reconfigure(self, process_filter=None):
+        if self._restarts is None:
+            self.is_running = False
+            raise RuntimeError("could not build the command")
         if not self._restarts:
             self.is_running = False
             self._error = "simctl log stream exited (149): device is not booted."
@@ -576,3 +579,14 @@ async def test_a_filter_whose_capture_restarts_is_applied(app):
     body = resp.json()
     assert body["status"] == "applied" and body["adapter_restarted"] is True
     assert body["restart_errors"] == []
+
+
+
+async def test_a_restart_that_raises_is_reported_not_a_500(app):
+    """A start can raise before its own handling; that is this capture's
+    failure, reported with the rest, not the whole request failing."""
+    resp = await _filter(app, _Capture(restarts=None))
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "applied_capture_failed"
+    assert "could not build the command" in body["restart_errors"][0]["error"]
