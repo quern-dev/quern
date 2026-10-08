@@ -339,6 +339,22 @@ async def test_other_screen_changing_actions_count_as_a_change(action):
     assert SIM in ctrl._last_ui_change
 
 
+async def test_a_web_element_tap_waits_for_the_screen_too():
+    """Web content has its own path, and a transition swallows a tap there as
+    surely as on native."""
+    link = UIElement(type="Link", label="Sign in", extra_attrs={"source": "web-inspector"},
+                     frame={"x": 16, "y": 503, "width": 370, "height": 39})
+    ctrl, backend = _controller(target=link)
+    ctrl._web_element_still_there = AsyncMock(return_value=True)
+    ctrl._last_ui_change[SIM] = time.monotonic()
+    result = await _tap(ctrl, label="Sign in", skip=False)
+
+    assert result["status"] == "ok" and result["tapped"]["source"] == "web-inspector"
+    ctrl.wait_for_settle.assert_awaited_once()
+    assert "waited_for_settle_ms" in result
+    backend.tap.assert_awaited_once()
+
+
 def test_an_action_that_changes_the_screen_is_noted():
     ctrl = DeviceController()
     before = time.monotonic()
