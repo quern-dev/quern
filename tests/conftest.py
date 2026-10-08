@@ -127,17 +127,20 @@ def _exact(path: Path) -> tuple:
 
 def _mcp_servers(path: Path) -> tuple:
     try:
-        text = path.read_text()
+        raw = path.read_bytes()
     except FileNotFoundError:
         return (False, None)
     except OSError:
         return _UNREADABLE
     try:
-        servers = json.loads(text).get("mcpServers")
-    except (ValueError, AttributeError):
-        # Not JSON (or not an object): reported as content, so a test that
-        # corrupts the file is still caught.
-        return (True, "unparseable", len(text))
+        # Bytes, not text: a file that is not UTF-8 raised UnicodeDecodeError
+        # from read_text, outside any handler -- every later test errored at
+        # setup and the one that did it was never named.
+        servers = json.loads(raw).get("mcpServers")
+    except (ValueError, AttributeError, RecursionError):
+        # Not JSON, not UTF-8, or not an object: reported as content, so a test
+        # that corrupts the file is still caught -- as "modified", not "deleted".
+        return (True, "unparseable", len(raw))
     return (True, json.dumps(servers, sort_keys=True))
 
 
@@ -170,8 +173,8 @@ _WATCHED: list[tuple] = [
     (kind, path, _mcp_servers) for kind, paths in _WATCH_MCP_SERVERS.items() for path in paths
 ]
 
-# Keyed by path, so the same path in both dicts would have one reading silently
-# overwrite the other -- and comparing a 1-tuple against a 3-tuple is never
+# Keyed by path, so the same path in two dicts would have one reading silently
+# overwrite the other -- and comparing readings of different shapes is never
 # equal, turning the whole suite red with a message that misdirects.
 _seen = [path for _, path, _ in _WATCHED]
 assert len(_seen) == len(set(_seen)), (
@@ -196,6 +199,9 @@ def _the_real_machine_is_not_a_fixture():
       fixing only the named one can still leave others broken.
     * Damage that is not a file. `run_uninstall` signals the PID from state, and
       the integration tests kill a real server; nothing here sees a process.
+    * Anything outside `mcpServers` in Claude Desktop's config, and a rewrite
+      of the file that leaves that section's meaning unchanged -- the price of
+      not failing on the app's own saves.
     """
     before = {path: read(path) for _, path, read in _WATCHED}
     yield

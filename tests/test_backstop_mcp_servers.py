@@ -12,7 +12,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tests.conftest import _WATCH_EXACTLY, _WATCH_MCP_SERVERS, _describe, _mcp_servers
+from tests.conftest import (
+    _UNREADABLE,
+    _WATCH_EXACTLY,
+    _WATCH_MCP_SERVERS,
+    _WATCHED,
+    _describe,
+    _mcp_servers,
+)
 
 DESKTOP = (Path.home() / "Library" / "Application Support" / "Claude"
            / "claude_desktop_config.json")
@@ -69,3 +76,27 @@ def test_the_desktop_config_is_watched_this_way_and_no_other():
     exact = [p for paths in _WATCH_EXACTLY.values() for p in paths]
     assert DESKTOP not in exact
     assert DESKTOP in [p for paths in _WATCH_MCP_SERVERS.values() for p in paths]
+    # And wired: the fixture iterates _WATCHED, not the dicts, so a path the
+    # dict lists but nothing reads -- or reads by mtime -- passed the above.
+    assert {path: read for _, path, read in _WATCHED}[DESKTOP] is _mcp_servers
+
+
+def test_corruption_reads_as_a_change_not_a_crash(tmp_path):
+    """Not UTF-8, not an object, or unreadable: each a distinct reading, none
+    an exception. An exception here errored every later test, naming none."""
+    path = _config(tmp_path / "c.json", {}, {})
+    intact = _mcp_servers(path)
+    for damage in (b"\xff\xfe\x00 not utf-8", b"[]", b"null"):
+        path.write_bytes(damage)
+        reading = _mcp_servers(path)
+        assert reading != intact, damage
+        assert _describe(intact, reading) == "modified", damage
+
+
+def test_an_unreadable_file_reads_as_unreadable(tmp_path):
+    """Not "deleted": the file is there, it could not be read. (A directory,
+    because patching Path.read_bytes would blind the backstop's own read of the
+    real file too.)"""
+    unreadable = tmp_path / "c.json"
+    unreadable.mkdir()
+    assert _mcp_servers(unreadable) == _UNREADABLE
