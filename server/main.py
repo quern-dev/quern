@@ -22,10 +22,11 @@ import os
 import signal
 import sys
 import time
-from collections.abc import AsyncGenerator, Iterator
+from collections.abc import AsyncGenerator, Iterable, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Protocol
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -192,7 +193,13 @@ async def _refresh_mcp_clients_periodically() -> None:
         await asyncio.sleep(MCP_CLIENTS_INTERVAL)
 
 
-async def _stop_all(sources) -> None:
+class _Stoppable(Protocol):
+    """A log source or plist watcher: anything shutdown stops."""
+
+    async def stop(self) -> None: ...
+
+
+async def _stop_all(sources: Iterable[_Stoppable]) -> None:
     """Stop every source at once, and every one even if another raises.
 
     Each source may spend up to its drain bound finishing what its stream had
