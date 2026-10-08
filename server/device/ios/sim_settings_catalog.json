@@ -61,6 +61,13 @@
           "by": "an app team using quern",
           "storage_only": true,
           "method": "Two simulators switched off through Settings hold the same file, key and value; a direct write was not tried."
+        },
+        {
+          "runtime": "iOS 18.6",
+          "date": "2026-10-07",
+          "by": "quern",
+          "storage_only": true,
+          "method": "set_simulator_setting with a reboot (iPhone 16 Pro simulator): Settings > General > AutoFill & Passwords showed AutoFill Passwords and Passkeys on and off as written, and turning it off in Settings changed only this key (snapshot diff; the effective copies are recomputed from it at boot). No effect was established: the edit menu's AutoFill > Passwords item shows either way, and Safari's save-password prompt appeared once in six sign-ins to a local page and could not tell on from off."
         }
       ],
       "does_not_work": [
@@ -328,6 +335,12 @@
           "date": "2026-10-07",
           "by": "quern",
           "method": "set_simulator_setting while shut down, then booted: Settings > General > Keyboard showed Predictive Text on and off as written. Its effect is on the software keyboard's suggestion bar, which was not inspected."
+        },
+        {
+          "runtime": "iOS 18.6",
+          "date": "2026-10-07",
+          "by": "quern",
+          "method": "set_simulator_setting while shut down, then booted (iPhone 16 Pro simulator): Settings > General > Keyboard showed Predictive Text on and off as written, and with the software keyboard up in QuernProbe's field_natural the suggestion bar showed with it on and was gone with it off."
         }
       ]
     },
@@ -371,6 +384,12 @@
           "date": "2026-10-07",
           "by": "quern",
           "method": "set_simulator_setting while shut down, then booted: Settings > General > Keyboard showed Check Spelling off as written. The on state was not read back on screen, and its effect (underlining) was not inspected."
+        },
+        {
+          "runtime": "iOS 18.6",
+          "date": "2026-10-07",
+          "by": "quern",
+          "method": "set_simulator_setting while shut down, then booted (iPhone 16 Pro simulator): Settings > General > Keyboard showed Check Spelling on and off as written, and \"teh qzxv wrod\" typed into QuernProbe's field_natural (auto-correction off) was underlined with it on and not with it off."
         }
       ]
     }
