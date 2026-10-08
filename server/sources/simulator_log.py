@@ -17,7 +17,7 @@ import logging
 import uuid
 
 from server.models import LogEntry, LogLevel, LogSource
-from server.sources import BaseSourceAdapter, EntryCallback
+from server.sources import BaseSourceAdapter, EntryCallback, describe_exit
 from server.sources.oslog import (
     OSLOG_LEVEL_MAP,
     extract_process_name,
@@ -27,6 +27,10 @@ from server.sources.oslog import (
 logger = logging.getLogger(__name__)
 
 _UNCHANGED = object()  # Sentinel for reconfigure() defaults
+
+#: How long start() waits to see whether simctl exits at once -- as it does for
+#: a simulator that is not booted, or a predicate it rejects.
+STARTUP_GRACE_S = 0.5
 
 
 class SimulatorLogAdapter(BaseSourceAdapter):
@@ -53,6 +57,9 @@ class SimulatorLogAdapter(BaseSourceAdapter):
         self.level = level
         self._process: asyncio.subprocess.Process | None = None
         self._read_task: asyncio.Task | None = None
+        #: The stream exited during start's grace period: simctl turned the
+        #: request down (a simulator not booted, a bad predicate).
+        self.exited_at_start = False
 
     def _build_command(self) -> list[str]:
         """Build the simctl log stream command with filters."""
@@ -95,6 +102,8 @@ class SimulatorLogAdapter(BaseSourceAdapter):
 
     async def start(self) -> None:
         """Spawn simctl log stream and begin reading JSON output."""
+        # Reset per start: reconfigure() restarts the same object.
+        self.exited_at_start = False
         cmd = self._build_command()
 
         try:
@@ -109,6 +118,20 @@ class SimulatorLogAdapter(BaseSourceAdapter):
             return
         except Exception as e:
             self._error = f"Failed to start simctl log stream: {e}"
+            logger.error(self._error)
+            return
+
+        # simctl exits at once for a simulator that is not booted, and the
+        # start reported success while the stream was already dead: the error
+        # surfaced only later, on the adapter's status. Give it a moment and
+        # ask, so the start says what actually happened (as logcat does).
+        try:
+            await asyncio.wait_for(self._process.wait(), timeout=STARTUP_GRACE_S)
+        except TimeoutError:
+            pass  # still running, which is the point
+        else:
+            self.exited_at_start = True
+            self._error = await describe_exit(self._process, "simctl log stream")
             logger.error(self._error)
             return
 
@@ -251,43 +274,24 @@ class SimulatorLogAdapter(BaseSourceAdapter):
                         obj_chars.append(ch)
                     # else: outside object, skip (array brackets, commas, preamble)
 
-            if self._running:
+            if self._running and self._process is process:
                 # The output ended while nobody asked it to: simctl exited --
                 # a simulator that is not booted, a bad predicate. Say why,
                 # rather than reading as a clean stop.
-                self._error = await self._exit_reason(process)
+                self._error = await describe_exit(process, "simctl log stream")
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            if self._running:
+            if self._running and self._process is process:
                 self._error = f"Read loop error: {e}"
             # Logged during stop's drain too, which is a processing phase now:
             # an entry that fails there would otherwise vanish without a trace.
             logger.exception("SimulatorLog read loop failed")
         finally:
-            self._running = False
-
-    @staticmethod
-    async def _exit_reason(process: asyncio.subprocess.Process) -> str:
-        """What simctl said as it ended its output on its own."""
-        code = None
-        try:
-            code = await asyncio.wait_for(process.wait(), 5)
-        except TimeoutError:
-            pass
-        tail = ""
-        if process.stderr is not None:
-            try:
-                raw = await asyncio.wait_for(process.stderr.read(), 2)
-                # The start says what went wrong ("device is not booted");
-                # the end is an underlying-error dump. One line, the start.
-                lines = raw.decode("utf-8", errors="replace").splitlines()
-                tail = " / ".join(ln.strip() for ln in lines if ln.strip())[:300]
-            except (TimeoutError, OSError):
-                pass
-        status = (f"exited ({code})" if code is not None
-                  else "closed its output but has not exited")
-        return f"simctl log stream {status}" + (f": {tail}" if tail else "")
+            # Only this run's: a loop still finishing after a restart must not
+            # mark the new run stopped or give it this one's error.
+            if self._process is process:
+                self._running = False
 
     def _parse_json_line(self, line: str) -> LogEntry | None:
         """Parse a JSON object from simctl log stream output.

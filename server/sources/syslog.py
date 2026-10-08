@@ -20,7 +20,7 @@ import re
 import uuid
 
 from server.models import LogEntry, LogLevel, LogSource
-from server.sources import BaseSourceAdapter, EntryCallback
+from server.sources import BaseSourceAdapter, EntryCallback, describe_exit
 
 logger = logging.getLogger(__name__)
 
@@ -111,35 +111,36 @@ class SyslogAdapter(BaseSourceAdapter):
     async def stop(self) -> None:
         """Terminate the idevicesyslog subprocess and clean up."""
         self._running = False
+        # Held before any await: an overlapping stop, or a restart meanwhile,
+        # must neither re-read these after another stop cleared them nor have
+        # this stop clear a newer run's.
+        process, task = self._process, self._read_task
 
-        if self._process and self._process.returncode is None:
-            self._process.terminate()
+        if process and process.returncode is None:
+            process.terminate()
             try:
-                await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                await asyncio.wait_for(process.wait(), timeout=5.0)
             except TimeoutError:
-                self._process.kill()
+                process.kill()
 
-        if self._read_task and not self._read_task.done():
-            self._read_task.cancel()
-            try:
-                await self._read_task
-            except asyncio.CancelledError:
-                pass
+        # The loop runs to EOF, which terminating produces, so lines written
+        # before the stop are kept rather than cancelled away.
+        await self._drain(task)
 
-        self._process = None
-        self._read_task = None
+        if self._process is process:
+            self._process = None
+        if self._read_task is task:
+            self._read_task = None
         logger.info("idevicesyslog adapter stopped")
 
     async def _read_loop(self) -> None:
         """Read lines from idevicesyslog stdout and parse them."""
         assert self._process is not None
         assert self._process.stdout is not None
+        process = self._process
 
         try:
-            async for raw_line in self._process.stdout:
-                if not self._running:
-                    break
-
+            async for raw_line in process.stdout:
                 line = raw_line.decode("utf-8", errors="replace").rstrip()
                 if not line:
                     continue
@@ -147,14 +148,24 @@ class SyslogAdapter(BaseSourceAdapter):
                 entry = self._parse_line(line)
                 if entry is not None:
                     await self.emit(entry)
+            # The stream ended without anyone stopping it. Say why, rather
+            # than reading as a clean stop.
+            if self._running and self._process is process:
+                self._error = await describe_exit(process, "idevicesyslog")
+                logger.error(self._error)
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            if self._running:
+            if self._running and self._process is process:
                 self._error = f"Read loop error: {e}"
-                logger.exception("idevicesyslog read loop failed")
+            # Logged during stop's drain too, which processes what the stream
+            # had already written; a failure there would otherwise leave no trace.
+            logger.exception("idevicesyslog read loop failed")
         finally:
-            self._running = False
+            # Only this run's: a loop still finishing after a restart must not
+            # mark the new run stopped or give it this one's error.
+            if self._process is process:
+                self._running = False
 
     def _parse_line(self, line: str) -> LogEntry | None:
         """Parse a single idevicesyslog output line into a LogEntry."""

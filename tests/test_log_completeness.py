@@ -488,3 +488,105 @@ async def test_a_start_during_a_stop_leaves_the_new_capture_registered(app, monk
     assert registered is not None and registered.is_running, (
         "the new capture is running but no longer registered, so it cannot be stopped"
     )
+
+
+async def _start_with(app, monkeypatch, start):
+    from types import SimpleNamespace
+
+    from server.sources.simulator_log import SimulatorLogAdapter
+
+    async def _resolve(udid):
+        return udid
+
+    app.state.device_controller = SimpleNamespace(resolve_udid=_resolve)
+    app.state.deduplicator = SimpleNamespace(process=lambda entry: None)
+    monkeypatch.setattr(SimulatorLogAdapter, "start", start)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        return await client.post(
+            "/api/v1/device/logging/start", headers=HEADERS, json={"udid": "SIM-A"},
+        )
+
+
+async def test_a_stream_that_dies_at_start_is_a_409_with_its_reason(app, monkeypatch):
+    """A simulator that is not booted: simctl exits at once. That answered
+    "started", and the error surfaced only later on the adapter's status."""
+    async def _dies(self):
+        self.exited_at_start = True
+        self._error = ("simctl log stream exited (149): Process spawn via launchd "
+                       "failed because device is not booted.")
+
+    resp = await _start_with(app, monkeypatch, _dies)
+    assert resp.status_code == 409, resp.text
+    assert "not booted" in resp.json()["detail"]
+    assert "SIM-A" not in app.state.sim_log_adapters, "registered a dead capture"
+
+
+async def test_failing_to_spawn_stays_a_500(app, monkeypatch):
+    async def _cannot_spawn(self):
+        self._error = "xcrun not found. Install Xcode Command Line Tools."
+
+    resp = await _start_with(app, monkeypatch, _cannot_spawn)
+    assert resp.status_code == 500, resp.text
+
+
+class _Capture:
+    """A running capture whose restart does what the test says."""
+
+    def __init__(self, restarts: bool):
+        self.adapter_id = "simlog-SIM-A"
+        self.is_running = True
+        self._error = None
+        self._restarts = restarts
+
+    async def reconfigure(self, process_filter=None):
+        if self._restarts is None:
+            self.is_running = False
+            raise RuntimeError("could not build the command")
+        if not self._restarts:
+            self.is_running = False
+            self._error = "simctl log stream exited (149): device is not booted."
+
+
+async def _filter(app, capture):
+    from server.processing.ingestion_filter import IngestionFilter
+
+    app.state.ingestion_filter = IngestionFilter()
+    app.state.sim_log_adapters["SIM-A"] = capture
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        return await client.post(
+            "/api/v1/logs/filter", headers=HEADERS, json={"process": "App", "source": "simulator"},
+        )
+
+
+async def test_a_filter_whose_capture_fails_to_restart_says_so(app):
+    """The restart can now fail visibly -- the simulator shut down since. It
+    answered "applied" and adapter_restarted: true over a dead capture."""
+    resp = await _filter(app, _Capture(restarts=False))
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "applied_capture_failed"
+    assert body["adapter_restarted"] is False
+    assert body["restart_errors"] == [{
+        "adapter_id": "simlog-SIM-A",
+        "error": "simctl log stream exited (149): device is not booted.",
+    }]
+
+
+async def test_a_filter_whose_capture_restarts_is_applied(app):
+    resp = await _filter(app, _Capture(restarts=True))
+    body = resp.json()
+    assert body["status"] == "applied" and body["adapter_restarted"] is True
+    assert body["restart_errors"] == []
+
+
+
+async def test_a_restart_that_raises_is_reported_not_a_500(app):
+    """A start can raise before its own handling; that is this capture's
+    failure, reported with the rest, not the whole request failing."""
+    resp = await _filter(app, _Capture(restarts=None))
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "applied_capture_failed"
+    assert "could not build the command" in body["restart_errors"][0]["error"]

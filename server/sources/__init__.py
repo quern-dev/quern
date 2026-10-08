@@ -11,6 +11,7 @@ Each adapter is responsible for:
 from __future__ import annotations
 
 import abc
+import asyncio
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from typing import Any
@@ -58,6 +59,36 @@ class BaseSourceAdapter(abc.ABC):
         """
         ...
 
+    #: How long stop() lets a read loop finish what its stream already wrote.
+    DRAIN_TIMEOUT = 2.0
+
+    async def _drain(self, *tasks: asyncio.Task | None) -> None:
+        """Let read tasks finish what their streams already wrote, then stop them.
+
+        Terminating a subprocess closes its pipes, so a read loop that runs to
+        EOF -- rather than breaking as soon as `_running` is cleared -- parses
+        the lines written before the stop instead of dropping them. Bounded,
+        so a stream that does not close cannot hold up the stop; whatever is
+        still running after that is cancelled.
+        """
+        pending = [t for t in tasks if t is not None and not t.done()]
+        if not pending:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(asyncio.gather(*pending, return_exceptions=True)),
+                self.DRAIN_TIMEOUT,
+            )
+        except TimeoutError:
+            pass
+        for task in pending:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
     @property
     def is_running(self) -> bool:
         return self._running
@@ -91,3 +122,27 @@ class BaseSourceAdapter(abc.ABC):
     @staticmethod
     def _now() -> datetime:
         return datetime.now(UTC)
+
+
+async def describe_exit(process: asyncio.subprocess.Process, name: str) -> str:
+    """What a log subprocess said as it ended its output on its own.
+
+    For a read loop whose stream ended while nobody stopped it: reported as an
+    error with the tool's own reason, rather than reading as a clean stop.
+    """
+    code = None
+    try:
+        code = await asyncio.wait_for(process.wait(), 5)
+    except TimeoutError:
+        pass
+    detail = ""
+    if process.stderr is not None:
+        try:
+            raw = await asyncio.wait_for(process.stderr.read(), 2)
+            lines = raw.decode("utf-8", errors="replace").splitlines()
+            detail = " / ".join(ln.strip() for ln in lines if ln.strip())[:300]
+        except (TimeoutError, OSError):
+            pass
+    status = (f"exited ({code})" if code is not None
+              else "closed its output but has not exited")
+    return f"{name} {status}" + (f": {detail}" if detail else "")

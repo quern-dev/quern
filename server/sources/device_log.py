@@ -284,37 +284,35 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
     async def stop(self) -> None:
         """Terminate the pymobiledevice3 subprocess and clean up."""
         self._running = False
+        # Held before any await, for the reasons given in SimulatorLogAdapter.
+        process, read_task, stderr_task = self._process, self._read_task, self._stderr_task
 
-        if self._process and self._process.returncode is None:
-            self._process.terminate()
+        if process and process.returncode is None:
+            process.terminate()
             try:
-                await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                await asyncio.wait_for(process.wait(), timeout=5.0)
             except TimeoutError:
-                self._process.kill()
+                process.kill()
 
-        for task in (self._read_task, self._stderr_task):
-            if task and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+        # Both loops run to EOF, so what was written before the stop is kept.
+        await self._drain(read_task, stderr_task)
 
-        self._process = None
-        self._read_task = None
-        self._stderr_task = None
+        if self._process is process:
+            self._process = None
+        if self._read_task is read_task:
+            self._read_task = None
+        if self._stderr_task is stderr_task:
+            self._stderr_task = None
         logger.info("PhysicalDeviceLog adapter stopped (udid=%s)", self.udid[:8])
 
     async def _read_loop(self) -> None:
         """Read lines from pymobiledevice3 stdout and parse them."""
         assert self._process is not None
         assert self._process.stdout is not None
+        process = self._process
 
         try:
-            async for raw_line in self._process.stdout:
-                if not self._running:
-                    break
-
+            async for raw_line in process.stdout:
                 line = raw_line.decode("utf-8", errors="replace").rstrip()
                 if not line:
                     continue
@@ -326,7 +324,7 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
                 entry = self._parse_line(line)
                 if entry is not None:
                     await self.emit(entry)
-            if self._running:
+            if self._running and self._process is process:
                 # The output ended while nobody asked it to: pymobiledevice3
                 # exited. Say why -- a downgraded one rejects `--format` at
                 # once, and the capture would otherwise just stop (review).
@@ -334,11 +332,16 @@ class PhysicalDeviceLogAdapter(BaseSourceAdapter):
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            if self._running:
+            if self._running and self._process is process:
                 self._error = f"Read loop error: {e}"
-                logger.exception("PhysicalDeviceLog read loop failed")
+            # Logged during stop's drain too, which processes what the stream
+            # had already written; a failure there would otherwise leave no trace.
+            logger.exception("PhysicalDeviceLog read loop failed")
         finally:
-            self._running = False
+            # Only this run's: a loop still finishing after a restart must not
+            # mark the new run stopped or give it this one's error.
+            if self._process is process:
+                self._running = False
 
     def _parse_line(self, line: str) -> LogEntry | None:
         """Parse a single pymobiledevice3 syslog output line into a LogEntry."""

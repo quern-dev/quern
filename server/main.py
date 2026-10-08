@@ -22,10 +22,11 @@ import os
 import signal
 import sys
 import time
-from collections.abc import AsyncGenerator, Iterator
+from collections.abc import AsyncGenerator, Iterable, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Protocol
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -190,6 +191,32 @@ async def _refresh_mcp_clients_periodically() -> None:
         # own failures, so one bad pass does not end the loop.
         await asyncio.to_thread(mcp_clients.refresh)
         await asyncio.sleep(MCP_CLIENTS_INTERVAL)
+
+
+class _Stoppable(Protocol):
+    """A log source or plist watcher: anything shutdown stops."""
+
+    async def stop(self) -> None: ...
+
+
+async def _stop_all(sources: Iterable[_Stoppable]) -> None:
+    """Stop every source at once, and every one even if another raises.
+
+    Each source may spend up to its drain bound finishing what its stream had
+    written, and `quern stop` kills the server five seconds after asking.
+    Stopped one after another, a few slow sources ran past that, and the ones
+    still waiting were killed mid-cleanup; and one stop() raising skipped every
+    source after it.
+    """
+    # Once each: a capture is registered both among the sources and in its
+    # per-device registry, and was stopped twice.
+    sources = list({id(source): source for source in sources}.values())
+    results = await asyncio.gather(*(source.stop() for source in sources),
+                                   return_exceptions=True)
+    for source, result in zip(sources, results, strict=True):
+        if isinstance(result, BaseException):
+            logger.error("Stopping %s failed: %r",
+                         getattr(source, "adapter_id", type(source).__name__), result)
 
 
 @asynccontextmanager
@@ -617,14 +644,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.warning("Stopping the Android gesture servers failed", exc_info=True)
 
-    for adapter in adapters.values():
-        await adapter.stop()
-    for sim_adapter in app.state.sim_log_adapters.values():
-        await sim_adapter.stop()
-    for dev_adapter in app.state.device_log_adapters.values():
-        await dev_adapter.stop()
-    for plist_watcher in app.state.plist_watchers.values():
-        await plist_watcher.stop()
+    await _stop_all([
+        *adapters.values(),
+        *app.state.sim_log_adapters.values(),
+        *app.state.device_log_adapters.values(),
+        *app.state.plist_watchers.values(),
+    ])
     await dedup.stop()
 
     # Restore system proxy if we configured it

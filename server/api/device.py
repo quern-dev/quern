@@ -983,7 +983,12 @@ async def _start_simulator_logging(
     await adapter.start()
 
     if adapter._error:
-        raise HTTPException(status_code=500, detail=adapter._error)
+        # A stream that exited as it started -- a simulator that is not
+        # booted, a predicate simctl rejects -- is the caller's situation, not
+        # quern failing: 409 with simctl's own reason. Failing to spawn at all
+        # stays a 500.
+        status = 409 if adapter.exited_at_start else 500
+        raise HTTPException(status_code=status, detail=adapter._error)
 
     # Register in both dicts so it appears in list_log_sources
     sim_adapters[udid] = adapter

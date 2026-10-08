@@ -279,27 +279,45 @@ def _fake(tmp_path, source: str) -> str:
     return str(fake)
 
 
-def _open_fds() -> int:
-    return len(os.listdir("/dev/fd"))
+def _open_fds() -> frozenset[tuple[int, int, int]]:
+    """The process's open descriptors, each as (number, device, inode).
+
+    The inode keeps a leak that reuses a freed number from passing as the
+    descriptor that used to have it.
+    """
+    seen = set()
+    for name in os.listdir("/dev/fd"):
+        fd = int(name)
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            continue  # the listing's own descriptor, closed by now
+        seen.add((fd, st.st_dev, st.st_ino))
+    return frozenset(seen)
 
 
-async def _settled_fds(expected: int, timeout: float = 2.0) -> int:
-    """The process's open descriptors once closes already under way are done.
+async def _quiet_fds(timeout: float = 2.0) -> frozenset:
+    """The open descriptors once nothing else is closing.
 
-    The count is process-wide, so in a full suite it moves with whatever else
-    is finishing; and a transport's close completes on a later loop turn. One
-    reading straight after the call failed on a loaded CI runner, three high.
-    A real leak never closes, so it still fails, only up to `timeout` later.
+    Taken *before* the code under test, too. The set is process-wide, and
+    earlier tests leave transports and sockets for the collector: measured, one
+    closing mid-test made "before 12, after 9" -- a failure with nothing leaked,
+    and only after particular files had run. Collecting until two readings
+    agree takes those out of the picture, so what is left to compare is the
+    code under test. A transport's own close completes on a later loop turn,
+    which this waits out after the call as well.
     """
     import gc
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
+    previous = None
     while True:
         gc.collect()
-        count = _open_fds()
-        if count == expected or loop.time() >= deadline:
-            return count
+        current = _open_fds()
+        if current == previous or loop.time() >= deadline:
+            return current
+        previous = current
         await asyncio.sleep(0.05)
 
 
@@ -333,17 +351,34 @@ class TestTheReviewFindings:
         ):
             await a.start()
             await a.stop()
-            before = _open_fds()
+            before = await _quiet_fds()
             for _ in range(5):
                 await a.start()
                 await a.stop()
-            assert _open_fds() == before, "each start/stop cycle leaked a descriptor"
+            assert await _quiet_fds() == before, "each start/stop cycle leaked a descriptor"
+
+    async def test_the_read_loop_is_bound_to_its_run_when_created(self, tmp_path):
+        """create_task can defer the loop's first step; binding the process
+        and stream there let a start in between hand this run's loop the next
+        run's stream."""
+        a = ProxyAdapter(listen_port=1)
+        with (
+            patch.object(a, "_find_mitmdump", return_value=_fake(tmp_path, FAKE_MITMDUMP)),
+            patch.object(a, "_kill_stale_mitmdump"),
+        ):
+            await a.start()
+            try:
+                bound = a._read_task.get_coro().cr_frame.f_locals
+                assert bound["process"] is a._process
+                assert bound["stream"] is (a._events or a._process.stdout)
+            finally:
+                await a.stop()
 
     async def test_a_failed_pipe_setup_closes_only_what_it_owns(self, tmp_path):
         # The events pipe's protocol only: asyncio's own subprocess plumbing
         # calls connect_read_pipe too, so failing that would fail the spawn.
         a = ProxyAdapter(listen_port=1)
-        before = _open_fds()
+        before = await _quiet_fds()
         with (
             patch.object(a, "_find_mitmdump", return_value=_fake(tmp_path, FAKE_MITMDUMP)),
             patch.object(a, "_kill_stale_mitmdump"),
@@ -351,7 +386,8 @@ class TestTheReviewFindings:
         ):
             await a.start()
         assert a._process is None and "no pipe" in (a._error or "")
-        assert await _settled_fds(before) == before
+        # Both ways: nothing left open, and nothing closed that it did not own.
+        assert await _quiet_fds() == before
 
     async def test_a_drain_survives_an_over_long_line(self, caplog):
         """One line past the limit ended the stdout drain; nobody read stdout

@@ -185,35 +185,36 @@ class LogcatAdapter(BaseSourceAdapter):
     async def stop(self) -> None:
         """Terminate the adb logcat subprocess and clean up."""
         self._running = False
+        # Held before any await: an overlapping stop, or a restart meanwhile,
+        # must neither re-read these after another stop cleared them nor have
+        # this stop clear a newer run's.
+        process, task = self._process, self._read_task
 
-        if self._process and self._process.returncode is None:
-            self._process.terminate()
+        if process and process.returncode is None:
+            process.terminate()
             try:
-                await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                await asyncio.wait_for(process.wait(), timeout=5.0)
             except TimeoutError:
-                self._process.kill()
+                process.kill()
 
-        if self._read_task and not self._read_task.done():
-            self._read_task.cancel()
-            try:
-                await self._read_task
-            except asyncio.CancelledError:
-                pass
+        # The loop runs to EOF, which terminating produces, so lines written
+        # before the stop are kept rather than cancelled away.
+        await self._drain(task)
 
-        self._process = None
-        self._read_task = None
+        if self._process is process:
+            self._process = None
+        if self._read_task is task:
+            self._read_task = None
         logger.info("Logcat adapter stopped (serial=%s)", self.serial[:8])
 
     async def _read_loop(self) -> None:
         """Read lines from adb logcat stdout and parse them."""
         assert self._process is not None
         assert self._process.stdout is not None
+        process = self._process
 
         try:
-            async for raw_line in self._process.stdout:
-                if not self._running:
-                    break
-
+            async for raw_line in process.stdout:
                 line = raw_line.decode("utf-8", errors="replace").rstrip()
                 if not line:
                     continue
@@ -236,17 +237,22 @@ class LogcatAdapter(BaseSourceAdapter):
                         await self.emit(entry)
             # The stream ended without anyone stopping it: the device went
             # away or logcat died. That is an error to report, not "stopped".
-            if self._running:
+            if self._running and self._process is process:
                 self._error = await self._exit_reason("ended unexpectedly")
                 logger.error(self._error)
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            if self._running:
+            if self._running and self._process is process:
                 self._error = f"Read loop error: {e}"
-                logger.exception("Logcat read loop failed")
+            # Logged during stop's drain too, which processes what the stream
+            # had already written; a failure there would otherwise leave no trace.
+            logger.exception("Logcat read loop failed")
         finally:
-            self._running = False
+            # Only this run's: a loop still finishing after a restart must not
+            # mark the new run stopped or give it this one's error.
+            if self._process is process:
+                self._running = False
             # A crash whose last line never came is still a crash.
             for crash in self._crashes.flush():
                 if self._wanted_crash(crash):
