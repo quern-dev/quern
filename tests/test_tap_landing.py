@@ -84,8 +84,9 @@ def test_a_dismiss_popup_layer_can_itself_be_tapped():
 
 
 def test_frames_half_a_point_apart_are_the_same_element():
-    """The tree and the hit-test round frames differently."""
-    assert _covering_element(ROW, hit("Sound", 36.5, 53, 320.5, 28, "CheckBox")) is None
+    """The tree and the hit-test round frames differently: half a point out on
+    one side and in on the other is neither inside nor around, without slack."""
+    assert _covering_element(ROW, hit("Sound", 35.5, 53, 321, 28, "CheckBox")) is None
 
 
 def test_an_element_just_past_the_target_is_covering():
