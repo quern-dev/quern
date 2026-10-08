@@ -171,9 +171,16 @@ def _entry(name: str) -> dict:
 
 
 def verified_runtimes(entry: dict) -> tuple[list[str], list[str]]:
-    """(runtimes verified by effect, runtimes where only the storage is known)."""
-    full = [v["runtime"] for v in entry.get("verified", []) if not v.get("storage_only")]
-    storage = [v["runtime"] for v in entry.get("verified", []) if v.get("storage_only")]
+    """(runtimes verified by effect, runtimes where only the storage is known).
+
+    Each runtime once, in catalog order: two records for one runtime -- a
+    second team's check, a re-run -- read as "verified on iOS 26.5, iOS
+    26.5". A runtime verified by effect is not also listed as storage-only.
+    """
+    records = entry.get("verified", [])
+    full = list(dict.fromkeys(v["runtime"] for v in records if not v.get("storage_only")))
+    storage = list(dict.fromkeys(
+        v["runtime"] for v in records if v.get("storage_only") and v["runtime"] not in full))
     return full, storage
 
 

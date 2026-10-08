@@ -222,6 +222,24 @@ def test_a_verified_runtime_carries_no_warning(device):
     assert "warning" not in result
 
 
+def test_each_runtime_is_named_once():
+    """Two records for iOS 26.5 read "verified on iOS 26.5, iOS 26.5"; a
+    runtime verified by effect is not also storage-only."""
+    entry = {"verified": [
+        {"runtime": "iOS 26.5"}, {"runtime": "iOS 26.5"},
+        {"runtime": "iOS 18.6", "storage_only": True},
+        {"runtime": "iOS 26.5", "storage_only": True},
+        {"runtime": "iOS 18.6", "storage_only": True},
+    ]}
+    assert sim_settings.verified_runtimes(entry) == (["iOS 26.5"], ["iOS 18.6"])
+
+
+def test_a_warning_names_each_runtime_once(device):
+    _write(device / "device.plist", {"runtime": "com.apple.CoreSimulator.SimRuntime.iOS-17-5"})
+    result = asyncio.run(_set(FakeSimctl(booted=False), "password_autofill", "off"))
+    assert result["warning"].count("iOS 26.5") == 1, result["warning"]
+
+
 def test_an_unknown_setting_names_the_known_ones(device):
     with pytest.raises(DeviceError, match="auto_correction"):
         asyncio.run(_set(FakeSimctl(booted=False), "dark_mode", "on", reboot=False))
