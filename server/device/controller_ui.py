@@ -2027,6 +2027,7 @@ class DeviceControllerUI:
             if elapsed >= timeout:
                 # Fetch unfiltered elements for screen context (the polling
                 # loop uses filtered fetches that may return empty)
+                hint = None
                 try:
                     ctx_elements, _ = await self.get_ui_elements(
                         resolved, mode=mode,
@@ -2035,6 +2036,10 @@ class DeviceControllerUI:
                     screen_context.update(
                         await self._identify_for_miss(resolved, ctx_elements),
                     )
+                    # Only when the element was never found: a not_exists or a
+                    # value wait that timed out had it, so it was not missing.
+                    if last_element is None:
+                        hint = self._web_hint_for(resolved, ctx_elements)
                 except Exception:
                     screen_context = {}
                 screenshot = await _capture_screenshot(
@@ -2042,13 +2047,16 @@ class DeviceControllerUI:
                 )
                 if screenshot:
                     screen_context["screenshot"] = screenshot
-                return {
+                result = {
                     "matched": False,
                     "elapsed_seconds": round(elapsed, 2),
                     "polls": polls,
                     "last_state": last_element.model_dump() if last_element else None,
                     "screen_context": screen_context,
-                }, resolved
+                }
+                if hint:
+                    result["web_content_hint"] = hint
+                return result, resolved
 
             # Sleep before next poll
             await asyncio.sleep(interval)
@@ -3574,8 +3582,10 @@ class DeviceControllerUI:
         if label or identifier:
             matches = find_element(text_fields, label=label, identifier=identifier)
             if not matches:
+                hint = self._web_hint_for(resolved, elements)
                 raise DeviceError(
-                    f"No text field matching {label or identifier!r} to clear",
+                    f"No text field matching {label or identifier!r} to clear"
+                    + (f". {hint}" if hint else ""),
                     tool=self._backend_name(resolved),
                 )
             target = matches[0]

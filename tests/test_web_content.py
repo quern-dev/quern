@@ -706,6 +706,13 @@ def test_an_empty_probed_password_field_keeps_its_label():
                             "AXLabel": "Password", "AXValue": "\u2022" * 8, "frame": frame}])
     assert filled["AXLabel"] == "Password"
     assert filled["value"] == "\u2022" * 8
+    # WebKit can briefly show the last character typed. That is content, not
+    # a placeholder: still redacted, and still counted.
+    [revealing] = from_probe([{"type": "TextField", "role_description": "AXSecureTextField",
+                               "AXLabel": "Password", "AXValue": "\u2022" * 7 + "d",
+                               "frame": frame}])
+    assert revealing["value"] == "\u2022" * 8
+    assert revealing["AXLabel"] == "Password"
 
 
 def test_the_page_script_redacts_a_password_before_it_leaves_the_page():

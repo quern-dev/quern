@@ -482,10 +482,12 @@ def from_probe(hits: list[dict]) -> list[dict]:
             continue
         element_type = _probe_type(hit)
         label, value = hit.get("AXLabel"), hit.get("AXValue")
-        if element_type == "SecureTextField" and value and set(value) != {"\u2022"}:
+        if element_type == "SecureTextField" and value and "\u2022" not in value:
             # Not the password: a filled secure field reports dots -- measured
             # in Safari on iOS 26.5, even with a password equal to its label --
-            # so anything else is the placeholder of an empty field. Stripping
+            # so a value with no dots at all is the placeholder of an empty
+            # field. (Any dot means content: WebKit can briefly show the last
+            # character typed, "•••••••d", which is not a placeholder.) Stripping
             # that from the label emptied "Password" whenever the placeholder
             # matched it, and redacting it reported eight characters in a
             # field holding none. Still stripped from a label that merely

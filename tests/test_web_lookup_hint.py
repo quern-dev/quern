@@ -14,7 +14,7 @@ import pytest
 
 from server.device.controller import DeviceController
 from server.device.controller_ui import _web_content_hint
-from server.models import DeviceError, DeviceType, UIElement
+from server.models import DeviceError, DeviceType, UIElement, WaitCondition
 
 
 def element(type_, label, w=100.0, h=40.0, identifier=None):
@@ -100,9 +100,22 @@ def test_not_when_web_content_was_already_searched():
 # -- the three misses ---------------------------------------------------------------
 
 
-def _reading(ctrl, elements, udid="SIM"):
-    ctrl.get_ui_elements = AsyncMock(return_value=(elements, udid))
+def _reading(ctrl, elements, udid="SIM", *, filtered=None, full_read_fails=False):
+    """A get_ui_elements that behaves like the real one: a filtered read holds
+    only what matched (nothing, for these misses), a full read the whole tree.
+    Returning the full tree for both let the filtered-list trap go untested."""
+    async def read(*_args, filter_label=None, filter_identifier=None, filter_type=None,
+                   **_kwargs):
+        if filter_label or filter_identifier or filter_type:
+            return (list(filtered or []), udid)
+        if full_read_fails:
+            raise DeviceError("bridge read failed", tool="sim-bridge")
+        return (elements, udid)
+
+    ctrl.get_ui_elements = AsyncMock(side_effect=read)
     ctrl.resolve_udid = AsyncMock(return_value=udid)
+    ctrl._warn_if_input_is_suppressed = AsyncMock()
+    ctrl.screenshot = AsyncMock(side_effect=DeviceError("no", tool="x"))
     return ctrl
 
 
@@ -126,10 +139,51 @@ async def test_a_native_miss_is_unchanged():
     assert "get_web_content" not in str(caught.value)
 
 
-async def test_tap_element_says_so(monkeypatch):
+async def test_tap_element_says_so():
+    """From the whole tree: the filtered read of a miss holds nothing, so a
+    hint computed from it never fires."""
     ctrl = _reading(_ctrl(), SAFARI)
-    monkeypatch.setattr(ctrl, "screenshot", AsyncMock(side_effect=DeviceError("no", tool="x")))
     result = await ctrl.tap_element(label="Sign in", udid="SIM", scroll_to_find=False)
     assert result["status"] == "not_found"
     assert "get_web_content" in result["web_content_hint"]
     assert "get_web_content" in result["detail"]
+
+
+async def test_tap_element_does_not_judge_a_filtered_list():
+    """When the full read fails, all that is left is the filtered list -- and a
+    filtered list of one Application looks exactly like a collapsed tree."""
+    ctrl = _reading(_ctrl(), SAFARI, filtered=WEB_MODAL, full_read_fails=True)
+    result = await ctrl.tap_element(label="Sign in", element_type="Button", udid="SIM",
+                                    scroll_to_find=False)
+    assert result["status"] == "not_found"
+    assert "web_content_hint" not in result
+
+
+def test_a_device_not_yet_known_gets_no_hint():
+    """A cold cache is not known to be a simulator; staying quiet is the
+    side that costs nothing."""
+    assert DeviceController()._web_hint_for("SIM", SAFARI) is None
+
+
+async def test_clear_text_says_so():
+    """The step before type_text on a sign-in form."""
+    ctrl = _reading(_ctrl(), SAFARI)
+    with pytest.raises(DeviceError, match="to clear.*get_web_content"):
+        await ctrl.clear_text(label="Username", udid="SIM")
+
+
+async def test_a_wait_that_never_found_its_element_says_so():
+    ctrl = _reading(_ctrl(), SAFARI)
+    result, _ = await ctrl.wait_for_element(condition=WaitCondition.EXISTS, label="Sign in",
+                                            timeout=0, udid="SIM")
+    assert result["matched"] is False
+    assert "get_web_content" in result["web_content_hint"]
+
+
+async def test_a_wait_that_found_its_element_does_not():
+    """A not_exists that timed out had its element the whole time."""
+    ctrl = _reading(_ctrl(), SAFARI, filtered=[SAFARI[1]])
+    result, _ = await ctrl.wait_for_element(condition=WaitCondition.NOT_EXISTS,
+                                            label="Page Menu", timeout=0, udid="SIM")
+    assert result["matched"] is False
+    assert "web_content_hint" not in result
