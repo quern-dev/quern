@@ -187,3 +187,22 @@ async def test_a_wait_that_found_its_element_does_not():
                                             label="Page Menu", timeout=0, udid="SIM")
     assert result["matched"] is False
     assert "web_content_hint" not in result
+
+
+async def test_an_element_seen_and_then_gone_gets_no_hint():
+    """Found on an earlier poll, missing on the last: not a lookup that missed."""
+    ctrl = _reading(_ctrl(), SAFARI)
+    reads = iter([[SAFARI[1]], []])
+
+    async def read(*_args, filter_label=None, filter_identifier=None, filter_type=None,
+                   **_kwargs):
+        if filter_label or filter_identifier or filter_type:
+            return (next(reads, []), "SIM")
+        return (SAFARI, "SIM")
+
+    ctrl.get_ui_elements = AsyncMock(side_effect=read)
+    result, _ = await ctrl.wait_for_element(condition=WaitCondition.VALUE_EQUALS,
+                                            label="Page Menu", value="never",
+                                            timeout=0.2, interval=0.05, udid="SIM")
+    assert result["matched"] is False
+    assert "web_content_hint" not in result

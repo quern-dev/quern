@@ -1981,6 +1981,9 @@ class DeviceControllerUI:
         start_time = time.time()
         polls = 0
         last_element: UIElement | None = None
+        # Any poll, not only the last: an element seen and then gone was not
+        # a lookup that missed, and gets no web-content hint.
+        ever_found = False
 
         while True:
             polls += 1
@@ -2010,6 +2013,7 @@ class DeviceControllerUI:
             # Get first match (or None if no matches)
             current_element = matches[0] if matches else None
             last_element = current_element
+            ever_found = ever_found or current_element is not None
 
             # Check condition
             if checker(current_element):
@@ -2038,7 +2042,7 @@ class DeviceControllerUI:
                     )
                     # Only when the element was never found: a not_exists or a
                     # value wait that timed out had it, so it was not missing.
-                    if last_element is None:
+                    if not ever_found:
                         hint = self._web_hint_for(resolved, ctx_elements)
                 except Exception:
                     screen_context = {}
