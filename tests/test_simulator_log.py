@@ -200,55 +200,78 @@ async def test_start_xcrun_not_found():
         assert "xcrun" in adapter._error
 
 
-@pytest.mark.asyncio
-async def test_read_loop_emits_entries():
-    """Read loop parses lines and emits entries via callback."""
-    sample_line = (
-        b'{"traceID":1,"eventMessage":"hello from sim","eventType":"logEvent",'
-        b'"subsystem":"com.test","category":"test",'
-        b'"timestamp":"2026-02-07 14:23:01.000000-0800",'
-        b'"messageType":"Default","processID":42,'
-        b'"processImagePath":"/path/to/TestApp"}\n'
-    )
+def _stream(*chunks: bytes, eof: bool = True):
+    """A process whose stdout is a real StreamReader, as asyncio gives it.
+
+    Terminating it ends the stream, as terminating `log stream` closes its
+    stdout. Chunks are written as-is, newline or not.
+    """
+    import asyncio
+
+    reader = asyncio.StreamReader()
+    for chunk in chunks:
+        reader.feed_data(chunk)
+    if eof:
+        reader.feed_eof()
+
+    proc = AsyncMock()
+    proc.returncode = None
+    proc.stdout = reader
+
+    def terminate():
+        if not reader.at_eof():
+            reader.feed_eof()
+
+    proc.terminate = MagicMock(side_effect=terminate)
+    proc.wait = AsyncMock()
+    proc.kill = MagicMock()
+    return proc, reader
+
+
+def _pretty(message: str) -> bytes:
+    """One entry as `simctl spawn ... log stream --style json` writes it: the
+    closing brace has no newline after it."""
+    return (
+        "{\n"
+        f'  "eventMessage" : "{message}",\n'
+        '  "eventType" : "logEvent",\n'
+        '  "subsystem" : "com.test",\n'
+        '  "category" : "test",\n'
+        '  "timestamp" : "2026-02-07 14:23:01.000000-0800",\n'
+        '  "messageType" : "Default",\n'
+        '  "processID" : 42,\n'
+        '  "processImagePath" : "/path/to/TestApp"\n'
+        "}"
+    ).encode()
+
+
+async def _collect(proc, settle: float = 0.1):
+    import asyncio
 
     emitted = []
 
     async def on_entry(entry):
         emitted.append(entry)
 
-    mock_proc = AsyncMock()
-    mock_proc.returncode = None
-
-    # Create an async iterator that yields one line
-    class MockStdout:
-        def __init__(self):
-            self._lines = [sample_line]
-            self._index = 0
-
-        def __aiter__(self):
-            return self
-
-        async def __anext__(self):
-            if self._index >= len(self._lines):
-                raise StopAsyncIteration
-            line = self._lines[self._index]
-            self._index += 1
-            return line
-
-    mock_proc.stdout = MockStdout()
-    mock_proc.terminate = MagicMock()
-    mock_proc.wait = AsyncMock()
-
-    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
         adapter = SimulatorLogAdapter(udid=SAMPLE_UDID, on_entry=on_entry)
         await adapter.start()
+        await asyncio.sleep(settle)
+    return adapter, emitted
 
-        # Give the read loop a moment to process
-        import asyncio
 
-        await asyncio.sleep(0.1)
-
-        await adapter.stop()
+@pytest.mark.asyncio
+async def test_read_loop_emits_entries():
+    """Read loop parses compact JSON and emits entries via callback."""
+    proc, _ = _stream(
+        b'{"traceID":1,"eventMessage":"hello from sim","eventType":"logEvent",'
+        b'"subsystem":"com.test","category":"test",'
+        b'"timestamp":"2026-02-07 14:23:01.000000-0800",'
+        b'"messageType":"Default","processID":42,'
+        b'"processImagePath":"/path/to/TestApp"}\n'
+    )
+    adapter, emitted = await _collect(proc)
+    await adapter.stop()
 
     assert len(emitted) == 1
     assert emitted[0].message == "hello from sim"
@@ -259,61 +282,69 @@ async def test_read_loop_emits_entries():
 @pytest.mark.asyncio
 async def test_read_loop_pretty_printed_json():
     """Read loop handles pretty-printed multi-line JSON from simctl spawn."""
-    # Simulate the pretty-printed output from simctl spawn
-    lines = [
+    proc, _ = _stream(
         b'Filtering the log data using "process == \\"TestApp\\""\n',
-        b"[{\n",
-        b'  "eventMessage" : "hello pretty",\n',
-        b'  "eventType" : "logEvent",\n',
-        b'  "subsystem" : "com.test",\n',
-        b'  "category" : "test",\n',
-        b'  "timestamp" : "2026-02-07 14:23:01.000000-0800",\n',
-        b'  "messageType" : "Default",\n',
-        b'  "processID" : 42,\n',
-        b'  "processImagePath" : "/path/to/TestApp"\n',
-        b"}]\n",
-    ]
+        b"[" + _pretty("hello pretty") + b"]\n",
+    )
+    adapter, emitted = await _collect(proc)
+    await adapter.stop()
 
+    assert len(emitted) == 1
+    assert emitted[0].message == "hello pretty"
+    assert emitted[0].source == LogSource.SIMULATOR
+
+
+@pytest.mark.asyncio
+async def test_the_newest_entry_is_not_held_for_the_next_one():
+    """`log stream` writes an entry's closing brace with no newline; the `,`
+    and newline come with the next entry. A line reader therefore held the
+    newest entry until another arrived -- for good once the app went quiet."""
+    proc, reader = _stream(b"[" + _pretty("first") + b",\n" + _pretty("newest"), eof=False)
+    adapter, emitted = await _collect(proc)
+
+    assert [e.message for e in emitted] == ["first", "newest"], \
+        "the newest entry waited for one that never came"
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_stopping_keeps_what_was_already_written():
+    """Stopping a recording or logging must not drop an entry the stream had
+    already written but the reader had not got to yet."""
+    import asyncio
+
+    proc, reader = _stream(eof=False)
     emitted = []
 
     async def on_entry(entry):
         emitted.append(entry)
 
-    mock_proc = AsyncMock()
-    mock_proc.returncode = None
-
-    class MockStdout:
-        def __init__(self):
-            self._lines = lines
-            self._index = 0
-
-        def __aiter__(self):
-            return self
-
-        async def __anext__(self):
-            if self._index >= len(self._lines):
-                raise StopAsyncIteration
-            line = self._lines[self._index]
-            self._index += 1
-            return line
-
-    mock_proc.stdout = MockStdout()
-    mock_proc.terminate = MagicMock()
-    mock_proc.wait = AsyncMock()
-
-    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
         adapter = SimulatorLogAdapter(udid=SAMPLE_UDID, on_entry=on_entry)
         await adapter.start()
-
-        import asyncio
-
-        await asyncio.sleep(0.1)
-
+        await asyncio.sleep(0)
+        # Written, and stop called, before the reader runs again.
+        reader.feed_data(b"[" + _pretty("logged just before stop"))
         await adapter.stop()
 
-    assert len(emitted) == 1
-    assert emitted[0].message == "hello pretty"
-    assert emitted[0].source == LogSource.SIMULATOR
+    assert [e.message for e in emitted] == ["logged just before stop"]
+
+
+@pytest.mark.asyncio
+async def test_a_character_split_across_reads_is_kept_whole():
+    """A read returns whatever bytes are waiting, so one can end inside a
+    multi-byte character. Decoded per read, both halves became U+FFFD."""
+    import asyncio
+
+    entry = b"[" + _pretty("caf\u00e9 \u2713")
+    cut = entry.index("\u00e9".encode()) + 1          # inside the two-byte é
+    proc, reader = _stream(entry[:cut], eof=False)
+    adapter, emitted = await _collect(proc)            # the first half is read
+    reader.feed_data(entry[cut:])                      # and only then the rest
+    await asyncio.sleep(0.1)
+    await adapter.stop()
+
+    assert [e.message for e in emitted] == ["caf\u00e9 \u2713"]
 
 
 # ---------------------------------------------------------------------------

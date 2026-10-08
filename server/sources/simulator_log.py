@@ -11,6 +11,7 @@ simulator app logs, unlike the always-running OSLog adapter.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import json
 import logging
 import uuid
@@ -133,26 +134,52 @@ class SimulatorLogAdapter(BaseSourceAdapter):
                 self._process.kill()
 
         if self._read_task and not self._read_task.done():
-            self._read_task.cancel()
+            # Terminating the stream closes its stdout, so the read loop reaches
+            # EOF on its own after parsing what was already written -- an entry
+            # logged just before stop is kept, not cancelled away. Bounded, so
+            # a stream that does not close cannot hold up the stop.
             try:
-                await self._read_task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(asyncio.shield(self._read_task), self._DRAIN_TIMEOUT)
+            except TimeoutError:
                 pass
+            if not self._read_task.done():
+                self._read_task.cancel()
+                try:
+                    await self._read_task
+                except asyncio.CancelledError:
+                    pass
 
         self._process = None
         self._read_task = None
         logger.info("SimulatorLog adapter stopped (udid=%s)", self.udid[:8])
 
+    #: Bytes per read. Any size works; a read returns whatever is waiting.
+    _READ_SIZE = 65536
+    #: How long stop() lets the read loop finish what the stream already wrote.
+    _DRAIN_TIMEOUT = 2.0
+
     async def _read_loop(self) -> None:
-        """Read lines from simctl log stream stdout and parse JSON objects.
+        """Read simctl log stream stdout and parse JSON objects as they close.
 
         simctl spawn's log stream outputs pretty-printed JSON in an array,
         unlike host-side `log stream` which outputs compact single-line JSON.
         We accumulate characters and track brace depth (outside JSON strings)
         to detect complete objects. Handles `},{` separators correctly.
+
+        Read in chunks, not lines. Each object's closing `}` is written with
+        no newline after it -- the `,` and newline come with the *next* entry
+        -- so a line reader held the newest entry until another one arrived,
+        and for good when the app went quiet (measured on iOS 26.5: every
+        write ends in `\n}`). An entry is emitted at its `}`, whatever follows.
+
+        The loop ends at EOF rather than when `stop()` clears `_running`, so
+        whatever the stream wrote before it was terminated is still parsed.
         """
         assert self._process is not None
         assert self._process.stdout is not None
+
+        # A UTF-8 character can be split across two reads.
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
         # Character-level accumulator for pretty-printed JSON
         obj_chars: list[str] = []
@@ -161,13 +188,12 @@ class SimulatorLogAdapter(BaseSourceAdapter):
         escape_next = False
 
         try:
-            async for raw_line in self._process.stdout:
-                if not self._running:
+            while True:
+                chunk = await self._process.stdout.read(self._READ_SIZE)
+                if not chunk:
                     break
 
-                line = raw_line.decode("utf-8", errors="replace").rstrip()
-
-                for ch in line:
+                for ch in decoder.decode(chunk):
                     if escape_next:
                         escape_next = False
                         if brace_depth > 0:
@@ -210,10 +236,6 @@ class SimulatorLogAdapter(BaseSourceAdapter):
                     elif brace_depth > 0:
                         obj_chars.append(ch)
                     # else: outside object, skip (array brackets, commas, preamble)
-
-                # Add newline to preserve multi-line structure for JSON parsing
-                if brace_depth > 0:
-                    obj_chars.append("\n")
 
         except asyncio.CancelledError:
             raise
