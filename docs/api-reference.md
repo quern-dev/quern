@@ -46,10 +46,10 @@ The key lives at `~/.quern/api-key`; the server's URL and port are in `~/.quern/
 | `get_latest_crash` | GET | `/api/v1/crashes/latest` | Recent parsed crash reports; with `udid`, fetched from an iPhone (USB, the last `days`, default 3) or an Android device first |
 | `clear_crashes` | DELETE | `/api/v1/crashes` | Delete the crash reports quern stored on the Mac, for one `udid` or all; the device keeps its own |
 | `clear_device_crashes` | POST | `/api/v1/crashes/device/clear` | Permanently delete every crash report on an iPhone (USB); Android and simulators are refused with the reason |
-| `set_log_filter` | POST | `/api/v1/logs/filter` | Reconfigure capture filters. `quiet_subsystems` (subsystem prefixes) with `quiet_below` (default `error`) keeps those subsystems' entries only at that level and above -- their chatter dropped, their errors kept |
+| `set_log_filter` | POST | `/api/v1/logs/filter` | Reconfigure capture filters. `quiet_subsystems` (subsystem prefixes) with `quiet_below` (default `error`) keeps those subsystems' entries only at that level and above -- their chatter dropped, their errors kept. With a `process`, running captures restart with it at the source; a restart that fails answers `status: applied_capture_failed` with `restart_errors` |
 | `get_log_filter` | GET | `/api/v1/logs/filter` | Current ingestion filter config at all scopes (global, per-source, per-device) |
 | `list_log_sources` | GET | `/api/v1/logs/sources` | Active log source adapters, and what each log buffer holds and has evicted |
-| `start_simulator_logging` | POST | `/api/v1/device/logging/start` | Start simulator log capture |
+| `start_simulator_logging` | POST | `/api/v1/device/logging/start` | Start simulator log capture. 409, with simctl's reason, when the stream exits as it starts -- a simulator that is not booted, a filter simctl rejects |
 | `stop_simulator_logging` | POST | `/api/v1/device/logging/stop` | Stop simulator log capture |
 | `start_device_logging` | POST | `/api/v1/device/logging/device/start` | Start physical device log capture |
 | `stop_device_logging` | POST | `/api/v1/device/logging/device/stop` | Stop physical device log capture |

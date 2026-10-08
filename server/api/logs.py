@@ -560,20 +560,38 @@ async def set_filter(request: Request, filter_req: FilterRequest) -> dict:
 
     # Restart adapters with subprocess-level filters when a process include is set
     adapter_restarted = False
+    restart_errors: list[dict] = []
     if config.process and source in (LogSource.DEVICE, LogSource.SIMULATOR, None):
+        from server.api.device import _logging_lock
+
+        registries = []
         if source in (LogSource.DEVICE, None):
-            for adapter in request.app.state.device_log_adapters.values():
-                if adapter.is_running:
-                    await adapter.reconfigure(process_filter=config.process)
-                    adapter_restarted = True
+            registries.append(request.app.state.device_log_adapters)
         if source in (LogSource.SIMULATOR, None):
-            for adapter in request.app.state.sim_log_adapters.values():
-                if adapter.is_running:
+            registries.append(request.app.state.sim_log_adapters)
+        for registry in registries:
+            for udid, adapter in list(registry.items()):
+                # Under the same per-device lock as start and stop: unlocked, a
+                # stop arriving mid-restart deregistered the adapter this had
+                # just restarted, leaving a capture nothing could stop.
+                async with _logging_lock(request, udid):
+                    if registry.get(udid) is not adapter or not adapter.is_running:
+                        continue
                     await adapter.reconfigure(process_filter=config.process)
+                if adapter.is_running:
                     adapter_restarted = True
+                else:
+                    # The restart failed -- a simulator shut down since, a
+                    # filter the tool rejects. Reported, not "applied": the
+                    # capture is dead.
+                    restart_errors.append({
+                        "adapter_id": adapter.adapter_id,
+                        "error": adapter._error or "the capture did not restart",
+                    })
 
     return {
-        "status": "applied",
+        "status": "applied" if not restart_errors else "applied_capture_failed",
+        "restart_errors": restart_errors,
         "filter": config.to_dict(),
         "scope": (
             f"device:{filter_req.device_id}" if filter_req.device_id

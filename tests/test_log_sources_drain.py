@@ -106,6 +106,10 @@ async def test_a_line_written_just_before_stop_is_kept(name):
     await asyncio.wait_for(adapter.stop(), timeout=10)
 
     assert any("logged just before stop" in m for m in emitted), (name, emitted)
+    # The loop now runs on to EOF after stop(); "was I still running?" is all
+    # that keeps a clean stop from being reported as an exit.
+    assert adapter._error is None, (name, adapter._error)
+    assert adapter.status().status == "stopped", name
 
 
 @pytest.mark.asyncio
@@ -256,3 +260,114 @@ async def test_the_proxy_dispatches_an_event_written_just_before_stop():
         await asyncio.wait_for(adapter.stop(), timeout=10)
 
     assert {"type": "flow", "id": "late"} in dispatched
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", SOURCES)
+async def test_a_stream_that_never_closes_cannot_hold_up_stop(name, monkeypatch):
+    """The drain is bounded: past it, the read task is cancelled."""
+    import time
+
+    from server.sources import BaseSourceAdapter
+
+    monkeypatch.setattr(BaseSourceAdapter, "DRAIN_TIMEOUT", 0.2)
+    proc = _process()
+    adapter = await _started(name, proc, AsyncMock())
+    task = adapter._read_task
+    exited = asyncio.Event()
+
+    async def wait():
+        await exited.wait()
+        return 0
+
+    # The process exits, but something else holds its pipes open: no EOF.
+    proc.terminate = MagicMock(side_effect=exited.set)
+    proc.wait = AsyncMock(side_effect=wait)
+    started = time.monotonic()
+    await asyncio.wait_for(adapter.stop(), timeout=10)
+
+    assert time.monotonic() - started < 2, name
+    assert task.done(), name
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["oslog", "syslog", "logcat", "device_log"])
+async def test_an_old_loop_finishing_after_a_restart_leaves_the_new_run_alone(name):
+    """A loop still running when its adapter restarts must not, on reaching
+    EOF, mark the new run stopped or give it the old stream's exit."""
+    old = _process()
+    adapter = await _started(name, old, AsyncMock())
+    old_task = adapter._read_task
+    await asyncio.sleep(0)                  # the loop binds its own process
+    new = _process()
+    adapter._process = new                  # a restart, as start() leaves it
+    adapter._running = True
+    old.terminate()                         # the old stream ends on its own
+    await asyncio.wait_for(asyncio.shield(old_task), timeout=10)
+
+    assert adapter.is_running, name
+    assert adapter._error is None, (name, adapter._error)
+
+
+@pytest.mark.asyncio
+async def test_the_proxy_dispatches_late_events_before_clearing_its_state():
+    """Late events may be about held flows or mocks; clearing first left a
+    held flow on a stopped proxy."""
+    from server.sources import proxy as proxy_mod
+    from server.sources.proxy import ProxyAdapter
+
+    proc = _process()
+    adapter = ProxyAdapter()
+    adapter._mock_rules.append(MagicMock())
+    seen = []
+
+    async def dispatch(data):
+        seen.append(bool(adapter._mock_rules))
+
+    adapter._dispatch = dispatch
+    adapter._process = proc
+    adapter._running = True
+    with patch.object(proxy_mod, "update_state"):
+        adapter._read_task = asyncio.create_task(adapter._read_loop())
+        await asyncio.sleep(0)
+        proc.stdout.feed_data(b'{"type": "flow", "id": "late"}\n')
+        await asyncio.wait_for(adapter.stop(), timeout=10)
+
+    assert seen == [True], "the mocks were cleared before the late event"
+    assert not adapter._mock_rules
+
+
+@pytest.mark.asyncio
+async def test_a_proxy_stop_overlapping_a_start_leaves_the_new_run_alone():
+    """start_proxy checks only is_running, which stop() clears first. A start
+    landing while the stop waited had its process, pipe and mocks cleared --
+    a proxy reported running that was dead."""
+    from server.sources import proxy as proxy_mod
+    from server.sources.proxy import ProxyAdapter
+
+    release = asyncio.Event()
+    old = _process()
+    original_wait = old.wait.side_effect
+
+    async def slow_wait():
+        await release.wait()
+        return await original_wait()
+
+    old.wait = AsyncMock(side_effect=slow_wait)
+    adapter = ProxyAdapter()
+    adapter._process = old
+    adapter._running = True
+    with patch.object(proxy_mod, "update_state"):
+        stopping = asyncio.ensure_future(adapter.stop())
+        await asyncio.sleep(0.05)
+        new = _process()
+        adapter._process = new               # the new run, as start() leaves it
+        adapter._running = True
+        rule = MagicMock()
+        adapter._mock_rules.append(rule)
+        release.set()
+        await asyncio.wait_for(stopping, timeout=10)
+
+    assert adapter._process is new
+    assert adapter._mock_rules == [rule]

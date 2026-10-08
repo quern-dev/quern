@@ -150,19 +150,22 @@ class SyslogAdapter(BaseSourceAdapter):
                     await self.emit(entry)
             # The stream ended without anyone stopping it. Say why, rather
             # than reading as a clean stop.
-            if self._running:
+            if self._running and self._process is process:
                 self._error = await describe_exit(process, "idevicesyslog")
                 logger.error(self._error)
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            if self._running:
+            if self._running and self._process is process:
                 self._error = f"Read loop error: {e}"
             # Logged during stop's drain too, which processes what the stream
             # had already written; a failure there would otherwise leave no trace.
             logger.exception("idevicesyslog read loop failed")
         finally:
-            self._running = False
+            # Only this run's: a loop still finishing after a restart must not
+            # mark the new run stopped or give it this one's error.
+            if self._process is process:
+                self._running = False
 
     def _parse_line(self, line: str) -> LogEntry | None:
         """Parse a single idevicesyslog output line into a LogEntry."""

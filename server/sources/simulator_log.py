@@ -102,6 +102,8 @@ class SimulatorLogAdapter(BaseSourceAdapter):
 
     async def start(self) -> None:
         """Spawn simctl log stream and begin reading JSON output."""
+        # Reset per start: reconfigure() restarts the same object.
+        self.exited_at_start = False
         cmd = self._build_command()
 
         try:
@@ -272,7 +274,7 @@ class SimulatorLogAdapter(BaseSourceAdapter):
                         obj_chars.append(ch)
                     # else: outside object, skip (array brackets, commas, preamble)
 
-            if self._running:
+            if self._running and self._process is process:
                 # The output ended while nobody asked it to: simctl exited --
                 # a simulator that is not booted, a bad predicate. Say why,
                 # rather than reading as a clean stop.
@@ -280,13 +282,16 @@ class SimulatorLogAdapter(BaseSourceAdapter):
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            if self._running:
+            if self._running and self._process is process:
                 self._error = f"Read loop error: {e}"
             # Logged during stop's drain too, which is a processing phase now:
             # an entry that fails there would otherwise vanish without a trace.
             logger.exception("SimulatorLog read loop failed")
         finally:
-            self._running = False
+            # Only this run's: a loop still finishing after a restart must not
+            # mark the new run stopped or give it this one's error.
+            if self._process is process:
+                self._running = False
 
     def _parse_json_line(self, line: str) -> LogEntry | None:
         """Parse a JSON object from simctl log stream output.

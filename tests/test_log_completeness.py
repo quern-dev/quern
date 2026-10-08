@@ -528,3 +528,51 @@ async def test_failing_to_spawn_stays_a_500(app, monkeypatch):
 
     resp = await _start_with(app, monkeypatch, _cannot_spawn)
     assert resp.status_code == 500, resp.text
+
+
+class _Capture:
+    """A running capture whose restart does what the test says."""
+
+    def __init__(self, restarts: bool):
+        self.adapter_id = "simlog-SIM-A"
+        self.is_running = True
+        self._error = None
+        self._restarts = restarts
+
+    async def reconfigure(self, process_filter=None):
+        if not self._restarts:
+            self.is_running = False
+            self._error = "simctl log stream exited (149): device is not booted."
+
+
+async def _filter(app, capture):
+    from server.processing.ingestion_filter import IngestionFilter
+
+    app.state.ingestion_filter = IngestionFilter()
+    app.state.sim_log_adapters["SIM-A"] = capture
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        return await client.post(
+            "/api/v1/logs/filter", headers=HEADERS, json={"process": "App", "source": "simulator"},
+        )
+
+
+async def test_a_filter_whose_capture_fails_to_restart_says_so(app):
+    """The restart can now fail visibly -- the simulator shut down since. It
+    answered "applied" and adapter_restarted: true over a dead capture."""
+    resp = await _filter(app, _Capture(restarts=False))
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "applied_capture_failed"
+    assert body["adapter_restarted"] is False
+    assert body["restart_errors"] == [{
+        "adapter_id": "simlog-SIM-A",
+        "error": "simctl log stream exited (149): device is not booted.",
+    }]
+
+
+async def test_a_filter_whose_capture_restarts_is_applied(app):
+    resp = await _filter(app, _Capture(restarts=True))
+    body = resp.json()
+    assert body["status"] == "applied" and body["adapter_restarted"] is True
+    assert body["restart_errors"] == []

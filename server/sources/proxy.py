@@ -478,6 +478,14 @@ class ProxyAdapter(BaseSourceAdapter):
         # intercept and mock state below is cleared, which those events may use.
         await self._drain(*tasks)
 
+        if self._process is not process:
+            # A start landed while this stop was waiting: the process, pipes,
+            # mocks and intercepts below are the new run's. Clearing them
+            # closed its events pipe, so its read loop ended and terminated a
+            # proxy that start_proxy had just reported running.
+            logger.info("Proxy adapter stopped (a newer run is active; left in place)")
+            return
+
         if self._events_transport is not None:
             self._events_transport.close()
         self._events_transport = None

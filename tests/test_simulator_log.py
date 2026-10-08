@@ -359,6 +359,7 @@ async def test_stopping_keeps_what_was_already_written():
         await asyncio.wait_for(adapter.stop(), timeout=10)
 
     assert [e.message for e in emitted] == ["logged just before stop"]
+    assert adapter._error is None and adapter.status().status == "stopped"
 
 
 @pytest.mark.asyncio
@@ -466,12 +467,20 @@ async def test_an_escape_split_across_reads_is_kept():
 
 @pytest.mark.asyncio
 async def test_a_stream_that_ends_on_its_own_says_why():
-    """simctl exiting -- a simulator that is not booted -- read as a clean
-    stop: status "stopped", no error."""
-    proc, _ = _stream(stderr=b"Unable to locate device set\n", code=148)
-    adapter, _ = await _collect(proc)
+    """simctl dying mid-capture -- after a successful start -- read as a clean
+    stop: status "stopped", no error. (A stream that dies as it starts is the
+    startup check's, tested separately; this one is the read loop's.)"""
+    import asyncio
 
-    assert not adapter.is_running
+    proc, _ = _stream(eof=False, stderr=b"Unable to locate device set\n", code=148)
+    adapter, _ = await _collect(proc)
+    assert adapter.is_running and not adapter.exited_at_start
+    proc.terminate()                        # ends on its own, without stop()
+    for _ in range(50):
+        if not adapter.is_running:
+            break
+        await asyncio.sleep(0.02)
+
     assert adapter.status().status == "error"
     assert "exited (148)" in adapter._error
     assert "Unable to locate device set" in adapter._error
@@ -524,6 +533,36 @@ async def test_a_live_stream_is_not_mistaken_for_one_that_died():
         await adapter.start()
 
     assert adapter.is_running and not adapter.exited_at_start and adapter._error is None
+    await asyncio.wait_for(adapter.stop(), timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_an_old_loop_finishing_after_a_restart_leaves_the_new_run_alone():
+    """A loop still running when the adapter restarts must not, on reaching
+    EOF, mark the new run stopped or hand it the old stream's exit."""
+    old, _ = _stream(eof=False)
+    adapter, _ = await _collect(old)
+    old_task = adapter._read_task
+    new, _ = _stream(eof=False)
+    adapter._process = new                  # a restart, as start() leaves it
+    adapter._running = True
+    old.terminate()                         # the old stream ends on its own
+    await asyncio.wait_for(asyncio.shield(old_task), timeout=10)
+
+    assert adapter.is_running
+    assert adapter._error is None
+
+
+@pytest.mark.asyncio
+async def test_a_restart_that_succeeds_clears_the_earlier_failure():
+    """reconfigure() restarts the same object; a flag left from a failed start
+    would make the next good one read as dead."""
+    proc, _ = _stream(eof=False)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        adapter = SimulatorLogAdapter(udid=SAMPLE_UDID)
+        adapter.exited_at_start = True
+        await adapter.start()
+    assert adapter.is_running and not adapter.exited_at_start
     await asyncio.wait_for(adapter.stop(), timeout=10)
 
 
