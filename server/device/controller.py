@@ -121,6 +121,12 @@ class DeviceController(DeviceControllerUI):
             logger.info("Restored active device: %s", persisted[:8])
         # UI tree cache: {udid: (elements, timestamp)}
         self._ui_cache: dict[str, tuple[list[UIElement], float]] = {}
+        # When each device's screen was last changed by an action here (tap,
+        # swipe, type, launch...), for tap_element's settle-before-tapping.
+        self._last_ui_change: dict[str, float] = {}
+        # Each device's screen size, from the Application element of the last
+        # tree read that had one: a filtered read does not carry it.
+        self._screen_bounds: dict[str, tuple[float, float]] = {}
         # One long-lived Web Inspector connection. Reconnecting per request cost
         # ~3.4s of handshake, and webinspectord did not re-report its connected
         # applications to a connection opened immediately after the previous one
@@ -708,6 +714,9 @@ class DeviceController(DeviceControllerUI):
         """Invalidate UI tree cache for a device (or all devices if udid=None)."""
         if udid:
             self._ui_cache.pop(udid, None)
+            # Every action that changes the screen comes through here, which
+            # makes it the one place to note that it just changed.
+            self._last_ui_change[udid] = time.monotonic()
             # Anything that changed the native tree can have moved, replaced or
             # dismissed the page too, and a web element's position is only
             # meaningful for the layout it was measured against.

@@ -51,6 +51,11 @@ async def _capture(coro_factory, *, level=logging.INFO) -> list:
     return [e for e in captured if e.action]
 
 
+def _tapped() -> AsyncMock:
+    """What the tap route calls: a fresh report per test."""
+    return AsyncMock(return_value={"udid": "RESOLVED-UDID-1111"})
+
+
 def _controller(**overrides):
     controller = MagicMock()
     controller.resolve_udid = AsyncMock(return_value="RESOLVED-UDID-1111")
@@ -89,7 +94,7 @@ class TestOneEntryPerAction:
         from server.api import device_ui
         from server.models import TapRequest
 
-        controller = _controller(tap=AsyncMock(return_value="RESOLVED-UDID-1111"))
+        controller = _controller(tap_and_report=_tapped())
         request = _request(controller)
 
         entries = await _capture(
@@ -102,7 +107,7 @@ class TestOneEntryPerAction:
         from server.api import device_ui
         from server.models import TapRequest
 
-        controller = _controller(tap=AsyncMock(return_value="RESOLVED-UDID-1111"))
+        controller = _controller(tap_and_report=_tapped())
         request = _request(controller)
 
         entry = (await _capture(
@@ -122,7 +127,7 @@ class TestOneEntryPerAction:
         from server.api import device_ui
         from server.models import TapRequest
 
-        controller = _controller(tap=AsyncMock(return_value="RESOLVED-UDID-1111"))
+        controller = _controller(tap_and_report=_tapped())
         request = _request(controller)
 
         entry = (await _capture(
@@ -144,7 +149,7 @@ class TestTheUdidIsTheResolvedOne:
         from server.api import device_ui
         from server.models import TapRequest
 
-        controller = _controller(tap=AsyncMock(return_value="RESOLVED-UDID-1111"))
+        controller = _controller(tap_and_report=_tapped())
         request = _request(controller)
 
         # No udid in the request at all -- the caller left it to quern.
@@ -181,7 +186,7 @@ class TestOutcomesCarryTheLevelPolicy:
         from server.models import TapRequest
 
         controller = _controller(
-            tap=AsyncMock(side_effect=DeviceError("nope", tool="simctl")),
+            tap_and_report=AsyncMock(side_effect=DeviceError("nope", tool="simctl")),
         )
         request = _request(controller)
 
@@ -199,7 +204,7 @@ class TestOutcomesCarryTheLevelPolicy:
         from server.models import TapRequest
 
         controller = _controller(
-            tap=AsyncMock(side_effect=DeviceError("nope", tool="simctl")),
+            tap_and_report=AsyncMock(side_effect=DeviceError("nope", tool="simctl")),
         )
         request = _request(controller)
 
@@ -236,7 +241,7 @@ class TestTheBeginEntryIsDebugOnly:
         from server.api import device_ui
         from server.models import TapRequest
 
-        controller = _controller(tap=AsyncMock(return_value="RESOLVED-UDID-1111"))
+        controller = _controller(tap_and_report=_tapped())
         request = _request(controller)
 
         entries = await _capture(
@@ -252,7 +257,7 @@ class TestTheBeginEntryIsDebugOnly:
         from server.api import device_ui
         from server.models import TapRequest
 
-        controller = _controller(tap=AsyncMock(return_value="RESOLVED-UDID-1111"))
+        controller = _controller(tap_and_report=_tapped())
         request = _request(controller)
 
         entries = await _capture(

@@ -322,6 +322,48 @@ def _inserted_into(before: str, after: str, text: str) -> bool:
     return False
 
 
+
+#: Labels of system overlays that enclose everything under them, so the
+#: containment rule below would read them as a container. UIKit's popover
+#: dimming view: a Safari tip left it over the whole screen, taking every tap.
+_OVERLAY_LABELS = frozenset({"dismiss popup"})
+
+
+def _contains(outer: dict, inner: dict, slack: float = 1.0) -> bool:
+    return (outer["x"] - slack <= inner["x"]
+            and outer["y"] - slack <= inner["y"]
+            and inner["x"] + inner["width"] <= outer["x"] + outer["width"] + slack
+            and inner["y"] + inner["height"] <= outer["y"] + outer["height"] + slack)
+
+
+def _covering_element(target: UIElement, hit: dict | None) -> dict | None:
+    """What a tap at the target's point would land on instead, or None.
+
+    `hit` is the hit-test at that point. It is the target when its frame lies
+    inside the target's (the element itself, or a child such as a cell's
+    label), and inconclusive when it encloses the target (a container -- Maps'
+    "Legal" link hit-tests as the map, and tapping it works). Anything else is
+    on top: measured, a row scrolled under the navigation bar hit-tests as the
+    bar's title, a row under iOS 26 Settings' floating search bar as the
+    search field, a field under the edit menu as a menu item. No answer, or
+    no frame, is inconclusive -- the backends return None for a miss and for
+    a failed ask alike, and a check that could not run must not refuse a tap.
+    """
+    if not hit or not target.frame:
+        return None
+    label = hit.get("AXLabel") or ""
+    frame = hit.get("frame") or {}
+    covering = {"type": hit.get("type"), "label": label,
+                "identifier": hit.get("AXUniqueId"), "frame": frame or None}
+    if label.strip().lower() in _OVERLAY_LABELS:
+        return covering
+    if not all(k in frame for k in ("x", "y", "width", "height")):
+        return None
+    if _contains(target.frame, frame) or _contains(frame, target.frame):
+        return None
+    return covering
+
+
 class DeviceControllerUI:
     """Mixin providing UI inspection and interaction methods.
 
@@ -487,6 +529,77 @@ class DeviceControllerUI:
         _, cy = get_tap_point(element)
         safe_bottom = screen_height - self._HOME_INDICATOR_INSET
         return cy > safe_bottom
+
+    #: A tap this soon after the screen last changed waits for it to stop
+    #: moving. Measured on iOS 26.5: Settings' push transition swallowed a tap
+    #: sent ~0.8s after the tap that started it -- three times in three --
+    #: while the tree, and a hit-test, already reported the row at its final
+    #: frame. Waiting for the screen to settle first, the same tap landed three
+    #: times in three.
+    _RECENT_CHANGE_S = 1.5
+    _SETTLE_TIMEOUT_S = 2.5
+
+    def _checks_landing(self, udid: str) -> bool:
+        """Where tap_element confirms what a tap will land on: an iOS simulator
+        read through the accessibility tree, where hit-testing was measured."""
+        return (self._device_type(udid) == DeviceType.SIMULATOR
+                and not self._served_by_wda(udid))
+
+    async def _settle_if_just_changed(self, udid: str) -> int | None:
+        """Wait for the screen to settle if an action changed it moments ago.
+        Returns the milliseconds waited, or None when no wait was needed."""
+        since = time.monotonic() - self._last_ui_change.get(udid, float("-inf"))
+        if since >= self._RECENT_CHANGE_S:
+            return None
+        started = time.monotonic()
+        try:
+            await self.wait_for_settle(udid=udid, timeout=self._SETTLE_TIMEOUT_S)
+        except DeviceError:
+            # A wait that could not run does not stop the tap; it is no worse
+            # than tapping without one, which is what happened before.
+            logger.debug("settle before tap failed", exc_info=True)
+        return round((time.monotonic() - started) * 1000)
+
+    async def _obstruction(self, udid: str, target: UIElement,
+                           x: float, y: float) -> dict | None:
+        """Why a tap at (x, y) would not reach `target`, or None if nothing
+        says it would not."""
+        name = target.label or target.identifier or target.type
+        bounds = self._screen_bounds.get(udid)
+        if bounds and not (0 <= x <= bounds[0] and 0 <= y <= bounds[1]):
+            return {
+                "reason": "off_screen",
+                "detail": (f"'{name}' is off screen at ({x:.0f}, {y:.0f}); the screen is "
+                           f"{bounds[0]:.0f}x{bounds[1]:.0f}. Scroll it into view "
+                           "(scroll_to_element, or scroll_to_find=true) and tap again."),
+            }
+        try:
+            hit = await self._ui_backend(udid).describe_point(udid, x, y)
+        except Exception:
+            # Could not ask is not "something is there": tap as before.
+            logger.debug("hit-test before tap failed", exc_info=True)
+            return None
+        covering = _covering_element(target, hit)
+        if covering is None:
+            return None
+        what = f"{covering['type'] or 'an element'} '{covering['label']}'".replace(" ''", "")
+        return {
+            "reason": "covered",
+            "covered_by": covering,
+            "detail": (f"'{name}' is under {what} at ({x:.0f}, {y:.0f}), which would take "
+                       "the tap. It may be scrolled under a bar, or covered by a menu, "
+                       "sheet or keyboard: scroll it into view (scroll_to_element) or "
+                       "dismiss what is on top, then tap again."),
+        }
+
+    def _remember_screen(self, udid: str, raw) -> None:
+        """Keep the screen's size from a raw tree, for reads that filter it out."""
+        for item in raw or []:
+            if isinstance(item, dict) and item.get("type") == "Application":
+                frame = item.get("frame") or {}
+                if frame.get("width") and frame.get("height"):
+                    self._screen_bounds[udid] = (float(frame["width"]), float(frame["height"]))
+                return
 
     def _get_screen_height_from_elements(self, elements: list) -> float | None:
         """Extract screen height from the Application element in the UI tree."""
@@ -1745,6 +1858,8 @@ class DeviceControllerUI:
                 source_timeout=source_timeout, probe=probe_containers,
             )
 
+        self._remember_screen(resolved, raw)
+
         # Parse strategy:
         # - If filters AND will cache: parse full tree (for cache), then filter in memory
         # - If filters but won't cache (bypass): parse with filters to save time
@@ -2191,6 +2306,37 @@ class DeviceControllerUI:
         from server.device.ios import sim_input
 
         return sim_input.suppressed_input_warning(udid)
+
+    async def tap_and_report(self, x: float, y: float, udid: str | None = None,
+                             duration: float | None = None) -> dict:
+        """Tap at coordinates, saying what was there.
+
+        A coordinate has no target to compare against, so nothing is refused;
+        but `landed_on` names what a hit-test found at the point just before
+        the tap, which is the only way a caller can see that the tap met a
+        bar, a menu or nothing (#435). Waits for the screen to settle first
+        when an action changed it moments ago, as tap_element does.
+        """
+        hold = _hold(duration)
+        resolved = await self.resolve_udid(udid)
+        await self._warn_if_input_is_suppressed(resolved)
+        report: dict = {"udid": resolved}
+        if self._checks_landing(resolved):
+            settled_ms = await self._settle_if_just_changed(resolved)
+            if settled_ms is not None:
+                report["waited_for_settle_ms"] = settled_ms
+            try:
+                hit = await self._ui_backend(resolved).describe_point(resolved, x, y)
+            except Exception:
+                logger.debug("hit-test before tap failed", exc_info=True)
+                hit = None
+            if hit:
+                report["landed_on"] = {"type": hit.get("type"), "label": hit.get("AXLabel") or "",
+                                       "identifier": hit.get("AXUniqueId"),
+                                       "frame": hit.get("frame")}
+        await self._ui_backend(resolved).tap(resolved, x, y, **hold)
+        self._invalidate_ui_cache(resolved)  # UI changed
+        return report
 
     async def tap(self, x: float, y: float, udid: str | None = None,
                   duration: float | None = None) -> str:
@@ -2685,7 +2831,27 @@ class DeviceControllerUI:
                             element_type=element_type,
                         )
                         if matches_final:
-                            cx, cy = get_tap_point(matches_final[0])
+                            el = matches_final[0]
+                            cx, cy = get_tap_point(el)
+
+            settled_ms = None
+            if self._checks_landing(resolved):
+                if not skip_stability_check:
+                    settled_ms = await self._settle_if_just_changed(resolved)
+                obstruction = await self._obstruction(resolved, el, cx, cy)
+                if obstruction is not None:
+                    # Not tapped: what is there would take the tap. Reported
+                    # rather than tapped through -- that answered "ok" for a
+                    # tap a menu item, a bar or nothing at all received.
+                    result = {
+                        "status": "obstructed",
+                        "target": {"label": el.label, "type": el.type,
+                                   "identifier": el.identifier, "x": cx, "y": cy},
+                        **obstruction,
+                    }
+                    if sweep.get("attempted"):
+                        result["scroll"] = _scroll_report(sweep, scroll_to_find)
+                    return result
 
             await self._ui_backend(resolved).tap(resolved, cx, cy, **hold)
             self._invalidate_ui_cache(resolved)  # UI changed
@@ -2715,6 +2881,8 @@ class DeviceControllerUI:
             if value is not None:
                 result["previous_value"] = el.value or ""
                 result["requested_value"] = value
+            if settled_ms is not None:
+                result["waited_for_settle_ms"] = settled_ms
             _note_equivalence(result, element_type, el)
             if sweep.get("attempted"):
                 result["scroll"] = _scroll_report(sweep, scroll_to_find)

@@ -103,6 +103,7 @@ def mock_controller(app):
         )
     )
     ctrl.tap = AsyncMock(return_value="AAAA-1111")
+    ctrl.tap_and_report = AsyncMock(return_value={"udid": "AAAA-1111"})
     ctrl.tap_element = AsyncMock(
         return_value={
             "status": "ok",
@@ -722,7 +723,25 @@ class TestTap:
         assert data["status"] == "ok"
         assert data["x"] == 100.0
         assert data["y"] == 200.0
-        mock_controller.tap.assert_called_once_with(x=100.0, y=200.0, udid=None, duration=None)
+        mock_controller.tap_and_report.assert_called_once_with(
+            x=100.0, y=200.0, udid=None, duration=None)
+        assert "landed_on" not in data, "no hit-test result to report"
+
+    async def test_a_tap_says_what_it_landed_on(self, app, auth_headers, mock_controller):
+        """A coordinate has no target to check, but the caller can see what was
+        there: a bar, a menu, nothing (#435)."""
+        mock_controller.tap_and_report = AsyncMock(return_value={
+            "udid": "AAAA-1111",
+            "landed_on": {"type": "StaticText", "label": "AutoFill", "identifier": None,
+                          "frame": {"x": 191, "y": 406, "width": 83, "height": 44}},
+        })
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/device/ui/tap", json={"x": 232.0, "y": 427.0}, headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json()["landed_on"]["label"] == "AutoFill"
+        assert resp.json()["udid"] == "AAAA-1111"
 
     async def test_tap_no_auth(self, app):
         transport = ASGITransport(app=app)
@@ -734,7 +753,7 @@ class TestTap:
         assert resp.status_code == 401
 
     async def test_tap_idb_not_found(self, app, auth_headers, mock_controller):
-        mock_controller.tap = AsyncMock(
+        mock_controller.tap_and_report = AsyncMock(
             side_effect=DeviceError("idb not found. Install with: pip install fb-idb", tool="idb")
         )
         transport = ASGITransport(app=app)
