@@ -165,6 +165,42 @@ enum InstallKindTests {
                            .absent, "nothing")
         }
 
+        Harness.test("fnm's default node is on the app's search path (#447)") {
+            let home = "/home/u"
+            let path = QuernCLI.searchPath(home: home)
+            let fnmDirs = [".local/share/fnm", ".fnm", "Library/Application Support/fnm"]
+                .map { "\(home)/\($0)/aliases/default/bin" }
+            for dir in fnmDirs {
+                Harness.expect(path.contains(dir), "\(dir) is searched")
+            }
+            // In fnm's own lookup order.
+            Harness.expect(fnmDirs.compactMap { path.firstIndex(of: $0) },
+                           fnmDirs.compactMap { path.firstIndex(of: $0) }.sorted(), "fnm's order")
+            // Behind Homebrew, whose linked node is always current: an old fnm
+            // default ahead of it would turn a working node into a too-old one.
+            let fnm = path.firstIndex(of: fnmDirs[0])
+            let brew = path.firstIndex(of: "/opt/homebrew/bin")
+            Harness.expect(fnm != nil && brew != nil && brew! < fnm!, "Homebrew before fnm")
+            // But ahead of launchd's directories.
+            let usrBin = path.firstIndex(of: "/usr/bin")
+            Harness.expect(fnm != nil && usrBin != nil && fnm! < usrBin!, "fnm before /usr/bin")
+            // The quern wrapper still comes first.
+            Harness.expect(path.first, "\(home)/.local/bin", "wrapper first")
+
+            // A modern fnm with no default and no shell open is still named.
+            Harness.expect(NodeVisibility.check(home: home, searchPath: path,
+                                                isExecutable: { _ in false },
+                                                exists: { $0 == "\(home)/.local/share/fnm" }),
+                           .managedElsewhere("fnm"), "fnm's data directory alone")
+
+            // The machine #447 was found on: fnm with a default, nothing else.
+            let alias = "\(home)/.local/share/fnm/aliases/default/bin"
+            Harness.expect(NodeVisibility.check(home: home, searchPath: path,
+                                                isExecutable: { $0 == "\(alias)/node" },
+                                                exists: { $0 == "\(home)/.local/state/fnm_multishells" }),
+                           .visible, "fnm default is visible, not managed elsewhere")
+        }
+
         Harness.test("the Terminal script runs the wrapper it was given, quoted") {
             let script = TerminalUpdate.script(quern: "/Users/o'neil/.local/bin/quern")
             Harness.expect(script.hasPrefix("#!/bin/sh\n"), "has a shebang")

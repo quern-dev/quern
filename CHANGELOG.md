@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The menu bar app finds fnm's default Node (#447).** The commands it runs — start, restart, update, setup — searched `~/.local/bin`, Homebrew and launchd's directories, so on a machine whose only Node came from fnm they found none. That was true even though every MCP client is registered with fnm's default. It now also looks in fnm's `aliases/default/bin`, after Homebrew, so `quern doctor`'s "the Quern app" row goes green with no second Node installed. A release install with an fnm default no longer sends its updates to Terminal. When fnm has no default, doctor says `fnm install 22 && fnm default 22` instead of suggesting `brew install node`.
+
 ## [0.24.0-beta.3] - 2026-10-09
 
 ### Added

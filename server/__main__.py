@@ -208,7 +208,9 @@ def _ensure_mcp_built(quiet: bool = False) -> bool:
     node installed by fnm or nvm lives in a directory no static PATH list can
     name: fnm's contains the pid of the shell that asked for it. `quern setup`
     records node's path as None for exactly that reason. So "just add it to the
-    search path" is not available as a fix.
+    search path" is not available as a general fix. (fnm's `default` alias is
+    the exception, and the app searches it since #447; nvm's default is a
+    version string in a file, and has no such directory.)
 
     Never raises. Every caller already treats a failed build as survivable --
     MCP tools go stale, the server still runs -- but that intent only worked for

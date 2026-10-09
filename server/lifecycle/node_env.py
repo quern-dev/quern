@@ -46,8 +46,20 @@ MIN_NODE_MAJOR = 22
 #: launchd's default PATH for a user's GUI apps.
 GUI_PATH = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
 
-#: What the menu-bar app puts in front of it (`QuernCLI.searchPath`).
-MENUBAR_EXTRA_PATH = ("{home}/.local/bin", "/opt/homebrew/bin", "/usr/local/bin")
+#: What the menu-bar app puts in front of it (`QuernCLI.searchPath`), in its
+#: order; a test keeps the two in step. fnm's `default` alias, at each place fnm
+#: keeps its data by default and in fnm's own order, is the user's chosen Node
+#: at a path no shell owns -- the one every MCP client is registered with --
+#: and the app missed it (#447). After Homebrew, whose linked node is always
+#: current, so an old fnm default cannot displace a working one.
+MENUBAR_EXTRA_PATH = (
+    "{home}/.local/bin",
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "{home}/.local/share/fnm/aliases/default/bin",
+    "{home}/.fnm/aliases/default/bin",
+    "{home}/Library/Application Support/fnm/aliases/default/bin",
+)
 
 PROBE_TIMEOUT = 10.0
 
@@ -420,11 +432,23 @@ def fix_for(site: NodeSite, sites: list[NodeSite]) -> str:
                 "add a directory to every GUI app's PATH with "
                 "`sudo launchctl config user path ...` and log out and in.")
     if site.place == "the Quern app":
-        return ("The Quern app looks in ~/.local/bin, /opt/homebrew/bin and "
-                "/usr/local/bin as well as launchd's PATH. Install a node into "
-                "one of those (`brew install node`, or the installer from "
-                f"https://nodejs.org; not `node@{MIN_NODE_MAJOR}`, which Homebrew "
-                "does not link onto PATH).")
+        if manager == "fnm":
+            # fnm's default alias is on the app's search path (#447), so a
+            # default is the fix -- not a second Node from Homebrew. Installed
+            # first: `fnm default 22` fails when 22 is not (review). And only
+            # where the app looks: FNM_DIR or XDG_DATA_HOME can move fnm's
+            # data somewhere it cannot follow, default or no default.
+            return ("The Quern app finds fnm's default Node in ~/.local/share/fnm, "
+                    "~/.fnm or ~/Library/Application Support/fnm, and found none "
+                    f"there. Run: {upgrade_command('fnm')} (if FNM_DIR or "
+                    "XDG_DATA_HOME moves fnm's data elsewhere, the app cannot see "
+                    "it: point the app at a Node by installing one into "
+                    "/opt/homebrew/bin instead).")
+        return ("The Quern app looks in ~/.local/bin, /opt/homebrew/bin, "
+                "/usr/local/bin and fnm's default Node as well as launchd's PATH. "
+                "Install a node into one of those (`brew install node`, or the "
+                f"installer from https://nodejs.org; not `node@{MIN_NODE_MAJOR}`, "
+                "which Homebrew does not link onto PATH).")
     shell = site.shell or "zsh"
     if site.place == "non-interactive shell":
         file, extra = _startup(shell, "non-interactive")
