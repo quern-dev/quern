@@ -104,11 +104,26 @@ enum QuernCLI {
     /// has to ask about *this* list. Answering from a different one could
     /// report a node the child will not find, which is precisely the failure it
     /// exists to detect (#339).
+    ///
+    /// Mirrored by `MENUBAR_EXTRA_PATH` in `server/lifecycle/node_env.py`, which
+    /// is how `quern doctor` reports on it; `tests/test_node_env.py` keeps the
+    /// two in step.
     static func searchPath(home: String) -> [String] {
-        let extra = ["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+        let extra = ["\(home)/.local/bin"]
+            + fnmDataDirs.map { "\(home)/\($0)/aliases/default/bin" }
+            + ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
         let current = ProcessInfo.processInfo.environment["PATH"] ?? ""
         return extra + current.split(separator: ":").map(String.init)
     }
+
+    /// Where fnm has kept its data, newest first. Its `aliases/default/bin` is
+    /// the user's chosen Node at a path that outlives every shell, unlike the
+    /// per-shell `fnm_multishells/<pid>/bin` -- and it is the path every MCP
+    /// client is already registered with (#214). This list missed it, so a
+    /// Node that worked everywhere else was invisible here (#447). Ahead of
+    /// Homebrew: the directory holds only node, npm and npx, and fnm's default
+    /// is a choice where a Homebrew node may be a dependency nobody picked.
+    static let fnmDataDirs = [".local/share/fnm", "Library/Application Support/fnm", ".fnm"]
 
     /// Run a quern subcommand off the main thread. `completion` receives the
     /// exit status and combined output, dispatched back to the main thread.

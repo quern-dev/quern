@@ -124,11 +124,14 @@ enum TerminalUpdate {
 /// `quern setup` runs `check_node()`, which reports MISSING, and the update
 /// fails naming Node on a machine where Node is installed and working (#339).
 ///
-/// No static PATH can fix it. fnm's node lives in a directory containing the
-/// pid of the shell that asked for it -- `~/.local/state/fnm_multishells/
-/// 800_1789402185835/bin/node` on the machine this was found on -- so there is
-/// nothing for `QuernCLI.searchPath` to add. Terminal is not a workaround here,
-/// it is the answer: that is where the user's own environment is.
+/// A shell's fnm node lives in a directory containing the pid of the shell
+/// that asked for it -- `~/.local/state/fnm_multishells/800_1789402185835/bin/
+/// node` on the machine this was found on. That one no static PATH can name,
+/// but fnm's `default` alias can be, and `QuernCLI.searchPath` now includes it
+/// (#447), so an fnm user with a default set reads `.visible`. What is left
+/// here is a manager with no stable directory -- nvm's default is a version
+/// string in a file -- or fnm with no default. Terminal is not a workaround
+/// for those, it is the answer: that is where the user's own environment is.
 enum NodeVisibility: Equatable {
     case visible
     /// Not on our PATH, and a version manager is installed that would explain

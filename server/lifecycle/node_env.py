@@ -46,8 +46,18 @@ MIN_NODE_MAJOR = 22
 #: launchd's default PATH for a user's GUI apps.
 GUI_PATH = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
 
-#: What the menu-bar app puts in front of it (`QuernCLI.searchPath`).
-MENUBAR_EXTRA_PATH = ("{home}/.local/bin", "/opt/homebrew/bin", "/usr/local/bin")
+#: What the menu-bar app puts in front of it (`QuernCLI.searchPath`), in its
+#: order; a test keeps the two in step. fnm's `default` alias, at each place fnm
+#: has kept its data, is the user's chosen Node at a path no shell owns -- the
+#: one every MCP client is registered with -- and the app missed it (#447).
+MENUBAR_EXTRA_PATH = (
+    "{home}/.local/bin",
+    "{home}/.local/share/fnm/aliases/default/bin",
+    "{home}/Library/Application Support/fnm/aliases/default/bin",
+    "{home}/.fnm/aliases/default/bin",
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+)
 
 PROBE_TIMEOUT = 10.0
 
@@ -420,11 +430,16 @@ def fix_for(site: NodeSite, sites: list[NodeSite]) -> str:
                 "add a directory to every GUI app's PATH with "
                 "`sudo launchctl config user path ...` and log out and in.")
     if site.place == "the Quern app":
-        return ("The Quern app looks in ~/.local/bin, /opt/homebrew/bin and "
-                "/usr/local/bin as well as launchd's PATH. Install a node into "
-                "one of those (`brew install node`, or the installer from "
-                f"https://nodejs.org; not `node@{MIN_NODE_MAJOR}`, which Homebrew "
-                "does not link onto PATH).")
+        if manager == "fnm":
+            # fnm's default alias is on the app's search path (#447), so a
+            # default is all it takes -- not a second Node from Homebrew.
+            return ("The Quern app finds fnm's default Node, and fnm has none "
+                    f"set. Run: fnm default {MIN_NODE_MAJOR}")
+        return ("The Quern app looks in ~/.local/bin, fnm's default Node, "
+                "/opt/homebrew/bin and /usr/local/bin as well as launchd's PATH. "
+                "Install a node into one of those (`brew install node`, or the "
+                f"installer from https://nodejs.org; not `node@{MIN_NODE_MAJOR}`, "
+                "which Homebrew does not link onto PATH).")
     shell = site.shell or "zsh"
     if site.place == "non-interactive shell":
         file, extra = _startup(shell, "non-interactive")

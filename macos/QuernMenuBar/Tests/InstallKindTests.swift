@@ -165,6 +165,29 @@ enum InstallKindTests {
                            .absent, "nothing")
         }
 
+        Harness.test("fnm's default node is on the app's search path (#447)") {
+            let home = "/home/u"
+            let path = QuernCLI.searchPath(home: home)
+            for dir in [".local/share/fnm", "Library/Application Support/fnm", ".fnm"] {
+                Harness.expect(path.contains("\(home)/\(dir)/aliases/default/bin"),
+                               "\(dir) default alias is searched")
+            }
+            // Ahead of Homebrew, so the user's chosen node wins over one a
+            // formula pulled in.
+            let fnm = path.firstIndex(of: "\(home)/.local/share/fnm/aliases/default/bin")
+            let brew = path.firstIndex(of: "/opt/homebrew/bin")
+            Harness.expect(fnm != nil && brew != nil && fnm! < brew!, "fnm before Homebrew")
+            // The quern wrapper still comes first.
+            Harness.expect(path.first, "\(home)/.local/bin", "wrapper first")
+
+            // The machine #447 was found on: fnm with a default, nothing else.
+            let alias = "\(home)/.local/share/fnm/aliases/default/bin"
+            Harness.expect(NodeVisibility.check(home: home, searchPath: path,
+                                                isExecutable: { $0 == "\(alias)/node" },
+                                                exists: { $0 == "\(home)/.local/state/fnm_multishells" }),
+                           .visible, "fnm default is visible, not managed elsewhere")
+        }
+
         Harness.test("the Terminal script runs the wrapper it was given, quoted") {
             let script = TerminalUpdate.script(quern: "/Users/o'neil/.local/bin/quern")
             Harness.expect(script.hasPrefix("#!/bin/sh\n"), "has a shebang")

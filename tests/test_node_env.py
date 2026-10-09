@@ -118,6 +118,18 @@ class TestEachPlaceIsAskedSeparately:
         assert sites["the Quern app"].ok and sites["the Quern app"].path == local
         assert sites["GUI apps"].status == node_env.MISSING
 
+    @pytest.mark.parametrize("fnm_dir", [".local/share/fnm", "Library/Application Support/fnm",
+                                         ".fnm"])
+    def test_the_quern_app_sees_fnms_default_node(self, fnm_dir):
+        """The machine #447 was found on: fnm's default alias is where every
+        MCP client's node is, and the app's search path did not include it."""
+        node = f"{HOME}/{fnm_dir}/aliases/default/bin/node"
+        world = World(on_path={f"{HOME}/{fnm_dir}/aliases/default/bin": node},
+                      versions={node: "v22.23.2"})
+        sites = _by_place(world.probe())
+        assert sites["the Quern app"].ok and sites["the Quern app"].path == node
+        assert sites["GUI apps"].status == node_env.MISSING, "launchd's PATH has no fnm"
+
     def test_gui_apps_do_not_see_the_callers_path(self):
         """The field shape: fine in the terminal, nothing for a GUI client."""
         fnm = f"{HOME}/.local/state/fnm_multishells/1_2/bin/node"
@@ -378,6 +390,41 @@ class TestFixes:
         fix = node_env.fix_for(site, [site])
         assert "`brew install node`" in fix
         assert "brew install node@" not in fix
+
+    def test_with_fnm_the_quern_app_advice_is_a_default_not_a_second_node(self):
+        """fnm's default alias is on the app's search path (#447), so an fnm
+        user missing there has no default set; installing Homebrew's node
+        alongside would be the wrong fix."""
+        app = self._site("the Quern app", node_env.MISSING)
+        shell = self._site("login shell", node_env.OK,
+                           f"{HOME}/.local/state/fnm_multishells/9_9/bin/node", "v22.23.2")
+        fix = node_env.fix_for(app, [app, shell])
+        assert "fnm default 22" in fix
+        assert "brew install" not in fix
+
+    def test_the_menu_bar_search_path_matches_the_app(self):
+        """Doctor's "the Quern app" row is only true if it searches what the
+        app searches. `QuernCLI.searchPath` and `MENUBAR_EXTRA_PATH` are two
+        copies of one list, and nothing kept them in step until fnm's default
+        alias was added to both (#447)."""
+        src = (ROOT / "macos/QuernMenuBar/Sources/QuernCLI.swift").read_text()
+        expr = re.search(r"static func searchPath\(home: String\) -> \[String\] \{\s*"
+                         r"let extra = (.*?)\n\s*let current", src, re.S).group(1)
+        fnm_dirs = re.findall(r'"([^"]*)"',
+                              re.search(r"static let fnmDataDirs = \[(.*?)\]", src).group(1))
+        assert fnm_dirs, "fnmDataDirs not found"
+        swift: list[str] = []
+        for part in re.split(r"\n\s*\+ ", expr.strip()):
+            if part.startswith("fnmDataDirs.map"):
+                template = re.search(r'"(.*?)"', part).group(1)
+                swift += [template.replace(r"\($0)", d) for d in fnm_dirs]
+            else:
+                swift += re.findall(r'"([^"]*)"', part)
+        swift = [d.replace(r"\(home)", "{home}") for d in swift]
+        # The app also names /usr/bin and /bin, which doctor takes from GUI_PATH.
+        tail = [d for d in swift if d in node_env.GUI_PATH]
+        assert swift[:len(swift) - len(tail)] == list(node_env.MENUBAR_EXTRA_PATH)
+        assert tail and swift[-len(tail):] == tail, "launchd's directories come last"
 
     def test_dock_advice_names_only_fixes_that_work_there(self):
         """launchd's PATH has no Homebrew in it, so `brew install node`
