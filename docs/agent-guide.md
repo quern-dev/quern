@@ -232,6 +232,13 @@ interaction with the page** rather than reusing an earlier read. A tap against
 stale web content is refused with reason `stale_web_content` instead of landing
 somewhere wrong.
 
+A lookup that misses on a web page says so. When Safari is in front, or the
+native tree has collapsed to a bare `Application` (a presented web modal), a
+miss from `tap_element`, `type_text`, `get_element`, `clear_text` or a
+`wait_for_element` timeout tells you to call `get_web_content` first, and
+`tap_element` and `wait_for_element` also carry it as `web_content_hint`. Read
+that as "not visible to the tree yet", not "the field does not exist".
+
 If the response reports `anchored: false`, the page was found but its position
 on screen could not be confirmed, and the elements are withheld rather than
 returned at a guessed offset. Treat that as "look again", not "no content".

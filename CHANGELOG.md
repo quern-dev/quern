@@ -7,7 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Multi-finger gestures (#252, #419, #420).** A new `gesture` tool (`POST /api/v1/device/ui/gesture`) does `pinch`, `rotate`, two-finger `pan`, `double_tap` (or a triple tap) and `two_finger_tap`, centred on a point or on an element. It works on iOS simulators through sim-bridge, on physical iPhones through WDA's W3C pointer actions, and on Android emulators and devices through scrcpy's server, which needs `brew install scrcpy`. Every backend gets the same finger paths.
+- **Long press and edge swipes on every backend (#251, #421).** `duration` (seconds, up to 10) on `tap` and `tap_element` holds the touch, on sim-bridge, idb, WDA and uiautomator2. `edge` on `swipe` makes it a swipe from that screen edge: back, home, Control Centre or the notification shade. A swipe that doesn't start at the edge is a 400 on every backend.
+- **Simulator settings that rewrite typed text can be turned off (#433, #434).** `get_simulator_settings` and `set_simulator_setting` cover:
+  - auto-correction, auto-capitalization, smart punctuation and the period shortcut;
+  - predictive text and spell check;
+  - password AutoFill: the "Save Password?" sheet, which the app's UI tree can't see.
+
+  They write the simulator's own storage instead of driving the Settings app. Each setting reports how it was verified on which iOS runtime.
+- **Booted simulators in the preview app's Devices menu (#424, #425, #426, #429).**
+  - The preview app lists booted simulators and keeps the list current.
+  - A window whose simulator shuts down goes OFF AIR, says why, and recovers when the simulator boots again.
+  - Simulator previews are sharper.
+  - `quern-media`'s own page plays H.264 in the browser.
+- **A lookup that misses on web content says what to do (#436, #437).** On Safari or a presented web modal, a miss from `tap_element`, `type_text`, `get_element`, `clear_text` or `wait_for_element` says to call `get_web_content` first, because the accessibility tree holds none of the page. `tap_element` and `wait_for_element` also return it as `web_content_hint`.
+
+### Changed
+- **`tap_element` confirms what it will tap, on iOS simulators (#435, #441).** It used to answer `ok` for taps something else received: a row under the navigation bar or iOS 26's floating search field, a field under the edit menu, a row below the screen. It now hit-tests the target's centre first and refuses with a **409** `status: "obstructed"`, giving `reason` `covered` (with `covered_by`) or `off_screen`. Nothing was tapped. A tap within 1.5s of an action that changed the screen first waits for it to settle (`waited_for_settle_ms`), because a running transition swallows taps silently. `skip_stability_check` on `tap_element` and `skip_settle` on `tap` turn the wait off. A coordinate `tap` is never refused, but says what it `landed_on`. A check that could not run never refuses a tap.
+- **`type_text` says how the text failed to land, and returns the field's value (#431).** It used to give one message for every read-back failure, which could contradict itself. It now names the case:
+  - the value didn't change;
+  - it couldn't be read back;
+  - a secure field grew too little;
+  - it changed but doesn't contain the text. Here it shows where it differs.
+
+  The comparison stays exact: iOS rewriting "qft" to "Qft" is still a failure (see `set_simulator_setting` above). The typed text is never quoted, because errors end up in logs and `type_text` is how passwords go in; a secure field's value is never shown.
+- **MCP SDK 1.32.0 (#428).** Its HTTP client transports follow a redirect only to the same origin. Quern's MCP server speaks stdio to its client and plain HTTP to a local server, so nothing changes in use.
+
 ### Fixed
+- **Builds no longer collide in a shared DerivedData (#442, #443).** Two checkouts with the same scheme name shared one build directory, and a request for a phone and a simulator ran both builds at once in it, which Xcode doesn't support: measured, 1 of 10 failed. Each project path and platform now gets its own directory, locked for the request. A second request waits and says so (`waited_for_other_build_s`).
+- **xcodebuild failures in package resolution (#443).**
+  - They keep their reason: the indented lines under `Could not resolve package dependencies:` are no longer dropped.
+  - A non-zero exit from xcodebuild fails the build, whatever its output says.
+- **A recording's `video_lost` is null while it is running (#443).** It used to say `true` until its first movie finished.
+- **A simulator's newest log line arrives without waiting for the next one (#438).** `log stream` writes each entry's closing brace with no newline after it, so the last line an app wrote never arrived until it wrote another, and was lost at stop. That is the line that matters when an app stalls.
+- **Every log source keeps what it had already written when stopped (#440).** oslog, idevicesyslog, the physical-device source, logcat and the proxy dropped lines still in the pipe at stop. They now drain to the end first, bounded at 2s. Starting simulator logging on a simulator that isn't booted answers **409** with `simctl`'s reason instead of "started". `set_log_filter` answers `applied_capture_failed` with `restart_errors` when a capture fails to restart, instead of `applied`.
+- **A UI tree read could fail with `ProcessLookupError` (#423).** When a cancelled accessibility-bridge read raced its child's exit, it failed instead of returning the best tree it had.
+- **A failed proxy start closes its subprocess's pipes (#422).**
 - **A WDA action that timed out or lost its connection is no longer sent again (#407).** Quern re-sent it once on a fresh connection, but the action may already have run, so a tap could land twice, text be typed twice, or a second Home press open the app switcher. A tap, swipe, `type_text` or `press_button` that may have reached WDA is now reported instead: a `[wda]` error saying it may have been performed or still be pending, so read the UI tree before repeating it. `launch_app` and `open_url`, already not re-sent after a timeout, are no longer re-sent after a lost connection either. A connection that was never made, refused or timed out connecting, is still retried. Most reads keep their retry. Long `type_text` gets a timeout that grows with the text, so it is not reported as failed while WDA is still typing.
 
 ## [0.24.0-beta.2] - 2026-10-04
