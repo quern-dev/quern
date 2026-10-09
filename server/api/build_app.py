@@ -8,6 +8,7 @@ import contextlib
 import hashlib
 import logging
 import re
+import time
 import weakref
 from collections.abc import AsyncIterator, Iterable
 from datetime import UTC, datetime
@@ -98,6 +99,9 @@ class BuildAndInstallResponse(BaseModel):
     # after the next build overwrites DerivedData; for a device build, dSYMs of
     # the app's own code (#326).
     build_records: list[BuildRecord] = []
+    # Seconds this request waited for another build into the same DerivedData
+    # to finish (#442); None when it did not wait.
+    waited_for_other_build_s: float | None = None
     # Gradle projects: the build, what about the machine stopped it, and the
     # JDK and SDK it was given -- named, since a daemon without a shell finds
     # them itself.
@@ -152,6 +156,18 @@ async def _list_schemes(proj_flag: str, proj_path: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+async def _reap(proc) -> None:
+    """Kill xcodebuild and wait for it, a second cancellation included."""
+    with contextlib.suppress(ProcessLookupError):
+        proc.kill()
+    reap = asyncio.ensure_future(proc.wait())
+    try:
+        await asyncio.shield(reap)
+    except asyncio.CancelledError:
+        await reap
+        raise
+
+
 def _derived_data(proj_path: str, scheme: str, platform: str) -> Path:
     """Where one project's scheme builds for one platform.
 
@@ -166,15 +182,19 @@ def _derived_data(proj_path: str, scheme: str, platform: str) -> Path:
     return CONFIG_DIR / "builds" / f"{Path(proj_path).stem}-{key}" / scheme / platform
 
 
+#: A wait shorter than this is lock overhead, not another build.
+WAIT_WORTH_SAYING_S = 0.5
+
 #: One lock per DerivedData in use. Weak, so a directory nobody is building
 #: into holds none.
 _DERIVED_LOCKS: weakref.WeakValueDictionary[Path, asyncio.Lock] = weakref.WeakValueDictionary()
 
 
 @contextlib.asynccontextmanager
-async def _holding(dirs: Iterable[Path]) -> AsyncIterator[None]:
+async def _holding(dirs: Iterable[Path]) -> AsyncIterator[float]:
     """Hold every directory in `dirs`, taken in one order so two requests
-    wanting the same pair cannot each hold one and wait for the other."""
+    wanting the same pair cannot each hold one and wait for the other.
+    Yields the seconds spent waiting for another build to finish."""
     locks = []
     for path in sorted(set(dirs)):
         lock = _DERIVED_LOCKS.get(path)
@@ -182,13 +202,14 @@ async def _holding(dirs: Iterable[Path]) -> AsyncIterator[None]:
             lock = _DERIVED_LOCKS[path] = asyncio.Lock()
         locks.append((path, lock))
     held: list[asyncio.Lock] = []
+    started = time.monotonic()
     try:
         for path, lock in locks:
             if lock.locked():
                 logger.info("Waiting for another build into %s to finish", path)
             await lock.acquire()
             held.append(lock)
-        yield
+        yield time.monotonic() - started
     finally:
         # Only what was taken: a request cancelled while waiting for its
         # second directory still holds its first.
@@ -227,11 +248,18 @@ async def _build(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
-        stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=BUILD_TIMEOUT)
-    except TimeoutError:
-        raise RuntimeError(f"Build timed out after {BUILD_TIMEOUT}s ({destination})")
     except FileNotFoundError:
         raise RuntimeError("xcodebuild not found — is Xcode installed?")
+    try:
+        stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=BUILD_TIMEOUT)
+    except BaseException as e:
+        # Timed out or cancelled, it is still building -- into a DerivedData
+        # whose lock is about to be let go, so the next request's build would
+        # run inside it alongside this one (#442 review).
+        await _reap(proc)
+        if isinstance(e, TimeoutError):
+            raise RuntimeError(f"Build timed out after {BUILD_TIMEOUT}s ({destination})") from e
+        raise
 
     return await build_adapter.parse_build_output(stdout_bytes.decode(errors="replace"),
                                                   exit_code=proc.returncode)
@@ -411,10 +439,17 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
         for arch, udids in (("iphoneos", physical_udids), ("iphonesimulator", simulator_udids))
         if udids
     }
-    async with _holding(derived.values()):
-        return await _build_and_install_xcode(
+    async with _holding(derived.values()) as waited_s:
+        response = await _build_and_install_xcode(
             controller, body, build_adapter, proj_flag, proj_path,
             physical_udids, simulator_udids, derived)
+    if waited_s >= WAIT_WORTH_SAYING_S:
+        # On the response, not only in the log: a request that queued behind
+        # another build's whole build and install reads as a hang otherwise.
+        response.waited_for_other_build_s = round(waited_s, 1)
+        response.summary = (f"Waited {waited_s:.0f}s for another build of this project "
+                            f"to finish first.\n{response.summary}")
+    return response
 
 
 async def _build_and_install_xcode(
@@ -453,11 +488,20 @@ async def _build_and_install_xcode(
 
     build_results: dict[str, BuildResult] = {}
     build_errors: dict[str, str] = {}
-    for arch, task in build_tasks.items():
-        try:
-            build_results[arch] = await task
-        except RuntimeError as e:
-            build_errors[arch] = str(e)
+    try:
+        for arch, task in build_tasks.items():
+            try:
+                build_results[arch] = await task
+            except Exception as e:  # noqa: BLE001 -- one platform's failure is reported, not raised
+                build_errors[arch] = str(e) or type(e).__name__
+    finally:
+        # Cancelled while awaiting one, the other is still building -- and
+        # `derived` is released the moment this returns (#442 review).
+        unfinished = [t for t in build_tasks.values() if not t.done()]
+        for task in unfinished:
+            task.cancel()
+        if unfinished:
+            await asyncio.gather(*unfinished, return_exceptions=True)
 
     result_iphoneos = build_results.get("iphoneos")
     result_iphonesimulator = build_results.get("iphonesimulator")

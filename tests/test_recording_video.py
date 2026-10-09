@@ -780,6 +780,15 @@ class TestTheManager:
         assert ("video_stopped", 1) in kinds
         assert kinds.index(("video_stopped", 1)) < kinds.index(("stopped", None))
 
+    def test_an_interrupted_recording_has_not_lost_its_video_yet(self, tmp_path):
+        """Interrupted is still running: stoppable, its movie not yet tallied."""
+        rec = rec_mod.Recording(id="r", udid=SIM, dir=tmp_path, filters=Filters(video=True),
+                                started_at=datetime(2026, 10, 1, tzinfo=UTC),
+                                state="interrupted")
+        assert rec.video_lost is None
+        rec.video_segments = [{"segment": 1, "start_host_time": None, "error": "killed"}]
+        assert rec.video_lost is True
+
     def test_video_asked_for_and_none_recorded_is_not_complete(self, tmp_path):
         rec = rec_mod.Recording(id="r", udid=SIM, dir=tmp_path, filters=Filters(video=True),
                                 started_at=datetime(2026, 10, 1, tzinfo=UTC), state="stopped")

@@ -289,10 +289,12 @@ class BuildAdapter(BaseSourceAdapter):
 
         seen_errors = {e.message for e in errors}
         for m in LOCATIONLESS_ERROR_RE.finditer(content):
-            message = m.group(2) + _continuation(content, m)
-            if message not in seen_errors:       # xcodebuild repeats them
-                seen_errors.add(message)
-                errors.append(BuildDiagnostic(file=m.group(1) or "", message=message))
+            # Deduplicated on the error line alone, the first telling kept:
+            # a repeat of one failure can name a different cache path below.
+            if m.group(2) not in seen_errors:       # xcodebuild repeats them
+                seen_errors.add(m.group(2))
+                errors.append(BuildDiagnostic(file=m.group(1) or "",
+                                              message=m.group(2) + _continuation(content, m)))
 
         # Dedup warnings on (file, line, column, message)
         seen_warnings: set[tuple[str, int | None, int | None, str]] = set()
@@ -357,6 +359,8 @@ class BuildAdapter(BaseSourceAdapter):
         # Determine overall success
         status_match = BUILD_STATUS_RE.search(content)
         succeeded = status_match.group(1) == "SUCCEEDED" if status_match else len(errors) == 0
+        # Only a SUCCEEDED line says so; no errors found is not the output saying it.
+        said_succeeded = bool(status_match) and status_match.group(1) == "SUCCEEDED"
         if exit_code:
             # The output alone is not the verdict: a package failure exits 74
             # with no BUILD FAILED line, and was caught only because its first
@@ -377,9 +381,14 @@ class BuildAdapter(BaseSourceAdapter):
         if not succeeded and not errors:
             # Never "0 errors" for a failed build: that reads as a parser that
             # found nothing wrong, not one that could not see what was.
-            errors.append(BuildDiagnostic(message=(
-                f"xcodebuild exited {exit_code}; {UNREADABLE_FAILURE}" if exit_code
-                else UNREADABLE_FAILURE)))
+            if exit_code and said_succeeded:
+                message = (f"xcodebuild exited {exit_code} though its output said the build "
+                           "succeeded; run xcodebuild and read its output to see why")
+            elif exit_code:
+                message = f"xcodebuild exited {exit_code}; {UNREADABLE_FAILURE}"
+            else:
+                message = UNREADABLE_FAILURE
+            errors.append(BuildDiagnostic(message=message))
 
         result = BuildResult(
             succeeded=succeeded,

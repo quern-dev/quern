@@ -278,6 +278,21 @@ class TestPackageResolution:
         [error] = (await _parse(PACKAGE_PATH_MISSING + PACKAGE_PATH_MISSING)).errors
         assert "cannot be accessed" in error.message
 
+    async def test_a_repeat_naming_another_path_is_still_one_error(self):
+        """The same failure told twice can name a different cache path below;
+        the first telling is kept."""
+        again = PACKAGE_PATH_MISSING.replace("/src/Missing", "/elsewhere/Missing")
+        [error] = (await _parse(PACKAGE_PATH_MISSING + again)).errors
+        assert "/src/Missing" in error.message and "/elsewhere" not in error.message
+
+    async def test_an_unindented_line_is_not_part_of_the_reason(self):
+        text = ("xcodebuild: error: Could not resolve package dependencies:\n"
+                "  the package at '/src/X' cannot be accessed\n"
+                "Resolved source packages:\n")
+        [error] = (await _parse(text)).errors
+        assert "Resolved source packages" not in error.message
+        assert "cannot be accessed" in error.message
+
 
 # -- the exit code (#442) ----------------------------------------------------------
 
@@ -291,7 +306,9 @@ class TestExitCode:
 
     async def test_a_non_zero_exit_overrides_a_success_line(self):
         result = await BuildAdapter().parse_build_output("** BUILD SUCCEEDED **\n", exit_code=65)
-        assert not result.succeeded and result.errors
+        assert not result.succeeded
+        [error] = result.errors
+        assert "though its output said the build succeeded" in error.message
 
     @pytest.mark.parametrize("code", [0, None])
     async def test_a_clean_exit_changes_nothing(self, code):
