@@ -90,6 +90,32 @@ def _located(diag: BuildDiagnostic) -> str:
     return f"{where}: {diag.message}"
 
 
+# The lines under an error that ends in a colon: the reason, indented, up to
+# a blank line. `Could not resolve package dependencies:` says nothing else on
+# its own line -- the missing repository, path or version is all below it --
+# and the result used to end at the colon (#442). Only after a colon: an
+# indented line under any other error is the next command's `cd`, not part
+# of the message.
+_CONTINUATION_RE = re.compile(r"\n([ \t]+\S[^\n]*)")
+#: A git failure under a package error prints its whole transcript.
+MAX_CONTINUATION_LINES = 12
+
+
+def _continuation(content: str, match: re.Match) -> str:
+    """The indented reason under a locationless error ending in ":"."""
+    if not match.group(2).endswith(":"):
+        return ""
+    lines: list[str] = []
+    pos = match.end()
+    while (line := _CONTINUATION_RE.match(content, pos)) is not None:
+        lines.append(line.group(1).rstrip())
+        pos = line.end()
+    if len(lines) > MAX_CONTINUATION_LINES:
+        more = len(lines) - MAX_CONTINUATION_LINES
+        lines = [*lines[:MAX_CONTINUATION_LINES], f"  … {more} more line(s)"]
+    return "".join(f"\n{line}" for line in lines)
+
+
 def _failed_commands(content: str) -> list[str]:
     """xcodebuild's own list of what failed, less the noise in it: a base64
     token it prints under a plug-in step, and the whole-build step every
@@ -231,12 +257,15 @@ class BuildAdapter(BaseSourceAdapter):
             s.status = "ready"
         return s
 
-    async def parse_build_output(self, content: str, *, fuzzy: bool = True) -> BuildResult:
+    async def parse_build_output(self, content: str, *, fuzzy: bool = True,
+                                 exit_code: int | None = None) -> BuildResult:
         """Parse raw xcodebuild output and return a structured result.
 
         Args:
             content: Raw xcodebuild output text.
             fuzzy: Use fuzzy word-level template grouping instead of exact-match.
+            exit_code: xcodebuild's exit status, when it is known. Non-zero is
+                a failed build whatever the output says.
 
         Also emits LogEntry items for each error/warning through the pipeline.
         """
@@ -260,9 +289,10 @@ class BuildAdapter(BaseSourceAdapter):
 
         seen_errors = {e.message for e in errors}
         for m in LOCATIONLESS_ERROR_RE.finditer(content):
-            if m.group(2) not in seen_errors:       # xcodebuild repeats them
-                seen_errors.add(m.group(2))
-                errors.append(BuildDiagnostic(file=m.group(1) or "", message=m.group(2)))
+            message = m.group(2) + _continuation(content, m)
+            if message not in seen_errors:       # xcodebuild repeats them
+                seen_errors.add(message)
+                errors.append(BuildDiagnostic(file=m.group(1) or "", message=message))
 
         # Dedup warnings on (file, line, column, message)
         seen_warnings: set[tuple[str, int | None, int | None, str]] = set()
@@ -327,6 +357,12 @@ class BuildAdapter(BaseSourceAdapter):
         # Determine overall success
         status_match = BUILD_STATUS_RE.search(content)
         succeeded = status_match.group(1) == "SUCCEEDED" if status_match else len(errors) == 0
+        if exit_code:
+            # The output alone is not the verdict: a package failure exits 74
+            # with no BUILD FAILED line, and was caught only because its first
+            # line happened to parse. Anything that prints neither read as a
+            # successful build (#442).
+            succeeded = False
 
         # A failed build with nothing to show for it read "Build failed. 0
         # error(s)", which names no cause. Say what xcodebuild says failed.
@@ -341,7 +377,9 @@ class BuildAdapter(BaseSourceAdapter):
         if not succeeded and not errors:
             # Never "0 errors" for a failed build: that reads as a parser that
             # found nothing wrong, not one that could not see what was.
-            errors.append(BuildDiagnostic(message=UNREADABLE_FAILURE))
+            errors.append(BuildDiagnostic(message=(
+                f"xcodebuild exited {exit_code}; {UNREADABLE_FAILURE}" if exit_code
+                else UNREADABLE_FAILURE)))
 
         result = BuildResult(
             succeeded=succeeded,

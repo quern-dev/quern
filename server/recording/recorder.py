@@ -363,12 +363,22 @@ class Recording:
                 and not self.video_lost)
 
     @property
-    def video_lost(self) -> bool:
-        """Video was asked for and some of it is missing or unjoinable."""
+    def video_lost(self) -> bool | None:
+        """Video was asked for and some of it is missing or unjoinable; None
+        while it runs and nothing finished is lost yet.
+
+        A movie still being recorded has no segment yet, and judging it then
+        said `true` for every recording with video until its first movie
+        finished -- beside a `complete` that correctly said null (#442). A
+        segment that has finished lost is lost for good, so that is said at
+        once rather than held back to the stop."""
         if not self.filters.video:
             return False
-        return not self.video_segments or any(
-            s.get("error") or s.get("start_host_time") is None for s in self.video_segments)
+        if any(s.get("error") or s.get("start_host_time") is None for s in self.video_segments):
+            return True
+        if self.state in ("recording", "interrupted"):
+            return None
+        return not self.video_segments
 
     def summary(self) -> dict:
         return {

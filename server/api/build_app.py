@@ -4,8 +4,12 @@ project for iOS, or a Gradle project for Android (`build_android.py`, #347)."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
 import logging
 import re
+import weakref
+from collections.abc import AsyncIterator, Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -148,6 +152,50 @@ async def _list_schemes(proj_flag: str, proj_path: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+def _derived_data(proj_path: str, scheme: str, platform: str) -> Path:
+    """Where one project's scheme builds for one platform.
+
+    It was `builds/<scheme>`: two checkouts building a scheme of one name
+    shared a DerivedData, and one failed on a precompiled module the other
+    had left. And a device and a simulator build ran at once inside it,
+    which Xcode does not support -- 1 in 3 measured, "The Xcode build system
+    has crashed" (#442). Keyed by the resolved path, as Xcode keys its own,
+    with the name in front so a person can tell which is which.
+    """
+    key = hashlib.sha256(proj_path.encode()).hexdigest()[:10]
+    return CONFIG_DIR / "builds" / f"{Path(proj_path).stem}-{key}" / scheme / platform
+
+
+#: One lock per DerivedData in use. Weak, so a directory nobody is building
+#: into holds none.
+_DERIVED_LOCKS: weakref.WeakValueDictionary[Path, asyncio.Lock] = weakref.WeakValueDictionary()
+
+
+@contextlib.asynccontextmanager
+async def _holding(dirs: Iterable[Path]) -> AsyncIterator[None]:
+    """Hold every directory in `dirs`, taken in one order so two requests
+    wanting the same pair cannot each hold one and wait for the other."""
+    locks = []
+    for path in sorted(set(dirs)):
+        lock = _DERIVED_LOCKS.get(path)
+        if lock is None:
+            lock = _DERIVED_LOCKS[path] = asyncio.Lock()
+        locks.append((path, lock))
+    held: list[asyncio.Lock] = []
+    try:
+        for path, lock in locks:
+            if lock.locked():
+                logger.info("Waiting for another build into %s to finish", path)
+            await lock.acquire()
+            held.append(lock)
+        yield
+    finally:
+        # Only what was taken: a request cancelled while waiting for its
+        # second directory still holds its first.
+        for lock in reversed(held):
+            lock.release()
+
+
 async def _build(
     proj_flag: str,
     proj_path: str,
@@ -185,7 +233,8 @@ async def _build(
     except FileNotFoundError:
         raise RuntimeError("xcodebuild not found — is Xcode installed?")
 
-    return await build_adapter.parse_build_output(stdout_bytes.decode(errors="replace"))
+    return await build_adapter.parse_build_output(stdout_bytes.decode(errors="replace"),
+                                                  exit_code=proc.returncode)
 
 
 # ---------------------------------------------------------------------------
@@ -354,8 +403,33 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
             ),
         )
 
-    derived = CONFIG_DIR / "builds" / body.scheme
-    derived.mkdir(parents=True, exist_ok=True)
+    # One DerivedData per project, scheme and platform, held for the whole
+    # request -- build, record and install -- so no other build replaces the
+    # products this one is installing.
+    derived = {
+        arch: _derived_data(proj_path, body.scheme, arch)
+        for arch, udids in (("iphoneos", physical_udids), ("iphonesimulator", simulator_udids))
+        if udids
+    }
+    async with _holding(derived.values()):
+        return await _build_and_install_xcode(
+            controller, body, build_adapter, proj_flag, proj_path,
+            physical_udids, simulator_udids, derived)
+
+
+async def _build_and_install_xcode(
+    controller,
+    body: BuildAndInstallRequest,
+    build_adapter,
+    proj_flag: str,
+    proj_path: str,
+    physical_udids: list[str],
+    simulator_udids: list[str],
+    derived: dict[str, Path],
+) -> BuildAndInstallResponse:
+    """Steps 5-7 of build_and_install, run while `derived` is held."""
+    for path in derived.values():
+        path.mkdir(parents=True, exist_ok=True)
 
     # 5. Build each needed architecture concurrently
     build_tasks: dict[str, asyncio.Task] = {}
@@ -365,7 +439,7 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
             _build(
                 proj_flag, proj_path, body.scheme, body.configuration,
                 "generic/platform=iOS",
-                derived, build_adapter, body.skip_plugin_validation,
+                derived["iphoneos"], build_adapter, body.skip_plugin_validation,
             )
         )
     if simulator_udids:
@@ -373,7 +447,7 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
             _build(
                 proj_flag, proj_path, body.scheme, body.configuration,
                 "generic/platform=iOS Simulator",
-                derived, build_adapter, body.skip_plugin_validation,
+                derived["iphonesimulator"], build_adapter, body.skip_plugin_validation,
             )
         )
 
@@ -392,7 +466,7 @@ async def build_and_install(request: Request, body: BuildAndInstallRequest):
     # dSYMs must be made now: the next build of this scheme replaces the object
     # files its debug information lives in.
     app_paths = {
-        arch: _find_app(derived, body.configuration, arch == "iphoneos")
+        arch: _find_app(derived[arch], body.configuration, arch == "iphoneos")
         for arch, result in build_results.items() if result.succeeded
     }
     record_tasks = {

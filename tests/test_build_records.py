@@ -628,6 +628,8 @@ class TestPluginValidationFlag:
         seen = []
 
         class Proc:
+            returncode = 0
+
             async def communicate(self):
                 return b"** BUILD SUCCEEDED **\n", b""
 
@@ -636,7 +638,7 @@ class TestPluginValidationFlag:
             return Proc()
 
         class Adapter:
-            async def parse_build_output(self, text):
+            async def parse_build_output(self, text, **_kwargs):
                 return BuildResult(succeeded=True)
 
         monkeypatch.setattr(route.asyncio, "create_subprocess_exec", fake_exec)
