@@ -203,12 +203,15 @@ async def test_a_cancelled_request_stops_both_builds_before_letting_go(builds, m
                                                  str(project), [PHONE], [SIM], derived)
 
     task = asyncio.create_task(request())
-    while len(started) < 2:
-        await asyncio.sleep(0)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert sorted(stopped) == sorted(started), "a build outlived its request"
+    try:
+        while len(started) < 2:
+            await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+        assert sorted(stopped) == sorted(started), "a build outlived its request"
+    finally:
+        release.set()  # a build left running must not hang the suite
     assert not any(route._DERIVED_LOCKS[d].locked() for d in derived.values()
                    if d in route._DERIVED_LOCKS)
 
