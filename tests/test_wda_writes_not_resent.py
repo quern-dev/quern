@@ -136,6 +136,17 @@ async def test_the_refusal_says_the_write_may_have_run(wda, name, path, call, ma
     )), text
 
 
+async def test_the_refusal_warns_the_write_may_still_be_pending(wda):
+    """After a timeout WDA can be holding the action behind a slow request,
+    and a screenshot can show the screen from before it -- so a caller who
+    "checks the screen" that way taps again, and both land (review, #407)."""
+    wda.install({"/wda/tap": [httpx.ReadTimeout("slow", request=_req())]})
+    with pytest.raises(DeviceError) as caught:
+        await wda.tap(SIM, 10, 10)
+    assert "still be pending" in str(caught.value)
+    assert "Read the UI tree" in str(caught.value)
+
+
 #: Errors that mean no connection was made, so nothing reached WDA.
 NEVER_SENT = [
     pytest.param(lambda: httpx.ConnectError("refused", request=_req()), id="refused"),
