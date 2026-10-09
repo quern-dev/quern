@@ -104,11 +104,31 @@ enum QuernCLI {
     /// has to ask about *this* list. Answering from a different one could
     /// report a node the child will not find, which is precisely the failure it
     /// exists to detect (#339).
+    ///
+    /// Mirrored by `MENUBAR_EXTRA_PATH` in `server/lifecycle/node_env.py`, which
+    /// is how `quern doctor` reports on it; `tests/test_node_env.py` keeps the
+    /// two in step.
     static func searchPath(home: String) -> [String] {
-        let extra = ["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+        let extra = ["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin"]
+            + fnmDataDirs.map { "\(home)/\($0)/aliases/default/bin" }
+            + ["/usr/bin", "/bin"]
         let current = ProcessInfo.processInfo.environment["PATH"] ?? ""
         return extra + current.split(separator: ":").map(String.init)
     }
+
+    /// Where fnm keeps its data when neither `FNM_DIR` nor `XDG_DATA_HOME` says
+    /// otherwise, in the order fnm itself looks. Its `aliases/default/bin` is
+    /// the user's chosen Node at a path that outlives every shell, unlike the
+    /// per-shell `fnm_multishells/<pid>/bin` -- and it is the path every MCP
+    /// client is already registered with (#214). This list missed it, so a
+    /// Node that worked everywhere else was invisible here (#447).
+    ///
+    /// After Homebrew, not before: Homebrew's linked `node` is always current,
+    /// and an fnm default can be an old version -- ahead, it would turn a
+    /// working Homebrew node into a too-old one. And the directory holds
+    /// whatever was installed globally with npm as well as node, so ahead it
+    /// could shadow more than node.
+    static let fnmDataDirs = [".local/share/fnm", ".fnm", "Library/Application Support/fnm"]
 
     /// Run a quern subcommand off the main thread. `completion` receives the
     /// exit status and combined output, dispatched back to the main thread.

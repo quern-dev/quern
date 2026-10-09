@@ -296,7 +296,8 @@ minimal PATH rather than a shell's. A node installed by fnm or nvm is
 unreachable from there, in a way no static PATH list can fix, because fnm's
 directory is named for the pid of the shell that asked for it. Before this, such
 a machine could run `quern start` from a terminal and could not start the server
-from the menu bar at all (#193).
+from the menu bar at all (#193). (fnm's `default` alias turned out to be the one
+fixed path a version manager offers; the menu bar app searches it since #447.)
 
 So this step needs node and npm **on the release machine**. It is the one part
 of the cut that can fail after the tag and the Release already exist. That is

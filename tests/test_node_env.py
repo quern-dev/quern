@@ -118,6 +118,18 @@ class TestEachPlaceIsAskedSeparately:
         assert sites["the Quern app"].ok and sites["the Quern app"].path == local
         assert sites["GUI apps"].status == node_env.MISSING
 
+    @pytest.mark.parametrize("fnm_dir", [".local/share/fnm", "Library/Application Support/fnm",
+                                         ".fnm"])
+    def test_the_quern_app_sees_fnms_default_node(self, fnm_dir):
+        """The machine #447 was found on: fnm's default alias is where every
+        MCP client's node is, and the app's search path did not include it."""
+        node = f"{HOME}/{fnm_dir}/aliases/default/bin/node"
+        world = World(on_path={f"{HOME}/{fnm_dir}/aliases/default/bin": node},
+                      versions={node: "v22.23.2"})
+        sites = _by_place(world.probe())
+        assert sites["the Quern app"].ok and sites["the Quern app"].path == node
+        assert sites["GUI apps"].status == node_env.MISSING, "launchd's PATH has no fnm"
+
     def test_gui_apps_do_not_see_the_callers_path(self):
         """The field shape: fine in the terminal, nothing for a GUI client."""
         fnm = f"{HOME}/.local/state/fnm_multishells/1_2/bin/node"
@@ -378,6 +390,61 @@ class TestFixes:
         fix = node_env.fix_for(site, [site])
         assert "`brew install node`" in fix
         assert "brew install node@" not in fix
+
+    def test_with_fnm_the_quern_app_advice_is_a_default_not_a_second_node(self):
+        """fnm's default alias is on the app's search path (#447), so an fnm
+        user missing there has no default set; installing Homebrew's node
+        alongside would be the wrong fix."""
+        app = self._site("the Quern app", node_env.MISSING)
+        shell = self._site("login shell", node_env.OK,
+                           f"{HOME}/.local/state/fnm_multishells/9_9/bin/node", "v22.23.2")
+        fix = node_env.fix_for(app, [app, shell])
+        # Installed first: `fnm default 22` alone fails when 22 is not.
+        assert "fnm install 22 && fnm default 22" in fix
+        assert "brew install node" not in fix
+        assert "FNM_DIR" in fix, "says when the default is somewhere it cannot look"
+
+    def test_the_quern_app_keeps_a_current_homebrew_node_over_an_old_fnm_default(self):
+        """fnm's directories come after Homebrew's: ahead, an fnm default of
+        20 turned a working Homebrew node into a too-old one (#447 review)."""
+        brew = "/opt/homebrew/bin/node"
+        fnm = f"{HOME}/.local/share/fnm/aliases/default/bin/node"
+        world = World(on_path={"/opt/homebrew/bin": brew,
+                               f"{HOME}/.local/share/fnm/aliases/default/bin": fnm},
+                      versions={brew: "v25.0.0", fnm: "v20.19.4"})
+        app = _by_place(world.probe())["the Quern app"]
+        assert app.ok and app.path == brew
+
+    def test_the_menu_bar_search_path_matches_the_app(self):
+        """Doctor's "the Quern app" row is only true if it searches what the
+        app searches. `QuernCLI.searchPath` and `MENUBAR_EXTRA_PATH` are two
+        copies of one list, and nothing kept them in step until fnm's default
+        alias was added to both (#447)."""
+        src = (ROOT / "macos/QuernMenuBar/Sources/QuernCLI.swift").read_text()
+        expr = re.search(r"static func searchPath\(home: String\) -> \[String\] \{\s*"
+                         r"let extra = (.*?)\n\s*let current", src, re.S).group(1)
+        fnm_dirs = re.findall(r'"([^"]*)"',
+                              re.search(r"static let fnmDataDirs = \[(.*?)\]", src).group(1))
+        assert fnm_dirs, "fnmDataDirs not found"
+        swift: list[str] = []
+        for part in re.split(r"\n\s*\+ ", expr.strip()):
+            if part.startswith("fnmDataDirs.map"):
+                template = re.search(r'"(.*?)"', part).group(1)
+                swift += [template.replace(r"\($0)", d) for d in fnm_dirs]
+            else:
+                # Only a literal list is read. Anything else -- a named
+                # constant, a function call -- would contribute no strings and
+                # pass while the lists differed, so it fails here instead.
+                assert re.fullmatch(r'\[("[^"]*"(,\s*)?)+\]', part), \
+                    f"cannot read this part of searchPath; teach the test: {part}"
+                swift += re.findall(r'"([^"]*)"', part)
+        # Doctor assumes the app's own directories come before launchd's PATH.
+        assert re.search(r"return extra \+ current", src), "extra must come first"
+        swift = [d.replace(r"\(home)", "{home}") for d in swift]
+        # The app also names /usr/bin and /bin, which doctor takes from GUI_PATH.
+        tail = [d for d in swift if d in node_env.GUI_PATH]
+        assert swift[:len(swift) - len(tail)] == list(node_env.MENUBAR_EXTRA_PATH)
+        assert tail and swift[-len(tail):] == tail, "launchd's directories come last"
 
     def test_dock_advice_names_only_fixes_that_work_there(self):
         """launchd's PATH has no Homebrew in it, so `brew install node`
