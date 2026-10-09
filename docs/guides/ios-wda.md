@@ -96,10 +96,15 @@ On iOS 17+, the connection goes through tunneld via IPv6. On older iOS, it uses 
 WDA sessions go stale (device locks, app crashes, timeout). Quern handles this automatically:
 
 - **Session expired**: Creates a new session and retries
-- **Connection lost**: Restarts the driver process and retries
-- **Transport error**: Same recovery as connection loss
+- **Connection lost**: Reconnects (on a physical device, with a fresh port-forward) and retries
 
-If a command fails and succeeds on retry, that's the recovery system working as designed.
+Reads are always retried that way. **Actions are retried only when the connection was never made** -- a tap, swipe, gesture, `type_text`, `press_button`, `launch_app` or `open_url` that timed out or lost its connection may already have been performed, or may still be pending behind a slow request. Sending it again could tap twice or type the text twice, so quern reports it instead:
+
+```
+WDA did not answer the tap on 00008110 (ReadTimeout). It may already have been performed, or still be pending behind a slow request, so it was not sent again. ...
+```
+
+Read the UI tree (`get_screen_summary`) to see whether it happened before repeating it. A screenshot can show the screen from before a pending action.
 
 ## Finding Elements
 

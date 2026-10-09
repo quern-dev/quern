@@ -136,18 +136,32 @@ async def test_the_refusal_says_the_write_may_have_run(wda, name, path, call, ma
     )), text
 
 
+#: Errors that mean no connection was made, so nothing reached WDA.
+NEVER_SENT = [
+    pytest.param(lambda: httpx.ConnectError("refused", request=_req()), id="refused"),
+    # A TimeoutException subclass, so it is easy to class as maybe-delivered by
+    # accident; on a rotated tunnel that would fail every write (review, #407).
+    pytest.param(lambda: httpx.ConnectTimeout("no route", request=_req()),
+                 id="connect-timeout"),
+]
+
+
+@pytest.mark.parametrize("make_error", NEVER_SENT)
 @pytest.mark.parametrize(("name", "path", "call"), WRITES, ids=[w[0] for w in WRITES])
-async def test_a_refused_connection_is_still_retried(wda, name, path, call):
-    """A refused connection never reached WDA, so sending it again is safe --
-    and keeps a write working across a forward that has just been replaced."""
-    fake = wda.install({path: [httpx.ConnectError("refused", request=_req())]})
+async def test_a_connection_never_made_is_still_retried(wda, name, path, call, make_error):
+    """A connection that was never made never reached WDA, so sending it again
+    is safe -- and keeps a write working across a forward that has just been
+    replaced."""
+    fake = wda.install({path: [make_error()]})
     await call(wda)
     assert fake.reached(path) == 2
 
 
 async def test_the_backspace_fallback_of_a_clear_is_not_sent_twice(wda, monkeypatch):
     """select_all_and_delete's last resort: three taps, then one backspace.
-    Re-sent, the backspace deletes a character the caller did not ask about."""
+    Where the triple-tap selected everything a second backspace is harmless;
+    where it did not -- one paragraph of a multi-line view -- it deletes a
+    character the caller did not ask about. Held to the rule for writes."""
     fake = wda.install({"/wda/keys": [httpx.ReadError("reset", request=_req())]})
     with pytest.raises(DeviceError):
         await wda.select_all_and_delete(SIM, 10, 10)
@@ -178,3 +192,60 @@ async def test_a_clear_is_still_retried(wda):
     fake = wda.install({"/element/E1/clear": [httpx.ReadError("reset", request=_req())]})
     await wda._request("post", SIM, "/element/E1/clear", use_session=True)
     assert fake.reached("/element/E1/clear") == 2
+
+
+class _DropSpy:
+    """Records whether `_request` dropped the connection it used. On a
+    simulator dropping and keeping look alike -- the next request rebuilds an
+    identical one -- so the transport counts cannot tell them apart."""
+
+    def __init__(self, backend, monkeypatch):
+        self.dropped = 0
+        real = backend._drop_connection
+
+        async def spy(*a, **k):
+            self.dropped += 1
+            return await real(*a, **k)
+
+        monkeypatch.setattr(backend, "_drop_connection", spy)
+
+
+async def test_a_write_whose_connection_failed_drops_it(wda, monkeypatch):
+    """A read error means the connection is broken. Kept, a physical device's
+    dead usbmux forward would fail every write after it: `_get_base_url` only
+    replaces a forward whose process has exited."""
+    wda.install({"/wda/tap": [httpx.ReadError("reset", request=_req())]})
+    await wda._ensure_session(SIM)
+    spy = _DropSpy(wda, monkeypatch)
+    with pytest.raises(DeviceError):
+        await wda.tap(SIM, 10, 10)
+    assert spy.dropped == 1
+
+
+async def test_a_write_that_was_only_slow_keeps_its_connection(wda, monkeypatch):
+    """A timeout says WDA is slow, not gone; dropping would kill a working
+    forward and lose the session for every write queued behind this one."""
+    wda.install({"/wda/tap": [httpx.ReadTimeout("slow", request=_req())]})
+    await wda._ensure_session(SIM)
+    spy = _DropSpy(wda, monkeypatch)
+    with pytest.raises(DeviceError):
+        await wda.tap(SIM, 10, 10)
+    assert spy.dropped == 0
+
+
+async def test_long_text_gets_time_to_be_typed(wda, monkeypatch):
+    """WDA types at about 60 keys a second, so a fixed timeout would report
+    long text as failed while it is still being typed -- and, now that typing
+    is never re-sent, report it every time."""
+    seen = {}
+    real = wda._request
+
+    async def spy(method, udid, path, **kw):
+        if path == "/wda/keys":
+            seen["timeout"] = kw.get("timeout")
+        return await real(method, udid, path, **kw)
+
+    wda.install()
+    monkeypatch.setattr(wda, "_request", spy)
+    await wda.type_text(SIM, "x" * 3000)
+    assert seen["timeout"] >= wda_mod.ACTION_TIMEOUT + 3000 / 60

@@ -408,7 +408,8 @@ class TestWdaBackendTypeText:
             mock_client.post.assert_called_once_with(
                 "http://localhost:8100/session/test-session/wda/keys",
                 json={"value": ["h", "e", "l", "l", "o"]},
-                timeout=ACTION_TIMEOUT,
+                # Grows with the text, so long text is not cut off (#407).
+                timeout=ACTION_TIMEOUT + 5 / 20,
             )
 
 

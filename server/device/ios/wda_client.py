@@ -870,9 +870,10 @@ class WdaBackend:
         If raise_on_timeout=True, re-raises httpx.TimeoutException directly
         instead of wrapping it in DeviceError (so callers can handle timeouts).
         If raise_if_maybe_delivered=True, any transport error that may have
-        come after WDA had the request -- everything but a refused connection
-        -- is re-raised as the httpx exception and never re-sent: for a write
-        whose second answer would differ from its first (CodeRabbit on #393).
+        come after WDA had the request -- everything but a connection that was
+        never made (refused, or timed out connecting) -- is re-raised as the
+        httpx exception and never re-sent: for a write whose second answer
+        would differ from its first (CodeRabbit on #393).
 
         On WdaInvalidSessionError with use_session=True, automatically clears
         the stale session, creates a new one, and retries once.
@@ -900,7 +901,12 @@ class WdaBackend:
                 # Caller wants to handle timeouts — don't invalidate connection
                 # (WDA may still be alive, just slow on this request)
                 raise
-            if raise_if_maybe_delivered and not isinstance(exc, httpx.ConnectError):
+            # ConnectTimeout is a TimeoutException, but like a ConnectError it
+            # means no connection was made, so nothing reached WDA: it takes
+            # the drop-and-retry below. Classed as maybe-delivered, a stale
+            # tunnel address would fail every write until something read.
+            never_sent = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
+            if raise_if_maybe_delivered and not never_sent:
                 if not isinstance(exc, httpx.TimeoutException):
                     # The connection itself failed; a slow one is kept.
                     await self._drop_connection(udid, expected=conn_used)
@@ -991,10 +997,12 @@ class WdaBackend:
         can arrive *after* WDA has the request, so re-sending runs it again: a
         tap lands twice, text is typed twice, a second Home press opens the app
         switcher (#407; #74 is the same ambiguity on sim-bridge). Only a
-        refused connection, which never reached WDA, is still retried.
+        connection that was never made, which never reached WDA, is still
+        retried.
 
-        Anything else is a `DeviceError` saying the action may already have
-        been performed. Re-issuing it is the caller's call, made after looking
+        Anything else is a `DeviceError` saying the action may have been
+        performed, or may still be: after a timeout WDA can be holding it
+        behind a slow request. Re-issuing it is the caller's call, made after looking
         at the screen, because only the caller can tell whether a second one is
         safe.
         """
@@ -1007,8 +1015,9 @@ class WdaBackend:
         except httpx.HTTPError as exc:
             raise DeviceError(
                 f"WDA did not answer the {action} on {udid[:8]} ({type(exc).__name__}). "
-                "It may already have been performed, so it was not sent again; check "
-                "the screen.",
+                "It may already have been performed, or still be pending behind a "
+                "slow request, so it was not sent again. Read the UI tree before "
+                "repeating it -- a screenshot can show the screen from before it.",
                 tool="wda",
             ) from exc
 
@@ -1543,7 +1552,11 @@ class WdaBackend:
 
     async def type_text(self, udid: str, text: str) -> None:
         """Type text via WDA. Never re-sent: it would type the text twice."""
-        await self._write(udid, "/wda/keys", action="typing", json={"value": list(text)})
+        # WDA types at its maxTypingFrequency (60 keys/s by default; quern
+        # leaves it). Allow a third of that, so long text that is still being
+        # typed is not reported as a failure.
+        await self._write(udid, "/wda/keys", action="typing", json={"value": list(text)},
+                          timeout=ACTION_TIMEOUT + len(text) / 20)
 
     async def press_button(self, udid: str, button: str) -> None:
         """Press a hardware button via WDA. Never re-sent: a second Home press
@@ -1861,7 +1874,8 @@ class WdaBackend:
         for _ in range(3):
             await self.tap(udid, x, y)
         await asyncio.sleep(0.15)
-        await self._write(udid, "/wda/keys", action="backspace", json={"value": ["\b"]})
+        await self._write(udid, "/wda/keys", action="backspace clearing the field",
+                          json={"value": ["\b"]})
 
 
 # ------------------------------------------------------------------
