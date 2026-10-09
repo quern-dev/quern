@@ -21,6 +21,9 @@ from server.models import BuildResult
 from tests.test_build_records import HEADERS, FakeController, FakeDsymutil, _app
 
 PHONE, SIM = "00008101-PHONE", "SIM-UDID"
+#: Every wait on an event, a lock or a task is bounded: a regression fails
+#: the test rather than hanging the suite.
+BOUND = 2
 
 
 @pytest.fixture
@@ -204,11 +207,14 @@ async def test_a_cancelled_request_stops_both_builds_before_letting_go(builds, m
 
     task = asyncio.create_task(request())
     try:
-        while len(started) < 2:
-            await asyncio.sleep(0)
+        async def both_started():
+            while len(started) < 2:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(both_started(), BOUND)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(task, 2)
+            await asyncio.wait_for(task, BOUND)
         assert sorted(stopped) == sorted(started), "a build outlived its request"
     finally:
         release.set()  # a build left running must not hang the suite
@@ -231,18 +237,18 @@ async def test_a_request_cancelled_while_waiting_holds_nothing(tmp_path):
             pass
 
     held_b = asyncio.create_task(blocker())
-    await blocker_holds.wait()
+    await asyncio.wait_for(blocker_holds.wait(), BOUND)
     waiting = asyncio.create_task(waiter())
     await asyncio.sleep(0.01)
     assert route._DERIVED_LOCKS[a].locked(), "it took the first and waits for the second"
     lock_a, lock_b = route._DERIVED_LOCKS[a], route._DERIVED_LOCKS[b]
     waiting.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await waiting
+        await asyncio.wait_for(waiting, BOUND)
     assert not lock_a.locked()
     assert lock_b.locked(), "it let go of a lock the blocker holds"
     release.set()
-    await held_b
+    await asyncio.wait_for(held_b, BOUND)
 
 
 async def test_the_order_is_fixed_so_two_requests_cannot_deadlock(tmp_path):
@@ -264,12 +270,12 @@ async def test_the_order_is_fixed_so_two_requests_cannot_deadlock(tmp_path):
             done.append(name)
 
     held = asyncio.create_task(holder())
-    await holder_has_a.wait()
+    await asyncio.wait_for(holder_has_a.wait(), BOUND)
     ab = asyncio.create_task(take([a, b], "ab"))
     ba = asyncio.create_task(take([b, a], "ba"))
     await asyncio.sleep(0.01)
     let_a_go.set()
-    await asyncio.wait_for(asyncio.gather(held, ab, ba), 2)
+    await asyncio.wait_for(asyncio.gather(held, ab, ba), BOUND)
     assert sorted(done) == ["ab", "ba"]
 
 
@@ -333,8 +339,8 @@ async def test_a_cancelled_build_is_killed_too(monkeypatch, tmp_path):
     monkeypatch.setattr(route.asyncio, "create_subprocess_exec", fake_exec)
     task = asyncio.create_task(route._build("-workspace", "/p/W.xcworkspace", "S", "Debug",
                                             "generic/platform=iOS", tmp_path, object()))
-    await running.wait()
+    await asyncio.wait_for(running.wait(), BOUND)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await task
+        await asyncio.wait_for(task, BOUND)
     assert calls == ["kill", "wait"]
