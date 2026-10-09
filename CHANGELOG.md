@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0-beta.3] - 2026-10-09
+
 ### Added
 - **Multi-finger gestures (#252, #419, #420).** A new `gesture` tool (`POST /api/v1/device/ui/gesture`) does `pinch`, `rotate`, two-finger `pan`, `double_tap` (or a triple tap) and `two_finger_tap`, centred on a point or on an element. It works on iOS simulators through sim-bridge, on physical iPhones through WDA's W3C pointer actions, and on Android emulators and devices through scrcpy's server, which needs `brew install scrcpy`. Every backend gets the same finger paths.
 - **Long press and edge swipes on every backend (#251, #421).** `duration` (seconds, up to 10) on `tap` and `tap_element` holds the touch, on sim-bridge, idb, WDA and uiautomator2. `edge` on `swipe` makes it a swipe from that screen edge: back, home, Control Centre or the notification shade. A swipe that doesn't start at the edge is a 400 on every backend.
@@ -777,7 +779,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.24.0-beta.2...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.24.0-beta.3...main
+[0.24.0-beta.3]: https://github.com/quern-dev/quern/releases/tag/v0.24.0-beta.3
 [0.24.0-beta.2]: https://github.com/quern-dev/quern/releases/tag/v0.24.0-beta.2
 [0.24.0-beta.1]: https://github.com/quern-dev/quern/releases/tag/v0.24.0-beta.1
 [0.23.0]: https://github.com/quern-dev/quern/releases/tag/v0.23.0
