@@ -184,3 +184,150 @@ class TestHowItReads:
             BuildAndInstallResponse(build_iphoneos=result, devices=[], all_installed=False))
         assert "1 error(s)" in summary and "  : " not in summary
         assert result.generate_summary().count("  : ") == 0
+
+
+# -- package resolution (#442) -------------------------------------------------------
+# The reason is on the indented lines under the error, and the result ended
+# at the colon. Real output from Xcode 26.5, three causes, paths shortened.
+
+PACKAGE_REPO_MISSING = """\
+Command line invocation:
+    /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild \
+-workspace W.xcworkspace -scheme Pkg build
+
+Resolve Package Graph
+
+skipping cache due to an error: Failed to clone repository https://github.com/example/no-such-package.git:
+    Cloning into bare repository \
+'/Users/me/Library/Caches/org.swift.swiftpm/repositories/no-such-package-3995d913'...
+    remote: Repository not found.
+    fatal: repository 'https://github.com/example/no-such-package.git/' not found
+
+Resolved source packages:
+  Pkg: (null)
+
+2026-10-08 22:46:56.850 xcodebuild[58359:227958050] Writing error result bundle to \
+/var/folders/T/ResultBundle.xcresult
+xcodebuild: error: Could not resolve package dependencies:
+  Failed to clone repository https://github.com/example/no-such-package.git:
+    Cloning into bare repository '/src/dd/SourcePackages/repositories/no-such-package-3995d913'...
+    remote: Repository not found.
+    fatal: repository 'https://github.com/example/no-such-package.git/' not found
+
+"""
+
+PACKAGE_PATH_MISSING = """\
+xcodebuild: error: Could not resolve package dependencies:
+  the package at '/src/Missing/NoSuchDir' cannot be accessed \
+(/src/Missing/NoSuchDir doesn't exist in file system)
+
+"""
+
+PACKAGE_VERSION_UNSATISFIABLE = """\
+xcodebuild: error: Could not resolve package dependencies:
+  Failed to resolve dependencies Dependencies could not be resolved because no versions of \
+'swift-argument-parser' match the requirement 999.0.0..<1000.0.0 and root depends on \
+'swift-argument-parser' 999.0.0..<1000.0.0.
+
+"""
+
+
+class TestPackageResolution:
+    @pytest.mark.parametrize("text,why", [
+        (PACKAGE_REPO_MISSING, "remote: Repository not found."),
+        (PACKAGE_PATH_MISSING, "doesn't exist in file system"),
+        (PACKAGE_VERSION_UNSATISFIABLE, "no versions of 'swift-argument-parser' match"),
+    ])
+    async def test_the_reason_is_kept(self, text, why):
+        result = await _parse(text)
+        assert not result.succeeded
+        [error] = result.errors
+        assert error.message.startswith("Could not resolve package dependencies:\n")
+        assert why in error.message
+
+    async def test_the_reason_stops_at_the_blank_line(self):
+        [error] = (await _parse(PACKAGE_REPO_MISSING)).errors
+        assert error.message.splitlines()[-1].strip().startswith("fatal: repository")
+
+    async def test_the_reason_reaches_the_summary(self):
+        from server.api.build_app import BuildAndInstallResponse, _build_install_summary
+
+        result = await _parse(PACKAGE_PATH_MISSING)
+        summary = _build_install_summary(
+            BuildAndInstallResponse(build_iphonesimulator=result, devices=[], all_installed=False))
+        assert "doesn't exist in file system" in summary
+
+    async def test_an_error_not_ending_in_a_colon_takes_no_lines_below_it(self):
+        """Under any other error an indented line is the next command's, not
+        part of the message."""
+        text = ('error: Signing for "MyApp" requires a development team.\n'
+                "    cd /src/MyApp\n"
+                "** BUILD FAILED **\n")
+        [error] = (await _parse(text)).errors
+        assert error.message == 'Signing for "MyApp" requires a development team.'
+
+    async def test_a_long_reason_is_cut_and_says_so(self):
+        lines = "".join(f"    remote: line {n}\n" for n in range(40))
+        text = f"xcodebuild: error: Could not resolve package dependencies:\n{lines}\n"
+        [error] = (await _parse(text)).errors
+        kept = error.message.splitlines()
+        assert len(kept) == 1 + 12 + 1
+        assert kept[-1].strip() == "… 28 more line(s)"
+
+    async def test_the_same_block_twice_is_one_error(self):
+        [error] = (await _parse(PACKAGE_PATH_MISSING + PACKAGE_PATH_MISSING)).errors
+        assert "cannot be accessed" in error.message
+
+    async def test_a_repeat_naming_another_path_is_still_one_error(self):
+        """The same failure told twice can name a different cache path below;
+        the first telling is kept."""
+        again = PACKAGE_PATH_MISSING.replace("/src/Missing", "/elsewhere/Missing")
+        [error] = (await _parse(PACKAGE_PATH_MISSING + again)).errors
+        assert "/src/Missing" in error.message and "/elsewhere" not in error.message
+
+    async def test_an_unindented_line_is_not_part_of_the_reason(self):
+        text = ("xcodebuild: error: Could not resolve package dependencies:\n"
+                "  the package at '/src/X' cannot be accessed\n"
+                "Resolved source packages:\n")
+        [error] = (await _parse(text)).errors
+        assert "Resolved source packages" not in error.message
+        assert "cannot be accessed" in error.message
+
+
+# -- the exit code (#442) ----------------------------------------------------------
+
+
+class TestExitCode:
+    async def test_a_non_zero_exit_fails_a_build_whose_output_said_nothing(self):
+        result = await BuildAdapter().parse_build_output("Resolve Package Graph\n", exit_code=74)
+        assert not result.succeeded
+        [error] = result.errors
+        assert error.message.startswith("xcodebuild exited 74; ")
+
+    async def test_a_non_zero_exit_overrides_a_success_line(self):
+        result = await BuildAdapter().parse_build_output("** BUILD SUCCEEDED **\n", exit_code=65)
+        assert not result.succeeded
+        [error] = result.errors
+        assert "though its output said the build succeeded" in error.message
+
+    @pytest.mark.parametrize("code", [0, None])
+    async def test_a_clean_exit_changes_nothing(self, code):
+        result = await BuildAdapter().parse_build_output("** BUILD SUCCEEDED **\n", exit_code=code)
+        assert result.succeeded and result.errors == []
+
+    async def test_the_build_step_passes_xcodebuilds_exit_code(self, monkeypatch, tmp_path):
+        from server.api import build_app as route
+
+        class Proc:
+            returncode = 74
+
+            async def communicate(self):
+                return b"Resolve Package Graph\n", b""
+
+        async def fake_exec(*_argv, **_kwargs):
+            return Proc()
+
+        monkeypatch.setattr(route.asyncio, "create_subprocess_exec", fake_exec)
+        result = await route._build("-workspace", "/p/W.xcworkspace", "S", "Debug",
+                                    "generic/platform=iOS Simulator", tmp_path, BuildAdapter())
+        assert not result.succeeded

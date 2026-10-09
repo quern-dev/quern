@@ -576,6 +576,34 @@ class TestTheManager:
                     if e["type"] == "video_stopped" and e["segment"] == 2]
         assert failed["start_host_time"] is None and "could not be started" in failed["error"]
 
+    async def test_video_is_not_called_lost_while_its_movie_records(self, tmp_path):
+        """No segment has finished yet, which is not the same as none
+        recorded: it said `true` for every running recording with video
+        (#442), beside a `complete` that said null."""
+        manager = Sources().manager(FakeVideo())
+        rec = await manager.start(SIM, str(tmp_path / "r"), Filters(video=True))
+        running = manager.get(rec.id).summary()
+        assert running["video_lost"] is None and running["complete"] is None
+        await manager.stop(rec.id)
+        assert manager.get(rec.id).summary()["video_lost"] is False
+
+    async def test_a_segment_lost_mid_run_is_said_before_the_stop(self, tmp_path):
+        first = Sources().manager(FakeVideo())
+        rec = await first.start(SIM, str(tmp_path / "r"), Filters(video=True))
+        await first.shutdown()
+        second = Sources().manager(FakeVideo(fail_start=True))
+        await asyncio.wait_for(second.resume_all(), RESUME_BOUND)
+        await second.get(rec.id)._resuming
+        assert second.get(rec.id).state == "recording"
+        assert second.get(rec.id).summary()["video_lost"] is True
+        await second.stop(rec.id)
+
+    async def test_no_video_asked_is_never_lost(self, tmp_path):
+        manager = Sources().manager(FakeVideo())
+        rec = await manager.start(SIM, str(tmp_path / "r"), Filters())
+        assert manager.get(rec.id).summary()["video_lost"] is False
+        await manager.stop(rec.id)
+
     async def test_every_action_gets_a_keyframe_though_ids_are_reused(self, tmp_path):
         """Each scope freed before the next is made, as in production: CPython
         hands the next one the same address. Keyed on id(), 1 of 50 got a
@@ -752,10 +780,20 @@ class TestTheManager:
         assert ("video_stopped", 1) in kinds
         assert kinds.index(("video_stopped", 1)) < kinds.index(("stopped", None))
 
+    def test_an_interrupted_recording_has_not_lost_its_video_yet(self, tmp_path):
+        """Interrupted is still running: stoppable, its movie not yet tallied."""
+        rec = rec_mod.Recording(id="r", udid=SIM, dir=tmp_path, filters=Filters(video=True),
+                                started_at=datetime(2026, 10, 1, tzinfo=UTC),
+                                state="interrupted")
+        assert rec.video_lost is None
+        rec.video_segments = [{"segment": 1, "start_host_time": None, "error": "killed"}]
+        assert rec.video_lost is True
+
     def test_video_asked_for_and_none_recorded_is_not_complete(self, tmp_path):
         rec = rec_mod.Recording(id="r", udid=SIM, dir=tmp_path, filters=Filters(video=True),
                                 started_at=datetime(2026, 10, 1, tzinfo=UTC), state="stopped")
         assert rec.complete is False
+        assert rec.video_lost is True
         rec.video_segments = [{"segment": 1, "start_host_time": 1000.0}]
         assert rec.complete is True
 

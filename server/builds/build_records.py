@@ -1,8 +1,9 @@
 """A record of each build quern makes, so a crash can be matched to it (#326).
 
-`build_and_install` builds every scheme into one DerivedData directory, and the
-next build overwrites it. So the binary a phone is running, and the object files
-its debug information lives in, are gone by the time its crash is read. A
+`build_and_install` builds each project's scheme into one DerivedData directory
+per platform, and the next build overwrites it. So the binary a phone is
+running, and the object files its debug information lives in, are gone by the
+time its crash is read. A
 record keeps, per build: what was built (bundle id, version, configuration,
 platform), where, and each binary's UUID, which is how a crash report names the
 binaries it ran.
