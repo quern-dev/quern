@@ -389,7 +389,10 @@ class TestTheBackends:
         assert args[:3] == ("post", PHONE, "/wda/apps/launch")
         assert kwargs["json"] == {"bundleId": APP,
                                   "environment": {"QUERN_AUTOMATION": "YES", **ENV}}
-        assert kwargs["raise_on_timeout"] is True
+        # Every error that may come after WDA has the request, not only a
+        # timeout (#407); the re-send itself is tested against the real
+        # `_request` in test_wda_writes_not_resent.py.
+        assert kwargs["raise_if_maybe_delivered"] is True
 
     async def test_a_timed_out_wda_launch_is_reported_not_retried(self):
         import httpx

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A WDA action that timed out or lost its connection is no longer sent again (#407).** Quern re-sent it once on a fresh connection, but the action may already have run, so a tap could land twice, text be typed twice, or a second Home press open the app switcher. A tap, swipe, `type_text` or `press_button` that may have reached WDA is now reported instead: a `[wda]` error saying it may have been performed or still be pending, so read the UI tree before repeating it. `launch_app` and `open_url`, already not re-sent after a timeout, are no longer re-sent after a lost connection either. A connection that was never made, refused or timed out connecting, is still retried. Most reads keep their retry. Long `type_text` gets a timeout that grows with the text, so it is not reported as failed while WDA is still typing.
+
 ## [0.24.0-beta.2] - 2026-10-04
 
 ### Added

@@ -582,7 +582,11 @@ class TestTheWdaCalls:
         with pytest.raises(DeviceError, match="may have opened anyway"):
             await wda.open_url(PHONE, URL)
         assert wda._request.await_count == 1
-        assert wda._request.call_args.kwargs["raise_on_timeout"] is True
+        # Every error that may come after WDA has the request, not only a
+        # timeout (#407). That `_request` honours it -- the re-send this test
+        # cannot see, since it replaces `_request` -- is tested against the
+        # real one in test_wda_writes_not_resent.py.
+        assert wda._request.call_args.kwargs["raise_if_maybe_delivered"] is True
 
     async def test_a_slow_front_read_is_a_short_error_not_a_reconnect(self):
         import httpx
