@@ -161,6 +161,10 @@ enum NodeVisibility: Equatable {
         (".volta", "volta"),
         (".nvm", "nvm"),
         (".local/state/fnm_multishells", "fnm"),
+        // fnm's default data directory today; only the per-shell state one
+        // and the two older homes were here, so a modern fnm with no default
+        // set and no shell open read `.absent` (#447 review).
+        (".local/share/fnm", "fnm"),
         ("Library/Application Support/fnm", "fnm"),
         (".fnm", "fnm"),
         ("Library/pnpm", "pnpm"),

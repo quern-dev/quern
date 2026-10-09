@@ -399,8 +399,21 @@ class TestFixes:
         shell = self._site("login shell", node_env.OK,
                            f"{HOME}/.local/state/fnm_multishells/9_9/bin/node", "v22.23.2")
         fix = node_env.fix_for(app, [app, shell])
-        assert "fnm default 22" in fix
-        assert "brew install" not in fix
+        # Installed first: `fnm default 22` alone fails when 22 is not.
+        assert "fnm install 22 && fnm default 22" in fix
+        assert "brew install node" not in fix
+        assert "FNM_DIR" in fix, "says when the default is somewhere it cannot look"
+
+    def test_the_quern_app_keeps_a_current_homebrew_node_over_an_old_fnm_default(self):
+        """fnm's directories come after Homebrew's: ahead, an fnm default of
+        20 turned a working Homebrew node into a too-old one (#447 review)."""
+        brew = "/opt/homebrew/bin/node"
+        fnm = f"{HOME}/.local/share/fnm/aliases/default/bin/node"
+        world = World(on_path={"/opt/homebrew/bin": brew,
+                               f"{HOME}/.local/share/fnm/aliases/default/bin": fnm},
+                      versions={brew: "v25.0.0", fnm: "v20.19.4"})
+        app = _by_place(world.probe())["the Quern app"]
+        assert app.ok and app.path == brew
 
     def test_the_menu_bar_search_path_matches_the_app(self):
         """Doctor's "the Quern app" row is only true if it searches what the
@@ -419,7 +432,14 @@ class TestFixes:
                 template = re.search(r'"(.*?)"', part).group(1)
                 swift += [template.replace(r"\($0)", d) for d in fnm_dirs]
             else:
+                # Only a literal list is read. Anything else -- a named
+                # constant, a function call -- would contribute no strings and
+                # pass while the lists differed, so it fails here instead.
+                assert re.fullmatch(r'\[("[^"]*"(,\s*)?)+\]', part), \
+                    f"cannot read this part of searchPath; teach the test: {part}"
                 swift += re.findall(r'"([^"]*)"', part)
+        # Doctor assumes the app's own directories come before launchd's PATH.
+        assert re.search(r"return extra \+ current", src), "extra must come first"
         swift = [d.replace(r"\(home)", "{home}") for d in swift]
         # The app also names /usr/bin and /bin, which doctor takes from GUI_PATH.
         tail = [d for d in swift if d in node_env.GUI_PATH]

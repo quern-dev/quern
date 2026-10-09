@@ -11,7 +11,8 @@ diagnosis: the menubar app launches the server from a GUI context, inheriting
 launchd's minimal PATH rather than a shell's. A node installed by fnm or nvm is
 unreachable from there, and unreachable in a way no static PATH list can fix --
 fnm's directory is named for the pid of the shell that asked for it, which is
-why `quern setup` records node's path as None on such a machine.
+why `quern setup` records node's path as None on such a machine. (fnm's
+`default` alias is the exception; the app searches it since #447.)
 
 So the fix is not to find npm. It is to stop needing it (ship a built `dist/`),
 and to survive not having it (return False rather than raise). See #193.

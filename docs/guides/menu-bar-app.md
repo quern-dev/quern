@@ -205,13 +205,14 @@ wrapper already built, so updating does not need to run npm.
 
 It can still need your shell for a different reason. Setup checks that a Node is
 *present* — the MCP wrapper is run by your editor, not by the build — and an app
-started from the Dock or at login cannot see a Node installed by fnm, nvm,
-Volta, asdf or mise. When that is the case the item becomes **Update in
-Terminal…**, with a **Why Terminal?** line naming the manager, and the update
-runs where your own environment is. This is not something a longer search path
-could fix: fnm keeps its node in a directory named after the shell that asked
-for it, so the path is different in every shell and exists in none of them for a
-GUI app.
+started from the Dock or at login gets none of your shell's setup. The Quern app
+looks in `~/.local/bin`, Homebrew's directories and **fnm's default Node**
+(`fnm default 22` sets it), so a Node from any of those is found. A Node it
+can't see — nvm, Volta, asdf or mise, or fnm with no default — turns the item
+into **Update in Terminal…**, with a **Why Terminal?** line naming the manager,
+and the update runs where your own environment is. Those managers keep their
+Node somewhere no fixed list can name: nvm's default is a version written in a
+file, and each shell's fnm Node is in a directory named after that shell.
 
 **Git install** (a clone you ran `./quern setup` in): the item is **Update in
 Terminal…**, which opens a Terminal window running `quern update`. A git

@@ -1813,7 +1813,8 @@ def check_node(sites: list | None = None) -> CheckResult:
         # "Not installed" is wrong when it is installed and merely unreachable
         # from *this* process, which is the ordinary case for a GUI launch: a
         # node from fnm or nvm lives in a directory no static PATH can name,
-        # and fnm's contains the pid of the shell that asked for it. A user met
+        # and fnm's contains the pid of the shell that asked for it (the app
+        # does search fnm's `default` alias since #447). A user met
         # this as a failed update reporting Node missing on a machine whose
         # every shell has Node 22 (#339).
         #
