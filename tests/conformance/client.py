@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -195,9 +196,17 @@ class QuernClient:
     #: installing). Everything else gets the default.
     DEFAULT_TIMEOUT = 30.0
 
-    def __init__(self, target: ServerTarget, *, record: list[Call] | None = None):
+    def __init__(
+        self, target: ServerTarget, *, record: list[Call] | None = None,
+        session: str | None = None,
+    ):
         self.target = target
         self.calls: list[Call] = record if record is not None else []
+        #: Sent as `X-Quern-Session` on every request (#254), so this run's
+        #: actions are attributed to it rather than read as an unidentified
+        #: caller -- which the server warns about. One per client, so two
+        #: runs against the same server can be told apart in a trace.
+        self.session = session or f"conformance-{uuid.uuid4().hex[:12]}"
         self._client = httpx.Client(
             base_url=target.url,
             timeout=httpx.Timeout(self.DEFAULT_TIMEOUT),
@@ -221,6 +230,7 @@ class QuernClient:
         headers = dict(kwargs.pop("headers", {}) or {})
         if authenticated and self.target.api_key:
             headers.setdefault("Authorization", f"Bearer {self.target.api_key}")
+        headers.setdefault("X-Quern-Session", self.session)
 
         import time
 
