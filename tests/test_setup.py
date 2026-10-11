@@ -1719,6 +1719,68 @@ class TestBuildPreviewApp:
         assert "swiftc exploded" in (result.detail or "")
 
 
+class TestBuildSimulatorPreviewEngine:
+    """quern-media is built during setup too, beside the screen-mirror app (#285).
+
+    Built lazily, the first simulator preview paid a cold SwiftPM build inside
+    the request, a broken toolchain surfaced there rather than in setup, and
+    the preview app's Devices menu could not preview a simulator on a fresh
+    install: without a server it starts the quern-media installed beside it.
+    """
+
+    def test_builds_when_swift_is_available(self):
+        from server.lifecycle.setup import build_simulator_preview_engine
+
+        with patch("server.lifecycle.setup._which", return_value="/usr/bin/swift"), \
+             patch("server.device.media.media_engine.build_media_engine_sync") as build:
+            result = build_simulator_preview_engine()
+
+        build.assert_called_once_with()
+        assert result.status == CheckStatus.OK
+
+    def test_no_swift_is_skipped_and_builds_nothing(self):
+        """A missing feature, not a broken install. And no second installer
+        prompt: `build_preview_app` has just offered one for the same tools."""
+        from server.lifecycle.setup import build_simulator_preview_engine
+
+        with patch("server.lifecycle.setup._which", return_value=None), \
+             patch("server.lifecycle.setup._prompt_yn") as prompt, \
+             patch("server.device.media.media_engine.build_media_engine_sync") as build:
+            result = build_simulator_preview_engine()
+
+        assert result.status == CheckStatus.SKIPPED
+        assert result.fixable is True
+        assert "xcode-select --install" in (result.detail or "")
+        build.assert_not_called()
+        prompt.assert_not_called()
+
+    def test_an_install_without_the_sources_is_skipped(self):
+        from server.lifecycle.setup import build_simulator_preview_engine
+
+        with patch("server.device.media.media_engine.package_dir", return_value=None), \
+             patch("server.lifecycle.setup._which", return_value="/usr/bin/swift"), \
+             patch("server.device.media.media_engine.build_media_engine_sync") as build:
+            result = build_simulator_preview_engine()
+
+        assert result.status == CheckStatus.SKIPPED
+        build.assert_not_called()
+
+    @pytest.mark.parametrize("error", [
+        RuntimeError("Failed to build quern-media:\nerror: no such module"),
+        PermissionError("~/.quern/bin is not writable"),
+    ])
+    def test_a_failure_warns_rather_than_stopping_setup(self, error):
+        from server.lifecycle.setup import build_simulator_preview_engine
+
+        with patch("server.lifecycle.setup._which", return_value="/usr/bin/swift"), \
+             patch("server.device.media.media_engine.build_media_engine_sync",
+                   side_effect=error):
+            result = build_simulator_preview_engine()
+
+        assert result.status == CheckStatus.WARNING
+        assert str(error) in (result.detail or "")
+
+
 class TestTunneldDriftReporting:
     """The staleness check tests two conditions with different remedies, and
     reported the log path whichever one failed."""

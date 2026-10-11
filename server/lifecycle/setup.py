@@ -743,6 +743,63 @@ def build_preview_app() -> CheckResult:
     )
 
 
+def build_simulator_preview_engine() -> CheckResult:
+    """Build quern-media, which simulator preview and recorded video run on.
+
+    The same reasoning as `build_preview_app`, which it sits beside (#285).
+    Built lazily, the first simulator preview paid a cold SwiftPM build
+    inside the request, a broken toolchain surfaced there rather than here
+    where every other tool is checked, and the preview app's own Devices menu
+    could not preview a simulator at all on a fresh install: run without a
+    server, it starts the quern-media installed beside it, and nothing had
+    installed one.
+
+    Optional, like the screen-mirror app: without a Swift toolchain this is a
+    missing feature, not a broken install. It does not offer the Command Line
+    Tools installer -- `build_preview_app` just did, for the same tools.
+    """
+    from server.device.media import media_engine
+
+    name = "Simulator preview engine (quern-media)"
+
+    if media_engine.package_dir() is None:
+        return CheckResult(
+            name=name,
+            status=CheckStatus.SKIPPED,
+            message="QuernMedia sources not present in this install",
+        )
+    if _which("swift") is None:
+        return CheckResult(
+            name=name,
+            status=CheckStatus.SKIPPED,
+            message="Swift toolchain not found — simulator preview and recorded video unavailable",
+            detail="Install with: xcode-select --install",
+            fixable=True,
+        )
+
+    # Said before, not after: the report prints only at the end, and a cold
+    # release build can take minutes on a slow machine. Silence that long
+    # reads as a hang, and a Ctrl-C there ends setup before the steps after it.
+    print("    Building quern-media (simulator preview engine)...", flush=True)
+    try:
+        media_engine.build_media_engine_sync()
+    except (RuntimeError, OSError) as e:
+        # OSError for the same reason as build_preview_app: the install writes
+        # into ~/.quern/bin, and a filesystem fault must not end setup.
+        return CheckResult(
+            name=name,
+            status=CheckStatus.WARNING,
+            message="Could not build quern-media",
+            detail=str(e),
+        )
+
+    return CheckResult(
+        name=name,
+        status=CheckStatus.OK,
+        message="Built (simulator preview and recorded video)",
+    )
+
+
 # The Developer ID team that signs Quern releases. A fetched app must carry
 # this, not merely a valid signature from anyone.
 RELEASE_TEAM_ID = "3QUH73KW5Q"
@@ -3296,6 +3353,7 @@ def run_setup(assume_yes: bool = False) -> int:
     # "Screen Mirror…" when this bundle exists, and it reads that at launch.
 
     report.add(build_preview_app())
+    report.add(build_simulator_preview_engine())
 
     # ── Menu-bar app (only present in bundled release tarballs) ──
 

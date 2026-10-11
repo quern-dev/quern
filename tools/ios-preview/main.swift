@@ -641,11 +641,11 @@ final class LocalSimulatorPreview {
 
     func start() {
         guard FileManager.default.isExecutableFile(atPath: Self.binary.path) else {
-            // Not "run quern setup": setup does not build it. The server
-            // builds it the first time it previews or records a simulator.
-            end(error: "quern-media has not been built on this Mac yet. Quern builds it "
-                + "the first time it previews a simulator: start quern and open this "
-                + "simulator with preview_device, then try again.")
+            // `quern setup` builds it (#285), and so does the server the
+            // first time it previews or records a simulator.
+            end(error: "quern-media has not been built on this Mac yet. Run "
+                + "`quern setup`, or start quern and open this simulator with "
+                + "preview_device, then try again.")
             return
         }
         guard let port = Self.freeLoopbackPort() else {
