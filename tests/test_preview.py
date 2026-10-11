@@ -2191,6 +2191,12 @@ class TestPreviewStartReportsReuse:
         async def send(cmd):
             sent.append(cmd)
             _cid, _op, fut = pm._pending[cmd["key"]]
+            # Answered after a real suspension, as the app's reply over a pipe
+            # is. Answering synchronously let the first start finish before
+            # the second began, so no concurrency test could see a race --
+            # found by deleting `_add_device`'s re-check and watching this
+            # suite stay green.
+            await asyncio.sleep(0.02)
             fut.set_result(True)
 
         monkeypatch.setattr(pm, "_ensure_process", ensure_process)
@@ -2463,14 +2469,19 @@ class TestSimulatorEntriesNeverReadsAsNoneBooted:
         avoid the install dialog; that empty list is not "none booted"."""
         from server.device.media import preview as preview_mod
 
+        # A listing that would succeed, so the result can only be empty with
+        # an error if the Xcode check itself answered. (The first version of
+        # this raised here, and its message contained "Xcode" -- so with the
+        # check deleted the broad catch passed it through and the test still
+        # matched.)
         async def booted():
-            raise AssertionError("must not ask simctl without Xcode")
+            return [("SIM-1", "iPhone 17 Pro")]
 
         monkeypatch.setattr(preview_mod, "xcode_available", lambda: False)
         monkeypatch.setattr(preview_mod, "booted_simulators", booted)
         entries, error = asyncio.run(preview_mod.simulator_entries())
         assert entries == []
-        assert "Xcode" in (error or "")
+        assert error == "Xcode is not available, so simulators cannot be listed"
 
     def test_a_wedged_simctl_times_out_instead_of_hanging_status(self, monkeypatch):
         from server.device.media import preview as preview_mod
