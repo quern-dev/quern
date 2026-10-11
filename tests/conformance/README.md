@@ -151,6 +151,7 @@ parametrisation; probe-driven tests run once per platform present.
 | 18 | Preview & video streaming | `test_preview.py` | todo |
 | 19 | WDA lifecycle | `test_wda.py` | todo — physical tier |
 | 20 | Android-specific backends | `test_android.py` | todo |
+| 21 | Session attribution (`X-Quern-Session`, #254) | `test_session.py` | **done** — 3 tests; the client sends `conformance-<run id>` on every request, and the tests read it back from `/trace` |
 
 ### The fixture apps already exist
 
