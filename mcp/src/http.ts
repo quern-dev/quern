@@ -4,6 +4,15 @@ import { request as httpsRequest } from "node:https";
 import { randomBytes } from "node:crypto";
 import { discoverServer } from "./config.js";
 
+/** The server's rule for a session id (server/session.py).
+ *
+ * Declared before SESSION_ID, which reads it while the module loads. Below it,
+ * it is in its temporal dead zone at that moment: with QUERN_SESSION set, the
+ * MCP server threw on startup and never served a tool. Without it the pattern
+ * is never read, so only a run with the variable set could see it -- found by
+ * the live two-agent test, not the unit tests. */
+export const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}$/;
+
 /** Which agent session this MCP process serves, sent as X-Quern-Session on
  * every request so the server can say who asked for each action (#254).
  *
@@ -18,9 +27,6 @@ import { discoverServer } from "./config.js";
  * caller that wants a name it can recognise -- same rules the server
  * enforces, or it is ignored. Attribution, not authority. */
 export const SESSION_ID: string = mintSessionId(process.env.QUERN_SESSION);
-
-/** The server's rule for a session id (server/session.py). */
-export const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}$/;
 
 export function mintSessionId(override: string | undefined): string {
   const named = override?.trim();

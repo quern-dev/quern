@@ -99,3 +99,16 @@ test("every API request carries the session header", async () => {
     server.close();
   }
 });
+
+test("the module loads with QUERN_SESSION set", async () => {
+  // SESSION_ID is computed at import. The first version read the pattern
+  // before it was declared, which only bites when QUERN_SESSION is set -- so
+  // this imports in a fresh process with it set, as a CI job would start one.
+  const { execFileSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const http = fileURLToPath(new URL("../dist/http.js", import.meta.url));
+  const out = execFileSync(process.execPath, ["--input-type=module", "-e",
+    `const m = await import(${JSON.stringify(http)}); console.log(m.SESSION_ID);`],
+    { env: { ...process.env, QUERN_SESSION: "ci-run-4471" }, encoding: "utf8" });
+  assert.equal(out.trim(), "ci-run-4471");
+});

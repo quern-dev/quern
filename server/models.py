@@ -1300,6 +1300,11 @@ class TracedAction(BaseModel):
 
     action: str
     udid: str
+    #: The agent session that asked for it (X-Quern-Session), or "" (#254).
+    #: Declared here as well as serialised: this is the route's response
+    #: model, and FastAPI drops any field it does not name -- which is how the
+    #: first version filtered by session correctly and returned none.
+    session: str = ""
     outcome: str
     duration_ms: int | None = None
     category: str

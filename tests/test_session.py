@@ -110,9 +110,28 @@ class TestTheChain:
         assert got == {"session": "mcp-9"}
 
     def test_it_does_not_leak_between_requests(self):
+        """Behaviour, not a guard on the reset: each request already runs in
+        its own task with a copied context, so this passes without it. The
+        reset is guarded by the next test."""
         with TestClient(_app()) as client:
             client.post("/act", headers={"X-Quern-Session": "mcp-first"})
             assert client.post("/act").json() == {"session": ""}
+
+    async def test_the_middleware_restores_the_callers_context(self):
+        """Called within an existing context -- not a fresh request task -- the
+        session must not outlive the call. Found by deleting the reset and
+        watching the request-level tests stay green."""
+        seen: list[str] = []
+
+        async def inner(scope, receive, send):
+            seen.append(current_session())
+
+        middleware = SessionMiddleware(inner)
+        await middleware({"type": "http", "headers": [(b"x-quern-session", b"mcp-x")]},
+                         None, None)
+
+        assert seen == ["mcp-x"]
+        assert current_session() == ""
 
     def test_no_request_means_no_session(self):
         assert current_session() == ""
@@ -159,6 +178,27 @@ class TestTheTrace:
         mine = await get_trace(request=self._request(buf), since=None, udid=SIM, limit=10,
                                session="mcp-bbbb")
         assert [a["session"] for a in mine["actions"]] == ["mcp-bbbb"]
+
+    def test_the_http_response_carries_session(self):
+        """Through the route's response model, not a direct call: FastAPI drops
+        any field the model does not declare, and the direct-call tests above
+        cannot see that. The first version passed them and returned no
+        `session` at all over HTTP -- found by the live two-agent test."""
+        from server.api.trace import router
+
+        app = FastAPI()
+        app.include_router(router)
+        app.state.server_buffer = RingBuffer(max_size=100)
+        app.state.ring_buffer = RingBuffer(max_size=10)
+        app.state.crash_buffer = RingBuffer(max_size=10)
+        app.state.flow_store = None
+        t = datetime.now(UTC) - timedelta(seconds=30)
+        with TestClient(app) as client:
+            client.portal.call(app.state.server_buffer.append, _action(t, "mcp-aaaa"))
+            client.portal.call(app.state.server_buffer.append,
+                               _action(t + timedelta(seconds=1), "mcp-bbbb"))
+            body = client.get("/api/v1/trace", params={"session": "mcp-aaaa"}).json()
+        assert [a["session"] for a in body["actions"]] == ["mcp-aaaa"]
 
     async def test_trace_over_a_recording_filters_by_session(self, tmp_path):
         from server.api.trace import get_trace
