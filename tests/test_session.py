@@ -369,3 +369,92 @@ class TestTheEdges:
 
         data = _action(datetime.now(UTC), "mcp-aaaa").model_dump(mode="json")
         assert _summary("action", data)["session"] == "mcp-aaaa"
+
+
+class TestTheWarning:
+    """Anonymous callers still succeed, and are told how to identify
+    themselves (#254, the warning phase)."""
+
+    @staticmethod
+    def _app() -> FastAPI:
+        from fastapi.responses import StreamingResponse
+
+        app = FastAPI()
+        app.add_middleware(SessionMiddleware)
+
+        @app.post("/act")
+        async def act():
+            return {"ok": True}
+
+        @app.get("/health")
+        async def health():
+            return {"status": "ok"}
+
+        @app.get("/stream")
+        async def stream():
+            async def chunks():
+                yield b"a"
+                yield b"b"
+            return StreamingResponse(chunks())
+
+        return app
+
+    @pytest.mark.parametrize("headers, reason", [
+        ({}, "missing"),
+        ({"X-Quern-Session": ""}, "missing"),
+        ({"X-Quern-Session": "bad name"}, "malformed"),
+        ({"X-Quern-Session": "x" * 65}, "malformed"),
+    ])
+    def test_an_unattributed_request_succeeds_and_is_told(self, headers, reason):
+        with TestClient(self._app()) as client:
+            response = client.post("/act", headers=headers)
+        assert response.status_code == 200
+        warning = response.headers[session_mod.WARNING_HEADER]
+        # The reason token is the contract; the prose after it may change.
+        assert warning.split(";", 1)[0] == reason
+        assert "X-Quern-Session" in warning
+
+    def test_a_named_request_gets_no_warning(self):
+        with TestClient(self._app()) as client:
+            response = client.post("/act", headers={"X-Quern-Session": "mcp-1a2b"})
+        assert session_mod.WARNING_HEADER not in response.headers
+
+    def test_a_public_path_never_warns(self):
+        """/health answers anyone; an anonymous health check is not news."""
+        with TestClient(self._app()) as client:
+            response = client.get("/health")
+        assert response.status_code == 200
+        assert session_mod.WARNING_HEADER not in response.headers
+
+    def test_a_streaming_response_carries_it(self):
+        with TestClient(self._app()) as client:
+            response = client.get("/stream")
+        assert response.content == b"ab"
+        assert response.headers[session_mod.WARNING_HEADER].startswith("missing;")
+
+    def test_the_log_is_rate_limited_per_kind_of_caller(self, caplog):
+        caplog.set_level(logging.WARNING, logger="server.session")
+        with TestClient(self._app()) as client:
+            for _ in range(5):
+                client.post("/act", headers={"User-Agent": "loop-script/1"})
+            client.post("/act", headers={"User-Agent": "other-script/2"})
+            client.post("/act", headers={"User-Agent": "loop-script/1",
+                                         "X-Quern-Session": "bad name"})
+        lines = [r.getMessage() for r in caplog.records if r.name == "server.session"]
+        assert len(lines) == 3, lines
+        assert any("loop-script/1" in m and "missing" in m for m in lines)
+        assert any("other-script/2" in m for m in lines)
+        assert any("malformed" in m for m in lines)
+
+    def test_through_the_real_app(self):
+        """The real stack, in its real order: auth answers 401 from inside the
+        session middleware, and the warning still reaches the caller; the
+        public /health stays clean."""
+        from server.main import create_app
+
+        client = TestClient(create_app())   # no lifespan: neither route needs it
+        unauth = client.get("/api/v1/trace")
+        assert unauth.status_code == 401
+        assert unauth.headers[session_mod.WARNING_HEADER].startswith("missing;")
+        health = client.get("/health")
+        assert session_mod.WARNING_HEADER not in health.headers
