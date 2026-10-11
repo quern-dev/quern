@@ -1,7 +1,32 @@
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 
+import { randomBytes } from "node:crypto";
 import { discoverServer } from "./config.js";
+
+/** Which agent session this MCP process serves, sent as X-Quern-Session on
+ * every request so the server can say who asked for each action (#254).
+ *
+ * One per process, and measured to be one process per agent session: four
+ * Claude Code sessions on one machine ran four of these, each the child of
+ * its own session. So the id lives exactly as long as the session, with no
+ * cooperation needed from the agent.
+ *
+ * Minted here rather than taken from the client. Claude Code does export a
+ * session id to this process, but quern serves any MCP client, and the id
+ * ends up in recordings that CI publishes. QUERN_SESSION overrides it, for a
+ * caller that wants a name it can recognise -- same rules the server
+ * enforces, or it is ignored. Attribution, not authority. */
+export const SESSION_ID: string = mintSessionId(process.env.QUERN_SESSION);
+
+/** The server's rule for a session id (server/session.py). */
+export const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}$/;
+
+export function mintSessionId(override: string | undefined): string {
+  const named = override?.trim();
+  if (named && SESSION_ID_PATTERN.test(named)) return named;
+  return `mcp-${randomBytes(4).toString("hex")}`;
+}
 
 /** One request with no client-side timeout at all.
  *
@@ -60,6 +85,7 @@ export async function apiRequest(
 
   const headers: Record<string, string> = {
     Authorization: `Bearer ${server.apiKey}`,
+    "X-Quern-Session": SESSION_ID,
   };
 
   const init: RequestInit = { method, headers };

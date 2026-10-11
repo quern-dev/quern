@@ -52,6 +52,7 @@ def _serialise(attribution: Attribution, ip_map: dict[str, tuple[str, bool]]) ->
     return {
         "action": action.action,
         "udid": action.udid,
+        "session": action.session,
         "outcome": action.outcome,
         "duration_ms": action.duration_ms,
         "category": action.category,
@@ -116,10 +117,9 @@ async def get_trace(
     udid: str | None = Query(
         default=None,
         description=(
-            "Only actions against this device. With several agents sharing "
-            "one server this is how a caller gets its own trace: quern has no "
-            "notion of who is asking, so the device is the only separator "
-            "(see #254)."
+            "Only actions against this device. To separate callers rather "
+            "than devices -- several agents can share one device -- use "
+            "`session` (#254)."
         ),
     ),
     limit: int = Query(default=100, ge=1, le=1000),
@@ -136,10 +136,18 @@ async def get_trace(
     until: Annotated[UtcDatetime | None, Query(
         description="End of the window; with `recording`, default its end.",
     )] = None,
+    session: Annotated[str | None, Query(
+        description=(
+            "Only actions this caller asked for: the X-Quern-Session id its MCP "
+            "server sends. Separates agents sharing one device, which `udid` "
+            "cannot (#254)."
+        ),
+    )] = None,
 ) -> dict:
     """Actions in a window, each with the flows and log lines it caused."""
     if recording:
-        return await _trace_from_recording(request, recording, since, until, udid, limit)
+        return await _trace_from_recording(
+            request, recording, since, until, udid, limit, session)
     if until is not None and since is not None and until < since:
         raise HTTPException(status_code=400, detail="until is before since")
     # Canonicalised, because the caller may name a physical device by either
@@ -176,6 +184,7 @@ async def get_trace(
         e for e in entries
         if e.action and e.outcome != "started"
         and (not udid or e.udid == udid)
+        and (not session or e.session == session)
         and (until is None or e.timestamp <= until)
     ]
     # `limit` bounds what the caller gets back.
@@ -385,7 +394,8 @@ async def get_trace(
 
 
 async def _trace_from_recording(request: Request, ref: str, since: datetime | None,
-                                until: datetime | None, udid: str | None, limit: int) -> dict:
+                                until: datetime | None, udid: str | None, limit: int,
+                                session: str | None = None) -> dict:
     """The trace over a recording: `build_trace`, unchanged, on what it wrote.
 
     The truncation fields mean what they mean live, answered from the file:
@@ -409,7 +419,8 @@ async def _trace_from_recording(request: Request, ref: str, since: datetime | No
 
     actions = sorted((a for a in loaded.actions
                       if a.outcome != "started" and inside(a.timestamp)
-                      and (not udid or a.udid == udid)), key=lambda a: a.timestamp)
+                      and (not udid or a.udid == udid)
+                      and (not session or a.session == session)), key=lambda a: a.timestamp)
     actions_over_limit = len(actions) > limit
     if actions_over_limit:
         actions = actions[-limit:]

@@ -161,6 +161,15 @@ class LogEntry(BaseModel):
             "The end is this plus duration_ms, measured on the same clock."
         ),
     )
+    session: str = Field(
+        default="",
+        description=(
+            "Which caller asked for this action: the id its MCP server sent as "
+            "X-Quern-Session, one per agent session. Empty for a caller that "
+            "sent none (curl, the CLI) and for work nobody asked for. "
+            "Attribution, not authority -- see server/session.py and #254."
+        ),
+    )
     outcome: str = Field(
         default="",
         description=(

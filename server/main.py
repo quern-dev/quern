@@ -768,6 +768,11 @@ def create_app(
     # Auth middleware
     app.add_middleware(APIKeyMiddleware, api_key=config.api_key)
 
+    # Session attribution (#254). Outside auth, so it is set before anything
+    # below runs; pure ASGI, so the ContextVar reaches the handler's task.
+    from server.session import SessionMiddleware
+    app.add_middleware(SessionMiddleware)
+
     # CORS — allow local origins (Quern Helm, browser dev tools, etc.)
     # Must be added after auth so it wraps auth (handles OPTIONS preflight first)
     app.add_middleware(

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Every action says which agent session asked for it (#254).**
+  - Each agent's quern MCP server mints a session id when it starts and sends it as `X-Quern-Session` on every request. Measured: one MCP process per agent session.
+  - The server records it as `session` on every action entry, in the trace and in recordings. Callers that send none (curl, the CLI) and work nobody asked for are left empty.
+  - `get_trace(mine=true)` returns only your own actions, and `session=<id>` returns another agent's. That separates agents sharing one device, which `udid` couldn't.
+  - `QUERN_SESSION` in the MCP server's environment names the session instead.
+  - Malformed ids are recorded as unattributed rather than refused.
+  - It's attribution, not access control: any caller can claim any id.
+
 ### Fixed
 - **`preview_device` says when a preview already exists (#351).** Asking for a device or simulator that is already being previewed reused the open window and stream, as it should, but answered `"status": "added"`, the same as a fresh start. After a simulator reboot that read as a restart that never happened. It now answers `already_active` with the original `started_at` on every path: simulator, USB device, Android, and the no-UDID sweep. Two concurrent requests, such as an agent retrying after a timeout, get one `added` and one `already_active`. A simulator answer carries `on_air`, so a reused preview that is reattaching isn't read as live. Two concurrent starts of one USB device no longer open a second window and leak its slot, and two of one Android device no longer start a second scrcpy that nothing can stop. Since #425, a simulator preview reattaches by itself after a reboot, so the frozen window that prompted the report is fixed too.
 - **Simulator preview is discoverable and built at setup (#285).**

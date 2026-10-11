@@ -23,6 +23,8 @@ import logging
 import weakref
 from typing import Final, Protocol
 
+from server.session import current_session
+
 #: The closed category vocabulary. A call site that does not fit one of these
 #: is a reason to change this tuple in review, not to invent a string: a
 #: category nobody else uses cannot be filtered on by anyone who does not
@@ -179,6 +181,11 @@ def action(
             f"{_PREFIX}outcome": outcome,
             f"{_PREFIX}duration_ms": duration_ms,
             f"{_PREFIX}started_monotonic": started_monotonic,
+            # Read here, not passed in: every action is emitted inside the
+            # request that asked for it, and threading the session through
+            # each handler would be the kind of per-call-site duty that gets
+            # forgotten on one of them.
+            f"{_PREFIX}session": current_session(),
         },
     )
 
@@ -206,6 +213,11 @@ def started_monotonic_of(record: logging.LogRecord) -> float | None:
 def category_of(record: logging.LogRecord) -> str:
     """The category a record carries, or "" -- the shape the handler needs."""
     return getattr(record, f"{_PREFIX}category", "") or ""
+
+
+def session_of(record: logging.LogRecord) -> str:
+    """The session an action record was made for, or "" (see server/session.py)."""
+    return getattr(record, f"{_PREFIX}session", "") or ""
 
 
 def udid_of(record: logging.LogRecord) -> str:
