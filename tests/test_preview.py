@@ -2512,3 +2512,51 @@ class TestSimulatorEntriesNeverReadsAsNoneBooted:
         entries, error = asyncio.run(preview_mod.simulator_entries())
         assert entries == []
         assert type(exc).__name__ in (error or "")
+
+
+class TestThePreviewAppStartsOnce:
+    """Concurrent first previews build and launch the preview app once.
+
+    Found live: two simultaneous `preview_device` calls on a fresh state
+    directory both compiled ios-preview at once. One failed to link ("File
+    exists"), the other exec'd the half-written binary and answered a bare
+    500.
+    """
+
+    def test_concurrent_cold_starts_build_and_launch_once(self, monkeypatch):
+        from server.device.media import preview as preview_mod
+
+        pm = preview_mod.PreviewManager()
+        builds: list[int] = []
+        launches: list[tuple] = []
+
+        async def ensure_binary():
+            builds.append(1)
+            await asyncio.sleep(0.02)   # the compile both callers would overlap on
+            return Path("/nonexistent/ios-preview")
+
+        class _Proc:
+            returncode = None
+            stdin = None
+            stdout = None
+
+        async def spawn(*args, **_kwargs):
+            launches.append(args)
+            pm._ready.set()
+            return _Proc()
+
+        async def reader():
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(pm, "ensure_binary", ensure_binary)
+        monkeypatch.setattr(pm, "_stdout_reader", reader)
+        monkeypatch.setattr(preview_mod.asyncio, "create_subprocess_exec", spawn)
+
+        async def go():
+            await asyncio.gather(pm._ensure_process(), pm._ensure_process())
+            pm._reader_task.cancel()
+
+        asyncio.run(go())
+
+        assert len(builds) == 1, "two concurrent compiles collide at link time"
+        assert len(launches) == 1, "a second launch would orphan the first app"

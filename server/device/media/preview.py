@@ -391,6 +391,14 @@ class PreviewManager:
         self._command_seq = 0
         self._positions: set[int] = set()
         self._stagger_lock = asyncio.Lock()
+        # Held across `_ensure_process`'s check, build and launch. Without it
+        # two first previews on a fresh install -- an agent retrying, or two
+        # agents -- both compiled the app at once and collided at link time
+        # ("File exists"), and the other then exec'd the half-written binary
+        # and failed with a bare 500. Had both compiles succeeded, the second
+        # launch would have replaced `_process` and orphaned the first app.
+        # Measured live while testing #351.
+        self._process_lock = asyncio.Lock()
         self._bundle_path = QUERN_BIN_DIR / APP_BUNDLE_NAME
         self._binary_path = self._bundle_path / "Contents" / "MacOS" / BINARY_NAME
         # session key -> the quern-media process feeding that window, its
@@ -418,7 +426,16 @@ class PreviewManager:
         """Launch the interactive subprocess if not running."""
         if self._process is not None and self._process.returncode is None:
             return
+        async with self._process_lock:
+            # Re-checked under the lock: whoever held it may have just
+            # launched the process this call was about to.
+            if self._process is not None and self._process.returncode is None:
+                return
+            await self._launch_process()
 
+    async def _launch_process(self) -> None:
+        """Build if needed and start the interactive subprocess. Callers hold
+        `_process_lock`."""
         # Clean up stale state
         self._cleanup_state()
 
