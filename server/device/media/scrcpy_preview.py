@@ -116,6 +116,11 @@ class ScrcpyPreview:
         for serial in serials:
             await self.remove(serial)
 
+    def active_previews(self) -> list[ScrcpySession]:
+        """The sessions running now, as a snapshot list. See
+        `PreviewManager.active_previews`."""
+        return list(self._processes.values())
+
     def status(self) -> dict:
         """Return current scrcpy preview state."""
         active = {

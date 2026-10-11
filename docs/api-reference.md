@@ -420,7 +420,7 @@ public probes, and a few operations the CLI uses directly.
 |---|---|---|
 | DELETE | `/api/v1/proxy/mocks` | Clear all mock rules |
 | GET | `/` | Redirects to `/docs` (public) |
-| GET | `/api/v1/device/preview/devices` | List CoreMediaIO preview devices |
+| GET | `/api/v1/device/preview/devices` | List what can be previewed: USB iOS devices and booted simulators, each with `kind` |
 | GET | `/api/v1/device/video` | Live MJPEG video stream |
 | GET | `/api/v1/health` | Same as `/health` (public) |
 | GET | `/api/v1/logs/stream` | SSE real-time log stream |

@@ -12,6 +12,8 @@ from fastapi.responses import Response
 from starlette.responses import StreamingResponse
 
 from server.api.actions import action, logged_action
+from server.device.media import media_engine
+from server.device.media.preview import simulator_entries
 from server.logging_ext import current_action
 from server.models import (
     BootDeviceRequest,
@@ -1302,16 +1304,46 @@ def _get_scrcpy_preview(request: Request):
     return sp
 
 
+def _added_or_existing(preview: object, before: list) -> str:
+    """`already_active` when `preview` was in `before`, else `added`.
+
+    By identity, against previews held from before the call: the manager hands
+    back the record it already had for a key that is active, so "it was there
+    before I asked" is exactly "this call started nothing". Holding the
+    records in `before` also keeps their ids from being reused mid-check.
+    """
+    return "already_active" if any(p is preview for p in before) else "added"
+
+
+def _preview_started(preview, before: list) -> dict:
+    """The response to a single-device iOS `preview_start`."""
+    return {
+        "status": _added_or_existing(preview, before),
+        "name": preview.label or preview.name,
+        "position": preview.position,
+        "platform": "ios",
+        "kind": preview.kind,
+        "started_at": preview.started_at.isoformat(),
+    }
+
+
 @router.post("/preview/start")
 @logged_action("preview_start", category="media")
 async def preview_start(request: Request, body: PreviewStartRequest):
     """Start a live preview window for a device.
 
-    - iOS physical devices: CoreMediaIO screen capture (USB only, not simulators)
+    - iOS physical devices: CoreMediaIO screen capture over USB
+    - Booted iOS simulators: quern-media serves the framebuffer, the preview
+      app shows it
     - Android devices (emulator or physical): scrcpy (requires `brew install scrcpy`)
 
     If a UDID is provided, adds that single device. If omitted, adds all
-    available USB iOS devices. Multiple devices can be previewed independently.
+    available USB iOS devices (not simulators). Multiple devices can be
+    previewed independently.
+
+    A device already being previewed answers `already_active` with its
+    original `started_at`, not `added` (#351): the preview is reused, not
+    restarted, and saying "added" described a start that never happened.
     """
     controller = _get_controller(request)
 
@@ -1340,9 +1372,10 @@ async def preview_start(request: Request, body: PreviewStartRequest):
                 device_name = udid
 
             try:
+                before = sp.active_previews()
                 session = await sp.add(udid, device_name)
                 return {
-                    "status": "added",
+                    "status": _added_or_existing(session, before),
                     "name": session.name,
                     "serial": session.serial,
                     "platform": "android",
@@ -1366,6 +1399,7 @@ async def preview_start(request: Request, body: PreviewStartRequest):
         # never had the matching gate, so stopping a simulator preview was
         # reachable while starting one was not.
         if not controller._is_physical(udid):
+            before = pm.active_previews()
             try:
                 preview = await pm.add_booted_simulator(udid)
             except DeviceError as e:
@@ -1377,13 +1411,7 @@ async def preview_start(request: Request, body: PreviewStartRequest):
                 raise _handle_device_error(e)
             except RuntimeError as e:
                 raise HTTPException(status_code=500, detail=str(e))
-            return {
-                "status": "added",
-                "name": preview.label or preview.name,
-                "position": preview.position,
-                "platform": "ios",
-                "kind": preview.kind,
-            }
+            return _preview_started(preview, before)
 
         # Get device name for the CoreMediaIO match
         device_name = None
@@ -1410,14 +1438,9 @@ async def preview_start(request: Request, body: PreviewStartRequest):
             # same name there, and default simulator names are device model
             # names -- so the caller asking for their phone silently gets a
             # simulator, with nothing in the response to tell them apart.
+            before = pm.active_previews()
             preview = await pm.add_capture_device(device_name)
-            return {
-                "status": "added",
-                "name": preview.label or preview.name,
-                "position": preview.position,
-                "platform": "ios",
-                "kind": preview.kind,
-            }
+            return _preview_started(preview, before)
         except RuntimeError as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -1540,10 +1563,23 @@ async def preview_stop(request: Request, body: PreviewStopRequest):
 
 @router.get("/preview/status")
 async def preview_status(request: Request):
-    """Get the current preview state including per-device breakdown."""
+    """Get the current preview state including per-device breakdown.
+
+    `ios.available` lists capture devices and booted simulators, each tagged
+    with `kind` (#285). `ios.simulators_error` says why simulators could not
+    be listed, so a broken simctl is not reported as none booted.
+    `ios.quern_media_built` says whether the simulator preview engine is
+    built; when false, the first simulator preview builds it first.
+    """
     pm = _get_preview_manager(request)
     sp = _get_scrcpy_preview(request)
     ios_status = pm.status()
+    sims, sims_error = await simulator_entries()
+    ios_status["available"] = ios_status["available"] + sims
+    ios_status["available_count"] = len(ios_status["available"])
+    if sims_error is not None:
+        ios_status["simulators_error"] = sims_error
+    ios_status["quern_media_built"] = media_engine.is_available()
     android_status = sp.status()
     return {
         "ios": ios_status,
@@ -1553,17 +1589,26 @@ async def preview_status(request: Request):
 
 @router.get("/preview/devices")
 async def preview_devices(request: Request):
-    """List devices available for live preview via CoreMediaIO.
+    """List what can be previewed: USB iOS devices and booted simulators.
 
-    Only physical USB-connected iOS devices appear. If the preview process
-    is running, returns the cached device list instantly. Otherwise takes
-    ~3s due to CoreMediaIO discovery.
+    Each entry carries `kind`, `device` or `simulator`, because a phone and a
+    simulator of one model share a name (#285). A simulator's `id` is its
+    udid, which `preview_device` takes. `simulators_error` says why
+    simulators could not be listed, when they could not.
+
+    If the preview process is running, the capture devices come from its
+    cache instantly. Otherwise CoreMediaIO discovery takes ~3s.
     """
     pm = _get_preview_manager(request)
     try:
-        return await pm.list_devices()
+        result = await pm.list_devices()
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
+    sims, sims_error = await simulator_entries()
+    result["devices"] = result["devices"] + sims
+    if sims_error is not None:
+        result["simulators_error"] = sims_error
+    return result
 
 
 @router.get("/screenshot/annotated")

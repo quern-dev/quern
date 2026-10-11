@@ -135,6 +135,26 @@ async def booted_simulators() -> list[tuple[str, str]]:
     return [(d.udid, d.name) for d in devices if d.state == DeviceState.BOOTED]
 
 
+async def simulator_entries() -> tuple[list[dict], str | None]:
+    """Booted simulators as preview-list entries, and why if they can't be listed.
+
+    The discovery half of #285. `preview_status` and `/preview/devices` used
+    to list CoreMediaIO devices only, so an agent asking what it could preview
+    was never told about simulators, which `preview_device` accepts.
+
+    The second value separates "asked, and none are booted" from "could not
+    ask" -- an empty list for both would report a broken simctl as no
+    simulators, the false all-clear CONTRIBUTING warns about.
+    """
+    from server.models import DeviceError
+
+    try:
+        booted = await booted_simulators()
+    except (DeviceError, OSError) as e:
+        return [], str(e)
+    return [{"name": n, "id": u, "kind": "simulator"} for u, n in booted], None
+
+
 def bundle_paths() -> tuple[Path, Path]:
     """Where the preview app bundle and its binary live."""
     bundle = QUERN_BIN_DIR / APP_BUNDLE_NAME
@@ -1273,6 +1293,15 @@ class PreviewManager:
         self._cleanup_state()
         return {"status": "stopped", "pid": pid}
 
+    def active_previews(self) -> list[ActivePreview]:
+        """The preview records active now, as a snapshot list.
+
+        For a caller that needs to know afterwards whether an `add` started
+        something or handed back what was already open (#351): the add
+        methods return the existing record for an active key.
+        """
+        return list(self._active.values())
+
     def status(self) -> dict:
         """Return current preview state."""
         running = self._process is not None and self._process.returncode is None
@@ -1292,7 +1321,7 @@ class PreviewManager:
         }
 
         available = [
-            {"name": d.name, "id": d.cmio_id}
+            {"name": d.name, "id": d.cmio_id, "kind": "device"}
             for d in self._available
         ]
 
@@ -1316,7 +1345,7 @@ class PreviewManager:
         if self._process is not None and self._process.returncode is None:
             return {
                 "devices": [
-                    {"name": d.name, "id": d.cmio_id}
+                    {"name": d.name, "id": d.cmio_id, "kind": "device"}
                     for d in self._available
                 ]
             }
@@ -1355,6 +1384,7 @@ class PreviewManager:
                         "index": idx,
                         "name": name,
                         "id": device_id,
+                        "kind": "device",
                     })
                 except (ValueError, IndexError):
                     continue

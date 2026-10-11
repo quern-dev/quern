@@ -429,6 +429,9 @@ _DEVICE_TOOLS = frozenset({
     # particular laptop has.
     "ideviceinstaller", "ios-webkit-debug-proxy", "ios_webkit_debug_proxy",
     "xcode-select", "xcodebuild", "swiftc",
+    # `swift build` compiles quern-media during setup (#285). A test reaching
+    # it runs a real multi-minute release build of the developer's checkout.
+    "swift",
 })
 
 #: Shells, which carry the real command in an argument rather than in argv[0].
