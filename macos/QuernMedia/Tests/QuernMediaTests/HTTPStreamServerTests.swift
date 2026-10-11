@@ -752,7 +752,10 @@ func h264FramesArePartsAndStreamIsRaw() async throws {
 
     let framed = await rawGetWhile(path: "/frames", port: port, timeout: 1.5, whileAttached: push)
     let text = String(decoding: framed, as: UTF8.self)
-    #expect(text.contains("Content-Type: multipart/x-mixed-replace; boundary=\(HTTPWire.mjpegBoundary)"))
+    #expect(text.hasPrefix("HTTP/1.1 200"), "got: \(text.prefix(40))")
+    #expect(text.contains("Content-Type: application/octet-stream\r\n"),
+            "/frames must not be labelled multipart (#450)")
+    #expect(!text.contains("multipart/x-mixed-replace"))
     #expect(text.components(separatedBy: "Content-Type: video/h264").count - 1 == 2)
     #expect(text.contains("Content-Length: 700"))
     #expect(text.contains("Content-Length: 300"))
@@ -763,6 +766,29 @@ func h264FramesArePartsAndStreamIsRaw() async throws {
     #expect(!rawText.contains("--\(HTTPWire.mjpegBoundary)"), "/stream must stay a bare elementary stream")
     let bodyStart = try #require(raw.range(of: Data("\r\n\r\n".utf8))).upperBound
     #expect(raw.distance(from: bodyStart, to: raw.endIndex) == 1000)
+}
+
+@Test("MJPEG /frames carries /stream's parts under a label WebKit's fetch can read")
+func mjpegFramesAreRelabelledAndStreamIsNot() async throws {
+    // The label applies to /frames under either codec (#450). /stream must
+    // keep multipart/x-mixed-replace: that label is what an <img> renders.
+    let port = freePort()
+    let server = HTTPStreamServer(port: port, bindAll: false, codec: .mjpeg)
+    try server.start()
+    defer { server.stop() }
+    let jpeg = Data([0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 0xFF, 0xD9])
+    let push: @Sendable () -> Void = { server.receive(.jpeg(jpeg)) }
+
+    let framed = String(decoding: await rawGetWhile(
+        path: "/frames", port: port, timeout: 1.5, whileAttached: push), as: UTF8.self)
+    #expect(framed.contains("Content-Type: application/octet-stream\r\n"), "got: \(framed.prefix(160))")
+    #expect(!framed.contains("multipart/x-mixed-replace"))
+    #expect(framed.contains("--\(HTTPWire.mjpegBoundary)\r\nContent-Type: image/jpeg"),
+            "the parts themselves must keep their framing")
+
+    let raw = String(decoding: await rawGetWhile(
+        path: "/stream", port: port, timeout: 1.5, whileAttached: push), as: UTF8.self)
+    #expect(raw.contains("Content-Type: multipart/x-mixed-replace; boundary=\(HTTPWire.mjpegBoundary)"))
 }
 
 /// Descriptors this process has open. The suite runs `--no-parallel`, so

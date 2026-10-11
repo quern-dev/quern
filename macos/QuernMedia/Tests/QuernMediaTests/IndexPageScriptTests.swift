@@ -282,7 +282,7 @@ function streaming(steps, type) {
     let i = 0;
     return {
       ok: true, status: 200,
-      headers: { get: () => type || "multipart/x-mixed-replace; boundary=quernframe" },
+      headers: { get: () => type === undefined ? "application/octet-stream" : type },
       body: { getReader: () => ({
         read: () => {
           let step = steps[i++];
@@ -439,6 +439,63 @@ func anOlderServerIsNamed() throws {
     // used to report "Cannot reach quern-media" while reaching it fine.
     let player = try Player(answers: """
         answers.push(streaming([bytes("<!doctype html>"), "end"], "text/html; charset=utf-8"));
+        """)
+    let outcome = player.run("""
+        await advance(1);
+        return status();
+        """)
+    #expect(outcome?.toString().contains("does not serve /frames") == true,
+            "got: \(outcome?.toString() ?? "")")
+}
+
+
+@Test("the page plays /frames under either label, so it plays from an older quern-media too")
+func bothFramesLabelsPlay() throws {
+    // /frames was multipart/x-mixed-replace and is application/octet-stream
+    // now (#450). The page accepts both, so a new page against an older
+    // quern-media still plays. The reverse direction is not covered by
+    // anything: a tab opened before an upgrade runs the old script, which
+    // requires multipart, and needs one reload.
+    for type in ["application/octet-stream", "multipart/x-mixed-replace; boundary=quernframe",
+                 "Application/Octet-Stream"] {
+        let player = try Player(answers: """
+            answers.push(streaming([part("image/jpeg", [0xff, 0xd8, 1, 2]), "hang"], "\(type)"));
+            """)
+        let outcome = player.run("""
+            await advance(50);
+            return { draws: globalThis.draws || 0, status: status(), offAir: isOffAir() };
+            """)
+        let result = try #require(outcome?.toDictionary() as? [String: Any])
+        #expect(result["draws"] as? Int == 1, "\(type): no frame drawn; status \(result["status"] ?? "")")
+        #expect(result["offAir"] as? Bool == false, "\(type): still off air")
+    }
+}
+
+
+@Test("a 200 that is neither quern-media's stream nor its index page is named, not parsed")
+func somethingElseOnThePortIsNamed() throws {
+    // A reused port or a proxy answering 200 with its own content. Parsing it
+    // as parts fails later with "malformed part header" or "No picture
+    // arrived", which says nothing about the cause.
+    // JavaScript literals: `null` is what fetch's headers.get returns for a
+    // header that is absent.
+    for type in [#""application/json""#, #""text/plain""#, "null"] {
+        let player = try Player(answers: """
+            answers.push(streaming([bytes("{}"), "end"], \(type)));
+            """)
+        let outcome = player.run("""
+            await advance(1);
+            return status();
+            """)
+        #expect(outcome?.toString().contains("Something other than quern-media") == true,
+                "\(type): got \(outcome?.toString() ?? "")")
+    }
+}
+
+@Test("an index page labelled in another case is still an older quern-media")
+func anOlderServerIsNamedWhateverItsCase() throws {
+    let player = try Player(answers: """
+        answers.push(streaming([bytes("<!doctype html>"), "end"], "Text/HTML; charset=utf-8"));
         """)
     let outcome = player.run("""
         await advance(1);

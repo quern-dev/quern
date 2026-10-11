@@ -25,8 +25,9 @@ public enum HTTPWire {
 
     /// The stream with every frame in its own length-prefixed part.
     ///
-    /// For the index page. Under MJPEG it is byte-for-byte `/stream`, which is
-    /// already multipart. Under H.264 `/stream` is a bare elementary stream,
+    /// For the index page. Under MJPEG its parts are `/stream`'s, under its
+    /// own content type (see `framesContentType`). Under H.264 `/stream` is a
+    /// bare elementary stream,
     /// and a reader cannot tell where one access unit ends until the next one
     /// starts -- so a still screen, which sends one keyframe and then nothing,
     /// never shows at all. A part's `Content-Length` says where it ends.
@@ -184,9 +185,20 @@ public enum HTTPWire {
         return part
     }
 
-    /// `/frames` is multipart for either codec; each part names its own type.
-    public static let framesContentType =
-        "multipart/x-mixed-replace; boundary=\(mjpegBoundary)"
+    /// `/frames` is framed in multipart parts for either codec, each naming
+    /// its own type -- but is not *labelled* multipart.
+    ///
+    /// WebKit will not let `fetch` read a `multipart/x-mixed-replace` body:
+    /// the response resolves 200 with a body, and the first read throws
+    /// `TypeError: Load failed`. So the page never played in Safari, either
+    /// codec, while Chrome played both (#450, measured on Safari 27 on macOS
+    /// and iPadOS). The page never needed the label -- `Parts` reads the
+    /// boundary, `Content-Type` and `Content-Length` from the bytes -- and
+    /// the same bytes labelled `application/octet-stream` read in both.
+    ///
+    /// `/stream` keeps `multipart/x-mixed-replace` under MJPEG, because that
+    /// label is what makes a bare `<img>` render it.
+    public static let framesContentType = "application/octet-stream"
 
     public static func streamHeader(contentType: String) -> Data {
         Data("""
@@ -535,10 +547,19 @@ public enum HTTPWire {
           return "Off air" + (why ? ": " + why : "") + ".";
         }
         if (!response.ok || !response.body) return "quern-media answered " + response.status + ".";
-        if (!(response.headers.get("content-type") || "").startsWith("multipart/")) {
+        const type = (response.headers.get("content-type") || "").toLowerCase();
+        if (type.startsWith("text/html")) {
           // An older quern-media serves its index page for any path it does
           // not know, /frames included.
           return "This quern-media does not serve /frames; update quern.";
+        }
+        if (!type.startsWith("application/octet-stream") && !type.startsWith("multipart/")) {
+          // /frames is application/octet-stream (#450) and was multipart
+          // before; both are accepted, so this page also plays from an older
+          // quern-media. Anything else is not quern-media's stream at all --
+          // a reused port, a proxy -- and parsing it would only fail later
+          // with a less useful reason.
+          return "Something other than quern-media answered here (" + (type || "no content type") + ").";
         }
         const parts = new Parts(response.body.getReader());
         for (;;) {

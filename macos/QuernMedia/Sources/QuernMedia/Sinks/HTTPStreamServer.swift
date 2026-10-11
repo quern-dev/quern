@@ -288,8 +288,9 @@ public final class HTTPStreamServer: FrameSink {
     }
 
     public func receive(_ payload: EncodedPayload) {
-        // `raw` for `/stream`, `parts` for `/frames`. Identical under MJPEG,
-        // which is multipart either way.
+        // `raw` for `/stream`, `parts` for `/frames`. Identical bytes under
+        // MJPEG, which is multipart-framed either way; only the response
+        // label differs (`HTTPWire.framesContentType`, #450).
         let raw: Data
         let parts: Data
         switch (codec, payload) {
