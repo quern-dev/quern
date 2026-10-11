@@ -38,7 +38,7 @@ def check(monkeypatch):
     clock = {"t": 0.0}
     monkeypatch.setattr(module.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
     monkeypatch.setattr(module.time, "monotonic", lambda: clock["t"])
-    monkeypatch.setattr(module, "_ask_for_review", lambda _n: 0.0)
+    monkeypatch.setattr(module, "_ask_for_review", lambda _n, **_kw: 0.0)
     return module
 
 
@@ -101,3 +101,25 @@ def test_a_refusal_exits_at_once_rather_than_polling_on(check, monkeypatch):
     monkeypatch.setattr(check, "_summary_verdict", counting)
     assert check._reviewed_by_asking(1, HEAD, timeout=80.0) == "rate_limited"
     assert polls["n"] == 1, "it kept polling after the refusal"
+
+
+def test_a_triggered_review_is_confirmed_by_the_marker_without_asking_again(check, monkeypatch):
+    """Once a review is running, the marker says when it lands; a second
+    request is only a fallback."""
+    asks: list[dict] = []
+    monkeypatch.setattr(check, "_ask_for_review",
+                        lambda _n, **kw: asks.append(kw) or 0.0)
+    # The reply says a review started; the marker shows it landed.
+    assert _drive(check, monkeypatch, [check._TRIGGERED], ["reviewed"]) == "reviewed"
+    assert len(asks) == 1, "the marker answered; no second request was needed"
+
+
+def test_the_confirming_ask_is_never_a_full_review(check, monkeypatch):
+    """`full review` on a commit already under review starts another review and
+    spends a slot; the plain form declines for free. Measured on #453."""
+    asks: list[dict] = []
+    monkeypatch.setattr(check, "_ask_for_review",
+                        lambda _n, **kw: asks.append(kw) or 0.0)
+    _drive(check, monkeypatch, [check._TRIGGERED], ["pending"])
+    assert len(asks) == 2
+    assert asks[1] == {"full": False}

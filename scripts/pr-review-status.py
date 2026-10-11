@@ -424,9 +424,21 @@ def _reviewed_by_asking(number: int, head: str, timeout: float = 600.0) -> str:
             return "rate_limited"
         if _TRIGGERED in reply and asks < _MAX_ASKS:
             # A review is running. It leaves a review object only if it finds
-            # something, so the way to learn it finished is to ask again — once.
+            # something, so the way to learn it finished is the coverage
+            # marker -- read first, because it is authoritative and costs no
+            # comment -- and failing that, one more ask.
             time.sleep(60)
-            since = _ask_for_review(number)
+            if _summary_verdict(number, head)[0] == "reviewed":
+                return "reviewed"
+            # The plain form, never `full`. On a PR that has never been
+            # reviewed, `_ask_for_review` picks `full review` by itself -- and
+            # a PR whose first review is still running has never been
+            # reviewed. So this confirming ask went out as `full review`,
+            # which does not decline on a reviewed commit the way the plain
+            # form does: it starts another whole review and spends a slot.
+            # Measured on #453, a second `full review` posted 73s after
+            # "Full review triggered", with the allowance at one an hour.
+            since = _ask_for_review(number, full=False)
             asks += 1
     return "timeout"
 
