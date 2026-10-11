@@ -282,7 +282,7 @@ function streaming(steps, type) {
     let i = 0;
     return {
       ok: true, status: 200,
-      headers: { get: () => type || "multipart/x-mixed-replace; boundary=quernframe" },
+      headers: { get: () => type || "application/octet-stream" },
       body: { getReader: () => ({
         read: () => {
           let step = steps[i++];
@@ -446,6 +446,27 @@ func anOlderServerIsNamed() throws {
         """)
     #expect(outcome?.toString().contains("does not serve /frames") == true,
             "got: \(outcome?.toString() ?? "")")
+}
+
+
+@Test("the page plays /frames under either label, so a tab outlives an upgrade")
+func bothFramesLabelsPlay() throws {
+    // /frames was multipart/x-mixed-replace and is application/octet-stream
+    // now (#450). The old-server check must refuse only the index page, not
+    // whichever label the other version uses: a check for one label is what
+    // made the relabel alone show "does not serve /frames" in Safari.
+    for type in ["application/octet-stream", "multipart/x-mixed-replace; boundary=quernframe"] {
+        let player = try Player(answers: """
+            answers.push(streaming([part("image/jpeg", [0xff, 0xd8, 1, 2]), "hang"], "\(type)"));
+            """)
+        let outcome = player.run("""
+            await advance(50);
+            return { draws: globalThis.draws || 0, status: status(), offAir: isOffAir() };
+            """)
+        let result = try #require(outcome?.toDictionary() as? [String: Any])
+        #expect(result["draws"] as? Int == 1, "\(type): no frame drawn; status \(result["status"] ?? "")")
+        #expect(result["offAir"] as? Bool == false, "\(type): still off air")
+    }
 }
 
 

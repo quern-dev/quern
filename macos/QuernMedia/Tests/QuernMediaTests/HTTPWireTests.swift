@@ -96,7 +96,15 @@ func h264PartIsFramed() throws {
     #expect(head.contains("Content-Type: video/h264"))
     #expect(head.contains("Content-Length: \(au.count)"))
     #expect(part[headEnd.upperBound..<headEnd.upperBound + au.count] == au)
-    #expect(HTTPWire.framesContentType.contains(HTTPWire.mjpegBoundary))
+}
+
+@Test("/frames is not labelled multipart, so WebKit's fetch can read it")
+func framesAreNotLabelledMultipart() {
+    // Safari's fetch resolves a multipart/x-mixed-replace response and then
+    // fails the first read with "Load failed", so the page never played
+    // there (#450). The parts keep their boundary; only the label changes.
+    #expect(!HTTPWire.framesContentType.lowercased().hasPrefix("multipart/"))
+    #expect(HTTPWire.framesContentType == "application/octet-stream")
 }
 
 @Test("index responses declare an accurate Content-Length", arguments: [
