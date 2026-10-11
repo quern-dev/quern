@@ -19,7 +19,9 @@ export const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}$/;
  * Measured to be one MCP process per agent session: four Claude Code sessions
  * on one machine ran four of these, each the child of its own session. So
  * even the random fallback lives exactly as long as the session, with no
- * cooperation needed from the agent.
+ * cooperation needed from the agent. (A random id does not survive an MCP
+ * restart -- a reconnect mints a new one, and earlier actions stop being
+ * "mine". The Claude id does.)
  *
  * Under Claude Code it is the agent's own session id, which names its
  * transcript, so a reader can open the conversation behind an action -- and
@@ -34,6 +36,16 @@ export const SESSION_ID: string = mintSessionId(
  * id names the agent's transcript in ~/.claude/projects and is also in the
  * environment of the agent's Bash commands, so CLI calls the agent makes land
  * under the same session; else a random id for this process. */
+/** Headers for any request to the quern API: the key, and who is asking.
+ *
+ * The one place they are built. Two screenshot tools used to call fetch with
+ * only the Authorization header, so two of the commonest actions an agent
+ * takes were the two the server could not attribute (#254 review). A test
+ * fails if an Authorization header is written anywhere else in mcp/src. */
+export function quernHeaders(apiKey: string): Record<string, string> {
+  return { Authorization: `Bearer ${apiKey}`, "X-Quern-Session": SESSION_ID };
+}
+
 export function mintSessionId(
   override: string | undefined, claudeSession?: string | undefined,
 ): string {
@@ -99,10 +111,7 @@ export async function apiRequest(
     }
   }
 
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${server.apiKey}`,
-    "X-Quern-Session": SESSION_ID,
-  };
+  const headers: Record<string, string> = quernHeaders(server.apiKey);
 
   const init: RequestInit = { method, headers };
 

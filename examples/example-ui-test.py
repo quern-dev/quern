@@ -111,7 +111,12 @@ async def run_test(device_udid: str, device_name: str, device_index: int):
     print(f"[{device_index}] Running test on {device_name} ({device_udid[:8]}...)")
 
     async with httpx.AsyncClient() as client:
-        headers = {"Authorization": f"Bearer {api_key}"}
+        # X-Quern-Session says who is asking, so this run's actions can be
+        # read back with GET /api/v1/trace?session=<name> (#254).
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "X-Quern-Session": os.getenv("QUERN_SESSION") or f"example-ui-test-{device_index}",
+        }
 
         # Example: Get screen summary
         resp = await client.get(

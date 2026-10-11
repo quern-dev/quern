@@ -783,7 +783,7 @@ Every flow and log line carries \`identified_by\`, saying how its device was est
 
 Read \`caveats\` and \`overlaps\` before trusting an attribution. Attribution is by device and time, because the proxy is a separate process and nothing quern controls travels with the app's requests. Two actions overlapping on one device cannot be told apart, and that is reported rather than guessed. Simulators under local capture (see set_local_capture) attribute most precisely, because flows carry a UDID resolved from the client process.
 
-With several agents on one server, pass \`mine: true\` to get only the actions you asked for. Every action carries \`session\`, the id of the agent session that asked for it (empty for callers that send none, such as curl or the CLI), so this separates agents even on one shared device, which \`udid\` cannot. Pass \`session\` to read another agent's actions by its id.
+With several agents on one server, pass \`mine: true\` to get only the actions you asked for. Every action carries \`session\`, the id of the agent session that asked for it (empty for callers that send none, such as a plain curl), so this separates agents even on one shared device, which \`udid\` cannot. Pass \`session\` to read another agent's actions by its id. Every answer includes \`your_session\`, your own id.
 
 Pass \`recording\` (an id from start_recording, or the directory it wrote) to build the same trace from a recording instead of the live buffers, over any window of it (\`since\`, \`until\`) -- for a run longer than the buffers hold. Its \`recording.holes\` lists spans the recording says it does not cover, and the *_truncated fields are set when one overlaps the window. A recording made with video gives each action and flow \`video: {path, offset_s}\` -- the movie and the offset to seek to -- or null when no movie of its quern run covers it, and lists the movies in \`recording.video\`, each with an \`error\` if it was lost.`,
     inputSchema: strictParams({
@@ -830,7 +830,13 @@ Pass \`recording\` (an id from start_recording, or the directory it wrote) to bu
         if (mine) params.session = SESSION_ID;
         else if (session) params.session = session;
 
-        const data = await apiRequest("GET", "/api/v1/trace", params);
+        // Your own id, said in every answer: otherwise the only way to learn
+        // it is to read it off one of your own actions, and nothing else can
+        // tell another agent what to pass as `session`.
+        const data = {
+          your_session: SESSION_ID,
+          ...(await apiRequest("GET", "/api/v1/trace", params) as object),
+        };
 
         return {
           content: [

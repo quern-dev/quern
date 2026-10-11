@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { discoverServer } from "../config.js";
-import { apiRequest } from "../http.js";
+import { apiRequest, quernHeaders } from "../http.js";
 import { strictParams } from "./helpers.js";
 
 export function registerDeviceTools(server: McpServer): void {
@@ -440,7 +440,7 @@ NOTE: If you want to capture network traffic from this app:
       url.searchParams.set("quality", String(quality));
 
       const resp = await fetch(url.toString(), {
-        headers: { Authorization: `Bearer ${srv.apiKey}` },
+        headers: quernHeaders(srv.apiKey),
       });
 
       if (!resp.ok) {
@@ -531,7 +531,7 @@ NOTE: If you want to capture network traffic from this app:
       }
 
       const resp = await fetch(url.toString(), {
-        headers: { Authorization: `Bearer ${srv.apiKey}` },
+        headers: quernHeaders(srv.apiKey),
       });
 
       if (!resp.ok) {

@@ -134,3 +134,27 @@ test("the module picks up CLAUDE_CODE_SESSION_ID when it loads", async () => {
     { env, encoding: "utf8" });
   assert.equal(out.trim(), "claude-abc-123");
 });
+
+test("API headers are built only in http.ts", async () => {
+  // take_screenshot and take_annotated_screenshot called fetch with their own
+  // Authorization header and no session, so two of the commonest actions were
+  // unattributed while the apiRequest test passed. Any request that builds
+  // its own auth header would skip the session the same way.
+  const { readdirSync, readFileSync, statSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const src = fileURLToPath(new URL("../src", import.meta.url));
+  const offenders = [];
+  const walk = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const path = join(dir, name);
+      if (statSync(path).isDirectory()) walk(path);
+      else if (name.endsWith(".ts") && name !== "http.ts"
+               && /Authorization|Bearer \$\{/.test(readFileSync(path, "utf8"))) {
+        offenders.push(path.slice(src.length + 1));
+      }
+    }
+  };
+  walk(src);
+  assert.deepEqual(offenders, [], "build headers with quernHeaders() from http.ts");
+});

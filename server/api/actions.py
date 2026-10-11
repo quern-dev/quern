@@ -31,6 +31,7 @@ from server.logging_ext import (
     reset_current_action,
     set_current_action,
 )
+from server.session import current_session
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +95,11 @@ def action(
     # back, categorised, so `category=device.action` returns both halves.
     logging_ext.debug(
         logger, "%s started", name, category=category,
-        extra_fields={"quern_action": name, "quern_outcome": "started"},
+        # With the session: a begin entry is what is left of an action that
+        # hung or was cut off, and that is when "which agent started this"
+        # matters most (#254 review).
+        extra_fields={"quern_action": name, "quern_outcome": "started",
+                      "quern_session": current_session()},
     )
     try:
         yield scope

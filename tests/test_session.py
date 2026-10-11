@@ -200,6 +200,45 @@ class TestTheTrace:
             body = client.get("/api/v1/trace", params={"session": "mcp-aaaa"}).json()
         assert [a["session"] for a in body["actions"]] == ["mcp-aaaa"]
 
+    def test_filtering_by_session_does_not_change_what_an_action_says(self):
+        """Two sessions, overlapping actions, one device -- the case `session`
+        exists for. The first version filtered before attributing, so the other
+        session's action was gone when overlaps were computed: A lost its
+        overlap caveat and kept a log line B's action may have caused. Found
+        by review, reproduced through the route."""
+        from server.api.trace import router
+
+        app = FastAPI()
+        app.include_router(router)
+        app.state.server_buffer = RingBuffer(max_size=100)
+        app.state.ring_buffer = RingBuffer(max_size=100)
+        app.state.crash_buffer = RingBuffer(max_size=10)
+        app.state.flow_store = None
+        t = datetime.now(UTC) - timedelta(seconds=30)
+        # A: tap from t to t+2s. B: launch_app from t+0.5 to t+1.5. Entries are
+        # written when an action ends, so the timestamp is the end.
+        a = _action(t + timedelta(seconds=2), "mcp-aaaa")
+        a.duration_ms = 2000
+        b = _action(t + timedelta(seconds=1.5), "mcp-bbbb")
+        b.action, b.duration_ms = "launch_app", 1000
+        line = LogEntry(id=uuid.uuid4().hex, timestamp=t + timedelta(seconds=1), device_id=SIM,
+                        process="MyApp", level=LogLevel.INFO, message="x",
+                        source=LogSource.SIMULATOR)
+        since = (t - timedelta(seconds=5)).isoformat()
+        with TestClient(app) as client:
+            for entry in (a, b):
+                client.portal.call(app.state.server_buffer.append, entry)
+            client.portal.call(app.state.ring_buffer.append, line)
+            whole = client.get("/api/v1/trace", params={"since": since}).json()
+            mine = client.get("/api/v1/trace",
+                              params={"since": since, "session": "mcp-aaaa"}).json()
+
+        [a_whole] = [x for x in whole["actions"] if x["session"] == "mcp-aaaa"]
+        [a_mine] = mine["actions"]
+        assert a_whole["overlaps"] == ["launch_app"], "the scenario must overlap"
+        for field in ("overlaps", "caveats", "logs", "flows"):
+            assert a_mine[field] == a_whole[field], field
+
     async def test_trace_over_a_recording_filters_by_session(self, tmp_path):
         from server.api.trace import get_trace
 
@@ -289,3 +328,38 @@ class TestTheSharedRule:
         assert cli._call("GET", "/api/v1/recordings") == (200, {"ok": True})
         # urllib title-cases header names.
         assert sent[0]["X-quern-session"] == f"claude-{self.CLAUDE}"
+
+
+class TestTheEdges:
+    async def test_a_begin_entry_carries_the_session(self):
+        """What is left of a hung or cut-off action is its begin entry, and
+        that is when "which agent started this" matters most."""
+        from server.api.actions import action
+        from server.logging_ext import session_of
+
+        records: list[logging.LogRecord] = []
+
+        class _Keep(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        log = logging.getLogger("server.api.actions")
+        handler = _Keep(level=logging.DEBUG)
+        log.addHandler(handler)
+        token = session_mod._SESSION.set("mcp-hung")
+        try:
+            with action("tap", category="device.action"):
+                pass
+        finally:
+            session_mod._SESSION.reset(token)
+            log.removeHandler(handler)
+
+        begins = [r for r in records if getattr(r, "quern_outcome", "") == "started"]
+        assert begins, "no begin entry was written"
+        assert session_of(begins[0]) == "mcp-hung"
+
+    def test_the_recording_summary_view_keeps_the_session(self):
+        from server.recording.recorder import _summary
+
+        data = _action(datetime.now(UTC), "mcp-aaaa").model_dump(mode="json")
+        assert _summary("action", data)["session"] == "mcp-aaaa"

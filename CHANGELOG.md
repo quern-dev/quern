@@ -10,8 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Every action says which agent session asked for it (#254).**
   - Each agent's quern MCP server mints a session id when it starts and sends it as `X-Quern-Session` on every request. Measured: one MCP process per agent session.
-  - The server records it as `session` on every action entry, in the trace and in recordings. Callers that send none (curl, the CLI) and work nobody asked for are left empty.
-  - `get_trace(mine=true)` returns only your own actions, and `session=<id>` returns another agent's. That separates agents sharing one device, which `udid` couldn't.
+  - The server records it as `session` on every action entry, including the begin entry an action that hangs leaves behind, and in the trace, in recordings, and in `get_recording`'s summary view. Callers that send none (curl, the CLI) and work nobody asked for are left empty.
+  - `get_trace(mine=true)` returns only your own actions, and `session=<id>` returns another agent's. That separates agents sharing one device, which `udid` couldn't. Attribution still sees every action on the device, so an action that overlapped another agent's keeps its overlap caveat and doesn't claim that agent's flows and logs. Every `get_trace` answer includes `your_session`.
   - Under Claude Code the session is `claude-<session id>`: the agent's own id, which names its transcript in `~/.claude/projects`. Agents' Bash commands carry the same id, so `quern record` and API scripts an agent runs are attributed to the same session as its MCP calls. The `quern-api` skill shows the header for direct API calls. Other MCP clients get a random `mcp-…` id, and the CLI otherwise sends `cli`.
   - `QUERN_SESSION` names the session instead, for the MCP server or the CLI.
   - Malformed ids are recorded as unattributed rather than refused.
