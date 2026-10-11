@@ -45,6 +45,14 @@ the source-protocol design discussion is in
   `didReceive response:` fires **once per part** — so anything hung off it
   needs a fire-once gate. The add acknowledgement went out per frame until one
   went in.
+- **WebKit's `fetch` cannot read a `multipart/x-mixed-replace` body.** The
+  response resolves 200 with a `body`, and the first `read()` throws
+  `TypeError: Load failed`. Chrome reads it fine, so a Chrome-only check
+  passes. That is why `/frames` is labelled `application/octet-stream` even
+  though its bytes are multipart-framed: the page's `Parts` reads the framing
+  from the bytes, never from the label (#450, Safari 27 on macOS and iPadOS).
+  Don't "correct" the label back. `/stream` keeps the multipart label under
+  MJPEG, because a bare `<img>` needs it and doesn't go through `fetch`.
 - **One `NWConnection.receive` is not one HTTP request.** TCP will split
   `GET /stream`, and routing on the first segment served the index page to a
   viewer that asked for video. Accumulate to `\r\n\r\n` before routing.

@@ -547,12 +547,19 @@ public enum HTTPWire {
           return "Off air" + (why ? ": " + why : "") + ".";
         }
         if (!response.ok || !response.body) return "quern-media answered " + response.status + ".";
-        if ((response.headers.get("content-type") || "").startsWith("text/html")) {
+        const type = (response.headers.get("content-type") || "").toLowerCase();
+        if (type.startsWith("text/html")) {
           // An older quern-media serves its index page for any path it does
-          // not know, /frames included. Tested for directly: /frames is
-          // labelled application/octet-stream now (#450), and was multipart
-          // before, so a check for either label refuses the other version.
+          // not know, /frames included.
           return "This quern-media does not serve /frames; update quern.";
+        }
+        if (!type.startsWith("application/octet-stream") && !type.startsWith("multipart/")) {
+          // /frames is application/octet-stream (#450) and was multipart
+          // before; both are accepted, so this page also plays from an older
+          // quern-media. Anything else is not quern-media's stream at all --
+          // a reused port, a proxy -- and parsing it would only fail later
+          // with a less useful reason.
+          return "Something other than quern-media answered here (" + (type || "no content type") + ").";
         }
         const parts = new Parts(response.body.getReader());
         for (;;) {
