@@ -112,3 +112,25 @@ test("the module loads with QUERN_SESSION set", async () => {
     { env: { ...process.env, QUERN_SESSION: "ci-run-4471" }, encoding: "utf8" });
   assert.equal(out.trim(), "ci-run-4471");
 });
+
+test("under Claude Code the session is the agent's own session id", async () => {
+  const { mintSessionId } = await import("../dist/http.js");
+  const claude = "1256bb48-e4fc-5e5c-95cc-3a3bde6898a3";
+  assert.equal(mintSessionId(undefined, claude), `claude-${claude}`);
+  assert.equal(mintSessionId("ci-run-4471", claude), "ci-run-4471", "QUERN_SESSION wins");
+  assert.equal(mintSessionId("bad name", claude), `claude-${claude}`);
+  assert.match(mintSessionId(undefined, "bad id"), /^mcp-[0-9a-f]{8}$/);
+  assert.match(mintSessionId(undefined, "   "), /^mcp-[0-9a-f]{8}$/);
+});
+
+test("the module picks up CLAUDE_CODE_SESSION_ID when it loads", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const http = fileURLToPath(new URL("../dist/http.js", import.meta.url));
+  const env = { ...process.env, CLAUDE_CODE_SESSION_ID: "abc-123" };
+  delete env.QUERN_SESSION;
+  const out = execFileSync(process.execPath, ["--input-type=module", "-e",
+    `const m = await import(${JSON.stringify(http)}); console.log(m.SESSION_ID);`],
+    { env, encoding: "utf8" });
+  assert.equal(out.trim(), "claude-abc-123");
+});

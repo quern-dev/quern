@@ -233,3 +233,59 @@ class TestTheTrace:
 @pytest.fixture(autouse=True)
 def _actions_are_logged():
     logging.getLogger("server.api.actions").setLevel(logging.DEBUG)
+
+
+class TestTheSharedRule:
+    """QUERN_SESSION, else the Claude Code session, else the fallback. The MCP
+    server's copy of this rule is `mintSessionId` in mcp/src/http.ts."""
+
+    CLAUDE = "1256bb48-e4fc-5e5c-95cc-3a3bde6898a3"
+
+    @pytest.mark.parametrize("env, expected", [
+        ({}, "cli"),
+        ({"CLAUDE_CODE_SESSION_ID": CLAUDE}, f"claude-{CLAUDE}"),
+        ({"QUERN_SESSION": "ci-1", "CLAUDE_CODE_SESSION_ID": CLAUDE}, "ci-1"),
+        # A name the server would refuse falls through rather than being sent
+        # and discarded, which would leave the caller unattributed.
+        ({"QUERN_SESSION": "bad name", "CLAUDE_CODE_SESSION_ID": CLAUDE}, f"claude-{CLAUDE}"),
+        ({"CLAUDE_CODE_SESSION_ID": "bad id"}, "cli"),
+        ({"CLAUDE_CODE_SESSION_ID": "   "}, "cli"),
+    ])
+    def test_rule(self, env, expected):
+        assert session_mod.session_from_env(env, fallback="cli") == expected
+
+    def test_the_record_cli_sends_it(self, monkeypatch, tmp_path):
+        """`quern record` called from an agent's Bash lands under that agent's
+        session, the same one its MCP server reports."""
+        import io
+        import json as json_mod
+
+        from server import __main__ as main_mod
+        from server.recording import cli
+
+        sent: list[dict] = []
+
+        class _Resp(io.BytesIO):
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def urlopen(req, timeout=None):
+            sent.append(dict(req.header_items()))
+            return _Resp(json_mod.dumps({"ok": True}).encode())
+
+        key = tmp_path / "api-key"
+        key.write_text("k")
+        monkeypatch.setattr("server.config.API_KEY_FILE", key)
+        monkeypatch.setattr(main_mod, "_server_base_url", lambda: "http://127.0.0.1:1")
+        monkeypatch.setattr(cli.urllib.request, "urlopen", urlopen)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", self.CLAUDE)
+        monkeypatch.delenv("QUERN_SESSION", raising=False)
+
+        assert cli._call("GET", "/api/v1/recordings") == (200, {"ok": True})
+        # urllib title-cases header names.
+        assert sent[0]["X-quern-session"] == f"claude-{self.CLAUDE}"

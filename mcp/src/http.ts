@@ -16,21 +16,31 @@ export const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}$/;
 /** Which agent session this MCP process serves, sent as X-Quern-Session on
  * every request so the server can say who asked for each action (#254).
  *
- * One per process, and measured to be one process per agent session: four
- * Claude Code sessions on one machine ran four of these, each the child of
- * its own session. So the id lives exactly as long as the session, with no
+ * Measured to be one MCP process per agent session: four Claude Code sessions
+ * on one machine ran four of these, each the child of its own session. So
+ * even the random fallback lives exactly as long as the session, with no
  * cooperation needed from the agent.
  *
- * Minted here rather than taken from the client. Claude Code does export a
- * session id to this process, but quern serves any MCP client, and the id
- * ends up in recordings that CI publishes. QUERN_SESSION overrides it, for a
- * caller that wants a name it can recognise -- same rules the server
- * enforces, or it is ignored. Attribution, not authority. */
-export const SESSION_ID: string = mintSessionId(process.env.QUERN_SESSION);
+ * Under Claude Code it is the agent's own session id, which names its
+ * transcript, so a reader can open the conversation behind an action -- and
+ * the same id reaches the agent's Bash commands, so the CLI attributes them
+ * the same way. Another MCP client gets a random id. QUERN_SESSION overrides
+ * both, for a caller that wants a name it chose. Attribution, not authority. */
+export const SESSION_ID: string = mintSessionId(
+  process.env.QUERN_SESSION, process.env.CLAUDE_CODE_SESSION_ID);
 
-export function mintSessionId(override: string | undefined): string {
+/** The rule every quern client shares (server/session.py session_from_env):
+ * QUERN_SESSION if valid; else `claude-<id>` under Claude Code, whose session
+ * id names the agent's transcript in ~/.claude/projects and is also in the
+ * environment of the agent's Bash commands, so CLI calls the agent makes land
+ * under the same session; else a random id for this process. */
+export function mintSessionId(
+  override: string | undefined, claudeSession?: string | undefined,
+): string {
   const named = override?.trim();
   if (named && SESSION_ID_PATTERN.test(named)) return named;
+  const claude = `claude-${claudeSession?.trim() ?? ""}`;
+  if (claudeSession?.trim() && SESSION_ID_PATTERN.test(claude)) return claude;
   return `mcp-${randomBytes(4).toString("hex")}`;
 }
 

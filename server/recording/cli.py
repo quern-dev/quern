@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from server.session import session_from_env
 
 USAGE = """\
 Usage: quern record start --udid UDID [--out DIR] [--kinds actions,flows,logs]
@@ -64,7 +67,10 @@ def _call(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
         raise ConnectionError(f"no API key at {API_KEY_FILE}: run `quern setup`")
     req = urllib.request.Request(
         url + path, method=method, data=json.dumps(body).encode() if body is not None else None,
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+                 # Who is asking (#254): an agent's Bash command is attributed
+                 # to that agent's session, anything else to "cli".
+                 "X-Quern-Session": session_from_env(dict(os.environ), fallback="cli")})
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             return resp.status, json.loads(resp.read() or b"{}")

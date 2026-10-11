@@ -43,6 +43,30 @@ def current_session() -> str:
     return _SESSION.get()
 
 
+def session_from_env(env: dict[str, str], *, fallback: str) -> str:
+    """The session a client process should send, by the rule every quern client
+    shares (the MCP server's copy is `mintSessionId` in mcp/src/http.ts):
+
+    1. `QUERN_SESSION`, when it is a valid id -- a name the caller chose, such
+       as a CI job's.
+    2. `claude-<CLAUDE_CODE_SESSION_ID>` when running under Claude Code. That
+       id names the agent's transcript in ~/.claude/projects, so a reader can
+       open the conversation behind an action. It is in the environment of the
+       agent's MCP server *and* of its Bash commands, so a `quern record` the
+       agent runs lands under the same session as its MCP calls.
+    3. `fallback`.
+    """
+    named = parse_session(env.get("QUERN_SESSION"))
+    if named:
+        return named
+    claude_id = (env.get("CLAUDE_CODE_SESSION_ID") or "").strip()
+    if claude_id:
+        claude = parse_session(f"claude-{claude_id}")
+        if claude:
+            return claude
+    return fallback
+
+
 def parse_session(raw: bytes | str | None) -> str:
     """A header value as a session id, or "" when absent or malformed.
 
