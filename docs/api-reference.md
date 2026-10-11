@@ -20,7 +20,9 @@ The key lives at `~/.quern/api-key`; the server's URL and port are in `~/.quern/
 
 Send `X-Quern-Session: <name>` to say who is asking: letters, digits and `. _ : @ -`, up to 64 characters, starting with a letter or digit (#254). Every action records it as `session`, and `GET /api/v1/trace?session=<name>` returns that caller's actions. The MCP server, `quern record` and the `quern-api` skill's examples send one automatically. Under Claude Code it is `claude-<CLAUDE_CODE_SESSION_ID>`; `QUERN_SESSION` overrides it.
 
-It is attribution, not access control: nothing is refused without it. A request that names no valid session gets an `X-Quern-Session-Warning` response header. Its value starts with a reason, `missing` or `malformed`, followed by `; ` and how to fix it. The server log notes unattributed callers once every five minutes per kind. Public paths never warn.
+It is attribution, not access control: nothing is refused without it. A request that names no valid session gets an `X-Quern-Session-Warning` response header (exposed to browsers through CORS). Its value starts with a reason, `missing` or `malformed`, followed by `; ` and how to fix it. Public paths never warn. A 500 from an unhandled error doesn't carry the header either.
+
+The server log notes unattributed callers that passed authentication: once every five minutes per reason and User-Agent, and at most 20 lines per five minutes in all. A request without the API key gets the header but isn't logged as an unattributed caller.
 
 ## Tools and their endpoints
 

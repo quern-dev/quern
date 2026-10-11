@@ -37,9 +37,24 @@ WARNING_HEADER = "x-quern-session-warning"
 
 #: Seconds between server-log lines about one kind of unattributed caller.
 _WARN_LOG_INTERVAL = 300.0
-#: Kinds remembered for that rate limit. Bounded because the key includes the
-#: caller's User-Agent, which the caller chooses.
-_WARN_LOG_KINDS = 256
+#: Lines per interval across all kinds, which also bounds the table. The
+#: per-kind limit alone is defeated by a caller that changes its User-Agent
+#: on every request -- the key includes it, and the caller chooses it.
+_WARN_LOG_BUDGET = 20
+
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _loggable(text: str, limit: int) -> str:
+    """`text` safe for a one-line log record: control characters escaped, cut.
+
+    ASGI paths arrive percent-decoded, so `%0A` in a URL is a real newline by
+    the time it reaches us. Logged as-is, an unauthenticated caller could
+    write a forged timestamped `[ERROR]` line into server.log -- and into
+    `query_logs`, which agents read (#254 review).
+    """
+    cleaned = _CONTROL.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
+    return cleaned if len(cleaned) <= limit else cleaned[:limit] + "..."
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +163,7 @@ class SessionMiddleware:
         session = parse_session(raw)
         warning = "" if scope.get("path") in _public_paths() else warning_for(raw, session)
         if warning:
-            self._note(warning, headers, scope.get("path", ""))
+            path = scope.get("path", "")
 
             async def send_with_warning(message):
                 if message["type"] == "http.response.start":
@@ -156,6 +171,12 @@ class SessionMiddleware:
                         *message.get("headers", []),
                         (WARNING_HEADER.encode(), warning.encode()),
                     ]}
+                    # Logged once the status is known, and not for a 401: a
+                    # caller without the key is a port scan or a wrong key,
+                    # not a script that forgot to name itself, and logging it
+                    # as one misleads whoever reads the log.
+                    if message.get("status") != 401:
+                        self._note(warning, headers, path)
                 await send(message)
         else:
             send_with_warning = send
@@ -170,18 +191,23 @@ class SessionMiddleware:
         """Log an unattributed caller, at most once per interval per kind."""
         reason = warning.split(";", 1)[0]
         agent = next((v for k, v in headers if k == b"user-agent"), b"").decode(
-            "ascii", "replace")[:80]
+            "ascii", "replace")
         now = time.monotonic()
         key = (reason, agent)
         if now - self._logged.get(key, float("-inf")) < _WARN_LOG_INTERVAL:
             return
-        if len(self._logged) >= _WARN_LOG_KINDS:
-            self._logged.clear()
+        # Expired kinds go first; a full table then refuses new kinds rather
+        # than being cleared, which would log every remembered kind again.
+        self._logged = {k: t for k, t in self._logged.items()
+                        if now - t < _WARN_LOG_INTERVAL}
+        if len(self._logged) >= _WARN_LOG_BUDGET:
+            return
         self._logged[key] = now
         # Imported here: logging_ext reads this module's ContextVar at import.
         from server import logging_ext
 
         logging_ext.warning(
             logger, "Unattributed API caller (%s session header): %s, first seen on %s",
-            reason, agent or "no user agent", path, category="server.lifecycle",
+            reason, _loggable(agent, 80) or "no user agent", _loggable(path, 120),
+            category="server.lifecycle",
         )

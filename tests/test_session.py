@@ -458,3 +458,62 @@ class TestTheWarning:
         assert unauth.headers[session_mod.WARNING_HEADER].startswith("missing;")
         health = client.get("/health")
         assert session_mod.WARNING_HEADER not in health.headers
+
+
+class TestTheWarningLog:
+    """The log line is safe, honest about who it names, and bounded."""
+
+    @staticmethod
+    def _client():
+        return TestClient(TestTheWarning._app())
+
+    @staticmethod
+    def _lines(caplog):
+        return [r.getMessage() for r in caplog.records if r.name == "server.session"]
+
+    def test_a_crafted_path_cannot_forge_a_log_line(self, caplog):
+        """Paths arrive percent-decoded: %0A is a real newline by then."""
+        caplog.set_level(logging.WARNING, logger="server.session")
+        with self._client() as client:
+            client.get("/act%0A2026-10-11 00:00:00,000 [ERROR] server: forged" + "x" * 500)
+        [line] = self._lines(caplog)
+        assert "\n" not in line and "\\x0a" in line
+        assert len(line) < 400, "the path must be bounded"
+
+    def test_a_request_without_the_key_is_not_logged_as_unattributed(self, caplog):
+        """A 401 is a scan or a wrong key, not a script that forgot its name.
+        It still gets the header."""
+        from server.main import create_app
+
+        caplog.set_level(logging.WARNING, logger="server.session")
+        response = TestClient(create_app()).get("/api/v1/trace")
+        assert response.status_code == 401
+        assert response.headers[session_mod.WARNING_HEADER].startswith("missing;")
+        assert self._lines(caplog) == []
+
+    def test_rotating_user_agents_is_capped(self, caplog):
+        caplog.set_level(logging.WARNING, logger="server.session")
+        with self._client() as client:
+            for i in range(60):
+                client.post("/act", headers={"User-Agent": f"rotating/{i}"})
+        assert len(self._lines(caplog)) == session_mod._WARN_LOG_BUDGET
+
+    def test_a_kind_is_logged_again_after_the_interval(self, caplog, monkeypatch):
+        caplog.set_level(logging.WARNING, logger="server.session")
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(session_mod.time, "monotonic", lambda: clock["t"])
+        with self._client() as client:
+            client.post("/act", headers={"User-Agent": "loop/1"})
+            client.post("/act", headers={"User-Agent": "loop/1"})
+            clock["t"] += session_mod._WARN_LOG_INTERVAL + 1
+            client.post("/act", headers={"User-Agent": "loop/1"})
+        assert len(self._lines(caplog)) == 2
+
+    def test_browsers_can_read_the_header(self):
+        """CORS hides response headers from page JS unless exposed."""
+        from server.main import create_app
+
+        response = TestClient(create_app()).get(
+            "/api/v1/trace", headers={"Origin": "http://localhost:3000"})
+        exposed = response.headers.get("access-control-expose-headers", "")
+        assert "x-quern-session-warning" in exposed.lower()
