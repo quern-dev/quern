@@ -161,6 +161,15 @@ class LogEntry(BaseModel):
             "The end is this plus duration_ms, measured on the same clock."
         ),
     )
+    session: str = Field(
+        default="",
+        description=(
+            "Which caller asked for this action: the id its MCP server sent as "
+            "X-Quern-Session, one per agent session. Empty for a caller that "
+            "sent none (curl, the CLI) and for work nobody asked for. "
+            "Attribution, not authority -- see server/session.py and #254."
+        ),
+    )
     outcome: str = Field(
         default="",
         description=(
@@ -1291,6 +1300,11 @@ class TracedAction(BaseModel):
 
     action: str
     udid: str
+    #: The agent session that asked for it (X-Quern-Session), or "" (#254).
+    #: Declared here as well as serialised: this is the route's response
+    #: model, and FastAPI drops any field it does not name -- which is how the
+    #: first version filtered by session correctly and returned none.
+    session: str = ""
     outcome: str
     duration_ms: int | None = None
     category: str

@@ -20,10 +20,11 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from server.device.ios.devicectl import canonical_device_id
-from server.models import LogQueryParams, LogSource, TraceResponse, UtcDatetime
+from server.models import LogEntry, LogQueryParams, LogSource, TraceResponse, UtcDatetime
 from server.recording import recorder as recording_mod
 from server.trace import (
     APP_LOG_SOURCES,
+    CAUSAL_GRACE,
     Attribution,
     Ownership,
     build_trace,
@@ -47,11 +48,52 @@ DEFAULT_WINDOW = timedelta(minutes=5)
 _MAX_QUERY_LIMIT = 1000
 
 
+def _select(actions: list[LogEntry], session: str | None, limit: int,
+            ) -> tuple[list[LogEntry], list[LogEntry] | None, bool]:
+    """What to attribute over, what to return, and whether `limit` cut it.
+
+    Without `session`: the newest `limit` actions, all returned.
+
+    With it, the caller's own newest `limit` actions are returned -- but
+    attributed together with every other action on the device that overlaps
+    their span. Filtering first, as the first version did, removed another
+    session's concurrent action before `build_trace` could compare it: the
+    overlap caveat vanished, and the caller's action claimed the flows and log
+    lines the other one caused. That is the shared-device case `session`
+    exists for, answered confidently wrong (#254 review). `udid` never had
+    this problem, because overlaps are only ever between same-device actions.
+    """
+    if not session:
+        over = len(actions) > limit
+        return (actions[-limit:] if over else actions), None, over
+    mine = [a for a in actions if a.session == session]
+    over = len(mine) > limit
+    if over:
+        mine = mine[-limit:]
+    if not mine:
+        return [], [], over
+    starts = [a.timestamp - timedelta(milliseconds=a.duration_ms or 0) for a in mine]
+    span_start = min(starts) - CAUSAL_GRACE
+    span_end = max(a.timestamp for a in mine) + CAUSAL_GRACE
+    context = [a for a in actions
+               if a.timestamp >= span_start
+               and a.timestamp - timedelta(milliseconds=a.duration_ms or 0) <= span_end]
+    return context, mine, over
+
+
+def _returned(attributions: list[Attribution], keep: list[LogEntry] | None) -> list[Attribution]:
+    """The attributions for the actions `_select` chose to return."""
+    if keep is None:
+        return attributions
+    return [a for a in attributions if any(a.action is k for k in keep)]
+
+
 def _serialise(attribution: Attribution, ip_map: dict[str, tuple[str, bool]]) -> dict:
     action = attribution.action
     return {
         "action": action.action,
         "udid": action.udid,
+        "session": action.session,
         "outcome": action.outcome,
         "duration_ms": action.duration_ms,
         "category": action.category,
@@ -116,10 +158,9 @@ async def get_trace(
     udid: str | None = Query(
         default=None,
         description=(
-            "Only actions against this device. With several agents sharing "
-            "one server this is how a caller gets its own trace: quern has no "
-            "notion of who is asking, so the device is the only separator "
-            "(see #254)."
+            "Only actions against this device. To separate callers rather "
+            "than devices -- several agents can share one device -- use "
+            "`session` (#254)."
         ),
     ),
     limit: int = Query(default=100, ge=1, le=1000),
@@ -136,10 +177,18 @@ async def get_trace(
     until: Annotated[UtcDatetime | None, Query(
         description="End of the window; with `recording`, default its end.",
     )] = None,
+    session: Annotated[str | None, Query(
+        description=(
+            "Only actions this caller asked for: the X-Quern-Session id its MCP "
+            "server sends. Separates agents sharing one device, which `udid` "
+            "cannot (#254)."
+        ),
+    )] = None,
 ) -> dict:
     """Actions in a window, each with the flows and log lines it caused."""
     if recording:
-        return await _trace_from_recording(request, recording, since, until, udid, limit)
+        return await _trace_from_recording(
+            request, recording, since, until, udid, limit, session)
     if until is not None and since is not None and until < since:
         raise HTTPException(status_code=400, detail="until is before since")
     # Canonicalised, because the caller may name a physical device by either
@@ -188,9 +237,7 @@ async def get_trace(
     #
     # The newest are kept, since a trace is read backwards from whatever just
     # went wrong. The response is still ordered oldest-first.
-    actions_over_limit = len(actions) > limit
-    if actions_over_limit:
-        actions = actions[-limit:]
+    actions, keep, actions_over_limit = _select(actions, session, limit)
 
     # Actions can also age out, and the probe below only ever watched the
     # device-log buffer. Actions come from `server_buffer`, a separate and
@@ -330,9 +377,9 @@ async def get_trace(
     # measured at 0.25s for a full window even after bounding the inputs, and
     # ~0.95s before. That is the whole server's event loop, shared by every
     # other agent and device, stalled on one caller reading a trace.
-    attributions = await asyncio.to_thread(
+    attributions = _returned(await asyncio.to_thread(
         build_trace, actions, flows, device_logs, ip_map=ip_map,
-    )
+    ), keep)
 
     return {
         "since": window_start.isoformat(),
@@ -385,7 +432,8 @@ async def get_trace(
 
 
 async def _trace_from_recording(request: Request, ref: str, since: datetime | None,
-                                until: datetime | None, udid: str | None, limit: int) -> dict:
+                                until: datetime | None, udid: str | None, limit: int,
+                                session: str | None = None) -> dict:
     """The trace over a recording: `build_trace`, unchanged, on what it wrote.
 
     The truncation fields mean what they mean live, answered from the file:
@@ -410,20 +458,20 @@ async def _trace_from_recording(request: Request, ref: str, since: datetime | No
     actions = sorted((a for a in loaded.actions
                       if a.outcome != "started" and inside(a.timestamp)
                       and (not udid or a.udid == udid)), key=lambda a: a.timestamp)
-    actions_over_limit = len(actions) > limit
-    if actions_over_limit:
-        actions = actions[-limit:]
+    actions, keep, actions_over_limit = _select(actions, session, limit)
     flows = sorted((f for f in [*loaded.flows, *loaded.unfinished] if inside(f.timestamp)),
                    key=lambda f: f.timestamp)
     logs = sorted((e for e in loaded.logs if inside(e.timestamp)), key=lambda e: e.timestamp)
     ip_map = await asyncio.to_thread(_ip_map)
-    attributions = await asyncio.to_thread(build_trace, actions, flows, logs, ip_map=ip_map)
+    attributions = _returned(
+        await asyncio.to_thread(build_trace, actions, flows, logs, ip_map=ip_map), keep)
 
     def holes(*kinds: str) -> list[str]:
         return recording_mod.holes_in(loaded, set(kinds), since, until)
 
     return {
-        "since": (since or (min((a.timestamp for a in actions), default=None))
+        "since": (since or (min((a.timestamp for a in (actions if keep is None else keep)),
+                                default=None))
                   or datetime.now(UTC)).isoformat(),
         "udid": udid,
         # The recording's own anchor, not this server's now: a recording read

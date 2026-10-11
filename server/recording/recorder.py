@@ -1614,6 +1614,7 @@ def _summary(kind: str, data: dict) -> dict:
         return {"timestamp": data.get("timestamp"), "action": data.get("action"),
                 "outcome": data.get("outcome"), "duration_ms": data.get("duration_ms"),
                 "started_monotonic": data.get("started_monotonic"),
+                "session": data.get("session", ""),
                 "message": data.get("message")}
     return {"timestamp": data.get("timestamp"), "level": data.get("level"),
             "process": data.get("process"), "message": data.get("message")}

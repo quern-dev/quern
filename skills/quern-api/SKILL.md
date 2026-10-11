@@ -23,6 +23,7 @@ from REST paths in non-obvious ways — this reference gives you the correct map
 4. **`/devices/` (plural)** for resolve/ensure — **`/device/` (singular)** for everything else
 5. **Mocks use `/proxy/mocks`** (plural) — not `/proxy/mock`
 6. **Auth**: `X-API-Key` header — read the value from `~/.quern/state.json` field `api_key`
+6a. **Say who you are**: send `X-Quern-Session: claude-$CLAUDE_CODE_SESSION_ID` (or `$QUERN_SESSION` if set). Every action is recorded with it, so `GET /api/v1/trace?session=<id>` — and `get_trace(mine=true)` from the MCP — shows your calls alongside your MCP calls instead of as unattributed. Not auth: nothing is refused without it.
 7. **Device targeting**: most endpoints accept `udid` as a query param (GET) or body field (POST)
 
 ## MCP Tool → REST Endpoint Mapping
@@ -212,7 +213,7 @@ For commonly-used endpoint schemas, see `references/schemas.md`.
 ## Python Helper Pattern
 
 ```python
-import json, requests
+import json, os, requests
 
 def quern(method, path, **kwargs):
     """Helper for calling the Quern REST API."""
@@ -220,6 +221,10 @@ def quern(method, path, **kwargs):
         api_key = json.load(f)["api_key"]
     url = f"http://localhost:9100/api/v1{path}"
     headers = {"X-API-Key": api_key}
+    claude = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    session = os.environ.get("QUERN_SESSION") or (f"claude-{claude}" if claude else "")
+    if session:
+        headers["X-Quern-Session"] = session
     if method.upper() == "GET":
         return requests.get(url, headers=headers, params=kwargs)
     return requests.request(method, url, headers=headers, json=kwargs)

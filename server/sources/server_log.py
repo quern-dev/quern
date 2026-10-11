@@ -16,6 +16,7 @@ from server.logging_ext import (
     category_of,
     duration_ms_of,
     outcome_of,
+    session_of,
     started_monotonic_of,
     udid_of,
 )
@@ -77,6 +78,7 @@ class _BufferHandler(logging.Handler):
             duration_ms=duration_ms_of(record),
             outcome=outcome_of(record),
             started_monotonic=started_monotonic_of(record),
+            session=session_of(record),
         )
 
         # Schedule the async emit on the event loop (thread-safe)
