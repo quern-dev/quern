@@ -780,6 +780,9 @@ def create_app(
         allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
         allow_methods=["*"],
         allow_headers=["*"],
+        # Readable from browser JS too (Quern Helm, dev tools); a header CORS
+        # does not expose is invisible to a page even when it arrives.
+        expose_headers=["X-Quern-Session-Warning"],
     )
 
     # Routes

@@ -369,3 +369,167 @@ class TestTheEdges:
 
         data = _action(datetime.now(UTC), "mcp-aaaa").model_dump(mode="json")
         assert _summary("action", data)["session"] == "mcp-aaaa"
+
+
+class TestTheWarning:
+    """Anonymous callers still succeed, and are told how to identify
+    themselves (#254, the warning phase)."""
+
+    @staticmethod
+    def _app() -> FastAPI:
+        from fastapi.responses import StreamingResponse
+
+        app = FastAPI()
+        app.add_middleware(SessionMiddleware)
+
+        @app.post("/act")
+        async def act():
+            return {"ok": True}
+
+        @app.get("/health")
+        async def health():
+            return {"status": "ok"}
+
+        @app.get("/stream")
+        async def stream():
+            async def chunks():
+                yield b"a"
+                yield b"b"
+            return StreamingResponse(chunks())
+
+        return app
+
+    @pytest.mark.parametrize("headers, reason", [
+        ({}, "missing"),
+        ({"X-Quern-Session": ""}, "missing"),
+        ({"X-Quern-Session": "bad name"}, "malformed"),
+        ({"X-Quern-Session": "x" * 65}, "malformed"),
+    ])
+    def test_an_unattributed_request_succeeds_and_is_told(self, headers, reason):
+        with TestClient(self._app()) as client:
+            response = client.post("/act", headers=headers)
+        assert response.status_code == 200
+        warning = response.headers[session_mod.WARNING_HEADER]
+        # The reason token is the contract; the prose after it may change.
+        assert warning.split(";", 1)[0] == reason
+        assert "X-Quern-Session" in warning
+
+    def test_a_named_request_gets_no_warning(self):
+        with TestClient(self._app()) as client:
+            response = client.post("/act", headers={"X-Quern-Session": "mcp-1a2b"})
+        assert session_mod.WARNING_HEADER not in response.headers
+
+    def test_a_public_path_never_warns(self):
+        """/health answers anyone; an anonymous health check is not news."""
+        with TestClient(self._app()) as client:
+            response = client.get("/health")
+        assert response.status_code == 200
+        assert session_mod.WARNING_HEADER not in response.headers
+
+    def test_a_streaming_response_carries_it(self):
+        with TestClient(self._app()) as client:
+            response = client.get("/stream")
+        assert response.content == b"ab"
+        assert response.headers[session_mod.WARNING_HEADER].startswith("missing;")
+
+    def test_the_log_is_rate_limited_per_kind_of_caller(self, caplog):
+        caplog.set_level(logging.WARNING, logger="server.session")
+        with TestClient(self._app()) as client:
+            for _ in range(5):
+                client.post("/act", headers={"User-Agent": "loop-script/1"})
+            client.post("/act", headers={"User-Agent": "other-script/2"})
+            client.post("/act", headers={"User-Agent": "loop-script/1",
+                                         "X-Quern-Session": "bad name"})
+        lines = [r.getMessage() for r in caplog.records if r.name == "server.session"]
+        assert len(lines) == 3, lines
+        assert any("loop-script/1" in m and "missing" in m for m in lines)
+        assert any("other-script/2" in m for m in lines)
+        assert any("malformed" in m for m in lines)
+
+    def test_through_the_real_app(self):
+        """The real stack, in its real order: auth answers 401 from inside the
+        session middleware, and the warning still reaches the caller; the
+        public /health stays clean."""
+        from server.main import create_app
+
+        client = TestClient(create_app())   # no lifespan: neither route needs it
+        unauth = client.get("/api/v1/trace")
+        assert unauth.status_code == 401
+        assert unauth.headers[session_mod.WARNING_HEADER].startswith("missing;")
+        health = client.get("/health")
+        assert session_mod.WARNING_HEADER not in health.headers
+
+
+class TestTheWarningLog:
+    """The log line is safe, honest about who it names, and bounded."""
+
+    @staticmethod
+    def _client():
+        return TestClient(TestTheWarning._app())
+
+    @staticmethod
+    def _lines(caplog):
+        return [r.getMessage() for r in caplog.records if r.name == "server.session"]
+
+    def test_a_crafted_path_cannot_forge_a_log_line(self, caplog):
+        """Paths arrive percent-decoded: %0A is a real newline by then."""
+        caplog.set_level(logging.WARNING, logger="server.session")
+        with self._client() as client:
+            client.get("/act%0A2026-10-11 00:00:00,000 [ERROR] server: forged" + "x" * 500)
+        [line] = self._lines(caplog)
+        assert "\n" not in line and "\\x0a" in line
+        assert len(line) < 400, "the path must be bounded"
+
+    def test_a_request_without_the_key_is_not_logged_as_unattributed(self, caplog):
+        """A 401 is a scan or a wrong key, not a script that forgot its name.
+        It still gets the header."""
+        from server.main import create_app
+
+        caplog.set_level(logging.WARNING, logger="server.session")
+        response = TestClient(create_app()).get("/api/v1/trace")
+        assert response.status_code == 401
+        assert response.headers[session_mod.WARNING_HEADER].startswith("missing;")
+        assert self._lines(caplog) == []
+
+    def test_rotating_user_agents_is_capped(self, caplog):
+        caplog.set_level(logging.WARNING, logger="server.session")
+        with self._client() as client:
+            for i in range(60):
+                client.post("/act", headers={"User-Agent": f"rotating/{i}"})
+        assert len(self._lines(caplog)) == session_mod._WARN_LOG_BUDGET
+
+    def test_a_kind_is_logged_again_after_the_interval(self, caplog, monkeypatch):
+        caplog.set_level(logging.WARNING, logger="server.session")
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(session_mod.time, "monotonic", lambda: clock["t"])
+        with self._client() as client:
+            client.post("/act", headers={"User-Agent": "loop/1"})
+            client.post("/act", headers={"User-Agent": "loop/1"})
+            clock["t"] += session_mod._WARN_LOG_INTERVAL + 1
+            client.post("/act", headers={"User-Agent": "loop/1"})
+        assert len(self._lines(caplog)) == 2
+
+    def test_browsers_can_read_the_header(self):
+        """CORS hides response headers from page JS unless exposed."""
+        from server.main import create_app
+
+        response = TestClient(create_app()).get(
+            "/api/v1/trace", headers={"Origin": "http://localhost:3000"})
+        exposed = response.headers.get("access-control-expose-headers", "")
+        assert "x-quern-session-warning" in exposed.lower()
+
+    def test_a_full_budget_frees_up_once_its_kinds_expire(self, caplog, monkeypatch):
+        """Without dropping expired kinds, twenty callers would fill the budget
+        for good and nobody new would ever be logged. Found by deleting the
+        pruning and watching the suite stay green."""
+        caplog.set_level(logging.WARNING, logger="server.session")
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(session_mod.time, "monotonic", lambda: clock["t"])
+        with self._client() as client:
+            for i in range(session_mod._WARN_LOG_BUDGET):
+                client.post("/act", headers={"User-Agent": f"early/{i}"})
+            client.post("/act", headers={"User-Agent": "too-soon/1"})
+            assert len(self._lines(caplog)) == session_mod._WARN_LOG_BUDGET
+            clock["t"] += session_mod._WARN_LOG_INTERVAL + 1
+            client.post("/act", headers={"User-Agent": "later/1"})
+        assert any("later/1" in m for m in self._lines(caplog))
