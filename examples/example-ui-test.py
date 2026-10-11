@@ -10,6 +10,7 @@ The coordinator passes device info via environment variables:
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.request
@@ -112,11 +113,14 @@ async def run_test(device_udid: str, device_name: str, device_index: int):
 
     async with httpx.AsyncClient() as client:
         # X-Quern-Session says who is asking, so this run's actions can be
-        # read back with GET /api/v1/trace?session=<name> (#254).
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "X-Quern-Session": os.getenv("QUERN_SESSION") or f"example-ui-test-{device_index}",
-        }
+        # read back with GET /api/v1/trace?session=<name> (#254). A name the
+        # server would refuse falls back here rather than being sent and
+        # recorded as unattributed. Inlined so the example needs no quern
+        # source tree; the server's rule is server/session.py.
+        named = (os.getenv("QUERN_SESSION") or "").strip()
+        session = (named if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}", named)
+                   else f"example-ui-test-{device_index}")
+        headers = {"Authorization": f"Bearer {api_key}", "X-Quern-Session": session}
 
         # Example: Get screen summary
         resp = await client.get(

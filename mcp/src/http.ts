@@ -31,11 +31,6 @@ export const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}$/;
 export const SESSION_ID: string = mintSessionId(
   process.env.QUERN_SESSION, process.env.CLAUDE_CODE_SESSION_ID);
 
-/** The rule every quern client shares (server/session.py session_from_env):
- * QUERN_SESSION if valid; else `claude-<id>` under Claude Code, whose session
- * id names the agent's transcript in ~/.claude/projects and is also in the
- * environment of the agent's Bash commands, so CLI calls the agent makes land
- * under the same session; else a random id for this process. */
 /** Headers for any request to the quern API: the key, and who is asking.
  *
  * The one place they are built. Two screenshot tools used to call fetch with
@@ -46,6 +41,11 @@ export function quernHeaders(apiKey: string): Record<string, string> {
   return { Authorization: `Bearer ${apiKey}`, "X-Quern-Session": SESSION_ID };
 }
 
+/** The rule every quern client shares (server/session.py session_from_env):
+ * QUERN_SESSION if valid; else `claude-<id>` under Claude Code, whose session
+ * id names the agent's transcript in ~/.claude/projects and is also in the
+ * environment of the agent's Bash commands, so CLI calls the agent makes land
+ * under the same session; else a random id for this process. */
 export function mintSessionId(
   override: string | undefined, claudeSession?: string | undefined,
 ): string {

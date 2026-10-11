@@ -271,7 +271,13 @@ class TestTheTrace:
 
 @pytest.fixture(autouse=True)
 def _actions_are_logged():
-    logging.getLogger("server.api.actions").setLevel(logging.DEBUG)
+    """The actions logger at DEBUG for these tests, restored afterwards: it is
+    process-global, and leaving it changed would alter later tests."""
+    log = logging.getLogger("server.api.actions")
+    before = log.level
+    log.setLevel(logging.DEBUG)
+    yield
+    log.setLevel(before)
 
 
 class TestTheSharedRule:
