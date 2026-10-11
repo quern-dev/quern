@@ -224,13 +224,19 @@ class QuernClient:
         *,
         timeout: float | None = None,
         authenticated: bool = True,
+        tagged: bool = True,
         **kwargs: Any,
     ) -> httpx.Response:
-        """Issue a request and record it. Non-2xx is returned, not raised."""
+        """Issue a request and record it. Non-2xx is returned, not raised.
+
+        `tagged=False` sends no `X-Quern-Session` at all, for the tests of
+        what an unidentified caller is told.
+        """
         headers = dict(kwargs.pop("headers", {}) or {})
         if authenticated and self.target.api_key:
             headers.setdefault("Authorization", f"Bearer {self.target.api_key}")
-        headers.setdefault("X-Quern-Session", self.session)
+        if tagged:
+            headers.setdefault("X-Quern-Session", self.session)
 
         import time
 
