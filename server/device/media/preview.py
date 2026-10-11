@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from server.config import CONFIG_DIR
+from server.device.ios._xcode import xcode_available
 from server.device.media.media_engine import build_media_engine
 from server.lifecycle.ports import find_available_port
 
@@ -135,6 +136,11 @@ async def booted_simulators() -> list[tuple[str, str]]:
     return [(d.udid, d.name) for d in devices if d.state == DeviceState.BOOTED]
 
 
+#: Seconds `simulator_entries` waits for simctl. A module constant so tests
+#: can shorten it.
+SIMULATOR_LIST_TIMEOUT = 5.0
+
+
 async def simulator_entries() -> tuple[list[dict], str | None]:
     """Booted simulators as preview-list entries, and why if they can't be listed.
 
@@ -144,14 +150,26 @@ async def simulator_entries() -> tuple[list[dict], str | None]:
 
     The second value separates "asked, and none are booted" from "could not
     ask" -- an empty list for both would report a broken simctl as no
-    simulators, the false all-clear CONTRIBUTING warns about.
-    """
-    from server.models import DeviceError
+    simulators, the false all-clear CONTRIBUTING warns about. That includes
+    the case `SimctlBackend.list_devices` itself answers with an empty list:
+    no Xcode, which it short-circuits to avoid the install dialog.
 
+    Bounded by SIMULATOR_LIST_TIMEOUT. `preview_status` was an in-memory read
+    before simulators joined it, and a wedged CoreSimulator would otherwise
+    hang it indefinitely -- simctl's own call has no timeout.
+
+    Catches broadly. This feeds two status routes that never failed before it
+    existed, and a listing problem is reported in the second value rather than
+    turning them into a 500.
+    """
+    if not xcode_available():
+        return [], "Xcode is not available, so simulators cannot be listed"
     try:
-        booted = await booted_simulators()
-    except (DeviceError, OSError) as e:
-        return [], str(e)
+        booted = await asyncio.wait_for(booted_simulators(), SIMULATOR_LIST_TIMEOUT)
+    except TimeoutError:
+        return [], f"simctl did not list simulators within {SIMULATOR_LIST_TIMEOUT:g}s"
+    except Exception as e:  # noqa: BLE001 -- reported, not swallowed; see above
+        return [], f"{type(e).__name__}: {e}"
     return [{"name": n, "id": u, "kind": "simulator"} for u, n in booted], None
 
 
@@ -326,6 +344,14 @@ class ActivePreview:
     #: window's own reports while it retries ("quern-media is not running",
     #: until the restart lands) must not replace it.
     off_air_by_server: bool = False
+    #: The `opener` token of the call that created this record, if it passed
+    #: one. A caller compares it with its own to learn whether *it* opened the
+    #: preview or was handed one that already existed (#351). Set under the
+    #: same lock as the insert, so two concurrent adds of one key cannot both
+    #: read themselves as the opener -- which a before/after snapshot in the
+    #: caller could not guarantee: the second add rechecks under the lock and
+    #: returns the first one's record, created after its snapshot.
+    opened_by: object | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass
@@ -704,7 +730,9 @@ class PreviewManager:
             )
         return by_name[0] if by_name else None
 
-    async def add_capture_device(self, identifier: str) -> ActivePreview:
+    async def add_capture_device(
+        self, identifier: str, *, opener: object | None = None
+    ) -> ActivePreview:
         """Open a preview for a CoreMediaIO capture device, and only that.
 
         For a caller that already knows it wants a physical device. `add`
@@ -731,9 +759,11 @@ class PreviewManager:
                 "CoreMediaIO discovery takes about 3 seconds after attach, so "
                 "unlock the device, trust this Mac, and try again."
             )
-        return await self._add_device(device)
+        return await self._add_device(device, opener=opener)
 
-    async def add_booted_simulator(self, udid: str) -> ActivePreview:
+    async def add_booted_simulator(
+        self, udid: str, *, opener: object | None = None
+    ) -> ActivePreview:
         """Open a preview for a booted simulator, and only that.
 
         The mirror of `add_capture_device`. Resolves the title from simctl so
@@ -750,7 +780,7 @@ class PreviewManager:
 
         for booted_udid, sim_name in await booted_simulators():
             if booted_udid == udid:
-                return await self.add_simulator(udid, title=sim_name)
+                return await self.add_simulator(udid, title=sim_name, opener=opener)
 
         raise RuntimeError(
             f"No booted simulator has the udid '{udid}'. "
@@ -837,7 +867,9 @@ class PreviewManager:
             f"Devices: {available or 'none'}"
         )
 
-    async def _add_device(self, device: PreviewDeviceInfo) -> ActivePreview:
+    async def _add_device(
+        self, device: PreviewDeviceInfo, *, opener: object | None = None
+    ) -> ActivePreview:
         """Open a preview window on a CoreMediaIO capture device."""
         key = device.cmio_id
 
@@ -845,6 +877,12 @@ class PreviewManager:
             return self._active[key]
 
         async with self._stagger_lock:
+            # Re-checked under the lock, as `add_simulator` does. Two adds of
+            # one phone both passed the check above, and the second then sent
+            # a second `add`, overwrote `_pending` and `_active`, and leaked
+            # the first one's window position.
+            if key in self._active:
+                return self._active[key]
             position = self._next_position()
 
             loop = asyncio.get_event_loop()
@@ -864,7 +902,9 @@ class PreviewManager:
                     f"Timeout adding preview for {device.name}"
                 ) from None
 
-            preview = ActivePreview(name=key, position=position, label=device.name)
+            preview = ActivePreview(
+                name=key, position=position, label=device.name, opened_by=opener,
+            )
             self._active[key] = preview
             self._positions.add(position)
 
@@ -873,7 +913,9 @@ class PreviewManager:
 
             return preview
 
-    async def add_simulator(self, udid: str, title: str | None = None) -> ActivePreview:
+    async def add_simulator(
+        self, udid: str, title: str | None = None, *, opener: object | None = None
+    ) -> ActivePreview:
         """Open a preview window on a booted simulator.
 
         A simulator is not a CoreMediaIO device, so there is nothing for
@@ -950,7 +992,7 @@ class PreviewManager:
 
             preview = ActivePreview(
                 name=udid, position=position, kind="simulator", stream_port=port,
-                label=title,
+                label=title, opened_by=opener,
             )
             self._active[udid] = preview
             self._positions.add(position)
@@ -1292,15 +1334,6 @@ class PreviewManager:
 
         self._cleanup_state()
         return {"status": "stopped", "pid": pid}
-
-    def active_previews(self) -> list[ActivePreview]:
-        """The preview records active now, as a snapshot list.
-
-        For a caller that needs to know afterwards whether an `add` started
-        something or handed back what was already open (#351): the add
-        methods return the existing record for an active key.
-        """
-        return list(self._active.values())
 
     def status(self) -> dict:
         """Return current preview state."""

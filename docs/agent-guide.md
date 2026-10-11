@@ -334,7 +334,7 @@ Physical iOS devices are supported for screenshots, UI automation, log capture, 
 - `tap_element` taps only an element a tap can reach: its centre on screen and XCUITest reporting it hittable. Elements read through WDA carry `on_screen`. When every match is unreachable the not-found response lists them and why — scroll the element into view (`scroll_to_element`) rather than retrying the tap
 - Reads made for `tap_element`, `get_element`, `wait_for_element` and `scroll_to_element` go through WDA at depth 12, which keeps long lists fast (measured: 3.9s instead of 34.5s on a 200-row list). Pass `snapshot_depth` when the element sits deeper; a miss reports the depth it used
 - A physical iPhone that has never had `setup_wda` is a **400 naming `setup_wda`**, not a failure to retry: run setup first
-- `preview_device` — opens a live macOS video preview window of the device screen: CoreMediaIO for USB-connected physical devices, and quern-media's MJPEG stream for booted simulators. Each device is independently controlled — add and remove individual previews without affecting others. Use `stop_preview` with a UDID to close one device, or without to close all. `preview_status` shows per-device breakdown and what can be previewed, booted simulators included, each tagged `kind`. Asking again for a device already being previewed answers `already_active` with the original `started_at`: the stream is reused, not restarted
+- `preview_device` — opens a live macOS video preview window of the device screen: CoreMediaIO for USB-connected physical devices, and quern-media's MJPEG stream for booted simulators. Each device is independently controlled — add and remove individual previews without affecting others. Use `stop_preview` with a UDID to close one device, or without to close all. `preview_status` shows per-device breakdown and what can be previewed, booted simulators included, each tagged `kind`. Asking again for a device already being previewed answers `already_active` with the original `started_at`: the stream is reused, not restarted. A simulator answer carries `on_air`, so a reused preview that is reattaching is not read as live
 
 ---
 
@@ -344,7 +344,7 @@ Open real-time video windows to see what's happening on USB-connected physical d
 
 1. `preview_device` with a device UDID — adds that device's preview window
 2. `preview_device` with another UDID — adds a second device (1s stagger, no rediscovery)
-3. `preview_status` — see which devices are active vs. available. `available` includes booted simulators (`kind: "simulator"`, `id` is the UDID); `simulators_error` means simulators could not be listed, not that none are booted
+3. `preview_status` — see which devices are active vs. available. `available` always includes booted simulators (`kind: "simulator"`, `id` is the UDID `preview_device` takes). USB devices (`kind: "device"`) appear once the preview process is running, and their `id` is a CoreMediaIO id: preview a phone by its UDID from `list_devices`. `simulators_error` means simulators could not be listed, not that none are booted
 4. `stop_preview` with a UDID — remove one device's preview, others stay running
 5. `stop_preview` without a UDID — stop all previews and kill the process
 

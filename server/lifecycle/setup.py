@@ -777,6 +777,10 @@ def build_simulator_preview_engine() -> CheckResult:
             fixable=True,
         )
 
+    # Said before, not after: the report prints only at the end, and a cold
+    # release build can take minutes on a slow machine. Silence that long
+    # reads as a hang, and a Ctrl-C there ends setup before the steps after it.
+    print("    Building quern-media (simulator preview engine)...", flush=True)
     try:
         media_engine.build_media_engine_sync()
     except (RuntimeError, OSError) as e:

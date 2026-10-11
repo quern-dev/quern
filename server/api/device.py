@@ -1304,27 +1304,38 @@ def _get_scrcpy_preview(request: Request):
     return sp
 
 
-def _added_or_existing(preview: object, before: list) -> str:
-    """`already_active` when `preview` was in `before`, else `added`.
+def _added_or_existing(record, opener: object) -> str:
+    """`added` when this call opened `record`, `already_active` when it was
+    handed one that already existed (#351).
 
-    By identity, against previews held from before the call: the manager hands
-    back the record it already had for a key that is active, so "it was there
-    before I asked" is exactly "this call started nothing". Holding the
-    records in `before` also keeps their ids from being reused mid-check.
+    The manager stamps the opener token of the call that created a record,
+    under the lock that guards the insert. Two concurrent starts of one
+    simulator -- an agent retrying after a client timeout -- therefore get one
+    `added` and one `already_active`. A snapshot of the active set taken here
+    before the call could not do that: both snapshots are empty, and the
+    second add returns the record the first created after its snapshot.
     """
-    return "already_active" if any(p is preview for p in before) else "added"
+    return "added" if record.opened_by is opener else "already_active"
 
 
-def _preview_started(preview, before: list) -> dict:
+def _preview_started(preview, opener: object) -> dict:
     """The response to a single-device iOS `preview_start`."""
-    return {
-        "status": _added_or_existing(preview, before),
+    result = {
+        "status": _added_or_existing(preview, opener),
         "name": preview.label or preview.name,
         "position": preview.position,
         "platform": "ios",
         "kind": preview.kind,
         "started_at": preview.started_at.isoformat(),
     }
+    if preview.kind == "simulator":
+        # A reused simulator preview may be OFF AIR -- reattaching after a
+        # reboot, or its quern-media restarting -- and "already_active" alone
+        # would read as a live stream.
+        result["on_air"] = preview.on_air
+        if not preview.on_air and preview.off_air_reason:
+            result["off_air_reason"] = preview.off_air_reason
+    return result
 
 
 @router.post("/preview/start")
@@ -1372,13 +1383,14 @@ async def preview_start(request: Request, body: PreviewStartRequest):
                 device_name = udid
 
             try:
-                before = sp.active_previews()
-                session = await sp.add(udid, device_name)
+                opener = object()
+                session = await sp.add(udid, device_name, opener=opener)
                 return {
-                    "status": _added_or_existing(session, before),
+                    "status": _added_or_existing(session, opener),
                     "name": session.name,
                     "serial": session.serial,
                     "platform": "android",
+                    "started_at": session.started_at.isoformat(),
                 }
             except RuntimeError as e:
                 raise HTTPException(status_code=500, detail=str(e))
@@ -1399,9 +1411,9 @@ async def preview_start(request: Request, body: PreviewStartRequest):
         # never had the matching gate, so stopping a simulator preview was
         # reachable while starting one was not.
         if not controller._is_physical(udid):
-            before = pm.active_previews()
+            opener = object()
             try:
-                preview = await pm.add_booted_simulator(udid)
+                preview = await pm.add_booted_simulator(udid, opener=opener)
             except DeviceError as e:
                 # `add` enumerates booted simulators through simctl to match
                 # the udid, so an unavailable or mid-update Xcode raises here.
@@ -1411,7 +1423,7 @@ async def preview_start(request: Request, body: PreviewStartRequest):
                 raise _handle_device_error(e)
             except RuntimeError as e:
                 raise HTTPException(status_code=500, detail=str(e))
-            return _preview_started(preview, before)
+            return _preview_started(preview, opener)
 
         # Get device name for the CoreMediaIO match
         device_name = None
@@ -1438,9 +1450,9 @@ async def preview_start(request: Request, body: PreviewStartRequest):
             # same name there, and default simulator names are device model
             # names -- so the caller asking for their phone silently gets a
             # simulator, with nothing in the response to tell them apart.
-            before = pm.active_previews()
-            preview = await pm.add_capture_device(device_name)
-            return _preview_started(preview, before)
+            opener = object()
+            preview = await pm.add_capture_device(device_name, opener=opener)
+            return _preview_started(preview, opener)
         except RuntimeError as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -1455,21 +1467,18 @@ async def preview_start(request: Request, body: PreviewStartRequest):
         added = []
         errors = []
         for dev in pm._available:
-            if dev.cmio_id in pm._active:
-                added.append({
-                    "name": dev.name,
-                    "status": "already_active",
-                    "kind": pm._active[dev.cmio_id].kind,
-                })
-                continue
             try:
                 # Also kind-explicit: this loop is over the capture-device list.
-                preview = await pm.add_capture_device(dev.cmio_id)
+                # The opener token says whether this call opened it, rather
+                # than a membership check taken before an await (#351).
+                opener = object()
+                preview = await pm.add_capture_device(dev.cmio_id, opener=opener)
                 added.append({
                     "name": preview.label or preview.name,
                     "position": preview.position,
-                    "status": "added",
+                    "status": _added_or_existing(preview, opener),
                     "kind": preview.kind,
+                    "started_at": preview.started_at.isoformat(),
                 })
             except RuntimeError as e:
                 errors.append({"name": dev.name, "error": str(e)})

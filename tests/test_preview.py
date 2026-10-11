@@ -6,7 +6,7 @@ import asyncio
 import os
 import subprocess
 from collections import deque
-from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -903,18 +903,15 @@ class TestSimulatorPreviewRouting:
         added: list[str] = []
 
         class _PM:
-            def active_previews(self):
-                return []
-
             # `add_booted_simulator`, not `add`: the route states the kind.
             # `add` is deliberately absent so a stub offering both cannot
             # hide which one the route reached.
-            async def add_booted_simulator(self, name):
+            async def add_booted_simulator(self, name, *, opener=None):
                 added.append(name)
                 return preview_mod.ActivePreview(
                     name=udid, position=0, kind="simulator",
                     stream_port=preview_mod.STREAM_BASE_PORT,
-                    label="iPhone 16 Pro",
+                    label="iPhone 16 Pro", opened_by=opener,
                 )
 
         result = asyncio.run(
@@ -947,16 +944,14 @@ class TestSimulatorPreviewRouting:
                 self.name = "Jerimiah's iPhone"
 
         class _PM:
-            def active_previews(self):
-                return []
-
             # The kind-explicit entry point. `add` is deliberately absent:
             # the physical branch must not reach the kind-guessing path, and
             # a stub that offers both cannot show which one was used.
-            async def add_capture_device(self, name):
+            async def add_capture_device(self, name, *, opener=None):
                 added.append(name)
                 return preview_mod.ActivePreview(
-                    name="CMIO-ID", position=0, label="Jerimiah's iPhone"
+                    name="CMIO-ID", position=0, label="Jerimiah's iPhone",
+                    opened_by=opener,
                 )
 
         request = self._request(_PM(), physical=True)
@@ -1364,9 +1359,9 @@ class TestAskingForAPhoneNeverOpensASimulator:
 
         mgr = self._manager(monkeypatch, booted=[("sim-udid", "iPhone 16 Pro")])
 
-        async def _add_sim(udid, title=None):
+        async def _add_sim(udid, title=None, *, opener=None):
             return preview_mod.ActivePreview(
-                name=udid, position=0, kind="simulator", label=title,
+                name=udid, position=0, kind="simulator", label=title, opened_by=opener,
             )
 
         monkeypatch.setattr(mgr, "add_simulator", _add_sim)
@@ -1534,9 +1529,10 @@ class TestEverySingleDeviceResponseSaysItsKind:
         async def _no_process():
             return None
 
-        async def _add(identifier):
+        async def _add(identifier, *, opener=None):
             return preview_mod.ActivePreview(
-                name=identifier, position=0, kind="device", label="iPhone 11"
+                name=identifier, position=0, kind="device", label="iPhone 11",
+                opened_by=opener,
             )
 
         monkeypatch.setattr(mgr, "_ensure_process", _no_process)
@@ -1561,6 +1557,9 @@ class TestEverySingleDeviceResponseSaysItsKind:
         assert result["devices"], result
         for entry in result["devices"]:
             assert "kind" in entry, f"sweep entry without kind: {entry}"
+            # #351: the sweep reports by opener too, and carries started_at.
+            assert entry["status"] == "added", entry
+            assert entry["started_at"], entry
 
     def test_the_no_udid_stop_is_an_aggregate_with_no_kind(self):
         """Asserted so the documented exception stays true. Adding `kind`
@@ -2139,8 +2138,13 @@ class TestPreviewStartReportsReuse:
     every single-device branch of `preview_start` reported that as "added" --
     with nothing to show the stream was not restarted. Seen as a simulator
     preview frozen after a reboot that `preview_device` claimed to have
-    re-added. The no-udid sweep already said `already_active`; these three
-    branches now say it too, with the original `started_at`.
+    re-added.
+
+    These run the real managers, with only their subprocesses stubbed. The
+    first version of the fix compared against a snapshot taken in the route,
+    and its tests stubbed the managers -- so they could not see that two
+    concurrent starts both answered "added": both snapshots were empty, and
+    the second add returned the record the first created after its snapshot.
     """
 
     UDID = "11111111-2222-3333-4444-555555555555"
@@ -2174,95 +2178,163 @@ class TestPreviewStartReportsReuse:
         return _Request()
 
     @staticmethod
-    def _pm(record, *, active: bool):
-        class _PM:
-            def active_previews(self):
-                return [record] if active else []
-
-            async def add_booted_simulator(self, _udid):
-                return record
-
-            async def add_capture_device(self, _name):
-                return record
-
-        return _PM()
-
-    def _start(self, request):
-        from server.api.device import PreviewStartRequest, preview_start
-
-        return asyncio.run(preview_start(request, PreviewStartRequest(udid=self.UDID)))
-
-    @pytest.mark.parametrize("active, expected", [(True, "already_active"), (False, "added")])
-    def test_simulator(self, active, expected):
+    def _answering_manager(monkeypatch):
+        """A real PreviewManager whose preview app answers every command."""
         from server.device.media import preview as preview_mod
 
-        record = preview_mod.ActivePreview(
-            name=self.UDID, position=0, kind="simulator", stream_port=8422, label="iPhone 17 Pro",
-            started_at=datetime(2026, 9, 30, 16, 28, 41, tzinfo=UTC),
-        )
-        result = self._start(self._request(self._pm(record, active=active)))
+        pm = preview_mod.PreviewManager()
+        sent: list[dict] = []
 
-        assert result["status"] == expected
-        # The original start time, which is what tells a caller the stream
-        # was reused rather than restarted.
-        assert result["started_at"] == "2026-09-30T16:28:41+00:00"
-        assert result["kind"] == "simulator"
+        async def ensure_process():
+            return None
 
-    @pytest.mark.parametrize("active, expected", [(True, "already_active"), (False, "added")])
-    def test_capture_device(self, active, expected):
+        async def send(cmd):
+            sent.append(cmd)
+            _cid, _op, fut = pm._pending[cmd["key"]]
+            fut.set_result(True)
+
+        monkeypatch.setattr(pm, "_ensure_process", ensure_process)
+        monkeypatch.setattr(pm, "_send", send)
+        monkeypatch.setattr(preview_mod, "ADD_STAGGER_SECONDS", 0)
+        return pm, sent
+
+    def _start(self, request, n=1):
+        from server.api.device import PreviewStartRequest, preview_start
+
+        async def go():
+            return await asyncio.gather(*(
+                preview_start(request, PreviewStartRequest(udid=self.UDID)) for _ in range(n)
+            ))
+
+        return asyncio.run(go())
+
+    def _simulator_manager(self, monkeypatch):
+        from server.device.media import preview as preview_mod
+
+        pm, sent = self._answering_manager(monkeypatch)
+
+        async def booted():
+            return [(self.UDID, "iPhone 17 Pro")]
+
+        async def build():
+            await asyncio.sleep(0.02)   # the await both concurrent calls cross
+            return Path("/nonexistent/quern-media")
+
+        class _Stream:
+            port = preview_mod.STREAM_BASE_PORT
+
+        async def start_stream(udid, _binary, port):
+            pm._streams[udid] = _Stream()
+            return pm._streams[udid]
+
+        async def serving(_udid, _stream):
+            return None
+
+        monkeypatch.setattr(preview_mod, "booted_simulators", booted)
+        monkeypatch.setattr(preview_mod, "build_media_engine", build)
+        monkeypatch.setattr(pm, "_start_stream", start_stream)
+        monkeypatch.setattr(pm, "_wait_until_serving", serving)
+        return pm, sent
+
+    def test_simulator_sequential(self, monkeypatch):
+        pm, _sent = self._simulator_manager(monkeypatch)
+        request = self._request(pm)
+
+        first, = self._start(request)
+        second, = self._start(request)
+
+        assert (first["status"], second["status"]) == ("added", "already_active")
+        assert first["started_at"] == second["started_at"]
+        assert second["kind"] == "simulator"
+        assert second["on_air"] is True
+
+    def test_simulator_concurrent_starts_report_one_opener(self, monkeypatch):
+        """The retry-after-timeout case the manager's own comment names."""
+        pm, sent = self._simulator_manager(monkeypatch)
+
+        results = self._start(self._request(pm), n=2)
+
+        assert sorted(r["status"] for r in results) == ["added", "already_active"]
+        assert len({r["started_at"] for r in results}) == 1
+        assert [c["cmd"] for c in sent] == ["add_stream"], "one window, not two"
+
+    def test_a_reused_simulator_preview_that_is_off_air_says_so(self, monkeypatch):
+        """`already_active` alone would read as a live stream while the window
+        shows OFF AIR -- reattaching after a reboot, or quern-media restarting."""
+        pm, _sent = self._simulator_manager(monkeypatch)
+        request = self._request(pm)
+        self._start(request)
+        pm._active[self.UDID].on_air = False
+        pm._active[self.UDID].off_air_reason = "the simulator is shutdown"
+
+        reused, = self._start(request)
+
+        assert reused["status"] == "already_active"
+        assert reused["on_air"] is False
+        assert reused["off_air_reason"] == "the simulator is shutdown"
+
+    def test_capture_device_concurrent_starts_report_one_opener(self, monkeypatch):
+        """`_add_device` had no re-check under its lock, so the second start
+        sent a second `add`, overwrote the first record, and leaked a
+        window position."""
         from server.device.media import preview as preview_mod
 
         class _Device:
             udid = TestPreviewStartReportsReuse.UDID
             name = "Jerimiah's iPhone"
 
-        record = preview_mod.ActivePreview(name="CMIO-ID", position=0, label="Jerimiah's iPhone")
-        result = self._start(self._request(
-            self._pm(record, active=active), physical=True, devices=[_Device()],
-        ))
+        pm, sent = self._answering_manager(monkeypatch)
+        pm._available = [preview_mod.PreviewDeviceInfo(name="Jerimiah's iPhone", cmio_id="CMIO-1")]
 
-        assert result["status"] == expected
-        assert result["kind"] == "device"
-        assert result["started_at"] == record.started_at.isoformat()
+        results = self._start(self._request(pm, physical=True, devices=[_Device()]), n=2)
 
-    @pytest.mark.parametrize("active, expected", [(True, "already_active"), (False, "added")])
-    def test_android(self, active, expected):
-        from server.device.media.scrcpy_preview import ScrcpySession
+        assert sorted(r["status"] for r in results) == ["added", "already_active"]
+        assert [c["cmd"] for c in sent] == ["add"], "one window, not two"
+        assert pm._positions == {0}, "the second start must not reserve a slot"
+        assert all(r["kind"] == "device" for r in results)
 
-        session = ScrcpySession(serial=self.UDID, name="Pixel 9", process=None)
+    def test_android_concurrent_starts_report_one_opener(self, monkeypatch):
+        """The spawn awaits between `add`'s check and its insert, so two starts
+        each ran a scrcpy and the first was orphaned."""
+        from server.device.media import scrcpy_preview
 
-        class _SP:
-            def active_previews(self):
-                return [session] if active else []
+        spawned: list[tuple] = []
 
-            async def add(self, _serial, _name):
-                return session
+        class _Proc:
+            pid = 4242
+            returncode = None
 
-        result = self._start(self._request(sp=_SP(), android=True))
+            async def wait(self):
+                await asyncio.Event().wait()
 
-        assert result["status"] == expected
-        assert result["platform"] == "android"
+        async def spawn(*args, **_kwargs):
+            spawned.append(args)
+            await asyncio.sleep(0.02)
+            return _Proc()
 
-    def test_an_equal_but_distinct_record_is_still_new(self):
-        """Identity, not equality: ActivePreview is a dataclass, so a new
-        record with the same fields compares equal to an old one. A check by
-        `in` would call a fresh start a reuse."""
-        from server.device.media import preview as preview_mod
+        class _Device:
+            udid = TestPreviewStartReportsReuse.UDID
+            name = "Pixel 9"
 
-        stamp = datetime(2026, 9, 30, 16, 28, 41, tzinfo=UTC)
-        fields = {"name": self.UDID, "position": 0, "kind": "simulator", "started_at": stamp}
-        old = preview_mod.ActivePreview(**fields)
-        new = preview_mod.ActivePreview(**fields)
-        assert old == new
+        sp = scrcpy_preview.ScrcpyPreview()
+        monkeypatch.setattr(sp, "is_available", lambda: True)
+        monkeypatch.setattr(scrcpy_preview.asyncio, "create_subprocess_exec", spawn)
+        from server.api.device import PreviewStartRequest, preview_start
+        request = self._request(sp=sp, android=True, devices=[_Device()])
 
-        class _PM:
-            def active_previews(self):
-                return [old]
+        async def go():
+            results = await asyncio.gather(*(
+                preview_start(request, PreviewStartRequest(udid=self.UDID)) for _ in range(2)
+            ))
+            for task in sp._monitor_tasks.values():
+                task.cancel()
+            return results
 
-            async def add_booted_simulator(self, _udid):
-                return new
+        results = asyncio.run(go())
 
-        assert self._start(self._request(_PM()))["status"] == "added"
+        assert sorted(r["status"] for r in results) == ["added", "already_active"]
+        assert len(spawned) == 1, "a second scrcpy would be orphaned"
+        assert len({r["started_at"] for r in results}) == 1
 
 
 class TestPreviewDiscoveryListsSimulators:
@@ -2381,3 +2453,51 @@ class TestPreviewDiscoveryListsSimulators:
             monkeypatch.setattr(media_engine, "is_available", lambda b=built: b)
             ios = asyncio.run(preview_status(self._request(self._manager())))["ios"]
             assert ios["quern_media_built"] is built
+
+
+class TestSimulatorEntriesNeverReadsAsNoneBooted:
+    """Every way simulators can fail to be listed is reported, not swallowed."""
+
+    def test_no_xcode_is_reported(self, monkeypatch):
+        """`SimctlBackend.list_devices` answers an empty list without Xcode, to
+        avoid the install dialog; that empty list is not "none booted"."""
+        from server.device.media import preview as preview_mod
+
+        async def booted():
+            raise AssertionError("must not ask simctl without Xcode")
+
+        monkeypatch.setattr(preview_mod, "xcode_available", lambda: False)
+        monkeypatch.setattr(preview_mod, "booted_simulators", booted)
+        entries, error = asyncio.run(preview_mod.simulator_entries())
+        assert entries == []
+        assert "Xcode" in (error or "")
+
+    def test_a_wedged_simctl_times_out_instead_of_hanging_status(self, monkeypatch):
+        from server.device.media import preview as preview_mod
+
+        async def booted():
+            await asyncio.sleep(10)
+            return []
+
+        monkeypatch.setattr(preview_mod, "booted_simulators", booted)
+        monkeypatch.setattr(preview_mod, "SIMULATOR_LIST_TIMEOUT", 0.05)
+        entries, error = asyncio.run(asyncio.wait_for(preview_mod.simulator_entries(), 2))
+        assert entries == []
+        assert "within" in (error or "")
+
+    @pytest.mark.parametrize("exc", [
+        UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+        KeyError("devices"),
+    ])
+    def test_an_unexpected_error_is_reported_not_raised(self, monkeypatch, exc):
+        """These feed two status routes that never failed before; a listing
+        problem must not turn them into a 500."""
+        from server.device.media import preview as preview_mod
+
+        async def booted():
+            raise exc
+
+        monkeypatch.setattr(preview_mod, "booted_simulators", booted)
+        entries, error = asyncio.run(preview_mod.simulator_entries())
+        assert entries == []
+        assert type(exc).__name__ in (error or "")

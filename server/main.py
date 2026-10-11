@@ -305,8 +305,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.recordings = RecordingManager(
         server_buffer=server_buffer, ring_buffer=buffer, crash_buffer=crash_buffer,
         flow_store=flow_store, ip_map=read_ip_map,
-        # Built on first use: a cold build is seconds, and a recording
-        # without video never needs it.
+        # Resolved on first use, not at startup: `quern setup` normally built
+        # it already (#285), but sources newer than the binary -- a pull --
+        # rebuild here, and a recording without video never needs it.
         video=VideoRecorder(binary=build_media_engine))
     try:
         resumed = await app.state.recordings.resume_all()

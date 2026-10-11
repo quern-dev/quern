@@ -17,6 +17,8 @@ class ScrcpySession:
     name: str
     process: asyncio.subprocess.Process
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    #: See `ActivePreview.opened_by`.
+    opened_by: object | None = field(default=None, repr=False, compare=False)
 
 
 class ScrcpyPreview:
@@ -25,8 +27,14 @@ class ScrcpyPreview:
     def __init__(self) -> None:
         self._processes: dict[str, ScrcpySession] = {}  # serial → session
         self._monitor_tasks: dict[str, asyncio.Task] = {}
+        # Held from the check to the insert in `add`. The spawn between them
+        # awaits, so two adds of one serial each started a scrcpy and the
+        # first was orphaned: out of `_processes`, so nothing could stop it.
+        self._add_lock = asyncio.Lock()
 
-    async def add(self, serial: str, name: str) -> ScrcpySession:
+    async def add(
+        self, serial: str, name: str, *, opener: object | None = None
+    ) -> ScrcpySession:
         """Start a scrcpy preview for an Android device.
 
         Args:
@@ -39,39 +47,43 @@ class ScrcpyPreview:
         Raises:
             RuntimeError: If scrcpy is not installed or process fails to start.
         """
-        if serial in self._processes:
-            return self._processes[serial]
+        async with self._add_lock:
+            if serial in self._processes:
+                return self._processes[serial]
 
-        if not self.is_available():
-            raise RuntimeError(
-                "scrcpy is not installed. Install with: brew install scrcpy"
+            if not self.is_available():
+                raise RuntimeError(
+                    "scrcpy is not installed. Install with: brew install scrcpy"
+                )
+
+            window_title = f"Quern: {name}"
+            proc = await asyncio.create_subprocess_exec(
+                "scrcpy",
+                "-s", serial,
+                "--window-title", window_title,
+                "--no-audio",
+                "--stay-awake",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
             )
 
-        window_title = f"Quern: {name}"
-        proc = await asyncio.create_subprocess_exec(
-            "scrcpy",
-            "-s", serial,
-            "--window-title", window_title,
-            "--no-audio",
-            "--stay-awake",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
+            session = ScrcpySession(
+                serial=serial,
+                name=name,
+                process=proc,
+                opened_by=opener,
+            )
+            self._processes[serial] = session
 
-        session = ScrcpySession(
-            serial=serial,
-            name=name,
-            process=proc,
-        )
-        self._processes[serial] = session
+            # Monitor process in background — remove from _processes on exit
+            self._monitor_tasks[serial] = asyncio.create_task(
+                self._monitor(serial)
+            )
 
-        # Monitor process in background — remove from _processes on exit
-        self._monitor_tasks[serial] = asyncio.create_task(
-            self._monitor(serial)
-        )
-
-        logger.info("Started scrcpy preview for %s (%s), pid %d", name, serial, proc.pid)
-        return session
+            logger.info(
+                "Started scrcpy preview for %s (%s), pid %d", name, serial, proc.pid
+            )
+            return session
 
     async def _monitor(self, serial: str) -> None:
         """Wait for scrcpy process to exit and clean up."""
@@ -115,11 +127,6 @@ class ScrcpyPreview:
         serials = list(self._processes.keys())
         for serial in serials:
             await self.remove(serial)
-
-    def active_previews(self) -> list[ScrcpySession]:
-        """The sessions running now, as a snapshot list. See
-        `PreviewManager.active_previews`."""
-        return list(self._processes.values())
 
     def status(self) -> dict:
         """Return current scrcpy preview state."""
