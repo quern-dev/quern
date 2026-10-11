@@ -517,3 +517,19 @@ class TestTheWarningLog:
             "/api/v1/trace", headers={"Origin": "http://localhost:3000"})
         exposed = response.headers.get("access-control-expose-headers", "")
         assert "x-quern-session-warning" in exposed.lower()
+
+    def test_a_full_budget_frees_up_once_its_kinds_expire(self, caplog, monkeypatch):
+        """Without dropping expired kinds, twenty callers would fill the budget
+        for good and nobody new would ever be logged. Found by deleting the
+        pruning and watching the suite stay green."""
+        caplog.set_level(logging.WARNING, logger="server.session")
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(session_mod.time, "monotonic", lambda: clock["t"])
+        with self._client() as client:
+            for i in range(session_mod._WARN_LOG_BUDGET):
+                client.post("/act", headers={"User-Agent": f"early/{i}"})
+            client.post("/act", headers={"User-Agent": "too-soon/1"})
+            assert len(self._lines(caplog)) == session_mod._WARN_LOG_BUDGET
+            clock["t"] += session_mod._WARN_LOG_INTERVAL + 1
+            client.post("/act", headers={"User-Agent": "later/1"})
+        assert any("later/1" in m for m in self._lines(caplog))
