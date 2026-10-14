@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.1] - 2026-10-14
+
+First-install fixes, from a new user's install that failed on a Mac whose only Python was newer than quern supported. Cut from 0.24.0 on the stabilisation branch.
+
 ### Fixed
 - **A first install on a Mac with no supported Python finishes (#455).** Setup offered to install Python with Homebrew, then stopped with "restart your shell, then re-run" and exited 0 before any virtual environment existed, so the installer failed on the next step and a re-run said quern was already installed. It now builds the environment with the Python it has just installed and carries on. Installing a supported Python is now the default answer for a too-new one as well as a too-old one. With only a too-old Python and the install declined, setup stops and says what to install, instead of building an environment pip would reject minutes later; a too-old Python is no longer replaced when a supported one is already on the PATH. Setup now accepts Python 3.11–3.14, the versions CI tests (it stopped at 3.13), and installs 3.13 when it needs to install one.
 - **An install interrupted partway is rebuilt instead of stranded (#455).** A virtual environment that can't import quern's dependencies (pip interrupted or timed out, or the Python it was built from uninstalled) is rebuilt; setup used to re-enter it and fail every time. The installer repairs an install whose setup never finished, rather than calling it installed (quern.dev#3), and setup's suggested commands work from the user's own shell rather than only from the install directory.
@@ -792,7 +796,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.24.0...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.24.1...main
+[0.24.1]: https://github.com/quern-dev/quern/releases/tag/v0.24.1
 [0.24.0]: https://github.com/quern-dev/quern/releases/tag/v0.24.0
 [0.24.0-beta.3]: https://github.com/quern-dev/quern/releases/tag/v0.24.0-beta.3
 [0.24.0-beta.2]: https://github.com/quern-dev/quern/releases/tag/v0.24.0-beta.2
