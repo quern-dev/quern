@@ -53,9 +53,25 @@ class TestTheCommandIsResolvedNotAssumed:
         self, monkeypatch,
     ):
         monkeypatch.setattr("server.config.shutil.which", lambda _n: None)
+        # A clone, stated rather than assumed: a `git archive` copy of this tree
+        # (how CONTRIBUTING says to mutation-test) has no .git.
+        monkeypatch.setattr("server.config._is_git_clone", lambda _root: True)
         root = Path(__file__).resolve().parent.parent
         monkeypatch.chdir(root)
         assert quern_cmd() == "./quern"
+
+    def test_it_is_absolute_in_a_tarball_install_even_when_standing_in_it(
+        self, monkeypatch,
+    ):
+        """install.sh cds into the install directory before running setup, so
+        setup stands there while its reader does not. `./quern setup` was what a
+        first install told its user, measured in a clean VM (#455)."""
+        monkeypatch.setattr("server.config.shutil.which", lambda _n: None)
+        monkeypatch.setattr("server.config._is_git_clone", lambda _root: False)
+        root = Path(__file__).resolve().parent.parent
+        monkeypatch.chdir(root)
+        answer = quern_cmd()
+        assert answer.startswith("/"), f"{answer!r} is not runnable from the user's shell"
 
     def test_it_is_absolute_when_the_reader_is_somewhere_else(
         self, monkeypatch, tmp_path,
