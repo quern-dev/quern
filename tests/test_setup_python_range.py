@@ -217,6 +217,18 @@ class TestAnExistingVenvIsCheckedBeforeItIsUsed:
         assert seen["created"] == 1, "a broken venv was re-entered instead of rebuilt"
         assert seen["reexec"] == 1
 
+    def test_a_venv_that_cannot_be_removed_stops_with_a_failure(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        venv, seen = self._with_venv(monkeypatch, tmp_path, usable=False)
+        monkeypatch.setattr(setup.shutil, "rmtree", lambda *a, **k: None)  # nothing removed
+
+        rc = setup.run_setup()
+
+        assert rc == 1
+        assert seen == {"created": 0, "reexec": 0}, "it carried on into a half-deleted venv"
+        assert "rm -rf" in capsys.readouterr().out
+
     def test_a_working_venv_is_kept(self, monkeypatch, tmp_path):
         venv, seen = self._with_venv(monkeypatch, tmp_path, usable=True)
         setup.run_setup()

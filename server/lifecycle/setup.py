@@ -3045,6 +3045,19 @@ def run_setup(assume_yes: bool = False) -> int:
             print(f"    The virtual environment at {venv_path} is incomplete or its")
             print("    Python is gone (an earlier install was interrupted?). Rebuilding it...")
             shutil.rmtree(venv_path, ignore_errors=True)
+            if venv_path.exists():
+                # A partial delete (a root-owned file inside, say) leaves a
+                # directory that is neither the old venv nor gone; carrying on
+                # would re-exec into it or compare its version (CodeRabbit, #459).
+                report.add(CheckResult(
+                    name="Virtual env",
+                    status=CheckStatus.ERROR,
+                    message=f"Could not remove the incomplete venv at {venv_path}",
+                    detail=f"Remove it by hand, then run setup again:\n  rm -rf {venv_path}",
+                ))
+                report.print_summary()
+                _print_unasked()
+                return 1
         if venv_path.exists():
             # Check if the venv was created with an unsupported Python
             venv_python = venv_path / "bin" / "python"
