@@ -3118,6 +3118,25 @@ def run_setup(assume_yes: bool = False) -> int:
             _print_unasked()
             return 1
 
+    # Running *inside* a venv that cannot import quern's own dependencies:
+    # the `quern` wrapper execs the venv's Python directly, so this is how
+    # `quern setup` meets a half-built install. It cannot rebuild the
+    # environment it is running in, so it says how, rather than failing later
+    # on an import that names a dependency rather than the cause (#455).
+    if in_venv and project_root and not _venv_is_usable(Path(sys.prefix)):
+        report.add(CheckResult(
+            name="Virtual env",
+            status=CheckStatus.ERROR,
+            message=f"{sys.prefix} is incomplete (an earlier install was interrupted?)",
+            detail=("Run the installer again (curl -fsSL https://quern.dev/install.sh | bash),\n"
+                    "or rebuild it by hand:\n"
+                    f"  rm -rf {sys.prefix}\n"
+                    f"  python3 -m server setup   (from {project_root})"),
+        ))
+        report.print_summary()
+        _print_unasked()
+        return 1
+
     # If we get here, we're inside the venv
     report.add(CheckResult(
         name="Virtual env",

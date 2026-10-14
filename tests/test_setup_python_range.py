@@ -280,3 +280,55 @@ class TestTheDefaultAnswer:
 
         assert defaults and defaults[0] is True
         assert no_supported_python["created_with"] == [BREW_PY]
+
+
+class TestTheBootstrapDoesNotHandSetupABrokenVenv:
+    """`python -m server setup` re-execs into `.venv` before setup runs. Into a
+    broken one, setup never got to check it: found by a clean-VM repair test
+    after every unit test here passed (#455)."""
+
+    def _bootstrap(self, monkeypatch, tmp_path, argv, usable):
+        from server import __main__ as main_mod
+        venv_python = tmp_path / ".venv" / "bin" / "python"
+        venv_python.parent.mkdir(parents=True)
+        venv_python.write_text("")
+        monkeypatch.setattr(main_mod.sys, "prefix", "/usr/local", raising=False)
+        monkeypatch.setattr(main_mod.sys, "base_prefix", "/usr/local", raising=False)
+        monkeypatch.setattr(main_mod, "_find_project_root", lambda: tmp_path)
+        monkeypatch.setattr(main_mod.sys, "argv", ["server", *argv])
+        monkeypatch.setattr(setup, "_venv_is_usable", lambda path: usable)
+        execs = []
+        monkeypatch.setattr(main_mod.os, "execv", lambda *a: execs.append(a))
+        main_mod._maybe_reexec_in_venv()
+        return execs
+
+    def test_setup_is_not_sent_into_a_broken_venv(self, monkeypatch, tmp_path):
+        assert self._bootstrap(monkeypatch, tmp_path, ["setup"], usable=False) == []
+
+    def test_setup_still_uses_a_working_venv(self, monkeypatch, tmp_path):
+        assert len(self._bootstrap(monkeypatch, tmp_path, ["setup"], usable=True)) == 1
+
+    def test_other_commands_are_unchanged(self, monkeypatch, tmp_path):
+        """Only setup can rebuild a venv; anything else still goes into it."""
+        assert len(self._bootstrap(monkeypatch, tmp_path, ["start"], usable=False)) == 1
+
+
+class TestSetupInsideABrokenVenv:
+    def test_it_says_how_to_rebuild_instead_of_failing_on_an_import(
+        self, monkeypatch, tmp_path, capsys,
+    ):
+        _stub_the_checks_before_the_venv(monkeypatch)
+        (tmp_path / "pyproject.toml").write_text("")
+        monkeypatch.setattr(setup, "_find_project_root", lambda *a, **k: tmp_path)
+        monkeypatch.setattr(setup.sys, "prefix", str(tmp_path / ".venv"), raising=False)
+        monkeypatch.setattr(setup.sys, "base_prefix", "/usr/local", raising=False)
+        monkeypatch.setattr(setup, "_venv_is_usable", lambda path: False)
+        reached = []
+        monkeypatch.setattr(setup, "check_mitmdump", lambda *a, **k: reached.append(True))
+
+        rc = setup.run_setup()
+
+        assert rc == 1
+        assert reached == [], "setup carried on in an environment it knew was broken"
+        out = capsys.readouterr().out
+        assert "incomplete" in out and "install.sh" in out

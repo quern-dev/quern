@@ -53,6 +53,15 @@ def _maybe_reexec_in_venv() -> None:
     if not venv_python.exists():
         return
 
+    # Setup is what rebuilds a venv that cannot run -- pip interrupted, or its
+    # Python uninstalled -- so it must not be handed to one. Re-execing here
+    # put setup inside the broken venv before it could check it, and every
+    # repair attempt failed the same way (#455, found in a clean-VM test).
+    if sys.argv[1:2] == ["setup"]:
+        from server.lifecycle.setup import _venv_is_usable
+        if not _venv_is_usable(venv_python.parent.parent):
+            return
+
     # Replace this process with the venv Python running the same command
     os.execv(str(venv_python), [str(venv_python), "-m", "server"] + sys.argv[1:])
 
