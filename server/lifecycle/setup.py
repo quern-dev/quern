@@ -15,6 +15,7 @@ import os
 import platform
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -344,6 +345,20 @@ def _brew_install(formula: str) -> bool:
         return False
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
+
+
+def _brew_python(formula: str, version: str) -> str | None:
+    """The interpreter a Homebrew Python formula installed, by absolute path.
+
+    By path rather than by name because the shell that ran setup may not have
+    it on PATH yet -- which is what used to make setup stop and ask for a new
+    one (#455).
+    """
+    rc, prefix, _ = _run(["brew", "--prefix", formula])
+    if rc != 0 or not prefix.strip():
+        return None
+    candidate = Path(prefix.strip()) / "bin" / f"python{version}"
+    return str(candidate) if os.access(candidate, os.X_OK) else None
 
 
 #: Questions setup could not ask, in the order it would have asked them.
@@ -1552,7 +1567,7 @@ def check_venv() -> CheckResult:
 def _find_best_python() -> str:
     """Find the best available Python interpreter (prefer supported versions)."""
     # Try specific supported versions first (newest to oldest)
-    for ver in ("3.13", "3.12", "3.11"):
+    for ver in _supported_versions():
         path = _which(f"python{ver}")
         if path:
             return path
@@ -1560,10 +1575,67 @@ def _find_best_python() -> str:
     return sys.executable
 
 
-def create_venv(project_root: Path) -> bool:
-    """Create a .venv and install the project into it. Returns True on success."""
+def _venv_is_usable(venv_path: Path) -> bool:
+    """Whether a venv can run setup: its Python starts and has quern's core deps."""
+    python = venv_path / "bin" / "python"
+    if not os.access(python, os.X_OK):
+        return False  # also a dangling symlink to an uninstalled Python
+    # -I: isolated, so the caller's cwd is not on sys.path. Without it a
+    # directory holding something named `httpx` made a working venv read as
+    # broken -- and the advice for a broken one is to delete it (#455 review).
+    rc, _, _ = _run([str(python), "-I", "-c", "import fastapi, httpx, uvicorn"], timeout=60)
+    return rc == 0
+
+
+def _same_path(a: Path, b: Path) -> bool:
+    try:
+        return a.resolve() == b.resolve()
+    except OSError:
+        return False
+
+
+def _kill_pip(proc) -> None:
+    """Stop pip and whatever it started (a wheel build, say), not just pip."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (AttributeError, OSError):
+        proc.kill()
+    proc.wait()
+
+
+def _install_extras(project_root: Path) -> str:
+    """The extras to install: the dev ones in a git clone, none otherwise.
+
+    A tarball install is a user's, and pytest, pytest-asyncio and ruff are of no
+    use to them (#456). A git clone is someone working on quern, who wants them.
+    """
+    return "[dev]" if (project_root / ".git").exists() else ""
+
+
+#: How long the first `pip install` may take. A fresh venv pulls about 160
+#: packages with nothing cached; 300s was close to what a slow connection
+#: needs, and a timeout there leaves a half-built venv.
+PIP_INSTALL_TIMEOUT = 900
+
+#: Seconds between the "still installing" lines, so a quiet install is not
+#: mistaken for a hung one.
+PIP_HEARTBEAT = 30
+
+
+def create_venv(project_root: Path, python: str | None = None) -> bool:
+    """Create a .venv and install the project into it. Returns True on success.
+
+    `python` names the interpreter to build it with. Setup passes the one it has
+    just installed, because the shell that ran it may not have that one on PATH
+    yet; otherwise the best supported one found is used.
+
+    pip's own output goes to `.venv/pip-install.log`, not the terminal. On a
+    first install it is hundreds of lines over several minutes, and it buried
+    the one message that mattered when this failed in the field (#456). The log
+    is shown, tail first, only if pip fails.
+    """
     venv_path = project_root / ".venv"
-    python = _find_best_python()
+    python = python or _find_best_python()
     print(f"    Creating virtual environment at {venv_path} (using {python})...")
 
     rc, _, stderr = _run(
@@ -1574,20 +1646,59 @@ def create_venv(project_root: Path) -> bool:
         return False
 
     pip = str(venv_path / "bin" / "pip")
-    print("    Installing quern-debug-server into venv...")
+    log_path = venv_path / "pip-install.log"
+    target = f"{project_root}{_install_extras(project_root)}"
+    print("    Installing Quern's Python dependencies. A first install downloads")
+    print("    about 160 packages and can take a few minutes...")
     try:
-        result = subprocess.run(
-            [pip, "install", "-e", f"{project_root}[dev]"],
-            stdin=subprocess.DEVNULL, timeout=300,
-        )
-        if result.returncode != 0:
-            print("    pip install failed")
-            return False
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        with open(log_path, "w") as log:
+            proc = subprocess.Popen(
+                [pip, "install", "-e", target],
+                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            waited = 0
+            try:
+                while True:
+                    try:
+                        proc.wait(timeout=PIP_HEARTBEAT)
+                        break
+                    except subprocess.TimeoutExpired:
+                        waited += PIP_HEARTBEAT
+                        if waited >= PIP_INSTALL_TIMEOUT:
+                            _kill_pip(proc)
+                            raise subprocess.TimeoutExpired(
+                                pip, PIP_INSTALL_TIMEOUT) from None
+                        print(f"    ...still installing ({waited}s)")
+            except KeyboardInterrupt:
+                # Ctrl-C reaches setup, not pip (its own session), so stop it
+                # here rather than leave it installing into a venv nobody will
+                # use. The half-built venv is rebuilt on the next run.
+                _kill_pip(proc)
+                raise
+    except (OSError, subprocess.SubprocessError) as exc:
         print(f"    pip install failed: {exc}")
+        _print_log_tail(log_path)
         return False
 
+    if proc.returncode != 0:
+        print("    pip install failed")
+        _print_log_tail(log_path)
+        return False
+
+    print("    Python dependencies installed.")
     return True
+
+
+def _print_log_tail(log_path: Path, lines: int = 15) -> None:
+    """The end of pip's log, where its error is, and where the rest is."""
+    try:
+        tail = log_path.read_text(errors="replace").splitlines()[-lines:]
+    except OSError:
+        tail = []
+    for line in tail:
+        print(f"      {line}")
+    print(f"    Full output: {log_path}")
 
 
 def check_platform() -> CheckResult:
@@ -1610,11 +1721,31 @@ def check_platform() -> CheckResult:
 
 
 PYTHON_MIN = (3, 11)
-PYTHON_MAX = (3, 13)
+PYTHON_MAX = (3, 14)
+#: The version setup installs when there is no supported one. Not simply
+#: PYTHON_MAX: what is put on someone's machine should be the release with the
+#: broadest wheel coverage among those CI tests, not the newest one CI has just
+#: started covering. tests/test_setup_python_range.py ties all three to the CI
+#: matrix, so they cannot drift from it again the way PYTHON_MAX did (#455).
+RECOMMENDED_PYTHON = (3, 13)
+
+
+def _supported_versions() -> list[str]:
+    """Every supported minor version, newest first: ["3.14", ..., "3.11"]."""
+    return [f"{PYTHON_MIN[0]}.{minor}"
+            for minor in range(PYTHON_MAX[1], PYTHON_MIN[1] - 1, -1)]
+
+
+def _version_range() -> str:
+    return f"{PYTHON_MIN[0]}.{PYTHON_MIN[1]}–{PYTHON_MAX[0]}.{PYTHON_MAX[1]}"
+
+
+def _recommended() -> str:
+    return f"{RECOMMENDED_PYTHON[0]}.{RECOMMENDED_PYTHON[1]}"
 
 
 def check_python() -> CheckResult:
-    """Verify Python version is within the supported 3.11–3.13 range."""
+    """Verify the Python version is within the supported range (PYTHON_MIN–PYTHON_MAX)."""
     version = sys.version_info
     version_str = f"{version[0]}.{version[1]}.{version[2]}"
 
@@ -1626,15 +1757,25 @@ def check_python() -> CheckResult:
         )
 
     if (version[0], version[1]) < PYTHON_MIN:
+        # Same as above max: a supported one on PATH is what the venv uses, so
+        # there is nothing to install. Offering Homebrew's anyway (default yes)
+        # installed a second Python nobody needed.
+        for ver in _supported_versions():
+            if _which(f"python{ver}"):
+                return CheckResult(
+                    name="Python",
+                    status=CheckStatus.OK,
+                    message=f"{version_str} (will use python{ver} for venv)",
+                )
         return CheckResult(
             name="Python",
             status=CheckStatus.ERROR,
-            message=f"{version_str} (requires >= 3.11)",
+            message=f"{version_str} (requires >= {PYTHON_MIN[0]}.{PYTHON_MIN[1]})",
             fixable=True,
         )
 
     # Above max — check if a supported version is already installed
-    for ver in ("3.13", "3.12", "3.11"):
+    for ver in _supported_versions():
         if _which(f"python{ver}"):
             return CheckResult(
                 name="Python",
@@ -1646,7 +1787,7 @@ def check_python() -> CheckResult:
     return CheckResult(
         name="Python",
         status=CheckStatus.WARNING,
-        message=f"{version_str} (tested with 3.11–3.13)",
+        message=f"{version_str} (tested with {_version_range()})",
         fixable=True,
     )
 
@@ -2816,42 +2957,107 @@ def run_setup(assume_yes: bool = False) -> int:
         print()
         return 1
 
-    # ── Python (halt after brew install so user re-runs under new interpreter) ──
+    # ── Python (install a supported one if needed, then carry on with it) ──
+    #
+    # This used to stop after the install -- "restart your shell, then re-run"
+    # -- and return 0, before any venv existed. install.sh trusted the 0, ran
+    # `.venv/bin/python` and died; a re-run then read the version and said
+    # "already installed" (#455). Nothing needs a new shell: the venv is what
+    # has to run on the new interpreter, not this process, so the venv is built
+    # with it by path and setup re-execs into that as it always does.
 
     python_result = check_python()
+    installed_python: str | None = None
     if python_result.fixable and python_result.status in (CheckStatus.ERROR, CheckStatus.WARNING):
         too_old = python_result.status == CheckStatus.ERROR
+        rec = _recommended()
+        formula = f"python@{rec}"
         prompt = (
-            "    Python version is not supported. Install Python 3.12 via Homebrew?"
+            f"    Python version is not supported. Install Python {rec} via Homebrew?"
             if too_old else
-            "    Python version is untested. Install Python 3.12 via Homebrew?"
+            f"    Python version is untested. Install Python {rec} via Homebrew?"
         )
-        if _prompt_yn(prompt, default=too_old):
-            if _brew_install("python@3.12"):
-                report.add(CheckResult(
-                    name="Python",
-                    status=CheckStatus.OK,
-                    message="Python 3.12 installed via Homebrew",
-                ))
-                report.print_summary()
-                print("  Python 3.12 was installed. Restart your shell, then re-run:")
-                print(f"    {quern_cmd()} setup")
-                print()
-                return 0
+        # Yes by default for a too-new Python too. Homebrew's default python3
+        # is often newer than CI covers (3.15 in the field case), and declining
+        # builds the venv on it -- pip then fails minutes in wherever a wheel
+        # is missing. A supported Python is the safe answer to Enter.
+        if _prompt_yn(prompt, default=True):
+            if _brew_install(formula):
+                installed_python = _brew_python(formula, rec)
+                if installed_python:
+                    python_result = CheckResult(
+                        name="Python",
+                        status=CheckStatus.OK,
+                        message=f"Python {rec} installed via Homebrew; the venv will use it",
+                    )
+                else:
+                    python_result = CheckResult(
+                        name="Python",
+                        status=CheckStatus.ERROR,
+                        message=f"Installed {formula}, but could not find its python{rec}",
+                        detail=(f"Check `brew --prefix {formula}`, then run "
+                                f"{quern_cmd()} setup again"),
+                    )
             else:
                 python_result = CheckResult(
                     name="Python",
                     status=CheckStatus.ERROR,
                     message="Homebrew install failed",
-                    detail="Try manually: brew install python@3.12",
+                    detail=f"Try manually: brew install {formula}",
                 )
     report.add(python_result)
+
+    # Stop here only when there is nothing supported to build the venv with. A
+    # too-old interpreter running setup is fine when a supported one is on PATH
+    # (`_find_best_python` finds it); a venv built from the too-old one is not,
+    # because pip then refuses the project several minutes later with an error
+    # that names neither Python nor setup.
+    if (
+        python_result.status == CheckStatus.ERROR
+        and installed_python is None
+        and _find_best_python() == sys.executable
+    ):
+        report.print_summary()
+        if "could not find" in python_result.message:
+            # Homebrew says it installed it; repeating "install one" contradicts
+            # the line above. The summary's detail says what to check.
+            print("  Then run:")
+        else:
+            print(f"  Quern needs Python {_version_range()}, and none was found.")
+            print(f"  Install one (brew install python@{_recommended()}), then run:")
+        print(f"    {quern_cmd()} setup")
+        print()
+        _print_unasked()
+        return 1
 
     # ── Virtual environment (create + re-exec if needed) ──
 
     in_venv = sys.prefix != sys.base_prefix
     if not in_venv and project_root:
         venv_path = project_root / ".venv"
+        # A venv that cannot import quern's own dependencies is not one to
+        # re-exec into: pip was interrupted or timed out, or the Python it was
+        # built from has been uninstalled. Re-entering it died on
+        # ModuleNotFoundError or exited 255 with nothing said, and install.sh's
+        # repair kept the venv, so every retry hit the same wall. It is rebuilt
+        # instead; what it held never worked.
+        if venv_path.exists() and not _venv_is_usable(venv_path):
+            print(f"    The virtual environment at {venv_path} is incomplete or its")
+            print("    Python is gone (an earlier install was interrupted?). Rebuilding it...")
+            shutil.rmtree(venv_path, ignore_errors=True)
+            if venv_path.exists():
+                # A partial delete (a root-owned file inside, say) leaves a
+                # directory that is neither the old venv nor gone; carrying on
+                # would re-exec into it or compare its version (CodeRabbit, #459).
+                report.add(CheckResult(
+                    name="Virtual env",
+                    status=CheckStatus.ERROR,
+                    message=f"Could not remove the incomplete venv at {venv_path}",
+                    detail=f"Remove it by hand, then run setup again:\n  rm -rf {venv_path}",
+                ))
+                report.print_summary()
+                _print_unasked()
+                return 1
         if venv_path.exists():
             # Check if the venv was created with an unsupported Python
             venv_python = venv_path / "bin" / "python"
@@ -2861,7 +3067,7 @@ def run_setup(assume_yes: bool = False) -> int:
                     # e.g. "Python 3.14.0" → (3, 14)
                     parts = stdout.split()[-1].split(".")
                     venv_ver = (int(parts[0]), int(parts[1]))
-                    best = _find_best_python()
+                    best = installed_python or _find_best_python()
                     best_rc, best_out, _ = _run([best, "--version"])
                     best_ver = None
                     if best_rc == 0:
@@ -2873,7 +3079,7 @@ def run_setup(assume_yes: bool = False) -> int:
                         if _prompt_yn(f"    Recreate venv with {best}?"):
                             import shutil as _shutil
                             _shutil.rmtree(venv_path)
-                            if create_venv(project_root):
+                            if create_venv(project_root, python=installed_python):
                                 return _reexec_in_venv(venv_path)
                             # The venv has been deleted and not replaced. Falling
                             # through from here reached the branch below, which
@@ -2895,7 +3101,7 @@ def run_setup(assume_yes: bool = False) -> int:
                                     "in.\nTo build one by hand:\n"
                                     f"  {best} -m venv {venv_path}\n"
                                     f"  source {venv_path}/bin/activate\n"
-                                    '  pip install -e ".[dev]"'
+                                    f'  pip install -e ".{_install_extras(project_root)}"'
                                 ),
                             ))
                             report.print_summary()
@@ -2920,7 +3126,7 @@ def run_setup(assume_yes: bool = False) -> int:
             # No module named 'httpx'`, naming a dependency the user never
             # mentioned. There is nothing left to decline.
             print("    No virtual environment found. Creating one...")
-            if create_venv(project_root):
+            if create_venv(project_root, python=installed_python):
                 return _reexec_in_venv(venv_path)
             report.add(CheckResult(
                 name="Virtual env",
@@ -2929,11 +3135,33 @@ def run_setup(assume_yes: bool = False) -> int:
                 detail="Try manually:\n"
                        f"  python3 -m venv {project_root / '.venv'}\n"
                        f"  source {project_root / '.venv'}/bin/activate\n"
-                       '  pip install -e ".[dev]"',
+                       f'  pip install -e ".{_install_extras(project_root)}"',
             ))
             report.print_summary()
             _print_unasked()
             return 1
+
+    # Running *inside* a venv that cannot import quern's own dependencies:
+    # the `quern` wrapper execs the venv's Python directly, so this is how
+    # `quern setup` meets a half-built install. It cannot rebuild the
+    # environment it is running in, so it says how, rather than failing later
+    # on an import that names a dependency rather than the cause (#455).
+    # Only quern's own .venv: setup run from a developer's unrelated venv was
+    # told to `rm -rf` that one (#455 review).
+    own_venv = bool(project_root) and _same_path(Path(sys.prefix), project_root / ".venv")
+    if in_venv and own_venv and not _venv_is_usable(Path(sys.prefix)):
+        report.add(CheckResult(
+            name="Virtual env",
+            status=CheckStatus.ERROR,
+            message=f"{sys.prefix} is incomplete (an earlier install was interrupted?)",
+            detail=("Run the installer again (curl -fsSL https://quern.dev/install.sh | bash),\n"
+                    "or rebuild it by hand:\n"
+                    f"  rm -rf {sys.prefix}\n"
+                    f"  python3 -m server setup   (from {project_root})"),
+        ))
+        report.print_summary()
+        _print_unasked()
+        return 1
 
     # If we get here, we're inside the venv
     report.add(CheckResult(

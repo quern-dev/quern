@@ -155,10 +155,21 @@ class TestCheckPython:
             assert result.status == CheckStatus.OK
 
     def test_old_version(self):
-        with patch.object(sys, "version_info", (3, 10, 5, "final", 0)):
+        with patch.object(sys, "version_info", (3, 10, 5, "final", 0)), \
+                patch("server.lifecycle.setup._which", return_value=None):
             result = check_python()
             assert result.status == CheckStatus.ERROR
             assert result.fixable
+
+    def test_old_version_with_a_supported_one_on_path(self):
+        """Nothing to install: the venv is built with the supported one. This
+        used to offer Homebrew's anyway, default yes (#455 review)."""
+        with patch.object(sys, "version_info", (3, 9, 6, "final", 0)), \
+                patch("server.lifecycle.setup._which",
+                      side_effect=lambda n: "/opt/homebrew/bin/python3.12" if n == "python3.12" else None):
+            result = check_python()
+            assert result.status == CheckStatus.OK
+            assert "python3.12" in result.message
 
     def test_too_new_version_with_supported_available(self):
         """Above max but a supported python exists — OK with note."""
@@ -239,47 +250,142 @@ class TestCheckVenv:
             assert result.fixable
 
 
+class _FakePip:
+    """Stands in for `subprocess.Popen` running pip.
+
+    `waits` is how many heartbeat intervals pass before pip exits; past that,
+    `wait` returns. Records the command and writes `output` to the log file pip
+    was given, as pip would.
+    """
+
+    def __init__(self, returncode=0, waits=0, output="pip says hello\n", never_exits=False):
+        self.returncode_to_be = returncode
+        self.waits = waits
+        self.output = output
+        self.never_exits = never_exits
+        self.cmd = None
+        self.killed = False
+
+    def __call__(self, cmd, stdout=None, **kwargs):
+        self.cmd = cmd
+        if stdout is not None and self.output:
+            stdout.write(self.output)
+            stdout.flush()
+        self.returncode = None
+        return self
+
+    def wait(self, timeout=None):
+        if self.killed:
+            self.returncode = -9
+            return self.returncode
+        if self.never_exits or self.waits > 0:
+            self.waits -= 1
+            raise subprocess.TimeoutExpired(self.cmd, timeout)
+        self.returncode = self.returncode_to_be
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+
+
+def _venv_ok(cmd, **kwargs):
+    # `python -m venv <path>`: make the directory, so the log has somewhere to go.
+    Path(cmd[-1]).mkdir(parents=True, exist_ok=True)
+    return _mock_run()
+
+
 class TestCreateVenv:
-    def test_success(self, tmp_path):
-        call_count = 0
-
-        def side_effect(cmd, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            return _mock_run()
-
+    def _create(self, tmp_path, pip, python=None, venv=_venv_ok):
         with (
-            patch("server.lifecycle.setup.subprocess.run", side_effect=side_effect),
-            patch("server.lifecycle.setup.sys") as mock_sys,
+            patch("server.lifecycle.setup.subprocess.run", side_effect=venv),
+            patch("server.lifecycle.setup.subprocess.Popen", pip),
+            patch("server.lifecycle.setup._find_best_python", return_value="/usr/bin/python3"),
         ):
-            mock_sys.executable = "/usr/bin/python3"
-            assert create_venv(tmp_path) is True
-            assert call_count == 2  # venv creation + pip install
+            return create_venv(tmp_path, python=python)
+
+    def test_success(self, tmp_path):
+        pip = _FakePip()
+        assert self._create(tmp_path, pip) is True
+        assert pip.cmd[1:3] == ["install", "-e"]
 
     def test_venv_creation_fails(self, tmp_path):
-        with (
-            _patch_run(_mock_run(stderr="error", returncode=1)),
-            patch("server.lifecycle.setup.sys") as mock_sys,
-        ):
-            mock_sys.executable = "/usr/bin/python3"
-            assert create_venv(tmp_path) is False
+        pip = _FakePip()
+        assert self._create(
+            tmp_path, pip, venv=lambda *a, **k: _mock_run(stderr="error", returncode=1),
+        ) is False
+        assert pip.cmd is None, "pip ran against a venv that was never created"
 
-    def test_pip_install_fails(self, tmp_path):
-        call_count = 0
+    def test_pip_install_fails(self, tmp_path, capsys):
+        pip = _FakePip(returncode=1, output="Collecting x\nERROR: no matching distribution\n")
+        assert self._create(tmp_path, pip) is False
+        out = capsys.readouterr().out
+        assert "no matching distribution" in out, "the error pip gave was not shown"
+        assert "pip-install.log" in out, "the user was not told where the full output is"
 
-        def side_effect(cmd, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return _mock_run()  # venv creation succeeds
-            return _mock_run(returncode=1)  # pip install fails
+    def test_pip_output_goes_to_the_log_not_the_terminal(self, tmp_path, capsys):
+        """#456: a first install is hundreds of lines; they belong in a file."""
+        pip = _FakePip(output="Collecting fastapi\nDownloading fastapi\n")
+        assert self._create(tmp_path, pip) is True
+        out = capsys.readouterr().out
+        assert "Collecting fastapi" not in out
+        assert "Collecting fastapi" in (tmp_path / ".venv" / "pip-install.log").read_text()
 
-        with (
-            patch("server.lifecycle.setup.subprocess.run", side_effect=side_effect),
-            patch("server.lifecycle.setup.sys") as mock_sys,
-        ):
-            mock_sys.executable = "/usr/bin/python3"
-            assert create_venv(tmp_path) is False
+    def test_a_long_install_says_it_is_still_going(self, tmp_path, capsys):
+        pip = _FakePip(waits=2)
+        assert self._create(tmp_path, pip) is True
+        assert capsys.readouterr().out.count("still installing") == 2
+
+    def test_an_install_that_never_finishes_is_killed_and_reported(self, tmp_path, monkeypatch, capsys):
+        from server.lifecycle import setup
+        monkeypatch.setattr(setup, "PIP_INSTALL_TIMEOUT", 3 * setup.PIP_HEARTBEAT)
+        pip = _FakePip(never_exits=True)
+        assert self._create(tmp_path, pip) is False
+        assert pip.killed, "a timed-out pip was left running"
+        assert "pip install failed" in capsys.readouterr().out
+
+    def test_a_tarball_install_gets_no_dev_extras(self, tmp_path):
+        """#456: pytest and ruff are no use to someone who installed quern."""
+        pip = _FakePip()
+        self._create(tmp_path, pip)
+        assert pip.cmd[-1] == str(tmp_path)
+
+    def test_a_git_worktree_gets_the_dev_extras(self, tmp_path):
+        """In a worktree `.git` is a file, not a directory."""
+        (tmp_path / ".git").write_text("gitdir: /elsewhere/.git/worktrees/x\n")
+        pip = _FakePip()
+        self._create(tmp_path, pip)
+        assert pip.cmd[-1] == f"{tmp_path}[dev]"
+
+    def test_ctrl_c_stops_pip_too(self, tmp_path):
+        """pip runs in its own session, so Ctrl-C reaches setup alone; left
+        running, it would go on installing into a venv nobody will use."""
+        class Interrupted(_FakePip):
+            def wait(self, timeout=None):
+                if self.killed:
+                    return -9
+                raise KeyboardInterrupt
+        pip = Interrupted()
+        with pytest.raises(KeyboardInterrupt):
+            self._create(tmp_path, pip)
+        assert pip.killed
+
+    def test_a_git_clone_gets_the_dev_extras(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        pip = _FakePip()
+        self._create(tmp_path, pip)
+        assert pip.cmd[-1] == f"{tmp_path}[dev]"
+
+    def test_it_builds_with_the_interpreter_it_is_given(self, tmp_path):
+        """#455: setup passes the Python it just installed, by path."""
+        seen = []
+
+        def venv(cmd, **kwargs):
+            seen.append(cmd[0])
+            return _venv_ok(cmd, **kwargs)
+
+        self._create(tmp_path, _FakePip(), python="/opt/homebrew/opt/python@3.13/bin/python3.13",
+                     venv=venv)
+        assert seen == ["/opt/homebrew/opt/python@3.13/bin/python3.13"]
 
 
 # ── Homebrew check ───────────────────────────────────────────────────────
@@ -2752,18 +2858,25 @@ class TestAFailedVenvRecreateStopsThere:
         _stub_the_checks_before_the_venv(monkeypatch)
         monkeypatch.setattr(setup, "_find_project_root", lambda *a, **k: tmp_path)
         monkeypatch.setattr(setup, "_prompt_yn", lambda *a, **k: True)
+        # Healthy but built on a too-new Python: the branch under test. The
+        # placeholder `bin/python` would otherwise fail the health check and be
+        # rebuilt before this branch is reached.
+        monkeypatch.setattr(setup, "_venv_is_usable", lambda *a, **k: True)
         monkeypatch.setattr(setup, "create_venv", lambda *a, **k: False)
         monkeypatch.setattr(
             setup, "_reexec_in_venv", lambda *a, **k: reexeced.append(True) or -1,
         )
 
         # The branch only runs for a venv built with an unsupported Python when
-        # a better one exists: venv on 3.14 (> PYTHON_MAX), best is 3.12.
+        # a better one exists: venv one minor above PYTHON_MAX, best is 3.12.
+        # Derived, not spelled: this said 3.14, and silently stopped reaching
+        # the branch when 3.14 became supported (#455).
         monkeypatch.setattr(setup, "_find_best_python", lambda *a, **k: "python3.12")
+        too_new = f"{setup.PYTHON_MAX[0]}.{setup.PYTHON_MAX[1] + 1}.0"
 
         def fake_run(cmd, *a, **k):
             if str(cmd[0]).endswith(".venv/bin/python"):
-                return 0, "Python 3.14.0", ""
+                return 0, f"Python {too_new}", ""
             return 0, "Python 3.12.0", ""
 
         monkeypatch.setattr(setup, "_run", fake_run)

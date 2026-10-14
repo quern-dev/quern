@@ -16,7 +16,7 @@ curl -fsSL https://quern.dev/install.sh | bash
 
 That's it. The installer downloads the latest release to `~/.local/share/quern`, then runs `quern setup`, which does everything else:
 
-1. **Installs Python** (via Homebrew) if you don't already have Python 3.11+, then creates a virtual environment and installs server dependencies
+1. **Installs Python** (via Homebrew) if you don't already have a supported one (3.11–3.14), then creates a virtual environment and installs server dependencies
 2. **Checks for system tools** and offers to install what's missing:
    - **Xcode Command Line Tools** — for `simctl` (simulator control) and `devicectl` (iOS 17+ devices)
    - **idb + idb-companion** — for simulator UI automation (accessibility tree, tapping, typing)
