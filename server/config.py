@@ -540,6 +540,11 @@ def clear_plist_watch_config(bundle_id: str) -> bool:
     return True
 
 
+def _is_git_clone(root: Path) -> bool:
+    """A clone or worktree: `.git` is a directory in one and a file in the other."""
+    return (root / ".git").exists()
+
+
 def quern_cmd() -> str:
     """How to invoke quern, spelled for where the reader is actually standing.
 
@@ -575,8 +580,13 @@ def quern_cmd() -> str:
     wrapper = Path(__file__).resolve().parent.parent / "quern"
     if not wrapper.exists():
         return "quern"  # nothing better to offer; naming a missing file is worse
+    # `./quern` only for a developer in a clone. A tarball install's setup is
+    # run *by install.sh*, which cds into the install directory first -- so
+    # this process stands in the project while the person reading its output
+    # does not, and `./quern setup` sent them to a file that isn't there.
+    # Measured in a clean VM (#455).
     try:
-        if Path.cwd().resolve() == wrapper.parent:
+        if Path.cwd().resolve() == wrapper.parent and _is_git_clone(wrapper.parent):
             return "./quern"
     except OSError:
         pass  # cwd can be deleted out from under a process

@@ -15,6 +15,7 @@ import os
 import platform
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -1574,6 +1575,24 @@ def _find_best_python() -> str:
     return sys.executable
 
 
+def _venv_is_usable(venv_path: Path) -> bool:
+    """Whether a venv can run setup: its Python starts and has quern's core deps."""
+    python = venv_path / "bin" / "python"
+    if not os.access(python, os.X_OK):
+        return False  # also a dangling symlink to an uninstalled Python
+    rc, _, _ = _run([str(python), "-c", "import fastapi, httpx, uvicorn"], timeout=60)
+    return rc == 0
+
+
+def _kill_pip(proc) -> None:
+    """Stop pip and whatever it started (a wheel build, say), not just pip."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (AttributeError, OSError):
+        proc.kill()
+    proc.wait()
+
+
 def _install_extras(project_root: Path) -> str:
     """The extras to install: the dev ones in a git clone, none otherwise.
 
@@ -1626,19 +1645,27 @@ def create_venv(project_root: Path, python: str | None = None) -> bool:
             proc = subprocess.Popen(
                 [pip, "install", "-e", target],
                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                start_new_session=True,
             )
             waited = 0
-            while True:
-                try:
-                    proc.wait(timeout=PIP_HEARTBEAT)
-                    break
-                except subprocess.TimeoutExpired:
-                    waited += PIP_HEARTBEAT
-                    if waited >= PIP_INSTALL_TIMEOUT:
-                        proc.kill()
-                        proc.wait()
-                        raise subprocess.TimeoutExpired(pip, PIP_INSTALL_TIMEOUT) from None
-                    print(f"    ...still installing ({waited}s)")
+            try:
+                while True:
+                    try:
+                        proc.wait(timeout=PIP_HEARTBEAT)
+                        break
+                    except subprocess.TimeoutExpired:
+                        waited += PIP_HEARTBEAT
+                        if waited >= PIP_INSTALL_TIMEOUT:
+                            _kill_pip(proc)
+                            raise subprocess.TimeoutExpired(
+                                pip, PIP_INSTALL_TIMEOUT) from None
+                        print(f"    ...still installing ({waited}s)")
+            except KeyboardInterrupt:
+                # Ctrl-C reaches setup, not pip (its own session), so stop it
+                # here rather than leave it installing into a venv nobody will
+                # use. The half-built venv is rebuilt on the next run.
+                _kill_pip(proc)
+                raise
     except (OSError, subprocess.SubprocessError) as exc:
         print(f"    pip install failed: {exc}")
         _print_log_tail(log_path)
@@ -1720,6 +1747,16 @@ def check_python() -> CheckResult:
         )
 
     if (version[0], version[1]) < PYTHON_MIN:
+        # Same as above max: a supported one on PATH is what the venv uses, so
+        # there is nothing to install. Offering Homebrew's anyway (default yes)
+        # installed a second Python nobody needed.
+        for ver in _supported_versions():
+            if _which(f"python{ver}"):
+                return CheckResult(
+                    name="Python",
+                    status=CheckStatus.OK,
+                    message=f"{version_str} (will use python{ver} for venv)",
+                )
         return CheckResult(
             name="Python",
             status=CheckStatus.ERROR,
@@ -2930,7 +2967,11 @@ def run_setup(assume_yes: bool = False) -> int:
             if too_old else
             f"    Python version is untested. Install Python {rec} via Homebrew?"
         )
-        if _prompt_yn(prompt, default=too_old):
+        # Yes by default for a too-new Python too. Homebrew's default python3
+        # is often newer than CI covers (3.15 in the field case), and declining
+        # builds the venv on it -- pip then fails minutes in wherever a wheel
+        # is missing. A supported Python is the safe answer to Enter.
+        if _prompt_yn(prompt, default=True):
             if _brew_install(formula):
                 installed_python = _brew_python(formula, rec)
                 if installed_python:
@@ -2967,8 +3008,13 @@ def run_setup(assume_yes: bool = False) -> int:
         and _find_best_python() == sys.executable
     ):
         report.print_summary()
-        print(f"  Quern needs Python {_version_range()}, and none was found.")
-        print(f"  Install one (brew install python@{_recommended()}), then run:")
+        if "could not find" in python_result.message:
+            # Homebrew says it installed it; repeating "install one" contradicts
+            # the line above. The summary's detail says what to check.
+            print("  Then run:")
+        else:
+            print(f"  Quern needs Python {_version_range()}, and none was found.")
+            print(f"  Install one (brew install python@{_recommended()}), then run:")
         print(f"    {quern_cmd()} setup")
         print()
         _print_unasked()
@@ -2979,6 +3025,16 @@ def run_setup(assume_yes: bool = False) -> int:
     in_venv = sys.prefix != sys.base_prefix
     if not in_venv and project_root:
         venv_path = project_root / ".venv"
+        # A venv that cannot import quern's own dependencies is not one to
+        # re-exec into: pip was interrupted or timed out, or the Python it was
+        # built from has been uninstalled. Re-entering it died on
+        # ModuleNotFoundError or exited 255 with nothing said, and install.sh's
+        # repair kept the venv, so every retry hit the same wall. It is rebuilt
+        # instead; what it held never worked.
+        if venv_path.exists() and not _venv_is_usable(venv_path):
+            print(f"    The virtual environment at {venv_path} is incomplete or its")
+            print("    Python is gone (an earlier install was interrupted?). Rebuilding it...")
+            shutil.rmtree(venv_path, ignore_errors=True)
         if venv_path.exists():
             # Check if the venv was created with an unsupported Python
             venv_python = venv_path / "bin" / "python"

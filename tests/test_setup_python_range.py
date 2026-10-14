@@ -176,3 +176,107 @@ class TestBrewPython:
     def test_brew_failing_is_none(self, monkeypatch):
         monkeypatch.setattr(setup, "_run", lambda cmd, **k: (1, "", "no such formula"))
         assert setup._brew_python("python@3.13", "3.13") is None
+
+
+class TestAnExistingVenvIsCheckedBeforeItIsUsed:
+    """A half-built venv -- pip killed or timed out, or its Python uninstalled --
+    was re-execed into and died on ModuleNotFoundError or exited 255 silently.
+    install.sh's repair kept it, so no retry could get past it (#455 review)."""
+
+    def _with_venv(self, monkeypatch, tmp_path, usable):
+        venv = tmp_path / ".venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "python").write_text("")
+        _stub_the_checks_before_the_venv(monkeypatch)
+        (tmp_path / "pyproject.toml").write_text("")
+        monkeypatch.setattr(setup, "_find_project_root", lambda *a, **k: tmp_path)
+        monkeypatch.setattr(setup.sys, "prefix", "/usr/local", raising=False)
+        monkeypatch.setattr(setup.sys, "base_prefix", "/usr/local", raising=False)
+        monkeypatch.setattr(setup, "_venv_is_usable", lambda path: usable)
+        monkeypatch.setattr(setup, "_run", lambda cmd, **k: (0, "Python 3.12.0", ""))
+        seen = {"created": 0, "reexec": 0}
+
+        def created(*a, **k):
+            seen["created"] += 1
+            return True
+
+        def reexeced(*a, **k):
+            seen["reexec"] += 1
+            return 0
+
+        monkeypatch.setattr(setup, "create_venv", created)
+        monkeypatch.setattr(setup, "_reexec_in_venv", reexeced)
+        return venv, seen
+
+    def test_a_broken_venv_is_rebuilt(self, monkeypatch, tmp_path):
+        venv, seen = self._with_venv(monkeypatch, tmp_path, usable=False)
+        setup.run_setup()
+        assert seen["created"] == 1, "a broken venv was re-entered instead of rebuilt"
+        assert seen["reexec"] == 1
+
+    def test_a_working_venv_is_kept(self, monkeypatch, tmp_path):
+        venv, seen = self._with_venv(monkeypatch, tmp_path, usable=True)
+        setup.run_setup()
+        assert seen["created"] == 0, "a working venv was thrown away"
+        assert venv.exists()
+
+    def test_usable_means_its_python_runs_and_imports_the_deps(self, monkeypatch, tmp_path):
+        venv = tmp_path / ".venv"
+        assert setup._venv_is_usable(venv) is False, "a venv with no python was usable"
+        (venv / "bin").mkdir(parents=True)
+        py = venv / "bin" / "python"
+        py.symlink_to(tmp_path / "uninstalled-python")
+        assert setup._venv_is_usable(venv) is False, "a dangling interpreter was usable"
+
+
+class TestTheInstalledPythonReachesEveryVenvBuild:
+    def test_a_too_new_venv_is_rebuilt_with_the_python_just_installed(
+        self, monkeypatch, tmp_path,
+    ):
+        """The recreate branch: an old venv on 3.15, nothing supported on PATH,
+        3.13 just installed. Without the pass-through it was rebuilt on 3.15
+        again (review mutations M9, M10)."""
+        venv = tmp_path / ".venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "python").write_text("")
+        _stub_the_checks_before_the_venv(monkeypatch)
+        _python_check(monkeypatch, CheckStatus.WARNING)
+        (tmp_path / "pyproject.toml").write_text("")
+        monkeypatch.setattr(setup, "_find_project_root", lambda *a, **k: tmp_path)
+        monkeypatch.setattr(setup.sys, "prefix", "/usr/local", raising=False)
+        monkeypatch.setattr(setup.sys, "base_prefix", "/usr/local", raising=False)
+        monkeypatch.setattr(setup, "_venv_is_usable", lambda path: True)
+        monkeypatch.setattr(setup, "_prompt_yn", lambda *a, **k: True)
+        monkeypatch.setattr(setup, "_brew_install", lambda formula: True)
+        monkeypatch.setattr(setup, "_brew_python", lambda formula, ver: BREW_PY)
+        monkeypatch.setattr(setup, "_find_best_python", lambda: sys.executable)
+        too_new = f"{setup.PYTHON_MAX[0]}.{setup.PYTHON_MAX[1] + 1}.0"
+        monkeypatch.setattr(setup, "_run", lambda cmd, **k: (
+            0, f"Python {too_new}" if str(cmd[0]).endswith(".venv/bin/python")
+            else "Python 3.13.0", ""))
+        created_with = []
+        monkeypatch.setattr(setup, "create_venv",
+                            lambda root, python=None: created_with.append(python) or True)
+        monkeypatch.setattr(setup, "_reexec_in_venv", lambda *a, **k: 0)
+
+        setup.run_setup()
+
+        assert created_with == [BREW_PY]
+
+
+class TestTheDefaultAnswer:
+    def test_enter_installs_a_supported_python_for_a_too_new_one(
+        self, monkeypatch, no_supported_python,
+    ):
+        """Declining built the venv on the too-new Python, which pip then fails
+        on wherever a wheel is missing. Enter means yes now (#455 review)."""
+        _python_check(monkeypatch, CheckStatus.WARNING)
+        defaults = []
+        monkeypatch.setattr(setup, "_prompt_yn",
+                            lambda q, default=False, **k: defaults.append(default) or default)
+        monkeypatch.setattr(setup, "_brew_python", lambda formula, ver: BREW_PY)
+
+        setup.run_setup()
+
+        assert defaults and defaults[0] is True
+        assert no_supported_python["created_with"] == [BREW_PY]

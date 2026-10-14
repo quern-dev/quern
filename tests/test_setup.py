@@ -155,10 +155,21 @@ class TestCheckPython:
             assert result.status == CheckStatus.OK
 
     def test_old_version(self):
-        with patch.object(sys, "version_info", (3, 10, 5, "final", 0)):
+        with patch.object(sys, "version_info", (3, 10, 5, "final", 0)), \
+                patch("server.lifecycle.setup._which", return_value=None):
             result = check_python()
             assert result.status == CheckStatus.ERROR
             assert result.fixable
+
+    def test_old_version_with_a_supported_one_on_path(self):
+        """Nothing to install: the venv is built with the supported one. This
+        used to offer Homebrew's anyway, default yes (#455 review)."""
+        with patch.object(sys, "version_info", (3, 9, 6, "final", 0)), \
+                patch("server.lifecycle.setup._which",
+                      side_effect=lambda n: "/opt/homebrew/bin/python3.12" if n == "python3.12" else None):
+            result = check_python()
+            assert result.status == CheckStatus.OK
+            assert "python3.12" in result.message
 
     def test_too_new_version_with_supported_available(self):
         """Above max but a supported python exists — OK with note."""
@@ -337,6 +348,26 @@ class TestCreateVenv:
         pip = _FakePip()
         self._create(tmp_path, pip)
         assert pip.cmd[-1] == str(tmp_path)
+
+    def test_a_git_worktree_gets_the_dev_extras(self, tmp_path):
+        """In a worktree `.git` is a file, not a directory."""
+        (tmp_path / ".git").write_text("gitdir: /elsewhere/.git/worktrees/x\n")
+        pip = _FakePip()
+        self._create(tmp_path, pip)
+        assert pip.cmd[-1] == f"{tmp_path}[dev]"
+
+    def test_ctrl_c_stops_pip_too(self, tmp_path):
+        """pip runs in its own session, so Ctrl-C reaches setup alone; left
+        running, it would go on installing into a venv nobody will use."""
+        class Interrupted(_FakePip):
+            def wait(self, timeout=None):
+                if self.killed:
+                    return -9
+                raise KeyboardInterrupt
+        pip = Interrupted()
+        with pytest.raises(KeyboardInterrupt):
+            self._create(tmp_path, pip)
+        assert pip.killed
 
     def test_a_git_clone_gets_the_dev_extras(self, tmp_path):
         (tmp_path / ".git").mkdir()
@@ -2827,6 +2858,10 @@ class TestAFailedVenvRecreateStopsThere:
         _stub_the_checks_before_the_venv(monkeypatch)
         monkeypatch.setattr(setup, "_find_project_root", lambda *a, **k: tmp_path)
         monkeypatch.setattr(setup, "_prompt_yn", lambda *a, **k: True)
+        # Healthy but built on a too-new Python: the branch under test. The
+        # placeholder `bin/python` would otherwise fail the health check and be
+        # rebuilt before this branch is reached.
+        monkeypatch.setattr(setup, "_venv_is_usable", lambda *a, **k: True)
         monkeypatch.setattr(setup, "create_venv", lambda *a, **k: False)
         monkeypatch.setattr(
             setup, "_reexec_in_venv", lambda *a, **k: reexeced.append(True) or -1,
