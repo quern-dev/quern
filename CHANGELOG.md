@@ -24,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `preview_status` and `GET /api/v1/device/preview/devices` list booted simulators alongside USB devices, each tagged `kind`. A simulator's `id` is the UDID `preview_device` takes. If simulators can't be listed, `simulators_error` says why, rather than reporting none booted. That covers simctl failing, simctl taking longer than 5 s, and Xcode missing. `preview_status` lists USB devices only once the preview process is running; `/preview/devices` always lists them.
   - `preview_status` reports `quern_media_built`.
   - `quern setup` builds quern-media next to the screen-mirror app. The first simulator preview no longer pays for a cold build, and a broken Swift toolchain shows up in setup. The preview app's Devices menu can now open a simulator on a fresh install without a server.
+
+## [0.24.0] - 2026-10-14
+
+The stable release of everything in 0.24.0-beta.1 through beta.3, below, plus these two fixes. It was cut from beta.3 on a stabilisation branch, so the features that have landed on `main` since then are not in it.
+
+### Fixed
 - **quern-media's browser page plays in Safari (#450).** It never showed a picture in Safari, for MJPEG or H.264. It went OFF AIR with "The stream broke: Load failed" and reconnected forever, while Chrome played both. WebKit won't let a page read a `multipart/x-mixed-replace` response through `fetch`, and `/frames` was labelled that way. `/frames` is now `application/octet-stream`, with the same parts inside. `/stream` is unchanged, so `<img>` viewers, the preview app and the server are unaffected. A page tab left open across the upgrade needs one reload: it is still running the old page, which expects the old label. A newly loaded page plays from an older quern-media too. Checked in Safari 27 on macOS and iPadOS.
 - **The menu bar app finds fnm's default Node (#447).** The commands it runs — start, restart, update, setup — searched `~/.local/bin`, Homebrew and launchd's directories, so on a machine whose only Node came from fnm they found none. That was true even though every MCP client is registered with fnm's default. It now also looks in fnm's `aliases/default/bin`, after Homebrew, so `quern doctor`'s "the Quern app" row goes green with no second Node installed. A release install with an fnm default no longer sends its updates to Terminal. When fnm has no default, doctor says `fnm install 22 && fnm default 22` instead of suggesting `brew install node`.
 
@@ -799,7 +805,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.24.0-beta.3...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.24.0...main
+[0.24.0]: https://github.com/quern-dev/quern/releases/tag/v0.24.0
 [0.24.0-beta.3]: https://github.com/quern-dev/quern/releases/tag/v0.24.0-beta.3
 [0.24.0-beta.2]: https://github.com/quern-dev/quern/releases/tag/v0.24.0-beta.2
 [0.24.0-beta.1]: https://github.com/quern-dev/quern/releases/tag/v0.24.0-beta.1
