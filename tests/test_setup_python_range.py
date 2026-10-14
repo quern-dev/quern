@@ -124,7 +124,10 @@ class TestAfterInstallingPython:
 
         assert rc == 1, "an unfinished setup reported success"
         assert no_supported_python["created_with"] == []
-        assert "could not find" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "could not find" in out
+        assert "none was found" not in out, (
+            "it told the user to install the Python Homebrew had just installed")
 
 
 class TestWithoutASupportedPython:
@@ -332,3 +335,80 @@ class TestSetupInsideABrokenVenv:
         assert reached == [], "setup carried on in an environment it knew was broken"
         out = capsys.readouterr().out
         assert "incomplete" in out and "install.sh" in out
+
+
+class TestTheUsabilityProbeItself:
+    """`_venv_is_usable` is mocked everywhere else, so these run it for real
+    against stand-in interpreters (#455 review: N10, N12)."""
+
+    def _python(self, tmp_path, script):
+        py = tmp_path / ".venv" / "bin" / "python"
+        py.parent.mkdir(parents=True)
+        py.write_text("#!/bin/sh\n" + script)
+        py.chmod(0o755)
+        return tmp_path / ".venv"
+
+    def test_a_python_that_imports_the_deps_is_usable(self, tmp_path):
+        assert setup._venv_is_usable(self._python(tmp_path, "exit 0\n")) is True
+
+    def test_a_python_missing_them_is_not(self, tmp_path):
+        assert setup._venv_is_usable(self._python(tmp_path, "exit 1\n")) is False
+
+    def test_the_probe_is_isolated_from_the_callers_directory(self, tmp_path):
+        """Without -I, cwd is on sys.path, and a directory holding something
+        named httpx made a working venv read as broken."""
+        args = tmp_path / "args"
+        venv = self._python(tmp_path, f'echo "$@" > {args}\nexit 0\n')
+        setup._venv_is_usable(venv)
+        assert args.read_text().split()[0] == "-I"
+
+
+class TestPipIsStoppedWithEverythingItStarted:
+    def test_it_runs_in_its_own_session_and_the_whole_group_is_killed(
+        self, tmp_path, monkeypatch,
+    ):
+        from tests.test_setup import _FakePip, _venv_ok
+        monkeypatch.setattr(setup, "PIP_INSTALL_TIMEOUT", setup.PIP_HEARTBEAT)
+        pip = _FakePip(never_exits=True)
+        pip.pid = 4242
+        popen_kwargs, killed_groups = {}, []
+
+        def popen(cmd, **kw):
+            popen_kwargs.update(kw)
+            return pip(cmd, **kw)
+
+        monkeypatch.setattr(setup.subprocess, "run", _venv_ok)
+        monkeypatch.setattr(setup.subprocess, "Popen", popen)
+        monkeypatch.setattr(setup.os, "killpg", lambda pid, sig: killed_groups.append(pid))
+        pip.kill = lambda: setattr(pip, "killed", True)
+        monkeypatch.setattr(pip, "wait", lambda timeout=None: (
+            -9 if killed_groups else (_ for _ in ()).throw(
+                setup.subprocess.TimeoutExpired("pip", timeout))))
+
+        assert setup.create_venv(tmp_path, python="/usr/bin/python3") is False
+        assert popen_kwargs.get("start_new_session") is True, (
+            "pip shares setup's session, so Ctrl-C and the kill reach pip alone")
+        assert killed_groups == [4242], "only pip was killed, not what it started"
+
+
+class TestTheBrokenVenvAdviceIsOnlyForQuernsOwn:
+    def test_a_developers_own_venv_is_not_called_broken(self, monkeypatch, tmp_path, capsys):
+        _stub_the_checks_before_the_venv(monkeypatch)
+        (tmp_path / "pyproject.toml").write_text("")
+        monkeypatch.setattr(setup, "_find_project_root", lambda *a, **k: tmp_path)
+        monkeypatch.setattr(setup.sys, "prefix", str(tmp_path / "otherenv"), raising=False)
+        monkeypatch.setattr(setup.sys, "base_prefix", "/usr/local", raising=False)
+        monkeypatch.setattr(setup, "_venv_is_usable", lambda path: False)
+
+        class PastTheVenvBlock(Exception):
+            pass
+
+        def first_check_after_it(*a, **k):
+            raise PastTheVenvBlock  # stop before checks that touch the machine
+
+        monkeypatch.setattr(setup, "check_mitmdump", first_check_after_it)
+
+        with pytest.raises(PastTheVenvBlock):
+            setup.run_setup()  # reaching it is the assertion: setup did not stop
+
+        assert "rm -rf" not in capsys.readouterr().out, "it advised deleting someone else's venv"

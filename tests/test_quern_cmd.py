@@ -53,6 +53,9 @@ class TestTheCommandIsResolvedNotAssumed:
         self, monkeypatch,
     ):
         monkeypatch.setattr("server.config.shutil.which", lambda _n: None)
+        # A clone, stated rather than assumed: a `git archive` copy of this tree
+        # (how CONTRIBUTING says to mutation-test) has no .git.
+        monkeypatch.setattr("server.config._is_git_clone", lambda _root: True)
         root = Path(__file__).resolve().parent.parent
         monkeypatch.chdir(root)
         assert quern_cmd() == "./quern"

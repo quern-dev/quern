@@ -1580,8 +1580,18 @@ def _venv_is_usable(venv_path: Path) -> bool:
     python = venv_path / "bin" / "python"
     if not os.access(python, os.X_OK):
         return False  # also a dangling symlink to an uninstalled Python
-    rc, _, _ = _run([str(python), "-c", "import fastapi, httpx, uvicorn"], timeout=60)
+    # -I: isolated, so the caller's cwd is not on sys.path. Without it a
+    # directory holding something named `httpx` made a working venv read as
+    # broken -- and the advice for a broken one is to delete it (#455 review).
+    rc, _, _ = _run([str(python), "-I", "-c", "import fastapi, httpx, uvicorn"], timeout=60)
     return rc == 0
+
+
+def _same_path(a: Path, b: Path) -> bool:
+    try:
+        return a.resolve() == b.resolve()
+    except OSError:
+        return False
 
 
 def _kill_pip(proc) -> None:
@@ -3123,7 +3133,10 @@ def run_setup(assume_yes: bool = False) -> int:
     # `quern setup` meets a half-built install. It cannot rebuild the
     # environment it is running in, so it says how, rather than failing later
     # on an import that names a dependency rather than the cause (#455).
-    if in_venv and project_root and not _venv_is_usable(Path(sys.prefix)):
+    # Only quern's own .venv: setup run from a developer's unrelated venv was
+    # told to `rm -rf` that one (#455 review).
+    own_venv = bool(project_root) and _same_path(Path(sys.prefix), project_root / ".venv")
+    if in_venv and own_venv and not _venv_is_usable(Path(sys.prefix)):
         report.add(CheckResult(
             name="Virtual env",
             status=CheckStatus.ERROR,
