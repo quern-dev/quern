@@ -146,6 +146,10 @@ class TestPersistence:
             "mcp-live": {"udid": "SIM-Y", "last_used": time.time()},
         })
         ctrl = _controller()
+        # Not restored at all -- not merely hidden by the getter's own expiry
+        # check, which a read alone can't tell apart. Kept, an expired slot
+        # would hold a cap place and be written back to the file.
+        assert "mcp-old" not in ctrl._DeviceController__session_slots
         with as_session("mcp-old"):
             assert ctrl._active_udid is None
         with as_session("mcp-live"):
