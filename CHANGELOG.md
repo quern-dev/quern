@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0-beta.1] - 2026-10-15
+
 ### Added
 - **Every action says which agent session asked for it (#254).**
   - Each agent's quern MCP server mints a session id when it starts and sends it as `X-Quern-Session` on every request. Measured: one MCP process per agent session.
@@ -814,7 +816,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.24.1...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.25.0-beta.1...main
+[0.25.0-beta.1]: https://github.com/quern-dev/quern/releases/tag/v0.25.0-beta.1
 [0.24.1]: https://github.com/quern-dev/quern/releases/tag/v0.24.1
 [0.24.0]: https://github.com/quern-dev/quern/releases/tag/v0.24.0
 [0.24.0-beta.3]: https://github.com/quern-dev/quern/releases/tag/v0.24.0-beta.3
