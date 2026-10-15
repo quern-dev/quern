@@ -19,7 +19,7 @@ from server.device.ios.simctl import SimctlBackend
 from server.device.ios.usbmux import UsbmuxBackend
 from server.device.ios.wda_client import WdaBackend
 from server.device.media.screenshots import process_screenshot
-from server.lifecycle.state import read_active_udid, write_active_udid
+from server.lifecycle.state import read_active_device, read_active_udid, write_active_udid
 from server.logging_ext import current_action
 from server.models import (
     AppInfo,
@@ -32,6 +32,7 @@ from server.models import (
     EraseIncompleteError,
     UIElement,
 )
+from server.session import current_session, parse_session
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,42 @@ async def _simctl_state(udid: str) -> str:
         return await get_device_state(udid)
     except OSError:
         return "unknown"
+
+
+#: A session's own active device is forgotten after a day unused (#254).
+SESSION_SLOT_TTL = 24 * 3600
+#: At most this many session slots are kept; the least recently used go first.
+SESSION_SLOT_CAP = 64
+#: A slot that is only being used, not changed, is rewritten to the sidecar at
+#: most this often -- enough to keep its last-used time honest across a
+#: restart without a file write on every call.
+SESSION_SLOT_REWRITE = 3600
+
+
+def _restored_session_slots(raw: object) -> dict[str, dict]:
+    """Session slots read back from the sidecar: well-formed, live, capped.
+
+    Anything malformed is dropped rather than trusted -- the file is ours, but
+    an entry that would make the property raise mid-request is worse than a
+    session that has to name its device once more.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    now = time.time()
+    slots: dict[str, dict] = {}
+    for session, value in raw.items():
+        if not isinstance(value, dict) or parse_session(session) != session:
+            continue
+        udid, last_used = value.get("udid"), value.get("last_used")
+        if not isinstance(udid, str) or not udid or not isinstance(last_used, (int, float)):
+            continue
+        if now - last_used > SESSION_SLOT_TTL:
+            continue
+        slots[session] = {"udid": udid, "last_used": float(last_used)}
+    if len(slots) > SESSION_SLOT_CAP:
+        newest = sorted(slots, key=lambda s: slots[s]["last_used"])[-SESSION_SLOT_CAP:]
+        slots = {s: slots[s] for s in newest}
+    return slots
 
 
 class DeviceController(DeviceControllerUI):
@@ -112,6 +149,13 @@ class DeviceController(DeviceControllerUI):
         self.__active_name: str | None = None
         self.__active_kind: str | None = None
         self._pool = None  # Set by main.py after pool is created; None = no pool
+        #: Each named session's own active device (#254): session id ->
+        #: {"udid", "last_used"}. `__active_udid` above stays the shared slot.
+        #: See the `_active_udid` property.
+        self.__session_slots: dict[str, dict] = {}
+        #: When each session's slot was last written to the sidecar, so a
+        #: slot that is merely being used is rewritten at most hourly.
+        self.__session_written: dict[str, float] = {}
 
         # Restore active device from its sidecar file (lives separately
         # from state.json so it survives `quern stop` and stop/start cycles).
@@ -119,6 +163,8 @@ class DeviceController(DeviceControllerUI):
         if persisted:
             self.__active_udid = persisted
             logger.info("Restored active device: %s", persisted[:8])
+        self.__session_slots = _restored_session_slots(read_active_device().get("sessions"))
+        self.__session_written = {s: v["last_used"] for s, v in self.__session_slots.items()}
         # UI tree cache: {udid: (elements, timestamp)}
         self._ui_cache: dict[str, tuple[list[UIElement], float]] = {}
         # When each device's screen was last changed by an action here (tap,
@@ -166,7 +212,27 @@ class DeviceController(DeviceControllerUI):
 
     @property
     def _active_udid(self) -> str | None:
-        return self.__active_udid
+        """The active device for the caller (#254).
+
+        A request from a named session reads that session's own slot; anything
+        else -- no session, or no request at all -- reads the shared slot,
+        which keeps its old meaning: the device anyone selected last. A session
+        with no slot yet gets None, never the shared value: inheriting it would
+        hand the session another agent's device, which is the bug this fixes.
+        Every reader goes through here, so none of them needs to know.
+        """
+        session = current_session()
+        if not session:
+            return self.__active_udid
+        slot = self.__session_slots.get(session)
+        if slot is None:
+            return None
+        now = time.time()
+        if now - slot["last_used"] > SESSION_SLOT_TTL:
+            del self.__session_slots[session]
+            return None
+        slot["last_used"] = now
+        return slot["udid"]
 
     @_active_udid.setter
     def _active_udid(self, value: str | None) -> None:
@@ -185,6 +251,30 @@ class DeviceController(DeviceControllerUI):
         # Fixing the callers would have left the eleventh. This is the one
         # place the value lands, and it is also what the sidecar persists.
         value = canonical_device_id(value) if value else value
+
+        # A named session writes its own slot. It moves the shared slot only
+        # when it actually changes device: `_resolve_udid` re-assigns the
+        # active device on every unqualified call, and if that moved the
+        # shared slot too, it -- and the menu bar reading it -- would flip
+        # between agents' devices on every call, with a sidecar write each
+        # time. Clearing clears only the caller's own slot.
+        session = current_session()
+        if session:
+            previous = self.__session_slots.get(session)
+            now = time.time()
+            if value:
+                self.__session_slots[session] = {"udid": value, "last_used": now}
+            else:
+                self.__session_slots.pop(session, None)
+            changed_device = (previous or {}).get("udid") != value
+            stale_on_disk = now - self.__session_written.get(session, 0.0) > SESSION_SLOT_REWRITE
+            if not changed_device:
+                if stale_on_disk and value:
+                    self._write_active_device()
+                return
+            if not value:
+                self._write_active_device()
+                return
         # Best-effort name: the cache is filled by list_devices(), which
         # every resolve path runs before landing here, but the pool and the
         # set-active-device API can assign a UDID directly. A miss writes no
@@ -220,7 +310,20 @@ class DeviceController(DeviceControllerUI):
         self.__active_name_key = value
         self.__active_name = name
         self.__active_kind = kind
-        write_active_udid(value, name, kind)
+        self._write_active_device()
+
+    def _write_active_device(self) -> None:
+        """Persist the shared slot and every live session slot together."""
+        now = time.time()
+        live = {s: v for s, v in self.__session_slots.items()
+                if now - v["last_used"] <= SESSION_SLOT_TTL}
+        if len(live) > SESSION_SLOT_CAP:
+            newest = sorted(live, key=lambda s: live[s]["last_used"])[-SESSION_SLOT_CAP:]
+            live = {s: live[s] for s in newest}
+        self.__session_slots = live
+        self.__session_written = {s: v["last_used"] for s, v in live.items()}
+        write_active_udid(self.__active_name_key, self.__active_name, self.__active_kind,
+                          sessions={s: dict(v) for s, v in live.items()})
 
     def refresh_active_device(self) -> None:
         """Rewrite the active-device sidecar from the warmed caches.

@@ -169,7 +169,8 @@ def read_active_device() -> dict:
 
 
 def write_active_udid(
-    udid: str | None, name: str | None = None, kind: str | None = None
+    udid: str | None, name: str | None = None, kind: str | None = None,
+    sessions: dict[str, dict] | None = None,
 ) -> None:
     """Persist the active-device UDID to its sidecar file.
 
@@ -189,16 +190,24 @@ def write_active_udid(
     the name: the menu bar says whether it is driving a simulator or real
     hardware, and cannot work that out from a UDID. Optional and
     best-effort on the same terms; readers must tolerate its absence.
+
+    `sessions` holds each named session's own active device (#254): session id
+    -> {"udid", "last_used"}. Written beside the shared device so one file and
+    one lock cover both; readers that only want the shared device -- the menu
+    bar -- ignore the key.
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, object]
     if udid:
-        payload: dict[str, str] = {"udid": udid}
+        payload = {"udid": udid}
         if name:
             payload["name"] = name
         if kind:
             payload["type"] = kind
     else:
         payload = {}
+    if sessions:
+        payload["sessions"] = sessions
     # "a+" rather than "w", then truncate under the lock. "w" empties the file
     # on open, before the lock is taken, so a concurrent read_active_device()
     # holding LOCK_SH could see an empty file and report no active device --

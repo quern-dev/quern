@@ -109,10 +109,10 @@ class TestActiveDeviceName:
         writes = 0
         real = state.write_active_udid
 
-        def counting(udid, name=None, kind=None):
+        def counting(udid, name=None, kind=None, **kw):
             nonlocal writes
             writes += 1
-            return real(udid, name, kind)
+            return real(udid, name, kind, **kw)
 
         with patch.object(
             __import__("server.device.controller", fromlist=["x"]),
@@ -2130,10 +2130,10 @@ class TestActiveDeviceRefreshAtStartup:
         writes = 0
         real = state.write_active_udid
 
-        def counting(udid, name=None, kind=None):
+        def counting(udid, name=None, kind=None, **kw):
             nonlocal writes
             writes += 1
-            return real(udid, name, kind)
+            return real(udid, name, kind, **kw)
 
         with patch.object(
             __import__("server.device.controller", fromlist=["x"]),

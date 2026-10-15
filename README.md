@@ -160,7 +160,7 @@ The server prints connection info on startup — URL, API key, and proxy port. A
 | File | Purpose |
 |------|---------|
 | `state.json` | Running instance info (port, PID, API key) — deleted on stop |
-| `active-device.json` | The active device set via `resolve_device` — its UDID, name and type — persists across stop/start so you don't have to re-resolve after every restart, and is what the Quern app reads |
+| `active-device.json` | The active device set via `resolve_device` — its UDID, name and type — persists across stop/start so you don't have to re-resolve after every restart, and is what the Quern app reads. Each agent session's own active device is kept here too, under `sessions`, for a day of inactivity (#254) |
 | `cert-state.json` | Per-device certificate installation state, including per-SSID Wi-Fi proxy configs — persists across restarts |
 | `device-pool.json` | Device pool state (simctl cache) — persists across restarts |
 | `config.json` | Local capture processes, update channel, and the automatic-update-check and certificate-install settings |
