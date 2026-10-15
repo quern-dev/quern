@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 
 from server import logging_ext
@@ -92,7 +93,8 @@ def _restored_session_slots(raw: object) -> dict[str, dict]:
         if not isinstance(value, dict) or parse_session(session) != session:
             continue
         udid, last_used = value.get("udid"), value.get("last_used")
-        if not isinstance(udid, str) or not udid or not isinstance(last_used, (int, float)):
+        if (not isinstance(udid, str) or not udid or isinstance(last_used, bool)
+                or not isinstance(last_used, (int, float)) or not math.isfinite(last_used)):
             continue
         if now - last_used > SESSION_SLOT_TTL:
             continue
@@ -160,10 +162,19 @@ class DeviceController(DeviceControllerUI):
         # Restore active device from its sidecar file (lives separately
         # from state.json so it survives `quern stop` and stop/start cycles).
         persisted = read_active_udid()
+        sidecar = read_active_device()
         if persisted:
             self.__active_udid = persisted
             logger.info("Restored active device: %s", persisted[:8])
-        self.__session_slots = _restored_session_slots(read_active_device().get("sessions"))
+            # Seed what the file already says about it, so a write before the
+            # startup refresh runs -- a session's, which never touches these --
+            # writes the shared device back with its name, instead of none at
+            # all (#254 review: it erased the menu bar's device).
+            self.__active_name_key = persisted
+            name, kind = sidecar.get("name"), sidecar.get("type")
+            self.__active_name = name if isinstance(name, str) else None
+            self.__active_kind = kind if isinstance(kind, str) else None
+        self.__session_slots = _restored_session_slots(sidecar.get("sessions"))
         self.__session_written = {s: v["last_used"] for s, v in self.__session_slots.items()}
         # UI tree cache: {udid: (elements, timestamp)}
         self._ui_cache: dict[str, tuple[list[UIElement], float]] = {}
@@ -266,15 +277,30 @@ class DeviceController(DeviceControllerUI):
                 self.__session_slots[session] = {"udid": value, "last_used": now}
             else:
                 self.__session_slots.pop(session, None)
-            changed_device = (previous or {}).get("udid") != value
+            previous_udid = (previous or {}).get("udid")
+            changed_device = previous_udid != value
             stale_on_disk = now - self.__session_written.get(session, 0.0) > SESSION_SLOT_REWRITE
             if not changed_device:
                 if stale_on_disk and value:
                     self._write_active_device()
                 return
             if not value:
+                # A clear is a device going away -- shut down, erased -- so
+                # the shared slot follows when it pointed at the same device.
+                # Otherwise the menu bar kept showing a dead simulator and
+                # unattributed callers resolved to it (#254 review).
+                if previous_udid and self.__active_udid == previous_udid:
+                    self.__active_udid = None
+                    self.__active_name_key = self.__active_name = self.__active_kind = None
                 self._write_active_device()
                 return
+            # A real change: the slot must reach disk even if the shared slot
+            # below is already this device and its dedup guard skips the write
+            # -- which left a session's switch unsaved, so after a restart it
+            # acted on its old device (#254 review).
+            force_write = True
+        else:
+            force_write = False
         # Best-effort name: the cache is filled by list_devices(), which
         # every resolve path runs before landing here, but the pool and the
         # set-active-device API can assign a UDID directly. A miss writes no
@@ -302,7 +328,8 @@ class DeviceController(DeviceControllerUI):
         # first assignment, and that later fill is exactly when the sidecar
         # needs rewriting.
         if (
-            value == self.__active_name_key
+            not force_write
+            and value == self.__active_name_key
             and name == self.__active_name
             and kind == self.__active_kind
         ):
@@ -322,7 +349,12 @@ class DeviceController(DeviceControllerUI):
             live = {s: live[s] for s in newest}
         self.__session_slots = live
         self.__session_written = {s: v["last_used"] for s, v in live.items()}
-        write_active_udid(self.__active_name_key, self.__active_name, self.__active_kind,
+        # `__active_udid` is the shared device; the name and type are written
+        # only when they describe it.
+        same = self.__active_name_key == self.__active_udid
+        write_active_udid(self.__active_udid,
+                          self.__active_name if same else None,
+                          self.__active_kind if same else None,
                           sessions={s: dict(v) for s, v in live.items()})
 
     def refresh_active_device(self) -> None:

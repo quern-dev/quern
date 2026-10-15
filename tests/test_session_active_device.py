@@ -86,13 +86,24 @@ class TestIsolation:
             ctrl._active_udid = "SIM-X"      # A keeps using X
         assert ctrl._active_udid == "SIM-Y"
 
-    def test_clearing_clears_only_the_callers_slot(self):
+    def test_clearing_follows_the_device_not_the_caller(self):
+        """A clear means the device went away -- shut down, erased. The shared
+        slot follows when it pointed at that device (otherwise the menu bar
+        showed a dead simulator), and is left alone when it pointed elsewhere."""
         ctrl = _controller()
         with as_session("mcp-aaaa"):
-            ctrl._active_udid = "SIM-X"
+            ctrl._active_udid = "SIM-X"          # shared slot = X too
             ctrl._active_udid = None
             assert ctrl._active_udid is None
-        assert ctrl._active_udid == "SIM-X", "a session's clear wiped the shared slot"
+        assert ctrl._active_udid is None, "the shared slot kept a device that went away"
+
+        with as_session("mcp-aaaa"):
+            ctrl._active_udid = "SIM-X"
+        with as_session("mcp-bbbb"):
+            ctrl._active_udid = "SIM-Y"          # shared slot = Y
+        with as_session("mcp-aaaa"):
+            ctrl._active_udid = None
+        assert ctrl._active_udid == "SIM-Y", "A's clear wiped another agent's device"
 
 
 class TestResolution:
@@ -254,3 +265,79 @@ class TestTheRealServerHasAPool:
         pool = self._with_pool(ctrl)
         assert await ctrl.resolve_udid() == "PHYSICAL-PHONE"
         assert pool.calls == 1
+
+
+class TestPersistenceEdges:
+    """Found by review: paths where a session's choice, or the shared device,
+    failed to reach the file correctly."""
+
+    def test_a_session_write_before_the_refresh_keeps_the_shared_device(self):
+        """After a restart the shared device is restored but the setter's
+        name cache was not, so a session's write -- before the startup refresh,
+        which skips devices the caches don't know -- wrote no shared device."""
+        two_hours_ago = time.time() - 2 * 3600
+        state.write_active_udid("SIM-X", "Sim X", "simulator", sessions={
+            "mcp-aaaa": {"udid": "SIM-Y", "last_used": two_hours_ago}})
+        ctrl = _controller()                 # no refresh_active_device()
+        with as_session("mcp-aaaa"):
+            ctrl._active_udid = "SIM-Y"      # due its hourly rewrite
+        data = json.loads(state.ACTIVE_DEVICE_FILE.read_text())
+        assert (data.get("udid"), data.get("name"), data.get("type")) == (
+            "SIM-X", "Sim X", "simulator"), data
+        assert data["sessions"]["mcp-aaaa"]["last_used"] > two_hours_ago
+
+    def test_switching_to_the_shared_device_is_saved(self):
+        """The shared slot's dedup guard saw nothing new and skipped the write,
+        so after a restart the session acted on its old device."""
+        ctrl = _controller()
+        with as_session("mcp-aaaa"):
+            ctrl._active_udid = "SIM-Y"
+        with as_session("mcp-bbbb"):
+            ctrl._active_udid = "SIM-X"      # shared = X
+        with as_session("mcp-aaaa"):
+            ctrl._active_udid = "SIM-X"      # A switches to the shared device
+        with as_session("mcp-aaaa"):
+            assert _controller()._active_udid == "SIM-X"
+
+    def test_a_fresh_session_choosing_the_shared_device_is_saved(self):
+        ctrl = _controller()
+        ctrl._active_udid = "SIM-X"          # an unattributed caller
+        with as_session("mcp-new"):
+            ctrl._active_udid = "SIM-X"
+        with as_session("mcp-new"):
+            assert _controller()._active_udid == "SIM-X"
+
+    def test_a_slot_in_use_is_rewritten_hourly(self, monkeypatch):
+        clock = {"t": time.time()}
+        monkeypatch.setattr(controller_mod.time, "time", lambda: clock["t"])
+        ctrl = _controller()
+        with as_session("mcp-aaaa"):
+            ctrl._active_udid = "SIM-X"
+        def on_disk():
+            return json.loads(state.ACTIVE_DEVICE_FILE.read_text())["sessions"]["mcp-aaaa"]
+
+        first = on_disk()["last_used"]
+        clock["t"] += controller_mod.SESSION_SLOT_REWRITE + 60
+        with as_session("mcp-aaaa"):
+            ctrl._active_udid = "SIM-X"      # same device, just in use
+        assert on_disk()["last_used"] > first
+
+    def test_reading_a_slot_keeps_it_alive(self, monkeypatch):
+        clock = {"t": time.time()}
+        monkeypatch.setattr(controller_mod.time, "time", lambda: clock["t"])
+        ctrl = _controller()
+        with as_session("mcp-aaaa"):
+            ctrl._active_udid = "SIM-X"
+        step = controller_mod.SESSION_SLOT_TTL * 0.8
+        for _ in range(3):                   # 2.4 TTLs in all, read each time
+            clock["t"] += step
+            with as_session("mcp-aaaa"):
+                assert ctrl._active_udid == "SIM-X"
+
+    def test_a_non_finite_timestamp_is_dropped(self):
+        # Written by hand: json.dumps would refuse Infinity, which is the point.
+        now = time.time()
+        state.ACTIVE_DEVICE_FILE.write_text(
+            '{"udid": "SIM-X", "sessions": {"mcp-inf": {"udid": "SIM-X", "last_used": Infinity},'
+            f' "mcp-ok": {{"udid": "SIM-Y", "last_used": {now}}}}}}}')
+        assert list(_controller()._DeviceController__session_slots) == ["mcp-ok"]
