@@ -243,6 +243,13 @@ class DeviceController(DeviceControllerUI):
             del self.__session_slots[session]
             return None
         slot["last_used"] = now
+        # Use by reading counts too, and reaches disk on the same hourly
+        # schedule as the setter's rewrite. Otherwise a session that only
+        # reads its device -- through calls that never re-assign it -- would
+        # carry a stale last-used time across a restart and could expire
+        # while in use (CodeRabbit, #460).
+        if now - self.__session_written.get(session, 0.0) > SESSION_SLOT_REWRITE:
+            self._write_active_device()
         return slot["udid"]
 
     @_active_udid.setter

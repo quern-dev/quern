@@ -341,3 +341,17 @@ class TestPersistenceEdges:
             '{"udid": "SIM-X", "sessions": {"mcp-inf": {"udid": "SIM-X", "last_used": Infinity},'
             f' "mcp-ok": {{"udid": "SIM-Y", "last_used": {now}}}}}}}')
         assert list(_controller()._DeviceController__session_slots) == ["mcp-ok"]
+
+    def test_a_slot_only_read_still_reaches_disk_hourly(self, monkeypatch):
+        """A session that reads its device but never re-assigns it."""
+        clock = {"t": time.time()}
+        monkeypatch.setattr(controller_mod.time, "time", lambda: clock["t"])
+        ctrl = _controller()
+        with as_session("mcp-aaaa"):
+            ctrl._active_udid = "SIM-X"
+        first = json.loads(state.ACTIVE_DEVICE_FILE.read_text())["sessions"]["mcp-aaaa"]
+        clock["t"] += controller_mod.SESSION_SLOT_REWRITE + 60
+        with as_session("mcp-aaaa"):
+            assert ctrl._active_udid == "SIM-X"      # a read, not a set
+        later = json.loads(state.ACTIVE_DEVICE_FILE.read_text())["sessions"]["mcp-aaaa"]
+        assert later["last_used"] > first["last_used"]
