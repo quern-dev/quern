@@ -215,3 +215,42 @@ class TestThroughHTTP:
                    for name in ("mcp-aaaa", "mcp-bbbb", "mcp-cccc", "")}
         assert got == {"mcp-aaaa": "SIM-X", "mcp-bbbb": "SIM-Y",
                        "mcp-cccc": None, "": "SIM-Y"}
+
+
+class TestTheRealServerHasAPool:
+    """The real server always attaches a DevicePool, which the tests above
+    don't. With no criteria the pool silently picks a ranked device -- live, it
+    picked a USB iPhone over two simulators -- so a fresh session must not
+    reach it, or "never handed someone else's device" becomes "handed an
+    arbitrary one", possibly real hardware."""
+
+    @staticmethod
+    def _with_pool(ctrl):
+        class _Pool:
+            calls = 0
+
+            async def resolve_device(self, **_kw):
+                _Pool.calls += 1
+                return "PHYSICAL-PHONE"
+
+        ctrl._pool = _Pool()
+        return ctrl._pool
+
+    async def test_a_fresh_session_is_asked_even_with_a_pool(self):
+        ctrl = _controller()
+        pool = self._with_pool(ctrl)
+        with as_session("mcp-new"), pytest.raises(DeviceError, match="specify udid"):
+            await ctrl.resolve_udid()
+        assert pool.calls == 0
+
+    async def test_a_fresh_session_with_one_device_booted_uses_it(self):
+        ctrl = _controller(booted=("SIM-X",))
+        self._with_pool(ctrl)
+        with as_session("mcp-new"):
+            assert await ctrl.resolve_udid() == "SIM-X"
+
+    async def test_an_unattributed_caller_still_gets_the_pools_choice(self):
+        ctrl = _controller()
+        pool = self._with_pool(ctrl)
+        assert await ctrl.resolve_udid() == "PHYSICAL-PHONE"
+        assert pool.calls == 1

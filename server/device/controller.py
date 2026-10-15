@@ -788,8 +788,16 @@ class DeviceController(DeviceControllerUI):
             # the hardware udid while `_active_udid` held the canonical one.
             return self._active_udid
 
-        # Step 3: try pool-based resolution (silent upgrade)
-        if self._pool is not None:
+        # Step 3: try pool-based resolution (silent upgrade).
+        #
+        # Not for a named session that has no device yet (#254). With no
+        # criteria the pool ranks every candidate and takes the first booted
+        # one -- with two simulators and a USB iPhone booted, measured, it took
+        # the iPhone, and an agent's first unqualified `open_url` went to real
+        # hardware. A session with no device of its own falls through to the
+        # plain auto-detect below instead: the one booted device, or "specify
+        # udid". Callers with no session keep the pool, as before.
+        if self._pool is not None and not current_session():
             try:
                 resolved = await self._pool.resolve_device()
                 self._active_udid = resolved
