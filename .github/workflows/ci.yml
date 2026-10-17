@@ -240,3 +240,8 @@ jobs:
         run: |
           cd mcp
           npm test
+
+      # The viewer's fMP4 muxer (#449): box-level checks against a real
+      # quern-media stream. Plain ES modules, no install needed.
+      - name: Test the viewer's fMP4 muxer
+        run: node --test server/device/media/web/test/*.test.mjs
