@@ -58,6 +58,14 @@ WDA_DERIVED_SIM = WDA_DIR / "build-sim"
 #: WDA and call the phone ready. So simulators get their own range.
 SIM_PORT_FIRST = 8200
 SIM_PORT_LAST = 8299
+#: WDA's MJPEG screenshot server needs a port per simulator too (#445). Left
+#: to its default it binds the Mac's 9100: quern's own default port, where it
+#: sat beside quern on the other address family -- IPv4 reached quern, IPv6
+#: (and so a browser's `localhost`) reached WDA's video -- and where two
+#: simulators could not both have it. Beside the control ports, and clear of
+#: quern's and the viewer's ranges.
+SIM_MJPEG_PORT_FIRST = 8300
+SIM_MJPEG_PORT_LAST = 8399
 #: First start on a simulator installs the runner as well as launching it.
 SIM_DRIVER_START_TIMEOUT = 90
 DRIVER_STOP_TIMEOUT = 5
@@ -1011,12 +1019,16 @@ async def stop_driver(udid: str) -> dict:
         except ProcessLookupError:
             pass
 
-    # Clean up state
+    # Clean up state -- only the entry this stop was for. A start can record a
+    # new runner for the same device while this one waits for its pid to exit,
+    # and removing that would leave a live WDA nothing knows about, so the next
+    # start spawns a second (CodeRabbit on #466).
     state = read_wda_state()
     runners = state.get("runners", {})
-    runners.pop(udid, None)
-    state["runners"] = runners
-    save_wda_state(state)
+    if (runners.get(udid) or {}).get("pid") == pid:
+        runners.pop(udid, None)
+        state["runners"] = runners
+        save_wda_state(state)
 
     return {"status": "stopped", "udid": udid}
 
@@ -1175,24 +1187,46 @@ async def _build_wda_simulator(force: bool) -> bool:
 
 
 def _port_is_free(port: int) -> bool:
+    """Free on IPv4 and on IPv6. WDA listens on both, so a port held on
+    either one is taken: over IPv4 only, a listener on IPv6 alone passed,
+    and WDA's video server then failed to bind it and carried on with no
+    video and no error (review, #445) -- or bound beside it, split by
+    address family, which is #445 again on a different port."""
+    import errno
     import socket
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+    probes = [(socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1"), (socket.AF_INET6, "::")]
+    for family, host in probes:
         try:
-            s.bind(("127.0.0.1", port))
+            sock = socket.socket(family, socket.SOCK_STREAM)
         except OSError:
-            return False
+            continue                          # no IPv6 on this Mac: nothing to clash with
+        with sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+            if family == socket.AF_INET6:
+                sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            try:
+                sock.bind((host, port))
+            except OSError as e:
+                # Taken only when something holds it. A Mac (or CI runner)
+                # with IPv6 present but unconfigured answers EADDRNOTAVAIL for
+                # ::1, and reading that as taken would refuse every port.
+                if e.errno in (errno.EADDRINUSE, errno.EACCES):
+                    return False
     return True
 
 
-def _allocate_sim_port(runners: dict[str, Any]) -> int:
-    taken = {r.get("port") for r in runners.values() if r.get("simulator")}
-    for port in range(SIM_PORT_FIRST, SIM_PORT_LAST + 1):
+def _allocate_sim_port(runners: dict[str, Any], *, key: str = "port",
+                       first: int = SIM_PORT_FIRST, last: int = SIM_PORT_LAST,
+                       what: str = "WDA") -> int:
+    """A port in [first, last] that no simulator's runner has recorded under
+    `key` and nothing else is bound to."""
+    taken = {r.get(key) for r in runners.values() if r.get("simulator")}
+    for port in range(first, last + 1):
         if port not in taken and _port_is_free(port):
             return port
     raise RuntimeError(
-        f"No free port for WDA in {SIM_PORT_FIRST}-{SIM_PORT_LAST}; stop a "
+        f"No free port for {what} in {first}-{last}; stop a "
         "simulator's driver (stop_driver) or free a port in that range."
     )
 
@@ -1205,6 +1239,12 @@ def _runner_pid(udid: str) -> int | None:
     (CodeRabbit on #362).
     """
     return (read_wda_state().get("runners", {}).get(udid) or {}).get("pid")
+
+
+def _video_port(udid: str) -> int | None:
+    """The MJPEG port recorded for this simulator's runner; None for one an
+    older quern started, whose video is on WDA's default 9100."""
+    return (read_wda_state().get("runners", {}).get(udid) or {}).get("mjpeg_port")
 
 
 def simulator_runner_port(udid: str) -> int | None:
@@ -1245,11 +1285,18 @@ async def start_driver_simulator(udid: str) -> dict:
         # A live pid is not a working runner: it may be hung, or a start that
         # was cancelled mid-poll. Ask it.
         pid = _runner_pid(udid)
-        if await _answers(port) and pid is not None and simulator_runner_port(udid) == port:
+        if _video_port(udid) is None:
+            # Started by a quern before #445: its video server is on the Mac's
+            # 9100. Restarted rather than kept, so it moves off quern's port.
+            logger.info("WDA on simulator %s predates per-simulator video ports; "
+                        "restarting it off 9100", udid[:8])
+            await stop_driver(udid)
+        elif await _answers(port) and pid is not None and simulator_runner_port(udid) == port:
             return {"status": "already_running", "udid": udid, "pid": pid,
-                    "port": port, "ready": True}
-        logger.info("WDA on simulator %s is alive but not answering; restarting", udid[:8])
-        await stop_driver(udid)
+                    "port": port, "mjpeg_port": _video_port(udid), "ready": True}
+        else:
+            logger.info("WDA on simulator %s is alive but not answering; restarting", udid[:8])
+            await stop_driver(udid)
 
     built = await build_wda_simulator()
     xctestrun = _find_sim_xctestrun()
@@ -1269,6 +1316,9 @@ async def start_driver_simulator(udid: str) -> dict:
             runners = state.get("runners", {})
             runners.pop(udid, None)  # a dead entry for this simulator
             port = _allocate_sim_port(runners)
+            mjpeg_port = _allocate_sim_port(
+                runners, key="mjpeg_port", first=SIM_MJPEG_PORT_FIRST,
+                last=SIM_MJPEG_PORT_LAST, what="WDA's video stream")
 
             WDA_LOG_DIR.mkdir(parents=True, exist_ok=True)
             log_path = WDA_LOG_DIR / f"runner-{udid[:8]}.log"
@@ -1276,7 +1326,9 @@ async def start_driver_simulator(udid: str) -> dict:
             # xcodebuild hands TEST_RUNNER_* variables to the runner with the
             # prefix removed; WDA reads USE_PORT.
             env["TEST_RUNNER_USE_PORT"] = str(port)
-            logger.info("Starting WDA on simulator %s, port %d", udid[:8], port)
+            env["TEST_RUNNER_MJPEG_SERVER_PORT"] = str(mjpeg_port)
+            logger.info("Starting WDA on simulator %s, port %d (video %d)",
+                        udid[:8], port, mjpeg_port)
             with open(log_path, "w") as log_file:
                 proc = await asyncio.create_subprocess_exec(
                     "xcodebuild", "test-without-building",
@@ -1291,6 +1343,7 @@ async def start_driver_simulator(udid: str) -> dict:
             state.setdefault("runners", {})[udid] = {
                 "pid": proc.pid,
                 "port": port,
+                "mjpeg_port": mjpeg_port,
                 "simulator": True,
                 "log_path": str(log_path),
                 "started_at": datetime.now(UTC).isoformat(),
@@ -1305,12 +1358,12 @@ async def start_driver_simulator(udid: str) -> dict:
         # simulator to a runner that is being torn down.
         ready = ready and simulator_runner_port(udid) == raced_port
         return {"status": "already_running", "udid": udid, "pid": pid,
-                "port": raced_port, "ready": ready}
+                "port": raced_port, "mjpeg_port": _video_port(udid), "ready": ready}
 
     ready = await _answers(port, timeout=SIM_DRIVER_START_TIMEOUT)
     result: dict[str, Any] = {
         "status": "started", "udid": udid, "pid": proc.pid,
-        "port": port, "ready": ready, "built": built,
+        "port": port, "mjpeg_port": mjpeg_port, "ready": ready, "built": built,
     }
     if not ready:
         # Not left registered: routing would send this simulator's reads to a

@@ -146,6 +146,32 @@ class TestPorts:
         monkeypatch.setattr(wda, "_port_is_free", lambda port: port != wda.SIM_PORT_FIRST)
         assert wda._allocate_sim_port({}) == wda.SIM_PORT_FIRST + 1
 
+    def test_video_ports_are_their_own_range_clear_of_quern(self):
+        """WDA's MJPEG server defaulted to the Mac's 9100: quern's port (#445).
+        Its range must not overlap the control ports, quern's default ports
+        and their scan, or the viewer's."""
+        video = range(wda.SIM_MJPEG_PORT_FIRST, wda.SIM_MJPEG_PORT_LAST + 1)
+        control = range(wda.SIM_PORT_FIRST, wda.SIM_PORT_LAST + 1)
+        assert not set(video) & set(control)
+        assert not set(video) & set(range(9100, 9140)), "quern's ports, scan and viewer"
+        assert 8100 not in video
+
+    def test_a_video_port_another_simulator_holds_is_skipped(self, monkeypatch):
+        monkeypatch.setattr(wda, "_port_is_free", lambda port: True)
+        runners = {"X": {"simulator": True, "port": wda.SIM_PORT_FIRST,
+                         "mjpeg_port": wda.SIM_MJPEG_PORT_FIRST}}
+        assert wda._allocate_sim_port(
+            runners, key="mjpeg_port", first=wda.SIM_MJPEG_PORT_FIRST,
+            last=wda.SIM_MJPEG_PORT_LAST) == wda.SIM_MJPEG_PORT_FIRST + 1
+
+    def test_a_full_video_range_is_an_error_that_names_it(self, monkeypatch):
+        """Refused rather than started without a video port: WDA would then
+        take its default, 9100, which is what #445 removed."""
+        monkeypatch.setattr(wda, "_port_is_free", lambda port: port < wda.SIM_MJPEG_PORT_FIRST)
+        with pytest.raises(RuntimeError, match="video stream.*8300-8399"):
+            wda._allocate_sim_port({}, key="mjpeg_port", first=wda.SIM_MJPEG_PORT_FIRST,
+                                   last=wda.SIM_MJPEG_PORT_LAST, what="WDA's video stream")
+
     def test_a_full_range_is_an_error_that_says_what_to_do(self, monkeypatch):
         monkeypatch.setattr(wda, "_port_is_free", lambda port: False)
         with pytest.raises(RuntimeError, match="stop_driver"):
@@ -181,7 +207,10 @@ class TestStartingOnASimulator:
         result = await wda.start_driver_simulator(SIM)
 
         assert result["ready"] is True and result["port"] == wda.SIM_PORT_FIRST
+        assert result["mjpeg_port"] == wda.SIM_MJPEG_PORT_FIRST, "reported, not just recorded"
         assert env["env"]["TEST_RUNNER_USE_PORT"] == str(wda.SIM_PORT_FIRST)
+        # Its video server on its own port, never WDA's default 9100 (#445).
+        assert env["env"]["TEST_RUNNER_MJPEG_SERVER_PORT"] == str(wda.SIM_MJPEG_PORT_FIRST)
         assert f"id={SIM}" in env["cmd"]
         assert "test-without-building" in env["cmd"]
 
@@ -211,19 +240,46 @@ class TestStartingOnASimulator:
     async def test_a_live_answering_runner_is_reused(self, env, state, monkeypatch):
         """With `env`, a regression past the reuse path fails fast on the mocked
         spawn instead of reaching a real clone and build (CodeRabbit on #362)."""
-        state["runners"] = {SIM: {"pid": 77, "port": 8205, "simulator": True}}
+        state["runners"] = {SIM: {"pid": 77, "port": 8205, "mjpeg_port": 8305,
+                                  "simulator": True}}
         monkeypatch.setattr(wda, "_is_process_alive", lambda pid: True)
         monkeypatch.setattr(wda, "_poll_wda_status", AsyncMock(return_value=True))
         result = await wda.start_driver_simulator(SIM)
         assert result == {"status": "already_running", "udid": SIM, "pid": 77,
-                          "port": 8205, "ready": True}
+                          "port": 8205, "mjpeg_port": 8305, "ready": True}
+
+    async def test_a_runner_from_before_video_ports_is_restarted_off_9100(
+        self, env, state, monkeypatch,
+    ):
+        """A runner an older quern started has no recorded video port: its
+        MJPEG server is on the Mac's 9100. Kept, it would hold quern's port
+        across the upgrade, so it is restarted onto its own (review, #445)."""
+        state["runners"] = {SIM: {"pid": 77, "port": 8205, "simulator": True}}
+        monkeypatch.setattr(wda, "_is_process_alive", lambda pid: True)
+        monkeypatch.setattr(wda, "_poll_wda_status", AsyncMock(return_value=True))
+        stopped = []
+
+        async def stop(udid):
+            stopped.append(udid)
+            s = wda.read_wda_state()
+            s.get("runners", {}).pop(udid, None)
+            wda.save_wda_state(s)
+            return {"status": "stopped"}
+
+        monkeypatch.setattr(wda, "stop_driver", stop)
+        result = await wda.start_driver_simulator(SIM)
+        assert stopped == [SIM], "the old runner was stopped, not reused"
+        assert result["status"] == "started"
+        assert result["mjpeg_port"] == wda.SIM_MJPEG_PORT_FIRST
+        assert env["env"]["TEST_RUNNER_MJPEG_SERVER_PORT"] == str(wda.SIM_MJPEG_PORT_FIRST)
 
     async def test_a_live_but_silent_runner_is_restarted_not_reused(
         self, env, state, monkeypatch,
     ):
         """A live pid is not a working runner. Reporting it ready on the pid
         alone registered a hung one (review on #336)."""
-        state["runners"] = {SIM: {"pid": 77, "port": 8205, "simulator": True}}
+        state["runners"] = {SIM: {"pid": 77, "port": 8205, "mjpeg_port": 8305,
+                                  "simulator": True}}
         monkeypatch.setattr(wda, "_is_process_alive", lambda pid: True)
         answers = iter([False, True])  # silent first, then the new runner
         monkeypatch.setattr(wda, "_poll_wda_status",
@@ -381,6 +437,9 @@ class TestTwoSimulatorsStartedTogetherGetTwoPorts:
             wda.start_driver_simulator("SIM-A"), wda.start_driver_simulator("SIM-B"),
         )
         assert a["port"] != b["port"]
+        # And two video servers: both on one port is the other half of #445.
+        runners = state["runners"]
+        assert runners["SIM-A"]["mjpeg_port"] != runners["SIM-B"]["mjpeg_port"]
 
     async def test_concurrent_starts_of_one_simulator_spawn_once(
         self, state, monkeypatch, tmp_path,
@@ -756,3 +815,89 @@ class TestARunnerRemovedDuringThePoll:
         assert result["status"] == "already_running"
         assert result["ready"] is False, "registering it would route to a runner being torn down"
         assert result["pid"] == 9
+
+
+class TestThePortProbe:
+    """Real sockets on ephemeral ports: WDA listens on IPv4 and IPv6, so a
+    port held on either is taken (review, #445)."""
+
+    @staticmethod
+    def _free_port() -> int:
+        import socket
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    def test_a_free_port_is_free(self):
+        assert wda._port_is_free(self._free_port())
+
+    def test_a_port_held_on_ipv4_is_taken(self):
+        import socket
+        with socket.socket() as held:
+            held.bind(("127.0.0.1", 0))
+            held.listen()
+            assert not wda._port_is_free(held.getsockname()[1])
+
+    def test_a_port_held_on_ipv6_alone_is_taken(self):
+        import socket
+        try:
+            held = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        except OSError:
+            pytest.skip("no IPv6 on this machine")
+        with held:
+            held.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            try:
+                held.bind(("::", 0))
+            except OSError:
+                pytest.skip("IPv6 not configured here")
+            held.listen()
+            port = held.getsockname()[1]
+            with socket.socket() as v4:
+                v4.bind(("127.0.0.1", port))   # IPv4 is free: only IPv6 holds it
+            assert not wda._port_is_free(port)
+
+    def test_an_unconfigured_ipv6_is_not_read_as_taken(self, monkeypatch):
+        """EADDRNOTAVAIL for ::1 means no IPv6 here, not a busy port; reading
+        it as busy would refuse every port on such a machine."""
+        import errno
+        import socket
+        real = socket.socket
+
+        class NoV6(real):
+            def bind(self, addr):
+                if self.family == socket.AF_INET6:
+                    raise OSError(errno.EADDRNOTAVAIL, "not available")
+                return super().bind(addr)
+
+        monkeypatch.setattr(socket, "socket", NoV6)
+        assert wda._port_is_free(self._free_port())
+
+
+class TestAStaleStopLeavesANewRunnerAlone:
+    async def test_a_runner_recorded_during_the_stop_is_kept(self, state, monkeypatch):
+        """stop_driver waits for the old pid to exit before cleaning up. A
+        start that records a new runner meanwhile must not have it removed:
+        nothing would know about that WDA, and the next start would spawn a
+        second (CodeRabbit on #466)."""
+        state["runners"] = {SIM: {"pid": 77, "port": 8205, "simulator": True}}
+        alive = {77: True}
+        monkeypatch.setattr(wda, "_is_process_alive", lambda pid: alive.get(pid, False))
+
+        def kill(pid, sig):
+            # The old runner exits, and a concurrent start records a new one.
+            alive[pid] = False
+            s = wda.read_wda_state()
+            s["runners"][SIM] = {"pid": 88, "port": 8206, "mjpeg_port": 8306, "simulator": True}
+            wda.save_wda_state(s)
+
+        monkeypatch.setattr(wda.os, "kill", kill)
+        assert (await wda.stop_driver(SIM))["status"] == "stopped"
+        assert state["runners"][SIM]["pid"] == 88, "the new runner's record survived"
+
+    async def test_its_own_entry_is_still_removed(self, state, monkeypatch):
+        state["runners"] = {SIM: {"pid": 77, "port": 8205, "simulator": True}}
+        alive = {77: True}
+        monkeypatch.setattr(wda, "_is_process_alive", lambda pid: alive.get(pid, False))
+        monkeypatch.setattr(wda.os, "kill", lambda pid, sig: alive.__setitem__(pid, False))
+        assert (await wda.stop_driver(SIM))["status"] == "stopped"
+        assert SIM not in state["runners"]
