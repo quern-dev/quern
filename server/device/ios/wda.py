@@ -1019,12 +1019,16 @@ async def stop_driver(udid: str) -> dict:
         except ProcessLookupError:
             pass
 
-    # Clean up state
+    # Clean up state -- only the entry this stop was for. A start can record a
+    # new runner for the same device while this one waits for its pid to exit,
+    # and removing that would leave a live WDA nothing knows about, so the next
+    # start spawns a second (CodeRabbit on #466).
     state = read_wda_state()
     runners = state.get("runners", {})
-    runners.pop(udid, None)
-    state["runners"] = runners
-    save_wda_state(state)
+    if (runners.get(udid) or {}).get("pid") == pid:
+        runners.pop(udid, None)
+        state["runners"] = runners
+        save_wda_state(state)
 
     return {"status": "stopped", "udid": udid}
 

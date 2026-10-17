@@ -871,3 +871,33 @@ class TestThePortProbe:
 
         monkeypatch.setattr(socket, "socket", NoV6)
         assert wda._port_is_free(self._free_port())
+
+
+class TestAStaleStopLeavesANewRunnerAlone:
+    async def test_a_runner_recorded_during_the_stop_is_kept(self, state, monkeypatch):
+        """stop_driver waits for the old pid to exit before cleaning up. A
+        start that records a new runner meanwhile must not have it removed:
+        nothing would know about that WDA, and the next start would spawn a
+        second (CodeRabbit on #466)."""
+        state["runners"] = {SIM: {"pid": 77, "port": 8205, "simulator": True}}
+        alive = {77: True}
+        monkeypatch.setattr(wda, "_is_process_alive", lambda pid: alive.get(pid, False))
+
+        def kill(pid, sig):
+            # The old runner exits, and a concurrent start records a new one.
+            alive[pid] = False
+            s = wda.read_wda_state()
+            s["runners"][SIM] = {"pid": 88, "port": 8206, "mjpeg_port": 8306, "simulator": True}
+            wda.save_wda_state(s)
+
+        monkeypatch.setattr(wda.os, "kill", kill)
+        assert (await wda.stop_driver(SIM))["status"] == "stopped"
+        assert state["runners"][SIM]["pid"] == 88, "the new runner's record survived"
+
+    async def test_its_own_entry_is_still_removed(self, state, monkeypatch):
+        state["runners"] = {SIM: {"pid": 77, "port": 8205, "simulator": True}}
+        alive = {77: True}
+        monkeypatch.setattr(wda, "_is_process_alive", lambda pid: alive.get(pid, False))
+        monkeypatch.setattr(wda.os, "kill", lambda pid, sig: alive.__setitem__(pid, False))
+        assert (await wda.stop_driver(SIM))["status"] == "stopped"
+        assert SIM not in state["runners"]
