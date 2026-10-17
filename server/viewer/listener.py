@@ -5,17 +5,23 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import resource
 import socket
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import uvicorn
 
 from server.viewer.app import create_viewer_app
 from server.viewer.grants import ViewerGrants
+from server.viewer.protocol import MAX_CONNECTIONS, GuardedH11Protocol
 
 logger = logging.getLogger(__name__)
 
 _ANY = {"0.0.0.0", "::", ""}
+#: How long a looked-up LAN address is trusted: a laptop changes networks.
+LAN_REFRESH_SECONDS = 30.0
 
 
 def lan_address(bind_host: str) -> str:
@@ -36,8 +42,66 @@ def lan_address(bind_host: str) -> str:
                 return addr
         except OSError:
             pass
-    logger.warning("Could not find this Mac's LAN address; viewer links will use 127.0.0.1")
     return "127.0.0.1"
+
+
+class LanAddress:
+    """`lan_address`, looked up again at most every LAN_REFRESH_SECONDS: links
+    issued after a Mac moves networks point at its new address, and requests
+    to it are accepted. A lookup that finds none is said once per change."""
+
+    def __init__(self, bind_host: str, lookup: Callable[[str], str] = lan_address,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self._bind = bind_host
+        self._lookup = lookup
+        self._clock = clock
+        self._value = ""
+        self._at = -LAN_REFRESH_SECONDS
+
+    def __call__(self) -> str:
+        now = self._clock()
+        if now - self._at >= LAN_REFRESH_SECONDS:
+            value = self._lookup(self._bind)
+            if value != self._value and value == "127.0.0.1" and self._bind in _ANY:
+                logger.warning("Could not find this Mac's LAN address; viewer links will use "
+                               "127.0.0.1, which only this Mac can open")
+            self._value, self._at = value, now
+        return self._value
+
+
+#: The soft file-descriptor limit the viewer asks for: macOS starts a process
+#: at 256, which a busy server with a LAN listener could reach. 10240 is the
+#: most macOS lets setrlimit grant under an unlimited hard limit.
+FD_SOFT_LIMIT = 10240
+
+
+def raise_fd_limit(target: int = FD_SOFT_LIMIT) -> int | None:
+    """Raise the soft RLIMIT_NOFILE toward `target`, never lowering it and
+    never past the hard limit. The new soft limit, or None if it could not be
+    read or set -- which is logged, not raised: the connection cap is the
+    real defence, and this is headroom."""
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        want = target if hard == resource.RLIM_INFINITY else min(target, hard)
+        if soft != resource.RLIM_INFINITY and soft < want:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+            return want
+        return soft
+    except (OSError, ValueError) as e:
+        logger.warning("Could not raise the file-descriptor limit: %s", e)
+        return None
+
+
+def allowed_hosts(bind_host: str, hosts, lan: Callable[[], str]) -> Callable[[], set[str]]:
+    """The Host names requests may carry: the LAN address as it is now, the
+    configured extras, and a specific bind address. Never a wildcard: no
+    browser sends `Host: 0.0.0.0` for a page it means to reach."""
+    fixed = {*hosts} | ({bind_host} - _ANY)
+    return lambda: fixed | ({lan()} - _ANY)
+
+
+def _url_host(host: str) -> str:
+    return f"[{host}]" if ":" in host else host
 
 
 @dataclass
@@ -45,13 +109,22 @@ class ViewerListener:
     """What the API needs from a running viewer: tokens, and where links point."""
 
     grants: ViewerGrants
-    base_url: str | None
+    port: int | None
     error: str | None = None
+    lan: Callable[[], str] | None = field(default=None, repr=False)
     _server: uvicorn.Server | None = field(default=None, repr=False)
     _task: asyncio.Task | None = field(default=None, repr=False)
 
+    @property
+    def base_url(self) -> str | None:
+        """Where links point now; None when the listener isn't listening."""
+        if self.port is None or self.lan is None:
+            return None
+        return f"http://{_url_host(self.lan())}:{self.port}"
+
     def url_for(self, token: str) -> str | None:
-        return f"{self.base_url}/v/{token}/" if self.base_url else None
+        base = self.base_url
+        return f"{base}/v/{token}/" if base else None
 
     async def stop(self) -> None:
         if self._server is not None:
@@ -72,14 +145,27 @@ async def start_viewer(recordings, settings: dict) -> ViewerListener | None:
         return None
     if settings.get("bind_error"):
         logger.warning("%s", settings["bind_error"])
+    raise_fd_limit()
     grants = ViewerGrants(recordings, grace_seconds=settings["grace_seconds"])
     host, port = settings["host"], settings["port"]
-    lan = lan_address(host)
-    allowed = {lan, *settings.get("hosts", [])} | ({host} - _ANY)
-    app = create_viewer_app(recordings=recordings, grants=grants, allowed_hosts=allowed,
+    lan = LanAddress(host)
+    app = create_viewer_app(recordings=recordings, grants=grants,
+                            allowed_hosts=allowed_hosts(host, settings.get("hosts", []), lan),
                             jmuxer_path=settings.get("jmuxer_path"))
-    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning",
-                                           lifespan="off", access_log=False))
+    server = uvicorn.Server(uvicorn.Config(
+        app, host=host, port=port, lifespan="off",
+        # The guarded protocol closes a connection that sends no request
+        # within a few seconds and refuses past a cap: the listener is
+        # reachable from the LAN without a token, and idle sockets held open
+        # by anyone there would otherwise use up the whole server's file
+        # descriptors. limit_concurrency is the same cap for requests.
+        http=GuardedH11Protocol, limit_concurrency=MAX_CONNECTIONS,
+        # Open streams never finish, so shutdown cuts them rather than waiting.
+        timeout_graceful_shutdown=1,
+        # The main server owns logging. uvicorn's default log_config would
+        # reconfigure its loggers -- the main server's included -- and an
+        # access log would write every token-bearing URL to the server log.
+        log_config=None, access_log=False))
     # The main server owns SIGINT/SIGTERM. A second Server installing its own
     # handlers would take shutdown away from it.
     server.capture_signals = contextlib.nullcontext  # type: ignore[method-assign]
@@ -105,7 +191,7 @@ async def start_viewer(recordings, settings: dict) -> ViewerListener | None:
         if task.done() and task.exception() is not None:
             error += f": {task.exception()}"
         logger.error("Viewer listener: %s", error)
-        return ViewerListener(grants=grants, base_url=None, error=error)
-    base = f"http://{lan}:{port}"
-    logger.info("Viewer listener on %s:%d; links point at %s", host, port, base)
-    return ViewerListener(grants=grants, base_url=base, _server=server, _task=task)
+        return ViewerListener(grants=grants, port=None, error=error)
+    viewer = ViewerListener(grants=grants, port=port, lan=lan, _server=server, _task=task)
+    logger.info("Viewer listener on %s:%d; links point at %s", host, port, viewer.base_url)
+    return viewer

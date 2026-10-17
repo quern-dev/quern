@@ -211,11 +211,23 @@ VIEWER_DEFAULT_PORT = 9120
 VIEWER_GRACE_SECONDS = 600
 
 
+def _host_name(value: str) -> str:
+    """'ci.lan:9120' or '[fe80::1]:9120' to its name, lowercased."""
+    value = value.strip().lower()
+    if value.startswith("["):
+        return value[1:value.find("]")] if "]" in value else ""
+    return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
+
+
 def viewer_settings() -> dict:
     """The LAN viewer's settings from config.json's `viewer` object (#449).
 
         {"viewer": {"enabled": true, "bind": "0.0.0.0:9120",
                     "hosts": ["ci.lan"], "jmuxer_path": "/path/jmuxer.min.js"}}
+
+`hosts` are extra names the listener answers to, for links someone rewrote
+to a DNS name; a port written with one is ignored, since Host is matched by
+name. `bind` takes an IPv6 host in brackets, `[::]:9120`.
 
     Off unless `enabled` is literally true: it is the first quern listener
     meant to be reached from another machine, so a typo must mean off. A
@@ -228,13 +240,18 @@ def viewer_settings() -> dict:
     bind = raw.get("bind")
     if isinstance(bind, str) and bind:
         h, sep, p = bind.rpartition(":")
+        if h.startswith("[") and h.endswith("]"):
+            h = h[1:-1]                          # "[::]:9120", "[fe80::1]:9120"
         try:
             port_n = int(p)
-            if not sep or not (1 <= port_n <= 65535):
+            if not sep or not (1 <= port_n <= 65535) or ("[" in h or "]" in h):
                 raise ValueError(bind)
+            if ":" in h and not bind.startswith("["):
+                raise ValueError(bind)           # "::1:9120" is ambiguous
             host, port = (h or VIEWER_DEFAULT_HOST), port_n
         except ValueError:
-            bind_error = f"viewer.bind {bind!r} is not host:port; using {host}:{port}"
+            bind_error = (f"viewer.bind {bind!r} is not host:port (an IPv6 host in "
+                          f"brackets); using {host}:{port}")
     hosts = raw.get("hosts")
     jmuxer = raw.get("jmuxer_path")
     return {
@@ -242,7 +259,8 @@ def viewer_settings() -> dict:
         "host": host,
         "port": port,
         "bind_error": bind_error,
-        "hosts": [h for h in hosts if isinstance(h, str) and h] if isinstance(hosts, list) else [],
+        "hosts": [n for n in (_host_name(h) for h in hosts if isinstance(h, str)) if n]
+                 if isinstance(hosts, list) else [],
         "jmuxer_path": jmuxer if isinstance(jmuxer, str) and jmuxer else None,
         "grace_seconds": VIEWER_GRACE_SECONDS,
     }

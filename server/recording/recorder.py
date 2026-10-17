@@ -122,6 +122,8 @@ _monotonic = time.monotonic
 #: kind. A burst of requests is one seek point, not a burst of keyframes, and
 #: the requests an action sets off already have the action's.
 REQUEST_KEYFRAME_INTERVAL = 1.0
+#: The LAN viewer's keyframes, at most one per recording this often (#449).
+VIEWER_KEYFRAME_INTERVAL = 1.0
 
 
 def _content_type(part: dict) -> str:
@@ -573,6 +575,7 @@ class RecordingManager:
         self._ip_map_at = -IP_MAP_REFRESH
         self._ip_map_failing = False
         self._recordings: dict[str, Recording] = {}
+        self._viewer_keyframe_at: dict[str, float] = {}
         self._save_lock = asyncio.Lock()
         #: Keyframe requests and segment finishes in flight, held so none is
         #: collected mid-request, and awaited at shutdown.
@@ -886,17 +889,28 @@ class RecordingManager:
             return None
         return seg.port, seg.udid
 
-    async def viewer_keyframe(self, recording_id: str) -> bool:
+    async def viewer_keyframe(self, recording_id: str) -> bool | None:
         """Ask the movie for a keyframe so a viewer that just attached gets a
-        picture on a still screen (#449). Unlike `keyframe`, it writes no
-        `mark`: someone watching must not add lines to the recording."""
+        picture on a still screen (#449). True if asked, False if it could not
+        be, None if one was asked for this recording's viewers within the last
+        VIEWER_KEYFRAME_INTERVAL.
+
+        Someone watching must not change the recording: no `mark` line, unlike
+        `keyframe`, and not counted in the segment's keyframes. Throttled per
+        recording, since a LAN client holding a link could otherwise ask as
+        fast as it liked and grow the movie with keyframes."""
         try:
             rec = self.get(recording_id)
         except RecordingError:
             return False
         if rec.state != "recording" or rec._segment is None or self._video is None:
             return False
-        return await self._video.keyframe(rec._segment)
+        now = _monotonic()
+        last = self._viewer_keyframe_at.get(recording_id)
+        if last is not None and now - last < VIEWER_KEYFRAME_INTERVAL:
+            return None
+        self._viewer_keyframe_at[recording_id] = now
+        return await self._video.keyframe(rec._segment, counted=False)
 
     async def keyframe(self, recording_id: str, label: str | None = None) -> bool:
         """Ask for a keyframe now, for a driver quern does not see (#415): a CI

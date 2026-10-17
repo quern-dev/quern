@@ -187,11 +187,16 @@ class VideoRecorder:
         raise VideoError(f"quern-media did not start recording {seg.udid} within "
                          f"{START_TIMEOUT:g}s: {_tail(await asyncio.to_thread(_lines, log))}")
 
-    async def keyframe(self, seg: Segment) -> bool:
-        """Ask for a keyframe now. Never raises; False if it was not asked."""
+    async def keyframe(self, seg: Segment, *, counted: bool = True) -> bool:
+        """Ask for a keyframe now. Never raises; False if it was not asked.
+
+        `counted=False` leaves the segment's counts alone: the LAN viewer's
+        requests (#449) are someone watching, not part of the run, and must
+        not change what the recording reports about itself."""
         if seg.process is None or seg.process.returncode is not None:
             return False
-        seg.keyframes_requested += 1
+        if counted:
+            seg.keyframes_requested += 1
         writer = None
         try:
             reader, writer = await asyncio.wait_for(
@@ -206,7 +211,7 @@ class VideoRecorder:
         finally:
             if writer is not None:
                 writer.close()
-        if not ok:
+        if not ok and counted:
             seg.keyframes_failed += 1
         return ok
 
