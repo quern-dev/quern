@@ -135,3 +135,49 @@ test("a decode time past 32 bits is written whole", () => {
   const tfdt = find(boxes(seg), "tfdt").body;
   assert.equal(u32at(tfdt, 4) * 2 ** 32 + u32at(tfdt, 8), big);
 });
+
+/** Bits for a synthetic SPS: u(n), ue(v) and se(v) as H.264 7.2 defines them. */
+class BitWriter {
+  constructor() { this.bits = []; }
+  u(n, v) { for (let i = n - 1; i >= 0; i -= 1) this.bits.push(Math.floor(v / 2 ** i) % 2); }
+  ue(v) {
+    const x = v + 1;
+    const len = Math.floor(Math.log2(x));
+    this.u(len, 0);
+    this.u(len + 1, x);
+  }
+  se(v) { this.ue(v > 0 ? 2 * v - 1 : -2 * v); }
+  bytes() {
+    const bits = [...this.bits, 1];                 // rbsp_stop_one_bit
+    while (bits.length % 8) bits.push(0);
+    const out = new Uint8Array(bits.length / 8);
+    bits.forEach((b, i) => { out[i >> 3] |= b << (7 - (i & 7)); });
+    return out;
+  }
+}
+
+test("an SPS with scaling matrices still yields its dimensions", () => {
+  // The captured stream carries none, so skipping them wrongly changed
+  // nothing there -- found by mutating the skip away. A High-profile encoder
+  // that sends them would otherwise misread every later field.
+  const w = new BitWriter();
+  w.u(8, 0x67); w.u(8, 100); w.u(8, 0); w.u(8, 31);  // header, High, constraints, level 3.1
+  w.ue(0);                                          // seq_parameter_set_id
+  w.ue(1); w.ue(0); w.ue(0); w.u(1, 0);             // 4:2:0, 8-bit, no bypass
+  w.u(1, 1);                                        // seq_scaling_matrix_present_flag
+  w.u(1, 1);                                        // list 0 present: 16 deltas
+  for (let j = 0; j < 16; j += 1) w.se(j === 0 ? 4 : 1);
+  w.u(1, 1);                                        // list 1 present: ends early (next = 0)
+  w.se(-8);
+  for (let i = 2; i < 6; i += 1) w.u(1, 0);
+  w.u(1, 1);                                        // list 6 (8x8) present: 64 deltas
+  for (let j = 0; j < 64; j += 1) w.se(j % 3 === 0 ? 2 : -1);
+  w.u(1, 0);                                        // list 7 absent
+  w.ue(0); w.ue(0); w.ue(4);                        // frame num, poc type 0, poc lsb
+  w.ue(1); w.u(1, 0);                               // ref frames, gaps
+  w.ue(1280 / 16 - 1); w.ue(720 / 16 - 1);          // 1280x720 in macroblocks
+  w.u(1, 1); w.u(1, 1); w.u(1, 0);                  // frame_mbs_only, direct_8x8, no crop
+  w.u(1, 0);                                        // no VUI
+  const info = parseSps(w.bytes());
+  assert.deepEqual([info.width, info.height, info.profile, info.level], [1280, 720, 100, 31]);
+});
