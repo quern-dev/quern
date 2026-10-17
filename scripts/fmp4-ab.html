@@ -37,7 +37,14 @@ async function quernSink() {
         if (item.changeType) {
           // Before an init segment whose codec string differs (a new
           // profile or level): MSE requires it before data in a new format.
-          if (typeof sb.changeType === "function") sb.changeType(`video/mp4; codecs="${item.changeType}"`);
+          // Without changeType (older engines) the fallback is explicit and
+          // reported, not a silent success: appending a new avc1 init to the
+          // same SourceBuffer, which browsers accept for one codec family.
+          if (typeof sb.changeType === "function") {
+            sb.changeType(`video/mp4; codecs="${item.changeType}"`);
+          } else {
+            S.errors.push(`changeType unsupported; appending the ${item.changeType} init without it`);
+          }
           continue;
         }
         sb.appendBuffer(item.data);
