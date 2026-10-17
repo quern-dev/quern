@@ -969,6 +969,12 @@ class RecordingStartRequest(BaseModel):
         "quern run, with a keyframe at each action's start and at requests (see "
         "`keyframes`). Simulators only. Refused, "
         "rather than recorded without video, if video cannot start."))
+    viewer: bool = Field(default=False, description=(
+        "Also issue a LAN viewer link for this recording (#449): the response's "
+        "`viewer_url` plays the simulator live in a browser on another machine. View-only, "
+        "for this recording, and expires 10 minutes after it stops. Needs `video` and the "
+        "viewer enabled in config.json (`viewer.enabled`); when it is off the recording "
+        "still starts, with `viewer_url` null and the reason in `warnings`."))
     allow_passthrough: bool = Field(default=False, description=(
         "Start even if this simulator does not trust quern's CA. Under local capture "
         "its apps work and its HTTPS is not recorded; under the system proxy its HTTPS "

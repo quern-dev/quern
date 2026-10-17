@@ -420,6 +420,7 @@ class FakeVideo:
         self.reaped, self.reap_calls = reaped, []
         self.start_host_time = start_host_time
         self.started, self.stopped, self.keyframes = [], [], []
+        self.keyframe_counted = []
 
     async def start(self, udid, path):
         if self.fail_start:
@@ -433,8 +434,9 @@ class FakeVideo:
         self.reap_calls.append((pid, str(movie)))
         return self.reaped
 
-    async def keyframe(self, seg):
+    async def keyframe(self, seg, *, counted=True):
         self.keyframes.append(seg.path)
+        self.keyframe_counted.append(counted)
         return True
 
     async def stop(self, seg):

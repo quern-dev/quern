@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>quern viewer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #111; color: #ccc; font: 13px -apple-system, system-ui, sans-serif; }
+  #stage { position: relative; height: calc(100% - 2.2em); display: flex; align-items: center; justify-content: center; }
+  canvas, video { max-width: 100%; max-height: 100%; display: none; }
+  #offair { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column;
+            background: rgba(17,17,17,.55); color: #eee; letter-spacing: .2em; font-weight: 600; }
+  body.offair #offair { display: flex; }
+  body.offair canvas, body.offair video { filter: grayscale(1) brightness(.5); }
+  #reason { margin-top: .6em; letter-spacing: 0; font-weight: 400; font-size: 12px; opacity: .85; max-width: 90%; text-align: center; }
+  #status { height: 2.2em; line-height: 2.2em; padding: 0 .8em; font: 12px ui-monospace, Menlo, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+</style>
+<div id="stage">
+  <canvas id="canvas"></canvas>
+  <video id="video" autoplay muted playsinline></video>
+  <div id="offair">OFF AIR<div id="reason"></div></div>
+</div>
+<div id="status">connecting…</div>
+<script type="module" src="viewer.js"></script>
+</html>

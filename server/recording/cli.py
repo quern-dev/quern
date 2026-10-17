@@ -24,7 +24,7 @@ from server.session import session_from_env
 USAGE = """\
 Usage: quern record start --udid UDID [--out DIR] [--kinds actions,flows,logs]
                           [--host H]... [--exclude-host H]... [--include-unattributed]
-                          [--requested-by NAME] [--video] [--allow-passthrough]
+                          [--requested-by NAME] [--video [--viewer]] [--allow-passthrough]
                           [--keyframes actions,requests]
                           [--bodies all|errors|none] [--max-body-bytes N]
                           [--exclude-content-type TYPE]...
@@ -39,6 +39,10 @@ request's own body is kept on the line written when it starts, since whether it
 will be answered is not known yet; --max-body-bytes bounds that too.
 With --video, seek points come from actions and requests (requests need flows
 in --kinds); --keyframes '' asks for none. `keyframe --label` marks a moment.
+--viewer (with --video) also prints a LAN viewer link on the second line, for
+a CI job to post: it plays the simulator live in a browser on another machine,
+and expires 10 minutes after the recording stops. Needs viewer.enabled in
+~/.quern/config.json.
 
 Record one device's actions, flows and logs to disk until stopped, for as long
 as a run lasts. `start` prints the recording's id on the first line, so a
@@ -114,6 +118,7 @@ def main(argv: list[str]) -> int:
     start.add_argument("--kinds")
     start.add_argument("--include-unattributed", action="store_true")
     start.add_argument("--video", action="store_true")
+    start.add_argument("--viewer", action="store_true")
     start.add_argument("--allow-passthrough", action="store_true")
     start.add_argument("--requested-by")
     start.add_argument("--keyframes")
@@ -140,6 +145,7 @@ def main(argv: list[str]) -> int:
             body = {"udid": args.udid, "output_dir": args.out, "kinds": kinds,
                     "hosts": args.host, "exclude_hosts": args.exclude_host,
                     "include_unattributed": args.include_unattributed, "video": args.video,
+                    "viewer": args.viewer,
                     "allow_passthrough": args.allow_passthrough,
                     "requested_by": args.requested_by,
                     "max_body_bytes": args.max_body_bytes,
@@ -169,6 +175,10 @@ def main(argv: list[str]) -> int:
         return 0 if answer.get("requested") else 3
     if args.what == "start":
         print(answer["id"])
+        # The viewer link on stdout's second line (#449), so a CI script keeps
+        # `head -1` for the id and takes `sed -n 2p` for the link to post.
+        if answer.get("viewer_url"):
+            print(answer["viewer_url"])
         print(f"recording {answer['udid']} into {answer['output_dir']}", file=sys.stderr)
         for w in answer.get("warnings") or []:
             print(f"warning: {w}", file=sys.stderr)

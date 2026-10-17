@@ -595,7 +595,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         config.api_key[-4:],
     )
 
+    # The LAN viewer (#449), opt-in. Started after the recordings it serves.
+    from server.config import viewer_settings as _viewer_settings
+    from server.viewer.listener import start_viewer
+    try:
+        app.state.viewer = await start_viewer(app.state.recordings, _viewer_settings())
+    except Exception:  # noqa: BLE001 -- the viewer must never stop the server starting
+        logger.exception("Could not start the viewer listener")
+        app.state.viewer = None
+
     yield
+
+    # Viewers first: their streams relay recordings stopped below.
+    viewer = getattr(app.state, "viewer", None)
+    if viewer is not None:
+        await viewer.stop()
 
     # Recordings first, while the buffers still exist: each gets a `paused`
     # line and is kept to resume, so a restart costs a gap, not the run.
@@ -1023,10 +1037,14 @@ def _cmd_start(args: argparse.Namespace) -> None:
     # Resolve ports — try to reclaim from stale quern processes first,
     # only scan upward if occupied by something else
     server_port = args.port
+    # Never scan onto the viewer's port (#449): its links must not move, and a
+    # default range shifted by #446 would otherwise reach it.
+    from server.config import viewer_settings
+    viewer_port = viewer_settings()["port"]
     if not reclaim_port(server_port, args.host):
         print(f"Port {server_port} is in use by another application")
         server_port = find_available_port(
-            server_port + 1, host=args.host, exclude={args.proxy_port},
+            server_port + 1, host=args.host, exclude={args.proxy_port, viewer_port},
         )
         print(f"Using port {server_port} instead (override with --port)")
 
@@ -1038,7 +1056,7 @@ def _cmd_start(args: argparse.Namespace) -> None:
             proxy_port = find_available_port(
                 proxy_port + 1,
                 host=args.host,
-                exclude={server_port},
+                exclude={server_port, viewer_port},
             )
             print(f"Using proxy port {proxy_port} instead (override with --proxy-port)")
 

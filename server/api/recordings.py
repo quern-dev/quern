@@ -59,6 +59,10 @@ async def start_recording(request: Request, body: RecordingStartRequest) -> dict
             # nothing for 90 minutes and look like a quiet run.
             warnings.append(f"{udid} is not a device quern knows right now; recording "
                             f"anyway, in case it appears")
+    if body.viewer and not body.video:
+        # The viewer relays the recording's movie; without one there is
+        # nothing to show, and a link that never plays is worse than none.
+        raise HTTPException(status_code=400, detail="a viewer link needs video: pass video=true")
     if body.video:
         # quern-media captures a simulator's framebuffer; a phone or an
         # emulator would be accepted and give no movie.
@@ -103,9 +107,53 @@ async def start_recording(request: Request, body: RecordingStartRequest) -> dict
         raise HTTPException(status_code=400, detail=str(e)) from e
     if "flows" in rec.filters.kinds and not _proxy_is_running(request):
         warnings.append("the proxy is not running, so no flows will be recorded until it is")
+    viewer_url = None
+    if body.viewer:
+        viewer_url, why = _issue_viewer_link(request, rec.id)
+        if why:
+            warnings.append(why)
     return {**rec.summary(), "warnings": [*warnings, *rec.warnings],
+            "viewer_url": viewer_url if body.viewer else None,
             # What is in effect for this simulator now, not what was asked for.
             "simulator_tls": simulator_tls.model_dump() if simulator_tls else None}
+
+
+def _issue_viewer_link(request: Request, recording_id: str) -> tuple[str | None, str | None]:
+    """(viewer URL, reason there is none) for a recording (#449)."""
+    viewer = getattr(request.app.state, "viewer", None)
+    if viewer is None:
+        return None, ("no viewer link: the LAN viewer is off. Set viewer.enabled in "
+                      "~/.quern/config.json and restart quern")
+    if viewer.base_url is None:
+        return None, f"no viewer link: the viewer listener is not running ({viewer.error})"
+    return viewer.url_for(viewer.grants.issue(recording_id)), None
+
+
+@router.post("/{recording_id}/viewer")
+@logged_action("recording_viewer_link", category="media")
+async def recording_viewer_link(request: Request, recording_id: str) -> dict:
+    """Issue another viewer link for a recording that is filming (#449)."""
+    manager = _manager(request)
+    try:
+        rec = manager.get(recording_id)
+    except RecordingError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    if not rec.filters.video or rec.state != "recording":
+        raise HTTPException(status_code=409,
+                            detail=f"{recording_id} is not filming, so there is nothing to view")
+    url, why = _issue_viewer_link(request, recording_id)
+    if url is None:
+        raise HTTPException(status_code=503, detail=why)
+    return {"recording_id": recording_id, "viewer_url": url}
+
+
+@router.delete("/{recording_id}/viewer")
+@logged_action("recording_viewer_revoke", category="media")
+async def recording_viewer_revoke(request: Request, recording_id: str) -> dict:
+    """Revoke every viewer link for a recording at once (#449)."""
+    viewer = getattr(request.app.state, "viewer", None)
+    revoked = viewer.grants.revoke(recording_id) if viewer is not None else 0
+    return {"recording_id": recording_id, "revoked": revoked}
 
 
 def _with_rejections(request: Request, summary: dict) -> dict:

@@ -122,6 +122,8 @@ _monotonic = time.monotonic
 #: kind. A burst of requests is one seek point, not a burst of keyframes, and
 #: the requests an action sets off already have the action's.
 REQUEST_KEYFRAME_INTERVAL = 1.0
+#: The LAN viewer's keyframes, at most one per recording this often (#449).
+VIEWER_KEYFRAME_INTERVAL = 1.0
 
 
 def _content_type(part: dict) -> str:
@@ -573,6 +575,7 @@ class RecordingManager:
         self._ip_map_at = -IP_MAP_REFRESH
         self._ip_map_failing = False
         self._recordings: dict[str, Recording] = {}
+        self._viewer_keyframe_at: dict[str, float] = {}
         self._save_lock = asyncio.Lock()
         #: Keyframe requests and segment finishes in flight, held so none is
         #: collected mid-request, and awaited at shutdown.
@@ -868,6 +871,49 @@ class RecordingManager:
             return
         rec._last_keyframe = now
         self._spawn(self._video.keyframe(rec._segment))
+
+    def viewer_stream(self, recording_id: str) -> tuple[int, str] | None:
+        """(loopback port, udid) of the movie a recording is filming now, for
+        the LAN viewer (#449), or None when it isn't filming.
+
+        Looked up per call, not cached: a recording resumed after a quern
+        restart films a new segment, and a quern-media restarted after losing
+        its port serves on another.
+        """
+        try:
+            rec = self.get(recording_id)
+        except RecordingError:
+            return None
+        seg = rec._segment
+        if rec.state != "recording" or seg is None or not seg.port:
+            return None
+        return seg.port, seg.udid
+
+    async def viewer_keyframe(self, recording_id: str) -> bool | None:
+        """Ask the movie for a keyframe so a viewer that just attached gets a
+        picture on a still screen (#449). True if asked, False if it could not
+        be, None if one was asked for this recording's viewers within the last
+        VIEWER_KEYFRAME_INTERVAL.
+
+        Someone watching must not change the recording: no `mark` line, unlike
+        `keyframe`, and not counted in the segment's keyframes. Throttled per
+        recording, since a LAN client holding a link could otherwise ask as
+        fast as it liked and grow the movie with keyframes."""
+        try:
+            rec = self.get(recording_id)
+        except RecordingError:
+            return False
+        if rec.state != "recording" or rec._segment is None or self._video is None:
+            return False
+        now = _monotonic()
+        last = self._viewer_keyframe_at.get(recording_id)
+        if last is not None and now - last < VIEWER_KEYFRAME_INTERVAL:
+            return None
+        # Pruned as it goes: a server runs for weeks of recordings.
+        self._viewer_keyframe_at = {r: t for r, t in self._viewer_keyframe_at.items()
+                                    if now - t < VIEWER_KEYFRAME_INTERVAL}
+        self._viewer_keyframe_at[recording_id] = now
+        return await self._video.keyframe(rec._segment, counted=False)
 
     async def keyframe(self, recording_id: str, label: str | None = None) -> bool:
         """Ask for a keyframe now, for a driver quern does not see (#415): a CI
