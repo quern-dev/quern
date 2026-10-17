@@ -1061,17 +1061,19 @@ def rebuild(monkeypatch, tmp_path):
     """Drive each step of _rebuild_and_restart independently."""
     from server.lifecycle import updater
 
-    state = {"deps": True, "mcp": True, "setup": 0, "restart": 0, "running": True}
+    state = {"deps": True, "mcp": True, "setup": 0, "restart": 0, "running": True,
+             "port": 9110, "cmds": []}
 
     monkeypatch.setattr("server.__main__._ensure_python_deps",
                         lambda **_kw: state["deps"])
     monkeypatch.setattr("server.__main__._ensure_mcp_built", lambda **_kw: state["mcp"])
     monkeypatch.setattr("server.lifecycle.setup.run_setup", lambda: state["setup"])
     monkeypatch.setattr("server.lifecycle.state.read_state",
-                        lambda: {"server_port": 9100} if state["running"] else None)
+                        lambda: {"server_port": state["port"]} if state["running"] else None)
     monkeypatch.setattr("server.lifecycle.state.is_server_healthy", lambda _p: state["running"])
 
-    def fake_run(_cmd, **_kw):
+    def fake_run(cmd, **_kw):
+        state["cmds"].append(list(cmd))
         if isinstance(state["restart"], BaseException):
             raise state["restart"]
         return SimpleNamespace(returncode=state["restart"])
@@ -1086,6 +1088,29 @@ def rebuild(monkeypatch, tmp_path):
 
 def test_everything_working_reports_no_failures(rebuild):
     assert rebuild["_run"]() == []
+
+
+# The default server port moved from 9100 to 9110 (#446). `quern restart`
+# keeps the running port on purpose, so the update is where an install on the
+# old default moves -- once, and out loud.
+
+
+def test_an_update_moves_a_server_off_the_old_default_port(rebuild, capsys):
+    rebuild["port"] = 9100
+    assert rebuild["_run"]() == []
+    restart = rebuild["cmds"][-1]
+    assert restart[-4:] == ["server", "restart", "--port", "9110"]
+    out = capsys.readouterr().out
+    assert "9110" in out and "9100" in out, "the move is said, not silent"
+
+
+@pytest.mark.parametrize("port", [9110, 9101, 9105, 8080])
+def test_a_server_on_any_other_port_stays_there(rebuild, capsys, port):
+    """Put there by --port, or by the scan past a busy 9100: not ours to move."""
+    rebuild["port"] = port
+    assert rebuild["_run"]() == []
+    assert rebuild["cmds"][-1][-2:] == ["server", "restart"]
+    assert "default port is now" not in capsys.readouterr().out
 
 
 def test_a_failed_mcp_build_is_no_longer_only_a_warning(rebuild):

@@ -36,7 +36,7 @@ export function readStateFile(): ServerState | null {
  * ~/.quern/state.json, and is not this one whenever something else had it
  * first.
  */
-export const DEFAULT_SERVER_PORT = 9100;
+export const DEFAULT_SERVER_PORT = 9110;
 
 /** Where the URL came from, so a caller can tell "unreachable" from
  * "nothing told us where to look". */

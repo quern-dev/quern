@@ -863,7 +863,8 @@ def create_app(
 def _add_server_flags(parser: argparse.ArgumentParser) -> None:
     """Add shared server flags to a subcommand parser."""
     parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=None, help="Bind port (default: 9100)")
+    parser.add_argument("--port", type=int, default=None,
+                        help=f"Bind port (default: {DEFAULT_SERVER_PORT})")
     parser.add_argument("--process", "-p", default=None, help="Filter logs to this process name")
     parser.add_argument(
         "--buffer-size", type=int, default=10_000, help="Ring buffer size (default: 10000)"
@@ -934,7 +935,7 @@ def _keep_running_ports(args: argparse.Namespace) -> argparse.Namespace:
     to move, and this must not override it.
 
     Called before `_resolve_args`, which is the last moment "the user did not
-    say" is still distinguishable from "the user said 9100".
+    say" is still distinguishable from "the user said the default".
     """
     state = read_state()
     if not state:
@@ -1346,7 +1347,7 @@ def _cmd_status(args: argparse.Namespace) -> None:
         print("No server running")
         sys.exit(1)
 
-    port = state.get("server_port", 9100)
+    port = state.get("server_port", DEFAULT_SERVER_PORT)
     if not is_server_healthy(port):
         print("Server state file exists but server is not responding")
         print("  State file may be stale. Run 'quern-debug-server stop' to clean up.")
@@ -1394,7 +1395,7 @@ def _fetch_device_tools() -> tuple[dict | None, str]:
     if not state:
         return None, "no server running (start it with `quern start`)"
 
-    port = state.get("server_port", 9100)
+    port = state.get("server_port", DEFAULT_SERVER_PORT)
     if not is_server_healthy(port):
         return None, f"server on port {port} is not responding on /health"
 
@@ -2069,7 +2070,7 @@ def _cmd_enable_local_capture(
 
     # Restart server if running
     state = read_state()
-    if state and is_server_healthy(state.get("server_port", 9100)):
+    if state and is_server_healthy(state.get("server_port", DEFAULT_SERVER_PORT)):
         print("Restarting server to apply changes...")
         pid = state.get("pid")
         if pid:
@@ -2094,7 +2095,7 @@ def _cmd_disable_local_capture() -> None:
 
     # Restart server if running
     state = read_state()
-    if state and is_server_healthy(state.get("server_port", 9100)):
+    if state and is_server_healthy(state.get("server_port", DEFAULT_SERVER_PORT)):
         print("Restarting server to apply changes...")
         pid = state.get("pid")
         if pid:
@@ -2294,7 +2295,7 @@ def cli() -> None:
         parser.error("unrecognised arguments: " + " ".join(remaining))
 
     # Fill port defaults. A restart first adopts whatever the running server
-    # is on, since by the time defaults are filled in, "not given" and "9100"
+    # is on, since by the time defaults are filled in, "not given" and "the default"
     # are the same value.
     if hasattr(args, "port"):
         if args.command == "restart":

@@ -2,17 +2,17 @@
 name: quern-api
 description: >
   Quern REST API reference — the correct HTTP endpoints, methods, and request body schemas
-  for the Quern debug server at localhost:9100. Use this skill whenever writing Python scripts,
+  for the Quern debug server at localhost:9110. Use this skill whenever writing Python scripts,
   curl/httpie commands, or any HTTP requests targeting the Quern REST API. Also use when the
   user asks about quern REST paths, endpoint mappings, or how to call quern from code. The MCP
   tool names do NOT match REST paths (e.g., type_text → /device/ui/type, not /device/ui/type-text),
   so this reference is essential to avoid guessing wrong. Trigger on: quern + (python|curl|requests|
-  httpie|script|REST|API|endpoint|path), or when you see localhost:9100 in code being written.
+  httpie|script|REST|API|endpoint|path), or when you see localhost:9110 in code being written.
 ---
 
 # Quern REST API Reference
 
-The Quern debug server exposes a REST API at `http://localhost:9100`. MCP tool names differ
+The Quern debug server exposes a REST API at `http://localhost:9110`. MCP tool names differ
 from REST paths in non-obvious ways — this reference gives you the correct mappings.
 
 ## Critical Rules
@@ -205,7 +205,7 @@ These tools exist only in the MCP interface and have no REST endpoint:
 
 For the full request/response schemas of any endpoint, fetch the OpenAPI spec:
 ```
-curl http://localhost:9100/openapi.json
+curl http://localhost:9110/openapi.json
 ```
 
 For commonly-used endpoint schemas, see `references/schemas.md`.
@@ -219,7 +219,7 @@ def quern(method, path, **kwargs):
     """Helper for calling the Quern REST API."""
     with open(os.path.expanduser("~/.quern/state.json")) as f:
         api_key = json.load(f)["api_key"]
-    url = f"http://localhost:9100/api/v1{path}"
+    url = f"http://localhost:9110/api/v1{path}"
     headers = {"X-API-Key": api_key}
     claude = os.environ.get("CLAUDE_CODE_SESSION_ID")
     session = os.environ.get("QUERN_SESSION") or (f"claude-{claude}" if claude else "")

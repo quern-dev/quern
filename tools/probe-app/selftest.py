@@ -19,7 +19,7 @@ from pathlib import Path
 
 import requests
 
-BASE = "http://localhost:9100/api/v1"
+BASE = "http://localhost:9110/api/v1"
 BUNDLE_ID = "com.quern.probe"
 SCENE_BUNDLE_ID = "com.quern.probe.scene"
 SHIFT_TEXT = "ab_CD!2@x"

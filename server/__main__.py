@@ -897,7 +897,7 @@ def _server_base_url() -> str | None:
         return None
 
     # Answering /health is not proof of being ours, and `quern env` prints the
-    # API key. Quern records the port it settled on, which is not 9100 when
+    # API key. Quern records the port it settled on, which is not the default when
     # something else had that first -- so if quern then dies, an untrusted
     # local process can take the freed port, answer 200, and be handed the key
     # by a caller that only checked for a pulse.

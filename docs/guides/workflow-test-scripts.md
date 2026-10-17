@@ -37,7 +37,7 @@ import time
 
 # Run `eval "$(quern env)"` first: it exports QUERN_SERVER_URL and
 # QUERN_API_KEY. Don't write the port down -- quern starts on whatever port
-# was free, so a script that hardcodes 9100 breaks the first time something
+# was free, so a script that hardcodes 9110 breaks the first time something
 # else has it, and `quern restart` used to be enough to move it.
 BASE = f"{os.environ['QUERN_SERVER_URL']}/api/v1"
 API_KEY = os.environ["QUERN_API_KEY"]
@@ -222,7 +222,7 @@ API_KEY = os.environ["QUERN_REMOTE_KEY"]
 
 Both values come from the **test machine**, not from your laptop. Run `quern url`
 there for the URL — quern starts on whatever port was free, so do not assume
-9100 — and read its `~/.quern/api-key` for the key. `quern env` cannot help
+9110 — and read its `~/.quern/api-key` for the key. `quern env` cannot help
 here: it reads the local `~/.quern/state.json`, which knows nothing about a
 server on another host.
 

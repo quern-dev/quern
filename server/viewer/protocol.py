@@ -4,7 +4,7 @@ The listener runs inside the main quern process and is reachable from the
 LAN without a token, so its connections are the main server's file
 descriptors. Plain uvicorn has no timeout for a request that never arrives,
 and no cap on connections: a review opened 260 idle sockets, and the whole
-process ran out of descriptors -- the 9100 API, log writes and subprocess
+process ran out of descriptors -- the main API, log writes and subprocess
 spawns all failing with EMFILE.
 
 So two limits, before anything else runs:

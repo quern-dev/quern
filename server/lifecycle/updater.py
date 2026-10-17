@@ -28,6 +28,7 @@ from pathlib import Path
 from server.config import CONFIG_DIR
 from server.lifecycle import releases
 from server.lifecycle.invocation import run_it_yourself
+from server.lifecycle.ports import DEFAULT_SERVER_PORT, LEGACY_SERVER_PORT
 from server.lifecycle.update_check import ENDPOINT
 from server.lifecycle.update_check import TIMEOUT as CHECK_TIMEOUT
 
@@ -558,6 +559,22 @@ def _update_via_tarball(project_root: Path) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _restart_args(state: dict) -> list[str]:
+    """Arguments for the update's restart: empty to stay put, or `--port` to
+    move a server off the old default port (#446).
+
+    `quern restart` keeps the port the running server is on, deliberately --
+    an update that silently moved the port broke every script that knew it.
+    So the move from 9100 to 9110 happens here, once, during an update the
+    user asked for, and is said out loud, instead of whenever the server
+    next happens to start fresh. A server on any other port was put there --
+    by `--port`, or by the scan past a busy 9100 -- and stays.
+    """
+    if state.get("server_port") == LEGACY_SERVER_PORT:
+        return ["--port", str(DEFAULT_SERVER_PORT)]
+    return []
+
+
 def _rebuild_and_restart(project_root: Path) -> list[str]:
     """Reinstall deps, rebuild MCP, run setup, restart server if running.
 
@@ -612,12 +629,18 @@ def _rebuild_and_restart(project_root: Path) -> list[str]:
     from server.lifecycle.state import is_server_healthy, read_state
 
     state = read_state()
-    if state and is_server_healthy(state.get("server_port", 9100)):
+    if state and is_server_healthy(state.get("server_port", DEFAULT_SERVER_PORT)):
         print("Restarting server to pick up changes...")
         venv_python = project_root / ".venv" / "bin" / "python"
+        move = _restart_args(state)
+        if move:
+            print(f"Quern's default port is now {DEFAULT_SERVER_PORT} (was "
+                  f"{LEGACY_SERVER_PORT}): the server moves there now. Anything "
+                  f"pointed at port {LEGACY_SERVER_PORT} needs updating; MCP clients "
+                  "find the new port by themselves.")
         try:
             restart = subprocess.run(
-                [str(venv_python), "-m", "server", "restart"],
+                [str(venv_python), "-m", "server", "restart", *move],
                 cwd=str(project_root),
                 timeout=30,
             )

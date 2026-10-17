@@ -63,7 +63,7 @@ fi
 # shellcheck source=lib/sandbox.sh
 source "$SCRIPT_COPY/scripts/lib/sandbox.sh"
 
-# Clear of the defaults (9100/9101, the developer's) and of the rehearsal's
+# Clear of the defaults (9110/9101, the developer's; 9100 before #446) and of the rehearsal's
 # 9187/9188, so the two can run at once. Never the defaults: `quern start`
 # kills a healthy quern on its port, whatever QUERN_STATE_DIR says (#405).
 PORT=9197
@@ -567,10 +567,11 @@ record record-list "$(head -1 "$LOG" | cut -c1-60)"
 ok "record list exits $RC (recorded)"
 
 # A plain restart is what the updater runs, and it must keep the port. If it
-# ever forgot it, it would start on 9100 -- and #405 means that kills the
-# developer's daemon. So it is only run plainly when nothing holds 9100.
-if lsof -nP -iTCP:9100 -sTCP:LISTEN >/dev/null 2>&1; then
-  skip "plain restart: 9100 is in use, and a restart that forgot its port would kill it (#405); restarted with explicit ports instead"
+# ever forgot it, it would start on the default -- 9110, or 9100 for a ref
+# before #446 -- and #405 means that kills the developer's daemon. So it is
+# only run plainly when nothing holds either.
+if lsof -nP -iTCP:9110 -sTCP:LISTEN >/dev/null 2>&1 || lsof -nP -iTCP:9100 -sTCP:LISTEN >/dev/null 2>&1; then
+  skip "plain restart: a default port (9110 or 9100) is in use, and a restart that forgot its port would kill it (#405); restarted with explicit ports instead"
   run restart q restart --port "$PORT" --proxy-port "$PROXY_PORT"
 else
   run restart q restart

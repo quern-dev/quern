@@ -99,7 +99,7 @@ async def run_test(device_udid: str, device_name: str, device_index: int):
     """Your UI automation test logic goes here."""
 
     # Where the server is. Read, never assumed: the port is whatever the
-    # server settled on, which is not 9100 when something else already had
+    # server settled on, which is not the default when something else already had
     # it. This example used to default to 9100 and would have quietly talked
     # to the wrong thing -- or nothing -- the first time that happened.
     #

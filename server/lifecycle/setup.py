@@ -35,6 +35,7 @@ refresh_if_stale()
 from server.config import CONFIG_DIR, quern_cmd  # noqa: E402
 from server.device.ios._xcode import xcode_available  # noqa: E402
 from server.lifecycle.invocation import MENUBAR, invoked_by, run_it_yourself  # noqa: E402
+from server.lifecycle.ports import DEFAULT_SERVER_PORT  # noqa: E402
 
 # ── Result types ──────────────────────────────────────────────────────────
 
@@ -3849,7 +3850,7 @@ def run_uninstall() -> int:
 
     from server.lifecycle.state import is_server_healthy, read_state
     state = read_state()
-    if state and is_server_healthy(state.get("server_port", 9100)):
+    if state and is_server_healthy(state.get("server_port", DEFAULT_SERVER_PORT)):
         print()
         print("  Stopping running server...")
         pid = state.get("pid")

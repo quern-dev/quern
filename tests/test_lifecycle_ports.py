@@ -182,3 +182,30 @@ class TestTheChildIsToldWhichPort:
             "the scanned-for port lost to the one the user asked for and "
             "could not have"
         )
+
+
+class TestTheDefaultPorts:
+    """#446: the server's default moved off 9100, where WDA's MJPEG server and
+    Prometheus node_exporter both default; the proxy, which devices are
+    pointed at by hand, stayed."""
+
+    def test_the_server_is_on_9110_and_the_proxy_stays_on_9101(self):
+        from server.lifecycle import ports
+
+        assert (ports.DEFAULT_SERVER_PORT, ports.DEFAULT_PROXY_PORT) == (9110, 9101)
+        assert ports.LEGACY_SERVER_PORT == 9100
+
+    def test_the_default_is_clear_of_wda_and_the_viewer(self):
+        from server.config import VIEWER_DEFAULT_PORT
+        from server.device.ios import wda
+        from server.lifecycle import ports
+
+        wda_ports = set(range(wda.SIM_PORT_FIRST, wda.SIM_PORT_LAST + 1)) | {8100}
+        assert ports.DEFAULT_SERVER_PORT not in wda_ports | {ports.LEGACY_SERVER_PORT}
+        assert VIEWER_DEFAULT_PORT not in {ports.DEFAULT_SERVER_PORT, ports.DEFAULT_PROXY_PORT}
+
+    def test_the_server_config_default_follows_the_constant(self):
+        from server.config import ServerConfig
+        from server.lifecycle.ports import DEFAULT_SERVER_PORT
+
+        assert ServerConfig().port == DEFAULT_SERVER_PORT
