@@ -174,6 +174,22 @@ if (stats) {
 
 let current = null;
 
+// A picture now, even on a still screen, where nothing is encoded until it
+// changes. quern-media sends a new viewer one keyframe, and Chrome's MSE
+// presents nothing from a buffer holding a single frame (measured: frames 0
+// for as long as the screen stayed still), so ask until there is a picture.
+// The server allows one a second per recording, shared by everyone watching:
+// 429 says when to ask again.
+async function askForKeyframe() {
+  for (let i = 0; i < 5 && !picture; i += 1) {
+    let res;
+    try { res = await fetch("keyframe", { method: "POST" }); } catch { return; }
+    if (res.status !== 204 && res.status !== 429) return;   // not filming, or gone
+    const after = res.status === 429 ? Number(res.headers.get("retry-after")) || 1 : 1.1;
+    await sleep(1000 * after);
+  }
+}
+
 async function playOnce() {
   picture = false;
   const res = await fetch("frames", { cache: "no-store" });
@@ -183,7 +199,7 @@ async function playOnce() {
     return { reason: why || `the server answered ${res.status}` };
   }
   current = await makeDecoder();
-  fetch("keyframe", { method: "POST" }).catch(() => {});   // a picture now, even on a still screen
+  askForKeyframe();
   const reader = res.body.getReader();
   let buf = new Uint8Array(0);
   try {
