@@ -181,3 +181,123 @@ test("an SPS with scaling matrices still yields its dimensions", () => {
   const info = parseSps(w.bytes());
   assert.deepEqual([info.width, info.height, info.profile, info.level], [1280, 720, 100, 31]);
 });
+
+// ---- field-level checks (#449 review: existence-only checks let 21 of 23
+// box mutations through, including several that break every decoder) ------
+
+test("init segment fields are exact, not merely present", () => {
+  const aus = fixture();
+  const out = new Fmp4Muxer({ timescale: 90000 }).push(aus[0]);
+  const init = boxes(out.init);
+  const sps = splitNalUnits(aus[0]).find((u) => (u[0] & 0x1f) === NAL.SPS);
+  const pps = splitNalUnits(aus[0]).find((u) => (u[0] & 0x1f) === NAL.PPS);
+
+  const mvhd = find(init, "mvhd").body;
+  assert.equal(u32at(mvhd, 12), 90000, "mvhd timescale");
+  const mdhd = find(init, "mdhd").body;
+  assert.equal(u32at(mdhd, 12), 90000, "mdhd timescale");
+  const hdlr = find(init, "hdlr").body;
+  assert.equal(String.fromCharCode(...hdlr.subarray(8, 12)), "vide", "handler type");
+  const tkhd = find(init, "tkhd").body;
+  assert.equal(u32at(tkhd, 0) & 0xffffff, 3, "tkhd flags: track_enabled | track_in_movie");
+  assert.equal(u32at(tkhd, 12), 1, "tkhd track_ID");
+  const trex = find(init, "trex").body;
+  assert.deepEqual([u32at(trex, 4), u32at(trex, 8)], [1, 1], "trex track_ID, default_sample_description_index");
+
+  // avc1 sample entry: width and height at offsets 24/26 of its body.
+  const stsd = find(init, "stsd");
+  const avc1At = stsd.body.indexOf(0x61, 8);                 // 'a' of 'avc1'
+  assert.equal(String.fromCharCode(...stsd.body.subarray(avc1At, avc1At + 4)), "avc1");
+  const avc1 = stsd.body.subarray(avc1At + 4);
+  assert.deepEqual([(avc1[24] << 8) | avc1[25], (avc1[26] << 8) | avc1[27]], [414, 900], "avc1 width, height");
+
+  // avcC, byte for byte.
+  const avcCAt = Buffer.from(stsd.body).indexOf(Buffer.from("avcC")) + 4;
+  const a = stsd.body.subarray(avcCAt);
+  assert.deepEqual([...a.subarray(0, 6)], [1, sps[1], sps[2], sps[3], 0xff, 0xe1],
+    "version, profile, compat, level, lengthSizeMinusOne=3, one SPS");
+  assert.equal((a[6] << 8) | a[7], sps.length);
+  assert.deepEqual([...a.subarray(8, 8 + sps.length)], [...sps]);
+  let o = 8 + sps.length;
+  assert.equal(a[o], 1, "one PPS");
+  assert.equal((a[o + 1] << 8) | a[o + 2], pps.length);
+  o += 3 + pps.length;
+  // High profile (100): chroma_format 1, 8-bit, no SPS extensions.
+  assert.deepEqual([...a.subarray(o, o + 4)], [0xfd, 0xf8, 0xf8, 0], "High-profile trailer");
+});
+
+/** A synthetic SPS covering the branches a real 4:2:0 frame stream never takes. */
+function synthSps({ profile = 100, chroma = 1, separate = 0, frameMbsOnly = 1, crop = null,
+  poc = 0, widthMbs = 40, heightUnits = 30 }) {
+  const w = new BitWriter();
+  w.u(8, 0x67); w.u(8, profile); w.u(8, 0); w.u(8, 30);
+  w.ue(0);
+  if ([100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135].includes(profile)) {
+    w.ue(chroma);
+    if (chroma === 3) w.u(1, separate);
+    w.ue(0); w.ue(0); w.u(1, 0); w.u(1, 0);         // 8-bit, no bypass, no scaling
+  }
+  w.ue(0);                                          // log2_max_frame_num_minus4
+  w.ue(poc);
+  if (poc === 0) w.ue(4);
+  if (poc === 1) {
+    w.u(1, 0); w.se(-2); w.se(3);                   // delta_always_zero, two offsets
+    w.ue(2); w.se(5); w.se(-7);                     // a cycle of two
+  }
+  w.ue(1); w.u(1, 0);
+  w.ue(widthMbs - 1); w.ue(heightUnits - 1);
+  w.u(1, frameMbsOnly);
+  if (!frameMbsOnly) w.u(1, 1);                     // mb_adaptive_frame_field_flag
+  w.u(1, 1);
+  if (crop) { w.u(1, 1); w.ue(crop[0]); w.ue(crop[1]); w.ue(crop[2]); w.ue(crop[3]); } else w.u(1, 0);
+  w.u(1, 0);
+  return w.bytes();
+}
+
+test("crop units follow the chroma format, field coding and separate planes", () => {
+  const cases = [
+    // [what, sps options, expected width x height]
+    ["monochrome", { chroma: 0, crop: [1, 1, 2, 2] }, [638, 476]],
+    ["4:2:0", { chroma: 1, crop: [0, 3, 0, 3] }, [634, 474]],
+    ["4:2:2", { chroma: 2, crop: [0, 3, 0, 3] }, [634, 477]],
+    ["4:4:4", { chroma: 3, crop: [0, 3, 0, 3] }, [637, 477]],
+    ["4:4:4 separate planes", { chroma: 3, separate: 1, crop: [0, 3, 0, 3] }, [637, 477]],
+    ["field coding, 4:2:0", { chroma: 1, frameMbsOnly: 0, heightUnits: 15, crop: [0, 2, 0, 2] }, [636, 472]],
+    ["POC type 1 with a cycle", { poc: 1 }, [640, 480]],
+    ["Main profile (no chroma fields)", { profile: 77, crop: [0, 0, 0, 4] }, [640, 472]],
+  ];
+  for (const [what, opts, [width, height]] of cases) {
+    const info = parseSps(synthSps(opts));
+    assert.deepEqual([info.width, info.height], [width, height], what);
+  }
+});
+
+test("a bad SPS mid-stream drops frames until a keyframe that parses", () => {
+  const aus = fixture();
+  const mux = new Fmp4Muxer();
+  assert.ok(mux.push(aus[0]).fragment);
+  // A keyframe whose SPS is cut short: not thrown, and not muxed against the
+  // old parameters either.
+  const sps = splitNalUnits(aus[0]).find((u) => (u[0] & 0x1f) === NAL.SPS);
+  const broken = Uint8Array.from([0, 0, 0, 1, ...sps.subarray(0, 4), 0, 0, 0, 1,
+    ...splitNalUnits(aus[0]).find((u) => (u[0] & 0x1f) === NAL.PPS),
+    0, 0, 0, 1, ...splitNalUnits(aus[0]).find((u) => (u[0] & 0x1f) === NAL.IDR)]);
+  assert.equal(mux.push(broken), null);
+  assert.match(mux.lastError, /SPS/);
+  assert.equal(mux.push(aus[2]), null, "a delta after the bad SPS is dropped");
+  assert.equal(mux.dropped, 2);
+  const back = mux.push(aus[1]);                    // a good keyframe
+  assert.ok(back && back.keyframe, "the next good keyframe resumes");
+  assert.ok(mux.push(aus[2]).fragment, "and deltas flow again");
+});
+
+test("parameter sets in their own access unit keep their init segment", () => {
+  const aus = fixture();
+  const units = splitNalUnits(aus[0]);
+  const prefix = (t) => [0, 0, 0, 1, ...units.find((u) => (u[0] & 0x1f) === t)];
+  const mux = new Fmp4Muxer();
+  assert.equal(mux.push(Uint8Array.from([...prefix(NAL.SPS), ...prefix(NAL.PPS)])), null);
+  const out = mux.push(Uint8Array.from(prefix(NAL.IDR)));
+  assert.ok(out.init, "the init built from the parameter-set unit must arrive with the IDR");
+  assert.equal(out.codec, "avc1.64001e");
+});

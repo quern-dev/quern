@@ -13,7 +13,8 @@
 // Usage:
 //   const mux = new Fmp4Muxer();
 //   for each access unit:
-//     const out = mux.push(annexB);       // null until the first keyframe
+//     const out = mux.push(annexB);       // null: nothing to append (see push)
+//     if (!out) continue;
 //     if (out.init) sourceBuffer.appendBuffer(out.init);   // codec: out.codec
 //     sourceBuffer.appendBuffer(out.fragment);
 //
@@ -118,11 +119,13 @@ export function parseSps(spsUnit) {
   r.ue(); // seq_parameter_set_id
   let chromaFormat = 1;
   let separateColourPlanes = 0;
+  let bitDepthLumaMinus8 = 0;
+  let bitDepthChromaMinus8 = 0;
   if (HIGH_PROFILES.has(profile)) {
     chromaFormat = r.ue();
     if (chromaFormat === 3) separateColourPlanes = r.bit();
-    r.ue(); // bit_depth_luma_minus8
-    r.ue(); // bit_depth_chroma_minus8
+    bitDepthLumaMinus8 = r.ue();
+    bitDepthChromaMinus8 = r.ue();
     r.bit(); // qpprime_y_zero_transform_bypass_flag
     if (r.bit()) { // seq_scaling_matrix_present_flag
       const lists = chromaFormat === 3 ? 12 : 8;
@@ -159,7 +162,8 @@ export function parseSps(spsUnit) {
   const cropY = (arrayType === 0 ? 1 : (arrayType === 1 ? 2 : 1)) * (2 - frameMbsOnly);
   const width = (widthMbs * 16) - ((crop.left + crop.right) * cropX);
   const height = ((2 - frameMbsOnly) * heightMapUnits * 16) - ((crop.top + crop.bottom) * cropY);
-  return { profile, constraints, level, width, height };
+  return { profile, constraints, level, width, height, chromaFormat,
+    bitDepthLumaMinus8, bitDepthChromaMinus8 };
 }
 
 function skipScalingList(r, size) {
@@ -222,16 +226,29 @@ const MATRIX = [
   ...u32(0), ...u32(0), ...u32(0x40000000),
 ];
 
-function avcC(spsUnit, ppsUnit) {
-  return box("avcC",
+// Profiles whose avcC carries the chroma/bit-depth trailer (14496-15 5.3.3.1.2).
+const AVCC_EXTENDED_PROFILES = new Set([100, 110, 122, 144]);
+
+function avcC(spsUnit, ppsUnit, sps) {
+  // 0xff: reserved bits and lengthSizeMinusOne = 3, so samples carry 4-byte
+  // NAL lengths. 0xe1: reserved bits and one SPS.
+  const parts = [
     [1, spsUnit[1], spsUnit[2], spsUnit[3], 0xff, 0xe1, ...u16(spsUnit.length)],
     spsUnit,
     [1, ...u16(ppsUnit.length)],
-    ppsUnit);
+    ppsUnit,
+  ];
+  if (sps && AVCC_EXTENDED_PROFILES.has(sps.profile)) {
+    // Required for High profiles. Browsers tolerate its absence, but it is
+    // the conformant box, and parseSps has already read the values.
+    parts.push([0xfc | (sps.chromaFormat & 3), 0xf8 | (sps.bitDepthLumaMinus8 & 7),
+      0xf8 | (sps.bitDepthChromaMinus8 & 7), 0]);
+  }
+  return box("avcC", ...parts);
 }
 
 /** ftyp + moov for one H.264 track. */
-export function initSegment({ spsUnit, ppsUnit, width, height, timescale, trackId = 1 }) {
+export function initSegment({ spsUnit, ppsUnit, width, height, timescale, trackId = 1, sps }) {
   const ftyp = box("ftyp", [..."iso5".split("").map((c) => c.charCodeAt(0)), ...u32(512),
     ...["iso5", "iso6", "avc1", "mp41"].flatMap((b) => b.split("").map((c) => c.charCodeAt(0)))]);
   const mvhd = fullBox("mvhd", 0, 0, u32(0), u32(0), u32(timescale), u32(0),
@@ -246,7 +263,7 @@ export function initSegment({ spsUnit, ppsUnit, width, height, timescale, trackI
   const dinf = box("dinf", fullBox("dref", 0, 0, u32(1), fullBox("url ", 0, 1)));
   const avc1 = box("avc1", new Uint8Array(6), u16(1), new Uint8Array(16),
     u16(width), u16(height), u32(0x00480000), u32(0x00480000), u32(0), u16(1),
-    new Uint8Array(32), u16(0x0018), u16(0xffff), avcC(spsUnit, ppsUnit));
+    new Uint8Array(32), u16(0x0018), u16(0xffff), avcC(spsUnit, ppsUnit, sps));
   const stbl = box("stbl",
     fullBox("stsd", 0, 0, u32(1), avc1),
     fullBox("stts", 0, 0, u32(0)),
@@ -292,34 +309,57 @@ export class Fmp4Muxer {
     this.frameDuration = frameDuration;
     this.sequence = 0;
     this.decodeTime = 0;
-    this.config = null;      // { spsKey, ppsKey } of the init segment in force
+    this.config = null;      // { key, width, height } of the init segment in force
     this.codec = null;
+    this.pendingInit = null; // built, not yet sent with a sample
+    this.waiting = true;     // dropping until a keyframe whose SPS parses
+    this.dropped = 0;        // access units dropped while waiting
+    this.lastError = null;   // why, when a parameter set would not parse
   }
 
   /**
-   * One access unit. Returns null until a keyframe carrying SPS and PPS has
-   * arrived -- MSE cannot start without them -- then
-   * `{ fragment, keyframe, init?, codec? }`, with `init` and `codec` present
-   * on the first fragment and whenever the parameter sets change (a rotation
-   * changes the dimensions, which needs a new init segment).
+   * One access unit. Returns `{ fragment, keyframe, init?, codec? }`, with
+   * `init` and `codec` on the first fragment and whenever the parameter sets
+   * change -- a rotation changes the dimensions, which needs a new init
+   * segment.
+   *
+   * Returns null when there is nothing to append: before the first keyframe
+   * (MSE cannot start without one), for an access unit with no slices (an
+   * init built from it is held for the next sample, not lost), and after a
+   * parameter set that will not parse, until the next keyframe whose SPS
+   * does. That last case is not thrown: one bad SPS must not end the stream,
+   * and muxing the frames after it against the previous parameters would
+   * decode as garbage. `dropped` and `lastError` say it happened.
    */
   push(accessUnit) {
     const units = splitNalUnits(accessUnit);
     const sps = units.find((u) => (u[0] & 0x1f) === NAL_SPS);
     const pps = units.find((u) => (u[0] & 0x1f) === NAL_PPS);
     const keyframe = units.some((u) => (u[0] & 0x1f) === NAL_IDR);
-    let init;
     if (sps && pps) {
       const key = `${hexOf(sps)}/${hexOf(pps)}`;
-      if (!this.config || this.config.key !== key) {
-        const info = parseSps(sps);
-        init = initSegment({ spsUnit: sps, ppsUnit: pps, width: info.width,
-          height: info.height, timescale: this.timescale });
-        this.codec = codecString(info);
-        this.config = { key, width: info.width, height: info.height };
+      if (!this.config || this.config.key !== key || this.waiting) {
+        let info;
+        try {
+          info = parseSps(sps);
+        } catch (e) {
+          this.waiting = true;
+          this.lastError = String(e && e.message || e);
+          this.dropped += 1;
+          return null;
+        }
+        if (!this.config || this.config.key !== key) {
+          this.pendingInit = initSegment({ spsUnit: sps, ppsUnit: pps, width: info.width,
+            height: info.height, timescale: this.timescale, sps: info });
+          this.codec = codecString(info);
+          this.config = { key, width: info.width, height: info.height };
+        }
       }
     }
-    if (!this.config) return null;
+    if (this.waiting && !(keyframe && this.config)) {
+      if (this.config) this.dropped += 1;
+      return null;
+    }
     // Parameter sets live in avcC; SEI and delimiters are not needed to
     // decode. What remains is length-prefixed, as an avc1 sample expects.
     const payload = units.filter((u) => {
@@ -327,15 +367,17 @@ export class Fmp4Muxer {
       return t !== NAL_SPS && t !== NAL_PPS && t !== NAL_AUD && t !== NAL_SEI;
     });
     if (payload.length === 0) return null;
+    this.waiting = false;
     const sample = concat(payload.flatMap((u) => [Uint8Array.from(u32(u.length)), u]));
     this.sequence += 1;
     const fragment = mediaSegment({ sequence: this.sequence, decodeTime: this.decodeTime,
       duration: this.frameDuration, sample, keyframe });
     this.decodeTime += this.frameDuration;
     const out = { fragment, keyframe };
-    if (init) {
-      out.init = init;
+    if (this.pendingInit) {
+      out.init = this.pendingInit;
       out.codec = this.codec;
+      this.pendingInit = null;
     }
     return out;
   }
