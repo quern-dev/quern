@@ -117,22 +117,31 @@ func passesThroughWhatItDoesNotUnderstand() {
 /// A synthetic SPS taking the branches VideoToolbox's never does. Returns the
 /// NAL and the bit where its VUI flag is written.
 private func syntheticSPS(scaling: Bool, pocType: Int, frameMbsOnly: Bool, cropping: Bool,
-                          maxRefFrames: Int, crop: [Int] = [0, 2, 0, 3]) -> (Data, Int) {
+                          maxRefFrames: Int, crop: [Int] = [0, 2, 0, 3], profile: Int = 100,
+                          chroma: Int = 1, separatePlanes: Bool = false) -> (Data, Int) {
     var w = BitWriter()
-    w.u(8, 0x67); w.u(8, 100); w.u(8, 0); w.u(8, 31)  // header, High, constraints, level 3.1
+    w.u(8, 0x67); w.u(8, profile); w.u(8, 0); w.u(8, 31)  // header, profile, constraints, 3.1
     w.ue(0)                                            // sps id
-    w.ue(1); w.ue(0); w.ue(0); w.u(1, 0)               // 4:2:0, 8-bit, no bypass
-    w.u(1, scaling ? 1 : 0)
-    if scaling {
-        for i in 0..<8 {
+    // Only the high profiles carry chroma format, bit depth and scaling.
+    let high = [100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135].contains(profile)
+    if high {
+        w.ue(chroma)
+        if chroma == 3 { w.u(1, separatePlanes ? 1 : 0) }
+        w.ue(0); w.ue(0); w.u(1, 0)                    // 8-bit, no bypass
+        w.u(1, scaling ? 1 : 0)
+    }
+    if high && scaling {
+        for i in 0..<(chroma != 3 ? 8 : 12) {
             let present = i % 3 == 0
             w.u(1, present ? 1 : 0)
             // Real deltas, then one that ends the list early (next == 0), so
             // both arms of the reader's loop run.
-            // List 6 is an 8x8 list run to its full 64 entries, so a reader
-            // that took every list as 4x4 would end in the wrong place.
+            // Lists 6 and 9 are 8x8 lists run to their full 64 entries, so a
+            // reader that took every list as 4x4, or read 8 lists for 4:4:4,
+            // would end in the wrong place.
             if present {
-                writeScalingList(&w, size: i < 6 ? 16 : 64, deltas: i == 6 ? [1] : [3, -2, -9])
+                writeScalingList(&w, size: i < 6 ? 16 : 64,
+                                 deltas: i == 6 || i == 9 ? [1] : [3, -2, -9])
             }
         }
     }
@@ -192,6 +201,56 @@ func syntheticBranches(scaling: Bool, pocType: Int, frameMbsOnly: Bool, cropping
     #expect((0..<at).allSatisfy { bit(before, $0) == bit(after, $0) })
     // max_dec_frame_buffering is at least 1 and at least max_num_ref_frames.
     #expect(readVUI(after, at: at) == expectedVUI(decBuffering: max(refs, 1)))
+}
+
+@Test("Baseline, Main and 4:4:4 SPSes are rewritten too",
+      arguments: [
+        (66, 1, false, false),    // Baseline: no chroma branch at all
+        (77, 1, false, false),    // Main: the same
+        (244, 3, true, true),     // High 4:4:4, separate planes, 12 scaling lists
+        (244, 3, false, true),    // High 4:4:4, joint planes
+      ])
+func otherProfiles(profile: Int, chroma: Int, separatePlanes: Bool, scaling: Bool) throws {
+    let (sps, at) = syntheticSPS(scaling: scaling, pocType: 0, frameMbsOnly: true,
+                                 cropping: false, maxRefFrames: 1, profile: profile,
+                                 chroma: chroma, separatePlanes: separatePlanes)
+    let before = LowDelaySPS.unescape(Array(sps))
+    #expect(vuiFlagPosition(before) == at, "test builder: VUI position")
+    let out = LowDelaySPS.rewrite(sps)
+    #expect(out != sps, "rewritten, not passed through")
+    let after = LowDelaySPS.unescape(Array(out))
+    #expect((0..<at).allSatisfy { bit(before, $0) == bit(after, $0) })
+    #expect(readVUI(after, at: at) == expectedVUI(decBuffering: 1))
+}
+
+// Real VideoToolbox output for Main profile at 320x240 (the encoder asks for
+// High, but a regression that stopped rewriting Main would bring #464 back
+// for anyone whose encoder settled on it).
+private let mainSPS = Data([0x27, 0x4D, 0x00, 0x0D, 0xAB, 0x40, 0xA0, 0xFC, 0x80])
+
+@Test("a real Main-profile SPS is rewritten, and CoreMedia accepts it")
+func realMainProfile() throws {
+    let out = LowDelaySPS.rewrite(mainSPS)
+    #expect(out != mainSPS)
+    let before = LowDelaySPS.unescape(Array(mainSPS))
+    let after = LowDelaySPS.unescape(Array(out))
+    let at = vuiFlagPosition(before)
+    #expect((0..<at).allSatisfy { bit(before, $0) == bit(after, $0) })
+    #expect(readVUI(after, at: at) == expectedVUI(decBuffering: 1))
+    let original = try #require(dimensions(sps: mainSPS, pps: livePPS))
+    let rewritten = try #require(dimensions(sps: out, pps: livePPS))
+    #expect(original.width == rewritten.width && original.height == rewritten.height)
+}
+
+@Test("the encoder never reorders frames, which the rewritten SPS promises")
+func encoderDoesNotReorder() throws {
+    let surface = try #require(TestSurface.make(width: 320, height: 240))
+    let encoder = H264Encoder(maxDimension: 0, bitrate: 800_000, expectedFPS: 30)
+    defer { encoder.invalidate() }
+    _ = try #require(encoder.encode(CapturedFrame(
+        surface: surface, time: CMTime(seconds: 0, preferredTimescale: 600),
+        timeAccuracy: .reported)))
+    #expect(encoder.sessionAllowsFrameReordering() == false)
 }
 
 @Test("emulation prevention is removed on the way in and restored on the way out")

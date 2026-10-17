@@ -139,6 +139,18 @@ public final class H264Encoder {
         return true
     }
 
+    /// The live session's AllowFrameReordering, for a test; nil with no
+    /// session yet or if it cannot be read.
+    func sessionAllowsFrameReordering() -> Bool? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let session else { return nil }
+        var value: CFTypeRef?
+        guard VTSessionCopyProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering,
+                                    allocator: nil, valueOut: &value) == noErr else { return nil }
+        return (value as? Bool) ?? (value as? NSNumber)?.boolValue
+    }
+
     /// Caller holds `lock`.
     private func ensureSession(width: Int, height: Int) -> Bool {
         if session != nil, sessionSize == (width, height) { return true }
@@ -164,6 +176,9 @@ public final class H264Encoder {
                              value: kCFBooleanTrue)
         // No B-frames: reordering delay is not worth the bitrate for a live
         // view, and it keeps presentation order equal to decode order.
+        // LowDelaySPS relies on this: it tells every viewer the stream has no
+        // reordering (#464), so turning reordering on here would show frames
+        // out of order. A test reads it back from the session.
         VTSessionSetProperty(created, key: kVTCompressionPropertyKey_AllowFrameReordering,
                              value: kCFBooleanFalse)
         VTSessionSetProperty(created, key: kVTCompressionPropertyKey_ProfileLevel,
