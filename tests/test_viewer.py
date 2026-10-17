@@ -964,7 +964,12 @@ class TestTheLiveListener:
         access = logging.getLogger("uvicorn.access")
         monkeypatch.setattr(access, "handlers", [handler])
         monkeypatch.setattr(access, "propagate", True)
-        monkeypatch.setattr(access, "level", logging.INFO)
+        # setLevel, not the attribute: it clears the logger's isEnabledFor
+        # cache, and a level cached by an earlier test made INFO read as off
+        # -- so no access line could be seen and the check could not fail.
+        monkeypatch.setattr(access, "level", access.level)  # restored after
+        access.setLevel(logging.INFO)
+        monkeypatch.setattr(access, "_cache", {})
         names = ("uvicorn", "uvicorn.error", "uvicorn.access", "")
 
         def state():
