@@ -48,6 +48,12 @@ public enum AnnexB {
     /// Re-emitted ahead of every keyframe rather than once at stream start, so
     /// a viewer joining mid-stream can begin decoding at any keyframe instead
     /// of only at the beginning. Costs a few dozen bytes per IDR.
+    ///
+    /// The SPS goes out with a VUI saying the stream has no reordering
+    /// (`LowDelaySPS`, #464), so a decoder shows each frame as it arrives
+    /// rather than waiting for frames a still screen never sends. This is the
+    /// live stream's copy only: a recording takes its parameter sets from the
+    /// sample buffer's format description.
     public static func parameterSets(from fd: CMFormatDescription) -> Data? {
         var count = 0
         guard CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
@@ -65,8 +71,9 @@ public enum AnnexB {
                 parameterSetSizeOut: &size, parameterSetCountOut: nil,
                 nalUnitHeaderLengthOut: nil
             ) == noErr, let pointer else { continue }
+            let set = Data(bytes: pointer, count: size)
             out.append(startCode)
-            out.append(Data(bytes: pointer, count: size))
+            out.append(set.first.map { $0 & 0x1F == 7 } == true ? LowDelaySPS.rewrite(set) : set)
         }
         return out.isEmpty ? nil : out
     }
