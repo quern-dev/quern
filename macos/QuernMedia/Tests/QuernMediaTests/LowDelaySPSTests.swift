@@ -9,8 +9,11 @@ import Testing
 private let liveSPS = Data([0x27, 0x64, 0x00, 0x1E, 0xAC, 0x56, 0x81, 0xA0, 0x73, 0xEA, 0x74])
 private let livePPS = Data([0x28, 0xEE, 0x3C, 0xB0])
 
-/// One bit of `bytes`, MSB first.
-private func bit(_ bytes: [UInt8], _ p: Int) -> Int { Int(bytes[p >> 3] >> (7 - UInt8(p & 7))) & 1 }
+/// One bit of `bytes`, MSB first; -1 past the end, so a short buffer fails
+/// an expectation rather than crashing the test run (which hides the rest).
+private func bit(_ bytes: [UInt8], _ p: Int) -> Int {
+    p >= 0 && p < bytes.count * 8 ? Int(bytes[p >> 3] >> (7 - UInt8(p & 7))) & 1 : -1
+}
 
 /// The VUI fields this rewrite writes, read from bit `at` of an RBSP by a
 /// reader written separately from the one under test.
@@ -24,7 +27,7 @@ private func readVUI(_ rbsp: [UInt8], at start: Int) -> VUI {
     func u() -> Int { defer { p += 1 }; return bit(rbsp, p) }
     func ue() -> Int {
         var z = 0
-        while u() == 0 { z += 1 }
+        while u() == 0 && z < 32 { z += 1 }
         var v = 0
         for _ in 0..<z { v = v << 1 | u() }
         return (1 << z) - 1 + v
@@ -48,7 +51,7 @@ private func expectedVUI(decBuffering: Int) -> VUI {
 /// which is the RBSP's last 1 bit.
 private func vuiFlagPosition(_ rbsp: [UInt8]) -> Int {
     var p = rbsp.count * 8 - 1
-    while bit(rbsp, p) == 0 { p -= 1 }
+    while p > 0 && bit(rbsp, p) == 0 { p -= 1 }
     return p - 1
 }
 
@@ -114,7 +117,7 @@ func passesThroughWhatItDoesNotUnderstand() {
 /// A synthetic SPS taking the branches VideoToolbox's never does. Returns the
 /// NAL and the bit where its VUI flag is written.
 private func syntheticSPS(scaling: Bool, pocType: Int, frameMbsOnly: Bool, cropping: Bool,
-                          maxRefFrames: Int) -> (Data, Int) {
+                          maxRefFrames: Int, crop: [Int] = [0, 2, 0, 3]) -> (Data, Int) {
     var w = BitWriter()
     w.u(8, 0x67); w.u(8, 100); w.u(8, 0); w.u(8, 31)  // header, High, constraints, level 3.1
     w.ue(0)                                            // sps id
@@ -126,7 +129,11 @@ private func syntheticSPS(scaling: Bool, pocType: Int, frameMbsOnly: Bool, cropp
             w.u(1, present ? 1 : 0)
             // Real deltas, then one that ends the list early (next == 0), so
             // both arms of the reader's loop run.
-            if present { writeScalingList(&w, size: i < 6 ? 16 : 64, deltas: [3, -2, -9]) }
+            // List 6 is an 8x8 list run to its full 64 entries, so a reader
+            // that took every list as 4x4 would end in the wrong place.
+            if present {
+                writeScalingList(&w, size: i < 6 ? 16 : 64, deltas: i == 6 ? [1] : [3, -2, -9])
+            }
         }
     }
     w.ue(0)                                            // log2_max_frame_num_minus4
@@ -143,7 +150,7 @@ private func syntheticSPS(scaling: Bool, pocType: Int, frameMbsOnly: Bool, cropp
     if !frameMbsOnly { w.u(1, 0) }
     w.u(1, 1)                                          // direct_8x8
     w.u(1, cropping ? 1 : 0)
-    if cropping { w.ue(0); w.ue(2); w.ue(0); w.ue(3) }
+    if cropping { for c in crop { w.ue(c) } }
     let at = w.bitCount
     w.u(1, 0)                                          // no VUI
     w.u(1, 1)                                          // stop bit
@@ -191,7 +198,36 @@ func syntheticBranches(scaling: Bool, pocType: Int, frameMbsOnly: Bool, cropping
 func emulationPrevention() {
     #expect(LowDelaySPS.escape([0, 0, 1, 0, 0, 0, 0, 0, 4]) == [0, 0, 3, 1, 0, 0, 3, 0, 0, 3, 0, 4])
     #expect(LowDelaySPS.unescape([0, 0, 3, 1, 0, 0, 3, 0, 0, 3, 0, 4]) == [0, 0, 1, 0, 0, 0, 0, 0, 4])
+    #expect(LowDelaySPS.escape([0, 0, 3]) == [0, 0, 3, 3], "a 0x03 is escaped too")
     #expect(LowDelaySPS.escape([0, 0, 4]) == [0, 0, 4], "only bytes <= 3 are escaped")
+}
+
+/// Whether a NAL payload holds a sequence emulation prevention forbids:
+/// two zeros then 0, 1 or 2. Two zeros then 3 is the escape itself.
+private func hasUnescapedRun(_ d: [UInt8]) -> Bool {
+    var zeros = 0
+    for b in d {
+        if zeros >= 2 && b <= 2 { return true }
+        zeros = zeros >= 2 && b == 3 ? 0 : (b == 0 ? zeros + 1 : 0)
+    }
+    return false
+}
+
+@Test("an SPS that needs emulation prevention is read through it and written with it")
+func emulationPreventionThroughARewrite() throws {
+    // Cropping offsets with long Exp-Golomb prefixes put runs of zero bytes
+    // in the RBSP, so the NAL carries 0x03 bytes going in, and the rewrite
+    // must strip them to parse and restore them coming out.
+    let (sps, at) = syntheticSPS(scaling: false, pocType: 0, frameMbsOnly: true, cropping: true,
+                                 maxRefFrames: 1, crop: [1 << 26, 1 << 27, 1 << 26, 1 << 28])
+    let before = LowDelaySPS.unescape(Array(sps))
+    try #require(sps.count > before.count, "fixture: the NAL must carry emulation prevention")
+    let out = LowDelaySPS.rewrite(sps)
+    #expect(out != sps, "rewritten")
+    #expect(!hasUnescapedRun(Array(out)), "the output is escaped")
+    let after = LowDelaySPS.unescape(Array(out))
+    #expect((0..<at).allSatisfy { bit(before, $0) == bit(after, $0) })
+    #expect(readVUI(after, at: at) == expectedVUI(decBuffering: 1))
 }
 
 @Test("the live stream carries the rewritten SPS; the recording's format description does not")
