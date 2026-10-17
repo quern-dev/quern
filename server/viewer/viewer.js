@@ -26,6 +26,18 @@ const stats = params.has("stats") ? { frames: 0, last: 0 } : null;
 
 // ---- decoders: one per connection, so a reconnect starts clean ----------
 
+// Counts presented frames on the shared <video> until the returned function
+// is called: a decoder's close() must stop its callbacks, or each reconnect
+// adds another and the frame counts inflate.
+function watchFrames() {
+  if (!video.requestVideoFrameCallback) return () => {};
+  let id = 0;
+  let stopped = false;
+  const on = () => { if (stopped) return; shown(); id = video.requestVideoFrameCallback(on); };
+  id = video.requestVideoFrameCallback(on);
+  return () => { stopped = true; if (video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(id); };
+}
+
 function webCodecsDecoder() {
   const ctx = canvas.getContext("2d");
   canvas.style.display = "block";
@@ -74,14 +86,31 @@ function mseDecoder() {
   const queue = [];
   let sb = null;
   let activeCodec = null;
+  let failure = null;                 // an append that can't recover: push() throws it
   const pump = () => {
     while (sb && !sb.updating && queue.length) {
-      const item = queue.shift();
+      const item = queue[0];
       if (item.changeType) {
+        queue.shift();
         if (typeof sb.changeType === "function") sb.changeType(`video/mp4; codecs="${item.changeType}"`);
         continue;
       }
-      try { sb.appendBuffer(item.data); } catch (e) { say(`append failed: ${e.message}`); }
+      try {
+        sb.appendBuffer(item.data);
+        queue.shift();
+      } catch (e) {
+        // A full buffer: live playback needs only the last moment, so free
+        // what is behind it and retry this fragment when that is done.
+        // Anything else, or a second refusal, reconnects with a fresh
+        // decoder rather than freezing on a stale picture.
+        if (e.name === "QuotaExceededError" && !item.retried && video.buffered.length) {
+          item.retried = true;
+          const start = video.buffered.start(0);
+          const keep = Math.max(start, video.currentTime - 1);
+          if (keep > start) { sb.remove(start, keep); return; }   // updateend pumps again
+        }
+        failure = e;
+      }
       return;
     }
   };
@@ -90,14 +119,15 @@ function mseDecoder() {
     const end = video.buffered.end(video.buffered.length - 1);
     if (end - video.currentTime > MAX_LAG_S) video.currentTime = end - 0.05;
     if (video.paused) video.play().catch(() => {});
+    // Keep the buffer short so it never fills over a long run.
+    const start = video.buffered.start(0);
+    if (sb && !sb.updating && video.currentTime - start > 10) sb.remove(start, video.currentTime - 2);
   }, 250);
-  if (video.requestVideoFrameCallback) {
-    const on = () => { shown(); video.requestVideoFrameCallback(on); };
-    video.requestVideoFrameCallback(on);
-  }
+  const stopWatching = watchFrames();
   return {
     name: "MSE (quern)",
     async push(au) {
+      if (failure) throw failure;
       await opened;
       const out = mux.push(au);
       if (!out) return;
@@ -115,8 +145,13 @@ function mseDecoder() {
       }
       queue.push({ data: out.fragment });
       pump();
+      if (failure) throw failure;
     },
-    close() { clearInterval(live); try { URL.revokeObjectURL(video.src); } catch { /* fine */ } },
+    close() {
+      clearInterval(live);
+      stopWatching();
+      try { URL.revokeObjectURL(video.src); } catch { /* fine */ }
+    },
   };
 }
 
@@ -136,12 +171,9 @@ async function jmuxerDecoder() {
   video.style.display = "block";
   const jm = new window.JMuxer({ node: video, mode: "video", flushingTime: 0,
     maxDelay: MAX_LAG_S * 1000, clearBuffer: true, fps: 30 });
-  if (video.requestVideoFrameCallback) {
-    const on = () => { shown(); video.requestVideoFrameCallback(on); };
-    video.requestVideoFrameCallback(on);
-  }
+  const stopWatching = watchFrames();
   return { name: "MSE (jmuxer)", async push(au) { jm.feed({ video: au, duration: FRAME_US / 1000 }); },
-    close() { try { jm.destroy(); } catch { /* fine */ } } };
+    close() { stopWatching(); try { jm.destroy(); } catch { /* fine */ } } };
 }
 
 async function makeDecoder() {
@@ -201,11 +233,15 @@ async function playOnce() {
     const why = (await res.text().catch(() => "")).trim();
     return { reason: why || `the server answered ${res.status}` };
   }
-  current = await makeDecoder();
-  askForKeyframe();
+  // Everything from here cancels the response on the way out, however it
+  // ends: an open one holds one of the recording's few stream slots on the
+  // server, and the reconnect below would open another beside it.
   const reader = res.body.getReader();
+  current = null;
   let buf = new Uint8Array(0);
   try {
+    current = await makeDecoder();
+    askForKeyframe();
     for (;;) {
       const { value, done } = await reader.read();
       if (done) return { reason: "the stream ended" };
@@ -227,7 +263,8 @@ async function playOnce() {
       }
     }
   } finally {
-    current.close();
+    reader.cancel().catch(() => {});
+    if (current) current.close();
   }
 }
 
