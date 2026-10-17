@@ -637,7 +637,7 @@ def _rebuild_and_restart(project_root: Path) -> list[str]:
             print(f"Quern's default port is now {DEFAULT_SERVER_PORT} (was "
                   f"{LEGACY_SERVER_PORT}): the server moves there now. Anything "
                   f"pointed at port {LEGACY_SERVER_PORT} needs updating; MCP clients "
-                  "find the new port by themselves.")
+                  "find the new port by themselves.", flush=True)  # before the restart's output
         try:
             restart = subprocess.run(
                 [str(venv_python), "-m", "server", "restart", *move],
