@@ -285,7 +285,10 @@ test("a bad SPS mid-stream drops frames until a keyframe that parses", () => {
   assert.equal(mux.push(broken), null);
   assert.match(mux.lastError, /SPS/);
   assert.equal(mux.push(aus[2]), null, "a delta after the bad SPS is dropped");
-  assert.equal(mux.dropped, 2);
+  const idrOnly = Uint8Array.from([0, 0, 0, 1,
+    ...splitNalUnits(aus[0]).find((u) => (u[0] & 0x1f) === NAL.IDR)]);
+  assert.equal(mux.push(idrOnly), null, "an IDR without fresh parameters can't resume");
+  assert.equal(mux.dropped, 3);
   const back = mux.push(aus[1]);                    // a good keyframe
   assert.ok(back && back.keyframe, "the next good keyframe resumes");
   assert.ok(mux.push(aus[2]).fragment, "and deltas flow again");

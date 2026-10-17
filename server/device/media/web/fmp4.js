@@ -313,6 +313,7 @@ export class Fmp4Muxer {
     this.codec = null;
     this.pendingInit = null; // built, not yet sent with a sample
     this.waiting = true;     // dropping until a keyframe whose SPS parses
+    this.needsParams = false; // a parameter set failed: only fresh ones resume
     this.dropped = 0;        // access units dropped while waiting
     this.lastError = null;   // why, when a parameter set would not parse
   }
@@ -344,10 +345,12 @@ export class Fmp4Muxer {
           info = parseSps(sps);
         } catch (e) {
           this.waiting = true;
+          this.needsParams = true;
           this.lastError = String(e && e.message || e);
           this.dropped += 1;
           return null;
         }
+        this.needsParams = false;
         if (!this.config || this.config.key !== key) {
           this.pendingInit = initSegment({ spsUnit: sps, ppsUnit: pps, width: info.width,
             height: info.height, timescale: this.timescale, sps: info });
@@ -356,7 +359,10 @@ export class Fmp4Muxer {
         }
       }
     }
-    if (this.waiting && !(keyframe && this.config)) {
+    // After a parameter set failed, an IDR without its own SPS and PPS can't
+    // resume: decoding it against the previous ones is the garbage this wait
+    // exists to avoid (CodeRabbit, #461).
+    if (this.waiting && !(keyframe && this.config && !this.needsParams)) {
       if (this.config) this.dropped += 1;
       return null;
     }

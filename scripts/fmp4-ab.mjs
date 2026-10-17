@@ -63,7 +63,13 @@ http.createServer((req, res) => {
       res.writeHead(r.statusCode, { "Content-Type": "application/octet-stream", "Cache-Control": "no-store" });
       r.pipe(res);
     });
-    up.on("error", (e) => { res.writeHead(502); res.end(String(e)); });
+    up.on("error", (e) => {
+      // Once streaming has begun the status is already sent; end the response
+      // rather than throw ERR_HTTP_HEADERS_SENT and take the harness down.
+      if (res.headersSent) { res.destroy(); return; }
+      res.writeHead(502);
+      res.end(String(e));
+    });
     req.on("close", () => up.destroy());
     return undefined;
   }
