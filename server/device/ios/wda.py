@@ -1183,14 +1183,32 @@ async def _build_wda_simulator(force: bool) -> bool:
 
 
 def _port_is_free(port: int) -> bool:
+    """Free on IPv4 and on IPv6. WDA listens on both, so a port held on
+    either one is taken: over IPv4 only, a listener on IPv6 alone passed,
+    and WDA's video server then failed to bind it and carried on with no
+    video and no error (review, #445) -- or bound beside it, split by
+    address family, which is #445 again on a different port."""
+    import errno
     import socket
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+    probes = [(socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1"), (socket.AF_INET6, "::")]
+    for family, host in probes:
         try:
-            s.bind(("127.0.0.1", port))
+            sock = socket.socket(family, socket.SOCK_STREAM)
         except OSError:
-            return False
+            continue                          # no IPv6 on this Mac: nothing to clash with
+        with sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+            if family == socket.AF_INET6:
+                sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            try:
+                sock.bind((host, port))
+            except OSError as e:
+                # Taken only when something holds it. A Mac (or CI runner)
+                # with IPv6 present but unconfigured answers EADDRNOTAVAIL for
+                # ::1, and reading that as taken would refuse every port.
+                if e.errno in (errno.EADDRINUSE, errno.EACCES):
+                    return False
     return True
 
 
@@ -1217,6 +1235,12 @@ def _runner_pid(udid: str) -> int | None:
     (CodeRabbit on #362).
     """
     return (read_wda_state().get("runners", {}).get(udid) or {}).get("pid")
+
+
+def _video_port(udid: str) -> int | None:
+    """The MJPEG port recorded for this simulator's runner; None for one an
+    older quern started, whose video is on WDA's default 9100."""
+    return (read_wda_state().get("runners", {}).get(udid) or {}).get("mjpeg_port")
 
 
 def simulator_runner_port(udid: str) -> int | None:
@@ -1257,11 +1281,18 @@ async def start_driver_simulator(udid: str) -> dict:
         # A live pid is not a working runner: it may be hung, or a start that
         # was cancelled mid-poll. Ask it.
         pid = _runner_pid(udid)
-        if await _answers(port) and pid is not None and simulator_runner_port(udid) == port:
+        if _video_port(udid) is None:
+            # Started by a quern before #445: its video server is on the Mac's
+            # 9100. Restarted rather than kept, so it moves off quern's port.
+            logger.info("WDA on simulator %s predates per-simulator video ports; "
+                        "restarting it off 9100", udid[:8])
+            await stop_driver(udid)
+        elif await _answers(port) and pid is not None and simulator_runner_port(udid) == port:
             return {"status": "already_running", "udid": udid, "pid": pid,
-                    "port": port, "ready": True}
-        logger.info("WDA on simulator %s is alive but not answering; restarting", udid[:8])
-        await stop_driver(udid)
+                    "port": port, "mjpeg_port": _video_port(udid), "ready": True}
+        else:
+            logger.info("WDA on simulator %s is alive but not answering; restarting", udid[:8])
+            await stop_driver(udid)
 
     built = await build_wda_simulator()
     xctestrun = _find_sim_xctestrun()
@@ -1323,12 +1354,12 @@ async def start_driver_simulator(udid: str) -> dict:
         # simulator to a runner that is being torn down.
         ready = ready and simulator_runner_port(udid) == raced_port
         return {"status": "already_running", "udid": udid, "pid": pid,
-                "port": raced_port, "ready": ready}
+                "port": raced_port, "mjpeg_port": _video_port(udid), "ready": ready}
 
     ready = await _answers(port, timeout=SIM_DRIVER_START_TIMEOUT)
     result: dict[str, Any] = {
         "status": "started", "udid": udid, "pid": proc.pid,
-        "port": port, "ready": ready, "built": built,
+        "port": port, "mjpeg_port": mjpeg_port, "ready": ready, "built": built,
     }
     if not ready:
         # Not left registered: routing would send this simulator's reads to a
