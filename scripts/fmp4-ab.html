@@ -1,0 +1,105 @@
+<!doctype html><meta charset="utf-8"><title>fMP4 A/B</title>
+<style>body{margin:0;background:#111;color:#ccc;font:12px monospace}video{max-height:88vh;display:block}#s{padding:4px}</style>
+<video id="v" autoplay muted playsinline></video><div id="s"></div>
+<script type="module">
+// Plays the relayed /frames stream through MSE with the muxer the URL names,
+// and reports what it measured. See scripts/fmp4-ab.mjs.
+const params = new URLSearchParams(location.search);
+const which = params.get("muxer") || "quern";
+const S = { muxer: which, ua: navigator.userAgent, secure: isSecureContext,
+  webcodecs: typeof VideoDecoder !== "undefined",
+  mse: typeof MediaSource !== "undefined" || typeof ManagedMediaSource !== "undefined",
+  fed: 0, presented: 0, lags: [], errors: [], appended: 0 };
+const v = document.getElementById("v");
+const FRAME_MS = 33;
+const MAX_LAG_S = 0.3;
+
+async function quernSink() {
+  const { Fmp4Muxer } = await import("/fmp4.js");
+  const mux = new Fmp4Muxer({ frameDuration: 90000 * FRAME_MS / 1000 });
+  const MS = window.MediaSource || window.ManagedMediaSource;
+  const ms = new MS();
+  v.src = URL.createObjectURL(ms);
+  await new Promise((r) => ms.addEventListener("sourceopen", r, { once: true }));
+  let sb = null;
+  const queue = [];
+  const pump = () => {
+    if (!sb || sb.updating || queue.length === 0) return;
+    try { sb.appendBuffer(queue.shift()); S.appended += 1; } catch (e) { S.errors.push(`append: ${e.message}`); }
+  };
+  return (au) => {
+    const out = mux.push(au);
+    if (!out) return;
+    if (out.init) {
+      if (!sb) {
+        sb = ms.addSourceBuffer(`video/mp4; codecs="${out.codec}"`);
+        sb.mode = "segments";
+        sb.addEventListener("updateend", pump);
+        sb.addEventListener("error", () => S.errors.push("sourcebuffer error"));
+      }
+      queue.push(out.init);
+    }
+    queue.push(out.fragment);
+    pump();
+  };
+}
+
+async function jmuxerSink() {
+  const r = await fetch("/jmuxer.js");
+  if (!r.ok) throw new Error("jmuxer not available: start the harness with --jmuxer");
+  const s = document.createElement("script");
+  s.textContent = await r.text();
+  document.head.append(s);
+  const jm = new window.JMuxer({ node: v, mode: "video", flushingTime: 0, maxDelay: MAX_LAG_S * 1000,
+    clearBuffer: true, fps: 30, onError: (e) => S.errors.push(String(e && e.message || e)) });
+  return (au) => jm.feed({ video: au, duration: FRAME_MS });
+}
+
+// Keep playback near the live edge, for our muxer; jmuxer does this itself.
+setInterval(() => {
+  if (!v.buffered.length) return;
+  const end = v.buffered.end(v.buffered.length - 1);
+  S.lags.push(end - v.currentTime);
+  if (which === "quern" && end - v.currentTime > MAX_LAG_S) v.currentTime = end - 0.05;
+  if (v.paused) v.play().catch(() => {});
+}, 250);
+
+if (v.requestVideoFrameCallback) {
+  const on = (_t, md) => { S.presented = md.presentedFrames; v.requestVideoFrameCallback(on); };
+  v.requestVideoFrameCallback(on);
+}
+
+setInterval(() => {
+  const lags = S.lags.splice(0).map((x) => Math.round(x * 1000));
+  const report = { ...S, lags: undefined, lag_ms_max: lags.length ? Math.max(...lags) : null,
+    lag_ms_last: lags.length ? lags.at(-1) : null, errors: S.errors.splice(0) };
+  document.getElementById("s").textContent = JSON.stringify(report);
+  fetch("/report", { method: "POST", body: JSON.stringify(report) }).catch(() => {});
+}, 2000);
+
+(async () => {
+  const sink = which === "jmuxer" ? await jmuxerSink() : await quernSink();
+  const res = await fetch("/frames");
+  const reader = res.body.getReader();
+  let buf = new Uint8Array(0);
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    const joined = new Uint8Array(buf.length + value.length);
+    joined.set(buf); joined.set(value, buf.length); buf = joined;
+    for (;;) {
+      let h = -1;
+      for (let i = 0; i + 3 < buf.length; i += 1) {
+        if (buf[i] === 13 && buf[i + 1] === 10 && buf[i + 2] === 13 && buf[i + 3] === 10) { h = i; break; }
+      }
+      if (h < 0) break;
+      const len = Number((/content-length:\s*(\d+)/i.exec(new TextDecoder().decode(buf.subarray(0, h))) || [0, 0])[1]);
+      if (buf.length < h + 4 + len + 2) break;
+      const au = buf.slice(h + 4, h + 4 + len);
+      buf = buf.slice(h + 4 + len + 2);
+      if (len) { S.fed += 1; sink(au); }
+    }
+  }
+  S.errors.push("stream ended");
+})().catch((e) => S.errors.push(String(e && e.message || e)));
+</script>
