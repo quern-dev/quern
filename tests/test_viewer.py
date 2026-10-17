@@ -142,8 +142,15 @@ class TestGrants:
         assert grants.recording_for(grants.issue("gone")) is None
 
     @pytest.mark.parametrize("token", ["", "x" * 129])
-    def test_absurd_tokens_are_refused_outright(self, token):
+    def test_absurd_tokens_are_refused_outright(self, token, monkeypatch):
+        """Refused before hashing: an attacker's path segment can be long."""
+        from server.viewer import grants as grants_mod
+
+        hashed = []
+        real = grants_mod._digest
+        monkeypatch.setattr(grants_mod, "_digest", lambda t: hashed.append(t) or real(t))
         assert ViewerGrants(_Recordings(), grace_seconds=600).recording_for(token) is None
+        assert hashed == []
 
 
 class _FakeQuernMedia:

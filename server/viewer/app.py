@@ -6,7 +6,7 @@
     GET  /v/<token>/fmp4.js     the MSE muxer (server/device/media/web)
     GET  /v/<token>/jmuxer.js   only when viewer.jmuxer_path is set, for A/B
 
-Everything else is 404, and so is any request whose token is unknown, revoked
+Everything else is 404 (Starlette's own), and so is any request whose token is unknown, revoked
 or expired: the listener never confirms that a token exists. Requests must
 also name an expected Host, and a browser's Origin, when sent, must too --
 the DNS-rebinding and cross-site checks from the baguette notes, in addition
@@ -124,9 +124,6 @@ def create_viewer_app(*, recordings, grants, allowed_hosts: set[str],
         return FileResponse(jmuxer_path, media_type="text/javascript",
                             headers={"Cache-Control": "no-store"})
 
-    async def not_found(_request: Request) -> Response:
-        return _NOT_FOUND
-
     app = Starlette(routes=[
         Route("/v/{token}", page, methods=["GET"]),
         Route("/v/{token}/", page, methods=["GET"]),
@@ -134,7 +131,6 @@ def create_viewer_app(*, recordings, grants, allowed_hosts: set[str],
         Route("/v/{token}/keyframe", keyframe, methods=["POST"]),
         Route("/v/{token}/fmp4.js", muxer, methods=["GET"]),
         Route("/v/{token}/jmuxer.js", jmuxer, methods=["GET"]),
-        Route("/{rest:path}", not_found, methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]),
     ])
 
     async def guarded(scope, receive, send):
