@@ -137,7 +137,9 @@ def _url_from_port(state: dict | None) -> str | None:
     """Reconstruct a URL when state.json records only a port."""
     if not state:
         return None
-    port = state.get("port")
+    # `server_port` is what the server writes; `port` was never written, so
+    # this always fell through to the default URL (CodeRabbit on #467).
+    port = state.get("server_port") or state.get("port")
     if not port:
         return None
     return f"http://127.0.0.1:{port}"

@@ -569,10 +569,45 @@ def _restart_args(state: dict) -> list[str]:
     user asked for, and is said out loud, instead of whenever the server
     next happens to start fresh. A server on any other port was put there --
     by `--port`, or by the scan past a busy 9100 -- and stays.
+
+    The target is the first port from 9110 that nothing listens on, skipping
+    the proxy's and the viewer's, so the move never takes a port from a live
+    server.
     """
-    if state.get("server_port") == LEGACY_SERVER_PORT:
-        return ["--port", str(DEFAULT_SERVER_PORT)]
+    if state.get("server_port") != LEGACY_SERVER_PORT:
+        return []
+    # The first port from the new default that nothing is listening on --
+    # not 9110 unconditionally. Asked for explicitly, a held port goes to
+    # `reclaim_port`, which kills any quern-looking holder: another install, or
+    # a worktree's scratch server, would be taken down by this update
+    # (CodeRabbit on #467). Nothing free in range: stay put this time.
+    from server.config import viewer_settings
+    from server.lifecycle.ports import MAX_PORT_SCAN
+
+    avoid = {state.get("proxy_port"), viewer_settings().get("port")}
+    for port in range(DEFAULT_SERVER_PORT, DEFAULT_SERVER_PORT + MAX_PORT_SCAN):
+        if port not in avoid and not _listening(port):
+            return ["--port", str(port)]
     return []
+
+
+def _listening(port: int) -> bool:
+    """Whether anything accepts connections on the port, over IPv4 or IPv6.
+
+    A connect, not a bind: binding 127.0.0.1 with SO_REUSEADDR succeeds while a
+    server holds 0.0.0.0 on the same port, which is how the rehearsal once
+    decided a port was free and killed the server on it."""
+    import socket
+
+    for family, host in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as s:
+                s.settimeout(0.5)
+                if s.connect_ex((host, port)) == 0:
+                    return True
+        except OSError:
+            continue
+    return False
 
 
 def _rebuild_and_restart(project_root: Path) -> list[str]:

@@ -1062,14 +1062,18 @@ def rebuild(monkeypatch, tmp_path):
     from server.lifecycle import updater
 
     state = {"deps": True, "mcp": True, "setup": 0, "restart": 0, "running": True,
-             "port": 9110, "cmds": []}
+             "port": 9110, "proxy_port": 9101, "listening": set(), "cmds": []}
 
     monkeypatch.setattr("server.__main__._ensure_python_deps",
                         lambda **_kw: state["deps"])
     monkeypatch.setattr("server.__main__._ensure_mcp_built", lambda **_kw: state["mcp"])
     monkeypatch.setattr("server.lifecycle.setup.run_setup", lambda: state["setup"])
     monkeypatch.setattr("server.lifecycle.state.read_state",
-                        lambda: {"server_port": state["port"]} if state["running"] else None)
+                        lambda: {"server_port": state["port"], "proxy_port": state["proxy_port"]}
+                        if state["running"] else None)
+    # Which ports something listens on: injected, never probed for real.
+    monkeypatch.setattr(updater, "_listening", lambda port: port in state["listening"])
+    monkeypatch.setattr("server.config.viewer_settings", lambda: {"port": 9120})
     monkeypatch.setattr("server.lifecycle.state.is_server_healthy", lambda _p: state["running"])
 
     def fake_run(cmd, **_kw):
@@ -1104,6 +1108,47 @@ def test_an_update_moves_a_server_off_the_old_default_port(rebuild, capsys):
     assert restart[-4:] == ["server", "restart", "--port", "9110"]
     out = capsys.readouterr().out
     assert "9110" in out and "9100" in out, "the move is said, not silent"
+
+
+def test_the_move_never_takes_a_port_from_a_live_server(rebuild):
+    """Asked for explicitly, a held 9110 goes to reclaim_port, which kills a
+    quern-looking holder -- another install, or a worktree's scratch server
+    (CodeRabbit on #467). The move takes the first port nothing listens on."""
+    rebuild["port"] = 9100
+    rebuild["listening"] = {9110, 9111}
+    assert rebuild["_run"]() == []
+    assert rebuild["cmds"][-1][-2:] == ["--port", "9112"]
+
+
+def test_the_move_skips_the_proxys_and_the_viewers_ports(rebuild):
+    rebuild["port"] = 9100
+    rebuild["proxy_port"] = 9110
+    rebuild["listening"] = set(range(9111, 9120))
+    assert rebuild["_run"]() == []
+    assert rebuild["cmds"][-1][-2:] == ["--port", "9121"], "not 9110 (proxy) or 9120 (viewer)"
+
+
+def test_with_nothing_free_the_server_stays_put(rebuild, capsys):
+    rebuild["port"] = 9100
+    rebuild["listening"] = set(range(9110, 9140))
+    assert rebuild["_run"]() == []
+    assert rebuild["cmds"][-1][-2:] == ["server", "restart"]
+    assert "moving off" not in capsys.readouterr().out
+
+
+def test_listening_is_asked_by_connecting(tmp_path):
+    """A bind check reads a 0.0.0.0 listener as free on 127.0.0.1 with
+    SO_REUSEADDR; a connect does not."""
+    import socket
+
+    from server.lifecycle import updater
+
+    with socket.socket() as held:
+        held.bind(("0.0.0.0", 0))
+        held.listen()
+        port = held.getsockname()[1]
+        assert updater._listening(port)
+    assert not updater._listening(port), "nothing listens once it is closed"
 
 
 def test_the_move_reports_where_the_server_actually_landed(rebuild, capsys):
