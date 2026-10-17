@@ -304,3 +304,21 @@ test("parameter sets in their own access unit keep their init segment", () => {
   assert.ok(out.init, "the init built from the parameter-set unit must arrive with the IDR");
   assert.equal(out.codec, "avc1.64001e");
 });
+
+test("a configuration change on a delta frame waits for the next keyframe", () => {
+  const aus = fixture();
+  const mux = new Fmp4Muxer();
+  assert.ok(mux.push(aus[0]).init);
+  const units = splitNalUnits(aus[0]);
+  const sps = Uint8Array.from(units.find((u) => (u[0] & 0x1f) === NAL.SPS));
+  sps[3] = 0x1f;                                   // a different level: a new config
+  const pps = units.find((u) => (u[0] & 0x1f) === NAL.PPS);
+  const slice = splitNalUnits(aus[2])[0];          // a non-IDR slice
+  const withParams = (nal) => Uint8Array.from([0, 0, 0, 1, ...sps, 0, 0, 0, 1, ...pps, 0, 0, 0, 1, ...nal]);
+  assert.equal(mux.push(withParams(slice)), null, "a new config must not ride on a delta frame");
+  assert.equal(mux.push(aus[3]), null, "deltas wait for the keyframe");
+  const idr = units.find((u) => (u[0] & 0x1f) === NAL.IDR);
+  const back = mux.push(withParams(idr));
+  assert.ok(back.init && back.keyframe, "the held config is published with the keyframe");
+  assert.equal(back.codec, "avc1.64001f");
+});

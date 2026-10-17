@@ -356,6 +356,12 @@ export class Fmp4Muxer {
             height: info.height, timescale: this.timescale, sps: info });
           this.codec = codecString(info);
           this.config = { key, width: info.width, height: info.height };
+          // A new configuration can only begin decoding at an IDR. Arriving
+          // on anything else -- parameter sets in a delta unit, or alone --
+          // it waits, held, and is published with the next keyframe rather
+          // than beside a frame that can't be decoded against it
+          // (CodeRabbit, #461).
+          if (!keyframe) this.waiting = true;
         }
       }
     }
