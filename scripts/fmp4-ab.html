@@ -25,10 +25,28 @@ async function quernSink() {
   v.src = URL.createObjectURL(ms);
   await new Promise((r) => ms.addEventListener("sourceopen", r, { once: true }));
   let sb = null;
+  let activeCodec = null;
+  // Appends, plus the codec switches that must precede a changed init
+  // segment, in one serial queue: changeType may only run when the buffer is
+  // not updating, and the init in the new format must be the next append.
   const queue = [];
   const pump = () => {
-    if (!sb || sb.updating || queue.length === 0) return;
-    try { sb.appendBuffer(queue.shift()); S.appended += 1; } catch (e) { S.errors.push(`append: ${e.message}`); }
+    while (sb && !sb.updating && queue.length > 0) {
+      const item = queue.shift();
+      try {
+        if (item.changeType) {
+          // Before an init segment whose codec string differs (a new
+          // profile or level): MSE requires it before data in a new format.
+          if (typeof sb.changeType === "function") sb.changeType(`video/mp4; codecs="${item.changeType}"`);
+          continue;
+        }
+        sb.appendBuffer(item.data);
+        S.appended += 1;
+      } catch (e) {
+        S.errors.push(`${item.changeType ? "changeType" : "append"}: ${e.message}`);
+      }
+      return;
+    }
   };
   return (au) => {
     const out = mux.push(au);
@@ -36,13 +54,17 @@ async function quernSink() {
     if (out.init) {
       if (!sb) {
         sb = ms.addSourceBuffer(`video/mp4; codecs="${out.codec}"`);
+        activeCodec = out.codec;
         sb.mode = "segments";
         sb.addEventListener("updateend", pump);
         sb.addEventListener("error", () => S.errors.push("sourcebuffer error"));
+      } else if (out.codec !== activeCodec) {
+        queue.push({ changeType: out.codec });
+        activeCodec = out.codec;
       }
-      queue.push(out.init);
+      queue.push({ data: out.init });
     }
-    queue.push(out.fragment);
+    queue.push({ data: out.fragment });
     pump();
   };
 }
