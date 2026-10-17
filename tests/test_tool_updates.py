@@ -1151,6 +1151,16 @@ def test_listening_is_asked_by_connecting(tmp_path):
     assert not updater._listening(port), "nothing listens once it is closed"
 
 
+def test_a_listener_on_a_lan_address_alone_counts_as_held(monkeypatch):
+    """It accepts no loopback connection, but reclaim_port finds it by lsof and
+    would kill it -- so lsof's answer counts (CodeRabbit on #467)."""
+    from server.lifecycle import updater
+
+    monkeypatch.setattr("server.lifecycle.ports._get_pid_on_port",
+                        lambda port: 4321 if port == 9110 else None)
+    assert updater._listening(9110)
+
+
 def test_the_move_reports_where_the_server_actually_landed(rebuild, capsys):
     """9110 held by something that is not quern sends the server further up:
     the update says where it went, read back from state, not where it aimed."""

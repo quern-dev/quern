@@ -592,13 +592,21 @@ def _restart_args(state: dict) -> list[str]:
 
 
 def _listening(port: int) -> bool:
-    """Whether anything accepts connections on the port, over IPv4 or IPv6.
+    """Whether anything listens on the port, on any local address.
 
-    A connect, not a bind: binding 127.0.0.1 with SO_REUSEADDR succeeds while a
-    server holds 0.0.0.0 on the same port, which is how the rehearsal once
-    decided a port was free and killed the server on it."""
+    The question `reclaim_port` will act on, asked the same way: it kills a
+    holder `lsof` names, on whatever address, so a listener `lsof` sees is
+    held -- a server bound to a LAN address alone accepts no loopback
+    connection, and was missed (CodeRabbit on #467). A loopback connect as
+    well, for when lsof cannot answer. Never a bind: binding 127.0.0.1 with
+    SO_REUSEADDR succeeds while a server holds 0.0.0.0, which is how the
+    rehearsal once decided a port was free and killed the server on it."""
     import socket
 
+    from server.lifecycle.ports import _get_pid_on_port
+
+    if _get_pid_on_port(port) is not None:
+        return True
     for family, host in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
         try:
             with socket.socket(family, socket.SOCK_STREAM) as s:
