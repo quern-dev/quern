@@ -19,6 +19,9 @@ async function quernSink() {
   const mux = new Fmp4Muxer({ frameDuration: 90000 * FRAME_MS / 1000 });
   const MS = window.MediaSource || window.ManagedMediaSource;
   const ms = new MS();
+  // iPhone Safari has only ManagedMediaSource, which never opens while remote
+  // playback (AirPlay) is possible: disable it before attaching.
+  v.disableRemotePlayback = true;
   v.src = URL.createObjectURL(ms);
   await new Promise((r) => ms.addEventListener("sourceopen", r, { once: true }));
   let sb = null;
