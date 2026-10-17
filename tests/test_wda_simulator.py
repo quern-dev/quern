@@ -146,6 +146,24 @@ class TestPorts:
         monkeypatch.setattr(wda, "_port_is_free", lambda port: port != wda.SIM_PORT_FIRST)
         assert wda._allocate_sim_port({}) == wda.SIM_PORT_FIRST + 1
 
+    def test_video_ports_are_their_own_range_clear_of_quern(self):
+        """WDA's MJPEG server defaulted to the Mac's 9100: quern's port (#445).
+        Its range must not overlap the control ports, quern's default ports
+        and their scan, or the viewer's."""
+        video = range(wda.SIM_MJPEG_PORT_FIRST, wda.SIM_MJPEG_PORT_LAST + 1)
+        control = range(wda.SIM_PORT_FIRST, wda.SIM_PORT_LAST + 1)
+        assert not set(video) & set(control)
+        assert not set(video) & set(range(9100, 9140)), "quern's ports, scan and viewer"
+        assert 8100 not in video
+
+    def test_a_video_port_another_simulator_holds_is_skipped(self, monkeypatch):
+        monkeypatch.setattr(wda, "_port_is_free", lambda port: True)
+        runners = {"X": {"simulator": True, "port": wda.SIM_PORT_FIRST,
+                         "mjpeg_port": wda.SIM_MJPEG_PORT_FIRST}}
+        assert wda._allocate_sim_port(
+            runners, key="mjpeg_port", first=wda.SIM_MJPEG_PORT_FIRST,
+            last=wda.SIM_MJPEG_PORT_LAST) == wda.SIM_MJPEG_PORT_FIRST + 1
+
     def test_a_full_range_is_an_error_that_says_what_to_do(self, monkeypatch):
         monkeypatch.setattr(wda, "_port_is_free", lambda port: False)
         with pytest.raises(RuntimeError, match="stop_driver"):
@@ -182,6 +200,8 @@ class TestStartingOnASimulator:
 
         assert result["ready"] is True and result["port"] == wda.SIM_PORT_FIRST
         assert env["env"]["TEST_RUNNER_USE_PORT"] == str(wda.SIM_PORT_FIRST)
+        # Its video server on its own port, never WDA's default 9100 (#445).
+        assert env["env"]["TEST_RUNNER_MJPEG_SERVER_PORT"] == str(wda.SIM_MJPEG_PORT_FIRST)
         assert f"id={SIM}" in env["cmd"]
         assert "test-without-building" in env["cmd"]
 
@@ -381,6 +401,9 @@ class TestTwoSimulatorsStartedTogetherGetTwoPorts:
             wda.start_driver_simulator("SIM-A"), wda.start_driver_simulator("SIM-B"),
         )
         assert a["port"] != b["port"]
+        # And two video servers: both on one port is the other half of #445.
+        runners = state["runners"]
+        assert runners["SIM-A"]["mjpeg_port"] != runners["SIM-B"]["mjpeg_port"]
 
     async def test_concurrent_starts_of_one_simulator_spawn_once(
         self, state, monkeypatch, tmp_path,

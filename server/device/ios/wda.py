@@ -58,6 +58,14 @@ WDA_DERIVED_SIM = WDA_DIR / "build-sim"
 #: WDA and call the phone ready. So simulators get their own range.
 SIM_PORT_FIRST = 8200
 SIM_PORT_LAST = 8299
+#: WDA's MJPEG screenshot server needs a port per simulator too (#445). Left
+#: to its default it binds the Mac's 9100: quern's own default port, where it
+#: sat beside quern on the other address family -- IPv4 reached quern, IPv6
+#: (and so a browser's `localhost`) reached WDA's video -- and where two
+#: simulators could not both have it. Beside the control ports, and clear of
+#: quern's and the viewer's ranges.
+SIM_MJPEG_PORT_FIRST = 8300
+SIM_MJPEG_PORT_LAST = 8399
 #: First start on a simulator installs the runner as well as launching it.
 SIM_DRIVER_START_TIMEOUT = 90
 DRIVER_STOP_TIMEOUT = 5
@@ -1186,13 +1194,17 @@ def _port_is_free(port: int) -> bool:
     return True
 
 
-def _allocate_sim_port(runners: dict[str, Any]) -> int:
-    taken = {r.get("port") for r in runners.values() if r.get("simulator")}
-    for port in range(SIM_PORT_FIRST, SIM_PORT_LAST + 1):
+def _allocate_sim_port(runners: dict[str, Any], *, key: str = "port",
+                       first: int = SIM_PORT_FIRST, last: int = SIM_PORT_LAST,
+                       what: str = "WDA") -> int:
+    """A port in [first, last] that no simulator's runner has recorded under
+    `key` and nothing else is bound to."""
+    taken = {r.get(key) for r in runners.values() if r.get("simulator")}
+    for port in range(first, last + 1):
         if port not in taken and _port_is_free(port):
             return port
     raise RuntimeError(
-        f"No free port for WDA in {SIM_PORT_FIRST}-{SIM_PORT_LAST}; stop a "
+        f"No free port for {what} in {first}-{last}; stop a "
         "simulator's driver (stop_driver) or free a port in that range."
     )
 
@@ -1269,6 +1281,9 @@ async def start_driver_simulator(udid: str) -> dict:
             runners = state.get("runners", {})
             runners.pop(udid, None)  # a dead entry for this simulator
             port = _allocate_sim_port(runners)
+            mjpeg_port = _allocate_sim_port(
+                runners, key="mjpeg_port", first=SIM_MJPEG_PORT_FIRST,
+                last=SIM_MJPEG_PORT_LAST, what="WDA's video stream")
 
             WDA_LOG_DIR.mkdir(parents=True, exist_ok=True)
             log_path = WDA_LOG_DIR / f"runner-{udid[:8]}.log"
@@ -1276,7 +1291,9 @@ async def start_driver_simulator(udid: str) -> dict:
             # xcodebuild hands TEST_RUNNER_* variables to the runner with the
             # prefix removed; WDA reads USE_PORT.
             env["TEST_RUNNER_USE_PORT"] = str(port)
-            logger.info("Starting WDA on simulator %s, port %d", udid[:8], port)
+            env["TEST_RUNNER_MJPEG_SERVER_PORT"] = str(mjpeg_port)
+            logger.info("Starting WDA on simulator %s, port %d (video %d)",
+                        udid[:8], port, mjpeg_port)
             with open(log_path, "w") as log_file:
                 proc = await asyncio.create_subprocess_exec(
                     "xcodebuild", "test-without-building",
@@ -1291,6 +1308,7 @@ async def start_driver_simulator(udid: str) -> dict:
             state.setdefault("runners", {})[udid] = {
                 "pid": proc.pid,
                 "port": port,
+                "mjpeg_port": mjpeg_port,
                 "simulator": True,
                 "log_path": str(log_path),
                 "started_at": datetime.now(UTC).isoformat(),
