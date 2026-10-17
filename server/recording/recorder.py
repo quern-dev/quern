@@ -869,6 +869,35 @@ class RecordingManager:
         rec._last_keyframe = now
         self._spawn(self._video.keyframe(rec._segment))
 
+    def viewer_stream(self, recording_id: str) -> tuple[int, str] | None:
+        """(loopback port, udid) of the movie a recording is filming now, for
+        the LAN viewer (#449), or None when it isn't filming.
+
+        Looked up per call, not cached: a recording resumed after a quern
+        restart films a new segment, and a quern-media restarted after losing
+        its port serves on another.
+        """
+        try:
+            rec = self.get(recording_id)
+        except RecordingError:
+            return None
+        seg = rec._segment
+        if rec.state != "recording" or seg is None or not seg.port:
+            return None
+        return seg.port, seg.udid
+
+    async def viewer_keyframe(self, recording_id: str) -> bool:
+        """Ask the movie for a keyframe so a viewer that just attached gets a
+        picture on a still screen (#449). Unlike `keyframe`, it writes no
+        `mark`: someone watching must not add lines to the recording."""
+        try:
+            rec = self.get(recording_id)
+        except RecordingError:
+            return False
+        if rec.state != "recording" or rec._segment is None or self._video is None:
+            return False
+        return await self._video.keyframe(rec._segment)
+
     async def keyframe(self, recording_id: str, label: str | None = None) -> bool:
         """Ask for a keyframe now, for a driver quern does not see (#415): a CI
         step or a test marking the moment it cares about. True if it was asked.

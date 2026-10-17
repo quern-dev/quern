@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Watch a simulator live from another machine (#449).** `start_recording` with `video` and `viewer: true` (`quern record start --video --viewer`) returns `viewer_url`, a link that plays the recording's simulator in a browser elsewhere on the LAN. For example, a CI job can post it when a UI test starts.
+  - It's off unless `viewer.enabled` is set in `~/.quern/config.json`.
+  - It's served by a separate listener on port 9120 that carries only viewer pages and streams, never the API. quern's own port scan never takes that port.
+  - Each link is view-only and scoped to one recording. It expires 10 minutes after the recording stops and can be revoked (`DELETE /api/v1/recordings/{id}/viewer`). Only its hash is kept, and links don't survive a restart.
+  - Host, Origin and cross-site checks run in addition to the token.
+  - The page plays the recording's existing stream, with no second capture. It decodes with WebCodecs where the browser has it, and otherwise through Media Source Extensions with quern's own fMP4 muxer, which covers Chrome on a plain-HTTP LAN address. It reconnects and shows OFF AIR when the stream drops.
+
 ### Fixed
 - **Each agent session has its own active device (#254).** The active device was one value for the whole server, so an agent that left out `udid` got whichever device *any* agent had resolved last, and could tap another agent's simulator without either noticing.
   - A request from a named session (#453) now reads and sets only that session's active device.

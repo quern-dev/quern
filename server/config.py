@@ -203,6 +203,51 @@ def set_update_channel(channel: str) -> None:
     update_user_config(lambda c: c.__setitem__("update_channel", channel))
 
 
+#: The LAN viewer's defaults (#449). Port 9120 was chosen by the maintainer;
+#: quern's own port scan excludes it (see `viewer_settings`).
+VIEWER_DEFAULT_HOST = "0.0.0.0"
+VIEWER_DEFAULT_PORT = 9120
+#: How long a viewer link keeps working after its recording stops.
+VIEWER_GRACE_SECONDS = 600
+
+
+def viewer_settings() -> dict:
+    """The LAN viewer's settings from config.json's `viewer` object (#449).
+
+        {"viewer": {"enabled": true, "bind": "0.0.0.0:9120",
+                    "hosts": ["ci.lan"], "jmuxer_path": "/path/jmuxer.min.js"}}
+
+    Off unless `enabled` is literally true: it is the first quern listener
+    meant to be reached from another machine, so a typo must mean off. A
+    malformed `bind` falls back to the default rather than raising, and is
+    reported in `bind_error`.
+    """
+    raw = read_user_config().get("viewer")
+    raw = raw if isinstance(raw, dict) else {}
+    host, port, bind_error = VIEWER_DEFAULT_HOST, VIEWER_DEFAULT_PORT, None
+    bind = raw.get("bind")
+    if isinstance(bind, str) and bind:
+        h, sep, p = bind.rpartition(":")
+        try:
+            port_n = int(p)
+            if not sep or not (1 <= port_n <= 65535):
+                raise ValueError(bind)
+            host, port = (h or VIEWER_DEFAULT_HOST), port_n
+        except ValueError:
+            bind_error = f"viewer.bind {bind!r} is not host:port; using {host}:{port}"
+    hosts = raw.get("hosts")
+    jmuxer = raw.get("jmuxer_path")
+    return {
+        "enabled": raw.get("enabled") is True,
+        "host": host,
+        "port": port,
+        "bind_error": bind_error,
+        "hosts": [h for h in hosts if isinstance(h, str) and h] if isinstance(hosts, list) else [],
+        "jmuxer_path": jmuxer if isinstance(jmuxer, str) and jmuxer else None,
+        "grace_seconds": VIEWER_GRACE_SECONDS,
+    }
+
+
 def get_auto_install_cert() -> bool:
     """Whether to install the mitmproxy CA automatically when capture needs it.
 
