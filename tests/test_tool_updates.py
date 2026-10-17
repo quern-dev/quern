@@ -1076,6 +1076,8 @@ def rebuild(monkeypatch, tmp_path):
         state["cmds"].append(list(cmd))
         if isinstance(state["restart"], BaseException):
             raise state["restart"]
+        if state.get("lands_on") is not None:
+            state["port"] = state["lands_on"]          # where the restarted server settled
         return SimpleNamespace(returncode=state["restart"])
 
     monkeypatch.setattr(updater.subprocess, "run", fake_run)
@@ -1102,6 +1104,15 @@ def test_an_update_moves_a_server_off_the_old_default_port(rebuild, capsys):
     assert restart[-4:] == ["server", "restart", "--port", "9110"]
     out = capsys.readouterr().out
     assert "9110" in out and "9100" in out, "the move is said, not silent"
+
+
+def test_the_move_reports_where_the_server_actually_landed(rebuild, capsys):
+    """9110 held by something that is not quern sends the server further up:
+    the update says where it went, read back from state, not where it aimed."""
+    rebuild["port"] = 9100
+    rebuild["lands_on"] = 9112
+    assert rebuild["_run"]() == []
+    assert "now on port 9112" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("port", [9110, 9101, 9105, 8080])

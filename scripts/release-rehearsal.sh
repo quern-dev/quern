@@ -1069,6 +1069,7 @@ DEV_SERVER_STOPPED=""
 #: that was on 9100 in the middle of a rehearsal, which is the unannounced move
 #: `quern update` exists to avoid.
 DEV_SERVER_PORT=""
+DEV_PROXY_PORT=""
 #: Sticky, unlike DEV_SERVER_STOPPED, which the restore clears. The final
 #: safety check runs long afterwards and needs to know a restart happened at
 #: all, not whether one is outstanding.
@@ -1077,17 +1078,29 @@ DEV_SERVER_RESTARTED=""
 # The developer's server port, from ~/.quern/state.json: 9100 or 9110
 # depending on which release they run, or whatever it settled on.
 developer_server_port() {
+  _developer_state_port server_port 9110
+}
+
+# And its proxy's, so the restore puts that back too: a proxy that had scanned
+# off 9101 would otherwise come back on 9101 (review, #446).
+developer_proxy_port() {
+  _developer_state_port proxy_port 9101
+}
+
+_developer_state_port() {
   python3 -c '
-import json, os
+import json, os, sys
+key, fallback = sys.argv[1], sys.argv[2]
 try:
-    print(int(json.load(open(os.path.expanduser("~/.quern/state.json"))).get("server_port") or 9110))
+    print(int(json.load(open(os.path.expanduser("~/.quern/state.json"))).get(key) or fallback))
 except Exception:
-    print(9110)' 2>/dev/null
+    print(fallback)' "$1" "$2" 2>/dev/null
 }
 
 stop_developer_server() {
   DEV_SERVER_STOPPED=""
   DEV_SERVER_PORT="$(developer_server_port)"
+  DEV_PROXY_PORT="$(developer_proxy_port)"
   local pid
   pid="$(lsof -nP -iTCP:"$DEV_SERVER_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)"
   [[ -z "$pid" ]] && return 0          # free already; nothing to do
@@ -1139,7 +1152,7 @@ restore_developer_server() {
   local root
   root="$(sed -n 's/^# Points to: //p' "$HOME/.local/bin/quern" 2>/dev/null | head -1)"
   [[ -d "$root" ]] || root="$HOME"
-  ( cd "$root" && "$HOME/.local/bin/quern" start --port "${DEV_SERVER_PORT:-9110}" ) >/dev/null 2>&1 || true
+  ( cd "$root" && "$HOME/.local/bin/quern" start --port "${DEV_SERVER_PORT:-9110}" --proxy-port "${DEV_PROXY_PORT:-9101}" ) >/dev/null 2>&1 || true
   sleep 3
   if curl -fsS --max-time 10 "http://127.0.0.1:${DEV_SERVER_PORT:-9110}/health" >/dev/null 2>&1; then
     ok "your server was stopped for this case and is back"

@@ -209,3 +209,61 @@ class TestTheDefaultPorts:
         from server.lifecycle.ports import DEFAULT_SERVER_PORT
 
         assert ServerConfig().port == DEFAULT_SERVER_PORT
+
+
+class TestStartNeverSharesAPort:
+    """`quern start` chooses the server's and the proxy's ports before binding
+    either, so `reclaim_port` finds a shared port free for both. A restart
+    that moved the server to 9110 while the proxy had scanned up to 9110 put
+    the two on one port (review, #446). The viewer's port is never either."""
+
+    @pytest.fixture
+    def start(self, tmp_path, monkeypatch):
+        import argparse
+
+        from server import main as main_mod
+
+        monkeypatch.setattr("server.__main__._ensure_python_deps", lambda **k: None)
+        monkeypatch.setattr("server.__main__._ensure_mcp_built", lambda **k: True)
+        monkeypatch.setattr(main_mod, "read_state", lambda: None)
+        monkeypatch.setattr(main_mod, "reclaim_port", lambda *a, **k: True)  # nothing real
+        monkeypatch.setattr("server.lifecycle.ports.is_port_available", lambda *a, **k: True)
+        key = tmp_path / "api-key"
+        key.write_text("k" * 32)
+        monkeypatch.setattr("server.config.API_KEY_FILE", key)
+        monkeypatch.setattr("server.config.CONFIG_DIR", tmp_path)
+        chosen = {}
+
+        def daemonize(server_port, proxy_port):
+            chosen.update(server=server_port, proxy=proxy_port)
+            raise SystemExit(0)
+
+        monkeypatch.setattr(main_mod, "daemonize", daemonize)
+
+        def run(port, proxy_port, viewer_port=9120):
+            monkeypatch.setattr("server.config.viewer_settings",
+                                lambda: {"port": viewer_port})
+            args = argparse.Namespace(
+                host="127.0.0.1", port=port, proxy_port=proxy_port, buffer_size=10,
+                foreground=False, verbose=False, syslog=False, no_syslog=True,
+                oslog=False, no_oslog=True, no_crash=True, no_proxy=False)
+            with pytest.raises(SystemExit):
+                main_mod._cmd_start(args)
+            return chosen["server"], chosen["proxy"]
+
+        return run
+
+    def test_a_proxy_on_the_servers_port_moves_up(self, start):
+        server, proxy = start(9110, 9110)
+        assert server == 9110 and proxy not in (9110, 9120)
+
+    def test_a_proxy_on_the_viewers_port_moves_up(self, start):
+        server, proxy = start(9110, 9120)
+        assert proxy not in (server, 9120)
+
+    def test_a_server_asked_for_the_viewers_port_moves_up(self, start):
+        server, proxy = start(9120, 9101)
+        assert server not in (9120, 9101) and proxy == 9101
+
+    def test_ordinary_ports_are_left_as_asked(self, start):
+        assert start(9110, 9101) == (9110, 9101)

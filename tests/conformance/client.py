@@ -28,7 +28,7 @@ import httpx
 #: Where a real install keeps its state, independent of QUERN_STATE_DIR.
 REAL_QUERN_DIR = Path.home() / ".quern"
 
-DEFAULT_URL = "http://127.0.0.1:9100"
+DEFAULT_URL = "http://127.0.0.1:9110"  # 9100 before #446, now WDA's and node_exporter's
 
 #: Endpoints documented as public. Used by the auth tests, and by the client to
 #: know when omitting the bearer token is not a bug.

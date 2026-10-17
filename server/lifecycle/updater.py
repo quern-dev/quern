@@ -635,9 +635,8 @@ def _rebuild_and_restart(project_root: Path) -> list[str]:
         move = _restart_args(state)
         if move:
             print(f"Quern's default port is now {DEFAULT_SERVER_PORT} (was "
-                  f"{LEGACY_SERVER_PORT}): the server moves there now. Anything "
-                  f"pointed at port {LEGACY_SERVER_PORT} needs updating; MCP clients "
-                  "find the new port by themselves.", flush=True)  # before the restart's output
+                  f"{LEGACY_SERVER_PORT}), so the server is moving off {LEGACY_SERVER_PORT}.",
+                  flush=True)  # before the restart's output
         try:
             restart = subprocess.run(
                 [str(venv_python), "-m", "server", "restart", *move],
@@ -654,6 +653,13 @@ def _rebuild_and_restart(project_root: Path) -> list[str]:
                 print(f"Warning: restart exited {restart.returncode} — "
                       "the server may be down; check `quern status`")
                 failures.append("restart")
+            elif move:
+                # Where it landed, read back rather than promised: a 9110 held
+                # by something else sends it further up (review, #446).
+                landed = (read_state() or {}).get("server_port")
+                print(f"The server is now on port {landed}. Anything pointed at port "
+                      f"{LEGACY_SERVER_PORT} needs updating (`quern url` prints the "
+                      "current address); MCP clients find it by themselves.")
     else:
         print("Server is not running — start it with: quern start")
 
