@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Each agent session has its own active device (#254).** The active device was one value for the whole server, so an agent that left out `udid` got whichever device *any* agent had resolved last, and could tap another agent's simulator without either noticing.
+  - A request from a named session (#453) now reads and sets only that session's active device.
+  - A session that hasn't chosen one never inherits anyone else's: with several devices booted, an unqualified call is refused with "specify udid". It skips the device pool's silent pick, which, measured, chose a USB iPhone over two booted simulators. Two agents that each ask `resolve_device` for "a simulator" can still get the same one: this stops agents redirecting each other, and keeping their devices apart is a later step of #254.
+  - When a session shuts down or erases its device, the shared device is cleared too if it was the same one.
+  - Callers with no session (a plain curl, MCP servers that predate #453) share one active device, as before. That shared device is still "the last one anyone selected", which the menu bar keeps showing.
+  - Each session's choice is kept in `~/.quern/active-device.json` across restarts, so a Claude Code session keeps its device through a `quern update`. A choice is forgotten after a day unused, and at most 64 are kept.
+
 ## [0.25.0-beta.1] - 2026-10-15
 
 ### Added

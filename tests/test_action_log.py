@@ -661,6 +661,9 @@ def _bare_controller():
     controller._DeviceController__active_name_key = None  # noqa: SLF001
     controller._DeviceController__active_name = None  # noqa: SLF001
     controller._DeviceController__active_kind = None  # noqa: SLF001
+    # And the per-session slots (#254), which the property reads.
+    controller._DeviceController__session_slots = {}  # noqa: SLF001
+    controller._DeviceController__session_written = {}  # noqa: SLF001
     controller._ensure_device_type_cached = AsyncMock()
     controller._device_name_cache = {}
     controller._device_type_cache = {}
