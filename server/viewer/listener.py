@@ -15,7 +15,7 @@ import uvicorn
 
 from server.viewer.app import create_viewer_app
 from server.viewer.grants import ViewerGrants
-from server.viewer.protocol import MAX_CONNECTIONS, GuardedH11Protocol
+from server.viewer.protocol import GuardedH11Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +114,7 @@ class ViewerListener:
     lan: Callable[[], str] | None = field(default=None, repr=False)
     _server: uvicorn.Server | None = field(default=None, repr=False)
     _task: asyncio.Task | None = field(default=None, repr=False)
+    _app: Callable | None = field(default=None, repr=False)
 
     @property
     def base_url(self) -> str | None:
@@ -127,6 +128,10 @@ class ViewerListener:
         return f"{base}/v/{token}/" if base else None
 
     async def stop(self) -> None:
+        # Streams first, so they end cleanly rather than being cancelled
+        # mid-write by uvicorn's shutdown, which logs each as a traceback.
+        if self._app is not None:
+            self._app.stop_streams()
         if self._server is not None:
             self._server.should_exit = True
         if self._task is not None:
@@ -158,14 +163,15 @@ async def start_viewer(recordings, settings: dict) -> ViewerListener | None:
         # within a few seconds and refuses past a cap: the listener is
         # reachable from the LAN without a token, and idle sockets held open
         # by anyone there would otherwise use up the whole server's file
-        # descriptors. limit_concurrency is the same cap for requests.
-        http=GuardedH11Protocol, limit_concurrency=MAX_CONNECTIONS,
-        # Open streams never finish, so shutdown cuts them rather than waiting.
-        timeout_graceful_shutdown=1,
-        # The main server owns logging. uvicorn's default log_config would
-        # reconfigure its loggers -- the main server's included -- and an
-        # access log would write every token-bearing URL to the server log.
-        log_config=None, access_log=False))
+        # descriptors. It also keeps the access log off -- every URL here
+        # carries a token -- without uvicorn's access_log=False, which
+        # would silence the main server's access log as well.
+        http=GuardedH11Protocol,
+        # Open streams are ended by stop() first; this bounds what is left.
+        timeout_graceful_shutdown=2,
+        # The main server owns logging: no log_config, no log_level, so
+        # uvicorn configures no logger at all.
+        log_config=None))
     # The main server owns SIGINT/SIGTERM. A second Server installing its own
     # handlers would take shutdown away from it.
     server.capture_signals = contextlib.nullcontext  # type: ignore[method-assign]
@@ -192,6 +198,7 @@ async def start_viewer(recordings, settings: dict) -> ViewerListener | None:
             error += f": {task.exception()}"
         logger.error("Viewer listener: %s", error)
         return ViewerListener(grants=grants, port=None, error=error)
-    viewer = ViewerListener(grants=grants, port=port, lan=lan, _server=server, _task=task)
+    viewer = ViewerListener(grants=grants, port=port, lan=lan, _server=server, _task=task,
+                            _app=app)
     logger.info("Viewer listener on %s:%d; links point at %s", host, port, viewer.base_url)
     return viewer

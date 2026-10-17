@@ -761,8 +761,9 @@ class TestTheLiveListener:
             token = viewer.grants.issue("r1")
             _, writer, head = await _open_stream(port, f"/v/{token}/frames")
             assert head.startswith("HTTP/1.1 200")
-            _, w2, head2 = await _open_stream(port, f"/v/{token}/frames")
+            r2, w2, head2 = await _open_stream(port, f"/v/{token}/frames")
             assert head2.startswith("HTTP/1.1 503"), "the cap"
+            assert b"too many viewers" in await asyncio.wait_for(r2.read(200), 2)
             w2.close()
             writer.close()
             assert await _until(lambda: upstream.closed == 1), "quern-media let go"
@@ -784,9 +785,11 @@ class TestTheLiveListener:
         try:
             heads = []
             for i in range(3):
-                _, w, head = await _open_stream(port, f"/v/{viewer.grants.issue(f'r{i}')}/frames")
+                r, w, head = await _open_stream(port, f"/v/{viewer.grants.issue(f'r{i}')}/frames")
                 writers.append(w)
                 heads.append(head.split("\r\n", 1)[0])
+            # The app's cap, not uvicorn's own 503.
+            assert b"too many viewers" in await asyncio.wait_for(r.read(200), 2)
             assert heads == [
                 "HTTP/1.1 200 OK",
                 "HTTP/1.1 200 OK",
@@ -798,17 +801,28 @@ class TestTheLiveListener:
             await viewer.stop()
             upstream.close()
 
-    async def test_stop_does_not_wait_out_open_streams(self):
+    async def test_stop_ends_open_streams_quickly_and_quietly(self):
+        import logging
+
+        errors = []
+        handler = logging.Handler(logging.ERROR)
+        handler.emit = errors.append
+        logging.getLogger("uvicorn.error").addHandler(handler)
         upstream = _FakeQuernMedia(hold=True)
         viewer, port = await self._viewer(_Recordings(r1=_recording(port=upstream.port)))
         try:
-            _, writer, head = await _open_stream(port, f"/v/{viewer.grants.issue('r1')}/frames")
+            reader, writer, head = await _open_stream(
+                port, f"/v/{viewer.grants.issue('r1')}/frames"
+            )
             assert head.startswith("HTTP/1.1 200")
             began = time.monotonic()
             await viewer.stop()
-            assert time.monotonic() - began < 3.0
+            assert time.monotonic() - began < 1.5, "ended, not waited out"
+            assert await _ends(reader, 1), "the stream was ended"
+            assert [r.getMessage() for r in errors] == [], "no traceback per open stream"
             writer.close()
         finally:
+            logging.getLogger("uvicorn.error").removeHandler(handler)
             upstream.close()
 
     async def test_idle_and_half_sent_connections_are_closed(self, monkeypatch):
@@ -832,6 +846,79 @@ class TestTheLiveListener:
         finally:
             await viewer.stop()
 
+    async def test_a_stray_byte_after_a_response_does_not_hold_the_connection(self, monkeypatch):
+        """uvicorn's keep-alive timer is cancelled by any byte and re-armed
+        only by a response: one byte after a response held the connection for
+        ever, and 64 of them locked everyone out without a token (review)."""
+        from server.viewer import protocol
+
+        monkeypatch.setattr(protocol, "REQUEST_TIMEOUT", 0.3)
+        viewer, port = await self._viewer(_Recordings())
+        try:
+            reader, writer, head = await _open_stream(port, "/v/nope/")
+            assert head.startswith("HTTP/1.1 404")
+            await reader.readexactly(len("not found"))
+            writer.write(b"G")
+            await writer.drain()
+            assert await asyncio.wait_for(reader.read(), 3) == b""
+            writer.close()
+        finally:
+            await viewer.stop()
+
+    async def test_a_silent_upstream_times_out_and_frees_its_slot(self, monkeypatch):
+        from server.viewer import app as app_mod
+
+        monkeypatch.setattr(app_mod, "UPSTREAM_TIMEOUT", 0.3)
+        monkeypatch.setattr(app_mod, "MAX_STREAMS_PER_RECORDING", 1)
+        silent = socket.socket()
+        silent.bind(("127.0.0.1", 0))
+        silent.listen()  # accepts, never answers
+        recs = _Recordings(r1=_recording(port=silent.getsockname()[1]))
+        viewer, port = await self._viewer(recs)
+        try:
+            token = viewer.grants.issue("r1")
+            for _ in range(2):  # the second gets past the cap of 1
+                reader, writer, head = await _open_stream(port, f"/v/{token}/frames")
+                assert head.startswith("HTTP/1.1 502"), head
+                assert b"timed out" in await asyncio.wait_for(reader.read(200), 2)
+                writer.close()
+        finally:
+            await viewer.stop()
+            silent.close()
+
+    @pytest.mark.parametrize("status", [404, 500])
+    async def test_an_upstream_refusal_frees_its_slot(self, monkeypatch, status):
+        from server.viewer import app as app_mod
+
+        monkeypatch.setattr(app_mod, "MAX_STREAMS_PER_RECORDING", 1)
+        upstream = _FakeQuernMedia(status=status)
+        viewer, port = await self._viewer(_Recordings(r1=_recording(port=upstream.port)))
+        try:
+            token = viewer.grants.issue("r1")
+            for _ in range(2):
+                _, writer, head = await _open_stream(port, f"/v/{token}/frames")
+                assert head.startswith("HTTP/1.1 502"), head
+                writer.close()
+            assert len(upstream.paths) == 2, "the second was not refused by the cap"
+        finally:
+            await viewer.stop()
+            upstream.close()
+
+    async def test_an_unreachable_upstream_frees_its_slot(self, monkeypatch):
+        from server.viewer import app as app_mod
+
+        monkeypatch.setattr(app_mod, "MAX_STREAMS_PER_RECORDING", 1)
+        viewer, port = await self._viewer(_Recordings(r1=_recording(port=_free_port())))
+        try:
+            token = viewer.grants.issue("r1")
+            for _ in range(2):
+                reader, writer, head = await _open_stream(port, f"/v/{token}/frames")
+                assert head.startswith("HTTP/1.1 502"), head
+                assert b"not answering" in await asyncio.wait_for(reader.read(200), 2)
+                writer.close()
+        finally:
+            await viewer.stop()
+
     async def test_connections_past_the_cap_are_refused(self, monkeypatch):
         from server.viewer import protocol
 
@@ -839,7 +926,15 @@ class TestTheLiveListener:
         viewer, port = await self._viewer(_Recordings())
         held = []
         try:
-            for _ in range(3):
+            # The last connection the cap admits is answered, not given
+            # uvicorn's own 503 (its limit_concurrency counted itself).
+            for _ in range(2):
+                held.append(await asyncio.open_connection("127.0.0.1", port))
+            _, w, head = await _open_stream(port, "/v/nope/")
+            assert head.startswith("HTTP/1.1 404"), head
+            w.close()
+            await asyncio.sleep(0.2)
+            for _ in range(1):
                 held.append(await asyncio.open_connection("127.0.0.1", port))
             await asyncio.sleep(0.1)
             extra_r, extra_w = await asyncio.open_connection("127.0.0.1", port)
@@ -854,23 +949,26 @@ class TestTheLiveListener:
         finally:
             await viewer.stop()
 
-    async def test_the_listener_leaves_logging_alone(self):
+    async def test_the_listener_leaves_logging_alone(self, monkeypatch):
+        """uvicorn's access_log=False empties the process-wide uvicorn.access
+        logger -- the main server's -- so the viewer must not use it (review).
+        Set to a known state first: the test must not depend on what ran
+        before it."""
         import logging
 
         from server.viewer.protocol import GuardedH11Protocol
 
+        records = []
+        handler = logging.Handler()
+        handler.emit = records.append
+        access = logging.getLogger("uvicorn.access")
+        monkeypatch.setattr(access, "handlers", [handler])
+        monkeypatch.setattr(access, "propagate", True)
+        monkeypatch.setattr(access, "level", logging.INFO)
         names = ("uvicorn", "uvicorn.error", "uvicorn.access", "")
-        before = {
-            n: (
-                logging.getLogger(n).level,
-                list(logging.getLogger(n).handlers),
-                logging.getLogger(n).propagate,
-            )
-            for n in names
-        }
-        viewer, _ = await self._viewer(_Recordings())
-        try:
-            after = {
+
+        def state():
+            return {
                 n: (
                     logging.getLogger(n).level,
                     list(logging.getLogger(n).handlers),
@@ -878,11 +976,19 @@ class TestTheLiveListener:
                 )
                 for n in names
             }
-            assert after == before
+
+        before = state()
+        viewer, port = await self._viewer(_Recordings())
+        try:
+            assert state() == before
             cfg = viewer._server.config
-            assert cfg.access_log is False and cfg.log_config is None
-            assert cfg.http is GuardedH11Protocol and cfg.limit_concurrency
-            assert cfg.timeout_graceful_shutdown == 1
+            assert cfg.log_config is None and cfg.log_level is None
+            assert cfg.http is GuardedH11Protocol and cfg.timeout_graceful_shutdown == 2
+            _, w, head = await _open_stream(port, "/v/secret-token/")
+            assert head.startswith("HTTP/1.1 404")
+            w.close()
+            await asyncio.sleep(0.1)
+            assert records == [], "no access line: every viewer URL carries a token"
         finally:
             await viewer.stop()
 

@@ -11,10 +11,16 @@ So two limits, before anything else runs:
 
 - a connection past MAX_CONNECTIONS is closed on arrival, holding nothing;
 - a connection that has not sent a complete request within REQUEST_TIMEOUT
-  is closed, which ends both idle sockets and slowloris drip-feeding.
+  -- of opening, or of its last response -- is closed, which ends idle
+  sockets and slowloris drip-feeding. Between requests too: uvicorn's
+  keep-alive timer is cancelled by any byte and re-armed only by a
+  response, so one stray byte after a response held a connection for ever
+  (review). A stream in progress is not timed: it is meant to be long.
 
-After its first request a connection is uvicorn's: a viewer's stream is
-meant to be long, and keep-alive idling is bounded by timeout_keep_alive.
+And no access log, decided here rather than with uvicorn's
+`access_log=False`: that empties the process-wide `uvicorn.access` logger,
+which is the main server's too (review). Every viewer URL carries a token,
+so none is ever logged.
 """
 
 from __future__ import annotations
@@ -34,6 +40,18 @@ class GuardedH11Protocol(H11Protocol):
     _refused = False
     _request_timer = None
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.access_log = False
+
+    def _arm(self) -> None:
+        if self._request_timer is not None:
+            self._request_timer.cancel()
+        self._request_timer = self.loop.call_later(REQUEST_TIMEOUT, self._no_request)
+
+    def _between_requests(self) -> bool:
+        return self.cycle is None or self.cycle.response_complete
+
     def connection_made(self, transport):  # type: ignore[override]
         if len(self.connections) >= MAX_CONNECTIONS:
             # Before super(): nothing is registered, so connection_lost below
@@ -42,19 +60,25 @@ class GuardedH11Protocol(H11Protocol):
             transport.close()
             return
         super().connection_made(transport)
-        self._request_timer = self.loop.call_later(REQUEST_TIMEOUT, self._no_request)
+        self._arm()
 
     def _no_request(self) -> None:
         self._request_timer = None
-        if self.cycle is None and self.transport is not None and not self.transport.is_closing():
+        if (self._between_requests() and self.transport is not None
+                and not self.transport.is_closing()):
             self.transport.close()
 
     def handle_events(self) -> None:
         super().handle_events()
         # A request's headers are complete once uvicorn has started its cycle.
-        if self.cycle is not None and self._request_timer is not None:
+        if not self._between_requests() and self._request_timer is not None:
             self._request_timer.cancel()
             self._request_timer = None
+
+    def on_response_complete(self) -> None:
+        super().on_response_complete()
+        if self.transport is not None and not self.transport.is_closing():
+            self._arm()
 
     def connection_lost(self, exc):  # type: ignore[override]
         if self._refused:

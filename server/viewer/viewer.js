@@ -180,8 +180,11 @@ let current = null;
 // for as long as the screen stayed still), so ask until there is a picture.
 // The server allows one a second per recording, shared by everyone watching:
 // 429 says when to ask again.
+// One loop per connection: a reconnect ends the last one's.
+let connection = 0;
 async function askForKeyframe() {
-  for (let i = 0; i < 5 && !picture; i += 1) {
+  const mine = ++connection;
+  for (let i = 0; i < 5 && !picture && mine === connection; i += 1) {
     let res;
     try { res = await fetch("keyframe", { method: "POST" }); } catch { return; }
     if (res.status !== 204 && res.status !== 429) return;   // not filming, or gone

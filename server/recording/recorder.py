@@ -909,6 +909,9 @@ class RecordingManager:
         last = self._viewer_keyframe_at.get(recording_id)
         if last is not None and now - last < VIEWER_KEYFRAME_INTERVAL:
             return None
+        # Pruned as it goes: a server runs for weeks of recordings.
+        self._viewer_keyframe_at = {r: t for r, t in self._viewer_keyframe_at.items()
+                                    if now - t < VIEWER_KEYFRAME_INTERVAL}
         self._viewer_keyframe_at[recording_id] = now
         return await self._video.keyframe(rec._segment, counted=False)
 

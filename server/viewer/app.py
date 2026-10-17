@@ -61,6 +61,11 @@ MAX_STREAMS = 32
 REVALIDATE_SECONDS = 1.0
 #: Of a non-200 from quern-media, at most this much is passed on.
 UPSTREAM_ERROR_BYTES = 300
+#: How long quern-media may take to answer with headers, or with an error's
+#: body. Bounded because the stream's slot is held meanwhile: a port that
+#: accepts and never answers held one for ever, through the viewer leaving
+#: and the link being revoked (review).
+UPSTREAM_TIMEOUT = 5.0
 
 #: The page loads its script, the muxer and jmuxer from this origin, reads the
 #: stream with fetch, and plays it in <video> from a MediaSource blob: URL.
@@ -88,6 +93,7 @@ def create_viewer_app(*, recordings, grants, allowed_hosts: Callable[[], set[str
     request, so a Mac that moves networks keeps accepting its own address."""
     loopback = {"localhost", "127.0.0.1", "::1"}
     streams: Counter[str] = Counter()
+    stopping = asyncio.Event()
 
     def recording(request: Request) -> str | None:
         return grants.recording_for(request.path_params.get("token", ""))
@@ -141,22 +147,21 @@ def create_viewer_app(*, recordings, grants, allowed_hosts: Callable[[], set[str
                 await client.aclose()
 
         try:
-            upstream = await client.send(
+            upstream = await asyncio.wait_for(client.send(
                 client.build_request("GET", f"http://127.0.0.1:{port}/frames",
-                                     params={"source": udid}), stream=True)
+                                     params={"source": udid}), stream=True), UPSTREAM_TIMEOUT)
             if upstream.status_code != 200:
                 # Read no more than is passed on, and never answered as 404:
                 # the page reads 404 as "this link has expired".
-                body = b""
-                async for chunk in upstream.aiter_raw():
-                    body += chunk
-                    if len(body) >= UPSTREAM_ERROR_BYTES:
-                        break
-                text = body[:UPSTREAM_ERROR_BYTES].decode("utf-8", "replace").strip()
+                body = await asyncio.wait_for(_head_of(upstream), UPSTREAM_TIMEOUT)
+                text = body.decode("utf-8", "replace").strip()
                 await release()
                 return PlainTextResponse(
                     f"quern-media answered {upstream.status_code}" + (f": {text}" if text else ""),
                     status_code=502)
+        except TimeoutError:
+            await release()
+            return PlainTextResponse("quern-media is not answering: timed out", status_code=502)
         except httpx.HTTPError as e:
             await release()
             return PlainTextResponse(f"quern-media is not answering: {type(e).__name__}",
@@ -168,20 +173,24 @@ def create_viewer_app(*, recordings, grants, allowed_hosts: Callable[[], set[str
         async def relay():
             chunks = upstream.aiter_raw().__aiter__()
             pending: asyncio.Future | None = None
+            stop = asyncio.ensure_future(stopping.wait())
             checked = time.monotonic()
             try:
-                while True:
+                while not stopping.is_set():
                     if pending is None:
                         pending = asyncio.ensure_future(chunks.__anext__())
-                    done, _ = await asyncio.wait({pending}, timeout=REVALIDATE_SECONDS)
+                    done, _ = await asyncio.wait({pending, stop}, timeout=REVALIDATE_SECONDS,
+                                                 return_when=asyncio.FIRST_COMPLETED)
+                    if stopping.is_set():
+                        return
                     now = time.monotonic()
-                    if not done or now - checked >= REVALIDATE_SECONDS:
+                    if pending not in done or now - checked >= REVALIDATE_SECONDS:
                         # A still screen sends nothing for seconds, so this
                         # runs on a timer and not only between chunks.
                         checked = now
                         if grants.recording_for(token) != rec_id:
                             return
-                    if not done:
+                    if pending not in done:
                         continue
                     try:
                         chunk = pending.result()
@@ -190,11 +199,12 @@ def create_viewer_app(*, recordings, grants, allowed_hosts: Callable[[], set[str
                     pending = None
                     yield chunk
             finally:
-                if pending is not None and not pending.done():
-                    pending.cancel()
+                stop.cancel()
+                if pending is not None:
+                    if not pending.done():
+                        pending.cancel()
                     with contextlib.suppress(BaseException):
-                        await pending
-
+                        await pending           # and retrieves its exception
         return _Relay(relay(), release, media_type="application/octet-stream",
                       headers={"Cache-Control": "no-store"})
 
@@ -249,7 +259,21 @@ def create_viewer_app(*, recordings, grants, allowed_hosts: Callable[[], set[str
             return
         await app(scope, receive, send)
 
+    def stop_streams() -> None:
+        """End every open stream, for the listener's shutdown."""
+        stopping.set()
+
+    guarded.stop_streams = stop_streams  # type: ignore[attr-defined]
     return guarded
+
+
+async def _head_of(upstream: httpx.Response) -> bytes:
+    body = b""
+    async for chunk in upstream.aiter_raw():
+        body += chunk
+        if len(body) >= UPSTREAM_ERROR_BYTES:
+            break
+    return body[:UPSTREAM_ERROR_BYTES]
 
 
 class _Relay(StreamingResponse):
