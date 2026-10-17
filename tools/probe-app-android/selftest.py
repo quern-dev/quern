@@ -18,7 +18,7 @@ import urllib.request
 from pathlib import Path
 
 PKG = "com.quern.probe"
-BASE = "http://localhost:9100/api/v1"
+BASE = "http://localhost:9110/api/v1"
 
 _passed: list[str] = []
 _failed: list[str] = []

@@ -14,6 +14,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from server.lifecycle.ports import DEFAULT_SERVER_PORT
+
 logger = logging.getLogger(__name__)
 
 # Honours QUERN_STATE_DIR, so redirecting it redirects *everything* under
@@ -38,7 +40,7 @@ class ServerConfig:
     """Configuration for the Quern debug log server."""
 
     host: str = "0.0.0.0"
-    port: int = 9100
+    port: int = DEFAULT_SERVER_PORT
     ring_buffer_size: int = 10_000
     #: What `device_id` a source gets when it does not know which device it
     #: is reading. Empty, not a name: a sentinel that looks like a device

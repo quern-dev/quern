@@ -4,7 +4,7 @@
  * Quern — MCP Server
  *
  * Thin wrapper that translates MCP tool calls into HTTP requests
- * to the Python log server running on localhost:9100.
+ * to the Python log server running on localhost:9110.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";

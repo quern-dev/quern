@@ -17,7 +17,7 @@ AI Agent (Claude Code, Cursor, etc.)
     │
     ├── via MCP ──→ mcp/          (thin TypeScript stdio wrapper)
     │                  │
-    └── via HTTP ──→ server/       (Python FastAPI, port 9100)
+    └── via HTTP ──→ server/       (Python FastAPI, port 9110)
                        │
                        ├── device/      Device control: the controllers, with backends in ios/
                        │                (simctl, sim-bridge, idb, WDA, devicectl,
@@ -418,7 +418,7 @@ reader to assume it was done.
 
 **An isolated `QUERN_STATE_DIR` does not isolate ports.** `quern start` takes
 its port back from any quern-looking process holding it, healthy or not, and
-reads no state to decide (#405) -- so a test server on 9100 stops the daemon
+reads no state to decide (#405) -- so a test server on the default port (9110) stops the daemon
 of whoever is at the keyboard. Pass `--port` and `--proxy-port`.
 
 **For the CLI there is a script.** `scripts/cli-live-test.sh [ref]` runs every

@@ -133,7 +133,7 @@ export function registerLogTools(server: McpServer): void {
                   "",
                   "Troubleshooting:",
                   "1. Check if server is already running:",
-                  "   curl http://127.0.0.1:9100/health",
+                  "   curl http://127.0.0.1:9110/health",
                   "",
                   "2. Try starting manually:",
                   "   cd ~/Dev/quern-debug-server",

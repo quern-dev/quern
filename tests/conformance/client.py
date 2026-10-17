@@ -28,7 +28,7 @@ import httpx
 #: Where a real install keeps its state, independent of QUERN_STATE_DIR.
 REAL_QUERN_DIR = Path.home() / ".quern"
 
-DEFAULT_URL = "http://127.0.0.1:9100"
+DEFAULT_URL = "http://127.0.0.1:9110"  # 9100 before #446, now WDA's and node_exporter's
 
 #: Endpoints documented as public. Used by the auth tests, and by the client to
 #: know when omitting the bearer token is not a bug.
@@ -137,7 +137,9 @@ def _url_from_port(state: dict | None) -> str | None:
     """Reconstruct a URL when state.json records only a port."""
     if not state:
         return None
-    port = state.get("port")
+    # `server_port` is what the server writes; `port` was never written, so
+    # this always fell through to the default URL (CodeRabbit on #467).
+    port = state.get("server_port") or state.get("port")
     if not port:
         return None
     return f"http://127.0.0.1:{port}"

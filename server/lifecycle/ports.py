@@ -8,7 +8,14 @@ import socket
 import subprocess
 import time
 
-DEFAULT_SERVER_PORT = 9100
+#: 9110, not 9100 (#446): WDA's MJPEG server and Prometheus node_exporter
+#: both default to 9100, and the documented port was wrong on exactly the
+#: machines that ran either. The proxy stays on 9101 -- devices are pointed at
+#: it by hand, and nothing claims it.
+DEFAULT_SERVER_PORT = 9110
+#: The default before #446. `quern update` moves a server still on it to the
+#: new default once (`updater._restart_args`); nothing else reads it.
+LEGACY_SERVER_PORT = 9100
 DEFAULT_PROXY_PORT = 9101
 MAX_PORT_SCAN = 20
 

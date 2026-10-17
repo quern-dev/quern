@@ -863,7 +863,8 @@ def create_app(
 def _add_server_flags(parser: argparse.ArgumentParser) -> None:
     """Add shared server flags to a subcommand parser."""
     parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=None, help="Bind port (default: 9100)")
+    parser.add_argument("--port", type=int, default=None,
+                        help=f"Bind port (default: {DEFAULT_SERVER_PORT})")
     parser.add_argument("--process", "-p", default=None, help="Filter logs to this process name")
     parser.add_argument(
         "--buffer-size", type=int, default=10_000, help="Ring buffer size (default: 10000)"
@@ -934,7 +935,7 @@ def _keep_running_ports(args: argparse.Namespace) -> argparse.Namespace:
     to move, and this must not override it.
 
     Called before `_resolve_args`, which is the last moment "the user did not
-    say" is still distinguishable from "the user said 9100".
+    say" is still distinguishable from "the user said the default".
     """
     state = read_state()
     if not state:
@@ -1041,7 +1042,14 @@ def _cmd_start(args: argparse.Namespace) -> None:
     # default range shifted by #446 would otherwise reach it.
     from server.config import viewer_settings
     viewer_port = viewer_settings()["port"]
-    if not reclaim_port(server_port, args.host):
+    if server_port == viewer_port:
+        # The viewer's port is never the server's, asked for or not.
+        print(f"Port {server_port} is the viewer's (viewer.bind)")
+        server_port = find_available_port(
+            server_port + 1, host=args.host, exclude={args.proxy_port, viewer_port},
+        )
+        print(f"Using port {server_port} instead (override with --port)")
+    elif not reclaim_port(server_port, args.host):
         print(f"Port {server_port} is in use by another application")
         server_port = find_available_port(
             server_port + 1, host=args.host, exclude={args.proxy_port, viewer_port},
@@ -1051,7 +1059,19 @@ def _cmd_start(args: argparse.Namespace) -> None:
     proxy_port = args.proxy_port
     enable_proxy = not args.no_proxy
     if enable_proxy:
-        if not reclaim_port(proxy_port, args.host):
+        # Never the server's port. Neither is bound yet, so reclaim_port alone
+        # found it free for both: a restart that moved the server to 9110
+        # while the proxy had scanned up to 9110 put the two on one port
+        # (review, #446).
+        if proxy_port == server_port or proxy_port == viewer_port:
+            print(f"Proxy port {proxy_port} is taken by quern's server or viewer")
+            proxy_port = find_available_port(
+                proxy_port + 1,
+                host=args.host,
+                exclude={server_port, viewer_port},
+            )
+            print(f"Using proxy port {proxy_port} instead (override with --proxy-port)")
+        elif not reclaim_port(proxy_port, args.host):
             print(f"Proxy port {proxy_port} is in use by another application")
             proxy_port = find_available_port(
                 proxy_port + 1,
@@ -1346,7 +1366,7 @@ def _cmd_status(args: argparse.Namespace) -> None:
         print("No server running")
         sys.exit(1)
 
-    port = state.get("server_port", 9100)
+    port = state.get("server_port", DEFAULT_SERVER_PORT)
     if not is_server_healthy(port):
         print("Server state file exists but server is not responding")
         print("  State file may be stale. Run 'quern-debug-server stop' to clean up.")
@@ -1394,7 +1414,7 @@ def _fetch_device_tools() -> tuple[dict | None, str]:
     if not state:
         return None, "no server running (start it with `quern start`)"
 
-    port = state.get("server_port", 9100)
+    port = state.get("server_port", DEFAULT_SERVER_PORT)
     if not is_server_healthy(port):
         return None, f"server on port {port} is not responding on /health"
 
@@ -2069,7 +2089,7 @@ def _cmd_enable_local_capture(
 
     # Restart server if running
     state = read_state()
-    if state and is_server_healthy(state.get("server_port", 9100)):
+    if state and is_server_healthy(state.get("server_port", DEFAULT_SERVER_PORT)):
         print("Restarting server to apply changes...")
         pid = state.get("pid")
         if pid:
@@ -2094,7 +2114,7 @@ def _cmd_disable_local_capture() -> None:
 
     # Restart server if running
     state = read_state()
-    if state and is_server_healthy(state.get("server_port", 9100)):
+    if state and is_server_healthy(state.get("server_port", DEFAULT_SERVER_PORT)):
         print("Restarting server to apply changes...")
         pid = state.get("pid")
         if pid:
@@ -2294,7 +2314,7 @@ def cli() -> None:
         parser.error("unrecognised arguments: " + " ".join(remaining))
 
     # Fill port defaults. A restart first adopts whatever the running server
-    # is on, since by the time defaults are filled in, "not given" and "9100"
+    # is on, since by the time defaults are filled in, "not given" and "the default"
     # are the same value.
     if hasattr(args, "port"):
         if args.command == "restart":

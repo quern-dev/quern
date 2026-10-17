@@ -348,7 +348,7 @@ It runs in a sandbox with its own `HOME` and `QUERN_STATE_DIR` and stubs for
 nothing outside a temporary directory. One run takes three or four minutes,
 mostly building venvs and the MCP wrapper, and the default does four of them —
 about a quarter of an hour. It does start a server, which takes the first free
-port from 9100 as usual.
+port from 9110 as usual.
 
 The cases, each against the tree the update produced:
 

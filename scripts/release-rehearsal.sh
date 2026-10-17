@@ -154,7 +154,7 @@ SKIPS_FILE="$WORK/skips"
 export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$HOME/.cache/pip}"
 export npm_config_cache="${npm_config_cache:-$HOME/.npm}"
 
-# Well clear of 9100/9101. See the note in case_gui_start: the default ports
+# Well clear of the defaults (9110/9101; 9100 before #446). See the note in case_gui_start: the default ports
 # are the developer's, and quern reclaims a port by killing whatever quern-ish
 # process holds it.
 REHEARSAL_PORT=9187
@@ -392,7 +392,7 @@ case_gui_start() {
   # port: it looks up whatever holds it and, if the argv looks like a quern,
   # SIGTERMs and then SIGKILLs it (server/lifecycle/ports.py). A separate
   # QUERN_STATE_DIR does not enter into that decision, so a sandbox server
-  # taking the default 9100 would kill the *developer's* running server, and
+  # taking the default port would kill the *developer's* running server, and
   # its proxy on 9101. No stub can cover it -- the kill is os.kill, in process.
   set +e
   env -i \
@@ -996,8 +996,9 @@ step "A git install updating while its server is running"
 # to 9100 -- whatever port the server was actually on. So a rehearsal that let
 # the restart run unimpeded would kill the developer's own server.
 #
-# The fix is a decoy: hold 9100 and 9101 with plain listeners that are not
-# quern. `reclaim_port` then reports them busy rather than killing them, and
+# The fix is a decoy: hold the default ports with plain listeners that are not
+# quern -- 9110 and 9101, and 9100 too, which is the default of the release
+# being updated from (#446). `reclaim_port` then reports them busy rather than killing them, and
 # the restarted server scans upward, exactly as it would beside any other
 # application. If the ports cannot be held -- because a real quern already has
 # them -- the case refuses to run rather than taking that server down.
@@ -1014,7 +1015,7 @@ import socket, sys, time
 # and finds the real listener) killed the developer's server. Measured: it
 # did, twice.
 held = []
-for port in (9100, 9101):
+for port in (9100, 9101, 9110):
     s = socket.socket()
     try:
         s.bind(("127.0.0.1", port))
@@ -1047,7 +1048,7 @@ release_default_ports() {
 # ports, and put back afterwards.
 #
 # That case tests `quern start` reclaiming its port, which means it has to use
-# 9100/9101 -- a `QUERN_STATE_DIR` does not enter into the reclaim decision, so
+# the default ports -- a `QUERN_STATE_DIR` does not enter into the reclaim decision, so
 # the case cannot be moved onto spare ports without testing something else. It
 # used to skip whenever a server held them, which on the maintainer's machine
 # was always, so the case that most directly covers "an update while the server
@@ -1063,15 +1064,45 @@ release_default_ports() {
 # The in-memory flow store is lost. `config.json` restores the local-capture
 # list and `active-device.json` the active device, so nothing else is.
 DEV_SERVER_STOPPED=""
+#: The port the developer's server was on, so it comes back there. A plain
+#: `quern start` would take the default -- 9110 since #446 -- and move a server
+#: that was on 9100 in the middle of a rehearsal, which is the unannounced move
+#: `quern update` exists to avoid.
+DEV_SERVER_PORT=""
+DEV_PROXY_PORT=""
 #: Sticky, unlike DEV_SERVER_STOPPED, which the restore clears. The final
 #: safety check runs long afterwards and needs to know a restart happened at
 #: all, not whether one is outstanding.
 DEV_SERVER_RESTARTED=""
 
+# The developer's server port, from ~/.quern/state.json: 9100 or 9110
+# depending on which release they run, or whatever it settled on.
+developer_server_port() {
+  _developer_state_port server_port 9110
+}
+
+# And its proxy's, so the restore puts that back too: a proxy that had scanned
+# off 9101 would otherwise come back on 9101 (review, #446).
+developer_proxy_port() {
+  _developer_state_port proxy_port 9101
+}
+
+_developer_state_port() {
+  python3 -c '
+import json, os, sys
+key, fallback = sys.argv[1], sys.argv[2]
+try:
+    print(int(json.load(open(os.path.expanduser("~/.quern/state.json"))).get(key) or fallback))
+except Exception:
+    print(fallback)' "$1" "$2" 2>/dev/null
+}
+
 stop_developer_server() {
   DEV_SERVER_STOPPED=""
+  DEV_SERVER_PORT="$(developer_server_port)"
+  DEV_PROXY_PORT="$(developer_proxy_port)"
   local pid
-  pid="$(lsof -nP -iTCP:9100 -sTCP:LISTEN -t 2>/dev/null | head -1)"
+  pid="$(lsof -nP -iTCP:"$DEV_SERVER_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)"
   [[ -z "$pid" ]] && return 0          # free already; nothing to do
 
   # Identify before acting. state.json is the only thing that says the listener
@@ -1085,15 +1116,15 @@ try:
 except Exception:
     print("")' 2>/dev/null)"
   if [[ -z "$statepid" || "$pid" != "$statepid" ]]; then
-    printf "  note: %s holds 9100 and is not the quern in ~/.quern/state.json — leaving it alone\n" "$pid"
+    printf "  note: %s holds %s and is not the quern in ~/.quern/state.json — leaving it alone\n" "$pid" "$DEV_SERVER_PORT"
     return 1
   fi
 
-  printf "  stopping your quern (pid %s) so the running-server case can use 9100/9101\n" "$pid"
+  printf "  stopping your quern (pid %s, port %s) so the running-server case can hold the default ports\n" "$pid" "$DEV_SERVER_PORT"
   "$HOME/.local/bin/quern" stop >/dev/null 2>&1 || true
   sleep 2
-  if [[ -n "$(lsof -nP -iTCP:9100 -sTCP:LISTEN -t 2>/dev/null)" ]]; then
-    printf "  warning: 9100 is still held after stop; not proceeding\n"
+  if [[ -n "$(lsof -nP -iTCP:"$DEV_SERVER_PORT" -sTCP:LISTEN -t 2>/dev/null)" ]]; then
+    printf "  warning: %s is still held after stop; not proceeding\n" "$DEV_SERVER_PORT"
     return 1
   fi
   DEV_SERVER_STOPPED=1
@@ -1121,9 +1152,9 @@ restore_developer_server() {
   local root
   root="$(sed -n 's/^# Points to: //p' "$HOME/.local/bin/quern" 2>/dev/null | head -1)"
   [[ -d "$root" ]] || root="$HOME"
-  ( cd "$root" && "$HOME/.local/bin/quern" start ) >/dev/null 2>&1 || true
+  ( cd "$root" && "$HOME/.local/bin/quern" start --port "${DEV_SERVER_PORT:-9110}" --proxy-port "${DEV_PROXY_PORT:-9101}" ) >/dev/null 2>&1 || true
   sleep 3
-  if curl -fsS --max-time 10 http://127.0.0.1:9100/health >/dev/null 2>&1; then
+  if curl -fsS --max-time 10 "http://127.0.0.1:${DEV_SERVER_PORT:-9110}/health" >/dev/null 2>&1; then
     ok "your server was stopped for this case and is back"
   else
     bad "your server was stopped for this case and did NOT come back — start it with: quern start"
@@ -1135,7 +1166,7 @@ restore_developer_server() {
   # is broken, which is this repo's standing failure shape. Check where it is
   # actually standing, not just that it replies.
   local pid cwd
-  pid="$(lsof -nP -iTCP:9100 -sTCP:LISTEN -t 2>/dev/null | head -1)"
+  pid="$(lsof -nP -iTCP:"${DEV_SERVER_PORT:-9110}" -sTCP:LISTEN -t 2>/dev/null | head -1)"
   cwd="$(lsof -a -p "${pid:-0}" -d cwd -Fn 2>/dev/null | grep '^n' | sed 's/^n//')"
   if [[ -n "$cwd" && -d "$cwd" ]]; then
     ok "and is rooted in a directory that exists ($cwd)"
@@ -1156,7 +1187,7 @@ case_running_server_update() {
     # Killing an unidentified listener is not something a release script should
     # do, so this still declines -- but it now names what is in the way rather
     # than assuming it is yours.
-    skip "running-server update: 9100/9101 are held by a process that is not the quern in ~/.quern/state.json — $(lsof -nP -iTCP:9100 -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1, $2}'). Free them and re-run to exercise it."
+    skip "running-server update: a default port (9100, 9101 or 9110) is held by a process that is not the quern in ~/.quern/state.json — $(lsof -nP -iTCP:9100 -iTCP:9101 -iTCP:9110 -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1, $2, $9}'). Free it and re-run to exercise it."
     return 0
   fi
 
@@ -1790,7 +1821,7 @@ elif [[ -n "$DEV_SERVER_RESTARTED" ]]; then
   # trusts at the end of a run -- and a guard that cannot tell a deliberate
   # restart from a kill would either cry wolf on every release or, if someone
   # silenced it, stop noticing the kill it exists for.
-  if curl -fsS --max-time 10 http://127.0.0.1:9100/health >/dev/null 2>&1; then
+  if curl -fsS --max-time 10 "http://127.0.0.1:${DEV_SERVER_PORT:-9110}/health" >/dev/null 2>&1; then
     ok "your own server was stopped for the running-server case and is serving again"
   else
     bad "your own server was stopped for the running-server case and is NOT back — run: quern start"

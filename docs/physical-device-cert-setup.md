@@ -28,7 +28,7 @@ Step-by-step WDA UI automation flow for installing the mitmproxy CA cert and con
 
 ```python
 local_ip   = proxy_status()["local_ip"]   # fallback default-route IP
-cert_url   = f"http://{local_ip}:9100/api/v1/proxy/cert"
+cert_url   = f"http://{local_ip}:9110/api/v1/proxy/cert"
 # NOTE: The actual proxy host used in Wi-Fi settings is derived by subnet
 # matching in record_device_proxy_config — you don't need to compute it manually.
 ```
@@ -166,7 +166,7 @@ regardless of routing tables or interface names.
 
 | Port | What it is |
 |------|------------|
-| `9100` | Quern API server (cert download, status, etc.) |
+| `9110` | Quern API server (cert download, status, etc.) |
 | `9101` | mitmproxy proxy listener (device points here for traffic capture) |
 
-The cert download uses **9100**. The device's Wi-Fi proxy points to **9101**.
+The cert download uses **9110** (9100 before #446). The device's Wi-Fi proxy points to **9101**.

@@ -129,7 +129,8 @@ on-device MediaCodec encoder in `quern-driver.apk` removes both.
   MJPEG endpoint above; a **single-instance, lock-guarded WDA supervisor**
   that relaunches on death and reports per-device health including
   `unlock-required`; and sequential per-device port assignment (8100+ for
-  control, 9100+ for video) persisted alongside the device list.
+  control, 9100+ for video) persisted alongside the device list. (Superseded: 9100 is quern's
+  old port; #445 put simulator video at 8300+.)
 
   The supervisor is the interesting one. Quern currently has no WDA
   supervision at all, which is why a runner dying leaves every subsequent

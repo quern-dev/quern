@@ -67,7 +67,7 @@ handing that back gets `Invalid device` from simctl.
 
 | Variable | Effect |
 |---|---|
-| `QUERN_SERVER_URL` | Target another host or port. Default: `~/.quern/state.json`, else `http://127.0.0.1:9100` |
+| `QUERN_SERVER_URL` | Target another host or port. Default: `~/.quern/state.json`, else `http://127.0.0.1:9110` |
 | `QUERN_API_KEY` | Override the key. Default: `~/.quern/api-key` |
 | `QUERN_CONFORMANCE_PHYSICAL` | Enable physical-device tests |
 | `QUERN_CONFORMANCE_DESTRUCTIVE` | Enable host-mutating tests |
@@ -86,7 +86,7 @@ maps the answer onto four **roles**, and prints a block like:
 
 ```text
 Quern conformance environment
-  server    http://127.0.0.1:9100  (v0.17.0, via default + ~/.quern/api-key)
+  server    http://127.0.0.1:9110  (v0.17.0, via default + ~/.quern/api-key)
   auth      ok
   tools     adb, devicectl, idb, pymobiledevice3, simctl, tunneld
   missing   sim_bridge

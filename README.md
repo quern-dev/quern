@@ -11,7 +11,7 @@ No cloud. No telemetry. Just a daemon on your Mac that bridges the gap between "
 ```
 Simulator / Device
     │
-Quern (localhost:9100)
+Quern (localhost:9110)
     ├── Log capture (device, simulator, crash reports, build output)
     ├── Network proxy (intercept, mock, replay HTTP traffic)
     ├── Device control (boot, screenshot, tap, swipe, type)
@@ -213,15 +213,15 @@ The MCP server auto-discovers the running server via `state.json` — no URL or 
 API_KEY=$(cat ~/.quern/api-key)
 
 # Health check (no auth)
-curl http://localhost:9100/health
+curl http://localhost:9110/health
 
 # Tail recent logs
 curl -H "Authorization: Bearer $API_KEY" \
-     "http://localhost:9100/api/v1/logs/query?limit=20&level=error"
+     "http://localhost:9110/api/v1/logs/query?limit=20&level=error"
 
 # Get an LLM-optimized summary
 curl -H "Authorization: Bearer $API_KEY" \
-     "http://localhost:9100/api/v1/logs/summary?window=5m"
+     "http://localhost:9110/api/v1/logs/summary?window=5m"
 ```
 
 ## Update Checks
@@ -515,8 +515,8 @@ port are in `~/.quern/state.json`.
 
 ```bash
 KEY=$(cat ~/.quern/api-key)
-curl -s localhost:9100/health                                    # public
-curl -s -H "Authorization: Bearer $KEY" localhost:9100/api/v1/logs/summary
+curl -s localhost:9110/health                                    # public
+curl -s -H "Authorization: Bearer $KEY" localhost:9110/api/v1/logs/summary
 ```
 
 ## Architecture

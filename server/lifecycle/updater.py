@@ -28,6 +28,7 @@ from pathlib import Path
 from server.config import CONFIG_DIR
 from server.lifecycle import releases
 from server.lifecycle.invocation import run_it_yourself
+from server.lifecycle.ports import DEFAULT_SERVER_PORT, LEGACY_SERVER_PORT
 from server.lifecycle.update_check import ENDPOINT
 from server.lifecycle.update_check import TIMEOUT as CHECK_TIMEOUT
 
@@ -558,6 +559,65 @@ def _update_via_tarball(project_root: Path) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _restart_args(state: dict) -> list[str]:
+    """Arguments for the update's restart: empty to stay put, or `--port` to
+    move a server off the old default port (#446).
+
+    `quern restart` keeps the port the running server is on, deliberately --
+    an update that silently moved the port broke every script that knew it.
+    So the move from 9100 to 9110 happens here, once, during an update the
+    user asked for, and is said out loud, instead of whenever the server
+    next happens to start fresh. A server on any other port was put there --
+    by `--port`, or by the scan past a busy 9100 -- and stays.
+
+    The target is the first port from 9110 that nothing listens on, skipping
+    the proxy's and the viewer's, so the move never takes a port from a live
+    server.
+    """
+    if state.get("server_port") != LEGACY_SERVER_PORT:
+        return []
+    # The first port from the new default that nothing is listening on --
+    # not 9110 unconditionally. Asked for explicitly, a held port goes to
+    # `reclaim_port`, which kills any quern-looking holder: another install, or
+    # a worktree's scratch server, would be taken down by this update
+    # (CodeRabbit on #467). Nothing free in range: stay put this time.
+    from server.config import viewer_settings
+    from server.lifecycle.ports import MAX_PORT_SCAN
+
+    avoid = {state.get("proxy_port"), viewer_settings().get("port")}
+    for port in range(DEFAULT_SERVER_PORT, DEFAULT_SERVER_PORT + MAX_PORT_SCAN):
+        if port not in avoid and not _listening(port):
+            return ["--port", str(port)]
+    return []
+
+
+def _listening(port: int) -> bool:
+    """Whether anything listens on the port, on any local address.
+
+    The question `reclaim_port` will act on, asked the same way: it kills a
+    holder `lsof` names, on whatever address, so a listener `lsof` sees is
+    held -- a server bound to a LAN address alone accepts no loopback
+    connection, and was missed (CodeRabbit on #467). A loopback connect as
+    well, for when lsof cannot answer. Never a bind: binding 127.0.0.1 with
+    SO_REUSEADDR succeeds while a server holds 0.0.0.0, which is how the
+    rehearsal once decided a port was free and killed the server on it."""
+    import socket
+
+    from server.lifecycle.ports import _get_pid_on_port
+
+    if _get_pid_on_port(port) is not None:
+        return True
+    for family, host in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as s:
+                s.settimeout(0.5)
+                if s.connect_ex((host, port)) == 0:
+                    return True
+        except OSError:
+            continue
+    return False
+
+
 def _rebuild_and_restart(project_root: Path) -> list[str]:
     """Reinstall deps, rebuild MCP, run setup, restart server if running.
 
@@ -612,12 +672,17 @@ def _rebuild_and_restart(project_root: Path) -> list[str]:
     from server.lifecycle.state import is_server_healthy, read_state
 
     state = read_state()
-    if state and is_server_healthy(state.get("server_port", 9100)):
+    if state and is_server_healthy(state.get("server_port", DEFAULT_SERVER_PORT)):
         print("Restarting server to pick up changes...")
         venv_python = project_root / ".venv" / "bin" / "python"
+        move = _restart_args(state)
+        if move:
+            print(f"Quern's default port is now {DEFAULT_SERVER_PORT} (was "
+                  f"{LEGACY_SERVER_PORT}), so the server is moving off {LEGACY_SERVER_PORT}.",
+                  flush=True)  # before the restart's output
         try:
             restart = subprocess.run(
-                [str(venv_python), "-m", "server", "restart"],
+                [str(venv_python), "-m", "server", "restart", *move],
                 cwd=str(project_root),
                 timeout=30,
             )
@@ -631,6 +696,13 @@ def _rebuild_and_restart(project_root: Path) -> list[str]:
                 print(f"Warning: restart exited {restart.returncode} — "
                       "the server may be down; check `quern status`")
                 failures.append("restart")
+            elif move:
+                # Where it landed, read back rather than promised: a 9110 held
+                # by something else sends it further up (review, #446).
+                landed = (read_state() or {}).get("server_port")
+                print(f"The server is now on port {landed}. Anything pointed at port "
+                      f"{LEGACY_SERVER_PORT} needs updating (`quern url` prints the "
+                      "current address); MCP clients find it by themselves.")
     else:
         print("Server is not running — start it with: quern start")
 
