@@ -123,6 +123,10 @@ class DeviceController(DeviceControllerUI):
         #: Backend name per device, written by `get_ui_elements` at the
         #: moment it selects one. See DeviceControllerUI._last_read_backend.
         self._last_read_backend: dict[str, str] = {}
+        # The depth a filtered WDA lookup actually found its element at, when
+        # that was deeper than it was asked to read (#470). Set by
+        # get_ui_elements, read and cleared by the action that asked.
+        self._deepened_to: dict[str, int] = {}
         #: When `_sim_bridge_ok` was last established, or None if never.
         #:
         #: Latching it at startup and never re-checking is #179: Xcode 27 moved

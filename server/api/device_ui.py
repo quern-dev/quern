@@ -791,6 +791,7 @@ async def type_text(request: Request, body: TypeTextRequest):
             typed = await controller.type_text(
                 text=body.text, udid=resolved,
                 label=body.label, identifier=body.identifier,
+                snapshot_depth=body.snapshot_depth,
             )
             udid = typed["udid"]
             act.udid = udid
@@ -833,6 +834,7 @@ async def clear_text(request: Request, body: ClearTextRequest):
         try:
             resolved = await controller.clear_text(
                 udid=body.udid, label=body.label, identifier=body.identifier,
+                snapshot_depth=body.snapshot_depth,
             )
             act.udid = resolved
             return _with_input_warning(

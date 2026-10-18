@@ -293,6 +293,18 @@ def _with_queried_identifier(raw: list[dict], identifier: str | None) -> list[di
     return raw
 
 
+def _note_deepened(result: dict, deepened: int | None, shallow: int | None) -> None:
+    """Say a lookup found its element only by reading deeper (#470), and how to
+    skip the shallow miss next time on this screen."""
+    if deepened is None:
+        return
+    result["snapshot_depth"] = deepened
+    result["depth_note"] = (
+        f"found only at snapshot_depth={deepened}, after a miss at {shallow}; "
+        f"pass snapshot_depth={deepened} on this screen to skip the shallow read"
+    )
+
+
 def _note_equivalence(result: dict, element_type: str | None, element: UIElement) -> None:
     """Add `matched_via` when `element_type` matched only through equivalence.
 
@@ -1750,6 +1762,7 @@ class DeviceControllerUI:
         source_timeout: float | None = None,
         mode: str | None = None,
         probe_containers: bool = True,
+        deepen_on_miss: bool = False,
     ) -> tuple[list[UIElement], str]:
         """Native UI elements, plus any web content read by get_web_content.
 
@@ -1760,7 +1773,7 @@ class DeviceControllerUI:
         elements, resolved = await self._native_ui_elements(
             udid, use_cache, filter_label, filter_identifier, filter_type,
             snapshot_depth, source_timeout, mode,
-            probe_containers=probe_containers,
+            probe_containers=probe_containers, deepen_on_miss=deepen_on_miss,
         )
         if self._served_by_wda(resolved):
             await self._mark_on_screen(resolved, elements)
@@ -1781,8 +1794,13 @@ class DeviceControllerUI:
         source_timeout: float | None = None,
         mode: str | None = None,
         probe_containers: bool = True,
+        deepen_on_miss: bool = False,
     ) -> tuple[list[UIElement], str]:
         """Get UI accessibility elements with TTL-based caching and optional filtering.
+
+        `deepen_on_miss`: through WDA, when a filtered query at the shallow action
+        depth finds nothing, query once more at the full depth before falling
+        back (#470). For reads whose depth the caller did not choose.
 
         Returns (elements, resolved_udid).
         Requires idb to be installed.
@@ -1844,6 +1862,30 @@ class DeviceControllerUI:
             )
             if elements:
                 return elements, resolved
+            from server.device.ios.wda_client import SNAPSHOT_MAX_DEPTH
+            shallow = snapshot_depth is not None and snapshot_depth < SNAPSHOT_MAX_DEPTH
+            if deepen_on_miss and shallow:
+                # The shallow action depth (F35) misses elements nested deeper:
+                # iOS 26's Settings root needs 20, and 12 saw a tenth of it
+                # (#470, measured on an iPhone 11). A query rather than /source,
+                # because a timed-out query returns nothing while a timed-out
+                # /source restarts the runner -- so on a 200-row table, where
+                # the full depth took 34.5s, a miss costs a bounded wait, not
+                # the runner. The depth is a session setting, and the next read
+                # sets its own, so nothing is left at 25.
+                await self.wda_client._set_snapshot_depth(resolved, SNAPSHOT_MAX_DEPTH)
+                deep, deep_elapsed = await self._wda_direct_query(
+                    resolved, label=filter_label,
+                    identifier=filter_identifier, element_type=filter_type,
+                )
+                logger.info(
+                    "[WDA DIRECT] miss at snapshot_depth=%d; at %d: %d result(s) in %.1fs on %s",
+                    snapshot_depth, SNAPSHOT_MAX_DEPTH, len(deep), deep_elapsed, resolved[:8],
+                )
+                if deep:
+                    self._deepened_to[resolved] = SNAPSHOT_MAX_DEPTH
+                    return deep, resolved
+                await self.wda_client._set_snapshot_depth(resolved, snapshot_depth)
             # Direct query found nothing. If the query was slow (>3s), the screen
             # is too dense for any WDA query to work — skip /source to avoid a
             # 30s+ cascade of timeouts and WDA restarts.
@@ -2000,6 +2042,25 @@ class DeviceControllerUI:
             label_prefix=label_prefix, identifier=identifier,
             element_type=element_type,
         )
+        deepened = None
+        shallow = self._read_depth(resolved, snapshot_depth)
+        if not matches and snapshot_depth is None and self._served_by_wda(resolved):
+            # This read is unfiltered, so it never takes the query path that
+            # deepens. A second, filtered look does -- a query, not a deep
+            # /source, which on a long list is the read that times out and
+            # restarts the runner (#470).
+            deep_elements, _ = await self.get_ui_elements(
+                resolved, use_cache=False,
+                filter_label=_effective_filter_label(label, label_contains, label_prefix),
+                filter_identifier=identifier, filter_type=element_type,
+                snapshot_depth=shallow, deepen_on_miss=True,
+            )
+            deepened = self._deepened_to.pop(resolved, None)
+            matches = find_element(
+                deep_elements, label=label, label_contains=label_contains,
+                label_prefix=label_prefix, identifier=identifier,
+                element_type=element_type,
+            )
 
         if len(matches) == 0:
             search_desc = (
@@ -2022,6 +2083,7 @@ class DeviceControllerUI:
         if len(matches) > 1:
             result["match_count"] = len(matches)
         _note_equivalence(result, element_type, el)
+        _note_deepened(result, deepened, shallow)
 
         return result, resolved
 
@@ -2129,6 +2191,13 @@ class DeviceControllerUI:
         # a lookup that missed, and gets no web-content hint.
         ever_found = False
 
+        # The first poll may deepen on a miss (#470); a depth that found the
+        # element is kept for the polls after it. Only the first, so a wait for
+        # something absent on a long list does not pay a deep query per poll
+        # and overrun its own timeout.
+        poll_depth = self._read_depth(resolved, snapshot_depth)
+        shallow_depth = poll_depth
+        deepened = None
         while True:
             polls += 1
             elapsed = time.time() - start_time
@@ -2142,8 +2211,12 @@ class DeviceControllerUI:
                 filter_identifier=identifier,
                 filter_type=element_type,
                 mode=mode,
-                snapshot_depth=self._read_depth(resolved, snapshot_depth),
+                snapshot_depth=poll_depth,
+                deepen_on_miss=(polls == 1 and snapshot_depth is None),
             )
+            found_deeper = self._deepened_to.pop(resolved, None)
+            if found_deeper is not None:
+                deepened = poll_depth = found_deeper
 
             matches = find_element(
                 elements,
@@ -2169,6 +2242,7 @@ class DeviceControllerUI:
                 }
                 if current_element is not None:
                     _note_equivalence(result, element_type, current_element)
+                _note_deepened(result, deepened, shallow_depth)
                 return result, resolved
 
             # Check timeout
@@ -2517,8 +2591,13 @@ class DeviceControllerUI:
             filter_type=element_type,
             source_timeout=source_timeout,
             snapshot_depth=read_depth,
+            deepen_on_miss=snapshot_depth is None,
         )
         served_from_cache = self._cache_hits > cache_hits_before
+        shallow_depth = read_depth
+        deepened = self._deepened_to.pop(resolved, None)
+        if deepened is not None:
+            read_depth = deepened
 
         # Use shared search helper
         matches = find_element(
@@ -2680,10 +2759,18 @@ class DeviceControllerUI:
                 # answer says how deep it looked and how to look deeper --
                 # otherwise "not found" reads as "not there".
                 result["snapshot_depth"] = read_depth
-                result["detail"] += (
-                    f" (read through WDA at snapshot_depth={read_depth}; if the "
-                    "element is nested deeper, retry with a larger snapshot_depth)"
-                )
+                if snapshot_depth is None:
+                    from server.device.ios.wda_client import SNAPSHOT_MAX_DEPTH
+                    result["detail"] += (
+                        f" (read through WDA at snapshot_depth={read_depth}, and "
+                        f"queried again at {SNAPSHOT_MAX_DEPTH}; if the element is "
+                        "nested deeper still, retry with a larger snapshot_depth)"
+                    )
+                else:
+                    result["detail"] += (
+                        f" (read through WDA at snapshot_depth={read_depth}; if the "
+                        "element is nested deeper, retry with a larger snapshot_depth)"
+                    )
             if unreachable:
                 # Found, but not tappable -- a different fact from "not there",
                 # and the one that decides what the caller does next.
@@ -2733,6 +2820,7 @@ class DeviceControllerUI:
                 if web_settled_ms is not None:
                     result["waited_for_settle_ms"] = web_settled_ms
                 _note_equivalence(result, element_type, el)
+                _note_deepened(result, deepened, shallow_depth)
                 if sweep.get("attempted"):
                     result["scroll"] = _scroll_report(sweep, scroll_to_find)
                 return result
@@ -2925,6 +3013,7 @@ class DeviceControllerUI:
             if settled_ms is not None:
                 result["waited_for_settle_ms"] = settled_ms
             _note_equivalence(result, element_type, el)
+            _note_deepened(result, deepened, shallow_depth)
             if sweep.get("attempted"):
                 result["scroll"] = _scroll_report(sweep, scroll_to_find)
             return result
@@ -3519,6 +3608,7 @@ class DeviceControllerUI:
         udid: str | None = None,
         label: str | None = None,
         identifier: str | None = None,
+        snapshot_depth: int | None = None,
     ) -> dict:
         """Type text, into a named field if one is given.
 
@@ -3540,7 +3630,9 @@ class DeviceControllerUI:
             self._invalidate_ui_cache(resolved)
             return {"udid": resolved, "verified": False}
 
-        target = await self._find_text_field(resolved, label=label, identifier=identifier)
+        target = await self._find_text_field(
+            resolved, label=label, identifier=identifier, snapshot_depth=snapshot_depth,
+        )
         before = target.value or ""
         cx, cy = get_tap_point(target)
         await self._ui_backend(resolved).tap(resolved, cx, cy)
@@ -3552,7 +3644,9 @@ class DeviceControllerUI:
         self._invalidate_ui_cache(resolved)
         await asyncio.sleep(0.3)
 
-        after = await self._read_field_value(resolved, target, label, identifier)
+        after = await self._read_field_value(
+            resolved, target, label, identifier, snapshot_depth=snapshot_depth,
+        )
         secure = self._is_secure_field(target)
         outcome = self._typing_outcome(before, after, text, secure)
         if outcome != "landed":
@@ -3681,6 +3775,7 @@ class DeviceControllerUI:
 
     async def _find_text_field(
         self, udid: str, *, label: str | None, identifier: str | None,
+        snapshot_depth: int | None = None,
     ):
         # Read fresh. A cached tree can describe a screen that has since
         # changed, and typing at stale coordinates would put the text in
@@ -3691,7 +3786,9 @@ class DeviceControllerUI:
         if self._web_overlay.get(udid):
             with contextlib.suppress(DeviceError):
                 await self.get_web_content(udid=udid)
-        elements, read_udid = await self.get_ui_elements(udid=udid, use_cache=False)
+        elements, read_udid = await self.get_ui_elements(
+            udid=udid, use_cache=False, snapshot_depth=snapshot_depth,
+        )
         matches = self._matching_fields(elements, label, identifier)
         if not matches:
             hint = self._web_hint_for(read_udid, elements)
@@ -3706,6 +3803,7 @@ class DeviceControllerUI:
 
     async def _read_field_value(
         self, udid: str, target, label: str | None, identifier: str | None,
+        snapshot_depth: int | None = None,
     ) -> str | None:
         """The field's value now, read fresh.
 
@@ -3727,7 +3825,9 @@ class DeviceControllerUI:
                     raise
                 return None
         try:
-            elements, _ = await self.get_ui_elements(udid=udid, use_cache=False)
+            elements, _ = await self.get_ui_elements(
+                udid=udid, use_cache=False, snapshot_depth=snapshot_depth,
+            )
         except DeviceError as e:
             # A read that could not happen is not a read that found nothing.
             #
@@ -3772,6 +3872,7 @@ class DeviceControllerUI:
         udid: str | None = None,
         label: str | None = None,
         identifier: str | None = None,
+        snapshot_depth: int | None = None,
     ) -> str:
         """Clear a text field: triple-tap to select, then Backspace.
 
@@ -3785,7 +3886,7 @@ class DeviceControllerUI:
         resolved = await self.resolve_udid(udid)
         await self._warn_if_input_is_suppressed(resolved)
 
-        elements, _ = await self.get_ui_elements(udid=resolved)
+        elements, _ = await self.get_ui_elements(udid=resolved, snapshot_depth=snapshot_depth)
         text_fields = [
             e for e in elements
             if e.type.lower() in self._TEXT_FIELD_TYPES and e.frame
