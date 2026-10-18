@@ -199,3 +199,43 @@ def test_a_hold_lost_unnoticed_by_the_socket_is_caught_at_the_end(server, child)
     _opened(server)
     server.answers[("GET", "/api/v1/sessions/ci-job")] = (404, {"detail": "no held session"})
     assert session_cli.main(["run", "--name", "ci-job", "--", "true"]) == 4
+
+
+def test_a_hold_that_cannot_be_confirmed_is_not_a_success(server, child):
+    """The server could not be asked at the end: said as that, and exit 4."""
+    _opened(server)
+    server.answers[("GET", "/api/v1/sessions/ci-job")] = (503, {"detail": "busy"})
+    assert session_cli.main(["run", "--name", "ci-job", "--", "true"]) == 4
+
+
+def test_the_loss_warning_prints_once(capsys):
+    """The socket thread and the final check can both find the loss (review)."""
+    import threading
+
+    sock = session_cli._Socket.__new__(session_cli._Socket)
+    sock._session, sock.lost, sock._lock = "s", False, threading.Lock()
+    sock._lose(4404)
+    sock._lose("unconfirmed")
+    err = capsys.readouterr().err
+    assert err.count("lost its hold") == 1 and "no longer knows it" in err
+
+
+def test_a_reconnect_after_close_is_closed_cleanly(monkeypatch):
+    """Reconnected after the command finished: that socket is closed too, or
+    the server would hold the devices for the grace period (review)."""
+    import threading
+
+    closed = []
+    new_ws = type("WS", (), {"close": lambda self, code=1000, reason="": closed.append(code)})()
+    sock = session_cli._Socket.__new__(session_cli._Socket)
+    sock._session, sock.lost, sock._lock = "s", False, threading.Lock()
+    sock._grace, sock._closing, sock._ws = 30, False, None
+
+    def connect():
+        sock._closing = True            # close() ran while the reconnect was in flight
+        return new_ws
+
+    monkeypatch.setattr(sock, "_connect", connect)
+    monkeypatch.setattr(session_cli.time, "sleep", lambda s: None)
+    assert sock._reconnect() is False
+    assert closed == [1000] and sock._ws is None

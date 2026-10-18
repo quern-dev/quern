@@ -117,6 +117,9 @@ class _Socket:
         self._grace = grace_seconds
         self._closing = False
         self.lost = False
+        # Guards _ws against close() racing a reconnect, and the loss warning
+        # against printing twice (review).
+        self._lock = threading.Lock()
         self._ws = self._connect()
         self._thread = threading.Thread(target=self._hold, daemon=True)
         self._thread.start()
@@ -153,32 +156,50 @@ class _Socket:
         while not self._closing and time.monotonic() < deadline:
             time.sleep(delay)
             try:
-                self._ws = self._connect()
-                return True
+                ws = self._connect()
             except Exception as e:  # noqa: BLE001 -- retried until grace runs out
                 code = getattr(getattr(e, "rcvd", None), "code", None)
                 if code in (4404, 4403, 4000):
                     self._lose(code)
                     return False
-            delay = min(delay * 2, 5.0)
+                delay = min(delay * 2, 5.0)
+                continue
+            with self._lock:
+                if self._closing:
+                    # Reconnected after the command finished: close this one
+                    # cleanly too, or the server holds the devices for the
+                    # whole grace period after the run (review).
+                    try:
+                        ws.close(code=1000, reason="done")
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return False
+                self._ws = ws
+                return True
         if not self._closing:
             self._lose(None)
         return False
 
     def _lose(self, code) -> None:
-        self.lost = True
+        with self._lock:
+            if self.lost:
+                return
+            self.lost = True
         why = {4404: "the server no longer knows it (it restarted, or its grace ran out)",
                4000: "another connection took it over",
-               4403: "its resume token was refused"}.get(code, "the server could not be "
-                                                               "reached within its grace period")
+               4403: "its resume token was refused",
+               "unconfirmed": "the server could not be asked whether it still holds it",
+               }.get(code, "the server could not be reached within its grace period")
         print(f"quern session run: WARNING: session {self._session} lost its hold -- {why}. "
               "Its devices are no longer reserved for this command.", file=sys.stderr)
 
     def close(self) -> None:
         """A clean close: the server releases the session at once."""
-        self._closing = True
+        with self._lock:
+            self._closing = True
+            ws = self._ws
         try:
-            self._ws.close(code=1000, reason="done")
+            ws.close(code=1000, reason="done")
         except Exception:  # noqa: BLE001 -- already gone: the server's grace applies
             pass
 
@@ -239,11 +260,13 @@ def _run(args: argparse.Namespace) -> int:
         for sig in (signal.SIGINT, signal.SIGTERM):
             signal.signal(sig, forward)
         rc = child.wait()
-        if not socket.lost and not _still_holding(url, key, session, udids):
+        holding = _still_holding(url, key, session, udids)
+        if holding is not True:
             # The socket thread may still have been reconnecting when the
             # command ended -- a server restart takes seconds -- so ask the
-            # server directly whether the hold survived (found live).
-            socket._lose(4404)
+            # server directly whether the hold survived (found live). "Could
+            # not ask" is said as that, not as "gone" (review).
+            socket._lose(4404 if holding is False else "unconfirmed")
         if socket.lost:
             print(f"quern session run: the command ran partly without its reservation "
                   f"(exit {rc if rc else HOLD_LOST})", file=sys.stderr)
@@ -253,14 +276,17 @@ def _run(args: argparse.Namespace) -> int:
         socket.close()
 
 
-def _still_holding(url: str, key: str, session: str, udids: list[str]) -> bool:
-    """Whether the server still has `session`, holding every one of `udids`."""
+def _still_holding(url: str, key: str, session: str, udids: list[str]) -> bool | None:
+    """Whether the server still has `session`, holding every one of `udids`;
+    None when it could not be asked."""
     try:
         status, answer = _call("GET", url, key, f"/api/v1/sessions/{session}", session=session)
     except ConnectionError:
+        return None
+    if status == 404:
         return False
     if status != 200:
-        return False
+        return None
     held = {r.get("udid") for r in answer.get("reservations") or []}
     return set(udids) <= held
 
