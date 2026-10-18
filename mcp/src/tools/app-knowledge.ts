@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { strictParams } from "./helpers.js";
+import { strictParams, errorText } from "./helpers.js";
 import { existsSync, cpSync, readdirSync, readFileSync, unlinkSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -96,7 +96,7 @@ After initialization, read the quern://app-knowledge-guide resource for instruct
       return {
         content: [{
           type: "text" as const,
-          text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          text: errorText(e),
         }],
         isError: true,
       };

@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { apiRequest } from "../http.js";
-import { strictParams } from "./helpers.js";
+import { strictParams, errorText } from "./helpers.js";
 
 export function registerDeviceUITools(server: McpServer): void {
   server.registerTool("get_ui_tree", {
@@ -66,7 +66,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -138,7 +138,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -256,7 +256,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -324,7 +324,7 @@ This is the recommended first step before interacting with UI. Use this to disco
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -368,7 +368,7 @@ Not needed for a simulator quern booted itself — that path restores the servic
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -425,7 +425,7 @@ If coordinate taps are not landing on the expected element, use take_annotated_s
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -561,7 +561,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -618,7 +618,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -670,7 +670,7 @@ Returns where the fingers went. An app's recogniser reports a little less than w
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -712,7 +712,7 @@ Returns where the fingers went. An app's recogniser reports a little less than w
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -757,7 +757,7 @@ Returns where the fingers went. An app's recogniser reports a little less than w
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -818,7 +818,7 @@ Returns where the fingers went. An app's recogniser reports a little less than w
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -886,7 +886,7 @@ Returns where the fingers went. An app's recogniser reports a little less than w
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -934,7 +934,7 @@ Returns where the fingers went. An app's recogniser reports a little less than w
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -977,7 +977,7 @@ Returns where the fingers went. An app's recogniser reports a little less than w
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,

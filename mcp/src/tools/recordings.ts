@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { apiRequest } from "../http.js";
-import { strictParams } from "./helpers.js";
+import { strictParams, errorText } from "./helpers.js";
 
 function answer(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
@@ -9,7 +9,7 @@ function answer(data: unknown) {
 
 function failure(e: unknown) {
   return {
-    content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+    content: [{ type: "text" as const, text: errorText(e) }],
     isError: true,
   };
 }

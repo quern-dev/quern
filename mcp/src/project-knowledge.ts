@@ -14,6 +14,7 @@
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { connectionCode, NEVER_CONNECTED } from "./http.js";
 
 export interface ProjectKnowledge {
   /** The directory looked in: QUERN_PROJECT_DIR, or this process's cwd. */
@@ -145,22 +146,6 @@ function samePlace(a: string, b: string): boolean {
   return real(a) === real(b);
 }
 
-/** Errors that mean the connection was never made, so no request left this
- * process. Anything else -- a reset, a timeout, no code at all -- may have
- * arrived first. Node's fetch reports these as `fetch failed` with the code
- * on `cause` (measured on Node 22: ECONNREFUSED for a closed port). */
-const NEVER_CONNECTED = new Set([
-  "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH", "EADDRNOTAVAIL",
-]);
-
-function connectionCode(e: unknown): string | undefined {
-  const pick = (x: unknown) =>
-    x && typeof x === "object" && typeof (x as { code?: unknown }).code === "string"
-      ? (x as { code: string }).code
-      : undefined;
-  return pick((e as { cause?: unknown })?.cause) ?? pick(e);
-}
-
 /** Load the project's knowledge base into the running server, unless it is
  * empty, unnamed, already loaded, or another checkout's set for the same app
  * is -- which is said, not replaced: sessions in two worktrees share one
@@ -202,7 +187,7 @@ export async function autoloadKnowledge(
   } catch (e) {
     const code = connectionCode(e);
     const message = e instanceof Error ? e.message : String(e);
-    const reason = code ? `${message} (${code})` : message;
+    const reason = code && !message.includes(code) ? `${message} (${code})` : message;
     // A load that was sent and never answered may still finish: the server
     // does not cancel the scan when this side gives up, so "not loaded"
     // could be false a moment later (CodeRabbit). Two failures are answers

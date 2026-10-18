@@ -3,8 +3,8 @@ import { dirname } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { discoverServer } from "../config.js";
-import { apiRequest, quernHeaders } from "../http.js";
-import { strictParams } from "./helpers.js";
+import { apiRequest, quernHeaders, ServerRefused } from "../http.js";
+import { strictParams, errorText } from "./helpers.js";
 
 export function registerDeviceTools(server: McpServer): void {
   server.registerTool("list_devices", {
@@ -72,7 +72,7 @@ export function registerDeviceTools(server: McpServer): void {
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -112,7 +112,7 @@ export function registerDeviceTools(server: McpServer): void {
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -144,7 +144,7 @@ export function registerDeviceTools(server: McpServer): void {
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -176,7 +176,7 @@ export function registerDeviceTools(server: McpServer): void {
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -215,7 +215,7 @@ export function registerDeviceTools(server: McpServer): void {
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -282,7 +282,7 @@ NOTE: If you want to capture network traffic from this app:
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -321,7 +321,7 @@ NOTE: If you want to capture network traffic from this app:
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -360,7 +360,7 @@ NOTE: If you want to capture network traffic from this app:
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -392,7 +392,7 @@ NOTE: If you want to capture network traffic from this app:
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -445,7 +445,7 @@ NOTE: If you want to capture network traffic from this app:
 
       if (!resp.ok) {
         const text = await resp.text();
-        throw new Error(`HTTP ${resp.status}: ${text}`);
+        throw new ServerRefused(resp.status, text);
       }
 
       const buffer = Buffer.from(await resp.arrayBuffer());
@@ -478,7 +478,7 @@ NOTE: If you want to capture network traffic from this app:
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -536,7 +536,7 @@ NOTE: If you want to capture network traffic from this app:
 
       if (!resp.ok) {
         const text = await resp.text();
-        throw new Error(`HTTP ${resp.status}: ${text}`);
+        throw new ServerRefused(resp.status, text);
       }
 
       const buffer = Buffer.from(await resp.arrayBuffer());
@@ -568,7 +568,7 @@ NOTE: If you want to capture network traffic from this app:
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -593,7 +593,7 @@ Use this to build visual test reports — every action becomes a timestamped ste
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -608,7 +608,7 @@ Use this to build visual test reports — every action becomes a timestamped ste
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -623,7 +623,7 @@ Use this to build visual test reports — every action becomes a timestamped ste
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -661,7 +661,7 @@ Use this to build visual test reports — every action becomes a timestamped ste
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -743,7 +743,7 @@ bundle_id names the app the link should open in, and quern reports whether it di
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -787,7 +787,7 @@ bundle_id names the app the link should open in, and quern reports whether it di
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -812,7 +812,7 @@ bundle_id names the app the link should open in, and quern reports whether it di
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -833,7 +833,7 @@ bundle_id names the app the link should open in, and quern reports whether it di
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -850,7 +850,7 @@ bundle_id names the app the link should open in, and quern reports whether it di
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -874,7 +874,7 @@ Applying a change needs the simulator rebooted, which ENDS THE RUNNING APP. On a
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -895,7 +895,7 @@ Applying a change needs the simulator rebooted, which ENDS THE RUNNING APP. On a
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -917,7 +917,7 @@ Applying a change needs the simulator rebooted, which ENDS THE RUNNING APP. On a
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -955,7 +955,7 @@ Applying a change needs the simulator rebooted, which ENDS THE RUNNING APP. On a
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -995,7 +995,7 @@ Applying a change needs the simulator rebooted, which ENDS THE RUNNING APP. On a
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -1020,7 +1020,7 @@ Applying a change needs the simulator rebooted, which ENDS THE RUNNING APP. On a
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,

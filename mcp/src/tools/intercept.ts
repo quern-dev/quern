@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { apiRequest } from "../http.js";
-import { strictParams } from "./helpers.js";
+import { strictParams, errorText } from "./helpers.js";
 
 export function registerInterceptTools(server: McpServer): void {
   server.registerTool(
@@ -37,7 +37,7 @@ Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code
           content: [
             {
               type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+              text: errorText(e),
             },
           ],
           isError: true,
@@ -66,7 +66,7 @@ Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code
           content: [
             {
               type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+              text: errorText(e),
             },
           ],
           isError: true,
@@ -106,7 +106,7 @@ Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code
           content: [
             {
               type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+              text: errorText(e),
             },
           ],
           isError: true,
@@ -154,7 +154,7 @@ Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code
           content: [
             {
               type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+              text: errorText(e),
             },
           ],
           isError: true,
@@ -202,7 +202,7 @@ Filter operators: ~d (domain), ~u (URL/path regex), ~m (method), ~c (status code
           content: [
             {
               type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+              text: errorText(e),
             },
           ],
           isError: true,
@@ -278,7 +278,7 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
           content: [
             {
               type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+              text: errorText(e),
             },
           ],
           isError: true,
@@ -307,7 +307,7 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
           content: [
             {
               type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+              text: errorText(e),
             },
           ],
           isError: true,
@@ -388,7 +388,7 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
           content: [
             {
               type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+              text: errorText(e),
             },
           ],
           isError: true,
@@ -430,7 +430,7 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
           content: [
             {
               type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+              text: errorText(e),
             },
           ],
           isError: true,

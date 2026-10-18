@@ -92,6 +92,62 @@ export function requestWithoutTimeout(
   });
 }
 
+/** The server answered, with a status outside 2xx. The message keeps the form
+ * `HTTP <status>: <body>` -- callers match on it, and a structured refusal (a
+ * 409 naming what covers an element, a 423 naming who holds a device) has to
+ * reach the agent whole. */
+export class ServerRefused extends Error {
+  constructor(readonly status: number, readonly body: string) {
+    super(`HTTP ${status}: ${body}`);
+    this.name = "ServerRefused";
+  }
+}
+
+/** No connection was made, so nothing answered: the one failure where "is the
+ * server running?" is the right question (#471). */
+export class ServerUnreachable extends Error {
+  constructor(readonly url: string, readonly code: string, options?: { cause?: unknown }) {
+    super(`Could not connect to Quern at ${url} (${code})`, options);
+    this.name = "ServerUnreachable";
+  }
+}
+
+/** Connected (or may have), but no answer arrived in time. Not "unreachable":
+ * a long tree read or a build can keep a healthy server busy. */
+export class ServerTimeout extends Error {
+  constructor(readonly url: string, readonly ms: number, options?: { cause?: unknown }) {
+    const wait = ms < 1000 ? `${ms}ms` : `${Math.round(ms / 1000)}s`;
+    super(`Quern at ${url} did not answer within ${wait}`, options);
+    this.name = "ServerTimeout";
+  }
+}
+
+/** Error codes that mean the connection was never made, so a request cannot
+ * have reached the server. Node's fetch reports these as `fetch failed` with
+ * the code on `cause` (measured on Node 22: ECONNREFUSED for a closed port).
+ * Anything else -- a reset, a timeout -- may have arrived first. */
+export const NEVER_CONNECTED = new Set([
+  "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH", "EADDRNOTAVAIL",
+  // fetch's own connect timeout (undici), and the OS connect timeout node's
+  // http client reports on the no-timeout path: a blackholed host, never
+  // connected (#471 review, both reproduced).
+  "UND_ERR_CONNECT_TIMEOUT", "ETIMEDOUT",
+]);
+
+export function connectionCode(e: unknown): string | undefined {
+  const pick = (x: unknown) =>
+    x && typeof x === "object" && typeof (x as { code?: unknown }).code === "string"
+      ? (x as { code: string }).code
+      : undefined;
+  return pick((e as { cause?: unknown })?.cause) ?? pick(e);
+}
+
+/** Whether an error means nothing answered: typed by apiRequest, or a raw fetch
+ * failure from a caller that fetches for itself. */
+export function isUnreachable(e: unknown): boolean {
+  return e instanceof ServerUnreachable || NEVER_CONNECTED.has(connectionCode(e) ?? "");
+}
+
 export async function apiRequest(
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   path: string,
@@ -131,16 +187,31 @@ export async function apiRequest(
 
   let status: number;
   let text: string;
-  if (timeoutMs === "none") {
-    ({ status, text } = await requestWithoutTimeout(
-      url, method, headers, init.body as string | undefined));
-  } else {
-    const resp = await fetch(url.toString(), init);
-    status = resp.status;
-    text = await resp.text();
+  try {
+    if (timeoutMs === "none") {
+      ({ status, text } = await requestWithoutTimeout(
+        url, method, headers, init.body as string | undefined));
+    } else {
+      const resp = await fetch(url.toString(), init);
+      status = resp.status;
+      text = await resp.text();
+    }
+  } catch (e) {
+    const code = connectionCode(e);
+    if (code && NEVER_CONNECTED.has(code)) {
+      throw new ServerUnreachable(server.url, code, { cause: e });
+    }
+    const name = (e as { name?: unknown })?.name;
+    // Only the timeout signal's own error: nothing else aborts this request,
+    // and a manual abort reported as a timeout would carry a false wait and a
+    // retry hint (CodeRabbit, #472).
+    if (name === "TimeoutError" && typeof timeoutMs === "number") {
+      throw new ServerTimeout(server.url, timeoutMs, { cause: e });
+    }
+    throw e; // a reset or similar: may have been delivered, so reported as it is
   }
   if (status < 200 || status > 299) {
-    throw new Error(`HTTP ${status}: ${text}`);
+    throw new ServerRefused(status, text);
   }
 
   if (!text) return null;

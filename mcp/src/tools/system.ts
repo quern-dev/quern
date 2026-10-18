@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { apiRequest } from "../http.js";
-import { strictParams } from "./helpers.js";
+import { errorText, strictParams } from "./helpers.js";
 
 export function registerSystemTools(server: McpServer): void {
   server.registerTool(
@@ -24,7 +24,7 @@ export function registerSystemTools(server: McpServer): void {
           content: [
             {
               type: "text" as const,
-              text: `Error launching update: ${e instanceof Error ? e.message : String(e)}\n\nFall back to running "quern update" in a terminal manually.`,
+              text: `${errorText(e, "Error launching update")}\n\nFall back to running "quern update" in a terminal manually.`,
             },
           ],
           isError: true,
@@ -62,7 +62,7 @@ export function registerSystemTools(server: McpServer): void {
           content: [
             {
               type: "text" as const,
-              text: `Error setting channel: ${e instanceof Error ? e.message : String(e)}`,
+              text: errorText(e, "Error setting channel"),
             },
           ],
           isError: true,
