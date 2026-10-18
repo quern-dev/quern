@@ -56,12 +56,18 @@ gh pr view "$N" --repo "$REPO" --json reviews,comments \
 import re, sys
 text = sys.stdin.read()
 # The body wraps these in <details><summary>Heading (N)</summary>…, with the
-# finding lines quoted. Headlines are bold.
-for section in ("Outside diff range comments", "Additional comments",
-                "Nitpick comments", "Duplicate comments"):
-    for m in re.finditer(re.escape(section) + r"[^(]*\((\d+)\)", text):
-        chunk = text[m.start():m.start() + 4000]
-        print(f"{section} ({m.group(1)}):")
+# finding lines quoted. Headlines are bold. CodeRabbit has written the count two
+# ways: "Nitpick comments (4)" and, since October 2026, "🧹 Nitpick comments: 4".
+# Matching only the first made the four nitpicks on #472 vanish -- an empty section,
+# indistinguishable from a clean review. So both forms are matched, and any
+# "... comments" heading that is not one of these is reported, not skipped.
+KNOWN = ("Outside diff range comments", "Additional comments",
+         "Nitpick comments", "Duplicate comments")
+for section in KNOWN:
+    for m in re.finditer(re.escape(section) + r"\s*(?:\((\d+)\)|:\s*(\d+))", text):
+        count = m.group(1) or m.group(2)
+        chunk = text[m.start():m.start() + 8000]
+        print(f"{section} ({count}):")
         seen = set()
         for f in re.findall(r"\*\*(.+?)\*\*", chunk):
             if f not in seen and len(f) > 15:
@@ -70,6 +76,9 @@ for section in ("Outside diff range comments", "Additional comments",
         for loc in re.findall(r"`(\d+-\d+)`", chunk)[:5]:
             print(f"     at lines {loc}")
         print()
+for heading in re.findall(r"<summary>([^<]*\bcomments\b[^<]*)</summary>", text, re.I):
+    if not any(k.lower() in heading.lower() for k in KNOWN) and "Prompt" not in heading:
+        print(f"WARNING: an unrecognised findings section, read it by hand: {heading.strip()}")
 '
 
 echo
