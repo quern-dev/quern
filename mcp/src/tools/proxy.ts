@@ -749,7 +749,7 @@ For an Android emulator, pass device_serial (e.g. emulator-5554) — its traffic
   });
 
   server.registerTool("proxy_setup_guide", {
-    description: `Get device proxy configuration instructions with auto-detected local IP. Includes steps for both simulator and physical device setup. For physical devices, the response includes cert_install_url — a direct URL to download the Quern CA cert from Safari on the device. The correct order is: install cert → trust cert → configure Wi-Fi proxy. You can perform all of these steps yourself using WDA tools (launch_app to open Safari/Settings, tap_element to navigate, type_text to enter URLs and values). See docs/physical-device-cert-setup.md for the step-by-step tool sequence.`,
+    description: `Get device proxy configuration instructions with auto-detected local IP. Includes steps for both simulator and physical device setup. For physical devices, the response includes cert_install_url — the URL to download the Quern CA cert from Safari on the device. Follow the order the steps give: normally configure the Wi-Fi proxy first, because the cert is served by the proxy itself (http://mitm.it/cert/cer), then install and trust it. You can perform all of these steps yourself using WDA tools (launch_app to open Safari/Settings, tap_element to navigate, type_text to enter URLs and values). See docs/physical-device-cert-setup.md for the step-by-step tool sequence.`,
     inputSchema: strictParams({}),
   }, async () => {
     try {

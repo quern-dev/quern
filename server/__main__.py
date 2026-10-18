@@ -1105,6 +1105,11 @@ def main() -> None:
 
         sys.exit(session_main(sys.argv[2:]))
 
+    if len(sys.argv) >= 2 and sys.argv[1] == "clients":
+        from server.clients_cli import main as clients_main
+
+        sys.exit(clients_main(sys.argv[2:]))
+
     if len(sys.argv) >= 2 and sys.argv[1] == "set-channel":
         sys.exit(_cmd_set_channel(_check_args("set-channel", sys.argv[2:], operands=1)))
 

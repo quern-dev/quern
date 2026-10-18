@@ -1,7 +1,10 @@
 """API key authentication middleware.
 
-Requires a valid API key on all endpoints except a short public list.
-Supports both Authorization: Bearer <key> and X-API-Key: <key> headers.
+Requires a valid key on all endpoints except a short public list, and decides
+the caller's principal from it (#254, phase 2): the owner's API key is the
+owner; a client key from `quern clients add` is that client, wherever the
+request comes from. Supports both Authorization: Bearer <key> and
+X-API-Key: <key> headers.
 
 Pure ASGI, deliberately. As a Starlette `BaseHTTPMiddleware` this replaced the
 receive channel with one that never delivered `http.disconnect` to the
@@ -19,8 +22,15 @@ from __future__ import annotations
 
 import hmac
 import json
+from typing import TYPE_CHECKING
 
 from starlette.types import ASGIApp, Receive, Scope, Send
+
+from server import principal
+from server.session_registry import OWNER
+
+if TYPE_CHECKING:
+    from server.clients import ClientKeys
 
 #: Reachable without a key. Matched exactly, as the paths themselves are.
 PUBLIC_PATHS = frozenset({
@@ -40,9 +50,10 @@ _UNAUTHORISED_BODY = json.dumps(
 class APIKeyMiddleware:
     """Validate an API key on every request outside `PUBLIC_PATHS`."""
 
-    def __init__(self, app: ASGIApp, api_key: str) -> None:
+    def __init__(self, app: ASGIApp, api_key: str, clients: ClientKeys | None = None) -> None:
         self.app = app
         self.api_key = api_key
+        self.clients = clients
         # Encoded once, so a key that cannot be encoded fails at startup
         # rather than on an unauthenticated request, and the encode is off
         # the hot path. ServerConfig refuses a non-ASCII key before this.
@@ -56,8 +67,9 @@ class APIKeyMiddleware:
         # Refused by closing in reply to the connect, which the client sees as
         # a failed handshake (HTTP 403).
         if scope["type"] == "websocket":
-            if self._has_valid_key(scope):
-                await self.app(scope, receive, send)
+            who = self._principal(scope)
+            if who is not None:
+                await self._as(who, scope, receive, send)
                 return
             message = await receive()
             if message.get("type") == "websocket.connect":
@@ -67,8 +79,14 @@ class APIKeyMiddleware:
             await self.app(scope, receive, send)    # lifespan
             return
 
-        if scope.get("path") in PUBLIC_PATHS or self._has_valid_key(scope):
-            await self.app(scope, receive, send)
+        who = self._principal(scope)
+        if who is not None:
+            await self._as(who, scope, receive, send)
+            return
+        if scope.get("path") in PUBLIC_PATHS:
+            # Not the owner: a request with no credential is nobody, and
+            # anything that asks who is calling must hear that.
+            await self._as(principal.ANONYMOUS, scope, receive, send)
             return
 
         await send({
@@ -80,6 +98,25 @@ class APIKeyMiddleware:
             ],
         })
         await send({"type": "http.response.body", "body": _UNAUTHORISED_BODY})
+
+    async def _as(self, who: str, scope: Scope, receive: Receive, send: Send) -> None:
+        token = principal.set_principal(who)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            principal.reset_principal(token)
+
+    def _principal(self, scope: Scope) -> str | None:
+        """The principal the request's key makes it, or None for no valid key."""
+        if self._has_valid_key(scope):
+            return OWNER
+        if self.clients is None:
+            return None
+        for presented in _presented_keys(scope):
+            who = self.clients.principal_for(presented)
+            if who is not None:
+                return who
+        return None
 
     def _has_valid_key(self, scope: Scope) -> bool:
         """Is either header carrying the configured key?
@@ -122,3 +159,20 @@ class APIKeyMiddleware:
         return api_key_header is not None and hmac.compare_digest(
             api_key_header, expected,
         )
+
+
+def _presented_keys(scope: Scope) -> list[bytes]:
+    """The keys a request presents: the first `Authorization: Bearer` and the
+    first `X-API-Key`, as `_has_valid_key` reads them."""
+    authorization = api_key_header = None
+    for raw_name, raw_value in scope.get("headers") or ():
+        if raw_name == b"authorization" and authorization is None:
+            authorization = raw_value
+        elif raw_name == b"x-api-key" and api_key_header is None:
+            api_key_header = raw_value
+    found = []
+    if authorization is not None and authorization.startswith(b"Bearer "):
+        found.append(authorization[7:])
+    if api_key_header is not None:
+        found.append(api_key_header)
+    return found

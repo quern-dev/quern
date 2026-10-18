@@ -801,8 +801,16 @@ def create_app(
     from server.device_access import AccessMiddleware
     app.add_middleware(AccessMiddleware)
 
-    # Auth middleware
-    app.add_middleware(APIKeyMiddleware, api_key=config.api_key)
+    # What a client key may reach (#254, phase 2): inside auth, which decides
+    # the principal, and outside the access check, which reads the session
+    # this puts in the client's namespace.
+    from server.scopes import ScopeMiddleware
+    app.add_middleware(ScopeMiddleware)
+
+    # Auth middleware: the owner's key, or a client key from `quern clients add`.
+    from server.clients import ClientKeys
+    app.state.clients = ClientKeys()
+    app.add_middleware(APIKeyMiddleware, api_key=config.api_key, clients=app.state.clients)
 
     # Session attribution (#254). Outside auth, so it is set before anything
     # below runs; pure ASGI, so the ContextVar reaches the handler's task.
@@ -885,7 +893,10 @@ def create_app(
 
 def _add_server_flags(parser: argparse.ArgumentParser) -> None:
     """Add shared server flags to a subcommand parser."""
-    parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
+    parser.add_argument(
+        "--host", default="127.0.0.1",
+        help="Bind host (default: 127.0.0.1; anything else exposes the API, keys "
+             "and all, to the network unencrypted)")
     parser.add_argument("--port", type=int, default=None,
                         help=f"Bind port (default: {DEFAULT_SERVER_PORT})")
     parser.add_argument("--process", "-p", default=None, help="Filter logs to this process name")
@@ -1220,6 +1231,15 @@ def _cmd_start(args: argparse.Namespace) -> None:
     if developer_dir_msg:
         state_dict["developer_dir_note"] = developer_dir_msg
     write_state(state_dict)
+
+    from server.config import bind_warning
+
+    exposed = bind_warning(config.host)
+    if exposed:
+        logger.warning("Warning: %s", exposed)
+        # Printed whether or not in the foreground: the daemonizing parent
+        # never sees the child's banner, so it reads this from the state file.
+        print(f"  Warning: {exposed}", file=sys.stderr)
 
     if args.foreground:
         print(f"Quern v{get_version()}")
@@ -1591,6 +1611,20 @@ def _cmd_check_updates() -> int:
     return 0
 
 
+def _report_bind() -> None:
+    """Where the running server's API listens, warning if beyond loopback
+    (#254, phase 2). Informational: a choice the owner made, not a fault."""
+    from server.config import bind_warning
+
+    state = read_state()
+    if not state:
+        return
+    host = state.get("server_host") or "127.0.0.1"
+    exposed = bind_warning(host)
+    print("API listener:")
+    print(f"  ⚠ {exposed}" if exposed else f"  ✓ {host} (this Mac only)")
+
+
 def _report_held_sessions() -> None:
     """Held sessions and their devices (#254), with any in grace called out:
     a device held by an agent that crashed is visible here rather than
@@ -1669,6 +1703,7 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
             print(f"  {'✓' if ok else '✗'} {name}")
 
     _report_held_sessions()
+    _report_bind()
     repaired = _report_python_deps(fix)
     _report_external_tools(fix)
     node_complete = _report_node()
@@ -2295,6 +2330,13 @@ def cli() -> None:
     session_release = session_sub.add_parser("release")
     session_release.add_argument("session_id")
 
+    clients_parser = subparsers.add_parser(
+        "clients", help="Issue, list and revoke client keys for other callers (#254)")
+    clients_sub = clients_parser.add_subparsers(dest="clients_command")
+    clients_sub.add_parser("add").add_argument("label")
+    clients_sub.add_parser("list")
+    clients_sub.add_parser("revoke").add_argument("label")
+
     record_parser = subparsers.add_parser(
         "record", help="Record a device's actions, flows and logs to disk")
     record_sub = record_parser.add_subparsers(dest="record_command")
@@ -2441,6 +2483,10 @@ def cli() -> None:
         from server.session_cli import main as session_main
 
         sys.exit(session_main(sys.argv[sys.argv.index("session") + 1:]))
+    elif args.command == "clients":
+        from server.clients_cli import main as clients_main
+
+        sys.exit(clients_main(sys.argv[sys.argv.index("clients") + 1:]))
     elif args.command == "url":
         from server.__main__ import _cmd_url
         sys.exit(_cmd_url())

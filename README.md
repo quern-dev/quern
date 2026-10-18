@@ -456,6 +456,9 @@ quern session run --group GROUP [--reserve N] [--name NAME] -- CMD   # A config.
 quern session run --reserve N --os-version 18 --device-name "iPhone 16" --no-boot -- CMD   # Criteria; only already-booted devices
 quern session list           # Held sessions, their state (live / grace) and devices
 quern session release ID     # End a session and free its devices
+quern clients add LABEL      # Issue a client key for another caller (printed once)
+quern clients list           # Issued client keys: created, last used, revoked
+quern clients revoke LABEL   # Revoke one; its sessions end and its devices are freed
 quern set-update-check [on|off]
                              # Show or set the automatic daily update check
                              #   (default: on). check-updates works either way.

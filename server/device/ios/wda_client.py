@@ -2056,10 +2056,10 @@ def _refuse_if_held(udid: str, what: str) -> None:
     with this instead, and only the holder's request may restart WDA."""
     from server import device_access
 
-    if device_access.held_by_another(udid):
+    if why := device_access.why_not(udid):
         raise DeviceError(
-            f"WDA on {udid[:8]} needs to {what}, but the device is reserved by another "
-            "session; only its holder can do that. Reads that need WDA will work again "
-            "once it is running or the device is released.",
+            f"WDA on {udid[:8]} needs to {what}, but the device is {why}; only its "
+            "holder can do that. Reads that need WDA will work again once it is "
+            "running or the device is released.",
             tool="wda",
         )

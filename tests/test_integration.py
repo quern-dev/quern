@@ -808,10 +808,33 @@ async def test_proxy_setup_guide_lists_all_interfaces_when_ambiguous(
         "192.168.200.98",
     }
 
-    phys_step_5 = data["steps"][1]["instructions"][4]
+    server_step = next(s for s in data["steps"][1]["instructions"] if "Set Server" in s)
     # Both Mac IPs should appear in the physical-device guidance.
-    assert "192.168.31.243" in phys_step_5
-    assert "192.168.200.98" in phys_step_5
+    assert "192.168.31.243" in server_step
+    assert "192.168.200.98" in server_step
+
+
+@pytest.mark.parametrize("host, url, first", [
+    # On loopback the API is unreachable from a phone: the proxy serves the CA
+    # at mitm.it, so the proxy is configured first (#254, phase 2).
+    ("127.0.0.1", "http://mitm.it/cert/cer", "Configure Proxy"),
+    # Bound beyond loopback, the API still serves it, and the order is as it was.
+    ("0.0.0.0", "/api/v1/proxy/cert", "Open Safari"),
+])
+async def test_setup_guide_fetches_the_ca_where_the_device_can_reach_it(
+    app, auth_headers, host, url, first,
+):
+    from server.sources.proxy import ProxyAdapter
+
+    app.state.proxy_adapter = ProxyAdapter(flow_store=FlowStore())
+    app.state.config.host = host
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        data = (await client.get("/api/v1/proxy/setup-guide", headers=auth_headers)).json()
+    steps = data["steps"][1]["instructions"]
+    assert data["cert_install_url"].endswith(url)
+    assert url in next(s for s in steps if "Open Safari" in s)
+    assert first in steps[0], steps
 
 
 # ---------------------------------------------------------------------------

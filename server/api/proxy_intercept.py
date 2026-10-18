@@ -367,6 +367,10 @@ def _check_mock_scope(adapter, rule_id: str | None = None) -> None:
             continue
         if rule.get("simulator_udid"):
             device_access.check(rule["simulator_udid"])
+        else:
+            # Unscoped, it answers every device's traffic: Mac-wide, so a
+            # client key may not change it (#254, phase 2).
+            device_access.require_owner("changing a mock rule with no simulator_udid")
 
 
 @router.delete("/mocks/{rule_id}")

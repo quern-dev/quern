@@ -58,17 +58,15 @@ connection) and their devices. `release` ends one -- yours, or a stuck one.
 
 def _server() -> tuple[str, str]:
     from server.__main__ import _server_base_url
-    from server.config import API_KEY_FILE
+    from server.config import API_KEY_FILE, client_api_key
 
     url = _server_base_url()
     if url is None:
         raise ConnectionError("no server answering: start it with `quern start`")
-    try:
-        key = API_KEY_FILE.read_text().strip()
-    except OSError:
-        key = ""
+    key = client_api_key()
     if not key:
-        raise ConnectionError(f"no API key at {API_KEY_FILE}: run `quern setup`")
+        raise ConnectionError(f"no API key at {API_KEY_FILE} and no QUERN_API_KEY: "
+                              "run `quern setup`")
     return url, key
 
 

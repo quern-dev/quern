@@ -39,7 +39,10 @@ USER_CONFIG_FILE = CONFIG_DIR / "config.json"
 class ServerConfig:
     """Configuration for the Quern debug log server."""
 
-    host: str = "0.0.0.0"
+    #: Loopback (#254, phase 2): the API carries the owner's key in clear, so
+    #: it is not offered to the LAN unless someone asks with --host. The
+    #: proxy and the viewer have their own listeners and keep theirs.
+    host: str = "127.0.0.1"
     port: int = DEFAULT_SERVER_PORT
     ring_buffer_size: int = 10_000
     #: What `device_id` a source gets when it does not know which device it
@@ -112,6 +115,37 @@ class ServerConfig:
         API_KEY_FILE.write_text(key)
         API_KEY_FILE.chmod(0o600)
         return key
+
+
+def client_api_key() -> str:
+    """The key a quern client process sends: `QUERN_API_KEY` when set -- a
+    client key from `quern clients add` (#254, phase 2), or the owner's as
+    `quern env` exports it -- else the owner's key file. "" when neither."""
+    explicit = os.environ.get("QUERN_API_KEY", "").strip()
+    if explicit:
+        return explicit
+    try:
+        return API_KEY_FILE.read_text().strip()
+    except OSError:
+        return ""
+
+
+def bind_warning(host: str) -> str | None:
+    """What to tell someone who bound the API beyond loopback, or None.
+
+    Honoured, not refused (#254, phase 2): it was the default until then. But
+    every key -- the owner's and every client's -- crosses the network in
+    clear, and anyone who can reach the port can try them."""
+    import ipaddress
+
+    try:
+        if host == "localhost" or ipaddress.ip_address(host).is_loopback:
+            return None
+    except ValueError:
+        pass
+    return (f"the API is listening on {host}, beyond this Mac: API keys -- the owner's "
+            "and every client's -- cross the network unencrypted. Drop --host to keep it "
+            "on 127.0.0.1; cross-machine access is planned as a separate TLS listener (#254).")
 
 
 class ConfigUnreadable(OSError):

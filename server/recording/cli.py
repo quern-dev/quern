@@ -58,17 +58,15 @@ Then GET /api/v1/trace?recording=<id or DIR> gives the trace over any window.
 
 def _call(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
     from server.__main__ import _server_base_url
-    from server.config import API_KEY_FILE
+    from server.config import API_KEY_FILE, client_api_key
 
     url = _server_base_url()
     if url is None:
         raise ConnectionError("no server answering: start it with `quern start`")
-    try:
-        key = API_KEY_FILE.read_text().strip()
-    except OSError:
-        key = ""
+    key = client_api_key()
     if not key:
-        raise ConnectionError(f"no API key at {API_KEY_FILE}: run `quern setup`")
+        raise ConnectionError(f"no API key at {API_KEY_FILE} and no QUERN_API_KEY: "
+                              "run `quern setup`")
     req = urllib.request.Request(
         url + path, method=method, data=json.dumps(body).encode() if body is not None else None,
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",

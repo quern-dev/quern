@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from server.principal import current_principal
 from server.session import current_session
 from server.session_registry import OWNER, Held, HeldSession
 
@@ -36,9 +37,9 @@ class Caller:
 
 
 def current_caller() -> Caller:
-    """The caller of the request being handled. Every phase 1 caller holds the
-    local API key, so is the owner; phase 2's client keys make principals."""
-    return Caller(session=current_session(), principal=OWNER)
+    """The caller of the request being handled: its session, and the principal
+    its key makes it (server/principal.py). The owner outside a request."""
+    return Caller(session=current_session(), principal=current_principal())
 
 
 def _blind(caller: Caller) -> bool:

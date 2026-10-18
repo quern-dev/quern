@@ -25,7 +25,7 @@ import secrets
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
-from server import visibility
+from server import principal, visibility
 from server.api.actions import logged_action
 from server.session import current_session, parse_session
 from server.session_registry import (
@@ -109,11 +109,18 @@ async def open_session(request: Request, body: OpenRequest | None = None) -> dic
     registry = _registry(request)
     raw = (body.name if body else None) or current_session()
     name = parse_session(raw) if raw else f"s-{secrets.token_hex(4)}"
-    if not name:
+    # A client's names live in its own namespace (server/principal.py); the
+    # header and the path are qualified by ScopeMiddleware, the body here.
+    name = principal.qualify(name) if name else name
+    if not name or parse_session(name) != name:
         raise HTTPException(400, "name must be a valid session id (letters, digits, . _ : @ -)")
     existed = registry.get(name) is not None
     try:
-        session, token = registry.open(name, principal=visibility.current_caller().principal)
+        # `local`: taking over a session in grace by name, with no resume
+        # token, is allowed to the caller's own principal only -- the registry
+        # checks that, so a client cannot take over another's session.
+        session, token = registry.open(name, principal=visibility.current_caller().principal,
+                                       local=True)
     except SessionError as e:
         raise _refused(e) from None
     # `resumed`: an existing session (in grace) was taken back, reservations
@@ -365,9 +372,32 @@ async def run_release_policies(app) -> list[dict]:
     return actions
 
 
+async def release_revoked(app) -> list[str]:
+    """End every session whose client key has been revoked: close its socket
+    (4401, as a refused key's handshake is) and free its devices. Requests
+    already in flight finish; the next one is refused by APIKeyMiddleware."""
+    registry = getattr(app.state, "sessions", None)
+    clients = getattr(app.state, "clients", None)
+    if registry is None or clients is None:
+        return []
+    from server.auth import WS_UNAUTHORISED
+
+    ended = []
+    for session in registry.sessions():
+        label = principal.label_of(session.principal)
+        if label is None or clients.is_active(label):
+            continue
+        registry.release(session.id)
+        await close_socket(app, session.id, WS_UNAUTHORISED, "client key revoked")
+        logger.info("Session %s released: client key %s was revoked", session.id, label)
+        ended.append(session.id)
+    return ended
+
+
 async def sweep(app, interval: float = 1.0) -> None:
-    """Release sessions whose grace ran out, and run their policies. The
-    lifespan runs this for as long as the server does."""
+    """Release sessions whose grace ran out or whose client key was revoked,
+    and run their policies. The lifespan runs this for as long as the server
+    does."""
     registry = app.state.sessions
     while True:
         await asyncio.sleep(interval)
@@ -375,6 +405,7 @@ async def sweep(app, interval: float = 1.0) -> None:
             expired = registry.expire_due()
             for s in expired:
                 logger.info("Session %s released: its grace period ran out", s.id)
+            await release_revoked(app)
             await run_release_policies(app)
         except Exception:  # noqa: BLE001 -- the sweeper must outlive one bad pass
             logger.exception("Session sweep failed")

@@ -506,8 +506,8 @@ async def install_cert(
                 continue
             # Never onto a device another session holds (#254): skipped, and
             # said so, rather than a CA landing on someone else's simulator.
-            if device_access.held_by_another(d.udid):
-                skipped.append(f"{d.udid}: reserved by another session")
+            if why := device_access.why_not(d.udid):
+                skipped.append(f"{d.udid}: {why}")
                 continue
             ok, why = await _can_install_cert(controller, d.udid, d.device_type)
             if ok:
@@ -1084,8 +1084,19 @@ async def setup_guide(request: Request) -> dict:
         ])
         simulator_steps.insert(0, f"Certificate Status:\n{cert_status_text}")
 
-    api_port = request.app.state.config.port
-    cert_url = f"http://{local_ip}:{api_port}/api/v1/proxy/cert"
+    # Where the device fetches the CA. The API listens on loopback since #254
+    # phase 2, so a phone cannot reach /api/v1/proxy/cert; mitmproxy answers
+    # `mitm.it` itself, for any device routed through it, with the same CA
+    # (~/.mitmproxy) and the same content type. So the proxy is set first,
+    # then the certificate fetched -- plain HTTP needs no trust. And two Macs
+    # never collide: whichever proxy the device is routed through answers.
+    # Only an API bound beyond loopback (--host) still serves it directly.
+    from server.config import bind_warning
+
+    config = request.app.state.config
+    via_api = bind_warning(config.host) is not None
+    cert_url = (f"http://{local_ip}:{config.port}/api/v1/proxy/cert" if via_api
+                else "http://mitm.it/cert/cer")
 
     # Physical-device step 5: when multiple interfaces are active, the
     # user has to pick the Mac IP on the same subnet as the device. Spell
@@ -1099,14 +1110,30 @@ async def setup_guide(request: Request) -> dict:
             if i["is_default_route"]:
                 label += " [default route]"
             iface_lines.append(f"     - {i['ip']} on {label}")
-        step_5 = (
-            f"5. Set Server to the Mac IP on the same subnet as this device "
-            f"(check Settings > Wi-Fi > (network) > IP Address on the device). "
+        set_server = (
+            "Set Server to the Mac IP on the same subnet as this device "
+            "(check Settings > Wi-Fi > (network) > IP Address on the device). "
             f"Port: {port}.\n   Active Mac interfaces:\n"
             + "\n".join(iface_lines)
         )
     else:
-        step_5 = f"5. Set Server: {local_ip}, Port: {port}"
+        set_server = f"Set Server: {local_ip}, Port: {port}"
+    configure = ["Go to Settings > Wi-Fi > (your network) > Configure Proxy > Manual",
+                 set_server]
+    install = [f"Open Safari on the device and go to {cert_url}",
+               "Install the profile — Settings > General > VPN & Device Management",
+               "Trust the certificate — Settings > General > About > "
+               "Certificate Trust Settings"]
+    ordered = install + configure if via_api else configure + install
+    physical_steps = [f"{n}. {step}" for n, step in enumerate(ordered, 1)]
+    physical_note = (
+        "Physical devices are configured directly in iOS Settings. "
+        + ("Install and trust the certificate BEFORE configuring the proxy."
+           if via_api else
+           "Configure the proxy FIRST: the certificate is served by the proxy itself "
+           "(mitm.it), so the device must be routed through this Mac to fetch it. "
+           "Plain-HTTP pages load before the certificate is trusted.")
+    )
 
     return {
         "proxy_host": local_ip,
@@ -1125,16 +1152,8 @@ async def setup_guide(request: Request) -> dict:
             },
             {
                 "target": "physical_device",
-                "note": "Physical devices are configured directly in iOS Settings. "
-                        "Install and trust the certificate BEFORE configuring the proxy.",
-                "instructions": [
-                    f"1. Open Safari on the device and go to {cert_url}",
-                    "2. Install the profile — Settings > General > VPN & Device Management",
-                    "3. Trust the certificate — Settings > General > About > "
-                    "Certificate Trust Settings",
-                    "4. Go to Settings > Wi-Fi > (your network) > Configure Proxy > Manual",
-                    step_5,
-                ],
+                "note": physical_note,
+                "instructions": physical_steps,
             },
         ],
     }

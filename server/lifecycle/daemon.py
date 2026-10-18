@@ -169,8 +169,14 @@ def _parent_wait_and_exit(child_pid: int, server_port: int) -> None:
 
 def _print_status(state: dict) -> None:
     """Print formatted server status."""
+    from server.config import bind_warning
+
     pid = state.get("pid", "?")
-    local_ip = state.get("local_ip") or state.get("server_host", "0.0.0.0")
+    host = state.get("server_host") or "127.0.0.1"
+    exposed = bind_warning(host)
+    # The address it answers on: loopback since #254 phase 2, the LAN address
+    # only when someone bound it there.
+    shown = (state.get("local_ip") or host) if exposed else host
     port = state.get("server_port", "?")
     api_key = state.get("api_key", "")
     proxy_port = state.get("proxy_port", "?")
@@ -180,7 +186,9 @@ def _print_status(state: dict) -> None:
 
     print(f"Quern v{get_version()} running")
     print(f"  PID:        {pid}")
-    print(f"  Server:     http://{local_ip}:{port}")
+    print(f"  Server:     http://{shown}:{port}")
+    if exposed:
+        print(f"  Warning:    {exposed}")
     if proxy_enabled:
         proxy_status = state.get("proxy_status", "unknown")
         print(f"  Proxy:      port {proxy_port} ({proxy_status})")

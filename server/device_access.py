@@ -17,6 +17,11 @@ per-route audit:
 
 Callers with no session are refused like any other (#254 decision 4): an
 agent on an MCP from before sessions must not tap a device a CI run holds.
+
+A client key's holder (phase 2) may change only a device its own session
+holds: a free device is refused too (403, "reserve it first"), where the owner
+may change any device nobody holds. Principal decides what a caller sees;
+the session decides what it may change.
 """
 
 from __future__ import annotations
@@ -108,6 +113,44 @@ class DeviceNotFound(DeviceError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message, tool="reservations")
+        self.detail = message
+
+
+class DeviceNotReserved(DeviceError):
+    """A client changing a device its session does not hold: HTTP 403."""
+
+    status = 403
+
+    def __init__(self, udid: str) -> None:
+        message = (f"{udid} is not reserved by this session; a client key may change only "
+                   "devices it holds -- reserve it first (reserve_devices, or POST "
+                   "/api/v1/sessions/{id}/reservations)")
+        super().__init__(message, tool="reservations")
+        self.udid = udid
+        self.detail = {"message": message, "udid": udid}
+
+
+class OwnerOnly(DeviceError):
+    """Something only the server's owner may do: HTTP 403."""
+
+    status = 403
+
+    def __init__(self, what: str) -> None:
+        message = f"{what} is owner-only: a client key cannot do it"
+        super().__init__(message, tool="scopes")
+        self.detail = message
+
+
+#: Every refusal the middleware answers with its own status and detail.
+REFUSALS = (DeviceHeld, DeviceNotFound, DeviceNotReserved, OwnerOnly)
+
+
+def _refusing(error: DeviceError) -> DeviceError:
+    """Record a refusal for the middleware, and return it to raise."""
+    refusals = _REFUSALS.get()
+    if refusals is not None:
+        refusals.append((error.status, error.detail))
+    return error
 
 
 def _canonical(udid: str) -> str:
@@ -130,24 +173,29 @@ def check(udid: str | None) -> None:
     if not udid or _REGISTRY is None or not _WRITE.get():
         return
     held = _REGISTRY.holder_of(_canonical(udid))
-    if held is None or held.session.id == current_session():
-        return
     caller = visibility.current_caller()
+    if held is None:
+        if caller.is_owner:
+            return
+        raise _refusing(DeviceNotReserved(udid))
+    if held.session.id == current_session():
+        return
     detail = visibility.holder_detail(held, caller)
-    refusals = _REFUSALS.get()
     if detail is None:
-        error: DeviceError = DeviceNotFound(f"Device {udid} not found")
-        if refusals is not None:
-            refusals.append((404, str(error)))
-        raise error
-    error = DeviceHeld(udid, {
+        raise _refusing(DeviceNotFound(f"Device {udid} not found"))
+    raise _refusing(DeviceHeld(udid, {
         "message": (f"{udid} is reserved by session {detail['held_by']} ({detail['state']}); "
                     "reads still work, changes are refused until it is released"),
         "udid": udid, **detail,
-    })
-    if refusals is not None:
-        refusals.append((423, error.detail))
-    raise error
+    }))
+
+
+def require_owner(what: str) -> None:
+    """Refuse a non-owner caller something Mac-wide, from inside a route --
+    for a change whose reach depends on what it addresses, such as a mock
+    rule with no device scope."""
+    if not visibility.current_caller().is_owner:
+        raise _refusing(OwnerOnly(what))
 
 
 def refusals_are_per_item() -> None:
@@ -159,12 +207,24 @@ def refusals_are_per_item() -> None:
     _REFUSALS.set(None)
 
 
-def held_by_another(udid: str | None) -> bool:
-    """Whether a session other than the caller's holds `udid`, read or write."""
+#: `why_not`'s answers, which callers may compare against.
+NOT_RESERVED = "not reserved by this session"
+HELD_ELSEWHERE = "reserved by another session"
+
+
+def why_not(udid: str | None) -> str | None:
+    """Why the caller may not change `udid` now, or None if it may: what
+    `check()` decides, as a reason rather than a refusal, for work that
+    re-checks a device later -- after a build -- or acts behind a read.
+
+    Another session's hold refuses everyone; a free device refuses a client,
+    which may change only what its own session holds."""
     if not udid or _REGISTRY is None:
-        return False
+        return None
     held = _REGISTRY.holder_of(_canonical(udid))
-    return held is not None and held.session.id != current_session()
+    if held is None:
+        return None if visibility.current_caller().is_owner else NOT_RESERVED
+    return None if held.session.id == current_session() else HELD_ELSEWHERE
 
 
 def is_write(method: str, path: str) -> bool:
@@ -232,11 +292,8 @@ class AccessMiddleware:
                 try:
                     for udid in _named_devices(scope.get("query_string", b""), body):
                         check(udid)
-                except DeviceHeld as e:
-                    await _refuse(send, 423, e.detail)
-                    return
-                except DeviceNotFound as e:
-                    await _refuse(send, 404, str(e))
+                except REFUSALS as e:
+                    await _refuse(send, e.status, e.detail)
                     return
             if not write or _REGISTRY is None:
                 await self.app(scope, receive, send)
@@ -250,16 +307,13 @@ class AccessMiddleware:
 
             try:
                 await self.app(scope, receive, _refusal_wins(tracking, refusals))
-            except (DeviceHeld, DeviceNotFound) as e:
+            except REFUSALS as e:
                 # A route that does not catch it at all: the exception would
                 # reach Starlette as a 500. Answer with the refusal instead,
                 # if nothing has been sent yet (review).
                 if started:
                     raise
-                if isinstance(e, DeviceHeld):
-                    await _refuse(send, 423, e.detail)
-                else:
-                    await _refuse(send, 404, str(e))
+                await _refuse(send, e.status, e.detail)
         finally:
             _WRITE.reset(token)
             _REFUSALS.reset(refusals_token)

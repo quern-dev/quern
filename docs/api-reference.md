@@ -70,6 +70,30 @@ It's all or nothing: **409** names the holder of any device another session has.
 - `GET /api/v1/sessions` lists sessions with their state (`live`, or `grace` with `grace_remaining_s`) and devices.
 - The server's owner can release any session.
 
+## Client keys
+
+The owner's API key (`~/.quern/api-key`) reaches everything. Anyone else -- another person's agent, a CI job, a second agent you want kept in its lane -- gets a **client key** (#254):
+
+```text
+quern clients add ci-runner     # prints the key once; quern keeps only its hash
+quern clients list              # label, created, last used, revoked
+quern clients revoke ci-runner  # its sessions end and its devices are freed within a second
+```
+
+Give it to the client as `QUERN_API_KEY`, which the quern MCP, `quern session run` and `quern record` read in place of the owner's key. The key decides who is calling, not the network address: a client key on the owner's own Mac is still a client.
+
+**What a client key may do:**
+
+- **Watch everything a shared server shows:** devices, screenshots, UI trees, logs, flows, crashes, recordings, the trace.
+- **Hold sessions and reserve devices**, as above.
+- **Change only devices its own session holds.** A free device is refused with **403** ("reserve it first"), not only one someone else holds (423). A change that names no device goes to the session's active device, which must be one it holds; a session with nothing reserved is refused before the route runs.
+- **Nothing Mac-wide**, which is **403 owner-only**: starting or stopping the proxy, the system proxy, local capture, intercepts and bypasses, mock rules with no `simulator_udid`, capture sessions of all traffic, host logs (oslog), log filters, updates, landmarks, the device pool's resolve/ensure (reserve instead), and anything that reads or writes a path on the Mac (`parse-file`, recordings and traces by directory, app-state snapshots).
+- **Every request must carry `X-Quern-Session`** (400 otherwise). The server puts a client's session ids in its own namespace, `<label>:<id>`, so one client can never name, release or take over another's session or active device. A client's sessions appear under those names in `GET /api/v1/sessions` and in 423 bodies.
+
+Every route is classified in `server/scopes.py`, and a route with no classification is owner-only; a test fails until each new route is given one.
+
+**The API listens on 127.0.0.1.** `quern start --host 0.0.0.0` still exposes it, with a warning from `start`, `status` and `doctor`: every key, the owner's included, crosses the network unencrypted. A separate TLS listener is the planned way to reach quern from another machine. The proxy (9101) is unaffected and stays reachable from devices on the LAN; a phone fetches the CA from `http://mitm.it/cert/cer` through it (see `proxy_setup_guide`).
+
 ## The LAN viewer
 
 `start_recording` with `video` and `viewer: true` (or `quern record start --video --viewer`) returns `viewer_url`. The link plays the simulator live in a browser on another machine on the LAN, for example for a CI job to post when a UI test starts (#449). It's off unless enabled in `~/.quern/config.json`:
