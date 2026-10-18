@@ -49,6 +49,7 @@ from server.api.proxy import router as proxy_router
 from server.api.proxy_certs import router as proxy_certs_router
 from server.api.proxy_intercept import router as proxy_intercept_router
 from server.api.recordings import router as recordings_router
+from server.api.sessions import router as sessions_router
 from server.api.system import router as system_router
 from server.api.trace import router as trace_router
 from server.api.wda import router as wda_router
@@ -595,6 +596,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         config.api_key[-4:],
     )
 
+    # Held sessions and reservations (#254). In memory only: nothing holding
+    # one survives a restart, so neither do they.
+    from server import device_access
+    from server.api.sessions import sweep as _sweep_sessions
+    from server.config import sessions_settings
+    from server.session_registry import SessionRegistry
+
+    app.state.sessions = SessionRegistry(grace_seconds=sessions_settings()["grace_seconds"])
+    device_access.install(app.state.sessions)
+    sessions_task = asyncio.create_task(_sweep_sessions(app), name="session-sweep")
+
     # The LAN viewer (#449), opt-in. Started after the recordings it serves.
     from server.config import viewer_settings as _viewer_settings
     from server.viewer.listener import start_viewer
@@ -605,6 +617,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.viewer = None
 
     yield
+
+    # Sessions end with the server; a reconnect will be told so (4404).
+    from server import device_access as _device_access
+    _device_access.install(None)
 
     # Viewers first: their streams relay recordings stopped below.
     viewer = getattr(app.state, "viewer", None)
@@ -623,7 +639,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Shutdown: cancel background tasks, stop adapters, flush deduplicator
     for task in (
         watchdog_task, update_check_task, network_monitor_task,
-        sim_bridge_resync_task, mcp_clients_task, sim_tls_task,
+        sim_bridge_resync_task, mcp_clients_task, sim_tls_task, sessions_task,
     ):
         if task and not task.done():
             task.cancel()
@@ -779,6 +795,12 @@ def create_app(
     from server.screenshot_timeline import TimelineMiddleware
     app.add_middleware(TimelineMiddleware)
 
+    # Reservations (#254): which requests change a device, and refusing a
+    # change to one another session holds. Inside auth, so an unauthenticated
+    # request's body is never read; inside session attribution, which it needs.
+    from server.device_access import AccessMiddleware
+    app.add_middleware(AccessMiddleware)
+
     # Auth middleware
     app.add_middleware(APIKeyMiddleware, api_key=config.api_key)
 
@@ -803,6 +825,7 @@ def create_app(
     app.include_router(logs_router)
     app.include_router(trace_router)
     app.include_router(recordings_router)
+    app.include_router(sessions_router)
     app.include_router(crashes_router)
     app.include_router(builds_router)
     app.include_router(proxy_router)
@@ -1272,6 +1295,11 @@ def _cmd_start(args: argparse.Namespace) -> None:
         port=server_port,
         log_level="debug" if args.verbose else "info",
         loop="asyncio",  # uvloop uses fork+exec for subprocesses, which crashes on macOS
+        # A held session's socket (#254): ping every 10s, and a peer that has
+        # not answered 20s later is gone -- a host that lost power never sends
+        # a FIN, and TCP can take hours to notice. Its session enters grace.
+        ws_ping_interval=10.0,
+        ws_ping_timeout=20.0,
     )
     server = uvicorn.Server(uv_config)
     try:

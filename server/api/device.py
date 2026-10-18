@@ -358,12 +358,33 @@ async def list_devices(
                 if dd["cert_installed"] == cert_installed
             ]
         return {
-            "devices": device_dicts,
+            "devices": _with_reservations(request, device_dicts),
             "tools": tools,
             "active_udid": controller._active_udid,
         }
     except DeviceError as e:
         raise _handle_device_error(e)
+
+
+def _with_reservations(request: Request, device_dicts: list[dict]) -> list[dict]:
+    """Each device with who holds it (#254): `reservation` is null for a free
+    device, else `{held_by, state, since, yours}` -- so a held device is never
+    mysterious. Through the visibility policy, which in blind mode would drop
+    another principal's devices and hold nothing back about the caller's own."""
+    from server import visibility
+
+    registry = getattr(request.app.state, "sessions", None)
+    if registry is None:
+        return device_dicts
+    caller = visibility.current_caller()
+    out = []
+    for dd in device_dicts:
+        held = registry.holder_of(dd["udid"])
+        if not visibility.device_visible(held, caller):
+            continue
+        dd["reservation"] = visibility.holder_detail(held, caller) if held else None
+        out.append(dd)
+    return out
 
 
 @router.post("/boot")

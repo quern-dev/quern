@@ -752,6 +752,13 @@ class DeviceController(DeviceControllerUI):
         resolved = await self._resolve_udid(udid, set_active=set_active)
         current_action().udid = resolved
         logging_ext.note_action_device(resolved)
+        # Last, once the device is known: a change to a device another session
+        # holds is refused here when the request did not name it (#254). A
+        # named one was already checked by AccessMiddleware; checking again is
+        # harmless. Reads pass: `check` knows which this request is.
+        from server import device_access
+
+        device_access.check(resolved)
         return resolved
 
     async def _resolve_udid(
