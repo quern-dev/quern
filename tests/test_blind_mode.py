@@ -324,6 +324,15 @@ class TestSetting:
             assert config.sessions_settings()["visibility"] == value
             assert config.sessions_settings()["visibility_note"] is None
 
+    def test_case_and_spaces_do_not_fall_back_to_shared(self, monkeypatch):
+        """Falling back to shared over a capital letter would show every
+        client everything."""
+        from server import config
+
+        monkeypatch.setattr(config, "read_user_config",
+                            lambda: {"sessions": {"visibility": " Blind "}})
+        assert config.sessions_settings()["visibility"] == "blind"
+
     def test_anything_else_is_shared_and_says_so(self, monkeypatch):
         from server import config
 
@@ -731,10 +740,41 @@ class TestFlowGuards:
         assert world.client.get("/api/v1/proxy/flows", params={"client_ip": "10.0.0.9"},
                                 headers=_h(KEY)).status_code == 200
 
-    def test_the_flow_stream_filter(self, world):
-        seen = visibility.Refreshing(visibility.Caller("alice:s1", "client:alice"), flows=True)
-        assert seen.flow(_flow("x", SIM_A))
-        assert not seen.flow(_flow("y", SIM_B))
+    def test_the_flow_stream_sends_only_the_callers_flows(self, world):
+        from server.api.proxy import stream_flows
+
+        class FakeRequest:
+            app = world.app
+
+            async def is_disconnected(self):
+                return False
+
+        async def run():
+            from server.principal import reset_principal, set_principal
+            from server.session import _SESSION
+
+            p, s = set_principal("client:alice"), _SESSION.set("alice:s1")
+            try:
+                response = await stream_flows(FakeRequest())
+            finally:
+                reset_principal(p)
+                _SESSION.reset(s)
+            got = []
+
+            async def read():
+                async for event in response.body_iterator:
+                    got.append(event)
+                    return
+
+            task = asyncio.create_task(read())
+            await asyncio.sleep(0.05)
+            await world.app.state.flow_store.add(_flow("live-bob", SIM_B))
+            await world.app.state.flow_store.add(_flow("live-alice", SIM_A))
+            await asyncio.wait_for(task, 3)
+            return got
+
+        text = str(asyncio.run(run()))
+        assert "live-alice" in text and "live-bob" not in text
 
 
 class TestProxyStatus:
@@ -794,13 +834,17 @@ class TestCrashesAndTrace:
             await world.app.state.server_buffer.append(_entry(
                 "server", ago=1, source=LogSource.SERVER, message="alice-tap", action="tap",
                 udid=SIM_A, outcome="ok", session="alice:s1"))
-            for udid, msg in ((SIM_A, "crash-alice"), (SIM_B, "crash-bob")):
+            for udid, msg in ((SIM_B, "crash-bob"), ("", "crash-nowhere")):
                 await world.app.state.crash_buffer.append(_entry(
                     udid, source=LogSource.CRASH, message=msg))
 
         asyncio.run(seed())
         r = world.client.get("/api/v1/trace", headers=_h(world.alice))
-        assert "crash-bob" not in r.text
+        # A crash naming no device would be attached to alice's action by
+        # time, as a shared trace does: on a blind server it is not hers.
+        assert "crash-bob" not in r.text and "crash-nowhere" not in r.text
+        owner = world.client.get("/api/v1/trace", headers=_h(KEY))
+        assert "crash-nowhere" in owner.text, "the owner's trace attaches it"
 
 
 class TestRecordings:
@@ -901,3 +945,32 @@ def test_a_blind_client_is_not_told_the_owners_session_name(world):
                             params={"udid": SIM_A}, headers=_h(KEY, "owner-secret-ci"))
     assert r.status_code == 200, r.text
     assert sent and sent[0]["by"] == "the server's owner", sent
+
+
+def test_a_clients_rules_and_recordings_end_with_its_hold(world):
+    """Left in place, the next holder's traffic was answered by them, and a
+    recording went on filming the next holder's work."""
+    from server.api.sessions import run_release_policies
+
+    cleared, stopped = [], []
+
+    async def clear_mock(rule_id=None):
+        cleared.append(rule_id)
+
+    async def stop(rec_id):
+        stopped.append(rec_id)
+
+    world.app.state.proxy_adapter = SimpleNamespace(clear_mock=clear_mock, _mock_rules=[
+        {"rule_id": "alice-rule", "simulator_udid": SIM_A},
+        {"rule_id": "owner-rule", "simulator_udid": SIM_A},
+        {"rule_id": "bob-rule", "simulator_udid": SIM_B}])
+    world.app.state.mock_owners = {"alice-rule": "client:alice", "owner-rule": "owner",
+                                   "bob-rule": "client:bob"}
+    rec = SimpleNamespace(id="rec-alice", udid=SIM_A, principal="client:alice", state="recording")
+    other = SimpleNamespace(id="rec-owner", udid=SIM_A, principal="owner", state="recording")
+    world.app.state.recordings = SimpleNamespace(list=lambda: [rec, other], stop=stop)
+    world.registry.release("alice:s1")
+    actions = asyncio.run(run_release_policies(world.app))
+    assert cleared == ["alice-rule"], "only the client's own rules on its released device"
+    assert stopped == ["rec-alice"]
+    assert {a["action"] for a in actions} == {"mock_removed", "recording_stopped"}

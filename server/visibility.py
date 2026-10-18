@@ -154,16 +154,14 @@ def blind_for(caller: Caller | None = None) -> bool:
 def entry_visible(view: View, entry) -> bool:
     """Whether a log entry is visible: by the device it came from -- an action
     entry's resolved `udid`, else the capture source's `device_id` -- and when.
-    The server's own lines (`device_id` "server") and the host's (empty) are
-    tied to no device."""
+    The host's lines (empty) and the server's own (`device_id` "server", which
+    no reservation can name) are tied to no device, so neither is shown."""
     if view.everything:
         return True
     session = getattr(entry, "session", "") or ""
     if session and view.session_prefix is not None and not session.startswith(view.session_prefix):
         return False
     udid = getattr(entry, "udid", "") or getattr(entry, "device_id", "")
-    if udid == "server":
-        udid = ""
     return view.allows(udid, getattr(entry, "timestamp", None))
 
 
