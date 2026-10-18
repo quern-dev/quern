@@ -83,6 +83,11 @@ def _app(registry):
             raise HTTPException(500, str(e)) from None
         return {"swiped": True}
 
+    @app.post("/api/v1/device/raw-op")
+    async def raw_op(body: TapBody):
+        """A route that never calls resolve_udid: only the middleware guards it."""
+        return {"did": body.udid}
+
     @app.get("/api/v1/device/screenshot")
     async def screenshot(udid: str | None = None):
         return {"shot": await app.state.device_controller.resolve_udid(udid)}
@@ -192,6 +197,13 @@ class TestEnforcement:
         _reserve(client, "claude-a", udids=["SIM-1"])
         q = client.post("/api/v1/device/ui/tap?udid=SIM-1", headers=_h("claude-b"), json={})
         assert q.status_code == 423
+        a.close()
+
+    def test_a_route_that_never_resolves_is_guarded_by_the_middleware(self, client):
+        a = Held(client, "claude-a")
+        _reserve(client, "claude-a", udids=["SIM-1"])
+        r = client.post("/api/v1/device/raw-op", headers=_h("claude-b"), json={"udid": "SIM-1"})
+        assert r.status_code == 423
         a.close()
 
     def test_a_free_device_is_open_to_everyone(self, client):
@@ -340,3 +352,64 @@ class TestTheGuardCoversEveryRoute:
         paths = m.create_app(ServerConfig(api_key=KEY)).openapi()["paths"]
         missing = [p for p in device_access.READ_POSTS if "post" not in paths.get(p, {})]
         assert missing == [], f"READ_POSTS names routes that do not exist: {missing}"
+
+
+class TestClassification:
+    @pytest.mark.parametrize("method,path,write", [
+        ("GET", "/api/v1/device/ui", False),
+        ("HEAD", "/api/v1/device/ui", False),
+        ("POST", "/api/v1/device/ui/tap", True),
+        ("DELETE", "/api/v1/device/app", True),
+        ("PUT", "/api/v1/whatever", True),
+        ("post", "/api/v1/device/ui/wait-for-element", False),
+        ("POST", "/api/v1/device/preview/start", False),
+        ("POST", "/api/v1/recordings", True),    # may install a CA
+    ])
+    def test_reads_and_changes(self, method, path, write):
+        assert device_access.is_write(method, path) is write
+
+
+class TestThePoolAndTheListing:
+    def test_the_pool_never_picks_a_device_another_session_holds(self, registry):
+        from types import SimpleNamespace
+
+        from server.device.pool import DevicePool
+        from server.session import _SESSION
+
+        a, token = registry.open("claude-a")
+        registry.attach(a.id, token)
+        registry.reserve("claude-a", ["SIM-1"])
+        pool = DevicePool.__new__(DevicePool)
+        pool._match_criteria = lambda d, **k: True
+        pool._filter_by_name = lambda devices, name: devices
+        devices = [SimpleNamespace(udid="SIM-1"), SimpleNamespace(udid="SIM-2")]
+        token_b = _SESSION.set("claude-b")
+        try:
+            assert [d.udid for d in pool._find_candidates(devices)] == ["SIM-2"]
+        finally:
+            _SESSION.reset(token_b)
+        token_a = _SESSION.set("claude-a")
+        try:
+            assert [d.udid for d in pool._find_candidates(devices)] == ["SIM-1", "SIM-2"], \
+                "the holder's own device is a candidate for it"
+        finally:
+            _SESSION.reset(token_a)
+
+    def test_list_devices_says_who_holds_each(self, registry):
+        from types import SimpleNamespace
+
+        from server.api.device import _with_reservations
+        from server.session import _SESSION
+
+        a, token = registry.open("claude-a")
+        registry.attach(a.id, token)
+        registry.reserve("claude-a", ["SIM-1"])
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(sessions=registry)))
+        token_b = _SESSION.set("claude-b")
+        try:
+            out = _with_reservations(request, [{"udid": "SIM-1"}, {"udid": "SIM-2"}])
+        finally:
+            _SESSION.reset(token_b)
+        assert out[0]["reservation"]["held_by"] == "claude-a"
+        assert out[0]["reservation"]["yours"] is False
+        assert out[1]["reservation"] is None
