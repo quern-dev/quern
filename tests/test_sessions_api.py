@@ -168,6 +168,31 @@ class Held:
             pass
 
 
+def _closed_with(ws, timeout=3.0) -> int:
+    """The close code the server ends `ws` with, or a test failure after
+    `timeout`. A bare receive blocks for ever when the socket wrongly stays
+    open, which hung the run instead of failing it (found by mutation)."""
+    import threading
+
+    box: dict = {}
+
+    def wait():
+        try:
+            ws.receive_json()
+            box["code"] = None                     # a message, not a close
+        except WebSocketDisconnect as e:
+            box["code"] = e.code
+        except Exception as e:  # noqa: BLE001
+            box["code"] = repr(e)
+
+    t = threading.Thread(target=wait, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        pytest.fail(f"the socket was not closed within {timeout}s")
+    return box["code"]
+
+
 def _reserve(client, name, **body):
     return client.post(f"/api/v1/sessions/{name}/reservations", headers=_h(name), json=body)
 
@@ -306,9 +331,7 @@ class TestLifecycle:
         assert registry.holder_of("SIM-1") is None
         # And the client is told: its socket is closed with "unknown session",
         # so it reopens instead of believing it still holds the device.
-        with pytest.raises(WebSocketDisconnect) as told:
-            a.ws.receive_json()
-        assert told.value.code == 4404
+        assert _closed_with(a.ws) == 4404
         a.close()
 
     def test_a_newer_connection_replaces_the_old_one(self, client, registry):
@@ -318,14 +341,14 @@ class TestLifecycle:
             a.opened["live_path"],
             headers={**_h("claude-a"), "X-Quern-Resume-Token": a.opened["resume_token"]})
         newer = ctx.__enter__()
-        assert newer.receive_json()["event"] == "attached"
-        with pytest.raises(WebSocketDisconnect) as replaced:
-            a.ws.receive_json()
-        assert replaced.value.code == 4000
-        a.close(code=1000)                       # the old socket's clean close...
-        assert registry.holder_of("SIM-1") is not None, "...does not release the session"
-        newer.close(code=1000)
-        ctx.__exit__(None, None, None)
+        try:
+            assert newer.receive_json()["event"] == "attached"
+            assert _closed_with(a.ws) == 4000
+            a.close(code=1000)                   # the old socket's clean close...
+            assert registry.holder_of("SIM-1") is not None, "...does not release the session"
+        finally:
+            newer.close(code=1000)
+            ctx.__exit__(None, None, None)
         assert registry.holder_of("SIM-1") is None
 
     def test_listing_shows_state_and_grace(self, client, clock):
@@ -502,9 +525,9 @@ class TestReviewFindings:
         a.close()
 
     def test_a_lowercase_spelling_of_a_held_simulator_is_refused(self, client):
-        udid = "5E6E8B35-4384-447E-84E8-4951BA26B181"
+        udid = "5E6E8B35-4384-447E-84E8-4951BA26B181"     # as the device list spells it
         a = Held(client, "claude-a")
-        _reserve(client, "claude-a", udids=[udid.lower()])
+        _reserve(client, "claude-a", udids=[udid])
         r = client.post("/api/v1/device/raw-op", headers=_h("claude-b"),
                         json={"udid": udid.lower()})
         assert r.status_code == 423
