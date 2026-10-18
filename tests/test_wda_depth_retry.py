@@ -50,6 +50,8 @@ class FakeWda:
         self.queries: list[dict] = []
         self.delay = 0.0
         self.deep_delay = 0.0
+        #: Bounded deep queries whose using-strategy times out, e.g. {"predicate string"}.
+        self.deep_timeouts: set[str] = set()
 
     async def set_depth(self, udid, depth):
         self.depth = depth
@@ -61,6 +63,10 @@ class FakeWda:
             await asyncio.sleep(self.delay)
         if self.deep_delay and self.depth == SNAPSHOT_MAX_DEPTH:
             await asyncio.sleep(self.deep_delay)
+        if (self.depth == SNAPSHOT_MAX_DEPTH and kw.get("no_resend")
+                and using in self.deep_timeouts):
+            from server.device.ios.wda_client import QueryTimedOut
+            raise QueryTimedOut(value)
         if "shallow_btn" in value:
             return [dict(SHALLOW_ROW)]
         if WIFI in value and self.depth is not None and self.depth >= 20:
@@ -307,9 +313,10 @@ class TestTheBoundedQueryAtTheTransport:
         fake = FakeWDA({"/elements": [httpx.ReadTimeout("slow", request=_req()) for _ in range(2)]})
         monkeypatch.setattr(wda_mod.httpx, "AsyncClient", fake)
 
-        bounded = await backend.find_elements_by_query(
-            SIM, "accessibility id", WIFI, timeout=5, no_resend=True)
-        assert bounded == []
+        from server.device.ios.wda_client import QueryTimedOut
+        with pytest.raises(QueryTimedOut):
+            await backend.find_elements_by_query(
+                SIM, "accessibility id", WIFI, timeout=5, no_resend=True)
         assert fake.reached("/elements") == 1, "a timed-out bounded query was re-sent"
 
     async def test_an_ordinary_query_keeps_its_retry(self, monkeypatch):
@@ -354,6 +361,17 @@ class TestTheRoundTwoGuards:
         assert all(q.get("no_resend") is True for q in deep)
 
     async def test_get_element_on_a_slow_screen_does_not_look_deeper(self, phone, monkeypatch):
+        """The gate times a filtered query, as tap_element's does."""
+        ctrl, wda = phone
+        monkeypatch.setattr(controller_ui, "DEEPEN_MAX_SHALLOW_SECONDS", 0.05)
+        wda.delay = 0.08
+        with pytest.raises(DeviceError):
+            await ctrl.get_element(identifier=WIFI)
+        assert wda.deep_queries() == []
+
+    async def test_a_slow_source_with_a_quick_query_still_looks_deeper(self, phone, monkeypatch):
+        """A phone's unfiltered /source can take over a second where the query
+        is quick; gating on the /source skipped the deep look (CodeRabbit)."""
         ctrl, wda = phone
         monkeypatch.setattr(controller_ui, "DEEPEN_MAX_SHALLOW_SECONDS", 0.05)
 
@@ -362,9 +380,8 @@ class TestTheRoundTwoGuards:
             return []
 
         ctrl.wda_client.describe_all = slow_source
-        with pytest.raises(DeviceError):
-            await ctrl.get_element(identifier=WIFI)
-        assert wda.deep_queries() == []
+        result, _ = await ctrl.get_element(identifier=WIFI)
+        assert result["snapshot_depth"] == SNAPSHOT_MAX_DEPTH
 
     async def test_a_deep_hit_is_seen_by_reachability_and_then_put_back(self, phone):
         """Reachability re-queries the element at the session depth, so it must
@@ -392,8 +409,7 @@ class TestTheRoundTwoGuards:
         self, phone, monkeypatch,
     ):
         ctrl, wda = phone
-        monkeypatch.setattr(controller_ui, "DEEP_QUERY_TIMEOUT", 0.05)
-        wda.deep_delay = 0.06
+        wda.deep_timeouts = {"accessibility id"}
         result = await ctrl.tap_element(identifier="absent", scroll_to_find=False)
         assert result["status"] == "not_found"
         assert "timed out" in result["detail"], result["detail"]
@@ -419,3 +435,47 @@ async def test_the_sweep_after_an_unreachable_deep_hit_starts_shallow(phone):
     await ctrl.tap_element(identifier=WIFI, scroll_to_find=True)
     assert depth_at_sweep, "the sweep never ran, so this test checks nothing"
     assert depth_at_sweep == [ACTION_SNAPSHOT_DEPTH], depth_at_sweep
+
+
+class TestTheCodeRabbitFindings:
+    async def test_a_timed_out_predicate_retry_is_still_a_timeout(self, phone):
+        """The id query misses quickly, the predicate retry times out: judged by
+        elapsed time it looked like a fast miss, and a full read queued behind
+        the walk (CodeRabbit, #474)."""
+        ctrl, wda = phone
+        wda.deep_timeouts = {"predicate string"}
+        result = await ctrl.tap_element(identifier="absent", scroll_to_find=False)
+        assert "timed out" in result["detail"], result["detail"]
+        ctrl.wda_client.describe_all.assert_not_called()
+
+    async def test_the_value_check_sees_a_deep_element(self, phone):
+        """value= reads the element's value by re-querying it at the session
+        depth; restored to 12 first, it could not find a row found at 25."""
+        ctrl, wda = phone
+        depth_at_value_read = []
+
+        async def element_value(*a, **k):
+            depth_at_value_read.append(wda.depth)
+            return "0"
+
+        ctrl.wda_client.element_value = element_value
+        await ctrl.tap_element(identifier=WIFI, value="1", scroll_to_find=False)
+        assert depth_at_value_read == [SNAPSHOT_MAX_DEPTH]
+        assert wda.depth == ACTION_SNAPSHOT_DEPTH, "not put back after the tap"
+
+    async def test_the_stability_check_re_queries_deep_without_a_source_fallback(self, phone):
+        ctrl, wda = phone
+        before = len(wda.deep_queries())
+        result = await ctrl.tap_element(identifier=WIFI, scroll_to_find=False)
+        assert result["status"] == "ok"
+        assert len(wda.deep_queries()) > before + 1, "the stability re-check did not query deep"
+        ctrl.wda_client.describe_all.assert_not_called()
+        assert wda.depth == ACTION_SNAPSHOT_DEPTH
+
+    async def test_the_depth_is_put_back_even_when_the_tap_raises(self, phone):
+        ctrl, wda = phone
+        ctrl.wda_client.tap = AsyncMock(side_effect=DeviceError("boom", tool="wda"))
+        with pytest.raises(DeviceError):
+            await ctrl.tap_element(identifier=WIFI, scroll_to_find=False,
+                                   skip_stability_check=True)
+        assert wda.depth == ACTION_SNAPSHOT_DEPTH

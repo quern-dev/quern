@@ -284,6 +284,11 @@ _DEEPEN_TRIED: contextvars.ContextVar[bool] = contextvars.ContextVar("_deepen_tr
 _DEEP_TIMED_OUT: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "_deep_timed_out", default=False,
 )
+#: A deep hit tap_element is still using: (udid, shallow depth) to put back
+#: once the tap is done.
+_PENDING_RESTORE: contextvars.ContextVar[tuple[str, int] | None] = contextvars.ContextVar(
+    "_pending_restore", default=None,
+)
 
 #: Look deeper only when the shallow look was this quick. A slow shallow query
 #: means a dense screen, where a deep walk is slower still: the 200-row table
@@ -1600,8 +1605,6 @@ class DeviceControllerUI:
         if deep:
             _DEEPENED.set(SNAPSHOT_MAX_DEPTH)
             return deep, elapsed
-        if elapsed >= DEEP_QUERY_TIMEOUT * 0.9:
-            _DEEP_TIMED_OUT.set(True)
         await self.wda_client._set_snapshot_depth(resolved, shallow_depth)
         return [], elapsed
 
@@ -1680,7 +1683,12 @@ class DeviceControllerUI:
         start = time.perf_counter()
         # Only the deeper look sets these; an ordinary query keeps its call.
         bounded = ({"timeout": timeout, "no_resend": True} if no_resend else {})
-        raw = await self.wda_client.find_elements_by_query(udid, using, value, **bounded)
+        from server.device.ios.wda_client import QueryTimedOut
+        try:
+            raw = await self.wda_client.find_elements_by_query(udid, using, value, **bounded)
+        except QueryTimedOut:
+            _DEEP_TIMED_OUT.set(True)
+            return [], time.perf_counter() - start
         elapsed = time.perf_counter() - start
         elements = parse_elements(_with_queried_identifier(raw, identifier))
 
@@ -1694,10 +1702,17 @@ class DeviceControllerUI:
                 "[WDA DIRECT] retrying with predicate string=%s on %s",
                 pred_value, udid[:8],
             )
-            raw = await self.wda_client.find_elements_by_query(
-                udid, "predicate string", pred_value, **bounded,
-            )
+            try:
+                raw = await self.wda_client.find_elements_by_query(
+                    udid, "predicate string", pred_value, **bounded,
+                )
+            except QueryTimedOut:
+                _DEEP_TIMED_OUT.set(True)
+                return [], time.perf_counter() - start
             elements = parse_elements(_with_queried_identifier(raw, identifier))
+            if no_resend:
+                # The bounded caller judges the cost from this; count the retry.
+                elapsed = time.perf_counter() - start
         elif not elements and elapsed >= 2.0:
             logger.info(
                 "[WDA DIRECT] skipping predicate retry "
@@ -2115,11 +2130,9 @@ class DeviceControllerUI:
         backend = self._backend_name(udid)
         resolved = await self.resolve_udid(udid)
         shallow = self._read_depth(resolved, snapshot_depth)
-        read_started = time.perf_counter()
         elements, resolved = await self.get_ui_elements(
             resolved, source_timeout=source_timeout, snapshot_depth=shallow,
         )
-        read_seconds = time.perf_counter() - read_started
         matches = find_element(
             elements, label=label, label_contains=label_contains,
             label_prefix=label_prefix, identifier=identifier,
@@ -2131,8 +2144,17 @@ class DeviceControllerUI:
             # deepens. One bounded query at the full depth does -- gated on how
             # quick this read was, never a second /source (#470 review).
             _begin_lookup()
+            # The gate times a filtered query at the shallow depth, the same
+            # thing tap_element times -- not the unfiltered /source above, which
+            # on a phone can take over a second on a screen where the query is
+            # quick (CodeRabbit, #474).
+            await self.wda_client._set_snapshot_depth(resolved, shallow)
+            _, shallow_seconds = await self._wda_direct_query(
+                resolved, label=label, label_contains=label_contains,
+                label_prefix=label_prefix, identifier=identifier, element_type=element_type,
+            )
             deep, _ = await self._deeper_query(
-                resolved, shallow, read_seconds,
+                resolved, shallow, shallow_seconds,
                 label=label, label_contains=label_contains, label_prefix=label_prefix,
                 identifier=identifier, element_type=element_type,
             )
@@ -2536,7 +2558,20 @@ class DeviceControllerUI:
         self._invalidate_ui_cache(resolved)  # UI changed
         return resolved
 
-    async def tap_element(
+    async def tap_element(self, *args, **kwargs) -> dict:
+        """Tap an element (see `_tap_element`), then put back the shallow WDA
+        depth if a deep hit held it at the full depth through the tap's own
+        lookups -- on every exit, including one that raises (#470)."""
+        _PENDING_RESTORE.set(None)
+        try:
+            return await self._tap_element(*args, **kwargs)
+        finally:
+            pending = _PENDING_RESTORE.get()
+            if pending is not None:
+                _PENDING_RESTORE.set(None)
+                await self.wda_client._set_snapshot_depth(*pending)
+
+    async def _tap_element(
         self,
         label: str | None = None,
         label_contains: str | None = None,
@@ -2701,7 +2736,15 @@ class DeviceControllerUI:
         unreachable: list[dict] = []
         if matches and self._served_by_wda(resolved):
             matches, unreachable = await self._wda_reachable_only(resolved, matches)
-        await self._done_with_deep_element(resolved, shallow_depth)
+        if not matches:
+            # Nothing to tap: what follows is the sweep or the not-found report,
+            # whose first read sets no depth of its own (#470 review).
+            await self._done_with_deep_element(resolved, shallow_depth)
+        elif deepened is not None:
+            # The value check and the stability re-check look the element up
+            # again at the session depth; the wrapper restores after the tap
+            # (CodeRabbit, #474).
+            _PENDING_RESTORE.set((resolved, shallow_depth))
 
         # iOS off-screen retry: on a tree-path miss, scroll the target into view
         # and retry. Android selector-misses are handled by the fast path above,
@@ -2999,14 +3042,24 @@ class DeviceControllerUI:
 
                 # Re-fetch UI and find element again (bypass cache to detect changes!)
                 # Use filtering for performance
-                elements_check, _ = await self.get_ui_elements(
-                    resolved,
-                    use_cache=False,
-                    filter_label=filter_label,
-                    filter_identifier=identifier,
-                    filter_type=element_type,
-                    snapshot_depth=read_depth,
-                )
+                if deepened is not None:
+                    # Found only deep: re-query there, session still at that
+                    # depth, with no /source fallback -- a fast shallow miss
+                    # would otherwise fall back to an unfiltered read that
+                    # cannot see it either (CodeRabbit, #474).
+                    elements_check, _ = await self._wda_direct_query(
+                        resolved, label=filter_label, identifier=identifier,
+                        element_type=element_type,
+                    )
+                else:
+                    elements_check, _ = await self.get_ui_elements(
+                        resolved,
+                        use_cache=False,
+                        filter_label=filter_label,
+                        filter_identifier=identifier,
+                        filter_type=element_type,
+                        snapshot_depth=read_depth,
+                    )
 
                 matches_check = find_element(
                     elements_check, label=label,

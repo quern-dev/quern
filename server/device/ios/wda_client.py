@@ -302,6 +302,11 @@ def _parse_wda_error(resp: httpx.Response, udid: str) -> WdaError | None:
     )
 
 
+class QueryTimedOut(Exception):
+    """A bounded element query (`no_resend=True`) ran out of time: it found
+    nothing because it did not finish, not because nothing is there (#470)."""
+
+
 class WdaBackend:
     """Speaks WDA's HTTP API for UI automation on physical iOS devices."""
 
@@ -1206,10 +1211,12 @@ class WdaBackend:
                 raise_on_timeout=no_resend,
                 json={"using": using, "value": value},
             )
-        except httpx.TimeoutException:
+        except httpx.TimeoutException as exc:
             logger.info("Element query timed out, not re-sent (%s=%s) on %s",
                         using, value, udid[:8])
-            return []
+            # Said, not inferred from elapsed time: a retry that times out after
+            # a quick first query looked like a fast miss (CodeRabbit, #474).
+            raise QueryTimedOut(f"{using}={value}") from exc
         except (DeviceError, WdaError):
             logger.debug("Element query failed (%s=%s) on %s", using, value, udid[:8])
             return []
