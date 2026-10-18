@@ -21,8 +21,11 @@ def server(monkeypatch):
     sockets = []
 
     class FakeSocket:
-        def __init__(self, url, key, session, token):
+        lose = False
+
+        def __init__(self, url, key, session, token, grace_seconds=120):
             self.session, self.token, self.closed = session, token, False
+            self.lost = FakeSocket.lose
             sockets.append(self)
 
         def close(self):
@@ -33,7 +36,7 @@ def server(monkeypatch):
     monkeypatch.setattr(session_cli, "_Socket", FakeSocket)
     monkeypatch.delenv("QUERN_SESSION", raising=False)
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
-    return SimpleNamespace(calls=calls, answers=answers, sockets=sockets)
+    return SimpleNamespace(calls=calls, answers=answers, sockets=sockets, Socket=FakeSocket)
 
 
 @pytest.fixture
@@ -157,3 +160,28 @@ def test_doctor_with_no_server_says_not_checked(monkeypatch, capsys):
     monkeypatch.setattr("server.__main__._server_base_url", lambda: None)
     main_mod._report_held_sessions()
     assert "not checked" in capsys.readouterr().out
+
+
+def test_the_default_name_is_its_own_never_the_callers(server, child, monkeypatch):
+    """Under Claude Code the caller's name is the agent's own MCP session; a
+    run under it collided with, or took over, the agent's session (review)."""
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "abc123")
+    server.answers[("POST", "/api/v1/sessions")] = (200, {"id": "x", "resume_token": "T"})
+    server.answers[("POST", "/api/v1/sessions/x/reservations")] = (200, {"holding": ["S"]})
+    session_cli.main(["run", "--", "true"])
+    opened = next(c for c in server.calls if c["path"] == "/api/v1/sessions")
+    name = opened["body"]["name"]
+    assert name.startswith("claude-abc123.run-") and name != "claude-abc123"
+
+
+def test_a_lost_hold_is_not_a_success(server, child):
+    """The command succeeded but ran partly unprotected: exit 4, not 0."""
+    _opened(server)
+    server.Socket.lose = True
+    try:
+        assert session_cli.main(["run", "--name", "ci-job", "--", "true"]) == 4
+        child["rc"] = 9
+        assert session_cli.main(["run", "--name", "ci-job", "--", "false"]) == 9, \
+            "a failing command keeps its own code"
+    finally:
+        server.Socket.lose = False

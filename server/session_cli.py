@@ -13,7 +13,12 @@ released cleanly. If `run` itself is killed, the server sees the socket drop
 and holds the devices for the grace period, as for any crashed client.
 
 Exit codes: the child's own when it ran; 1 when the server could not be
-asked; 2 when it refused (a device held, nothing free, a bad argument).
+asked; 2 when it refused (a device held, nothing free, a bad argument); 4
+when the child succeeded but the hold was lost while it ran -- the server
+restarted, say -- so its devices were not protected for the whole run.
+
+A dropped connection is reconnected with the session's resume token, inside
+the server's grace period, so a blip costs nothing.
 """
 
 from __future__ import annotations
@@ -21,12 +26,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import signal
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
+
+#: Exit code when the command succeeded but the session's hold was lost.
+HOLD_LOST = 4
 
 USAGE = """\
 Usage: quern session run [--name NAME] [--reserve N | --udid UDID ... | --group GROUP]
@@ -90,32 +100,83 @@ def _detail(answer: dict) -> str:
 
 
 class _Socket:
-    """The session's live socket, held on a thread until `close()`."""
+    """The session's live socket, held on a thread until `close()`.
 
-    def __init__(self, url: str, key: str, session: str, token: str) -> None:
-        from websockets.sync.client import connect
+    A connection that drops is reconnected with the resume token while the
+    server's grace period lasts; it used to end silently, leaving the command
+    running unprotected with nothing said (review). If the server no longer
+    knows the session -- it restarted, or grace ran out -- `lost` is set and
+    said on stderr at once."""
 
-        ws_url = "ws" + url[len("http"):] + f"/api/v1/sessions/{session}/live"
-        self._ws = connect(ws_url, additional_headers={
-            "Authorization": f"Bearer {key}", "X-Quern-Session": session,
-            "X-Quern-Resume-Token": token}, open_timeout=10)
-        first = json.loads(self._ws.recv(timeout=10))
-        if first.get("event") != "attached":
-            raise ConnectionError(f"the session socket said {first!r}, not attached")
-        self._thread = threading.Thread(target=self._drain, daemon=True)
+    def __init__(self, url: str, key: str, session: str, token: str,
+                 grace_seconds: float = 120) -> None:
+        self._url = "ws" + url[len("http"):] + f"/api/v1/sessions/{session}/live"
+        self._headers = {"Authorization": f"Bearer {key}", "X-Quern-Session": session,
+                         "X-Quern-Resume-Token": token}
+        self._session = session
+        self._grace = grace_seconds
+        self._closing = False
+        self.lost = False
+        self._ws = self._connect()
+        self._thread = threading.Thread(target=self._hold, daemon=True)
         self._thread.start()
 
-    def _drain(self) -> None:
-        # Server events are informational here; reading keeps the connection
-        # serviced (pings are answered by the library while it reads).
-        try:
-            for _ in self._ws:
-                pass
-        except Exception:  # noqa: BLE001 -- the socket ending is handled by close()
-            pass
+    def _connect(self):
+        from websockets.sync.client import connect
+
+        ws = connect(self._url, additional_headers=self._headers, open_timeout=10)
+        first = json.loads(ws.recv(timeout=10))
+        if first.get("event") != "attached":
+            raise ConnectionError(f"the session socket said {first!r}, not attached")
+        return ws
+
+    def _hold(self) -> None:
+        while not self._closing:
+            code = None
+            try:
+                for _ in self._ws:          # events are informational; reading
+                    pass                    # keeps pings answered
+                code = getattr(self._ws, "close_code", None)
+            except Exception as e:  # noqa: BLE001 -- any end is handled below
+                code = getattr(getattr(e, "rcvd", None), "code", None)
+            if self._closing:
+                return
+            if code in (4404, 4403, 4000):
+                self._lose(code)
+                return
+            if not self._reconnect():
+                return
+
+    def _reconnect(self) -> bool:
+        deadline = time.monotonic() + self._grace
+        delay = 1.0
+        while not self._closing and time.monotonic() < deadline:
+            time.sleep(delay)
+            try:
+                self._ws = self._connect()
+                return True
+            except Exception as e:  # noqa: BLE001 -- retried until grace runs out
+                code = getattr(getattr(e, "rcvd", None), "code", None)
+                if code in (4404, 4403, 4000):
+                    self._lose(code)
+                    return False
+            delay = min(delay * 2, 5.0)
+        if not self._closing:
+            self._lose(None)
+        return False
+
+    def _lose(self, code) -> None:
+        self.lost = True
+        why = {4404: "the server no longer knows it (it restarted, or its grace ran out)",
+               4000: "another connection took it over",
+               4403: "its resume token was refused"}.get(code, "the server could not be "
+                                                               "reached within its grace period")
+        print(f"quern session run: WARNING: session {self._session} lost its hold -- {why}. "
+              "Its devices are no longer reserved for this command.", file=sys.stderr)
 
     def close(self) -> None:
         """A clean close: the server releases the session at once."""
+        self._closing = True
         try:
             self._ws.close(code=1000, reason="done")
         except Exception:  # noqa: BLE001 -- already gone: the server's grace applies
@@ -129,7 +190,11 @@ def _run(args: argparse.Namespace) -> int:
     from server.session import session_from_env
 
     url, key = _server()
-    name = args.name or session_from_env(dict(os.environ), fallback="")
+    # Its own name, never the caller's: under Claude Code the caller's is the
+    # agent's own MCP session, which a `run` took over or collided with
+    # (review). Prefixed with it, so a reader can still tell whose run it was.
+    base = session_from_env(dict(os.environ), fallback="cli")
+    name = args.name or f"{base[:50]}.run-{secrets.token_hex(2)}"
     status, opened = _call("POST", url, key, "/api/v1/sessions", session=name,
                            body={"name": name} if name else {})
     if status != 200:
@@ -137,7 +202,8 @@ def _run(args: argparse.Namespace) -> int:
         return 2
     session, token = opened["id"], opened["resume_token"]
     try:
-        socket = _Socket(url, key, session, token)
+        socket = _Socket(url, key, session, token,
+                         grace_seconds=opened.get("grace_seconds", 120))
     except Exception as e:  # noqa: BLE001 -- any failure to hold it is the same answer
         print(f"quern session run: could not hold the session's socket: {e}", file=sys.stderr)
         _call("DELETE", url, key, f"/api/v1/sessions/{session}", session=session)
@@ -172,7 +238,12 @@ def _run(args: argparse.Namespace) -> int:
 
         for sig in (signal.SIGINT, signal.SIGTERM):
             signal.signal(sig, forward)
-        return child.wait()
+        rc = child.wait()
+        if socket.lost:
+            print(f"quern session run: the command ran partly without its reservation "
+                  f"(exit {rc if rc else HOLD_LOST})", file=sys.stderr)
+            return rc if rc else HOLD_LOST
+        return rc
     finally:
         socket.close()
 
