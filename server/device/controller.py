@@ -805,7 +805,13 @@ class DeviceController(DeviceControllerUI):
                 known = self._device_type_cache.get(canonical)
                 if known is not None:
                     self._device_type_cache[udid] = known
-            if set_active:
+            # Never onto a device another session holds (#254): reading one
+            # names it, and adopting it then sent the reader's own unqualified
+            # changes to the holder's device -- refused, correctly, but the
+            # reader had silently lost track of its own. Found live.
+            from server import device_access
+
+            if set_active and not device_access.held_by_another(canonical):
                 self._active_udid = canonical
             return canonical
 

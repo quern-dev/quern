@@ -141,6 +141,14 @@ def check(udid: str | None) -> None:
     raise error
 
 
+def held_by_another(udid: str | None) -> bool:
+    """Whether a session other than the caller's holds `udid`, read or write."""
+    if not udid or _REGISTRY is None:
+        return False
+    held = _REGISTRY.holder_of(_canonical(udid))
+    return held is not None and held.session.id != current_session()
+
+
 def is_write(method: str, path: str) -> bool:
     return method.upper() not in ("GET", "HEAD", "OPTIONS") and path not in READ_POSTS
 

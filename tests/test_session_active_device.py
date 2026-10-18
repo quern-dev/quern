@@ -118,6 +118,30 @@ class TestResolution:
         with as_session("mcp-bbbb"):
             assert await ctrl.resolve_udid() == "SIM-Y"
 
+    async def test_reading_a_device_another_session_holds_does_not_adopt_it(self):
+        """Found live (#254): B reserved SIM-Y, read A's SIM-X by naming it, and
+        its next unqualified change went to SIM-X -- refused, but B had lost
+        track of its own device. A held device is never adopted as active."""
+        from server import device_access
+        from server.session_registry import SessionRegistry
+
+        registry = SessionRegistry()
+        device_access.install(registry)
+        try:
+            a, token = registry.open("agent-a")
+            registry.attach(a.id, token)
+            registry.reserve("agent-a", ["SIM-X"])
+            ctrl = _controller()
+            with as_session("agent-b"):
+                assert await ctrl.resolve_udid("SIM-Y") == "SIM-Y"
+                assert await ctrl.resolve_udid("SIM-X") == "SIM-X", "the read itself works"
+                assert await ctrl.resolve_udid() == "SIM-Y", "and B's own device is still SIM-Y"
+            with as_session("agent-a"):
+                assert await ctrl.resolve_udid("SIM-X") == "SIM-X"
+                assert await ctrl.resolve_udid() == "SIM-X", "the holder adopts its own"
+        finally:
+            device_access.install(None)
+
     async def test_a_fresh_session_is_asked_rather_than_handed_a_device(self):
         """Two simulators booted and no slot: what a fresh server does --
         'specify udid' -- not whichever device someone else chose."""
