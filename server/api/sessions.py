@@ -110,11 +110,16 @@ async def open_session(request: Request, body: OpenRequest | None = None) -> dic
     name = parse_session(raw) if raw else f"s-{secrets.token_hex(4)}"
     if not name:
         raise HTTPException(400, "name must be a valid session id (letters, digits, . _ : @ -)")
+    existed = registry.get(name) is not None
     try:
         session, token = registry.open(name, principal=visibility.current_caller().principal)
     except SessionError as e:
         raise _refused(e) from None
+    # `resumed`: an existing session (in grace) was taken back, reservations
+    # and all. False is a new session -- for a client that held one before,
+    # the server restarted or its grace ran out, so its devices are gone.
     return {"id": session.id, "resume_token": token, "grace_seconds": registry.grace_seconds,
+            "resumed": existed,
             "live_path": f"/api/v1/sessions/{session.id}/live",
             "reservations": [r.udid for r in session.reservations.values()]}
 

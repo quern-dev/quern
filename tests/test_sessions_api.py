@@ -315,9 +315,11 @@ class TestLifecycle:
 
     def test_a_restarted_mcp_takes_its_session_back_by_name(self, client, registry):
         a = Held(client, "claude-a")
+        assert a.opened["resumed"] is False, "a new session"
         _reserve(client, "claude-a", udids=["SIM-1"])
         a.close(code=1001)
         again = Held(client, "claude-a")              # same name, new process
+        assert again.opened["resumed"] is True, "the session in grace, taken back"
         assert registry.holder_of("SIM-1").session.state == "live"
         assert again.opened["reservations"] == ["SIM-1"]
         again.close()

@@ -39,11 +39,6 @@ let stopping = false;
 let backoffMs = 1000;
 let timer: ReturnType<typeof setTimeout> | null = null;
 let everAttached = false;
-/** Set when the server said the session is gone; the agent is told once the
- * session is reopened. Not queued before: the reopen is itself an API request,
- * and a notice queued first rode on that answer, which this module reads and
- * the agent never sees (found live). */
-let lossPending = false;
 /** Handshakes in a row that failed before the server answered. A refused API
  * key fails the handshake itself (HTTP 403), which reads as a plain drop, so
  * the 4401 close is never seen; retrying the same attempt then went on for
@@ -102,11 +97,14 @@ async function open(): Promise<void> {
   try {
     const opened = (await apiRequest("POST", "/api/v1/sessions", undefined, {
       name: SESSION_ID,
-    })) as { resume_token?: string } | null;
+    })) as { resume_token?: string; resumed?: boolean } | null;
     if (!opened?.resume_token) throw new Error("no resume token in the answer");
     token = opened.resume_token;
-    if (lossPending) {
-      lossPending = false;
+    // A client that has held a session before and is handed a *new* one has
+    // lost what it held -- whichever way it got here: a 4404, or reopening
+    // after failed handshakes while the server was down, which never saw a
+    // 4404 at all (found live, after that path was added).
+    if (everAttached && opened.resumed === false) {
       sessionNotices.push(LOSS_NOTICE);
     }
     connect();
@@ -210,7 +208,6 @@ function onEnd(code: number): void {
     console.error(`Held session ${SESSION_ID}: taken over by another connection; not reconnecting`);
   } else if (code === CLOSE_UNKNOWN) {
     token = null;
-    if (everAttached) lossPending = true;
     // At once: the server is up (it just answered), and every second here
     // is a second the agent holds nothing.
     backoffMs = 1000;
