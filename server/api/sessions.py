@@ -168,9 +168,10 @@ async def release_session(request: Request, session_id: str) -> dict:
     actions = await run_release_policies(request.app)
     freed = [r.udid for r in session.reservations.values()]
     # The queue is global: another session's expired policies may run here,
-    # and are not this caller's to hear about (review).
-    return {"released": session_id, "freed": freed,
-            "actions": [a for a in actions if a["udid"] in freed]}
+    # and on a blind server are not a client's to hear about (review).
+    if visibility.blind_for(caller):
+        actions = [a for a in actions if a["udid"] in freed]
+    return {"released": session_id, "freed": freed, "actions": actions}
 
 
 @router.post("/{session_id}/reservations")
@@ -269,18 +270,21 @@ async def unreserve(request: Request, session_id: str, udid: str | None = None) 
         # tell its holder, who would otherwise go on believing it has them.
         entry = _sockets(request.app).get(session_id)
         if entry is not None:
-            # "the server's owner", never the owner's session name: the
-            # holder may be a client, and the owner's sessions are not its to
-            # know (review).
-            by = ("the server's owner" if caller.is_owner
-                  else caller.session or "the server's owner")
+            # Blind: "the server's owner", never the owner's session name --
+            # the owner's sessions are not a client's to know (review). Shared,
+            # the name, as every listing there already shows it.
+            target = registry.get(session_id)
+            hidden = (caller.is_owner and visibility.MODE == "blind" and target is not None
+                      and principal.label_of(target.principal) is not None)
+            by = "the server's owner" if hidden else (caller.session or "the server's owner")
             with contextlib.suppress(Exception):
                 await entry[1].send_json({"event": "released",
                                           "udids": [r.udid for r in freed], "by": by})
     actions = await run_release_policies(request.app)
     freed_ids = [r.udid for r in freed]
-    return {"session": session_id, "freed": freed_ids,
-            "actions": [a for a in actions if a["udid"] in freed_ids]}
+    if visibility.blind_for(caller):
+        actions = [a for a in actions if a["udid"] in freed_ids]
+    return {"session": session_id, "freed": freed_ids, "actions": actions}
 
 
 async def _choose(request: Request, registry: SessionRegistry, session_id: str,

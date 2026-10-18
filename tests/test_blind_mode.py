@@ -880,3 +880,24 @@ class TestPreviewsAndTimeline:
         world.app.state.active_timeline.udid = SIM_A
         assert world.client.get("/api/v1/device/screenshot/timeline",
                                 headers=_h(world.alice)).status_code == 200
+
+
+def test_a_blind_client_is_not_told_the_owners_session_name(world):
+    """The owner freeing a client's device: the client's socket is told who
+    did it, but not the owner's session name."""
+    from server.api.sessions import _sockets
+
+    sent = []
+
+    class WS:
+        async def send_json(self, data):
+            sent.append(data)
+
+        async def close(self, code=1000, reason=""):
+            pass
+
+    _sockets(world.app)["alice:s1"] = (1, WS())
+    r = world.client.delete("/api/v1/sessions/alice:s1/reservations",
+                            params={"udid": SIM_A}, headers=_h(KEY, "owner-secret-ci"))
+    assert r.status_code == 200, r.text
+    assert sent and sent[0]["by"] == "the server's owner", sent
