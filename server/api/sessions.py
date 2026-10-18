@@ -227,6 +227,15 @@ async def unreserve(request: Request, session_id: str, udid: str | None = None) 
         freed = registry.unreserve(session_id, [udid] if udid else None)
     except SessionError as e:
         raise _refused(e) from None
+    if freed and caller.session != session_id:
+        # Someone else -- the owner -- freed some of this session's devices:
+        # tell its holder, who would otherwise go on believing it has them.
+        entry = _sockets(request.app).get(session_id)
+        if entry is not None:
+            with contextlib.suppress(Exception):
+                await entry[1].send_json({"event": "released",
+                                          "udids": [r.udid for r in freed],
+                                          "by": caller.session or "the server's owner"})
     actions = await run_release_policies(request.app)
     return {"session": session_id, "freed": [r.udid for r in freed], "actions": actions}
 

@@ -44,6 +44,13 @@ let everAttached = false;
  * and a notice queued first rode on that answer, which this module reads and
  * the agent never sees (found live). */
 let lossPending = false;
+/** Handshakes in a row that failed before the server answered. A refused API
+ * key fails the handshake itself (HTTP 403), which reads as a plain drop, so
+ * the 4401 close is never seen; retrying the same attempt then went on for
+ * ever (review). After a few, the session is opened again from the start,
+ * whose POST says what is wrong. */
+let failedHandshakes = 0;
+const REOPEN_AFTER_FAILED_HANDSHAKES = 3;
 
 const LOSS_NOTICE =
   "Your quern session ended on the server (it was released, the server restarted, " +
@@ -139,6 +146,7 @@ function connect(): void {
   // ever -- so waiting for `close` left a client whose server had restarted
   // retrying nothing, unheld, and with no notice for its agent (found live).
   let done = false;
+  let attached = false;
   const handshake = setTimeout(() => ended(1006), HANDSHAKE_TIMEOUT_MS);
   (handshake as { unref?: () => void }).unref?.();
   const ended = (code: number) => {
@@ -154,13 +162,25 @@ function connect(): void {
     }
     // Only the current attempt decides what happens next: a superseded one
     // ending must not start another reconnect alongside the live one.
-    if (current) onEnd(code);
+    if (!current) return;
+    if (!attached && code === 1006) failedHandshakes += 1;
+    onEnd(code);
   };
 
   ws.onmessage = (event) => {
     try {
       const message = JSON.parse(String(event.data)) as { event?: string };
+      if (message.event === "released") {
+        const freed = (message as { udids?: string[]; by?: string }).udids ?? [];
+        const by = (message as { by?: string }).by ?? "another caller";
+        sessionNotices.push(
+          `${by} released ${freed.join(", ")} from your quern session; ` +
+            "it is no longer reserved for you. Reserve it again if you still need it.",
+        );
+      }
       if (message.event === "attached") {
+        attached = true;
+        failedHandshakes = 0;
         clearTimeout(handshake);
         state = "live";
         backoffMs = 1000;
@@ -197,6 +217,11 @@ function onEnd(code: number): void {
     void open();
   } else if (code === CLOSE_BAD_TOKEN || code === CLOSE_UNAUTHORISED) {
     // A new token by name (local takeover), or a rotated API key: start over.
+    token = null;
+    retry(() => void open());
+  } else if (failedHandshakes >= REOPEN_AFTER_FAILED_HANDSHAKES) {
+    // The handshake keeps failing: open the session again from the start.
+    failedHandshakes = 0;
     token = null;
     retry(() => void open());
   } else {

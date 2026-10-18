@@ -390,10 +390,32 @@ class TestTheGuardCoversEveryRoute:
         spec = m.create_app(ServerConfig(api_key=KEY)).openapi()
         schemas = spec.get("components", {}).get("schemas", {})
 
+        def walk(schema, seen):
+            """Every property name in a schema, at any depth: through $refs,
+            Optional bodies (anyOf), nested objects and arrays. Only top-level
+            $ref bodies were followed before (review)."""
+            if not isinstance(schema, dict):
+                return []
+            ref = schema.get("$ref")
+            if ref:
+                name = ref.rsplit("/", 1)[-1]
+                if name in seen:
+                    return []
+                return walk(schemas.get(name, {}), seen | {name})
+            names = []
+            for key, sub in (schema.get("properties") or {}).items():
+                names.append(key)
+                names += walk(sub, seen)
+            for combo in ("anyOf", "oneOf", "allOf"):
+                for sub in schema.get(combo) or []:
+                    names += walk(sub, seen)
+            names += walk(schema.get("items"), seen)
+            names += walk(schema.get("additionalProperties"), seen)
+            return names
+
         def body_fields(op):
-            ref = (op.get("requestBody", {}).get("content", {})
-                   .get("application/json", {}).get("schema", {}).get("$ref", ""))
-            return list(schemas.get(ref.rsplit("/", 1)[-1], {}).get("properties", {}))
+            content = op.get("requestBody", {}).get("content", {})
+            return [n for media in content.values() for n in walk(media.get("schema"), set())]
 
         suspicious, seen = [], 0
         for path, ops in spec["paths"].items():
@@ -524,6 +546,9 @@ class TestReviewFindings:
                           headers=_h("someone-else"))
         assert r.status_code == 200 and r.json()["freed"] == ["SIM-1"]
         assert registry.holder_of("SIM-1") is None and registry.holder_of("SIM-2") is not None
+        # The holder is told over its socket, so the MCP can tell the agent.
+        event = a.ws.receive_json()
+        assert event == {"event": "released", "udids": ["SIM-1"], "by": "someone-else"}
         a.close()
 
     def test_a_lowercase_spelling_of_a_held_simulator_is_refused(self, client):
