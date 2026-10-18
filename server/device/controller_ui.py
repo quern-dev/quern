@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import logging
 import math
 import time
@@ -271,6 +272,27 @@ def _effective_filter_label(
     return label
 
 logger = logging.getLogger(__name__)
+
+#: The deeper WDA look after a miss at the action depth (#470). Per request, as
+#: context variables rather than per-device state: two requests on one device
+#: must not read each other's result (#470 review). A caller resets them before
+#: a lookup and reads them after it.
+_DEEPENED: contextvars.ContextVar[int | None] = contextvars.ContextVar("_deepened", default=None)
+_DEEPEN_TRIED: contextvars.ContextVar[bool] = contextvars.ContextVar("_deepen_tried", default=False)
+
+#: Look deeper only when the shallow look was this quick. A slow shallow query
+#: means a dense screen, where a deep walk is slower still: the 200-row table
+#: that took 34.5s at full depth (F35) is exactly the screen to leave alone.
+DEEPEN_MAX_SHALLOW_SECONDS = 1.0
+#: The deeper query's own bound. It times out without being re-sent or dropping
+#: the connection, so a miss costs at most this much (#470 review).
+DEEP_QUERY_TIMEOUT = 5.0
+
+
+def _begin_lookup() -> None:
+    _DEEPENED.set(None)
+    _DEEPEN_TRIED.set(False)
+
 
 
 def _with_queried_identifier(raw: list[dict], identifier: str | None) -> list[dict]:
@@ -1524,6 +1546,51 @@ class DeviceControllerUI:
             _give_up(f"stopped by {type(exc).__name__}: {exc!r}")
             raise
 
+    async def _deeper_query(
+        self, resolved: str, shallow_depth: int | None, shallow_elapsed: float,
+        *, label: str | None = None, label_contains: str | None = None,
+        label_prefix: str | None = None, identifier: str | None = None,
+        element_type: str | None = None,
+    ) -> tuple[list[UIElement], float | None]:
+        """After a miss at the shallow action depth, one bounded query at the full
+        depth (#470). Returns (elements, elapsed); elapsed is None when it did
+        not run.
+
+        A query, never /source: a timed-out /source restarts the runner. It runs
+        only after a quick shallow look, has its own short timeout, and is never
+        re-sent -- each of those a defect the first version had (#470 review).
+
+        A hit leaves the session at the full depth on purpose: the reachability
+        check that follows must see the element at the depth it was found at.
+        Reads that care set their own depth; a miss puts the shallow one back.
+        """
+        from server.device.ios.wda_client import SNAPSHOT_MAX_DEPTH
+
+        if shallow_depth is None or shallow_depth >= SNAPSHOT_MAX_DEPTH:
+            return [], None
+        if shallow_elapsed >= DEEPEN_MAX_SHALLOW_SECONDS:
+            logger.info(
+                "[WDA DIRECT] miss at snapshot_depth=%d took %.1fs; a dense screen, "
+                "not looking deeper on %s", shallow_depth, shallow_elapsed, resolved[:8],
+            )
+            return [], None
+        _DEEPEN_TRIED.set(True)
+        await self.wda_client._set_snapshot_depth(resolved, SNAPSHOT_MAX_DEPTH)
+        deep, elapsed = await self._wda_direct_query(
+            resolved, label=label, label_contains=label_contains,
+            label_prefix=label_prefix, identifier=identifier, element_type=element_type,
+            timeout=DEEP_QUERY_TIMEOUT, no_resend=True,
+        )
+        logger.info(
+            "[WDA DIRECT] miss at snapshot_depth=%d; at %d: %d result(s) in %.1fs on %s",
+            shallow_depth, SNAPSHOT_MAX_DEPTH, len(deep), elapsed, resolved[:8],
+        )
+        if deep:
+            _DEEPENED.set(SNAPSHOT_MAX_DEPTH)
+            return deep, elapsed
+        await self.wda_client._set_snapshot_depth(resolved, shallow_depth)
+        return [], elapsed
+
     async def _wda_direct_query(
         self,
         udid: str,
@@ -1532,6 +1599,8 @@ class DeviceControllerUI:
         label_prefix: str | None = None,
         identifier: str | None = None,
         element_type: str | None = None,
+        timeout: float | None = None,
+        no_resend: bool = False,
     ) -> tuple[list[UIElement], float]:
         """Query WDA directly for specific elements without fetching the full tree.
 
@@ -1590,7 +1659,9 @@ class DeviceControllerUI:
 
         logger.info("[WDA DIRECT] %s=%s on %s", using, value, udid[:8])
         start = time.perf_counter()
-        raw = await self.wda_client.find_elements_by_query(udid, using, value)
+        raw = await self.wda_client.find_elements_by_query(
+            udid, using, value, timeout=timeout, no_resend=no_resend,
+        )
         elapsed = time.perf_counter() - start
         elements = parse_elements(_with_queried_identifier(raw, identifier))
 
@@ -1604,7 +1675,9 @@ class DeviceControllerUI:
                 "[WDA DIRECT] retrying with predicate string=%s on %s",
                 pred_value, udid[:8],
             )
-            raw = await self.wda_client.find_elements_by_query(udid, "predicate string", pred_value)
+            raw = await self.wda_client.find_elements_by_query(
+                udid, "predicate string", pred_value, timeout=timeout, no_resend=no_resend,
+            )
             elements = parse_elements(_with_queried_identifier(raw, identifier))
         elif not elements and elapsed >= 2.0:
             logger.info(
@@ -1862,30 +1935,18 @@ class DeviceControllerUI:
             )
             if elements:
                 return elements, resolved
-            from server.device.ios.wda_client import SNAPSHOT_MAX_DEPTH
-            shallow = snapshot_depth is not None and snapshot_depth < SNAPSHOT_MAX_DEPTH
-            if deepen_on_miss and shallow:
-                # The shallow action depth (F35) misses elements nested deeper:
-                # iOS 26's Settings root needs 20, and 12 saw a tenth of it
-                # (#470, measured on an iPhone 11). A query rather than /source,
-                # because a timed-out query returns nothing while a timed-out
-                # /source restarts the runner -- so on a 200-row table, where
-                # the full depth took 34.5s, a miss costs a bounded wait, not
-                # the runner. The depth is a session setting, and the next read
-                # sets its own, so nothing is left at 25.
-                await self.wda_client._set_snapshot_depth(resolved, SNAPSHOT_MAX_DEPTH)
-                deep, deep_elapsed = await self._wda_direct_query(
-                    resolved, label=filter_label,
-                    identifier=filter_identifier, element_type=filter_type,
-                )
-                logger.info(
-                    "[WDA DIRECT] miss at snapshot_depth=%d; at %d: %d result(s) in %.1fs on %s",
-                    snapshot_depth, SNAPSHOT_MAX_DEPTH, len(deep), deep_elapsed, resolved[:8],
+            if deepen_on_miss:
+                deep, deep_elapsed = await self._deeper_query(
+                    resolved, snapshot_depth, query_elapsed,
+                    label=filter_label, identifier=filter_identifier,
+                    element_type=filter_type,
                 )
                 if deep:
-                    self._deepened_to[resolved] = SNAPSHOT_MAX_DEPTH
                     return deep, resolved
-                await self.wda_client._set_snapshot_depth(resolved, snapshot_depth)
+                if deep_elapsed is not None and deep_elapsed > 3.0:
+                    # A slow deep miss is a dense screen like a slow shallow
+                    # one: no /source behind a runner still walking (#470 review).
+                    return [], resolved
             # Direct query found nothing. If the query was slow (>3s), the screen
             # is too dense for any WDA query to work — skip /source to avoid a
             # 30s+ cascade of timeouts and WDA restarts.
@@ -2033,31 +2094,31 @@ class DeviceControllerUI:
         # thing this change exists to get right.
         backend = self._backend_name(udid)
         resolved = await self.resolve_udid(udid)
+        shallow = self._read_depth(resolved, snapshot_depth)
+        read_started = time.perf_counter()
         elements, resolved = await self.get_ui_elements(
-            resolved, source_timeout=source_timeout,
-            snapshot_depth=self._read_depth(resolved, snapshot_depth),
+            resolved, source_timeout=source_timeout, snapshot_depth=shallow,
         )
+        read_seconds = time.perf_counter() - read_started
         matches = find_element(
             elements, label=label, label_contains=label_contains,
             label_prefix=label_prefix, identifier=identifier,
             element_type=element_type,
         )
         deepened = None
-        shallow = self._read_depth(resolved, snapshot_depth)
         if not matches and snapshot_depth is None and self._served_by_wda(resolved):
-            # This read is unfiltered, so it never takes the query path that
-            # deepens. A second, filtered look does -- a query, not a deep
-            # /source, which on a long list is the read that times out and
-            # restarts the runner (#470).
-            deep_elements, _ = await self.get_ui_elements(
-                resolved, use_cache=False,
-                filter_label=_effective_filter_label(label, label_contains, label_prefix),
-                filter_identifier=identifier, filter_type=element_type,
-                snapshot_depth=shallow, deepen_on_miss=True,
+            # This read is unfiltered, so it never reaches the query path that
+            # deepens. One bounded query at the full depth does -- gated on how
+            # quick this read was, never a second /source (#470 review).
+            _begin_lookup()
+            deep, _ = await self._deeper_query(
+                resolved, shallow, read_seconds,
+                label=label, label_contains=label_contains, label_prefix=label_prefix,
+                identifier=identifier, element_type=element_type,
             )
-            deepened = self._deepened_to.pop(resolved, None)
+            deepened = _DEEPENED.get()
             matches = find_element(
-                deep_elements, label=label, label_contains=label_contains,
+                deep, label=label, label_contains=label_contains,
                 label_prefix=label_prefix, identifier=identifier,
                 element_type=element_type,
             )
@@ -2191,10 +2252,10 @@ class DeviceControllerUI:
         # a lookup that missed, and gets no web-content hint.
         ever_found = False
 
-        # The first poll may deepen on a miss (#470); a depth that found the
-        # element is kept for the polls after it. Only the first, so a wait for
-        # something absent on a long list does not pay a deep query per poll
-        # and overrun its own timeout.
+        # Every poll may look deeper on a miss (#470): the common wait is for a
+        # row on the screen a tap just opened, which appears after the first
+        # poll. Safe on a long list because the deeper look runs only after a
+        # quick shallow one, and is bounded (#470 review).
         poll_depth = self._read_depth(resolved, snapshot_depth)
         shallow_depth = poll_depth
         deepened = None
@@ -2205,6 +2266,7 @@ class DeviceControllerUI:
             # Fast path not applicable or failed - use traditional describe-all
             # Fetch UI elements with filtering for performance
             filter_label = _effective_filter_label(label, label_contains, label_prefix)
+            _begin_lookup()
             elements, _ = await self.get_ui_elements(
                 resolved,
                 filter_label=filter_label,
@@ -2212,11 +2274,9 @@ class DeviceControllerUI:
                 filter_type=element_type,
                 mode=mode,
                 snapshot_depth=poll_depth,
-                deepen_on_miss=(polls == 1 and snapshot_depth is None),
+                deepen_on_miss=snapshot_depth is None,
             )
-            found_deeper = self._deepened_to.pop(resolved, None)
-            if found_deeper is not None:
-                deepened = poll_depth = found_deeper
+            deepened = _DEEPENED.get()
 
             matches = find_element(
                 elements,
@@ -2584,6 +2644,7 @@ class DeviceControllerUI:
         cache_hits_before = self._cache_hits
         depth_for = await self.resolve_udid(udid)
         read_depth = self._read_depth(depth_for, snapshot_depth)
+        _begin_lookup()
         elements, resolved = await self.get_ui_elements(
             depth_for,
             filter_label=filter_label,
@@ -2594,10 +2655,13 @@ class DeviceControllerUI:
             deepen_on_miss=snapshot_depth is None,
         )
         served_from_cache = self._cache_hits > cache_hits_before
+        # A deep hit changes what is reported, never the depth of the reads
+        # after it: escalating them sent the context read, the sweep and the
+        # stability checks to the full depth -- an unfiltered deep /source on
+        # a long list (#470 review).
         shallow_depth = read_depth
-        deepened = self._deepened_to.pop(resolved, None)
-        if deepened is not None:
-            read_depth = deepened
+        deepened = _DEEPENED.get()
+        deepen_tried = _DEEPEN_TRIED.get()
 
         # Use shared search helper
         matches = find_element(
@@ -2759,7 +2823,7 @@ class DeviceControllerUI:
                 # answer says how deep it looked and how to look deeper --
                 # otherwise "not found" reads as "not there".
                 result["snapshot_depth"] = read_depth
-                if snapshot_depth is None:
+                if deepen_tried:
                     from server.device.ios.wda_client import SNAPSHOT_MAX_DEPTH
                     result["detail"] += (
                         f" (read through WDA at snapshot_depth={read_depth}, and "

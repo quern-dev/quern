@@ -1180,6 +1180,7 @@ class WdaBackend:
     async def find_elements_by_query(
         self, udid: str, using: str, value: str,
         *, scope_element_id: str | None = None, timeout: float | None = None,
+        no_resend: bool = False,
     ) -> list[dict]:
         """Query WDA for elements using a locator strategy.
 
@@ -1198,8 +1199,17 @@ class WdaBackend:
             resp = await self._request(
                 "post", udid, path, use_session=True,
                 timeout=timeout or SKELETON_QUERY_TIMEOUT,
+                # `no_resend`: a timeout is an answer, not a dropped line. The
+                # default re-sends once on a fresh connection, which on a slow
+                # walk queues a second one behind the first on WDA's one-at-a-
+                # time runner and drops a phone's forward (#470 review).
+                raise_on_timeout=no_resend,
                 json={"using": using, "value": value},
             )
+        except httpx.TimeoutException:
+            logger.info("Element query timed out, not re-sent (%s=%s) on %s",
+                        using, value, udid[:8])
+            return []
         except (DeviceError, WdaError):
             logger.debug("Element query failed (%s=%s) on %s", using, value, udid[:8])
             return []
