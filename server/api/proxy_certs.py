@@ -1090,18 +1090,14 @@ async def setup_guide(request: Request) -> dict:
     # (~/.mitmproxy) and the same content type. So the proxy is set first,
     # then the certificate fetched -- plain HTTP needs no trust. And two Macs
     # never collide: whichever proxy the device is routed through answers.
-    # Only an API bound beyond loopback (--host) still serves it directly.
-    from server.config import bind_warning
-
-    config = request.app.state.config
-    via_api = bind_warning(config.host) is not None
-    # The address it answers on: the LAN one only for a wildcard bind, else
-    # the host it was bound to -- as `quern status` shows it (CodeRabbit).
-    api_host = local_ip if config.host in ("0.0.0.0", "::") else config.host
-    if ":" in api_host and not api_host.startswith("["):
-        api_host = f"[{api_host}]"             # an IPv6 address, in a URL
-    cert_url = (f"http://{api_host}:{config.port}/api/v1/proxy/cert" if via_api
-                else "http://mitm.it/cert/cer")
+    #
+    # Whatever the API is bound to. A guide that pointed a phone at the API
+    # when --host exposed it had to pick an address the phone could reach
+    # before it was routed anywhere -- the bound host, the default route, or
+    # with several subnets active none of them reliably (CodeRabbit, three
+    # times). Through the proxy there is nothing to pick: the phone reaches
+    # the Mac it was just told to use.
+    cert_url = "http://mitm.it/cert/cer"
 
     # Physical-device step 5: when multiple interfaces are active, the
     # user has to pick the Mac IP on the same subnet as the device. Spell
@@ -1129,15 +1125,12 @@ async def setup_guide(request: Request) -> dict:
                "Install the profile — Settings > General > VPN & Device Management",
                "Trust the certificate — Settings > General > About > "
                "Certificate Trust Settings"]
-    ordered = install + configure if via_api else configure + install
-    physical_steps = [f"{n}. {step}" for n, step in enumerate(ordered, 1)]
+    physical_steps = [f"{n}. {step}" for n, step in enumerate(configure + install, 1)]
     physical_note = (
         "Physical devices are configured directly in iOS Settings. "
-        + ("Install and trust the certificate BEFORE configuring the proxy."
-           if via_api else
-           "Configure the proxy FIRST: the certificate is served by the proxy itself "
-           "(mitm.it), so the device must be routed through this Mac to fetch it. "
-           "Plain-HTTP pages load before the certificate is trusted.")
+        "Configure the proxy FIRST: the certificate is served by the proxy itself "
+        "(mitm.it), so the device must be routed through this Mac to fetch it. "
+        "Plain-HTTP pages load before the certificate is trusted."
     )
 
     return {

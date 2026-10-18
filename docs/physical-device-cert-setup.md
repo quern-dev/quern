@@ -8,7 +8,7 @@ Step-by-step WDA UI automation flow for installing the mitmproxy CA cert and con
 
 1. **The proxy serves the certificate, so route the device first.** The quern API listens on 127.0.0.1 only (#254), out of a phone's reach. mitmproxy answers `http://mitm.it` itself, for any device routed through it, with the same CA quern installs on simulators -- so the Wi-Fi proxy is configured first (Phases 1-2), then the certificate fetched (Phases 3-5). Plain-HTTP pages load before the certificate is trusted. With two Macs running quern, whichever proxy the device points at answers, with that Mac's CA.
 
-2. **No API key is needed from Safari**: `mitm.it` is answered by the proxy, not the API. (A server started with `--host 0.0.0.0` also serves `/api/v1/proxy/cert` directly, unauthenticated -- `setup-guide` then gives that URL and the old order.)
+2. **No API key is needed from Safari**: `mitm.it` is answered by the proxy, not the API.
 
 3. **Cert download defaults to `.cer`** (`application/x-x509-ca-cert`) which triggers iOS's "Install Profile" dialog. The old `application/x-pem-file` was silently ignored by iOS.
 
