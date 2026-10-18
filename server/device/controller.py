@@ -752,6 +752,13 @@ class DeviceController(DeviceControllerUI):
         resolved = await self._resolve_udid(udid, set_active=set_active)
         current_action().udid = resolved
         logging_ext.note_action_device(resolved)
+        # Last, once the device is known: a change to a device another session
+        # holds is refused here when the request did not name it (#254). A
+        # named one was already checked by AccessMiddleware; checking again is
+        # harmless. Reads pass: `check` knows which this request is.
+        from server import device_access
+
+        device_access.check(resolved)
         return resolved
 
     async def _resolve_udid(
@@ -798,7 +805,13 @@ class DeviceController(DeviceControllerUI):
                 known = self._device_type_cache.get(canonical)
                 if known is not None:
                     self._device_type_cache[udid] = known
-            if set_active:
+            # Never onto a device another session holds (#254): reading one
+            # names it, and adopting it then sent the reader's own unqualified
+            # changes to the holder's device -- refused, correctly, but the
+            # reader had silently lost track of its own. Found live.
+            from server import device_access
+
+            if set_active and not device_access.held_by_another(canonical):
                 self._active_udid = canonical
             return canonical
 
@@ -1097,6 +1110,12 @@ class DeviceController(DeviceControllerUI):
             if not matches:
                 raise DeviceError(f"No simulator or AVD found with name '{name}'", tool="simctl")
             target = matches[0]
+            # Chosen by name, so AccessMiddleware never saw a udid: checked
+            # here (#254). (An AVD that is not running has no serial yet, so
+            # nothing can hold it.)
+            from server import device_access
+
+            device_access.check(target.udid)
             await self.simctl.boot(target.udid)
             self._active_udid = target.udid
             await self._restore_input_after_boot(target.udid)

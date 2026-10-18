@@ -13,6 +13,9 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { apiRequest, probeServer } from "./http.js";
+import { startHeldSession, stopHeldSession } from "./held-session.js";
+import { registerSessionTools } from "./tools/sessions.js";
+import { deliverSessionNotices } from "./notices.js";
 import { registerLogTools } from "./tools/logs.js";
 import { registerProxyTools } from "./tools/proxy.js";
 import { registerInterceptTools } from "./tools/intercept.js";
@@ -109,6 +112,9 @@ function buildServer(instructions: string): McpServer {
     },
     { instructions },
   );
+  // Before any tool is registered: every tool result carries pending
+  // held-session notices (#254).
+  deliverSessionNotices(server);
 
   // ---------------------------------------------------------------------------
   // Tools
@@ -121,6 +127,7 @@ function buildServer(instructions: string): McpServer {
   registerDeviceTools(server);
   registerDeviceUITools(server);
   registerDevicePoolTools(server);
+  registerSessionTools(server);
   registerSimulatorLogTools(server);
   registerDeviceLogTools(server);
   registerWdaTools(server);
@@ -276,6 +283,23 @@ async function main(): Promise<void> {
   const server = buildServer([...BASE_INSTRUCTIONS, ...knowledge].join("\n"));
   const transport = new StdioServerTransport();
   await server.connect(transport);
+
+  // The held session (#254): opened in the background, so a server that is
+  // down never delays the client. Released cleanly when the client goes away
+  // -- and that release is also what lets this process exit, because an open
+  // WebSocket keeps Node's event loop alive.
+  startHeldSession();
+  const finish = () => {
+    stopHeldSession();
+    setTimeout(() => process.exit(0), 300).unref();
+  };
+  // The SDK's own close hook: the transport's `onclose` belongs to the SDK,
+  // which installs its handler there on connect.
+  server.server.onclose = finish;
+  process.stdin.on("end", finish);
+  process.stdin.on("close", finish);
+  process.on("SIGTERM", finish);
+  process.on("SIGINT", finish);
 
   console.error(`Quern Debug MCP Server v${MCP_VERSION} running on stdio`);
 }

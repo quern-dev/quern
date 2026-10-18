@@ -37,6 +37,11 @@ export const SESSION_ID: string = mintSessionId(
  * only the Authorization header, so two of the commonest actions an agent
  * takes were the two the server could not attribute (#254 review). A test
  * fails if an Authorization header is written anywhere else in mcp/src. */
+/** Things the agent should know about its held session (held-session.ts),
+ * delivered on its next tool result (notices.ts): an agent cannot receive a
+ * push, so this is the only way a lost reservation reaches it. */
+export const sessionNotices: string[] = [];
+
 export function quernHeaders(apiKey: string): Record<string, string> {
   return { Authorization: `Bearer ${apiKey}`, "X-Quern-Session": SESSION_ID };
 }

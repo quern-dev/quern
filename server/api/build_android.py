@@ -334,8 +334,17 @@ def _not_built(serials: list[str], environment: list, used: dict, why: str) -> d
 
 async def _install_one(controller, serial: str, metadata: dict, may_uninstall: bool,
                        allow_downgrade: bool = False):
+    from server import device_access
     from server.api.build_app import DeviceInstallResult
 
+    # Re-checked after the build, which takes minutes: the install can
+    # uninstall the app and erase its data, so a device another session
+    # reserved meanwhile is skipped, per device (#254 review).
+    device_access.refusals_are_per_item()
+    if device_access.held_by_another(serial):
+        return DeviceInstallResult(
+            udid=serial, installed=False,
+            error="reserved by another session since the build started; not installed")
     asked = ""
     try:
         abis = await controller.adb.supported_abis(serial)

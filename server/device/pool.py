@@ -255,10 +255,19 @@ class DevicePool:
         device_type: DeviceType | None = None,
         device_family: str | None = None,
     ) -> list[DevicePoolEntry]:
-        """Find candidates matching all criteria including name and device_family."""
+        """Find candidates matching all criteria including name and device_family.
+
+        Never a device another session holds (#254): the pool's pick is how a
+        caller gets a device it did not name, and handing it one reserved by
+        someone else is the cross-agent mix-up reservations exist to stop."""
+        from server import device_access
+        from server.session import current_session
+
+        held = (device_access._REGISTRY.held_udids(except_session=current_session())
+                if device_access._REGISTRY is not None else set())
         matched = [
             d for d in devices
-            if self._match_criteria(
+            if d.udid not in held and self._match_criteria(
                 d, os_version=os_version,
                 device_type=device_type,
                 device_family=device_family,

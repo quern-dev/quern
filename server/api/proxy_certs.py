@@ -481,6 +481,12 @@ async def install_cert(
         ok, guidance = await _can_install_cert(controller, target_udid, target_type)
         if not ok:
             raise HTTPException(status_code=400, detail=guidance)
+        # Installing a CA changes the device: refused when another session
+        # holds it (#254). This route picks its own target -- the active device
+        # when none is named -- and never calls resolve_udid, so it checks here.
+        from server import device_access
+
+        device_access.check(target_udid)
         udids = [target_udid]
         # Named on both paths so the response shape does not depend on which
         # one ran: a single explicit target skips nothing by construction.
@@ -493,8 +499,15 @@ async def install_cert(
         # only for devices that are already booted.
         udids = []
         skipped: list[str] = []
+        from server import device_access
+
         for d in all_devices:
             if d.state != DeviceState.BOOTED:
+                continue
+            # Never onto a device another session holds (#254): skipped, and
+            # said so, rather than a CA landing on someone else's simulator.
+            if device_access.held_by_another(d.udid):
+                skipped.append(f"{d.udid}: reserved by another session")
                 continue
             ok, why = await _can_install_cert(controller, d.udid, d.device_type)
             if ok:

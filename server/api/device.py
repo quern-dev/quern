@@ -358,12 +358,33 @@ async def list_devices(
                 if dd["cert_installed"] == cert_installed
             ]
         return {
-            "devices": device_dicts,
+            "devices": _with_reservations(request, device_dicts),
             "tools": tools,
             "active_udid": controller._active_udid,
         }
     except DeviceError as e:
         raise _handle_device_error(e)
+
+
+def _with_reservations(request: Request, device_dicts: list[dict]) -> list[dict]:
+    """Each device with who holds it (#254): `reservation` is null for a free
+    device, else `{held_by, state, since, yours}` -- so a held device is never
+    mysterious. Through the visibility policy, which in blind mode would drop
+    another principal's devices and hold nothing back about the caller's own."""
+    from server import visibility
+
+    registry = getattr(request.app.state, "sessions", None)
+    if registry is None:
+        return device_dicts
+    caller = visibility.current_caller()
+    out = []
+    for dd in device_dicts:
+        held = registry.holder_of(dd["udid"])
+        if not visibility.device_visible(held, caller):
+            continue
+        dd["reservation"] = visibility.holder_detail(held, caller) if held else None
+        out.append(dd)
+    return out
 
 
 @router.post("/boot")
@@ -1566,6 +1587,14 @@ async def preview_stop(request: Request, body: PreviewStopRequest):
     # No UDID — stop all
     pm = _get_preview_manager(request)
     sp = _get_scrcpy_preview(request)
+    # Not if that includes a preview of a device another session holds (#254
+    # review): stopping it is interfering, and naming no device was a way
+    # around the check. Simulators are filed by udid and Android by serial; a
+    # USB iPhone's preview is filed by its name and cannot be tied to a hold.
+    from server import device_access
+
+    for key in [*pm.status().get("active", {}), *sp.status().get("active", {})]:
+        device_access.check(key)
     await sp.stop()
     return await pm.stop()
 
@@ -1689,6 +1718,10 @@ async def stop_timeline(request: Request):
     timeline = getattr(request.app.state, "active_timeline", None)
     if timeline is None:
         raise HTTPException(status_code=404, detail="No active timeline")
+    # Stopping the holder's timeline is interfering, not watching (#254).
+    from server import device_access
+
+    device_access.check(getattr(timeline, "udid", None))
     request.app.state.active_timeline = None
     return timeline.get_manifest()
 

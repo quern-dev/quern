@@ -28,6 +28,10 @@ PUBLIC_PATHS = frozenset({
     "/openapi.json", "/api/v1/proxy/cert",
 })
 
+#: The close code for a WebSocket refused for its key: 4000-4999 are the
+#: application's, and 4401 reads as the HTTP status it stands for.
+WS_UNAUTHORISED = 4401
+
 _UNAUTHORISED_BODY = json.dumps(
     {"detail": "Invalid or missing API key"}, separators=(",", ":"),
 ).encode()
@@ -45,10 +49,22 @@ class APIKeyMiddleware:
         self._expected = api_key.encode("utf-8")
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        # lifespan and websocket scopes carry no headers to check and no way
-        # to answer 401; they are not this middleware's business.
+        # WebSocket scopes carry headers too, and are checked like any request.
+        # This used to pass every non-HTTP scope through on the belief that a
+        # WebSocket has no headers to check -- harmless while no route was a
+        # WebSocket, and an open door the day one was (#254's session socket).
+        # Refused by closing in reply to the connect, which the client sees as
+        # a failed handshake (HTTP 403).
+        if scope["type"] == "websocket":
+            if self._has_valid_key(scope):
+                await self.app(scope, receive, send)
+                return
+            message = await receive()
+            if message.get("type") == "websocket.connect":
+                await send({"type": "websocket.close", "code": WS_UNAUTHORISED})
+            return
         if scope["type"] != "http":
-            await self.app(scope, receive, send)
+            await self.app(scope, receive, send)    # lifespan
             return
 
         if scope.get("path") in PUBLIC_PATHS or self._has_valid_key(scope):

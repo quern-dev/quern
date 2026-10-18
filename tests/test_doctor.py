@@ -25,6 +25,10 @@ def _no_slow_sections(monkeypatch):
     doctor's exit code. A unit test must not do real machine work, and
     `doctor` gains sections over time.
     """
+    # Asks the running server for its sessions: every doctor test, not only
+    # the ones that print sections, or the rest read the developer's real
+    # state and call their real server (CodeRabbit).
+    monkeypatch.setattr("server.main._report_held_sessions", lambda: None)
     monkeypatch.setattr("server.main._report_node", lambda: True)
     monkeypatch.setattr("server.main._report_mcp_registrations", lambda: True)
     monkeypatch.setattr("server.main._report_menubar", lambda fix=False: (True, None))
@@ -35,6 +39,7 @@ def stub_sections(monkeypatch):
     """Stand in for the three server-independent sections, which shell out."""
     monkeypatch.setattr("server.main._report_python_deps", lambda fix: print("PYDEPS"))
     monkeypatch.setattr("server.main._report_external_tools", lambda fix: print("EXTERNAL"))
+    monkeypatch.setattr("server.main._report_held_sessions", lambda: print("SESSIONS"))
     # True = both probes completed, which is what the real one returns when it
     # could look. Sections signal "could not check", not "found nothing wrong".
     def services(fix):
@@ -221,6 +226,7 @@ class TestDoctorExitContract:
         had gone wrong printed the least."""
         monkeypatch.setattr("server.main._report_python_deps", lambda fix: False)
         monkeypatch.setattr("server.main._report_external_tools", lambda fix: print("EXTERNAL"))
+        monkeypatch.setattr("server.main._report_held_sessions", lambda: print("SESSIONS"))
         def services(fix):
             print("SERVICES")
             return True

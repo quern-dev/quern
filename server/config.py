@@ -221,6 +221,21 @@ def _host_name(value: str) -> str:
     return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
 
 
+def sessions_settings() -> dict:
+    """Held sessions' settings from config.json's `sessions` object (#254).
+
+        {"sessions": {"grace_seconds": 180}}
+
+    `grace_seconds` is how long an abruptly dropped session keeps its devices,
+    clamped to 120-300 (the maintainer's 2-5 minutes); anything that is not a
+    plain number is the default, so a typo never means "no grace"."""
+    from server.session_registry import clamp_grace
+
+    raw = read_user_config().get("sessions")
+    raw = raw if isinstance(raw, dict) else {}
+    return {"grace_seconds": clamp_grace(raw.get("grace_seconds"))}
+
+
 def viewer_settings() -> dict:
     """The LAN viewer's settings from config.json's `viewer` object (#449).
 

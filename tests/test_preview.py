@@ -1570,7 +1570,15 @@ class TestEverySingleDeviceResponseSaysItsKind:
             async def stop(self):
                 return {"status": "stopped"}
 
+            def status(self):
+                # The stop-all route reads what is previewed, to refuse one
+                # of a device another session holds (#254).
+                return {"active": {}}
+
         class _SP:
+            def status(self):
+                return {"active": {}}
+
             async def stop(self):
                 return None
 

@@ -49,6 +49,7 @@ from server.api.proxy import router as proxy_router
 from server.api.proxy_certs import router as proxy_certs_router
 from server.api.proxy_intercept import router as proxy_intercept_router
 from server.api.recordings import router as recordings_router
+from server.api.sessions import router as sessions_router
 from server.api.system import router as system_router
 from server.api.trace import router as trace_router
 from server.api.wda import router as wda_router
@@ -595,6 +596,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         config.api_key[-4:],
     )
 
+    # Held sessions and reservations (#254). In memory only: nothing holding
+    # one survives a restart, so neither do they.
+    from server import device_access
+    from server.api.sessions import sweep as _sweep_sessions
+    from server.config import sessions_settings
+    from server.session_registry import SessionRegistry
+
+    app.state.sessions = SessionRegistry(grace_seconds=sessions_settings()["grace_seconds"])
+    device_access.install(app.state.sessions)
+    sessions_task = asyncio.create_task(_sweep_sessions(app), name="session-sweep")
+
     # The LAN viewer (#449), opt-in. Started after the recordings it serves.
     from server.config import viewer_settings as _viewer_settings
     from server.viewer.listener import start_viewer
@@ -605,6 +617,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.viewer = None
 
     yield
+
+    # Sessions end with the server; a reconnect will be told so (4404).
+    from server import device_access as _device_access
+    _device_access.install(None)
 
     # Viewers first: their streams relay recordings stopped below.
     viewer = getattr(app.state, "viewer", None)
@@ -623,7 +639,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Shutdown: cancel background tasks, stop adapters, flush deduplicator
     for task in (
         watchdog_task, update_check_task, network_monitor_task,
-        sim_bridge_resync_task, mcp_clients_task, sim_tls_task,
+        sim_bridge_resync_task, mcp_clients_task, sim_tls_task, sessions_task,
     ):
         if task and not task.done():
             task.cancel()
@@ -779,6 +795,12 @@ def create_app(
     from server.screenshot_timeline import TimelineMiddleware
     app.add_middleware(TimelineMiddleware)
 
+    # Reservations (#254): which requests change a device, and refusing a
+    # change to one another session holds. Inside auth, so an unauthenticated
+    # request's body is never read; inside session attribution, which it needs.
+    from server.device_access import AccessMiddleware
+    app.add_middleware(AccessMiddleware)
+
     # Auth middleware
     app.add_middleware(APIKeyMiddleware, api_key=config.api_key)
 
@@ -803,6 +825,7 @@ def create_app(
     app.include_router(logs_router)
     app.include_router(trace_router)
     app.include_router(recordings_router)
+    app.include_router(sessions_router)
     app.include_router(crashes_router)
     app.include_router(builds_router)
     app.include_router(proxy_router)
@@ -1272,6 +1295,11 @@ def _cmd_start(args: argparse.Namespace) -> None:
         port=server_port,
         log_level="debug" if args.verbose else "info",
         loop="asyncio",  # uvloop uses fork+exec for subprocesses, which crashes on macOS
+        # A held session's socket (#254): ping every 10s, and a peer that has
+        # not answered 20s later is gone -- a host that lost power never sends
+        # a FIN, and TCP can take hours to notice. Its session enters grace.
+        ws_ping_interval=10.0,
+        ws_ping_timeout=20.0,
     )
     server = uvicorn.Server(uv_config)
     try:
@@ -1563,6 +1591,47 @@ def _cmd_check_updates() -> int:
     return 0
 
 
+def _report_held_sessions() -> None:
+    """Held sessions and their devices (#254), with any in grace called out:
+    a device held by an agent that crashed is visible here rather than
+    mysterious. Informational -- it never changes doctor's exit code, and a
+    server that is down is already reported by the device-tool section."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    from server.__main__ import _server_base_url
+    from server.config import API_KEY_FILE
+
+    print("Held sessions:")
+    url = _server_base_url()
+    if url is None:
+        print("  ? not checked — no server answering")
+        return
+    try:
+        key = API_KEY_FILE.read_text().strip()
+        req = urllib.request.Request(url + "/api/v1/sessions",
+                                     headers={"Authorization": f"Bearer {key}",
+                                              "X-Quern-Session": "cli"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            sessions = json.loads(resp.read() or b"{}").get("sessions") or []
+    except (OSError, ValueError, urllib.error.URLError) as e:
+        print(f"  ? not checked — {e}")
+        return
+    if not sessions:
+        print("  none")
+        return
+    for s in sessions:
+        devices = ", ".join(r["udid"] for r in s.get("reservations") or []) or "no devices"
+        if s.get("state") == "grace":
+            left = s.get("grace_remaining_s")
+            print(f"  ⚠ {s['id']}: connection lost, holding {devices} for "
+                  f"{int(left) if left is not None else '?'}s more "
+                  f"(free now: quern session release {s['id']})")
+        else:
+            print(f"  ✓ {s['id']}: live, holding {devices}")
+
+
 def _cmd_doctor(args: argparse.Namespace) -> None:
     """Diagnostics: device tools, venv, tool versions, service health. Read-only,
     except that it records the MCP client finding the Quern app shows.
@@ -1599,6 +1668,7 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         for name, ok in sorted(tools.items()):
             print(f"  {'✓' if ok else '✗'} {name}")
 
+    _report_held_sessions()
     repaired = _report_python_deps(fix)
     _report_external_tools(fix)
     node_complete = _report_node()
@@ -2208,6 +2278,23 @@ def cli() -> None:
     # Dispatched early in `server.__main__`, like setup. Declared here so
     # `quern --help` lists them and the two entry points agree about what
     # exists.
+    session_parser = subparsers.add_parser(
+        "session", help="Hold a session and reserve devices for a command (#254)")
+    session_sub = session_parser.add_subparsers(dest="session_command")
+    session_run = session_sub.add_parser("run")
+    session_run.add_argument("--name")
+    session_run.add_argument("--reserve", type=int)
+    session_run.add_argument("--udid", action="append")
+    session_run.add_argument("--group")
+    session_run.add_argument("--device-type")
+    session_run.add_argument("--os-version")
+    session_run.add_argument("--device-name")
+    session_run.add_argument("--no-boot", action="store_true")
+    session_run.add_argument("--on-release")
+    session_sub.add_parser("list")
+    session_release = session_sub.add_parser("release")
+    session_release.add_argument("session_id")
+
     record_parser = subparsers.add_parser(
         "record", help="Record a device's actions, flows and logs to disk")
     record_sub = record_parser.add_subparsers(dest="record_command")
@@ -2350,6 +2437,10 @@ def cli() -> None:
         from server.recording.cli import main as record_main
 
         sys.exit(record_main(sys.argv[sys.argv.index("record") + 1:]))
+    elif args.command == "session":
+        from server.session_cli import main as session_main
+
+        sys.exit(session_main(sys.argv[sys.argv.index("session") + 1:]))
     elif args.command == "url":
         from server.__main__ import _cmd_url
         sys.exit(_cmd_url())

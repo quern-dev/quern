@@ -169,10 +169,24 @@ def _with_rejections(request: Request, summary: dict) -> dict:
     return summary
 
 
+def _check_recording_device(request: Request, recording_id: str) -> None:
+    """A recording is addressed by its id, so its device never reaches the
+    access middleware: stopping, or marking, the recording of a device another
+    session holds is checked against that device here (#254 review)."""
+    from server import device_access
+
+    try:
+        rec = _manager(request).get(recording_id)
+    except Exception:  # noqa: BLE001 -- an unknown id is the route's own 404
+        return
+    device_access.check(getattr(rec, "udid", None))
+
+
 @router.post("/{recording_id}/stop")
 @logged_action("stop_recording", category="proxy")
 async def stop_recording(request: Request, recording_id: str) -> dict:
     """Stop a recording, write its last lines and its manifest, and say whether it is complete."""
+    _check_recording_device(request, recording_id)
     try:
         rec = await _manager(request).stop(recording_id)
     except RecordingError as e:
@@ -188,6 +202,7 @@ async def recording_keyframe(request: Request, recording_id: str,
     point (#415) -- for a driver quern does not see, such as a CI step or a
     test marking the moment it cares about. The moment is written into the
     recording as a `mark`, with the label if one is given."""
+    _check_recording_device(request, recording_id)
     try:
         asked = await _manager(request).keyframe(recording_id,
                                                  label=body.label if body else None)

@@ -565,6 +565,7 @@ class WdaBackend:
                 tool="wda",
             )
 
+        _refuse_if_held(udid, "start")
         logger.info("WDA not reachable on %s, auto-starting driver...", udid[:8])
         from server.device.ios.wda import start_driver
 
@@ -1154,6 +1155,8 @@ class WdaBackend:
     async def _restart_wda(self, udid: str) -> None:
         """Stop and restart the WDA driver for a device, clearing cached connection."""
         from server.device.ios.wda import start_driver, stop_driver
+
+        _refuse_if_held(udid, "restart")
 
         # Clear cached connection
         await self._drop_connection(udid)
@@ -2041,3 +2044,22 @@ def find_element_at_point(elements: list[dict], x: float, y: float) -> dict | No
             if area <= best_area:
                 best, best_area = el, area
     return best
+
+
+def _refuse_if_held(udid: str, what: str) -> None:
+    """Refuse to start or restart WDA on a device another session holds (#254).
+
+    Both happen behind *reads* -- a UI tree that finds WDA down auto-starts
+    it, one whose /source times out restarts it -- and a read is open to
+    everyone. Restarting stops and reinstalls the runner, which would end the
+    holder's own XCUITest run under it (review). So a non-holder's read fails
+    with this instead, and only the holder's request may restart WDA."""
+    from server import device_access
+
+    if device_access.held_by_another(udid):
+        raise DeviceError(
+            f"WDA on {udid[:8]} needs to {what}, but the device is reserved by another "
+            "session; only its holder can do that. Reads that need WDA will work again "
+            "once it is running or the device is released.",
+            tool="wda",
+        )
