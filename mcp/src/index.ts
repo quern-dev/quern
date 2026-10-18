@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { apiRequest, probeServer } from "./http.js";
 import { startHeldSession, stopHeldSession } from "./held-session.js";
 import { registerSessionTools } from "./tools/sessions.js";
+import { deliverSessionNotices } from "./notices.js";
 import { registerLogTools } from "./tools/logs.js";
 import { registerProxyTools } from "./tools/proxy.js";
 import { registerInterceptTools } from "./tools/intercept.js";
@@ -111,6 +112,9 @@ function buildServer(instructions: string): McpServer {
     },
     { instructions },
   );
+  // Before any tool is registered: every tool result carries pending
+  // held-session notices (#254).
+  deliverSessionNotices(server);
 
   // ---------------------------------------------------------------------------
   // Tools

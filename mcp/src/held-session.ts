@@ -13,7 +13,7 @@
  *
  * Never throws and never blocks startup: a server that is down is retried in
  * the background. Agents cannot receive pushes, so what they need to know
- * travels as `session_notices` on the next API response (see http.ts).
+ * travels on its next tool result (see notices.ts).
  */
 
 import { discoverServer } from "./config.js";

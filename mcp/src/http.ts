@@ -38,8 +38,8 @@ export const SESSION_ID: string = mintSessionId(
  * takes were the two the server could not attribute (#254 review). A test
  * fails if an Authorization header is written anywhere else in mcp/src. */
 /** Things the agent should know about its held session (held-session.ts),
- * delivered on its next API response as `session_notices`: an agent cannot
- * receive a push, so this is the only way a lost reservation reaches it. */
+ * delivered on its next tool result (notices.ts): an agent cannot receive a
+ * push, so this is the only way a lost reservation reaches it. */
 export const sessionNotices: string[] = [];
 
 export function quernHeaders(apiKey: string): Record<string, string> {
@@ -143,18 +143,8 @@ export async function apiRequest(
     throw new Error(`HTTP ${status}: ${text}`);
   }
 
-  if (!text) return withNotices(null);
-  return withNotices(JSON.parse(text));
-}
-
-/** The answer, with any pending session notices attached. Only a plain JSON
- * object carries them -- an array or a scalar is returned as it is, and the
- * notices wait for the next object. */
-export function withNotices(answer: unknown): unknown {
-  if (!sessionNotices.length || !answer || typeof answer !== "object" || Array.isArray(answer)) {
-    return answer;
-  }
-  return { ...(answer as Record<string, unknown>), session_notices: sessionNotices.splice(0) };
+  if (!text) return null;
+  return JSON.parse(text);
 }
 
 /** Whether the server answered. Any answer counts: the question is whether

@@ -533,7 +533,7 @@ If another agent or a CI job may use the same quern server, **reserve your devic
 
 - You don't have to release: your reservation ends with your session. A brief network drop keeps it for a grace period (3 minutes by default). `release_devices` frees devices sooner.
 - A 423 on a device means someone else holds it. `session_status(all=true)` or `list_devices` (its `reservation` field) shows who. Pick a free device rather than waiting.
-- If a tool response carries `session_notices`, read it. It says, for example, that quern restarted and your reservations are gone, so reserve again.
+- If a tool result ends with a `quern session notice:` line, read it. It says, for example, that quern restarted and your reservations are gone, so reserve again.
 
 ## Common Mistakes
 
