@@ -47,8 +47,10 @@ def child(monkeypatch):
     seen = {}
 
     class FakePopen:
-        def __init__(self, cmd, env):
-            seen["cmd"], seen["env"] = cmd, env
+        pid = 4242
+
+        def __init__(self, cmd, env, **kw):
+            seen["cmd"], seen["env"], seen["popen_kw"] = cmd, env, kw
 
         def wait(self):
             return seen.get("rc", 0)
@@ -251,20 +253,36 @@ def test_a_child_killed_by_a_signal_exits_as_the_shell_would(server, child, rc, 
     assert session_cli.main(["run", "--name", "ci-job", "--", "x"]) == expected
 
 
-def test_ctrl_c_from_the_terminal_is_not_forwarded_twice(server, child, monkeypatch):
-    """The terminal already signalled the child; a second SIGINT makes many
-    tools abort without cleanup. Forwarded only when not in the foreground."""
+def test_the_child_is_its_own_job_and_each_signal_arrives_once(server, child, monkeypatch):
+    """Its own process group, so a signal to this process or its group reaches
+    the child only by forwarding -- once. Inferring 'from the terminal' from
+    foreground membership dropped a kill -INT aimed at this process
+    (CodeRabbit)."""
     import signal as sig
 
-    handlers = {}
-    monkeypatch.setattr(session_cli.signal, "signal", lambda s, h: handlers.__setitem__(s, h))
+    installed = {}
+
+    def fake_signal(s, h):
+        previous = installed.get(s, "original")
+        installed[s] = h
+        return previous
+
+    monkeypatch.setattr(session_cli.signal, "signal", fake_signal)
+    monkeypatch.setattr(session_cli, "_foreground_tty", lambda: None)
+    during = {}
+
+    def wait():
+        during.update(installed)            # the handlers while the child runs
+        return 0
+
     _opened(server)
+    monkeypatch.setattr(session_cli.subprocess.Popen, "wait", lambda self: wait(),
+                        raising=False)
     session_cli.main(["run", "--name", "ci-job", "--", "x"])
-    monkeypatch.setattr(session_cli, "_in_foreground_group", lambda: True)
-    handlers[sig.SIGINT](sig.SIGINT, None)
-    assert "signal" not in child, "not forwarded: the child got it from the terminal"
-    monkeypatch.setattr(session_cli, "_in_foreground_group", lambda: False)
-    handlers[sig.SIGINT](sig.SIGINT, None)
-    assert child["signal"] == sig.SIGINT, "forwarded when aimed at this process alone"
-    handlers[sig.SIGTERM](sig.SIGTERM, None)
-    assert child["signal"] == sig.SIGTERM
+    assert child["popen_kw"].get("process_group") == 0
+    during[sig.SIGINT](sig.SIGINT, None)
+    assert child["signal"] == sig.SIGINT, "SIGINT forwarded"
+    during[sig.SIGTERM](sig.SIGTERM, None)
+    assert child["signal"] == sig.SIGTERM, "SIGTERM forwarded"
+    assert installed[sig.SIGINT] == "original" and installed[sig.SIGTERM] == "original", \
+        "handlers put back once the child is gone, before the hold check"

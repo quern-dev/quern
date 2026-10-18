@@ -186,6 +186,9 @@ async def reserve(request: Request, session_id: str, body: ReserveRequest) -> di
         raise HTTPException(400, "give exactly one of udids, count (with criteria), or group "
                                  "(optionally with count)")
     udids, to_boot = await _choose(request, registry, session_id, body)
+    if not udids:
+        # Nothing more to reserve: the session already holds the whole group.
+        return {"session": session_id, "reserved": [], "holding": list(session.reservations)}
     # Claim first, boot after. Booting first let two concurrent requests both
     # boot the one free simulator; the loser's undo then shut down the device
     # the winner had just reserved (review). The claim is synchronous and all
@@ -274,20 +277,25 @@ async def _choose(request: Request, registry: SessionRegistry, session_id: str,
 
     await pool.refresh()
     devices = list(pool._read_state().devices.values())
+    held = registry.held_udids(except_session=session_id)
+    mine = registry.held_udids() - held
     if body.group is not None:
         devices = _group_members(body.group, devices, pool)
-        wanted = body.count or len(devices)
+        # No count means "the whole group": only the members this session does
+        # not hold yet -- holding them all already is success, not a 409 for a
+        # shortage that does not exist (CodeRabbit). A count means that many more.
+        wanted = body.count or len([d for d in devices if d.udid not in mine])
+        if wanted == 0:
+            return [], []
     else:
         devices = pool._find_candidates(
             devices, name=body.name, os_version=body.os_version,
             device_type=DeviceType(body.device_type) if body.device_type else None,
             device_family=body.device_family)
         wanted = body.count or 1
-    held = registry.held_udids(except_session=session_id)
     # `count` is how many *more* devices: not ones another session holds, and
     # not ones this session already holds (CodeRabbit: they ranked first, so
     # count=2 with one held gave one new device).
-    mine = registry.held_udids() - held
     devices = sorted((d for d in devices
                       if d.udid not in held and d.udid not in mine and d.is_available),
                      key=pool._rank_candidate)

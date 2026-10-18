@@ -252,23 +252,7 @@ def _run(args: argparse.Namespace) -> int:
         print(f"quern session run: session {session} holds {', '.join(udids)}", file=sys.stderr)
         env = {**os.environ, "QUERN_SESSION": session, "QUERN_SESSION_TOKEN": token,
                "QUERN_DEVICES": ",".join(udids)}
-        child = subprocess.Popen(args.command, env=env)
-
-        def forward(signum, _frame):
-            child.send_signal(signum)
-
-        def interrupt(signum, frame):
-            # A terminal's Ctrl-C reaches the whole foreground group, the
-            # child included; forwarding it too made a second SIGINT, which
-            # xcodebuild and pytest read as "abort now, skip cleanup"
-            # (CodeRabbit). Forwarded only when this process is not in the
-            # foreground group -- a `kill -INT` aimed at it alone.
-            if not _in_foreground_group():
-                forward(signum, frame)
-
-        signal.signal(signal.SIGTERM, forward)
-        signal.signal(signal.SIGINT, interrupt)
-        rc = _shell_status(child.wait())
+        rc = _run_child(args.command, env)
         holding = _still_holding(url, key, session, udids)
         if holding is not True:
             # The socket thread may still have been reconnecting when the
@@ -285,19 +269,68 @@ def _run(args: argparse.Namespace) -> int:
         socket.close()
 
 
+def _run_child(command: list[str], env: dict[str, str]) -> int:
+    """Run the command as its own job, forwarding SIGINT and SIGTERM to it
+    exactly once, and return its status as the shell would report it.
+
+    The child gets its own process group, as a shell's job does. A signal
+    sent to this process -- or to the group it was started in, as CI runners
+    do -- then reaches the child only through the forwarding below, so it
+    arrives once. When there is a terminal, the child's group is made its
+    foreground group: Ctrl-C goes to the child alone, from the terminal, and
+    the child can still read input. Inferring "this came from the terminal"
+    from foreground-group membership could not tell a terminal's Ctrl-C from
+    a `kill -INT` aimed at this process, and dropped the latter (CodeRabbit);
+    a terminal's Ctrl-C forwarded on top of its own was a second SIGINT,
+    which xcodebuild and pytest read as "abort, skip cleanup".
+    """
+    tty = _foreground_tty()
+    child = subprocess.Popen(command, env=env, process_group=0)
+    if tty is not None:
+        _hand_terminal_to(tty, child.pid)
+
+    def forward(signum: int, _frame: object) -> None:
+        child.send_signal(signum)
+
+    previous = {sig: signal.signal(sig, forward) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        return _shell_status(child.wait())
+    finally:
+        # Put things back as soon as the child is gone: the hold check that
+        # follows talks to the server, and must not run with Ctrl-C forwarded
+        # to a process that no longer exists (CodeRabbit).
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        if tty is not None:
+            _hand_terminal_to(tty, os.getpgrp())
+
+
+def _foreground_tty() -> int | None:
+    """stdin's terminal, when this process is in its foreground group."""
+    try:
+        fd = sys.stdin.fileno()
+        return fd if os.isatty(fd) and os.tcgetpgrp(fd) == os.getpgrp() else None
+    except (OSError, ValueError):
+        return None
+
+
+def _hand_terminal_to(fd: int, pgrp: int) -> None:
+    """Make `pgrp` the terminal's foreground group. SIGTTOU is ignored for the
+    call: a background group changing the foreground is otherwise stopped."""
+    old = signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+    try:
+        os.tcsetpgrp(fd, pgrp)
+    except OSError:
+        pass                              # the terminal went away: nothing to hand over
+    finally:
+        signal.signal(signal.SIGTTOU, old)
+
+
 def _shell_status(rc: int) -> int:
     """`Popen.wait()`'s -N for a child killed by signal N, as the shell's
     128+N: passed through as -N, sys.exit made it 256-N -- 241 for SIGTERM,
     not 143, which a CI step checking for cancellation would misread."""
     return 128 - rc if rc < 0 else rc
-
-
-def _in_foreground_group() -> bool:
-    """Whether this process is in its terminal's foreground process group."""
-    try:
-        return os.tcgetpgrp(sys.stdin.fileno()) == os.getpgrp()
-    except (OSError, ValueError):
-        return False                     # no terminal: nothing else signals the child
 
 
 def _still_holding(url: str, key: str, session: str, udids: list[str]) -> bool | None:

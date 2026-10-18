@@ -746,6 +746,25 @@ class TestReservingThroughThePool:
             "the other session's policy is still queued"
         a.close()
 
+    @pytest.fixture
+    def group(self, monkeypatch):
+        monkeypatch.setattr("server.config.read_user_config",
+                            lambda **k: {"device_groups": {"ios": ["SIM-1", "SIM-2"]}})
+
+    def test_a_group_with_no_count_reserves_the_members_not_yet_held(self, client, pool,
+                                                                    group):
+        """Holding SIM-1 and asking for the group was a 409 "asked for 2, 1
+        free" -- a shortage that did not exist (CodeRabbit)."""
+        a = Held(client, "claude-a")
+        _reserve(client, "claude-a", udids=["SIM-1"])
+        r = _reserve(client, "claude-a", group="ios")
+        assert r.status_code == 200, r.text
+        assert [x["udid"] for x in r.json()["reserved"]] == ["SIM-2"]
+        again = _reserve(client, "claude-a", group="ios")     # a repeat, after a reconnect
+        assert again.status_code == 200 and again.json()["reserved"] == []
+        assert sorted(again.json()["holding"]) == ["SIM-1", "SIM-2"]
+        a.close()
+
     def test_count_means_more_devices(self, client, pool):
         a = Held(client, "claude-a")
         _reserve(client, "claude-a", udids=["SIM-1"])
