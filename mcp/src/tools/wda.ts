@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { apiRequest } from "../http.js";
-import { strictParams } from "./helpers.js";
+import { strictParams, errorText } from "./helpers.js";
 
 export function registerWdaTools(server: McpServer): void {
   server.registerTool("setup_wda", {
@@ -48,7 +48,7 @@ On a simulator: builds WDA for the iOS Simulator — no signing team, no provisi
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -82,7 +82,7 @@ ON A SIMULATOR THIS CHANGES WHAT YOU SEE. Simulators are normally read through t
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -114,7 +114,7 @@ ON A SIMULATOR THIS CHANGES WHAT YOU SEE. Simulators are normally read through t
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,

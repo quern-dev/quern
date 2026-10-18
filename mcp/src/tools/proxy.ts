@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { discoverServer } from "../config.js";
 import { apiRequest } from "../http.js";
-import { strictParams } from "./helpers.js";
+import { strictParams, errorText } from "./helpers.js";
 
 export function registerProxyTools(server: McpServer): void {
   server.registerTool("list_pending_requests", {
@@ -19,7 +19,7 @@ export function registerProxyTools(server: McpServer): void {
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -130,7 +130,7 @@ For an Android emulator, filter by device_serial (e.g. emulator-5554): its traff
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -174,7 +174,7 @@ Use exclude_hosts to filter out analytics/SDK noise (Firebase, AppsFlyer, Facebo
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -191,7 +191,7 @@ Use exclude_hosts to filter out analytics/SDK noise (Firebase, AppsFlyer, Facebo
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -297,7 +297,7 @@ Use this after triggering a UI action to observe the resulting network request w
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -341,7 +341,7 @@ Use this after triggering a UI action to observe the resulting network request w
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -447,7 +447,7 @@ When traffic capture suddenly stops working on a physical device, check network_
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -501,7 +501,7 @@ IMPORTANT: Prefer omitting udid to check all devices in a single call (~1-2s tot
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -558,7 +558,7 @@ Physical iOS and Android devices are not eligible for automated install. iOS phy
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -657,7 +657,7 @@ refusal exists to prevent.`,
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -682,7 +682,7 @@ refusal exists to prevent.`,
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -743,7 +743,7 @@ For an Android emulator, pass device_serial (e.g. emulator-5554) — its traffic
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -768,7 +768,7 @@ For an Android emulator, pass device_serial (e.g. emulator-5554) — its traffic
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -824,7 +824,7 @@ Ask the user which they want before acting -- installing a root certificate auth
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -856,7 +856,7 @@ the background and can be re-enabled with configure_system_proxy.`,
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -934,7 +934,7 @@ the background and can be re-enabled with configure_system_proxy.`,
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -975,7 +975,7 @@ The bypass_patterns field in proxy_status shows the current list.`,
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -1016,7 +1016,7 @@ The bypass_patterns field in proxy_status shows the current list.`,
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -1129,17 +1129,8 @@ extension in System Settings > Privacy & Security.`,
       // that retrying will not clear it -- is not helped by being told the
       // server may be down, and reads as a contradiction of the advice it
       // follows.
-      const message = e instanceof Error ? e.message : String(e);
-      const served = /^HTTP \d{3}:/.test(message);
       return {
-        content: [
-          {
-            type: "text" as const,
-            text: served
-              ? `Error: ${message}`
-              : `Error: ${message}\n\nIs Quern running? Start it with: quern-debug-server`,
-          },
-        ],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }

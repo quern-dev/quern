@@ -4,7 +4,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { apiRequest } from "../http.js";
 import { reportProgress, type HandlerExtra, type RunningBuild } from "./build-progress.js";
-import { strictParams } from "./helpers.js";
+import { strictParams, errorText } from "./helpers.js";
 
 export function registerBuildTools(server: McpServer): void {
   server.registerTool("build_and_install", {
@@ -162,7 +162,7 @@ xcodebuild; the error says so, and skip_plugin_validation=true builds anyway.`,
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -195,7 +195,7 @@ Returns the record and a one-line summary. A variant with no APK output is a 404
       };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }

@@ -14,6 +14,7 @@
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { connectionCode, NEVER_CONNECTED } from "./http.js";
 
 export interface ProjectKnowledge {
   /** The directory looked in: QUERN_PROJECT_DIR, or this process's cwd. */
@@ -143,22 +144,6 @@ function samePlace(a: string, b: string): boolean {
     }
   };
   return real(a) === real(b);
-}
-
-/** Errors that mean the connection was never made, so no request left this
- * process. Anything else -- a reset, a timeout, no code at all -- may have
- * arrived first. Node's fetch reports these as `fetch failed` with the code
- * on `cause` (measured on Node 22: ECONNREFUSED for a closed port). */
-const NEVER_CONNECTED = new Set([
-  "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH", "EADDRNOTAVAIL",
-]);
-
-function connectionCode(e: unknown): string | undefined {
-  const pick = (x: unknown) =>
-    x && typeof x === "object" && typeof (x as { code?: unknown }).code === "string"
-      ? (x as { code: string }).code
-      : undefined;
-  return pick((e as { cause?: unknown })?.cause) ?? pick(e);
 }
 
 /** Load the project's knowledge base into the running server, unless it is

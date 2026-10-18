@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { apiRequest } from "../http.js";
-import { strictParams } from "./helpers.js";
+import { strictParams, errorText } from "./helpers.js";
 
 /**
  * A plist value as the caller typed it. Boolean first and nothing coerced:
@@ -39,7 +39,7 @@ IMPORTANT for logged-in states: auth tokens live in the simulator keychain, whic
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -64,7 +64,7 @@ If the checkpoint carries a keychain (saved with include_keychain), it is restor
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -81,7 +81,7 @@ If the checkpoint carries a keychain (saved with include_keychain), it is restor
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -103,7 +103,7 @@ If the checkpoint carries a keychain (saved with include_keychain), it is restor
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -135,7 +135,7 @@ If key is omitted, returns the entire plist as JSON.`,
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -161,7 +161,7 @@ The key is taken literally: "com.example.flag" is one top-level key, not a path.
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -186,7 +186,7 @@ Keys are taken literally and every value is read back, as in set_app_plist_value
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -211,7 +211,7 @@ Keys are taken literally and every value is read back, as in set_app_plist_value
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -234,7 +234,7 @@ Keys are taken literally and every value is read back, as in set_app_plist_value
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -261,7 +261,7 @@ Logs an initial snapshot of all keys when the watch starts. Then emits one log e
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -283,7 +283,7 @@ Logs an initial snapshot of all keys when the watch starts. Then emits one log e
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -308,7 +308,7 @@ When start_simulator_logging runs, it automatically starts watchers for ALL conf
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -323,7 +323,7 @@ When start_simulator_logging runs, it automatically starts watchers for ALL conf
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }
@@ -341,7 +341,7 @@ When start_simulator_logging runs, it automatically starts watchers for ALL conf
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return {
-        content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+        content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
     }

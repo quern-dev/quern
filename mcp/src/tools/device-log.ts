@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { apiRequest } from "../http.js";
-import { strictParams } from "./helpers.js";
+import { strictParams, errorText } from "./helpers.js";
 
 export function registerDeviceLogTools(server: McpServer): void {
   server.registerTool("start_device_logging", {
@@ -58,7 +58,7 @@ NOTE (iOS): Does NOT capture print() — use os.Logger instead.`,
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -96,7 +96,7 @@ NOTE (iOS): Does NOT capture print() — use os.Logger instead.`,
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,

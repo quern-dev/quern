@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { apiRequest } from "../http.js";
-import { strictParams } from "./helpers.js";
+import { strictParams, errorText } from "./helpers.js";
 
 export function registerSimulatorLogTools(server: McpServer): void {
   server.registerTool("start_simulator_logging", {
@@ -67,7 +67,7 @@ If plist watch is configured (via configure_plist_watch), watchers auto-start al
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,
@@ -105,7 +105,7 @@ If plist watch is configured (via configure_plist_watch), watchers auto-start al
         content: [
           {
             type: "text" as const,
-            text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            text: errorText(e),
           },
         ],
         isError: true,

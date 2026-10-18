@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { z } from "zod";
 import { readStateFile } from "../config.js";
 import { apiRequest, SESSION_ID } from "../http.js";
-import { strictParams } from "./helpers.js";
+import { strictParams, errorText } from "./helpers.js";
 import { type LogQueryAnswer, tailLogsResult } from "./log-responses.js";
 
 export function registerLogTools(server: McpServer): void {
@@ -135,9 +135,8 @@ export function registerLogTools(server: McpServer): void {
                   "1. Check if server is already running:",
                   "   curl http://127.0.0.1:9110/health",
                   "",
-                  "2. Try starting manually:",
-                  "   cd ~/Dev/quern-debug-server",
-                  "   .venv/bin/python -m server.main start",
+                  "2. Try starting it in the foreground, which prints why it fails:",
+                  "   quern start -f",
                   "",
                   "3. Check logs:",
                   "   tail -f ~/.quern/server.log",
@@ -205,7 +204,7 @@ export function registerLogTools(server: McpServer): void {
           content: [
             {
               type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+              text: errorText(e),
             },
           ],
           isError: true,
@@ -257,7 +256,7 @@ export function registerLogTools(server: McpServer): void {
           content: [
             {
               type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+              text: errorText(e),
             },
           ],
           isError: true,
@@ -321,7 +320,7 @@ export function registerLogTools(server: McpServer): void {
           content: [
             {
               type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+              text: errorText(e),
             },
           ],
           isError: true,
@@ -363,7 +362,7 @@ export function registerLogTools(server: McpServer): void {
           content: [
             {
               type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+              text: errorText(e),
             },
           ],
           isError: true,
@@ -408,7 +407,7 @@ export function registerLogTools(server: McpServer): void {
           content: [
             {
               type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+              text: errorText(e),
             },
           ],
           isError: true,
@@ -455,7 +454,7 @@ export function registerLogTools(server: McpServer): void {
           content: [
             {
               type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+              text: errorText(e),
             },
           ],
           isError: true,
@@ -508,7 +507,7 @@ export function registerLogTools(server: McpServer): void {
           content: [
             {
               type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+              text: errorText(e),
             },
           ],
           isError: true,
@@ -577,7 +576,7 @@ export function registerLogTools(server: McpServer): void {
           content: [
             {
               type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+              text: errorText(e),
             },
           ],
           isError: true,
@@ -609,7 +608,7 @@ export function registerLogTools(server: McpServer): void {
           content: [
             {
               type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+              text: errorText(e),
             },
           ],
           isError: true,
@@ -640,7 +639,7 @@ export function registerLogTools(server: McpServer): void {
           content: [
             {
               type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+              text: errorText(e),
             },
           ],
           isError: true,
@@ -735,7 +734,7 @@ This eliminates all framework noise (UIKitCore, CFNetwork, Security) and shows o
           content: [
             {
               type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+              text: errorText(e),
             },
           ],
           isError: true,
@@ -761,7 +760,7 @@ This eliminates all framework noise (UIKitCore, CFNetwork, Security) and shows o
           content: [
             {
               type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+              text: errorText(e),
             },
           ],
           isError: true,
@@ -848,7 +847,7 @@ Pass \`recording\` (an id from start_recording, or the directory it wrote) to bu
           content: [
             {
               type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+              text: errorText(e),
             },
           ],
           isError: true,
@@ -873,7 +872,7 @@ Pass \`recording\` (an id from start_recording, or the directory it wrote) to bu
           content: [
             {
               type: "text" as const,
-              text: `Error: ${e instanceof Error ? e.message : String(e)}\n\nIs Quern running? Start it with: quern-debug-server`,
+              text: errorText(e),
             },
           ],
           isError: true,
