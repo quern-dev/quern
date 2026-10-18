@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.testclient import TestClient
 
 from server.auth import APIKeyMiddleware
@@ -284,17 +284,37 @@ async def test_no_method_is_exempt(method):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scope_type", ["lifespan", "websocket"])
-async def test_non_http_scopes_pass_straight_through(scope_type):
+async def test_a_lifespan_scope_passes_straight_through():
     seen = []
 
     async def app(scope, receive, send):
         seen.append(scope["type"])
 
     middleware = APIKeyMiddleware(app, api_key=KEY)
-    await middleware({"type": scope_type}, None, None)
+    await middleware({"type": "lifespan"}, None, None)
 
-    assert seen == [scope_type], "a non-http scope was inspected for a key"
+    assert seen == ["lifespan"], "the lifespan scope was inspected for a key"
+
+
+@pytest.mark.asyncio
+async def test_a_websocket_scope_is_checked_not_passed_through():
+    """This test used to assert the opposite -- that a websocket scope reached
+    the app unchecked -- which is the gap #254 closes."""
+    seen, sent = [], []
+
+    async def app(scope, receive, send):
+        seen.append(scope["type"])
+
+    async def receive():
+        return {"type": "websocket.connect"}
+
+    async def send(message):
+        sent.append(message)
+
+    middleware = APIKeyMiddleware(app, api_key=KEY)
+    await middleware({"type": "websocket", "headers": []}, receive, send)
+    assert seen == [], "an unauthenticated websocket reached the app"
+    assert sent == [{"type": "websocket.close", "code": 4401}]
 
 
 @pytest.mark.asyncio
@@ -370,3 +390,43 @@ async def test_a_good_bearer_survives_a_wrong_x_api_key():
         (b"authorization", b"Bearer " + KEY.encode()),
         (b"x-api-key", b"wrong"),
     ])) == 200
+
+
+# -- WebSockets (#254) ----------------------------------------------------------
+
+
+def _ws_app() -> FastAPI:
+    app = FastAPI()
+
+    @app.websocket("/api/v1/live")
+    async def live(ws: WebSocket):
+        await ws.accept()
+        await ws.send_text("in")
+        await ws.close()
+
+    app.add_middleware(APIKeyMiddleware, api_key=KEY)
+    return app
+
+
+@pytest.mark.parametrize("headers", [
+    {},
+    {"Authorization": "Bearer wrong"},
+    {"X-API-Key": "wrong"},
+])
+def test_a_websocket_without_the_key_is_refused(headers):
+    """WebSocket scopes used to pass through unchecked, on the belief that they
+    carry no headers. They do, and the session socket is one (#254)."""
+    from starlette.websockets import WebSocketDisconnect
+
+    with TestClient(_ws_app()) as client:
+        with pytest.raises(WebSocketDisconnect) as refused:
+            with client.websocket_connect("/api/v1/live", headers=headers) as ws:
+                ws.receive_text()
+        assert refused.value.code == 4401
+
+
+@pytest.mark.parametrize("header", [{"Authorization": f"Bearer {KEY}"}, {"X-API-Key": KEY}])
+def test_a_websocket_with_the_key_is_let_in(header):
+    with TestClient(_ws_app()) as client:
+        with client.websocket_connect("/api/v1/live", headers=header) as ws:
+            assert ws.receive_text() == "in"
