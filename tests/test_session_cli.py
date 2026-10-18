@@ -63,6 +63,10 @@ def child(monkeypatch):
 
     monkeypatch.setattr(session_cli.subprocess, "Popen", FakePopen)
     monkeypatch.setattr(session_cli.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(session_cli, "_foreground_tty", lambda: None)
+    monkeypatch.setattr(session_cli, "_wait_as_a_shell", lambda pid, group, tty: seen.get("rc", 0))
+    monkeypatch.setattr(session_cli, "_signal_group",
+                        lambda group, signum: seen.__setitem__("signal", (group, signum)))
     return seen
 
 
@@ -246,11 +250,52 @@ def test_a_reconnect_after_close_is_closed_cleanly(monkeypatch):
     assert closed == [1000] and sock._ws is None
 
 
-@pytest.mark.parametrize("rc,expected", [(0, 0), (3, 3), (-15, 143), (-2, 130)])
-def test_a_child_killed_by_a_signal_exits_as_the_shell_would(server, child, rc, expected):
-    _opened(server)
-    child["rc"] = rc
-    assert session_cli.main(["run", "--name", "ci-job", "--", "x"]) == expected
+class TestWaitingAsAShell:
+    """The job-control loop, with waitpid and the terminal faked."""
+
+    def _run(self, monkeypatch, statuses, tty=None):
+        calls = []
+        seq = iter(statuses)
+        monkeypatch.setattr(session_cli.os, "waitpid", lambda pid, opts: (pid, next(seq)))
+        monkeypatch.setattr(session_cli, "_hand_terminal_to",
+                            lambda fd, pgrp: calls.append(("terminal", pgrp)))
+        monkeypatch.setattr(session_cli, "_signal_group",
+                            lambda group, sig: calls.append(("signal", group, sig)))
+        monkeypatch.setattr(session_cli.os, "kill",
+                            lambda pid, sig: calls.append(("stop-self", sig)))
+        monkeypatch.setattr(session_cli.os, "getpgrp", lambda: 100)
+        rc = session_cli._wait_as_a_shell(4242, 4242, tty)
+        return rc, calls
+
+    @staticmethod
+    def exited(code):
+        return code << 8
+
+    @staticmethod
+    def killed(sig):
+        return sig
+
+    @staticmethod
+    def stopped(sig):
+        return (sig << 8) | 0x7f
+
+    @pytest.mark.parametrize("status,expected", [
+        (0, 0), (3 << 8, 3), (15, 143), (2, 130),
+    ])
+    def test_status_as_the_shell_reports_it(self, monkeypatch, status, expected):
+        """A child killed by signal N is 128+N: passed through as -N, sys.exit
+        made SIGTERM 241, not 143 (CodeRabbit)."""
+        assert self._run(monkeypatch, [status])[0] == expected
+
+    def test_a_stopped_child_gives_the_terminal_back_and_resumes_on_continue(self, monkeypatch):
+        """Ctrl-Z stops only the child's group now; waiting on regardless left
+        the terminal held by a stopped job (CodeRabbit)."""
+        import signal as sig
+
+        rc, calls = self._run(monkeypatch, [self.stopped(sig.SIGTSTP), self.exited(0)], tty=0)
+        assert rc == 0
+        assert calls == [("terminal", 100), ("stop-self", sig.SIGSTOP),
+                         ("terminal", 4242), ("signal", 4242, sig.SIGCONT)]
 
 
 def test_the_child_is_its_own_job_and_each_signal_arrives_once(server, child, monkeypatch):
@@ -271,18 +316,17 @@ def test_the_child_is_its_own_job_and_each_signal_arrives_once(server, child, mo
     monkeypatch.setattr(session_cli, "_foreground_tty", lambda: None)
     during = {}
 
-    def wait():
+    def wait(pid, group, tty):
         during.update(installed)            # the handlers while the child runs
         return 0
 
     _opened(server)
-    monkeypatch.setattr(session_cli.subprocess.Popen, "wait", lambda self: wait(),
-                        raising=False)
+    monkeypatch.setattr(session_cli, "_wait_as_a_shell", wait)
     session_cli.main(["run", "--name", "ci-job", "--", "x"])
     assert child["popen_kw"].get("process_group") == 0
     during[sig.SIGINT](sig.SIGINT, None)
-    assert child["signal"] == sig.SIGINT, "SIGINT forwarded"
+    assert child["signal"] == (4242, sig.SIGINT), "SIGINT forwarded, to the child's group"
     during[sig.SIGTERM](sig.SIGTERM, None)
-    assert child["signal"] == sig.SIGTERM, "SIGTERM forwarded"
+    assert child["signal"] == (4242, sig.SIGTERM), "SIGTERM forwarded, to the child's group"
     assert installed[sig.SIGINT] == "original" and installed[sig.SIGTERM] == "original", \
         "handlers put back once the child is gone, before the hold check"

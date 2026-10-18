@@ -286,15 +286,21 @@ def _run_child(command: list[str], env: dict[str, str]) -> int:
     """
     tty = _foreground_tty()
     child = subprocess.Popen(command, env=env, process_group=0)
+    group = child.pid                     # process_group=0: the child leads its group
     if tty is not None:
-        _hand_terminal_to(tty, child.pid)
+        _hand_terminal_to(tty, group)
+        # A child that read the terminal before it was handed over was stopped
+        # by SIGTTIN; the handover does not resume it (CodeRabbit).
+        _signal_group(group, signal.SIGCONT)
 
     def forward(signum: int, _frame: object) -> None:
-        child.send_signal(signum)
+        # To the whole group, not just the child: descendants -- xcodebuild's
+        # own children -- would otherwise outlive the hold (CodeRabbit).
+        _signal_group(group, signum)
 
     previous = {sig: signal.signal(sig, forward) for sig in (signal.SIGINT, signal.SIGTERM)}
     try:
-        return _shell_status(child.wait())
+        return _wait_as_a_shell(child.pid, group, tty)
     finally:
         # Put things back as soon as the child is gone: the hold check that
         # follows talks to the server, and must not run with Ctrl-C forwarded
@@ -303,6 +309,36 @@ def _run_child(command: list[str], env: dict[str, str]) -> int:
             signal.signal(sig, handler)
         if tty is not None:
             _hand_terminal_to(tty, os.getpgrp())
+
+
+def _wait_as_a_shell(pid: int, group: int, tty: int | None) -> int:
+    """Wait for the child, handling stops the way a shell's job control does,
+    and return its status as the shell would report it.
+
+    A stopped child -- Ctrl-Z, which the terminal sends only to its group now
+    that it is the foreground job -- used to leave this waiting and the
+    terminal held by a stopped group, with no way back but killing it from
+    elsewhere (CodeRabbit). Now: take the terminal back and stop this process
+    too, so the user's shell gets control; when it is continued (`fg`), hand
+    the terminal back to the child and continue it."""
+    while True:
+        _, status = os.waitpid(pid, os.WUNTRACED)
+        if os.WIFEXITED(status):
+            return os.WEXITSTATUS(status)
+        if os.WIFSIGNALED(status):
+            return 128 + os.WTERMSIG(status)
+        if os.WIFSTOPPED(status) and tty is not None:
+            _hand_terminal_to(tty, os.getpgrp())
+            os.kill(os.getpid(), signal.SIGSTOP)    # until the shell continues us
+            _hand_terminal_to(tty, group)
+            _signal_group(group, signal.SIGCONT)
+
+
+def _signal_group(group: int, signum: int) -> None:
+    try:
+        os.killpg(group, signum)
+    except (ProcessLookupError, PermissionError):
+        pass                              # already gone
 
 
 def _foreground_tty() -> int | None:
@@ -324,13 +360,6 @@ def _hand_terminal_to(fd: int, pgrp: int) -> None:
         pass                              # the terminal went away: nothing to hand over
     finally:
         signal.signal(signal.SIGTTOU, old)
-
-
-def _shell_status(rc: int) -> int:
-    """`Popen.wait()`'s -N for a child killed by signal N, as the shell's
-    128+N: passed through as -N, sys.exit made it 256-N -- 241 for SIGTERM,
-    not 143, which a CI step checking for cancellation would misread."""
-    return 128 - rc if rc < 0 else rc
 
 
 def _still_holding(url: str, key: str, session: str, udids: list[str]) -> bool | None:
