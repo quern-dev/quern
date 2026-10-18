@@ -360,10 +360,23 @@ for (_method, _template), _rule in ROUTES.items():
 
 def match(method: str, path: str) -> tuple[str, Rule] | None:
     """The template and rule a request falls under, or None (unmapped). A
-    literal path wins over a template, as the routes themselves are ordered."""
+    literal path wins over a template, as the routes themselves are ordered.
+
+    A path that differs from a route only by its trailing slash is that route:
+    Starlette answers it with a redirect to the route, and judged as unmapped
+    it was refused to a client before the redirect could happen -- the MCP's
+    `list_landmarks` asks for `/api/v1/landmarks`, the route is
+    `/api/v1/landmarks/` (found live)."""
     method = method.upper()
     if method == "HEAD":
         method = "GET"
+    found = _match_exact(method, path)
+    if found is None and path not in ("", "/"):
+        found = _match_exact(method, path[:-1] if path.endswith("/") else path + "/")
+    return found
+
+
+def _match_exact(method: str, path: str) -> tuple[str, Rule] | None:
     found = _LITERAL.get((method, path))
     if found is not None:
         return found
