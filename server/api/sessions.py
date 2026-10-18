@@ -166,8 +166,11 @@ async def release_session(request: Request, session_id: str) -> dict:
     registry.release(session_id)
     await close_socket(request.app, session_id, CLOSE_UNKNOWN, "session released")
     actions = await run_release_policies(request.app)
-    return {"released": session_id, "freed": [r.udid for r in session.reservations.values()],
-            "actions": actions}
+    freed = [r.udid for r in session.reservations.values()]
+    # The queue is global: another session's expired policies may run here,
+    # and are not this caller's to hear about (review).
+    return {"released": session_id, "freed": freed,
+            "actions": [a for a in actions if a["udid"] in freed]}
 
 
 @router.post("/{session_id}/reservations")
@@ -205,6 +208,15 @@ async def reserve(request: Request, session_id: str, body: ReserveRequest) -> di
     # the winner had just reserved (review). The claim is synchronous and all
     # or nothing, so a loser never boots anything.
     already = set(session.reservations)
+    caller = visibility.current_caller()
+    if visibility.blind_for(caller):
+        # Another key's device is answered as one that does not exist, as
+        # `_choose` answers an unknown udid: the registry's 409 names the
+        # holding session, which is the key's label (review).
+        foreign = [u for u in udids if (held := registry.holder_of(u)) is not None
+                   and held.session.principal != caller.principal]
+        if foreign:
+            raise HTTPException(404, f"no such device: {', '.join(foreign)}")
     try:
         reservations = registry.reserve(session_id, udids, on_release=body.on_release,
                                         booted=to_boot)
@@ -257,12 +269,18 @@ async def unreserve(request: Request, session_id: str, udid: str | None = None) 
         # tell its holder, who would otherwise go on believing it has them.
         entry = _sockets(request.app).get(session_id)
         if entry is not None:
+            # "the server's owner", never the owner's session name: the
+            # holder may be a client, and the owner's sessions are not its to
+            # know (review).
+            by = ("the server's owner" if caller.is_owner
+                  else caller.session or "the server's owner")
             with contextlib.suppress(Exception):
                 await entry[1].send_json({"event": "released",
-                                          "udids": [r.udid for r in freed],
-                                          "by": caller.session or "the server's owner"})
+                                          "udids": [r.udid for r in freed], "by": by})
     actions = await run_release_policies(request.app)
-    return {"session": session_id, "freed": [r.udid for r in freed], "actions": actions}
+    freed_ids = [r.udid for r in freed]
+    return {"session": session_id, "freed": freed_ids,
+            "actions": [a for a in actions if a["udid"] in freed_ids]}
 
 
 async def _choose(request: Request, registry: SessionRegistry, session_id: str,
@@ -324,7 +342,8 @@ async def _choose(request: Request, registry: SessionRegistry, session_id: str,
         raise HTTPException(409, (
             f"asked for {wanted} device(s), {len(picked)} free"
             + ("" if body.auto_boot else " and booted (auto_boot is off)")
-            + f"; {len(held)} held by other sessions"))
+            # Blind: how many others hold is not this caller's to know.
+            + ("" if visibility.blind_for() else f"; {len(held)} held by other sessions")))
     return [d.udid for d in picked], to_boot
 
 
@@ -352,6 +371,49 @@ def _group_members(group: str, devices: list, pool) -> list:
     return list(members.values())
 
 
+async def _end_client_work(app, registry: SessionRegistry, session: HeldSession) -> list[dict]:
+    """A client key's mock rules and recordings on a device end when its hold
+    on the device does. Left in place, the next holder's traffic was answered
+    by the previous holder's rules -- whose patterns and bodies a blind
+    server then showed it -- and the previous holder's recording went on
+    filming the next holder's work (review). The owner's are left: the
+    owner's work is the owner's to end. Never raises."""
+    if principal.label_of(session.principal) is None:
+        return []
+    actions: list[dict] = []
+    owners = getattr(app.state, "mock_owners", {}) or {}
+    adapter = getattr(app.state, "proxy_adapter", None)
+    manager = getattr(app.state, "recordings", None)
+    for udid in session.reservations:
+        held = registry.holder_of(udid)
+        if held is not None and held.session.principal == session.principal:
+            continue                       # still the key's, through another session
+        for rule in list(getattr(adapter, "_mock_rules", []) or []):
+            if rule.get("simulator_udid") != udid or owners.get(rule.get("rule_id")) \
+                    != session.principal:
+                continue
+            try:
+                await adapter.clear_mock(rule_id=rule["rule_id"])
+                owners.pop(rule["rule_id"], None)
+                actions.append({"udid": udid, "action": "mock_removed", "ok": True,
+                                "rule_id": rule["rule_id"]})
+            except Exception as e:  # noqa: BLE001 -- reported, never raised
+                actions.append({"udid": udid, "action": "mock_removed", "ok": False,
+                                "rule_id": rule.get("rule_id"), "error": str(e)})
+        for rec in list(manager.list() if manager is not None else []):
+            if rec.udid != udid or rec.principal != session.principal \
+                    or rec.state not in ("recording", "interrupted"):
+                continue
+            try:
+                await manager.stop(rec.id)
+                actions.append({"udid": udid, "action": "recording_stopped", "ok": True,
+                                "recording": rec.id})
+            except Exception as e:  # noqa: BLE001 -- reported, never raised
+                actions.append({"udid": udid, "action": "recording_stopped", "ok": False,
+                                "recording": rec.id, "error": str(e)})
+    return actions
+
+
 async def run_release_policies(app) -> list[dict]:
     """Act on released reservations' `on_release`: shut down the simulators a
     session booted for them, when it asked to. Never raises: a release has
@@ -362,6 +424,7 @@ async def run_release_policies(app) -> list[dict]:
         return []
     actions = []
     for session in registry.take_released():
+        actions.extend(await _end_client_work(app, registry, session))
         for r in session.reservations.values():
             if r.on_release != "shutdown_booted" or not r.booted_here:
                 continue

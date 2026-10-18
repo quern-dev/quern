@@ -397,7 +397,10 @@ async def _blind_status(request: Request, status: ProxyStatusResponse,
         "active_filter": None,
         "active_intercept": None,
         "held_flows_count": 0,
-        "mock_rules_count": sum(1 for r in rules if view.allows(r.get("simulator_udid"))),
+        "mock_rules_count": sum(
+            1 for r in rules if view.allows(r.get("simulator_udid"))
+            and (getattr(request.app.state, "mock_owners", {}) or {}).get(r.get("rule_id"))
+            == visibility.current_caller().principal),
         "bypass_patterns": [],
         "local_capture": [],
         "capture_added": None,
@@ -729,6 +732,15 @@ def _flow_completeness(
     }
 
 
+def _refuse_client_ip_if_blind(client_ip: str | None) -> None:
+    """A `client_ip` filter names a LAN address, which no reservation covers:
+    on a blind server it reported eviction timing for any address (review)."""
+    if client_ip and visibility.blind_for():
+        raise HTTPException(status_code=403, detail=(
+            "client_ip filters are not available to client keys on a blind server; "
+            "filter by simulator_udid or device_serial"))
+
+
 @router.get("/flows", response_model=FlowQueryResponse)
 async def query_flows(
     request: Request,
@@ -751,6 +763,7 @@ async def query_flows(
     offset: int = Query(default=0, ge=0),
 ) -> FlowQueryResponse:
     """Query captured HTTP flows with filters and pagination."""
+    _refuse_client_ip_if_blind(client_ip)
     flow_store = request.app.state.flow_store
     if flow_store is None:
         return _with_tls_note(request, simulator_udid, FlowQueryResponse(total=0, has_more=False))
@@ -825,6 +838,7 @@ async def flow_summary(
     client_ip: str | None = None,
 ) -> FlowSummaryResponse:
     """Get an LLM-optimized summary of recent HTTP traffic."""
+    _refuse_client_ip_if_blind(client_ip)
     flow_store = request.app.state.flow_store
     if flow_store is None:
         return _with_tls_note(request, simulator_udid, generate_flow_summary(
@@ -919,6 +933,7 @@ async def pending_flows(
     with its age; `evicted` counts any pushed out by the bound, so a list
     that is not all of them says so.
     """
+    _refuse_client_ip_if_blind(client_ip)
     from server.api.trace import _proxy_is_running
 
     flow_store = request.app.state.flow_store
@@ -967,12 +982,11 @@ async def stream_flows(
     # now, with the address map read once for the stream.
     caller = visibility.current_caller()
     blind = visibility.blind_for(caller)
+    seen = visibility.Refreshing(caller, flows=True) if blind else None
 
     def matches_filter(flow: FlowRecord) -> bool:
-        if blind:
-            allowed = visibility.flow_filter(visibility.data_view(caller))
-            if allowed is not None and not allowed(flow):
-                return False
+        if seen is not None and not seen.flow(flow):
+            return False
         if host and flow.request.host != host:
             return False
         if method and flow.request.method.upper() != method.upper():
@@ -1018,9 +1032,10 @@ async def stream_flows(
                 except TimeoutError:
                     yield {
                         "event": "heartbeat",
+                        # Blind: no store size, which counts everyone's flows.
                         "data": json.dumps({
                             "time": datetime.now(UTC).isoformat(),
-                            "store_size": flow_store.size,
+                            **({} if blind else {"store_size": flow_store.size}),
                             "total_dropped": flow_store.dropped(queue),
                         }),
                     }
@@ -1042,6 +1057,7 @@ async def wait_for_flow(request: Request, body: WaitForFlowRequest) -> WaitForFl
     # Default since to now - 5s to catch flows that completed just before the call
     effective_since = body.since or (datetime.now(UTC) - timedelta(seconds=5))
 
+    _refuse_client_ip_if_blind(body.client_ip)
     start = time.monotonic()
     polls = 0
     allowed = visibility.flow_filter(visibility.data_view())
@@ -1174,8 +1190,10 @@ async def get_flow(request: Request, flow_id: str) -> FlowRecord:
 
     flow = await flow_store.get(flow_id)
     allowed = visibility.flow_filter(visibility.data_view())
-    if flow is not None and allowed is not None and not allowed(flow):
-        # Blind (#254): another's flow reads as one that does not exist.
+    if allowed is not None and (flow is None or not allowed(flow)):
+        # Blind (#254): another's flow reads as one that does not exist, in
+        # the same words -- without the eviction note, which differs from it
+        # and counts everyone's flows (review).
         raise HTTPException(status_code=404, detail=f"Flow {flow_id} not found")
     if flow is None:
         detail = f"Flow {flow_id} not found"

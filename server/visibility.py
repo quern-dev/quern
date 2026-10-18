@@ -92,6 +92,11 @@ class View:
     only with everything: "could not tell, so show less"."""
 
     since: dict[str, datetime] | None = None
+    #: A blind client's session-id prefix (`<label>:`). An entry that names a
+    #: session is the caller's only if the session is: another client's refused
+    #: probe of a device is logged against that device, and must not reach the
+    #: device's holder with the prober's session name in it (review).
+    session_prefix: str | None = None
 
     @property
     def everything(self) -> bool:
@@ -135,7 +140,10 @@ def data_view(caller: Caller | None = None) -> View:
                 start = reservation.since
                 if udid not in since or start < since[udid]:
                     since[udid] = start
-    return View(since=since)
+    from server.principal import label_of
+
+    label = label_of(caller.principal)
+    return View(since=since, session_prefix=f"{label}:" if label else "\x00")
 
 
 def blind_for(caller: Caller | None = None) -> bool:
@@ -150,6 +158,9 @@ def entry_visible(view: View, entry) -> bool:
     tied to no device."""
     if view.everything:
         return True
+    session = getattr(entry, "session", "") or ""
+    if session and view.session_prefix is not None and not session.startswith(view.session_prefix):
+        return False
     udid = getattr(entry, "udid", "") or getattr(entry, "device_id", "")
     if udid == "server":
         udid = ""
@@ -195,3 +206,34 @@ def listed(udid: str | None, caller: Caller | None = None) -> bool:
     holder = registry.holder_of(device_access._canonical(udid)) \
         if registry is not None and udid else None
     return device_visible(holder, caller)
+
+
+class Refreshing:
+    """A caller's view, rebuilt at most once a `ttl`, for streams: judging every
+    entry against a freshly built view scanned the registry -- and for flows
+    read the certificate state from disk -- once per entry per subscriber
+    (review). A device reserved or released mid-stream counts within `ttl`."""
+
+    def __init__(self, caller: Caller, ttl: float = 1.0, *, flows: bool = False) -> None:
+        import time
+
+        self._caller, self._ttl, self._flows, self._clock = caller, ttl, flows, time.monotonic
+        self._at = float("-inf")
+        self._view: View = View()
+        self._flow = None
+
+    def _refresh(self) -> None:
+        now = self._clock()
+        if now - self._at < self._ttl:
+            return
+        self._at = now
+        self._view = data_view(self._caller)
+        self._flow = flow_filter(self._view) if self._flows else None
+
+    def entry(self, entry) -> bool:
+        self._refresh()
+        return entry_visible(self._view, entry)
+
+    def flow(self, flow) -> bool:
+        self._refresh()
+        return self._flow is None or self._flow(flow)

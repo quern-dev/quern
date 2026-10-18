@@ -1385,6 +1385,13 @@ async def preview_start(request: Request, body: PreviewStartRequest):
     """
     controller = _get_controller(request)
 
+    if not body.udid and visibility.blind_for():
+        # Unnamed, this previews every USB iPhone, held or not, and names
+        # them (review).
+        raise HTTPException(status_code=403, detail=(
+            "name the device to preview (udid): previewing every device is not "
+            "available to client keys on a blind server"))
+
     if body.udid:
         # Resolve UDID and validate
         try:
@@ -1629,13 +1636,18 @@ async def preview_status(request: Request):
     if not view.everything:
         # Blind (#254): devices the caller could preview -- free or its own --
         # and only its own devices' running previews.
+        # A USB phone is listed by its capture id and name, not a udid, so
+        # whether another key holds it cannot be told: it is not listed --
+        # nor, for the same reason, its running preview (review).
         ios_status["available"] = [d for d in ios_status["available"]
-                                   if visibility.listed(d.get("id"))]
+                                   if d.get("kind") != "device" and visibility.listed(d.get("id"))]
         ios_status["available_count"] = len(ios_status["available"])
+        ios_status.pop("pid", None)
         for status in (ios_status, android_status):
             status["active"] = {k: v for k, v in (status.get("active") or {}).items()
                                 if view.allows(k)}
             status["active_count"] = len(status["active"])
+            status.pop("pid", None)
     return {
         "ios": ios_status,
         "android": android_status,
@@ -1660,8 +1672,12 @@ async def preview_devices(request: Request):
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
     sims, sims_error = await simulator_entries()
+    # Blind (#254): free devices and the caller's own; never a USB phone,
+    # listed by capture id rather than udid, so its holder cannot be told.
+    blind = visibility.blind_for()
     result["devices"] = [d for d in result["devices"] + sims
-                         if visibility.listed(d.get("id"))]    # blind (#254)
+                         if not (blind and d.get("kind") == "device")
+                         and visibility.listed(d.get("id"))]
     if sims_error is not None:
         result["simulators_error"] = sims_error
     return result

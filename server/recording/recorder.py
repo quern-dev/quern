@@ -1137,7 +1137,11 @@ class RecordingManager:
         return {"recordings": [
             {"id": r.id, "udid": r.udid, "output_dir": str(r.dir),
              "filters": r.filters.as_dict(), "started_at": r.started_at.isoformat(),
-             "requested_by": r.requested_by}
+             "requested_by": r.requested_by,
+             # Kept across a restart: lost, a client's recording came back as the
+             # owner's, vanished from the client's list, and began keeping the
+             # host's crash reports (review).
+             "principal": r.principal, "blind": r.blind}
             for r in self._recordings.values() if r.state in ("recording", "interrupted")]}
 
     async def _save(self) -> bool:
@@ -1302,7 +1306,9 @@ class RecordingManager:
                 rec = Recording(id=s["id"], udid=s["udid"], dir=Path(s["output_dir"]),
                                 filters=Filters.from_dict(s.get("filters") or {}),
                                 started_at=datetime.fromisoformat(s["started_at"]),
-                                requested_by=s.get("requested_by"))
+                                requested_by=s.get("requested_by"),
+                                principal=str(s.get("principal") or "owner"),
+                                blind=bool(s.get("blind", False)))
             except (KeyError, TypeError, ValueError, RecordingError) as e:
                 logger.error("Skipping a saved recording that cannot be read: %s (%r)", e, s)
                 continue

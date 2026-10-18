@@ -186,7 +186,11 @@ def check(udid: str | None) -> None:
         return
     detail = visibility.holder_detail(held, caller)
     if detail is None:
-        raise _refusing(DeviceNotFound(f"Device {udid} not found"))
+        # Blind: answered as a device nobody holds -- or one that does not
+        # exist -- is answered to a client, so a write cannot tell them apart.
+        # A distinct 404 here was an oracle for "someone else holds this"
+        # (review).
+        raise _refusing(DeviceNotReserved(udid))
     raise _refusing(DeviceHeld(udid, {
         "message": (f"{udid} is reserved by session {detail['held_by']} ({detail['state']}); "
                     "reads still work, changes are refused until it is released"),

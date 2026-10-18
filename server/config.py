@@ -277,6 +277,10 @@ def sessions_settings() -> dict:
     raw = read_user_config().get("sessions")
     raw = raw if isinstance(raw, dict) else {}
     visibility = raw.get("visibility", "shared")
+    if isinstance(visibility, str):
+        # " Blind" means blind: falling back to shared over a capital letter
+        # would show every client everything (review).
+        visibility = visibility.strip().lower()
     note = None
     if visibility not in ("shared", "blind"):
         note = (f"sessions.visibility is {visibility!r}, which is neither \"shared\" nor "

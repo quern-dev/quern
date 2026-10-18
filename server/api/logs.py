@@ -178,11 +178,12 @@ async def stream_logs(
     # Blind (#254): judged per entry against the caller's devices as they are
     # now -- a device reserved mid-stream starts appearing, one released stops.
     caller = visibility.current_caller()
+    seen = visibility.Refreshing(caller) if visibility.blind_for(caller) else None
 
     def matches_filter(entry: LogEntry) -> bool:
         if not stream_matches(params, min_levels, entry):
             return False
-        return visibility.entry_visible(visibility.data_view(caller), entry)
+        return seen is None or seen.entry(entry)
 
     async def event_generator():
         # Subscribe to all relevant buffers and merge into one queue
@@ -227,9 +228,10 @@ async def stream_logs(
                 except TimeoutError:
                     yield {
                         "event": "heartbeat",
+                        # Blind: no buffer size, which counts everyone's entries.
                         "data": json.dumps({
                             "time": datetime.now(UTC).isoformat(),
-                            "buffer_size": buffers[0].size,
+                            **({} if seen is not None else {"buffer_size": buffers[0].size}),
                             "total_dropped": sum(m.count for m in missed()),
                         }),
                     }
