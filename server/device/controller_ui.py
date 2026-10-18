@@ -1659,9 +1659,9 @@ class DeviceControllerUI:
 
         logger.info("[WDA DIRECT] %s=%s on %s", using, value, udid[:8])
         start = time.perf_counter()
-        raw = await self.wda_client.find_elements_by_query(
-            udid, using, value, timeout=timeout, no_resend=no_resend,
-        )
+        # Only the deeper look sets these; an ordinary query keeps its call.
+        bounded = ({"timeout": timeout, "no_resend": True} if no_resend else {})
+        raw = await self.wda_client.find_elements_by_query(udid, using, value, **bounded)
         elapsed = time.perf_counter() - start
         elements = parse_elements(_with_queried_identifier(raw, identifier))
 
@@ -1676,7 +1676,7 @@ class DeviceControllerUI:
                 pred_value, udid[:8],
             )
             raw = await self.wda_client.find_elements_by_query(
-                udid, "predicate string", pred_value, timeout=timeout, no_resend=no_resend,
+                udid, "predicate string", pred_value, **bounded,
             )
             elements = parse_elements(_with_queried_identifier(raw, identifier))
         elif not elements and elapsed >= 2.0:

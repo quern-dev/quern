@@ -284,3 +284,42 @@ class TestTypeAndClearPassTheDepth:
         with pytest.raises(DeviceError):
             await ctrl.clear_text(udid=PHONE, label="Search", snapshot_depth=20)
         assert seen.get("snapshot_depth") == 20
+
+
+class TestTheBoundedQueryAtTheTransport:
+    """`no_resend` at the layer that decides it. The tests above replace
+    `find_elements_by_query` whole, so they cannot see whether a timed-out deep
+    query was re-sent -- which on WDA's one-at-a-time runner queues a second
+    walk behind the first and drops a phone's forward (#470 review)."""
+
+    async def test_a_timed_out_bounded_query_is_sent_once(self, monkeypatch):
+        import httpx
+
+        from server.device.ios import wda_client as wda_mod
+        from server.device.ios.wda_client import WdaBackend
+        from tests.test_wda_writes_not_resent import SIM, FakeWDA, _req
+
+        backend = WdaBackend()
+        backend.register_simulator(SIM, 8200)
+        fake = FakeWDA({"/elements": [httpx.ReadTimeout("slow", request=_req()) for _ in range(2)]})
+        monkeypatch.setattr(wda_mod.httpx, "AsyncClient", fake)
+
+        bounded = await backend.find_elements_by_query(
+            SIM, "accessibility id", WIFI, timeout=5, no_resend=True)
+        assert bounded == []
+        assert fake.reached("/elements") == 1, "a timed-out bounded query was re-sent"
+
+    async def test_an_ordinary_query_keeps_its_retry(self, monkeypatch):
+        import httpx
+
+        from server.device.ios import wda_client as wda_mod
+        from server.device.ios.wda_client import WdaBackend
+        from tests.test_wda_writes_not_resent import SIM, FakeWDA, _req
+
+        backend = WdaBackend()
+        backend.register_simulator(SIM, 8200)
+        fake = FakeWDA({"/elements": [httpx.ReadTimeout("slow", request=_req())]})
+        monkeypatch.setattr(wda_mod.httpx, "AsyncClient", fake)
+
+        await backend.find_elements_by_query(SIM, "accessibility id", WIFI)
+        assert fake.reached("/elements") == 2, "the default read retry was lost"
