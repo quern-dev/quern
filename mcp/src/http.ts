@@ -202,7 +202,10 @@ export async function apiRequest(
       throw new ServerUnreachable(server.url, code, { cause: e });
     }
     const name = (e as { name?: unknown })?.name;
-    if ((name === "TimeoutError" || name === "AbortError") && typeof timeoutMs === "number") {
+    // Only the timeout signal's own error: nothing else aborts this request,
+    // and a manual abort reported as a timeout would carry a false wait and a
+    // retry hint (CodeRabbit, #472).
+    if (name === "TimeoutError" && typeof timeoutMs === "number") {
       throw new ServerTimeout(server.url, timeoutMs, { cause: e });
     }
     throw e; // a reset or similar: may have been delivered, so reported as it is

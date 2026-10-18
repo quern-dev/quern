@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { connectionCode, isUnreachable, ServerTimeout } from "../http.js";
+import { connectionCode, isUnreachable, ServerRefused, ServerTimeout } from "../http.js";
 
 /**
  * Wraps a raw zod shape with z.object().strict() so unknown keys are rejected.
@@ -19,6 +19,10 @@ export function strictParams<T extends z.ZodRawShape>(shape: T) {
  * refusal. */
 export function errorText(e: unknown, label = "Error"): string {
   const message = e instanceof Error ? e.message : String(e);
+  // A server that answered is never "unreachable", however a caller wrapped
+  // its refusal -- checked first so the #471 invariant does not rest on a
+  // refusal carrying no connection code (CodeRabbit, #472).
+  if (e instanceof ServerRefused) return `${label}: ${message}`;
   if (isUnreachable(e)) {
     return `${label}: ${message}\n\nIs the Quern server running? Start it with ` +
       "`quern start`, or call ensure_server.";

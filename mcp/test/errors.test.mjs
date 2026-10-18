@@ -139,10 +139,35 @@ test("a label replaces Error: without losing the classification", () => {
   assert.ok(text.includes(HINT));
 });
 
+test("a refusal never gets the start hint, even one carrying a connection code", () => {
+  // Refusal first: a ServerRefused that also carries a code (as a wrapper or a
+  // future field could give it) is still a server that answered.
+  const refused = Object.assign(
+    new ServerRefused(423, '{"detail":"held by another session"}'), { code: "ECONNREFUSED" });
+  assert.equal(errorText(refused), 'Error: HTTP 423: {"detail":"held by another session"}');
+});
+
 test("anything else is reported as itself", () => {
   assert.equal(errorText(new Error("label is required")), "Error: label is required");
   assert.equal(errorText("plain string"), "Error: plain string");
 });
+
+/** Every `catch (x) { ... }` body in a source file, found by counting braces
+ * rather than by indentation, so a nested block cannot end a match early. */
+function catchBodies(src) {
+  const bodies = [];
+  for (const m of src.matchAll(/catch\s*\((\w+)\)\s*\{/g)) {
+    let depth = 1;
+    let i = m.index + m[0].length;
+    const start = i;
+    for (; i < src.length && depth > 0; i++) {
+      if (src[i] === "{") depth++;
+      else if (src[i] === "}") depth--;
+    }
+    bodies.push(src.slice(start, i - 1));
+  }
+  return bodies;
+}
 
 test("every tool's failure goes through errorText", () => {
   // Stronger than matching old strings: every catch block that returns an
@@ -151,17 +176,22 @@ test("every tool's failure goes through errorText", () => {
   const allowed = new Set(["logs.ts"]);
   const dir = new URL("../src/tools/", import.meta.url);
   const offenders = [];
+  let inspected = 0;
   for (const name of readdirSync(dir)) {
     if (!name.endsWith(".ts") || name === "helpers.ts") continue;
     const src = readFileSync(new URL(name, dir), "utf8");
-    for (const m of src.matchAll(/catch \((\w+)\) \{([\s\S]*?)\n\s{4,8}\}/g)) {
-      const block = m[2];
+    const bodies = catchBodies(src);
+    // Every textual catch is inspected: a missed block can't hide an offender.
+    assert.equal(bodies.length, (src.match(/catch\s*\(\w+\)/g) ?? []).length, `${name}: catch blocks went uninspected`);
+    inspected += bodies.length;
+    for (const block of bodies) {
       if (!block.includes("isError")) continue;
       if (/errorText\(|failure\(/.test(block)) continue;
       if (allowed.has(name) && /Failed to start Quern|could not|Could not/.test(block)) continue;
       offenders.push(`${name}: ${block.trim().split("\n")[0].slice(0, 80)}`);
     }
   }
+  assert.ok(inspected > 100, `only ${inspected} catch blocks found; the extractor is blind`);
   assert.deepEqual(offenders, []);
 });
 

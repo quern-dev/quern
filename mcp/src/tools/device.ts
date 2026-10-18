@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { discoverServer } from "../config.js";
-import { apiRequest, quernHeaders } from "../http.js";
+import { apiRequest, quernHeaders, ServerRefused } from "../http.js";
 import { strictParams, errorText } from "./helpers.js";
 
 export function registerDeviceTools(server: McpServer): void {
@@ -445,7 +445,7 @@ NOTE: If you want to capture network traffic from this app:
 
       if (!resp.ok) {
         const text = await resp.text();
-        throw new Error(`HTTP ${resp.status}: ${text}`);
+        throw new ServerRefused(resp.status, text);
       }
 
       const buffer = Buffer.from(await resp.arrayBuffer());
@@ -536,7 +536,7 @@ NOTE: If you want to capture network traffic from this app:
 
       if (!resp.ok) {
         const text = await resp.text();
-        throw new Error(`HTTP ${resp.status}: ${text}`);
+        throw new ServerRefused(resp.status, text);
       }
 
       const buffer = Buffer.from(await resp.arrayBuffer());
