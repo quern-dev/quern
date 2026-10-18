@@ -751,6 +751,11 @@ async def video_stream(
     async def generate():
         boundary = b"--frame\r\n"
         while True:
+            # Asked every frame: a revoked client key reads as disconnected
+            # here (server/scopes.py), and nothing else would end this loop
+            # while the connection stays open (#254 review).
+            if await request.is_disconnected():
+                break
             t0 = asyncio.get_event_loop().time()
             try:
                 image_bytes, _ = await controller.screenshot(

@@ -865,3 +865,34 @@ class TestTheRealAppIsWired:
         parser = argparse.ArgumentParser()
         _add_server_flags(parser)
         assert parser.parse_args([]).host == "127.0.0.1"
+
+
+def test_the_video_stream_ends_when_its_caller_is_gone():
+    """It never asked, so a revoked key -- which reads as disconnected -- kept
+    receiving frames for as long as the connection stayed open (review)."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from server.api.device import video_stream
+
+    shots = []
+
+    class Controller:
+        async def screenshot(self, **kw):
+            shots.append(kw)
+            return b"jpeg", None
+
+    answers = iter([False, False, True])
+
+    class FakeRequest:
+        app = SimpleNamespace(state=SimpleNamespace(device_controller=Controller()))
+
+        async def is_disconnected(self):
+            return next(answers)
+
+    async def run():
+        response = await video_stream(FakeRequest(), udid="SIM", fps=10, scale=0.5, quality=70)
+        return [chunk async for chunk in response.body_iterator]
+
+    frames = asyncio.run(asyncio.wait_for(run(), timeout=5))
+    assert len(frames) == 2 and len(shots) == 2
