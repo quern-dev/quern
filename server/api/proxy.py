@@ -1093,6 +1093,11 @@ async def stop_capture(request: Request, body: CaptureStopRequest) -> CaptureSto
     flow_store = request.app.state.flow_store
     # Read before `stop`, which ends the session and forgets its filter.
     udid = manager.simulator_udid(body.session_id)
+    # Addressed by a session id in the body, so no device reached the access
+    # middleware: stopping the capture of a held device is checked here (#254).
+    from server import device_access
+
+    device_access.check(udid)
     if flow_store is None:
         return _with_tls_note(request, udid, CaptureStopResponse(
             session_id=body.session_id, duration_seconds=0, total_flows=0,

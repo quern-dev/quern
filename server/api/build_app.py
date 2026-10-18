@@ -543,6 +543,17 @@ async def _build_and_install_xcode(
             if os_error:
                 return DeviceInstallResult(udid=udid, installed=False, error=os_error)
 
+        # Re-checked here, not only when the request arrived: a build takes
+        # minutes, and another session may have reserved the device since
+        # (#254 review). Per device, so the others still install.
+        from server import device_access
+
+        device_access.refusals_are_per_item()
+        if device_access.held_by_another(udid):
+            return DeviceInstallResult(
+                udid=udid, installed=False,
+                error="reserved by another session; not installed (reads still work)")
+
         # Auto-boot shutdown simulators (simctl install requires a booted sim)
         if not is_physical:
             try:

@@ -854,3 +854,102 @@ class TestSocketBookkeepingRaces:
         assert b.closed_with == 4404
         assert not any(m.get("event") == "attached" for m in b.sent)
         await asyncio.wait_for(task_a, 2)
+
+
+class TestSecondReviewRoutes:
+    def _hold(self, registry, udid="SIM-1"):
+        a, token = registry.open("claude-a")
+        registry.attach(a.id, token)
+        registry.reserve("claude-a", [udid])
+
+    async def test_stopping_all_previews_refuses_if_one_is_a_held_device(self, registry):
+        from types import SimpleNamespace
+
+        from server.api.device import PreviewStopRequest, preview_stop
+        from server.session import _SESSION
+
+        self._hold(registry)
+        stopped = []
+
+        class PM:
+            def status(self):
+                return {"active": {"SIM-1": {}, "SIM-9": {}}}
+
+            async def stop(self):
+                stopped.append("pm")
+                return {"status": "stopped"}
+
+        class SP:
+            def status(self):
+                return {"active": {}}
+
+            async def stop(self):
+                stopped.append("sp")
+
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+            device_controller=None, preview_manager=PM(), scrcpy_preview=SP())))
+        write, who = device_access._WRITE.set(True), _SESSION.set("claude-b")
+        try:
+            with pytest.raises(device_access.DeviceHeld):
+                await preview_stop(request, PreviewStopRequest())
+        finally:
+            _SESSION.reset(who)
+            device_access._WRITE.reset(write)
+        assert stopped == [], "nothing was stopped"
+
+    async def test_stopping_a_capture_of_a_held_device_is_refused(self, registry):
+        from types import SimpleNamespace
+
+        from server.api.proxy import stop_capture
+        from server.models import CaptureStopRequest
+        from server.session import _SESSION
+
+        self._hold(registry)
+        manager = SimpleNamespace(simulator_udid=lambda sid: "SIM-1")
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+            capture_sessions=manager, flow_store=None)))
+        write, who = device_access._WRITE.set(True), _SESSION.set("claude-b")
+        try:
+            with pytest.raises(device_access.DeviceHeld):
+                await stop_capture(request, CaptureStopRequest(session_id="cap-1"))
+        finally:
+            _SESSION.reset(who)
+            device_access._WRITE.reset(write)
+
+    async def test_a_per_device_task_keeps_its_refusal_to_itself(self, registry):
+        """A multi-device install: one device's refusal must stay that device's
+        error, not turn the whole response into a 423 (review)."""
+        import asyncio
+
+        from server.session import _SESSION
+
+        self._hold(registry)
+        shared: list = []
+        refusals, write, who = (device_access._REFUSALS.set(shared),
+                                device_access._WRITE.set(True), _SESSION.set("claude-b"))
+        try:
+            async def one(udid):
+                device_access.refusals_are_per_item()
+                try:
+                    device_access.check(udid)
+                    return "installed"
+                except device_access.DeviceHeld:
+                    return "refused"
+
+            results = await asyncio.gather(one("SIM-1"), one("SIM-2"))
+        finally:
+            _SESSION.reset(who)
+            device_access._WRITE.reset(write)
+            device_access._REFUSALS.reset(refusals)
+        assert results == ["refused", "installed"]
+        assert shared == [], "the request's own refusal list was not touched"
+
+    def test_both_build_routes_recheck_before_installing(self):
+        import inspect
+
+        from server.api import build_android, build_app
+
+        for mod in (build_android, build_app):
+            source = inspect.getsource(mod)
+            assert "device_access.refusals_are_per_item()" in source, mod.__name__
+            assert "device_access.held_by_another(" in source, mod.__name__

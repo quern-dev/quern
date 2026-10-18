@@ -1587,6 +1587,14 @@ async def preview_stop(request: Request, body: PreviewStopRequest):
     # No UDID — stop all
     pm = _get_preview_manager(request)
     sp = _get_scrcpy_preview(request)
+    # Not if that includes a preview of a device another session holds (#254
+    # review): stopping it is interfering, and naming no device was a way
+    # around the check. Simulators are filed by udid and Android by serial; a
+    # USB iPhone's preview is filed by its name and cannot be tied to a hold.
+    from server import device_access
+
+    for key in [*pm.status().get("active", {}), *sp.status().get("active", {})]:
+        device_access.check(key)
     await sp.stop()
     return await pm.stop()
 

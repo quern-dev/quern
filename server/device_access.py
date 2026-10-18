@@ -150,6 +150,15 @@ def check(udid: str | None) -> None:
     raise error
 
 
+def refusals_are_per_item() -> None:
+    """In a task that handles one of several devices: a refusal stays that
+    device's error instead of turning the whole response into a 423. Tasks
+    copy the request's context, so their refusals used to land in its list
+    and replaced a multi-device result -- hiding the installs that worked
+    (review). Affects only the calling task's context."""
+    _REFUSALS.set(None)
+
+
 def held_by_another(udid: str | None) -> bool:
     """Whether a session other than the caller's holds `udid`, read or write."""
     if not udid or _REGISTRY is None:
