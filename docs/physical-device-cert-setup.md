@@ -24,8 +24,15 @@ Step-by-step WDA UI automation flow for installing the mitmproxy CA cert and con
 ## Automated Script Outline
 
 ```python
-local_ip   = proxy_status()["local_ip"]   # fallback default-route IP
-cert_url   = "http://mitm.it/cert/cer"         # served by the proxy, once routed
+status     = proxy_status()
+# The proxy serves the certificate: it must be running before Phase 1, or
+# Safari has nothing to fetch mitm.it from once the Wi-Fi proxy points at it.
+if status["status"] != "running":
+    start_proxy()
+    status = proxy_status()
+local_ip   = status["local_ip"]             # fallback default-route IP
+proxy_port = status["port"]                  # 9101 unless started on another port
+cert_url   = "http://mitm.it/cert/cer"       # served by the proxy, once routed
 # NOTE: The actual proxy host used in Wi-Fi settings is derived by subnet
 # matching in record_device_proxy_config — you don't need to compute it manually.
 ```
@@ -62,7 +69,7 @@ tap_element(label="Server", element_type="TextField")
 type_text(local_ip)
 
 tap_element(label="Port", element_type="TextField")
-type_text("9101")
+type_text(str(proxy_port))
 
 tap_element(label="Save", element_type="Button")
 
@@ -163,7 +170,7 @@ tap_element(label="Continue", element_type="Button")
 
 | Port | What it is |
 |------|------------|
-| `9110` | Quern API server, on 127.0.0.1 only (#254) |
+| `9110` | Quern API server: 127.0.0.1 by default (#254); `--host 0.0.0.0` exposes it, with a warning |
 | `9101` | mitmproxy proxy listener: the device points here, and fetches the cert from `mitm.it` through it |
 
 The device's Wi-Fi proxy points to **9101**; the cert download goes through it.

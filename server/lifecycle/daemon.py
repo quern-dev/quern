@@ -174,9 +174,11 @@ def _print_status(state: dict) -> None:
     pid = state.get("pid", "?")
     host = state.get("server_host") or "127.0.0.1"
     exposed = bind_warning(host)
-    # The address it answers on: loopback since #254 phase 2, the LAN address
-    # only when someone bound it there.
-    shown = (state.get("local_ip") or host) if exposed else host
+    # The address it answers on: the host it was bound to, which is loopback
+    # since #254 phase 2. Only a wildcard bind has no address of its own, and
+    # shows the LAN one -- a bind to one interface shows that interface, not
+    # whichever `local_ip` picked (CodeRabbit).
+    shown = (state.get("local_ip") or host) if host in ("0.0.0.0", "::") else host
     port = state.get("server_port", "?")
     api_key = state.get("api_key", "")
     proxy_port = state.get("proxy_port", "?")

@@ -213,7 +213,9 @@ def _run(args: argparse.Namespace) -> int:
     # agent's own MCP session, which a `run` took over or collided with
     # (review). Prefixed with it, so a reader can still tell whose run it was.
     base = session_from_env(dict(os.environ), fallback="cli")
-    name = args.name or f"{base[:50]}.run-{secrets.token_hex(2)}"
+    # 33 characters of it: with ".run-xxxx" that is 42, which leaves room for
+    # a client key's `<label>:` prefix (up to 17) inside the server's 64.
+    name = args.name or f"{base[:33]}.run-{secrets.token_hex(2)}"
     status, opened = _call("POST", url, key, "/api/v1/sessions", session=name,
                            body={"name": name} if name else {})
     if status != 200:

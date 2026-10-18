@@ -338,11 +338,13 @@ def _qualified_query(query: bytes, who: str) -> bytes:
 
 
 def _fields(query: bytes, body: bytes) -> dict[str, bool]:
-    """Which query parameters and top-level JSON body fields a request sets to
-    something -- not null, empty or false."""
+    """Which query parameters a request sets to any text, and which top-level
+    JSON body fields to something other than null, empty or false."""
     found: dict[str, bool] = {}
+    # Any non-empty query value: a query string carries text, so "false" is a
+    # value a handler may read as a path, not a boolean (CodeRabbit).
     for key, value in parse_qsl(query.decode("latin-1"), keep_blank_values=False):
-        if value and value.lower() != "false":
+        if value:
             found[key] = True
     if body:
         try:

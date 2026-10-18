@@ -390,6 +390,9 @@ class TestWhatAClientMayReach:
         c, _, alice, _ = world
         r = c.get("/api/v1/trace", params={"recording": "/etc"}, headers=_h(alice))
         assert r.status_code == 403
+        # Query text, not a boolean: a directory may be called "false" (CodeRabbit).
+        r = c.get("/api/v1/trace", params={"recording": "false"}, headers=_h(alice))
+        assert r.status_code == 403
         assert c.get("/api/v1/trace", headers=_h(alice)).status_code == 200
 
     def test_the_trace_filter_asks_about_the_clients_own_session(self, world):
@@ -896,3 +899,47 @@ def test_the_video_stream_ends_when_its_caller_is_gone():
 
     frames = asyncio.run(asyncio.wait_for(run(), timeout=5))
     assert len(frames) == 2 and len(shots) == 2
+
+
+def test_session_runs_name_fits_a_client_keys_longest_label(monkeypatch):
+    """A 43-character caller id -- `claude-<uuid>` -- plus the run suffix, plus
+    a 16-character label and its colon, must stay within the 64 the server
+    accepts, or `quern session run` on a client key fails before it opens."""
+    import re
+
+    from server.session import parse_session
+
+    base = "claude-" + "x" * 36
+    name = f"{base[:33]}.run-abcd"
+    src = open("server/session_cli.py").read()
+    assert 'f"{base[:33]}.run-{secrets.token_hex(2)}"' in src
+    qualified = principal.qualify(name, "client:" + "a" * 16)
+    assert len(qualified) <= 64 and parse_session(qualified.encode()) == qualified
+    assert re.fullmatch(r"a{16}:claude-x+\.run-abcd", qualified)
+
+
+def test_a_client_told_to_reserve_a_free_device_wda_needs(registry):
+    """For a free device, "wait for its holder to release it" is advice that
+    never comes true: nobody holds it (CodeRabbit)."""
+    from server.device.ios.wda_client import _refuse_if_held
+    from server.models import DeviceError
+    from server.principal import reset_principal, set_principal
+    from server.session import _SESSION
+
+    p, s = set_principal("client:alice"), _SESSION.set("alice:s1")
+    try:
+        with pytest.raises(DeviceError, match="reserve it"):
+            _refuse_if_held("SIM-FREE", "start")
+    finally:
+        reset_principal(p)
+        _SESSION.reset(s)
+
+
+@pytest.mark.parametrize("host, shown", [
+    ("127.0.0.1", "127.0.0.1"), ("0.0.0.0", "192.168.1.5"), ("10.0.0.7", "10.0.0.7")])
+def test_status_shows_the_address_the_api_answers_on(capsys, host, shown):
+    from server.lifecycle import daemon
+
+    daemon._print_status({"pid": 1, "server_host": host, "local_ip": "192.168.1.5",
+                          "server_port": 9110, "proxy_enabled": False})
+    assert f"http://{shown}:9110" in capsys.readouterr().out

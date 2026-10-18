@@ -402,8 +402,9 @@ TROUBLESHOOTING — no traffic from a physical device:
    This can be done fully via WDA automation — see the agent guide (quern://guide),
    "Autonomous proxy reconfiguration" under Physical Device Proxy Capture.
 2. wifi_proxy_configs: null → the device has never been configured. Run the full
-   physical device setup: install cert → trust cert → configure Wi-Fi proxy →
-   record_device_proxy_config. See the agent guide (quern://guide) for the full WDA script.
+   physical device setup in the order proxy_setup_guide gives -- normally configure
+   Wi-Fi proxy → record_device_proxy_config → install cert (from http://mitm.it/cert/cer,
+   which the proxy serves) → trust cert. See the agent guide (quern://guide) for the full WDA script.
 3. wifi_proxy_stale: false and active_wifi_network is set, but still no flows → check:
    - The proxy is running (status: "running")
    - The cert is trusted on the device (Settings > General > About > Certificate Trust Settings)

@@ -113,17 +113,46 @@ test("QUERN_CLIENT_KEY is the key sent, over the owner's (#254, phase 2)", async
     const { apiRequest } = await import("../dist/http.js");
     process.env.QUERN_CLIENT_KEY = "qc_client";
     await apiRequest("GET", "/api/v1/trace");
-    process.env.QUERN_CLIENT_KEY = "   ";              // blank: the owner's, not an empty key
-    await apiRequest("GET", "/api/v1/trace");
-    assert.equal(seen[0], "Bearer qc_client");
-    assert.notEqual(seen[1], "Bearer ");
-    assert.notEqual(seen[1], "Bearer qc_client");
+    assert.deepEqual(seen, ["Bearer qc_client"]);
   } finally {
     for (const [name, value] of [["QUERN_SERVER_URL", before.url], ["QUERN_CLIENT_KEY", before.key]]) {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
     }
     server.close();
+  }
+});
+
+test("a blank QUERN_CLIENT_KEY means the owner's key, not an empty one", async () => {
+  // In a child process with its own HOME and owner key: the key file's path is
+  // fixed when config.js loads, so it cannot be redirected from in here, and
+  // the developer's real ~/.quern must not decide the result (CodeRabbit).
+  const { execFile } = await import("node:child_process");
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const home = mkdtempSync(join(tmpdir(), "quern-key-"));
+  mkdirSync(join(home, ".quern"));
+  writeFileSync(join(home, ".quern", "api-key"), "owner-key\n");
+  const seen = [];
+  const server = await serve((req, res) => {
+    seen.push(req.headers.authorization);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end("{}");
+  });
+  try {
+    const http = fileURLToPath(new URL("../dist/http.js", import.meta.url));
+    const env = { ...process.env, HOME: home, QUERN_CLIENT_KEY: "   ",
+                  QUERN_SERVER_URL: `http://127.0.0.1:${server.address().port}` };
+    delete env.QUERN_STATE_DIR;
+    await new Promise((resolve, reject) => execFile(process.execPath, ["--input-type=module", "-e",
+      `const m = await import(${JSON.stringify(http)}); await m.apiRequest("GET", "/api/v1/trace");`],
+      { env }, (err) => (err ? reject(err) : resolve())));
+    assert.deepEqual(seen, ["Bearer owner-key"]);
+  } finally {
+    server.close();
+    rmSync(home, { recursive: true, force: true });
   }
 });
 
