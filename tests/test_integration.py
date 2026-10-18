@@ -822,6 +822,7 @@ async def test_proxy_setup_guide_lists_all_interfaces_when_ambiguous(
     ("0.0.0.0", "/api/v1/proxy/cert", "Open Safari"),
     # Bound to one interface: that interface's address, not the default route's.
     ("10.0.0.7", "http://10.0.0.7:", "Open Safari"),
+    ("fd00::7", "http://[fd00::7]:", "Open Safari"),
 ])
 async def test_setup_guide_fetches_the_ca_where_the_device_can_reach_it(
     app, auth_headers, host, url, first,

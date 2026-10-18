@@ -1098,6 +1098,8 @@ async def setup_guide(request: Request) -> dict:
     # The address it answers on: the LAN one only for a wildcard bind, else
     # the host it was bound to -- as `quern status` shows it (CodeRabbit).
     api_host = local_ip if config.host in ("0.0.0.0", "::") else config.host
+    if ":" in api_host and not api_host.startswith("["):
+        api_host = f"[{api_host}]"             # an IPv6 address, in a URL
     cert_url = (f"http://{api_host}:{config.port}/api/v1/proxy/cert" if via_api
                 else "http://mitm.it/cert/cer")
 
