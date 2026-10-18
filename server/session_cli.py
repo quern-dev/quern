@@ -284,10 +284,10 @@ def _run_child(command: list[str], env: dict[str, str]) -> int:
     a terminal's Ctrl-C forwarded on top of its own was a second SIGINT,
     which xcodebuild and pytest read as "abort, skip cleanup".
     """
-    tty = _foreground_tty()
+    tty = _terminal()
     child = subprocess.Popen(command, env=env, process_group=0)
     group = child.pid                     # process_group=0: the child leads its group
-    if tty is not None:
+    if tty is not None and _foreground(tty):
         _hand_terminal_to(tty, group)
         # A child that read the terminal before it was handed over was stopped
         # by SIGTTIN; the handover does not resume it (CodeRabbit).
@@ -307,7 +307,9 @@ def _run_child(command: list[str], env: dict[str, str]) -> int:
         # to a process that no longer exists (CodeRabbit).
         for sig, handler in previous.items():
             signal.signal(sig, handler)
-        if tty is not None:
+        # Only if the child's group still holds the terminal: taking it when
+        # this process is in the background would take it from the shell.
+        if tty is not None and _owner(tty) == group:
             _hand_terminal_to(tty, os.getpgrp())
 
 
@@ -328,9 +330,15 @@ def _wait_as_a_shell(pid: int, group: int, tty: int | None) -> int:
         if os.WIFSIGNALED(status):
             return 128 + os.WTERMSIG(status)
         if os.WIFSTOPPED(status) and tty is not None:
-            _hand_terminal_to(tty, os.getpgrp())
+            if _owner(tty) == group:
+                _hand_terminal_to(tty, os.getpgrp())
             os.kill(os.getpid(), signal.SIGSTOP)    # until the shell continues us
-            _hand_terminal_to(tty, group)
+            # Resumed: `fg` made this the foreground job, `bg` did not. Read
+            # it now, not at start -- handing the terminal over after a `bg`
+            # took it from the shell, and a CLI started with `&` never handled
+            # a stop at all (CodeRabbit).
+            if _foreground(tty):
+                _hand_terminal_to(tty, group)
             _signal_group(group, signal.SIGCONT)
 
 
@@ -341,13 +349,26 @@ def _signal_group(group: int, signum: int) -> None:
         pass                              # already gone
 
 
-def _foreground_tty() -> int | None:
-    """stdin's terminal, when this process is in its foreground group."""
+def _terminal() -> int | None:
+    """stdin's file descriptor when it is a terminal, foreground or not."""
     try:
         fd = sys.stdin.fileno()
-        return fd if os.isatty(fd) and os.tcgetpgrp(fd) == os.getpgrp() else None
+        return fd if os.isatty(fd) else None
     except (OSError, ValueError):
         return None
+
+
+def _owner(fd: int) -> int | None:
+    """The terminal's foreground process group, or None if it can't be read."""
+    try:
+        return os.tcgetpgrp(fd)
+    except OSError:
+        return None
+
+
+def _foreground(fd: int) -> bool:
+    """Whether this process is in the terminal's foreground group."""
+    return _owner(fd) == os.getpgrp()
 
 
 def _hand_terminal_to(fd: int, pgrp: int) -> None:

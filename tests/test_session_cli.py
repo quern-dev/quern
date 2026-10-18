@@ -63,7 +63,7 @@ def child(monkeypatch):
 
     monkeypatch.setattr(session_cli.subprocess, "Popen", FakePopen)
     monkeypatch.setattr(session_cli.signal, "signal", lambda *a: None)
-    monkeypatch.setattr(session_cli, "_foreground_tty", lambda: None)
+    monkeypatch.setattr(session_cli, "_terminal", lambda: None)
     monkeypatch.setattr(session_cli, "_wait_as_a_shell", lambda pid, group, tty: seen.get("rc", 0))
     monkeypatch.setattr(session_cli, "_signal_group",
                         lambda group, signum: seen.__setitem__("signal", (group, signum)))
@@ -253,8 +253,12 @@ def test_a_reconnect_after_close_is_closed_cleanly(monkeypatch):
 class TestWaitingAsAShell:
     """The job-control loop, with waitpid and the terminal faked."""
 
-    def _run(self, monkeypatch, statuses, tty=None):
+    def _run(self, monkeypatch, statuses, tty=None, owners=None):
+        """`owners`: what tcgetpgrp answers, in order (default: the child's
+        group while it runs, this process's after it resumes)."""
         calls = []
+        owner_seq = iter(owners or [4242, 100])
+        monkeypatch.setattr(session_cli, "_owner", lambda fd: next(owner_seq))
         seq = iter(statuses)
         monkeypatch.setattr(session_cli.os, "waitpid", lambda pid, opts: (pid, next(seq)))
         monkeypatch.setattr(session_cli, "_hand_terminal_to",
@@ -292,10 +296,31 @@ class TestWaitingAsAShell:
         the terminal held by a stopped job (CodeRabbit)."""
         import signal as sig
 
-        rc, calls = self._run(monkeypatch, [self.stopped(sig.SIGTSTP), self.exited(0)], tty=0)
+        rc, calls = self._run(monkeypatch, [self.stopped(sig.SIGTSTP), self.exited(0)], tty=0,
+                              owners=[4242, 100])          # child held it; then `fg`
         assert rc == 0
         assert calls == [("terminal", 100), ("stop-self", sig.SIGSTOP),
                          ("terminal", 4242), ("signal", 4242, sig.SIGCONT)]
+
+    def test_bg_continues_the_child_without_taking_the_terminal(self, monkeypatch):
+        """After Ctrl-Z, `bg` keeps the terminal with the shell; handing it to
+        the child then took it from the shell (CodeRabbit)."""
+        import signal as sig
+
+        rc, calls = self._run(monkeypatch, [self.stopped(sig.SIGTSTP), self.exited(0)], tty=0,
+                              owners=[4242, 7])            # after resume: the shell's
+        assert ("terminal", 4242) not in calls[1:], "the terminal stays with the shell"
+        assert calls[-1] == ("signal", 4242, sig.SIGCONT)
+
+    def test_started_in_the_background_a_stop_is_still_handled(self, monkeypatch):
+        """Started with `&`, the child never had the terminal; a stop must still
+        stop this job, so the shell can report and resume it (CodeRabbit)."""
+        import signal as sig
+
+        rc, calls = self._run(monkeypatch, [self.stopped(sig.SIGTTIN), self.exited(0)], tty=0,
+                              owners=[7, 100])             # the shell's; then `fg`
+        assert ("stop-self", sig.SIGSTOP) in calls
+        assert calls[-2:] == [("terminal", 4242), ("signal", 4242, sig.SIGCONT)]
 
 
 def test_the_child_is_its_own_job_and_each_signal_arrives_once(server, child, monkeypatch):
@@ -313,7 +338,7 @@ def test_the_child_is_its_own_job_and_each_signal_arrives_once(server, child, mo
         return previous
 
     monkeypatch.setattr(session_cli.signal, "signal", fake_signal)
-    monkeypatch.setattr(session_cli, "_foreground_tty", lambda: None)
+    monkeypatch.setattr(session_cli, "_terminal", lambda: None)
     during = {}
 
     def wait(pid, group, tty):
