@@ -67,7 +67,9 @@ Your reservation lasts as long as this MCP session: released when it ends, and k
       if (all) {
         return answer({ you: local, ...(await apiRequest("GET", "/api/v1/sessions") as object) });
       }
-      return answer({ you: local, session: await apiRequest("GET", path()) });
+      // Notices ride on the API answer; lifted to the top, where they are read.
+      const { session_notices, ...session } = (await apiRequest("GET", path())) as Record<string, unknown>;
+      return answer({ you: local, ...(session_notices ? { session_notices } : {}), session });
     } catch (e) {
       return answer({ you: local, session: null,
         note: `the server has no held session ${SESSION_ID} right now: ${e instanceof Error ? e.message : String(e)}` });

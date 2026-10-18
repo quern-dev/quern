@@ -24,7 +24,13 @@ const CLOSE_UNKNOWN = 4404;
 const CLOSE_BAD_TOKEN = 4403;
 const CLOSE_UNAUTHORISED = 4401;
 
-const MAX_BACKOFF_MS = 30_000;
+/** Capped low on purpose: reconnecting has to land well inside the server's
+ * grace period (120 s at the least), and after a server restart a long
+ * backoff left the agent unheld, and unaware its devices were gone, for as
+ * long as the backoff had grown while the server was down (found live). */
+const MAX_BACKOFF_MS = 5_000;
+/** A handshake that has neither opened nor failed by now is given up on. */
+const HANDSHAKE_TIMEOUT_MS = 10_000;
 
 let token: string | null = null;
 let socket: WebSocket | null = null;
@@ -32,6 +38,16 @@ let stopping = false;
 let backoffMs = 1000;
 let timer: ReturnType<typeof setTimeout> | null = null;
 let everAttached = false;
+/** Set when the server said the session is gone; the agent is told once the
+ * session is reopened. Not queued before: the reopen is itself an API request,
+ * and a notice queued first rode on that answer, which this module reads and
+ * the agent never sees (found live). */
+let lossPending = false;
+
+const LOSS_NOTICE =
+  "Your quern session ended on the server (it restarted, or its grace period ran " +
+  "out), so any devices you reserved were released. Reserve them again with " +
+  "reserve_devices if you need them.";
 
 export type HeldState = "idle" | "opening" | "connecting" | "live" | "retrying" | "stopped";
 let state: HeldState = "idle";
@@ -81,6 +97,10 @@ async function open(): Promise<void> {
     })) as { resume_token?: string } | null;
     if (!opened?.resume_token) throw new Error("no resume token in the answer");
     token = opened.resume_token;
+    if (lossPending) {
+      lossPending = false;
+      sessionNotices.push(LOSS_NOTICE);
+    }
     connect();
   } catch {
     retry(() => void open());
@@ -113,10 +133,31 @@ function connect(): void {
   }
   socket = ws;
 
+  // One end per attempt. Node 22's WebSocket (undici) fires only `error`, never
+  // `close`, when the connection is refused -- readyState stays CONNECTING for
+  // ever -- so waiting for `close` left a client whose server had restarted
+  // retrying nothing, unheld, and with no notice for its agent (found live).
+  let done = false;
+  const handshake = setTimeout(() => ended(1006), HANDSHAKE_TIMEOUT_MS);
+  (handshake as { unref?: () => void }).unref?.();
+  const ended = (code: number) => {
+    if (done) return;
+    done = true;
+    clearTimeout(handshake);
+    if (socket === ws) socket = null;
+    try {
+      ws.close();
+    } catch {
+      // never opened
+    }
+    onEnd(code);
+  };
+
   ws.onmessage = (event) => {
     try {
       const message = JSON.parse(String(event.data)) as { event?: string };
       if (message.event === "attached") {
+        clearTimeout(handshake);
         state = "live";
         backoffMs = 1000;
         everAttached = true;
@@ -126,30 +167,31 @@ function connect(): void {
     }
   };
 
-  ws.onclose = (event) => {
-    if (socket === ws) socket = null;
-    if (stopping) return;
-    if (event.code === CLOSE_UNKNOWN) {
-      token = null;
-      if (everAttached) {
-        sessionNotices.push(
-          "Your quern session ended on the server (it restarted, or its grace period " +
-            "ran out), so any devices you reserved were released. Reserve them again " +
-            "with reserve_devices if you need them.",
-        );
-      }
-      retry(() => void open());
-    } else if (event.code === CLOSE_BAD_TOKEN || event.code === CLOSE_UNAUTHORISED) {
-      // A new token by name (local takeover), or a rotated API key: start over.
-      token = null;
-      retry(() => void open());
-    } else {
-      // Dropped: reconnect with the token while the server holds the session.
-      retry(connect);
-    }
-  };
-
+  ws.onclose = (event) => ended(event.code);
   ws.onerror = () => {
-    // onclose follows and decides what to do.
+    // After an open socket, `close` follows and carries the code. Before one,
+    // it may never come: treat a failed handshake as a dropped connection.
+    if (ws.readyState === WebSocket.CONNECTING) ended(1006);
   };
+}
+
+/** What to do when an attempt ends, by the code it ended with. */
+function onEnd(code: number): void {
+  if (stopping) return;
+  console.error(`Held session ${SESSION_ID}: connection ended (code ${code})`);
+  if (code === CLOSE_UNKNOWN) {
+    token = null;
+    if (everAttached) lossPending = true;
+    // At once: the server is up (it just answered), and every second here
+    // is a second the agent holds nothing.
+    backoffMs = 1000;
+    void open();
+  } else if (code === CLOSE_BAD_TOKEN || code === CLOSE_UNAUTHORISED) {
+    // A new token by name (local takeover), or a rotated API key: start over.
+    token = null;
+    retry(() => void open());
+  } else {
+    // Dropped: reconnect with the token while the server holds the session.
+    retry(connect);
+  }
 }
