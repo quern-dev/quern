@@ -35,6 +35,7 @@ def stub_sections(monkeypatch):
     """Stand in for the three server-independent sections, which shell out."""
     monkeypatch.setattr("server.main._report_python_deps", lambda fix: print("PYDEPS"))
     monkeypatch.setattr("server.main._report_external_tools", lambda fix: print("EXTERNAL"))
+    monkeypatch.setattr("server.main._report_held_sessions", lambda: print("SESSIONS"))
     # True = both probes completed, which is what the real one returns when it
     # could look. Sections signal "could not check", not "found nothing wrong".
     def services(fix):
@@ -221,6 +222,7 @@ class TestDoctorExitContract:
         had gone wrong printed the least."""
         monkeypatch.setattr("server.main._report_python_deps", lambda fix: False)
         monkeypatch.setattr("server.main._report_external_tools", lambda fix: print("EXTERNAL"))
+        monkeypatch.setattr("server.main._report_held_sessions", lambda: print("SESSIONS"))
         def services(fix):
             print("SERVICES")
             return True

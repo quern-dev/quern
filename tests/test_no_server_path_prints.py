@@ -44,6 +44,7 @@ _TERMINAL_FACING = {
     "lifecycle/capture_env.py",
     "device/ios/tunneld.py",  # the `quern tunneld ...` subcommands
     "recording/cli.py",  # `quern record ...`, run in a shell or a CI step
+    "session_cli.py",  # `quern session ...`, run in a shell or a CI step
 }
 
 #: The one deliberate exception on a server path: logging from inside the log
