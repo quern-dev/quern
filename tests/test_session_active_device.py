@@ -142,6 +142,34 @@ class TestResolution:
         finally:
             device_access.install(None)
 
+    async def test_the_real_resolve_udid_refuses_a_change_to_a_held_device(self):
+        """The check in DeviceController.resolve_udid, for a device a request
+        does not name: here an unattributed caller whose shared active device
+        another session has reserved. Only in a request that changes things."""
+        import pytest
+
+        from server import device_access
+        from server.device_access import DeviceHeld
+        from server.session_registry import SessionRegistry
+
+        registry = SessionRegistry()
+        device_access.install(registry)
+        try:
+            ctrl = _controller()
+            assert await ctrl.resolve_udid("SIM-X") == "SIM-X"    # shared slot = X
+            a, token = registry.open("agent-a")
+            registry.attach(a.id, token)
+            registry.reserve("agent-a", ["SIM-X"])
+            write = device_access._WRITE.set(True)
+            try:
+                with pytest.raises(DeviceHeld):
+                    await ctrl.resolve_udid()
+            finally:
+                device_access._WRITE.reset(write)
+            assert await ctrl.resolve_udid() == "SIM-X", "a read still resolves it"
+        finally:
+            device_access.install(None)
+
     async def test_a_fresh_session_is_asked_rather_than_handed_a_device(self):
         """Two simulators booted and no slot: what a fresh server does --
         'specify udid' -- not whichever device someone else chose."""
