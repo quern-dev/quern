@@ -1343,23 +1343,39 @@ class RecordingManager:
                     # quern-media the last quern left filming is stopped
                     # first, as a resume stops it -- left running, it went on
                     # filming the device after the stopped line (CodeRabbit).
+                    # Each movie is accounted for as a resume accounts for it
+                    # (`_resume_segments`): its summary, or why there is none,
+                    # in the manifest and a `video_stopped` line -- dropped,
+                    # the recording could neither report nor join its last
+                    # movie (CodeRabbit).
+                    lines = []
                     for path, started in (tally.open_video or {}).items():
-                        if self._video is None or not isinstance(started.get("pid"), int):
-                            continue
+                        result = None
                         try:
-                            await self._video.reap(started["pid"], Path(path))
+                            if self._video is not None and isinstance(started.get("pid"), int):
+                                result = await self._video.reap(started["pid"], Path(path))
+                            if result is None:
+                                result = {"path": path, "start_host_time": None,
+                                          "error": "quern stopped without finishing it: the "
+                                                   "movie was not finalised and may not open"}
                         except Exception as e:  # noqa: BLE001 -- said, never fatal
-                            rec.warnings.append(f"the video still being filmed into {path} "
-                                                f"could not be confirmed stopped: {e}")
+                            result = {"path": path, "start_host_time": None,
+                                      "error": f"quern stopped without finishing it, and "
+                                               f"whether its quern-media is still running "
+                                               f"could not be told: {e}"}
+                        segment = {**result, "segment": started.get("segment")}
+                        self._note_segment(rec, segment, write=False)
+                        lines.append(_line("video_stopped", **segment))
                     rec.gaps.append(gap)
                     rec.state, rec.stopped_at = "stopped", _now()
                     rec.warnings.append("stopped at restart: a client key's recording ends "
                                         "with its reservation, and reservations do not "
                                         "survive a restart")
-                    await asyncio.to_thread(_append, rec.events, [
-                        _line("stopped", counts=dict(rec.counts), dropped=dict(rec.dropped),
-                              gaps=len(rec.gaps), complete=False,
-                              reason="quern restarted; the client's reservation ended")], True)
+                    lines.append(_line("stopped", counts=dict(rec.counts),
+                                       dropped=dict(rec.dropped), gaps=len(rec.gaps),
+                                       complete=False,
+                                       reason="quern restarted; the client's reservation ended"))
+                    await asyncio.to_thread(_append, rec.events, lines, True)
                     with contextlib.suppress(OSError):
                         await asyncio.to_thread(_write_json_atomic, rec.manifest,
                                                 rec.manifest_body())

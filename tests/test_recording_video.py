@@ -571,12 +571,18 @@ class TestTheManager:
         rec = await first.start(SIM, str(tmp_path / "r"), Filters(video=True),
                                 principal="client:alice", blind=True)
         await first._flush(rec)                        # and then quern is killed
-        video = FakeVideo()
+        reaped = {"path": str(tmp_path / "r" / "video-1.mp4"), "start_host_time": 1000.0,
+                  "duration_s": 30.0, "frames": 9}
+        video = FakeVideo(reaped=reaped)
         second = Sources().manager(video)
         assert await asyncio.wait_for(second.resume_all(), RESUME_BOUND) == []
         assert video.reap_calls, "the movie left filming was stopped"
         assert video.started == [], "and no new segment was started"
-        assert _events(tmp_path / "r")[-1]["type"] == "stopped"
+        events = _events(tmp_path / "r")
+        assert [e["type"] for e in events[-2:]] == ["video_stopped", "stopped"]
+        assert events[-2]["start_host_time"] == 1000.0, "the movie is accounted for"
+        [seg] = json.loads((tmp_path / "r" / "manifest.json").read_text())["video"]
+        assert seg["start_host_time"] == 1000.0
 
     async def test_a_segment_that_will_not_resume_is_said_and_the_run_goes_on(self, tmp_path):
         first = Sources().manager(FakeVideo())
