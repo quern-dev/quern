@@ -598,13 +598,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Held sessions and reservations (#254). In memory only: nothing holding
     # one survives a restart, so neither do they.
-    from server import device_access
+    from server import device_access, visibility
     from server.api.sessions import sweep as _sweep_sessions
     from server.config import sessions_settings
     from server.session_registry import SessionRegistry
 
-    app.state.sessions = SessionRegistry(grace_seconds=sessions_settings()["grace_seconds"])
+    _sessions_cfg = sessions_settings()
+    app.state.sessions = SessionRegistry(grace_seconds=_sessions_cfg["grace_seconds"])
     device_access.install(app.state.sessions)
+    # Shared or blind (#254, phase 2): read once, as the grace is. A server
+    # that is blind says so in its log; a setting it could not read says
+    # what it fell back to.
+    visibility.MODE = _sessions_cfg["visibility"]
+    # Recorded, so `doctor` reports the mode this server runs, not whatever
+    # config.json says now: edited without a restart, it read "blind" while
+    # every client still saw everything (CodeRabbit).
+    from server.lifecycle.state import update_state as _update_state
+
+    _update_state(visibility=visibility.MODE)
+    if _sessions_cfg["visibility_note"]:
+        logger.warning("%s", _sessions_cfg["visibility_note"])
+    elif visibility.MODE == "blind":
+        logger.info("Blind sharing: each client key sees only its own devices' data")
     sessions_task = asyncio.create_task(_sweep_sessions(app), name="session-sweep")
 
     # The LAN viewer (#449), opt-in. Started after the recordings it serves.
@@ -1623,6 +1638,20 @@ def _report_bind() -> None:
     exposed = bind_warning(host)
     print("API listener:")
     print(f"  ⚠ {exposed}" if exposed else f"  ✓ {host} (this Mac only)")
+    from server.config import sessions_settings
+
+    # The mode the running server took at start-up, from its state file; the
+    # configured one only to say a restart is due. A server from before the
+    # setting existed records none, and runs shared.
+    running = state.get("visibility") or "shared"
+    configured = sessions_settings()
+    print(f"  {'✓' if running == 'shared' or running == 'blind' else '?'} sharing: {running}"
+          + (" (client keys see only their own devices' data)" if running == "blind" else ""))
+    if configured["visibility_note"]:
+        print(f"  ⚠ {configured['visibility_note']}")
+    elif configured["visibility"] != running:
+        print(f"  ⚠ config.json now says {configured['visibility']!r}: restart the server "
+              f"(quern restart) for it to take effect")
 
 
 def _report_held_sessions() -> None:

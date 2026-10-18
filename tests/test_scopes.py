@@ -134,6 +134,13 @@ class TestMatching:
         assert scopes.match("GET", "/api/v1/proxy/flows/summary")[0] == \
             "/api/v1/proxy/flows/summary"
 
+    def test_a_trailing_slash_is_the_same_route(self):
+        """Starlette redirects between the two spellings; the table must not
+        refuse the one it does not list before the redirect happens."""
+        assert scopes.match("GET", "/api/v1/landmarks")[0] == "/api/v1/landmarks/"
+        assert scopes.match("GET", "/api/v1/device/list/")[0] == "/api/v1/device/list"
+        assert scopes.rule_for("GET", "/api/v1/landmarks").access is scopes.Access.VIEW
+
     def test_head_is_read_as_get(self):
         assert scopes.rule_for("HEAD", "/api/v1/device/list").access is scopes.Access.VIEW
 

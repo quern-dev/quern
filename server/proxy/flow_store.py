@@ -297,10 +297,18 @@ class FlowStore:
         async with self._lock:
             return self._flows.get(flow_id)
 
-    async def query(self, params: FlowQueryParams) -> tuple[list[FlowRecord], int]:
-        """Filter and paginate flows. Returns (page, total_matching)."""
+    async def query(
+        self, params: FlowQueryParams,
+        accept: Callable[[FlowRecord], bool] | None = None,
+    ) -> tuple[list[FlowRecord], int]:
+        """Filter and paginate flows. Returns (page, total_matching).
+
+        `accept` narrows further before paging, so the page and the total
+        count only what it allows -- blind mode's view (#254)."""
         async with self._lock:
             results = self._filter(params)
+            if accept is not None:
+                results = [f for f in results if accept(f)]
             total = len(results)
             page = results[params.offset : params.offset + params.limit]
             return page, total

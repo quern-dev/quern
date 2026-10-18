@@ -11,6 +11,7 @@ from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+from server import visibility
 from server.api.actions import logged_action
 from server.models import (
     Completeness,
@@ -174,8 +175,15 @@ async def stream_logs(
     if params.level is not None:
         min_levels = set(LogLevel.at_least(params.level))
 
+    # Blind (#254): judged per entry against the caller's devices as they are
+    # now -- a device reserved mid-stream starts appearing, one released stops.
+    caller = visibility.current_caller()
+    seen = visibility.Refreshing(caller) if visibility.blind_for(caller) else None
+
     def matches_filter(entry: LogEntry) -> bool:
-        return stream_matches(params, min_levels, entry)
+        if not stream_matches(params, min_levels, entry):
+            return False
+        return seen is None or seen.entry(entry)
 
     async def event_generator():
         # Subscribe to all relevant buffers and merge into one queue
@@ -220,9 +228,10 @@ async def stream_logs(
                 except TimeoutError:
                     yield {
                         "event": "heartbeat",
+                        # Blind: no buffer size, which counts everyone's entries.
                         "data": json.dumps({
                             "time": datetime.now(UTC).isoformat(),
-                            "buffer_size": buffers[0].size,
+                            **({} if seen is not None else {"buffer_size": buffers[0].size}),
                             "total_dropped": sum(m.count for m in missed()),
                         }),
                     }
@@ -279,7 +288,8 @@ async def query_logs(
     )
 
     buffers = _get_buffers(request, source)
-    if len(buffers) == 1:
+    view = visibility.data_view()
+    if len(buffers) == 1 and view.everything:
         entries, total = await buffers[0].query(params)
     else:
         # Merge results from multiple buffers, sorted by timestamp
@@ -287,6 +297,9 @@ async def query_logs(
         for buf in buffers:
             buf_entries = await buf.filter_entries(params)
             all_entries.extend(buf_entries)
+        # Blind (#254): only the caller's own devices' entries, filtered before
+        # paging so `total` and `has_more` count what it may see.
+        all_entries = [e for e in all_entries if visibility.entry_visible(view, e)]
         all_entries.sort(key=lambda e: e.timestamp)
         total = len(all_entries)
         if tail:
@@ -385,6 +398,8 @@ async def get_summary(
         for buf in buffers:
             all_entries.extend(await buf.get_since(covers_since, upto))
 
+    view = visibility.data_view()
+    all_entries = [e for e in all_entries if visibility.entry_visible(view, e)]
     all_entries.sort(key=lambda e: e.timestamp)
     summary = generate_summary(all_entries, window=window, process=process)
     summary.cursor = make_arrival_cursor(clock, upto)
@@ -435,7 +450,9 @@ async def get_errors(
             candidates.extend(await buf.get_recent(buf.max_size))
 
     candidates.sort(key=lambda e: e.timestamp)
-    all_entries = [e for e in candidates if e.level in error_levels]
+    view = visibility.data_view()
+    all_entries = [e for e in candidates
+                   if e.level in error_levels and visibility.entry_visible(view, e)]
 
     if not include_crashes:
         all_entries = [e for e in all_entries if e.source != LogSource.CRASH]
@@ -465,8 +482,15 @@ async def get_errors(
 async def list_sources(request: Request) -> SourcesResponse:
     """List all active log source adapters and their status."""
     adapters = request.app.state.source_adapters
+    view = visibility.data_view()
+    sources = [adapter.status().model_dump() for adapter in adapters.values()]
+    if not view.everything:
+        # Blind (#254): the caller's own devices' sources, and no buffer
+        # totals, which count everyone's entries.
+        sources = [s for s in sources if view.allows(s.get("device_id"))]
+        return SourcesResponse(sources=sources, buffers={})
     return SourcesResponse(
-        sources=[adapter.status().model_dump() for adapter in adapters.values()],
+        sources=sources,
         buffers={
             "logs": request.app.state.ring_buffer.stats(),
             "server": request.app.state.server_buffer.stats(),

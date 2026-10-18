@@ -57,7 +57,7 @@ from urllib.parse import parse_qsl, urlencode
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from server import device_access, principal
+from server import device_access, principal, visibility
 from server.session import _SESSION, HEADER, parse_session
 from server.session_registry import OWNER
 
@@ -70,7 +70,9 @@ class Access(StrEnum):
     OWNER = "owner"
 
 
-Device = Literal["named", "resolved", "path-id"] | None
+#: "resolved-read" is not written in ROUTES: ScopeMiddleware applies it to a
+#: blind client's VIEW "device" reads.
+Device = Literal["named", "resolved", "path-id", "resolved-read"] | None
 
 
 @dataclass(frozen=True)
@@ -281,6 +283,70 @@ ROUTES: dict[tuple[str, str], Rule] = {
     ("GET", "/api/v1/system/update-status"): _OWNER,
 }
 
+#: What a caller held to blind mode (#254, phase 2) gets from each route a
+#: client may read. `tests/test_scopes.py` fails until every VIEW route has
+#: an entry, as ROUTES does for every route.
+#:
+#:     device    reads one device: another principal's device answers 404,
+#:               as one that does not exist would (device_access.check)
+#:     filtered  lists data: the route keeps only what is attributable to the
+#:               caller's own devices (visibility.data_view)
+#:     hidden    describes the Mac or the owner's set-up, not a device: 403
+#:     shared    nothing about anyone: answered as for everyone
+BLIND: dict[tuple[str, str], str] = {
+    ("GET", "/api/v1/device/app/list"): "device",
+    ("GET", "/api/v1/device/app/state/plist"): "device",
+    ("GET", "/api/v1/device/app/state/plist/diff"): "device",
+    ("GET", "/api/v1/device/screen-summary"): "device",
+    ("GET", "/api/v1/device/screenshot"): "device",
+    ("GET", "/api/v1/device/screenshot/annotated"): "device",
+    ("GET", "/api/v1/device/settings"): "device",
+    ("GET", "/api/v1/device/ui"): "device",
+    ("GET", "/api/v1/device/ui/element"): "device",
+    ("GET", "/api/v1/device/video"): "device",
+    ("POST", "/api/v1/device/ui/wait-for-element"): "device",
+    ("POST", "/api/v1/device/ui/wait-settled"): "device",
+    ("POST", "/api/v1/device/preview/start"): "device",
+    ("POST", "/api/v1/device/logging/start"): "device",
+    ("POST", "/api/v1/device/logging/device/start"): "device",
+    ("POST", "/api/v1/landmarks/identify"): "device",
+    ("GET", "/api/v1/device/list"): "filtered",
+    ("GET", "/api/v1/device/preview/devices"): "filtered",
+    ("GET", "/api/v1/device/preview/status"): "filtered",
+    ("GET", "/api/v1/device/screenshot/timeline"): "filtered",
+    ("GET", "/api/v1/crashes/latest"): "filtered",
+    ("GET", "/api/v1/logs/errors"): "filtered",
+    ("GET", "/api/v1/logs/query"): "filtered",
+    ("GET", "/api/v1/logs/stream"): "filtered",
+    ("GET", "/api/v1/logs/summary"): "filtered",
+    ("GET", "/api/v1/logs/sources"): "filtered",
+    ("GET", "/api/v1/proxy/status"): "filtered",
+    ("GET", "/api/v1/proxy/cert/status"): "filtered",
+    ("GET", "/api/v1/proxy/flows"): "filtered",
+    ("GET", "/api/v1/proxy/flows/pending"): "filtered",
+    ("GET", "/api/v1/proxy/flows/stream"): "filtered",
+    ("GET", "/api/v1/proxy/flows/summary"): "filtered",
+    ("GET", "/api/v1/proxy/flows/{flow_id}"): "filtered",
+    ("POST", "/api/v1/proxy/flows/wait"): "filtered",
+    ("GET", "/api/v1/proxy/mocks"): "filtered",
+    ("GET", "/api/v1/recordings"): "filtered",
+    ("GET", "/api/v1/trace"): "filtered",
+    # The owner's set-up: which apps have knowledge bases, which hosts are
+    # bypassed or filtered, what builds ran, the flows held for intercept
+    # (which carry no device), app checkpoints, the Mac's tool layout.
+    ("GET", "/api/v1/device/app/state/list"): "hidden",
+    ("GET", "/api/v1/device/app/state/plist/watch/config"): "hidden",
+    ("GET", "/api/v1/device/build-progress"): "hidden",
+    ("GET", "/api/v1/device/tools/sites"): "hidden",
+    ("GET", "/api/v1/landmarks/"): "hidden",
+    ("POST", "/api/v1/landmarks/validate"): "hidden",
+    ("GET", "/api/v1/logs/filter"): "hidden",
+    ("GET", "/api/v1/proxy/bypass"): "hidden",
+    ("GET", "/api/v1/proxy/intercept/held"): "hidden",
+    ("GET", "/api/v1/system/channel"): "shared",
+}
+
+
 def _compile(template: str) -> re.Pattern:
     return re.compile("^" + re.sub(r"\\\{[^/]+?\\\}", "[^/]+", re.escape(template)) + "$")
 
@@ -296,10 +362,23 @@ for (_method, _template), _rule in ROUTES.items():
 
 def match(method: str, path: str) -> tuple[str, Rule] | None:
     """The template and rule a request falls under, or None (unmapped). A
-    literal path wins over a template, as the routes themselves are ordered."""
+    literal path wins over a template, as the routes themselves are ordered.
+
+    A path that differs from a route only by its trailing slash is that route:
+    Starlette answers it with a redirect to the route, and judged as unmapped
+    it was refused to a client before the redirect could happen -- the MCP's
+    `list_landmarks` asks for `/api/v1/landmarks`, the route is
+    `/api/v1/landmarks/` (found live)."""
     method = method.upper()
     if method == "HEAD":
         method = "GET"
+    found = _match_exact(method, path)
+    if found is None and path not in ("", "/"):
+        found = _match_exact(method, path[:-1] if path.endswith("/") else path + "/")
+    return found
+
+
+def _match_exact(method: str, path: str) -> tuple[str, Rule] | None:
     found = _LITERAL.get((method, path))
     if found is not None:
         return found
@@ -307,6 +386,13 @@ def match(method: str, path: str) -> tuple[str, Rule] | None:
         if m == method and pattern.match(path):
             return template, rule
     return None
+
+
+def _blind_kind(method: str, path: str) -> str:
+    """A VIEW route's blind-mode treatment; "hidden" when undecided."""
+    found = match(method, path)
+    return BLIND.get((method.upper() if method.upper() != "HEAD" else "GET", found[0]),
+                     "hidden") if found else "hidden"
 
 
 def rule_for(method: str, path: str) -> Rule:
@@ -435,6 +521,18 @@ class ScopeMiddleware:
         if rule.access is Access.OWNER:
             await _deny(send, 403, f"{method} {path} is owner-only: a client key cannot use it")
             return
+        if rule.access is Access.VIEW and visibility.blind_for():
+            kind = _blind_kind(method, path)
+            if kind == "hidden":
+                await _deny(send, 403, (f"{method} {path} describes this server's own set-up, "
+                                        "which a blind server does not share with client keys"))
+                return
+            if kind == "device":
+                # Unnamed, a read falls back to the active device and then to
+                # "the only booted one" -- which on a blind server could be
+                # another key's, named back in the refusal, or a list of every
+                # booted device (review). So it needs a device of its own.
+                rule = Rule(Access.VIEW, "resolved-read", owner_fields=rule.owner_fields)
         await self._as_session(who, scope, receive, send, rule=rule)
 
     async def _as_session(self, who: str, scope: Scope, receive: Receive, send: Send,
@@ -462,7 +560,7 @@ class ScopeMiddleware:
         receive = _ends_on_revoke(scope, who, receive)
         token = _SESSION.set(qualified)
         try:
-            if rule is not None and (rule.owner_fields or (
+            if rule is not None and (rule.owner_fields or rule.device == "resolved-read" or (
                     rule.access is Access.CONTROL and rule.device != "path-id")):
                 body, receive = await device_access._buffer(receive)
                 refusal = await self._refusal(scope, rule, body)
@@ -481,6 +579,15 @@ class ScopeMiddleware:
         if given:
             return 403, (f"{', '.join(given)} on {method} {path} is owner-only: it names a "
                          "path on the Mac or changes what every caller shares")
+        if rule.device == "resolved-read":
+            if device_access._named_devices(scope.get("query_string", b""), body):
+                return None
+            app = scope.get("app")
+            controller = getattr(getattr(app, "state", None), "device_controller", None)
+            if not (getattr(controller, "_active_udid", None) if controller is not None else None):
+                return 403, ("this session has no device: name one (udid), or reserve one "
+                             "(reserve_devices) to make it this session's active device")
+            return None
         if rule.access is not Access.CONTROL or rule.device == "path-id":
             return None
         if rule.device == "named":

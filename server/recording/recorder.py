@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import fnmatch
 import json
 import logging
@@ -293,6 +294,13 @@ class Recording:
     #: themselves, so subsystems sharing a server can tell their runs apart.
     #: A label, not ownership: anyone can still stop any recording.
     requested_by: str | None = None
+    #: Who started it (#254, phase 2): the owner, or a client key's principal.
+    #: A blind server lists a client's recordings to that client only.
+    principal: str = "owner"
+    #: Started by a caller held to blind mode: only what is attributable to
+    #: the device is written -- no device-less crash reports, no unattributed
+    #: logs or flows, whatever the filters asked.
+    blind: bool = False
     #: recording; interrupted (saved, but could not resume -- tried again at
     #: the next start, and stoppable); stopped; failed.
     state: str = "recording"
@@ -385,6 +393,7 @@ class Recording:
     def summary(self) -> dict:
         return {
             "id": self.id, "udid": self.udid, "requested_by": self.requested_by,
+            "principal": self.principal,
             "output_dir": str(self.dir), "events": str(self.events), "manifest": str(self.manifest),
             "state": self.state, "error": self.error,
             "started_at": self.started_at.isoformat(),
@@ -631,7 +640,7 @@ class RecordingManager:
         # A crash report with no device is kept, as the live trace keeps it:
         # host crash reports often carry none, and a crash is the one entry a
         # run most needs. They come a handful at a time, unlike log lines.
-        return e.device_id == rec.udid or not e.device_id
+        return e.device_id == rec.udid or (not e.device_id and not rec.blind)
 
     def _wants_flow(self, rec: Recording, f: FlowRecord) -> bool:
         work, _ = device_of(f, self._ip())
@@ -679,7 +688,8 @@ class RecordingManager:
                 raise RecordingError(_already_filmed(udid, holder))
 
     async def start(self, udid: str, output_dir: str | None, filters: Filters,
-                    requested_by: str | None = None) -> Recording:
+                    requested_by: str | None = None, *, principal: str = "owner",
+                    blind: bool = False) -> Recording:
         rec_id = f"rec_{uuid.uuid4().hex[:12]}"
         out = _output_dir(output_dir) if output_dir else (
             config_mod.CONFIG_DIR / "recordings" / rec_id)
@@ -687,8 +697,11 @@ class RecordingManager:
             out.mkdir(parents=True, exist_ok=True)
         except OSError as e:
             raise RecordingError(f"{out} could not be created: {e}") from e
+        if blind and filters.include_unattributed:
+            filters = dataclasses.replace(filters, include_unattributed=False)
         rec = Recording(id=rec_id, udid=udid, dir=out, filters=filters, started_at=_now(),
-                        requested_by=(requested_by or "").strip() or None)
+                        requested_by=(requested_by or "").strip() or None,
+                        principal=principal, blind=blind)
         if filters.video:
             # Asked for and impossible is a refusal, not a recording that
             # quietly has no video.
@@ -1124,7 +1137,11 @@ class RecordingManager:
         return {"recordings": [
             {"id": r.id, "udid": r.udid, "output_dir": str(r.dir),
              "filters": r.filters.as_dict(), "started_at": r.started_at.isoformat(),
-             "requested_by": r.requested_by}
+             "requested_by": r.requested_by,
+             # Kept across a restart: lost, a client's recording came back as the
+             # owner's, vanished from the client's list, and began keeping the
+             # host's crash reports (review).
+             "principal": r.principal, "blind": r.blind}
             for r in self._recordings.values() if r.state in ("recording", "interrupted")]}
 
     async def _save(self) -> bool:
@@ -1289,7 +1306,9 @@ class RecordingManager:
                 rec = Recording(id=s["id"], udid=s["udid"], dir=Path(s["output_dir"]),
                                 filters=Filters.from_dict(s.get("filters") or {}),
                                 started_at=datetime.fromisoformat(s["started_at"]),
-                                requested_by=s.get("requested_by"))
+                                requested_by=s.get("requested_by"),
+                                principal=str(s.get("principal") or "owner"),
+                                blind=bool(s.get("blind", False)))
             except (KeyError, TypeError, ValueError, RecordingError) as e:
                 logger.error("Skipping a saved recording that cannot be read: %s (%r)", e, s)
                 continue
@@ -1316,6 +1335,52 @@ class RecordingManager:
                 rec._segment_number = tally.last_segment
                 gap = {"from": tally.last_at.isoformat() if tally.last_at else None,
                        "to": _now().isoformat(), "reason": "quern was not running"}
+                if rec.principal != "owner":
+                    # A client key's recording does not outlive its
+                    # reservation, and no reservation survives a restart: it
+                    # is finished here, not resumed. Resumed, it would film
+                    # whoever reserves the device next (CodeRabbit). A
+                    # quern-media the last quern left filming is stopped
+                    # first, as a resume stops it -- left running, it went on
+                    # filming the device after the stopped line (CodeRabbit).
+                    # Each movie is accounted for as a resume accounts for it
+                    # (`_resume_segments`): its summary, or why there is none,
+                    # in the manifest and a `video_stopped` line -- dropped,
+                    # the recording could neither report nor join its last
+                    # movie (CodeRabbit).
+                    lines = []
+                    for path, started in (tally.open_video or {}).items():
+                        result = None
+                        try:
+                            if self._video is not None and isinstance(started.get("pid"), int):
+                                result = await self._video.reap(started["pid"], Path(path))
+                            if result is None:
+                                result = {"path": path, "start_host_time": None,
+                                          "error": "quern stopped without finishing it: the "
+                                                   "movie was not finalised and may not open"}
+                        except Exception as e:  # noqa: BLE001 -- said, never fatal
+                            result = {"path": path, "start_host_time": None,
+                                      "error": f"quern stopped without finishing it, and "
+                                               f"whether its quern-media is still running "
+                                               f"could not be told: {e}"}
+                        segment = {**result, "segment": started.get("segment")}
+                        self._note_segment(rec, segment, write=False)
+                        lines.append(_line("video_stopped", **segment))
+                    rec.gaps.append(gap)
+                    rec.state, rec.stopped_at = "stopped", _now()
+                    rec.warnings.append("stopped at restart: a client key's recording ends "
+                                        "with its reservation, and reservations do not "
+                                        "survive a restart")
+                    lines.append(_line("stopped", counts=dict(rec.counts),
+                                       dropped=dict(rec.dropped), gaps=len(rec.gaps),
+                                       complete=False,
+                                       reason="quern restarted; the client's reservation ended"))
+                    await asyncio.to_thread(_append, rec.events, lines, True)
+                    with contextlib.suppress(OSError):
+                        await asyncio.to_thread(_write_json_atomic, rec.manifest,
+                                                rec.manifest_body())
+                    logger.info("Recording %s, a client key's, finished at restart", rec.id)
+                    continue
                 await asyncio.to_thread(_append, rec.events, [
                     _line("resumed", gap=gap, clock_anchor=_anchor())], True)
             except OSError as e:

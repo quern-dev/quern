@@ -269,6 +269,28 @@ class TestCompleteness:
 
 
 class TestRestarts:
+    async def test_a_client_keys_recording_is_finished_at_restart_not_resumed(self, tmp_path):
+        """Its reservation did not survive the restart, so resumed it would
+        film whoever reserves the device next (#254, CodeRabbit)."""
+        src = Sources()
+        first = src.manager()
+        rec = await first.start(SIM, str(tmp_path / "r"), Filters(),
+                                principal="client:alice", blind=True)
+        await first.shutdown()
+
+        again = Sources()
+        second = again.manager()
+        assert await second.resume_all() == [], "not resumed"
+        await again.flows.add(_flow(host="after.example.com"))
+        await _settle()
+        events = _events(tmp_path / "r")
+        assert events[-1]["type"] == "stopped" and "reservation" in events[-1]["reason"]
+        assert not any(e["type"] == "flow" for e in events), "nothing recorded after"
+        [listed] = [r for r in second.list() if r.id == rec.id]
+        assert listed.state == "stopped" and listed.principal == "client:alice"
+        manifest = json.loads((tmp_path / "r" / "manifest.json").read_text())
+        assert manifest["complete"] is False
+
     async def test_a_restart_costs_a_gap_not_the_recording(self, tmp_path):
         src = Sources()
         first = src.manager()

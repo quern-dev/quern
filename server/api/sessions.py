@@ -22,7 +22,7 @@ import contextlib
 import logging
 import secrets
 
-from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from server import principal, visibility
@@ -166,8 +166,9 @@ async def release_session(request: Request, session_id: str) -> dict:
     registry.release(session_id)
     await close_socket(request.app, session_id, CLOSE_UNKNOWN, "session released")
     actions = await run_release_policies(request.app)
-    return {"released": session_id, "freed": [r.udid for r in session.reservations.values()],
-            "actions": actions}
+    freed = [r.udid for r in session.reservations.values()]
+    return {"released": session_id, "freed": freed,
+            "actions": _answerable(actions, session_id, blind=visibility.blind_for(caller))}
 
 
 @router.post("/{session_id}/reservations")
@@ -205,6 +206,15 @@ async def reserve(request: Request, session_id: str, body: ReserveRequest) -> di
     # the winner had just reserved (review). The claim is synchronous and all
     # or nothing, so a loser never boots anything.
     already = set(session.reservations)
+    caller = visibility.current_caller()
+    if visibility.blind_for(caller):
+        # Another key's device is answered as one that does not exist, as
+        # `_choose` answers an unknown udid: the registry's 409 names the
+        # holding session, which is the key's label (review).
+        foreign = [u for u in udids if (held := registry.holder_of(u)) is not None
+                   and held.session.principal != caller.principal]
+        if foreign:
+            raise HTTPException(404, f"no such device: {', '.join(foreign)}")
     try:
         reservations = registry.reserve(session_id, udids, on_release=body.on_release,
                                         booted=to_boot)
@@ -257,12 +267,20 @@ async def unreserve(request: Request, session_id: str, udid: str | None = None) 
         # tell its holder, who would otherwise go on believing it has them.
         entry = _sockets(request.app).get(session_id)
         if entry is not None:
+            # Blind: "the server's owner", never the owner's session name --
+            # the owner's sessions are not a client's to know (review). Shared,
+            # the name, as every listing there already shows it.
+            target = registry.get(session_id)
+            hidden = (caller.is_owner and visibility.MODE == "blind" and target is not None
+                      and principal.label_of(target.principal) is not None)
+            by = "the server's owner" if hidden else (caller.session or "the server's owner")
             with contextlib.suppress(Exception):
                 await entry[1].send_json({"event": "released",
-                                          "udids": [r.udid for r in freed],
-                                          "by": caller.session or "the server's owner"})
+                                          "udids": [r.udid for r in freed], "by": by})
     actions = await run_release_policies(request.app)
-    return {"session": session_id, "freed": [r.udid for r in freed], "actions": actions}
+    freed_ids = [r.udid for r in freed]
+    return {"session": session_id, "freed": freed_ids,
+            "actions": _answerable(actions, session_id, blind=visibility.blind_for(caller))}
 
 
 async def _choose(request: Request, registry: SessionRegistry, session_id: str,
@@ -324,7 +342,8 @@ async def _choose(request: Request, registry: SessionRegistry, session_id: str,
         raise HTTPException(409, (
             f"asked for {wanted} device(s), {len(picked)} free"
             + ("" if body.auto_boot else " and booted (auto_boot is off)")
-            + f"; {len(held)} held by other sessions"))
+            # Blind: how many others hold is not this caller's to know.
+            + ("" if visibility.blind_for() else f"; {len(held)} held by other sessions")))
     return [d.udid for d in picked], to_boot
 
 
@@ -352,6 +371,50 @@ def _group_members(group: str, devices: list, pool) -> list:
     return list(members.values())
 
 
+async def _end_client_work(app: FastAPI, registry: SessionRegistry,
+                           session: HeldSession) -> list[dict]:
+    """A client key's mock rules and recordings on a device end when its hold
+    on the device does. Left in place, the next holder's traffic was answered
+    by the previous holder's rules -- whose patterns and bodies a blind
+    server then showed it -- and the previous holder's recording went on
+    filming the next holder's work (review). The owner's are left: the
+    owner's work is the owner's to end. Never raises."""
+    if principal.label_of(session.principal) is None:
+        return []
+    actions: list[dict] = []
+    owners = getattr(app.state, "mock_owners", {}) or {}
+    adapter = getattr(app.state, "proxy_adapter", None)
+    manager = getattr(app.state, "recordings", None)
+    for udid in session.reservations:
+        held = registry.holder_of(udid)
+        if held is not None and held.session.principal == session.principal:
+            continue                       # still the key's, through another session
+        for rule in list(getattr(adapter, "_mock_rules", []) or []):
+            if rule.get("simulator_udid") != udid or owners.get(rule.get("rule_id")) \
+                    != session.principal:
+                continue
+            try:
+                await adapter.clear_mock(rule_id=rule["rule_id"])
+                owners.pop(rule["rule_id"], None)
+                actions.append({"udid": udid, "action": "mock_removed", "ok": True,
+                                "rule_id": rule["rule_id"]})
+            except Exception as e:  # noqa: BLE001 -- reported, never raised
+                actions.append({"udid": udid, "action": "mock_removed", "ok": False,
+                                "rule_id": rule.get("rule_id"), "error": str(e)})
+        for rec in list(manager.list() if manager is not None else []):
+            if rec.udid != udid or rec.principal != session.principal \
+                    or rec.state not in ("recording", "interrupted"):
+                continue
+            try:
+                await manager.stop(rec.id)
+                actions.append({"udid": udid, "action": "recording_stopped", "ok": True,
+                                "recording": rec.id})
+            except Exception as e:  # noqa: BLE001 -- reported, never raised
+                actions.append({"udid": udid, "action": "recording_stopped", "ok": False,
+                                "recording": rec.id, "error": str(e)})
+    return actions
+
+
 async def run_release_policies(app) -> list[dict]:
     """Act on released reservations' `on_release`: shut down the simulators a
     session booted for them, when it asked to. Never raises: a release has
@@ -362,6 +425,20 @@ async def run_release_policies(app) -> list[dict]:
         return []
     actions = []
     for session in registry.take_released():
+        start = len(actions)
+        ended: list[dict] = []
+        try:
+            ended = await _end_client_work(app, registry, session)
+        finally:
+            failed = {a["udid"] for a in ended if not a.get("ok")}
+            # A device whose clean-up failed stays unavailable, and is tried
+            # again at the next sweep: freed, another key could reserve it
+            # while the previous client's rule still answered its traffic or
+            # its recording still filmed (CodeRabbit). Fails closed.
+            registry.drained([u for u in session.reservations if u not in failed])
+            if failed:
+                registry.retry_release(session, failed)
+        actions.extend(ended)
         for r in session.reservations.values():
             if r.on_release != "shutdown_booted" or not r.booted_here:
                 continue
@@ -375,7 +452,18 @@ async def run_release_policies(app) -> list[dict]:
                 logger.warning("Could not shut down %s on release: %s", r.udid, e)
                 actions.append({"udid": r.udid, "action": "shutdown", "ok": False,
                                 "error": str(e)})
+        for a in actions[start:]:
+            a["_session"] = session.id         # whose release it was; stripped before answering
     return actions
+
+
+def _answerable(actions: list[dict], session_id: str, *, blind: bool) -> list[dict]:
+    """Release actions as a route answers them: on a blind server only those
+    of the caller's own release -- the queue is global, and a device's udid
+    alone does not say whose release an action was (CodeRabbit) -- and never
+    the internal tag."""
+    return [{k: v for k, v in a.items() if k != "_session"} for a in actions
+            if not blind or a.get("_session") == session_id]
 
 
 async def release_revoked(app) -> list[str]:

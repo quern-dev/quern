@@ -9,6 +9,7 @@ from pathlib import Path
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from server import visibility
 from server.api.actions import logged_action
 from server.models import (
     HeldFlow,
@@ -289,6 +290,11 @@ async def set_mock(request: Request, body: SetMockRequest) -> dict:
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # Whose rule it is (#254): a blind server lists a client's rules to it
+    # alone, and a client's rules end with its hold on the device.
+    if not hasattr(request.app.state, "mock_owners"):
+        request.app.state.mock_owners = {}
+    request.app.state.mock_owners[rule_id] = visibility.current_caller().principal
     result = {
         "status": "accepted", "rule_id": rule_id, "pattern": body.pattern,
         "simulator_udid": body.simulator_udid,
@@ -315,6 +321,15 @@ async def list_mocks(request: Request) -> MockListResponse:
         )
         for r in adapter._mock_rules
     ]
+    # Blind (#254): the caller's own rules on its own devices. Not "every rule
+    # on its devices": a previous holder's rule on a device is not the next
+    # holder's to read. Unscoped rules are the owner's set-up.
+    view = visibility.data_view()
+    if not view.everything:
+        caller = visibility.current_caller()
+        owners = getattr(request.app.state, "mock_owners", {}) or {}
+        rules = [r for r in rules if view.allows(r.simulator_udid)
+                 and owners.get(r.rule_id) == caller.principal]
     return MockListResponse(rules=rules, total=len(rules))
 
 

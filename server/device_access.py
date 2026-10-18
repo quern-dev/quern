@@ -165,11 +165,16 @@ def _canonical(udid: str) -> str:
 
 
 def check(udid: str | None) -> None:
-    """Refuse a change to `udid` when another session holds it.
+    """Refuse a change to `udid` when another session holds it -- and, for a
+    caller held to blind mode, a read of a device another principal holds,
+    which reads as a device that does not exist (#254, phase 2).
 
-    A no-op for reads, outside a request, with enforcement off, or for a
-    device nobody holds."""
-    if not udid or _REGISTRY is None or not _WRITE.get():
+    A no-op outside a request, with enforcement off, or for a device nobody
+    holds; and for other reads."""
+    if not udid or _REGISTRY is None:
+        return
+    if not _WRITE.get():
+        _check_read(udid)
         return
     held = _REGISTRY.holder_of(_canonical(udid))
     caller = visibility.current_caller()
@@ -181,7 +186,11 @@ def check(udid: str | None) -> None:
         return
     detail = visibility.holder_detail(held, caller)
     if detail is None:
-        raise _refusing(DeviceNotFound(f"Device {udid} not found"))
+        # Blind: answered as a device nobody holds -- or one that does not
+        # exist -- is answered to a client, so a write cannot tell them apart.
+        # A distinct 404 here was an oracle for "someone else holds this"
+        # (review).
+        raise _refusing(DeviceNotReserved(udid))
     raise _refusing(DeviceHeld(udid, {
         "message": (f"{udid} is reserved by session {detail['held_by']} ({detail['state']}); "
                     "reads still work, changes are refused until it is released"),
@@ -195,6 +204,16 @@ def _is_callers(held, caller) -> bool:
     owner session's name fell into -- the owner's CI named `alice:nightly` --
     act as that session (review)."""
     return held.session.id == caller.session and held.session.principal == caller.principal
+
+
+def _check_read(udid: str) -> None:
+    """Blind mode: another principal's device is not there to read."""
+    caller = visibility.current_caller()
+    if not visibility.blind_for(caller):
+        return
+    held = _REGISTRY.holder_of(_canonical(udid)) if _REGISTRY is not None else None
+    if held is not None and held.session.principal != caller.principal:
+        raise _refusing(DeviceNotFound(f"Device {udid} not found"))
 
 
 def require_owner(what: str) -> None:
@@ -291,11 +310,14 @@ class AccessMiddleware:
             return
         path = scope.get("path", "")
         write = is_write(scope.get("method", "GET"), path) and not path.startswith(_OWN_RULES)
+        # A read is checked too when the caller is blind: naming another
+        # principal's device must read as naming one that does not exist.
+        guarded = (write or (visibility.blind_for() and not path.startswith(_OWN_RULES)))
         token = _WRITE.set(write)
         refusals: list = []
         refusals_token = _REFUSALS.set(refusals)
         try:
-            if write and _REGISTRY is not None:
+            if guarded and _REGISTRY is not None:
                 body, receive = await _buffer(receive)
                 try:
                     for udid in _named_devices(scope.get("query_string", b""), body):
@@ -303,7 +325,7 @@ class AccessMiddleware:
                 except REFUSALS as e:
                     await _refuse(send, e.status, e.detail)
                     return
-            if not write or _REGISTRY is None:
+            if not guarded or _REGISTRY is None:
                 await self.app(scope, receive, send)
                 return
             started = []
