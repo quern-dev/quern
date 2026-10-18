@@ -1339,7 +1339,18 @@ class RecordingManager:
                     # A client key's recording does not outlive its
                     # reservation, and no reservation survives a restart: it
                     # is finished here, not resumed. Resumed, it would film
-                    # whoever reserves the device next (CodeRabbit).
+                    # whoever reserves the device next (CodeRabbit). A
+                    # quern-media the last quern left filming is stopped
+                    # first, as a resume stops it -- left running, it went on
+                    # filming the device after the stopped line (CodeRabbit).
+                    for path, started in (tally.open_video or {}).items():
+                        if self._video is None or not isinstance(started.get("pid"), int):
+                            continue
+                        try:
+                            await self._video.reap(started["pid"], Path(path))
+                        except Exception as e:  # noqa: BLE001 -- said, never fatal
+                            rec.warnings.append(f"the video still being filmed into {path} "
+                                                f"could not be confirmed stopped: {e}")
                     rec.gaps.append(gap)
                     rec.state, rec.stopped_at = "stopped", _now()
                     rec.warnings.append("stopped at restart: a client key's recording ends "
