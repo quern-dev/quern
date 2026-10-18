@@ -53,6 +53,9 @@ def child(monkeypatch):
         def wait(self):
             return seen.get("rc", 0)
 
+        def poll(self):
+            return None
+
         def send_signal(self, sig):
             seen["signal"] = sig
 
@@ -239,3 +242,29 @@ def test_a_reconnect_after_close_is_closed_cleanly(monkeypatch):
     monkeypatch.setattr(session_cli.time, "sleep", lambda s: None)
     assert sock._reconnect() is False
     assert closed == [1000] and sock._ws is None
+
+
+@pytest.mark.parametrize("rc,expected", [(0, 0), (3, 3), (-15, 143), (-2, 130)])
+def test_a_child_killed_by_a_signal_exits_as_the_shell_would(server, child, rc, expected):
+    _opened(server)
+    child["rc"] = rc
+    assert session_cli.main(["run", "--name", "ci-job", "--", "x"]) == expected
+
+
+def test_ctrl_c_from_the_terminal_is_not_forwarded_twice(server, child, monkeypatch):
+    """The terminal already signalled the child; a second SIGINT makes many
+    tools abort without cleanup. Forwarded only when not in the foreground."""
+    import signal as sig
+
+    handlers = {}
+    monkeypatch.setattr(session_cli.signal, "signal", lambda s, h: handlers.__setitem__(s, h))
+    _opened(server)
+    session_cli.main(["run", "--name", "ci-job", "--", "x"])
+    monkeypatch.setattr(session_cli, "_in_foreground_group", lambda: True)
+    handlers[sig.SIGINT](sig.SIGINT, None)
+    assert "signal" not in child, "not forwarded: the child got it from the terminal"
+    monkeypatch.setattr(session_cli, "_in_foreground_group", lambda: False)
+    handlers[sig.SIGINT](sig.SIGINT, None)
+    assert child["signal"] == sig.SIGINT, "forwarded when aimed at this process alone"
+    handlers[sig.SIGTERM](sig.SIGTERM, None)
+    assert child["signal"] == sig.SIGTERM

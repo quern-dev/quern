@@ -722,6 +722,39 @@ class TestReservingThroughThePool:
             "what it did boot is shut down again"
         a.close()
 
+    def test_a_failed_boot_keeps_what_the_session_held_before(self, client, pool, registry):
+        """It withdrew SIM-1 too, held from an earlier request, while saying
+        "nothing was reserved" -- and drained other sessions' queued release
+        policies (CodeRabbit)."""
+        a = Held(client, "claude-a")
+        assert _reserve(client, "claude-a", udids=["SIM-1"]).status_code == 200
+        other, token = registry.open("claude-z")
+        registry.attach(other.id, token)
+        registry.reserve("claude-z", ["SIM-9"], on_release="shutdown_booted", booted=["SIM-9"])
+        registry.unreserve("claude-z", ["SIM-9"])        # queued for its policy
+
+        async def failing(udid):
+            raise RuntimeError("simctl boot failed")
+
+        pool._boot_and_wait = failing
+        r = _reserve(client, "claude-a", count=1)          # would boot SIM-2
+        assert r.status_code == 502
+        assert registry.holder_of("SIM-1").session.id == "claude-a", "kept"
+        assert registry.holder_of("SIM-2") is None
+        queued = registry.take_released()
+        assert [list(s.reservations) for s in queued] == [["SIM-9"]], \
+            "the other session's policy is still queued"
+        a.close()
+
+    def test_count_means_more_devices(self, client, pool):
+        a = Held(client, "claude-a")
+        _reserve(client, "claude-a", udids=["SIM-1"])
+        r = _reserve(client, "claude-a", count=1)
+        assert r.status_code == 200
+        assert [x["udid"] for x in r.json()["reserved"]] == ["SIM-2"], "not SIM-1 again"
+        assert sorted(r.json()["holding"]) == ["SIM-1", "SIM-2"]
+        a.close()
+
     def test_release_policy_skips_a_device_reserved_again_meanwhile(self, client, registry):
         from server.api.sessions import run_release_policies
         a = Held(client, "claude-a")

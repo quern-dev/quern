@@ -257,9 +257,18 @@ def _run(args: argparse.Namespace) -> int:
         def forward(signum, _frame):
             child.send_signal(signum)
 
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            signal.signal(sig, forward)
-        rc = child.wait()
+        def interrupt(signum, frame):
+            # A terminal's Ctrl-C reaches the whole foreground group, the
+            # child included; forwarding it too made a second SIGINT, which
+            # xcodebuild and pytest read as "abort now, skip cleanup"
+            # (CodeRabbit). Forwarded only when this process is not in the
+            # foreground group -- a `kill -INT` aimed at it alone.
+            if not _in_foreground_group():
+                forward(signum, frame)
+
+        signal.signal(signal.SIGTERM, forward)
+        signal.signal(signal.SIGINT, interrupt)
+        rc = _shell_status(child.wait())
         holding = _still_holding(url, key, session, udids)
         if holding is not True:
             # The socket thread may still have been reconnecting when the
@@ -274,6 +283,21 @@ def _run(args: argparse.Namespace) -> int:
         return rc
     finally:
         socket.close()
+
+
+def _shell_status(rc: int) -> int:
+    """`Popen.wait()`'s -N for a child killed by signal N, as the shell's
+    128+N: passed through as -N, sys.exit made it 256-N -- 241 for SIGTERM,
+    not 143, which a CI step checking for cancellation would misread."""
+    return 128 - rc if rc < 0 else rc
+
+
+def _in_foreground_group() -> bool:
+    """Whether this process is in its terminal's foreground process group."""
+    try:
+        return os.tcgetpgrp(sys.stdin.fileno()) == os.getpgrp()
+    except (OSError, ValueError):
+        return False                     # no terminal: nothing else signals the child
 
 
 def _still_holding(url: str, key: str, session: str, udids: list[str]) -> bool | None:

@@ -46,6 +46,15 @@ let everAttached = false;
  * whose POST says what is wrong. */
 let failedHandshakes = 0;
 const REOPEN_AFTER_FAILED_HANDSHAKES = 3;
+/** One immediate reopen after a 4404; later ones, before the session attaches
+ * again, back off -- a repeated 4404 was a tight POST/WebSocket loop
+ * (CodeRabbit). Reset on attach. */
+let reopenedAtOnce = false;
+
+/** Queue a notice unless the same one is already waiting to be delivered. */
+function notice(text: string): void {
+  if (!sessionNotices.includes(text)) sessionNotices.push(text);
+}
 
 const LOSS_NOTICE =
   "Your quern session ended on the server (it was released, the server restarted, " +
@@ -104,9 +113,7 @@ async function open(): Promise<void> {
     // lost what it held -- whichever way it got here: a 4404, or reopening
     // after failed handshakes while the server was down, which never saw a
     // 4404 at all (found live, after that path was added).
-    if (everAttached && opened.resumed === false) {
-      sessionNotices.push(LOSS_NOTICE);
-    }
+    if (everAttached && opened.resumed === false) notice(LOSS_NOTICE);
     connect();
   } catch {
     retry(() => void open());
@@ -171,7 +178,7 @@ function connect(): void {
       if (message.event === "released") {
         const freed = (message as { udids?: string[]; by?: string }).udids ?? [];
         const by = (message as { by?: string }).by ?? "another caller";
-        sessionNotices.push(
+        notice(
           `${by} released ${freed.join(", ")} from your quern session; ` +
             "it is no longer reserved for you. Reserve it again if you still need it.",
         );
@@ -179,6 +186,7 @@ function connect(): void {
       if (message.event === "attached") {
         attached = true;
         failedHandshakes = 0;
+        reopenedAtOnce = false;
         clearTimeout(handshake);
         state = "live";
         backoffMs = 1000;
@@ -208,10 +216,16 @@ function onEnd(code: number): void {
     console.error(`Held session ${SESSION_ID}: taken over by another connection; not reconnecting`);
   } else if (code === CLOSE_UNKNOWN) {
     token = null;
-    // At once: the server is up (it just answered), and every second here
-    // is a second the agent holds nothing.
-    backoffMs = 1000;
-    void open();
+    // At once the first time: the server is up (it just answered), and every
+    // second here is a second the agent holds nothing. Again before attaching
+    // means something is wrong: back off.
+    if (!reopenedAtOnce) {
+      reopenedAtOnce = true;
+      backoffMs = 1000;
+      void open();
+    } else {
+      retry(() => void open());
+    }
   } else if (code === CLOSE_BAD_TOKEN || code === CLOSE_UNAUTHORISED) {
     // A new token by name (local takeover), or a rotated API key: start over.
     token = null;

@@ -69,8 +69,15 @@ Your reservation lasts as long as this MCP session: released when it ends, and k
       }
       return answer({ you: local, session: await apiRequest("GET", path()) });
     } catch (e) {
-      return answer({ you: local, session: null,
-        note: `the server has no held session ${SESSION_ID} right now: ${e instanceof Error ? e.message : String(e)}` });
+      const message = e instanceof Error ? e.message : String(e);
+      // Only a 404 means "no such session". Anything else -- a server that is
+      // down, a refused key, a 500 -- is a failure to ask, and saying "no held
+      // session" sent agents to reserve again instead of fixing that
+      // (CodeRabbit).
+      const note = !all && message.startsWith("HTTP 404")
+        ? `the server has no held session ${SESSION_ID} right now`
+        : `could not ask the quern server about sessions: ${message}`;
+      return answer({ you: local, session: null, note });
     }
   });
 }

@@ -266,6 +266,18 @@ class SessionRegistry:
                 udid, Reservation(udid=udid, on_release=on_release, booted_here=udid in booted))
         return [session.reservations[u] for u in udids]
 
+    def withdraw(self, session_id: str, udids: Iterable[str]) -> None:
+        """Take back reservations this request just made, as if never made:
+        no release policies queued, nothing else touched. For a reservation
+        that could not be completed (a failed boot). Going through `unreserve`
+        and then draining the queue also withdrew devices the session held
+        before, and dropped other sessions' queued policies (CodeRabbit)."""
+        session = self._sessions.get(session_id)
+        if session is None:
+            return
+        for udid in udids:
+            session.reservations.pop(udid, None)
+
     def unreserve(self, session_id: str, udids: Iterable[str] | None = None) -> list[Reservation]:
         """Free some (or all) of a session's devices; the session stays."""
         session = self._get(session_id)

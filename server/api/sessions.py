@@ -91,7 +91,8 @@ class OpenRequest(BaseModel):
 
 class ReserveRequest(BaseModel):
     udids: list[str] | None = None
-    count: int | None = Field(default=None, ge=1, le=64)
+    count: int | None = Field(default=None, ge=1, le=64, description=(
+        "How many more devices to reserve, not counting ones the session already holds"))
     group: str | None = None
     device_type: str | None = None
     os_version: str | None = None
@@ -189,11 +190,13 @@ async def reserve(request: Request, session_id: str, body: ReserveRequest) -> di
     # boot the one free simulator; the loser's undo then shut down the device
     # the winner had just reserved (review). The claim is synchronous and all
     # or nothing, so a loser never boots anything.
+    already = set(session.reservations)
     try:
         reservations = registry.reserve(session_id, udids, on_release=body.on_release,
                                         booted=to_boot)
     except SessionError as e:
         raise _refused(e) from None
+    added = [u for u in udids if u not in already]
     controller = getattr(request.app.state, "device_controller", None)
     pool = getattr(controller, "_pool", None)
     started: list[str] = []
@@ -202,8 +205,9 @@ async def reserve(request: Request, session_id: str, body: ReserveRequest) -> di
             await pool._boot_and_wait(udid)
             started.append(udid)
     except Exception as e:  # noqa: BLE001 -- any failed boot withdraws the claim
-        registry.unreserve(session_id, udids)
-        registry.take_released()          # not a release to act on: undone below
+        # Only what this request added: devices the session held before stay
+        # held, and no other session's queued release policy is touched.
+        registry.withdraw(session_id, added)
         for udid in started:
             with contextlib.suppress(Exception):
                 await controller.shutdown(udid)
@@ -280,7 +284,12 @@ async def _choose(request: Request, registry: SessionRegistry, session_id: str,
             device_family=body.device_family)
         wanted = body.count or 1
     held = registry.held_udids(except_session=session_id)
-    devices = sorted((d for d in devices if d.udid not in held and d.is_available),
+    # `count` is how many *more* devices: not ones another session holds, and
+    # not ones this session already holds (CodeRabbit: they ranked first, so
+    # count=2 with one held gave one new device).
+    mine = registry.held_udids() - held
+    devices = sorted((d for d in devices
+                      if d.udid not in held and d.udid not in mine and d.is_available),
                      key=pool._rank_candidate)
     booted = [d for d in devices if d.state == DeviceState.BOOTED]
     shutdown = [d for d in devices if d.state == DeviceState.SHUTDOWN]
