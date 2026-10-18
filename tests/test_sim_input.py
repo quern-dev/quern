@@ -455,7 +455,10 @@ class TestEveryInputPathIsCovered:
 
         from server.device.controller_ui import DeviceControllerUI
 
-        source = inspect.getsource(getattr(DeviceControllerUI, method))
+        # tap_element is a thin wrapper that restores the WDA depth (#470); the
+        # input path it guards is the implementation's.
+        impl = {"tap_element": "_tap_element"}.get(method, method)
+        source = inspect.getsource(getattr(DeviceControllerUI, impl))
         assert "_warn_if_input_is_suppressed" in source, (
             f"{method} sends input without checking whether it can land"
         )
@@ -475,7 +478,7 @@ class TestEveryInputPathIsCovered:
 
         from server.device.controller_ui import DeviceControllerUI
 
-        source = inspect.getsource(DeviceControllerUI.tap_element)
+        source = inspect.getsource(DeviceControllerUI._tap_element)  # behind the #470 wrapper
         assert "_warn_if_input_is_suppressed" in source
 
         # Unconditional means at the method body's own indentation. Comparing
