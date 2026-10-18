@@ -111,10 +111,20 @@ def registry(clock):
     device_access.install(None)
 
 
+_OPEN: list = []
+
+
 @pytest.fixture
 def client(registry):
     with TestClient(_app(registry)) as c:
-        yield c
+        try:
+            yield c
+        finally:
+            # Close every socket a test held, pass or fail: one left open when
+            # an assertion fired made the client's teardown wait for ever, so a
+            # failing test hung the run instead of failing it.
+            while _OPEN:
+                _OPEN.pop().close()
 
 
 def _h(session=None):
@@ -140,10 +150,18 @@ class Held:
             self.opened["live_path"],
             headers={**_h(name), "X-Quern-Resume-Token": self.opened["resume_token"]})
         self.ws = self.ctx.__enter__()
+        self.closed = False
+        _OPEN.append(self)
         assert self.ws.receive_json()["event"] == "attached"
 
     def close(self, code=1000):
-        self.ws.close(code=code)
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            self.ws.close(code=code)
+        except Exception:  # noqa: BLE001 -- already closed
+            pass
         try:
             self.ctx.__exit__(None, None, None)
         except Exception:  # noqa: BLE001 -- the server already closed
