@@ -105,7 +105,11 @@ class TestTheTableCoversTheApp:
                     rule.device == "path-id", f"{method} {path}"
 
     def test_mac_wide_routes_are_owner_only(self):
-        for key in [("POST", "/api/v1/proxy/stop"), ("POST", "/api/v1/proxy/configure-system"),
+        for key in [("POST", "/api/v1/device/build-and-install"),
+                    ("POST", "/api/v1/device/app/state/save"),
+                    ("POST", "/api/v1/device/app/state/restore"),
+                    ("POST", "/api/v1/builds/parse"),
+                    ("POST", "/api/v1/proxy/stop"), ("POST", "/api/v1/proxy/configure-system"),
                     ("POST", "/api/v1/proxy/local-capture"), ("POST", "/api/v1/system/update"),
                     ("POST", "/api/v1/logs/oslog/start"), ("POST", "/api/v1/devices/resolve"),
                     ("GET", "/api/v1/recordings/events"), ("POST", "/api/v1/builds/parse-file")]:
@@ -202,6 +206,7 @@ class TestClientKeys:
 
     def test_an_unreadable_file_admits_nobody_and_is_not_overwritten(self, keys):
         key = keys.add("alice")
+        assert keys.principal_for(key.encode()) == "client:alice", "loaded before the damage"
         keys.path.write_text("{not json")
         assert keys.principal_for(key.encode()) is None
         with pytest.raises(ClientKeyError, match="not readable"):
@@ -276,6 +281,35 @@ def _app(registry, keys):
     @app.post("/api/v1/not/in/the/table")
     async def unmapped(request: Request):
         return {"reached": True}
+
+    @app.post("/api/v1/device/ui/press")
+    async def press_without_check():
+        """A route that reads the active device without calling check(), as
+        the build path's readers do: only the middleware's precheck guards it."""
+        return {"pressed": app.state.device_controller._active_udid}
+
+    @app.post("/api/v1/proxy/mocks")
+    async def set_mock(request: Request):
+        return {"rule": await request.json()}
+
+    @app.post("/api/v1/proxy/capture/start")
+    async def capture_start(request: Request):
+        return {"capture": await request.json()}
+
+    @app.post("/api/v1/recordings")
+    async def start_recording(request: Request):
+        return {"recording": await request.json()}
+
+    @app.post("/api/v1/device/logging/start")
+    async def logging_start(request: Request):
+        return {"logging": await request.json()}
+
+    @app.get("/api/v1/logs/stream")
+    async def stream(request: Request):
+        """Revokes its caller's key mid-stream, then asks whether the caller
+        is still there -- the question every stream loop asks."""
+        app.state.clients.revoke("alice")
+        return {"disconnected": await request.is_disconnected()}
 
     app.add_middleware(AccessMiddleware)
     app.add_middleware(ScopeMiddleware)
@@ -538,11 +572,11 @@ class TestClientApiKey:
         f = tmp_path / "api-key"
         f.write_text("owner-key")
         monkeypatch.setattr(config, "API_KEY_FILE", f)
-        monkeypatch.setenv("QUERN_API_KEY", "  qc_client  ")
+        monkeypatch.setenv("QUERN_CLIENT_KEY", "  qc_client  ")
         assert config.client_api_key() == "qc_client"
-        monkeypatch.setenv("QUERN_API_KEY", " ")
+        monkeypatch.setenv("QUERN_CLIENT_KEY", " ")
         assert config.client_api_key() == "owner-key"
-        monkeypatch.delenv("QUERN_API_KEY")
+        monkeypatch.delenv("QUERN_CLIENT_KEY")
         assert config.client_api_key() == "owner-key"
 
 
@@ -616,10 +650,218 @@ class TestRouteLevelOwnerChecks:
         finally:
             self._reset(tokens)
 
-    def test_stopping_an_unscoped_capture_is_the_owners(self):
-        import inspect
+    def test_stopping_an_unscoped_capture_is_the_owners(self, registry):
+        import asyncio
+        from types import SimpleNamespace
 
-        from server.api import proxy
+        from server.api.proxy import stop_capture
+        from server.models import CaptureStopRequest
 
-        source = inspect.getsource(proxy.stop_capture)
-        assert "device_access.require_owner(" in source
+        stopped = []
+        manager = SimpleNamespace(simulator_udid=lambda sid: None,
+                                  stop=lambda sid: stopped.append(sid))
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+            capture_sessions=manager, flow_store=None)))
+        tokens = self._as("client:alice")
+        try:
+            with pytest.raises(device_access.OwnerOnly):
+                asyncio.run(stop_capture.__wrapped__(request, CaptureStopRequest(session_id="c1"))
+                            if hasattr(stop_capture, "__wrapped__") else
+                            stop_capture(request, CaptureStopRequest(session_id="c1")))
+        finally:
+            self._reset(tokens)
+        assert stopped == [], "refused before anything was stopped"
+
+
+class FakeMockAdapter:
+    is_running = True
+
+    def __init__(self):
+        self._mock_rules = []
+
+    async def set_mock(self, pattern, response, simulator_udid=None):
+        rid = f"r{len(self._mock_rules) + 1}"
+        self._mock_rules.append({"rule_id": rid, "pattern": pattern, "response": response,
+                                 "simulator_udid": simulator_udid})
+        return rid
+
+    async def update_mock(self, rule_id, pattern=None, response=None, simulator_udid=None,
+                          scope_given=False):
+        rule = next(r for r in self._mock_rules if r["rule_id"] == rule_id)
+        if scope_given:
+            rule["simulator_udid"] = simulator_udid
+        return rule
+
+
+SIM = "32593887-01F3-47B8-AF34-B2D444DB37FA"
+
+
+class TestReviewFindings:
+    """Each a way past the first version, found by review (#254 phase 2a)."""
+
+    def test_a_decoy_udid_does_not_make_an_unscoped_mock_a_clients(self, world, registry):
+        c, _, alice, _ = world
+        _hold(registry, "alice:s1", "client:alice", SIM)
+        r = c.post("/api/v1/proxy/mocks", headers=_h(alice),
+                   json={"pattern": "~d x.test", "udid": SIM})
+        assert r.status_code == 403 and "simulator_udid" in r.json()["detail"]
+        ok = c.post("/api/v1/proxy/mocks", headers=_h(alice),
+                    json={"pattern": "~d x.test", "simulator_udid": SIM})
+        assert ok.status_code == 200, ok.text
+
+    def test_a_decoy_udid_does_not_make_a_capture_of_all_traffic_a_clients(self, world, registry):
+        c, _, alice, _ = world
+        _hold(registry, "alice:s1", "client:alice", SIM)
+        r = c.post("/api/v1/proxy/capture/start", headers=_h(alice), json={"udid": SIM})
+        assert r.status_code == 403
+        r = c.post("/api/v1/proxy/capture/start", headers=_h(alice),
+                   json={"simulator_udid": SIM, "client_ip": "192.168.1.9"})
+        assert r.status_code == 403 and "client_ip" in r.json()["detail"]
+        ok = c.post("/api/v1/proxy/capture/start", headers=_h(alice), json={"simulator_udid": SIM})
+        assert ok.status_code == 200, ok.text
+
+    def test_a_client_cannot_unscope_its_own_mock_rule(self, registry, keys):
+        from types import SimpleNamespace
+
+        from server.api.proxy_intercept import router as intercept_router
+
+        alice = keys.add("alice")
+        app = FastAPI()
+        app.state.sessions, app.state.clients = registry, keys
+        app.state.proxy_adapter = FakeMockAdapter()
+        app.state.device_controller = SimpleNamespace(_active_udid=None)
+        app.include_router(intercept_router)
+        app.add_middleware(AccessMiddleware)
+        app.add_middleware(ScopeMiddleware)
+        app.add_middleware(APIKeyMiddleware, api_key=KEY, clients=keys)
+        app.add_middleware(SessionMiddleware)
+        _hold(registry, "alice:s1", "client:alice", SIM)
+        with TestClient(app) as c:
+            rid = c.post("/api/v1/proxy/mocks", headers=_h(alice), json={
+                "pattern": "~d x.test", "status_code": 500,
+                "simulator_udid": SIM}).json()["rule_id"]
+            # null names no device, so the access middleware never sees it.
+            r = c.patch(f"/api/v1/proxy/mocks/{rid}", headers=_h(alice),
+                        json={"simulator_udid": None})
+            assert r.status_code == 403, r.text
+            assert app.state.proxy_adapter._mock_rules[0]["simulator_udid"] == SIM
+            registry.release("alice:s1")     # the owner, too, waits for the holder
+            owner = c.patch(f"/api/v1/proxy/mocks/{rid}", headers=_h(KEY),
+                            json={"simulator_udid": None})
+            assert owner.status_code == 200, owner.text
+
+    @pytest.mark.parametrize("path, body", [
+        ("/api/v1/recordings", {"udid": SIM, "output_dir": "/tmp/anywhere"}),
+        ("/api/v1/recordings", {"udid": SIM, "video": True, "viewer": True}),
+        ("/api/v1/device/logging/start", {"udid": SIM, "preset": "quiet"}),
+    ])
+    def test_owner_fields_are_refused_to_a_client(self, world, registry, path, body):
+        c, _, alice, _ = world
+        _hold(registry, "alice:s1", "client:alice", SIM)
+        r = c.post(path, headers=_h(alice), json=body)
+        assert r.status_code == 403 and "owner-only" in r.json()["detail"], r.text
+        plain = {k: v for k, v in body.items() if k in ("udid", "video")}
+        assert c.post(path, headers=_h(alice), json=plain).status_code == 200
+        # The owner may -- on a device alice does not hold.
+        theirs = {**body, "udid": "SIM-OWNERS"}
+        assert c.post(path, headers=_h(KEY), json=theirs).status_code == 200
+
+    def test_resolved_precheck_guards_a_route_that_never_calls_check(self, world, registry):
+        c, app, alice, _ = world
+        app.state.device_controller.slots["alice:s1"] = "SIM-FREE"
+        r = c.post("/api/v1/device/ui/press", headers=_h(alice), json={})
+        assert r.status_code == 403 and "not reserved" in r.json()["detail"]
+        _hold(registry, "alice:s1", "client:alice", "SIM-FREE")
+        assert c.post("/api/v1/device/ui/press", headers=_h(alice), json={}).status_code == 200
+
+    def test_a_revoked_key_sees_its_stream_end(self, world):
+        c, _, alice, _ = world
+        r = c.get("/api/v1/logs/stream", headers=_h(alice))
+        assert r.json() == {"disconnected": True}
+
+    def test_an_owner_session_in_a_clients_namespace_is_not_that_clients(self, world, registry):
+        """The owner's CI named a session `alice:nightly`: client alice sending
+        `nightly` qualifies to the same id, but is not that session."""
+        c, _, alice, _ = world
+        _hold(registry, "alice:nightly", OWNER, SIM)
+        r = c.post("/api/v1/device/ui/tap", headers=_h(alice, "nightly"), json={"udid": SIM})
+        assert r.status_code == 423
+        r = c.delete("/api/v1/sessions/nightly/reservations", headers=_h(alice, "nightly"))
+        assert r.status_code == 403
+        r = c.delete("/api/v1/sessions/nightly", headers=_h(alice, "nightly"))
+        assert r.status_code == 403
+        r = c.post("/api/v1/sessions/nightly/reservations", headers=_h(alice, "nightly"),
+                   json={"udids": ["SIM-X"]})
+        assert r.status_code == 403
+        assert registry.holder_of(SIM).session.id == "alice:nightly"
+
+    def test_revoking_closes_the_session_socket(self, registry, keys):
+        import asyncio
+        from types import SimpleNamespace
+
+        from server.api.sessions import _sockets
+
+        keys.add("alice")
+        app = SimpleNamespace(state=SimpleNamespace(sessions=registry, clients=keys))
+        _hold(registry, "alice:s1", "client:alice", SIM)
+        closed = []
+
+        class WS:
+            async def close(self, code=1000, reason=""):
+                closed.append(code)
+
+        _sockets(app)["alice:s1"] = (1, WS())
+        keys.revoke("alice")
+        asyncio.run(release_revoked(app))
+        assert closed == [WS_UNAUTHORISED]
+
+    def test_the_sweep_ends_a_revoked_clients_sessions(self, registry, keys):
+        import asyncio
+        from types import SimpleNamespace
+
+        from server.api.sessions import sweep
+
+        keys.add("alice")
+        app = SimpleNamespace(state=SimpleNamespace(sessions=registry, clients=keys))
+        _hold(registry, "alice:s1", "client:alice", SIM)
+        keys.revoke("alice")
+
+        async def run():
+            task = asyncio.create_task(sweep(app, interval=0.01))
+            for _ in range(200):
+                await asyncio.sleep(0.01)
+                if registry.holder_of(SIM) is None:
+                    break
+            task.cancel()
+
+        asyncio.run(run())
+        assert registry.holder_of(SIM) is None
+
+
+class TestTheRealAppIsWired:
+    """The behaviour tests build their own app; this one is `create_app`'s,
+    so removing ScopeMiddleware or the client keys from it fails here."""
+
+    def test_a_client_key_is_a_client_in_the_real_app(self, tmp_path):
+        import server.main as m
+        from server.config import ServerConfig
+
+        app = m.create_app(ServerConfig(api_key=KEY))
+        app.state.clients.path = tmp_path / "clients.json"
+        app.state.clients.seen_path = tmp_path / "clients-seen.json"
+        key = app.state.clients.add("alice")
+        c = TestClient(app)
+        r = c.post("/api/v1/proxy/stop", headers=_h(key))
+        assert r.status_code == 403 and "owner-only" in r.json()["detail"]
+        r = c.get("/api/v1/system/channel", headers=_h(key))
+        assert r.status_code not in (401, 403), r.text
+        assert c.get("/api/v1/system/channel", headers=_h(key, None)).status_code == 400
+
+    def test_the_cli_binds_loopback_by_default(self):
+        import argparse
+
+        from server.main import _add_server_flags
+
+        parser = argparse.ArgumentParser()
+        _add_server_flags(parser)
+        assert parser.parse_args([]).host == "127.0.0.1"

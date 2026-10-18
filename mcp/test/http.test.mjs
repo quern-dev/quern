@@ -100,26 +100,26 @@ test("every API request carries the session header", async () => {
   }
 });
 
-test("QUERN_API_KEY is the key sent, over the owner's (#254, phase 2)", async () => {
+test("QUERN_CLIENT_KEY is the key sent, over the owner's (#254, phase 2)", async () => {
   const seen = [];
   const server = await serve((req, res) => {
     seen.push(req.headers.authorization);
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end("{}");
   });
-  const before = { url: process.env.QUERN_SERVER_URL, key: process.env.QUERN_API_KEY };
+  const before = { url: process.env.QUERN_SERVER_URL, key: process.env.QUERN_CLIENT_KEY };
   try {
     process.env.QUERN_SERVER_URL = `http://127.0.0.1:${server.address().port}`;
     const { apiRequest } = await import("../dist/http.js");
-    process.env.QUERN_API_KEY = "qc_client";
+    process.env.QUERN_CLIENT_KEY = "qc_client";
     await apiRequest("GET", "/api/v1/trace");
-    process.env.QUERN_API_KEY = "   ";              // blank: the owner's, not an empty key
+    process.env.QUERN_CLIENT_KEY = "   ";              // blank: the owner's, not an empty key
     await apiRequest("GET", "/api/v1/trace");
     assert.equal(seen[0], "Bearer qc_client");
     assert.notEqual(seen[1], "Bearer ");
     assert.notEqual(seen[1], "Bearer qc_client");
   } finally {
-    for (const [name, value] of [["QUERN_SERVER_URL", before.url], ["QUERN_API_KEY", before.key]]) {
+    for (const [name, value] of [["QUERN_SERVER_URL", before.url], ["QUERN_CLIENT_KEY", before.key]]) {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
     }

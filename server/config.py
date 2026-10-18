@@ -118,10 +118,14 @@ class ServerConfig:
 
 
 def client_api_key() -> str:
-    """The key a quern client process sends: `QUERN_API_KEY` when set -- a
-    client key from `quern clients add` (#254, phase 2), or the owner's as
-    `quern env` exports it -- else the owner's key file. "" when neither."""
-    explicit = os.environ.get("QUERN_API_KEY", "").strip()
+    """The key a quern client process sends: `QUERN_CLIENT_KEY` when set -- a
+    client key from `quern clients add` (#254, phase 2) -- else the owner's key
+    file. "" when neither.
+
+    Not `QUERN_API_KEY`, which `quern env` exports with the owner's key for
+    scripts: preferring it would pin an MCP started from such a shell to a key
+    that `quern regenerate-key` has since replaced (review)."""
+    explicit = os.environ.get("QUERN_CLIENT_KEY", "").strip()
     if explicit:
         return explicit
     try:

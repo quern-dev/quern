@@ -65,7 +65,7 @@ def _call(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
         raise ConnectionError("no server answering: start it with `quern start`")
     key = client_api_key()
     if not key:
-        raise ConnectionError(f"no API key at {API_KEY_FILE} and no QUERN_API_KEY: "
+        raise ConnectionError(f"no API key at {API_KEY_FILE} and no QUERN_CLIENT_KEY: "
                               "run `quern setup`")
     req = urllib.request.Request(
         url + path, method=method, data=json.dumps(body).encode() if body is not None else None,

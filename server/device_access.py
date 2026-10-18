@@ -35,7 +35,6 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from server import visibility
 from server.models import DeviceError
-from server.session import current_session
 from server.session_registry import SessionRegistry
 
 logger = logging.getLogger(__name__)
@@ -178,7 +177,7 @@ def check(udid: str | None) -> None:
         if caller.is_owner:
             return
         raise _refusing(DeviceNotReserved(udid))
-    if held.session.id == current_session():
+    if _is_callers(held, caller):
         return
     detail = visibility.holder_detail(held, caller)
     if detail is None:
@@ -188,6 +187,14 @@ def check(udid: str | None) -> None:
                     "reads still work, changes are refused until it is released"),
         "udid": udid, **detail,
     }))
+
+
+def _is_callers(held, caller) -> bool:
+    """Whether the session holding a device is the caller's own: the same id
+    *and* the same principal. The id alone let a client whose namespace an
+    owner session's name fell into -- the owner's CI named `alice:nightly` --
+    act as that session (review)."""
+    return held.session.id == caller.session and held.session.principal == caller.principal
 
 
 def require_owner(what: str) -> None:
@@ -222,9 +229,10 @@ def why_not(udid: str | None) -> str | None:
     if not udid or _REGISTRY is None:
         return None
     held = _REGISTRY.holder_of(_canonical(udid))
+    caller = visibility.current_caller()
     if held is None:
-        return None if visibility.current_caller().is_owner else NOT_RESERVED
-    return None if held.session.id == current_session() else HELD_ELSEWHERE
+        return None if caller.is_owner else NOT_RESERVED
+    return None if _is_callers(held, caller) else HELD_ELSEWHERE
 
 
 def is_write(method: str, path: str) -> bool:

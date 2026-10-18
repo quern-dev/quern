@@ -17,7 +17,7 @@ Usage: quern clients add LABEL      Issue a client key; it is printed once
 A client key is a caller other than the owner: another person's agent, a CI
 job, a second agent kept in its lane. It can watch every device, reserve
 devices, and change only the ones its own session holds -- nothing Mac-wide
-(the proxy, capture, updates). Give it to a client as QUERN_API_KEY, which the
+(the proxy, capture, updates). Give it to a client as QUERN_CLIENT_KEY, which the
 quern MCP, `quern session run` and `quern record` read.
 
 LABEL is 1-16 of a-z, 0-9 and '-'. It prefixes the client's session ids.
@@ -39,7 +39,7 @@ def main(argv: list[str]) -> int:
             print()
             print(f"  {key}")
             print()
-            print("Give it to the client as QUERN_API_KEY.")
+            print("Give it to the client as QUERN_CLIENT_KEY.")
             return 0
         if command == "revoke" and len(rest) == 1:
             record = keys.revoke(rest[0])

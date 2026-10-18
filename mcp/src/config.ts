@@ -85,11 +85,13 @@ export function discoverServer(): {
   };
 }
 
-/** QUERN_API_KEY: a key given explicitly -- a client key from `quern clients
- * add` (#254, phase 2) -- which wins over the owner's key in state.json and
- * ~/.quern/api-key. Unset or blank means "use the owner's". */
+/** QUERN_CLIENT_KEY: a client key from `quern clients add` (#254, phase 2),
+ * which wins over the owner's key in state.json and ~/.quern/api-key. Unset or
+ * blank means "use the owner's". Not QUERN_API_KEY, which `quern env` exports
+ * with the owner's key: preferring that would pin an MCP to a key since
+ * regenerated. */
 function explicitKey(): string | undefined {
-  const key = process.env.QUERN_API_KEY?.trim();
+  const key = process.env.QUERN_CLIENT_KEY?.trim();
   return key ? key : undefined;
 }
 

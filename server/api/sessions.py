@@ -160,7 +160,8 @@ async def release_session(request: Request, session_id: str) -> dict:
     caller = visibility.current_caller()
     if session is None or not visibility.visible_sessions([session], caller):
         raise HTTPException(404, f"no held session {session_id}")
-    if caller.session != session_id and not caller.is_owner:
+    if not caller.is_owner and (caller.session != session_id
+                                or session.principal != caller.principal):
         raise HTTPException(403, "only the session or the server's owner may release it")
     registry.release(session_id)
     await close_socket(request.app, session_id, CLOSE_UNKNOWN, "session released")
@@ -180,6 +181,9 @@ async def reserve(request: Request, session_id: str, body: ReserveRequest) -> di
     session = registry.get(session_id)
     if session is None:
         raise _refused(UnknownSession(f"no held session {session_id}"))
+    if session.principal != visibility.current_caller().principal:
+        # The same id under another key: not the session itself (review).
+        raise HTTPException(403, f"session {session_id} belongs to another key")
     if session.state != "live":
         raise HTTPException(409, (
             "reservations need a held session: open its live socket "
@@ -240,7 +244,9 @@ async def reserve(request: Request, session_id: str, body: ReserveRequest) -> di
 async def unreserve(request: Request, session_id: str, udid: str | None = None) -> dict:
     registry = _registry(request)
     caller = visibility.current_caller()
-    if caller.session != session_id and not caller.is_owner:
+    target = registry.get(session_id)
+    if not caller.is_owner and (caller.session != session_id or (
+            target is not None and target.principal != caller.principal)):
         raise HTTPException(403, "only the session or the server's owner may release its devices")
     try:
         freed = registry.unreserve(session_id, [udid] if udid else None)

@@ -80,14 +80,17 @@ quern clients list              # label, created, last used, revoked
 quern clients revoke ci-runner  # its sessions end and its devices are freed within a second
 ```
 
-Give it to the client as `QUERN_API_KEY`, which the quern MCP, `quern session run` and `quern record` read in place of the owner's key. The key decides who is calling, not the network address: a client key on the owner's own Mac is still a client.
+Give it to the client as `QUERN_CLIENT_KEY` (not `QUERN_API_KEY`, which `quern env` sets to the owner's key), which the quern MCP, `quern session run` and `quern record` read in place of the owner's key. The key decides who is calling, not the network address: a client key on the owner's own Mac is still a client.
 
 **What a client key may do:**
 
 - **Watch everything a shared server shows:** devices, screenshots, UI trees, logs, flows, crashes, recordings, the trace.
 - **Hold sessions and reserve devices**, as above.
 - **Change only devices its own session holds.** A free device is refused with **403** ("reserve it first"), not only one someone else holds (423). A change that names no device goes to the session's active device, which must be one it holds; a session with nothing reserved is refused before the route runs.
-- **Nothing Mac-wide**, which is **403 owner-only**: starting or stopping the proxy, the system proxy, local capture, intercepts and bypasses, mock rules with no `simulator_udid`, capture sessions of all traffic, host logs (oslog), log filters, updates, landmarks, the device pool's resolve/ensure (reserve instead), and anything that reads or writes a path on the Mac (`parse-file`, recordings and traces by directory, app-state snapshots).
+- **Nothing Mac-wide**, which is **403 owner-only**: starting or stopping the proxy, the system proxy, local capture, intercepts and bypasses, mock rules and capture sessions that don't name a simulator (by `simulator_udid`, not just any device field), host logs (oslog), log filters and log presets, updates, landmarks, the device pool's resolve/ensure (reserve instead), **builds** (`build_and_install` runs a project's scripts, so code on the Mac), app-state checkpoints (one store every caller shares), and anything that reads or writes a path on the Mac (`parse-file`, a recording's `output_dir`, recordings and traces by directory, `validate_landmarks`' `source`).
+
+**What a client key is not:** a sandbox. It keeps cooperating users from changing each other's devices and the Mac's shared state by mistake. It does not make a key safe to give someone you would not let use the Mac: an app a client installs on its own simulator runs as the Mac's user, and the simulator sandbox is not a security boundary.
+- **Revoking a key** ends its sessions and frees their devices within a second, closes its session sockets, and ends its open log, flow and video streams; the next request is refused with 401.
 - **Every request must carry `X-Quern-Session`** (400 otherwise). The server puts a client's session ids in its own namespace, `<label>:<id>`, so one client can never name, release or take over another's session or active device. A client's sessions appear under those names in `GET /api/v1/sessions` and in 423 bodies.
 
 Every route is classified in `server/scopes.py`, and a route with no classification is owner-only; a test fails until each new route is given one.

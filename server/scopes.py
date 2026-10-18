@@ -19,9 +19,12 @@ test checks.
 
 How a CONTROL route finds its device decides how it is guarded:
 
-    named     the request names it (`device_access.DEVICE_KEYS`). Naming none
-              means every device -- "stop all previews", "clear all crashes" --
-              which is Mac-wide, so owner-only.
+    named     the request names it, in the field the route scopes by (`keys`:
+              `simulator_udid` for a mock rule, not just any device field --
+              a decoy `udid` beside an unscoped rule passed the first version,
+              review). Naming none means every device -- "stop all previews",
+              "clear all crashes", a mock for all traffic -- which is
+              Mac-wide, so owner-only.
     resolved  named, or else the caller's active device, which must exist:
               the middleware checks it before the route runs, so a client with
               nothing reserved is refused rather than handed whatever the
@@ -29,6 +32,18 @@ How a CONTROL route finds its device decides how it is guarded:
     path-id   addressed by an id in the path (a recording, a mock rule); the
               route checks the device behind the id, and refuses a client one
               with no device.
+
+A rule's `owner_fields` are query or body fields only the owner may set, on a
+route a client may otherwise use: each names a path on the Mac (a recording's
+output directory, a knowledge base to scan) or changes something every caller
+shares (a log preset purges the shared buffer).
+
+Client keys guard against mistakes between cooperating users, not against a
+hostile one: a client installing an app on its own simulator runs that app as
+the Mac's user, and the simulator sandbox is not a security boundary. Builds
+are owner-only for that reason -- a build runs a project's scripts, and a
+Gradle build whatever arguments it is given -- but nothing here makes a client
+key safe to hand to someone you would not let use the Mac (#254).
 """
 
 from __future__ import annotations
@@ -62,13 +77,20 @@ Device = Literal["named", "resolved", "path-id"] | None
 class Rule:
     access: Access
     device: Device = None
+    #: For `named`: the fields the route scopes by, one of which must name a device.
+    keys: tuple[str, ...] = ()
+    owner_fields: frozenset[str] = frozenset()
+
+
+def _named(*keys: str, owner_fields: frozenset[str] = frozenset()) -> Rule:
+    return Rule(Access.CONTROL, "named", keys or ("udid",), owner_fields)
 
 
 _PUBLIC = Rule(Access.PUBLIC)
 _VIEW = Rule(Access.VIEW)
 _RESERVE = Rule(Access.RESERVE)
 _OWNER = Rule(Access.OWNER)
-_NAMED = Rule(Access.CONTROL, "named")
+_NAMED = _named("udid")
 _RESOLVED = Rule(Access.CONTROL, "resolved")
 _PATH_ID = Rule(Access.CONTROL, "path-id")
 
@@ -116,8 +138,10 @@ ROUTES: dict[tuple[str, str], Rule] = {
     ("POST", "/api/v1/device/ui/wait-for-element"): _VIEW,
     ("POST", "/api/v1/device/ui/wait-settled"): _VIEW,
     ("POST", "/api/v1/device/preview/start"): _VIEW,
-    ("POST", "/api/v1/device/logging/start"): _VIEW,
-    ("POST", "/api/v1/device/logging/device/start"): _VIEW,
+    # A preset rewrites the shared ingestion filter and purges the buffer.
+    ("POST", "/api/v1/device/logging/start"): Rule(Access.VIEW, owner_fields=frozenset({"preset"})),
+    ("POST", "/api/v1/device/logging/device/start"): Rule(
+        Access.VIEW, owner_fields=frozenset({"preset"})),
 
     # -- devices: changing one ------------------------------------------------
     ("POST", "/api/v1/device/active"): _NAMED,
@@ -130,10 +154,7 @@ ROUTES: dict[tuple[str, str], Rule] = {
     ("DELETE", "/api/v1/device/app/state/plist/key"): _RESOLVED,
     ("POST", "/api/v1/device/app/state/plist/watch/start"): _RESOLVED,
     ("POST", "/api/v1/device/app/state/plist/watch/stop"): _RESOLVED,
-    ("POST", "/api/v1/device/app/state/restore"): _RESOLVED,
-    ("POST", "/api/v1/device/app/state/save"): _RESOLVED,
     ("POST", "/api/v1/device/boot"): _RESOLVED,
-    ("POST", "/api/v1/device/build-and-install"): _RESOLVED,
     ("POST", "/api/v1/device/display-density"): _RESOLVED,
     ("POST", "/api/v1/device/erase"): _RESOLVED,
     ("POST", "/api/v1/device/font-scale"): _RESOLVED,
@@ -164,12 +185,17 @@ ROUTES: dict[tuple[str, str], Rule] = {
     ("POST", "/api/v1/proxy/device-proxy-config"): _NAMED,
     ("POST", "/api/v1/proxy/cert/install"): _NAMED,          # none named: every booted device
     ("POST", "/api/v1/proxy/cert/verify"): _NAMED,
-    ("POST", "/api/v1/proxy/capture/start"): _NAMED,         # none named: all traffic
+    # None named: all traffic. client_ip filters by a LAN address, which no
+    # reservation covers.
+    ("POST", "/api/v1/proxy/capture/start"): _named(
+        "simulator_udid", "device_serial", owner_fields=frozenset({"client_ip"})),
     ("POST", "/api/v1/proxy/capture/stop"): _PATH_ID,        # by session id in the body
-    ("POST", "/api/v1/proxy/mocks"): _NAMED,                 # unscoped: every device's traffic
+    ("POST", "/api/v1/proxy/mocks"): _named("simulator_udid"),  # unscoped: every device's
     ("PATCH", "/api/v1/proxy/mocks/{rule_id}"): _PATH_ID,
     ("DELETE", "/api/v1/proxy/mocks/{rule_id}"): _PATH_ID,
-    ("POST", "/api/v1/recordings"): _RESOLVED,
+    # output_dir is a path on the Mac; a viewer link is the owner's to issue.
+    ("POST", "/api/v1/recordings"): Rule(Access.CONTROL, "resolved",
+                                         owner_fields=frozenset({"output_dir", "viewer"})),
     ("POST", "/api/v1/recordings/{recording_id}/stop"): _PATH_ID,
     ("POST", "/api/v1/recordings/{recording_id}/keyframe"): _PATH_ID,
 
@@ -190,11 +216,11 @@ ROUTES: dict[tuple[str, str], Rule] = {
     ("POST", "/api/v1/logs/oslog/stop"): _OWNER,
     ("GET", "/api/v1/crashes/latest"): _VIEW,
     ("DELETE", "/api/v1/crashes"): _NAMED,                   # none named: every device's
-    ("POST", "/api/v1/builds/parse"): _VIEW,
+    ("POST", "/api/v1/builds/parse"): _OWNER,                # replaces the shared latest result
     ("POST", "/api/v1/builds/parse-file"): _OWNER,           # reads a path on the Mac
     ("POST", "/api/v1/builds/android/record"): _OWNER,
     ("GET", "/api/v1/builds/latest"): _OWNER,
-    ("GET", "/api/v1/trace"): _VIEW,                         # ?recording=: OWNER_PARAMS
+    ("GET", "/api/v1/trace"): Rule(Access.VIEW, owner_fields=frozenset({"recording"})),
 
     # -- the proxy -----------------------------------------------------------
     ("GET", "/api/v1/proxy/status"): _VIEW,
@@ -233,12 +259,20 @@ ROUTES: dict[tuple[str, str], Rule] = {
     # -- Mac-wide state -----------------------------------------------------------
     ("POST", "/api/v1/device/screenshot/timeline/start"): _OWNER,   # one timeline per server
     ("POST", "/api/v1/device/screenshot/timeline/stop"): _OWNER,
+    # App-state checkpoints are one store, keyed by bundle and label: a
+    # client's save would replace the owner's, and a restore of the owner's
+    # would put the owner's app data on the client's simulator (review).
+    ("POST", "/api/v1/device/app/state/save"): _OWNER,
+    ("POST", "/api/v1/device/app/state/restore"): _OWNER,
     ("DELETE", "/api/v1/device/app/state/{label}"): _OWNER,  # a snapshot on the Mac's disk
+    # Runs xcodebuild or Gradle on a project path: code on the Mac (#254).
+    ("POST", "/api/v1/device/build-and-install"): _OWNER,
     ("POST", "/api/v1/device/app/state/plist/watch/configure"): _OWNER,
     ("DELETE", "/api/v1/device/app/state/plist/watch/configure"): _OWNER,
     ("GET", "/api/v1/landmarks/"): _VIEW,
     ("POST", "/api/v1/landmarks/identify"): _VIEW,
-    ("POST", "/api/v1/landmarks/validate"): _VIEW,
+    ("POST", "/api/v1/landmarks/validate"): Rule(Access.VIEW,
+                                                 owner_fields=frozenset({"source"})),
     ("POST", "/api/v1/landmarks/load"): _OWNER,
     ("DELETE", "/api/v1/landmarks/"): _OWNER,
     ("GET", "/api/v1/system/channel"): _VIEW,
@@ -246,13 +280,6 @@ ROUTES: dict[tuple[str, str], Rule] = {
     ("POST", "/api/v1/system/update"): _OWNER,
     ("GET", "/api/v1/system/update-status"): _OWNER,
 }
-
-#: Query parameters only the owner may pass, on routes a client may otherwise
-#: use: each names a path on the Mac.
-OWNER_PARAMS: dict[tuple[str, str], frozenset[str]] = {
-    ("GET", "/api/v1/trace"): frozenset({"recording"}),
-}
-
 
 def _compile(template: str) -> re.Pattern:
     return re.compile("^" + re.sub(r"\\\{[^/]+?\\\}", "[^/]+", re.escape(template)) + "$")
@@ -308,6 +335,45 @@ def _qualified_query(query: bytes, who: str) -> bytes:
     pairs = parse_qsl(query.decode("latin-1"), keep_blank_values=True)
     return urlencode([(k, principal.qualify(v, who) if k == "session" else v)
                       for k, v in pairs]).encode("latin-1")
+
+
+def _fields(query: bytes, body: bytes) -> dict[str, bool]:
+    """Which query parameters and top-level JSON body fields a request sets to
+    something -- not null, empty or false."""
+    found: dict[str, bool] = {}
+    for key, value in parse_qsl(query.decode("latin-1"), keep_blank_values=False):
+        if value and value.lower() != "false":
+            found[key] = True
+    if body:
+        try:
+            data = json.loads(body)
+        except (ValueError, UnicodeDecodeError):
+            data = None
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if value not in (None, "", False, [], {}):
+                    found[key] = True
+    return found
+
+
+def _ends_on_revoke(scope: Scope, who: str, receive: Receive) -> Receive:
+    """A receive that reports the client gone once its key is revoked.
+
+    Streams -- logs, flows, video -- run until `request.is_disconnected()`,
+    which polls this; without it a revoked key went on reading for as long as
+    it kept the connection open (review)."""
+    label = principal.label_of(who)
+    clients = getattr(getattr(scope.get("app"), "state", None), "clients", None)
+    if label is None or clients is None:
+        return receive
+    gone = {"type": "websocket.disconnect" if scope["type"] == "websocket" else "http.disconnect"}
+
+    async def guarded():
+        if not clients.is_active(label):
+            return dict(gone)
+        return await receive()
+
+    return guarded
 
 
 async def _deny(send: Send, status: int, detail) -> None:
@@ -367,14 +433,6 @@ class ScopeMiddleware:
         if rule.access is Access.OWNER:
             await _deny(send, 403, f"{method} {path} is owner-only: a client key cannot use it")
             return
-        found = match(method, path)
-        forbidden = OWNER_PARAMS.get((method.upper(), found[0])) if found else None
-        if forbidden:
-            names = {k for k, _ in parse_qsl(scope.get("query_string", b"").decode("latin-1"))}
-            if names & forbidden:
-                await _deny(send, 403, (f"{', '.join(sorted(names & forbidden))} on {path} "
-                                        "names a path on the Mac: owner-only"))
-                return
         await self._as_session(who, scope, receive, send, rule=rule)
 
     async def _as_session(self, who: str, scope: Scope, receive: Receive, send: Send,
@@ -399,27 +457,42 @@ class ScopeMiddleware:
             scope["path"] = new_path
             scope["raw_path"] = new_path.encode()
         scope["query_string"] = _qualified_query(scope.get("query_string", b""), who)
+        receive = _ends_on_revoke(scope, who, receive)
         token = _SESSION.set(qualified)
         try:
-            if rule is not None and rule.access is Access.CONTROL and rule.device != "path-id":
+            if rule is not None and (rule.owner_fields or (
+                    rule.access is Access.CONTROL and rule.device != "path-id")):
                 body, receive = await device_access._buffer(receive)
-                named_devices = device_access._named_devices(scope["query_string"], body)
-                if not named_devices:
-                    refusal = await self._no_device(scope, rule)
-                    if refusal is not None:
-                        await _deny(send, *refusal)
-                        return
+                refusal = await self._refusal(scope, rule, body)
+                if refusal is not None:
+                    await _deny(send, *refusal)
+                    return
             await self.app(scope, receive, send)
         finally:
             _SESSION.reset(token)
 
-    async def _no_device(self, scope: Scope, rule: Rule) -> tuple[int, object] | None:
-        """A control request that names no device: refused when that means
-        every device, or when the caller has no device of its own to mean."""
+    async def _refusal(self, scope: Scope, rule: Rule, body: bytes) -> tuple[int, object] | None:
+        """Why a client's request is refused before the route runs, or None."""
         method, path = scope.get("method", ""), scope.get("path", "")
+        fields = _fields(scope.get("query_string", b""), body)
+        given = sorted(f for f in rule.owner_fields if fields.get(f))
+        if given:
+            return 403, (f"{', '.join(given)} on {method} {path} is owner-only: it names a "
+                         "path on the Mac or changes what every caller shares")
+        if rule.access is not Access.CONTROL or rule.device == "path-id":
+            return None
         if rule.device == "named":
-            return 403, (f"{method} {path} without a device acts on every device: "
-                         "owner-only. Name a device your session holds.")
+            if any(fields.get(k) for k in rule.keys):
+                return None
+            return 403, (f"{method} {path} without {' or '.join(rule.keys)} acts on every "
+                         "device: owner-only. Name a device your session holds.")
+        if device_access._named_devices(scope.get("query_string", b""), body):
+            return None
+        return await self._no_device(scope, rule)
+
+    async def _no_device(self, scope: Scope, rule: Rule) -> tuple[int, object] | None:
+        """A resolved request that names no device: refused when the caller
+        has no device of its own for it to mean."""
         app = scope.get("app")
         controller = getattr(getattr(app, "state", None), "device_controller", None)
         active = getattr(controller, "_active_udid", None) if controller is not None else None

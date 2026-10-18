@@ -65,7 +65,7 @@ def _server() -> tuple[str, str]:
         raise ConnectionError("no server answering: start it with `quern start`")
     key = client_api_key()
     if not key:
-        raise ConnectionError(f"no API key at {API_KEY_FILE} and no QUERN_API_KEY: "
+        raise ConnectionError(f"no API key at {API_KEY_FILE} and no QUERN_CLIENT_KEY: "
                               "run `quern setup`")
     return url, key
 
