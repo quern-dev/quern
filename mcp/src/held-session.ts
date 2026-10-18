@@ -23,6 +23,7 @@ import { SESSION_ID, apiRequest, quernHeaders, sessionNotices } from "./http.js"
 const CLOSE_UNKNOWN = 4404;
 const CLOSE_BAD_TOKEN = 4403;
 const CLOSE_UNAUTHORISED = 4401;
+const CLOSE_REPLACED = 4000;
 
 /** Capped low on purpose: reconnecting has to land well inside the server's
  * grace period (120 s at the least), and after a server restart a long
@@ -144,13 +145,16 @@ function connect(): void {
     if (done) return;
     done = true;
     clearTimeout(handshake);
-    if (socket === ws) socket = null;
+    const current = socket === ws;
+    if (current) socket = null;
     try {
       ws.close();
     } catch {
       // never opened
     }
-    onEnd(code);
+    // Only the current attempt decides what happens next: a superseded one
+    // ending must not start another reconnect alongside the live one.
+    if (current) onEnd(code);
   };
 
   ws.onmessage = (event) => {
@@ -179,7 +183,12 @@ function connect(): void {
 function onEnd(code: number): void {
   if (stopping) return;
   console.error(`Held session ${SESSION_ID}: connection ended (code ${code})`);
-  if (code === CLOSE_UNKNOWN) {
+  if (code === CLOSE_REPLACED) {
+    // Another connection presented this session's token and took it over.
+    // Reconnecting would only take it back; leave it to the newer holder.
+    state = "stopped";
+    console.error(`Held session ${SESSION_ID}: taken over by another connection; not reconnecting`);
+  } else if (code === CLOSE_UNKNOWN) {
     token = null;
     if (everAttached) lossPending = true;
     // At once: the server is up (it just answered), and every second here

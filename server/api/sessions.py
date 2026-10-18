@@ -43,6 +43,7 @@ router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 #: Close codes for the live socket, 4000-4999 being the application's.
 CLOSE_UNKNOWN = 4404       # no such session: it ended, expired, or the server restarted
 CLOSE_BAD_TOKEN = 4403
+CLOSE_REPLACED = 4000      # a newer connection for the same session took over
 #: The header the resume token travels in on the socket's upgrade request.
 TOKEN_HEADER = "x-quern-resume-token"
 
@@ -52,6 +53,23 @@ def _registry(request_or_ws) -> SessionRegistry:
     if registry is None:
         raise HTTPException(503, "sessions are not available on this server")
     return registry
+
+
+def _sockets(app) -> dict:
+    """session id -> (generation, WebSocket) of its current connection."""
+    if not hasattr(app.state, "session_sockets"):
+        app.state.session_sockets = {}
+    return app.state.session_sockets
+
+
+async def close_socket(app, session_id: str, code: int, reason: str) -> None:
+    """Close a session's current connection, if it has one. A release that
+    left the socket open left the client thinking it was still held -- live,
+    holding nothing, never told (review)."""
+    entry = _sockets(app).pop(session_id, None)
+    if entry is not None:
+        with contextlib.suppress(Exception):
+            await entry[1].close(code=code, reason=reason[:120])
 
 
 def _refused(e: SessionError) -> HTTPException:
@@ -132,6 +150,7 @@ async def release_session(request: Request, session_id: str) -> dict:
     if caller.session != session_id and not caller.is_owner:
         raise HTTPException(403, "only the session or the server's owner may release it")
     registry.release(session_id)
+    await close_socket(request.app, session_id, CLOSE_UNKNOWN, "session released")
     actions = await run_release_policies(request.app)
     return {"released": session_id, "freed": [r.udid for r in session.reservations.values()],
             "actions": actions}
@@ -313,13 +332,18 @@ async def live(websocket: WebSocket, session_id: str) -> None:
         await websocket.close(code=CLOSE_UNKNOWN, reason="sessions are not available")
         return
     try:
-        session = registry.attach(session_id, token)
+        session, generation = registry.attach(session_id, token)
     except UnknownSession as e:
         await websocket.close(code=CLOSE_UNKNOWN, reason=str(e)[:120])
         return
     except SessionError as e:
         await websocket.close(code=CLOSE_BAD_TOKEN, reason=str(e)[:120])
         return
+    # The newest connection holds the session; an older one is closed, and its
+    # end changes nothing (its generation is no longer current).
+    await close_socket(websocket.app, session_id, CLOSE_REPLACED,
+                       "replaced by a newer connection")
+    _sockets(websocket.app)[session_id] = (generation, websocket)
     clean = False
     try:
         await websocket.send_json({"event": "attached", "session": session.id,
@@ -336,10 +360,14 @@ async def live(websocket: WebSocket, session_id: str) -> None:
     except Exception:  # noqa: BLE001 -- any other end is an abrupt one
         clean = False
     finally:
-        registry.detach(session_id, clean=clean)
-        if clean:
+        sockets = _sockets(websocket.app)
+        if sockets.get(session_id, (None,))[0] == generation:
+            sockets.pop(session_id, None)
+        acted = registry.detach(session_id, generation, clean=clean)
+        if acted and clean:
             with contextlib.suppress(Exception):
                 await run_release_policies(websocket.app)
-        logger.info("Session %s connection ended (%s)", session_id,
-                    "clean: released" if clean else
-                    f"abrupt: in grace for {registry.grace_seconds}s")
+        if acted:
+            logger.info("Session %s connection ended (%s)", session_id,
+                        "clean: released" if clean else
+                        f"abrupt: in grace for {registry.grace_seconds}s")

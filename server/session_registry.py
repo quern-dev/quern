@@ -77,7 +77,12 @@ class HeldSession:
     opened_at: datetime
     #: "live" while a connection is held, "grace" after an abrupt drop.
     state: str = "live"
-    connections: int = 0
+    #: The current connection's generation, from a counter shared by every
+    #: session in the registry. A connection that has been replaced, or that
+    #: belonged to an earlier session of the same name, carries an older one,
+    #: and its end changes nothing (review: a stale socket closing used to
+    #: release, or put in grace, the newer session that reused its name).
+    generation: int = 0
     #: Monotonic time grace ends, while in grace.
     grace_until: float | None = None
     disconnected_at: datetime | None = None
@@ -136,6 +141,7 @@ class SessionRegistry:
         #: whoever drains them (`take_released`): grace that ran out in a
         #: sweep has nobody waiting on it to act.
         self._released: list[HeldSession] = []
+        self._generations = 0
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -148,7 +154,9 @@ class SessionRegistry:
         clients cannot hold one session. One in grace may be taken over by
         the same principal on the owner's machine (`local`), which is how an
         agent whose MCP restarted keeps its devices (#254 decision 5);
-        remotely only the resume token reclaims it (`attach`)."""
+        remotely only the resume token reclaims it (`attach`). A takeover
+        restarts the grace clock: the new holder needs time to connect, and a
+        takeover at 179s of 180 left it one second (review)."""
         self.expire_due()
         token = secrets.token_urlsafe(32)
         existing = self._sessions.get(name)
@@ -161,6 +169,7 @@ class SessionRegistry:
                 raise SessionConflict(
                     f"session {name} is in its grace period; reconnect with its resume token")
             existing.token_digest = _digest(token)
+            existing.grace_until = self._clock() + self.grace_seconds
             return existing, token
         session = HeldSession(id=name, principal=principal, token_digest=_digest(token),
                               opened_at=datetime.now(UTC), state="grace",
@@ -170,33 +179,43 @@ class SessionRegistry:
         self._sessions[name] = session
         return session, token
 
-    def attach(self, session_id: str, token: str) -> HeldSession:
-        """A connection for the session begins: it is live until it ends."""
+    def attach(self, session_id: str, token: str) -> tuple[HeldSession, int]:
+        """A connection for the session begins; returns it and its generation.
+
+        One connection holds a session at a time, and the newest wins: a
+        reconnect often arrives before the server has noticed the old socket
+        died (that takes up to 30s of missed pings), so the caller closes the
+        previous connection, whose end then changes nothing. Two sockets on
+        one token used to mean a clean close of either released the session
+        under the other (review)."""
         self.expire_due()
         session = self._get(session_id)
         if not token or not hmac.compare_digest(_digest(token), session.token_digest):
             raise BadToken(f"wrong resume token for session {session_id}")
-        session.connections += 1
+        self._generations += 1
+        session.generation = self._generations
         session.state = "live"
         session.grace_until = None
         session.disconnected_at = None
         session.last_seen = datetime.now(UTC)
-        return session
+        return session, session.generation
 
-    def detach(self, session_id: str, *, clean: bool) -> None:
-        """A connection ended. Clean: the holder is done, so release now.
-        Abrupt: grace, if it was the session's last connection."""
+    def detach(self, session_id: str, generation: int, *, clean: bool) -> bool:
+        """The connection of `generation` ended. Clean: the holder is done, so
+        release now. Abrupt: grace. A connection that is no longer the
+        session's current one -- replaced, or from an earlier session of the
+        same name -- changes nothing. True if it acted."""
         session = self._sessions.get(session_id)
-        if session is None:
-            return
-        session.connections = max(0, session.connections - 1)
+        if session is None or session.generation != generation:
+            return False
         session.last_seen = datetime.now(UTC)
         if clean:
             self.release(session_id)
-        elif session.connections == 0:
+        else:
             session.state = "grace"
             session.grace_until = self._clock() + self.grace_seconds
             session.disconnected_at = datetime.now(UTC)
+        return True
 
     def release(self, session_id: str) -> HeldSession | None:
         """End a session and free its devices. Its release policies are

@@ -70,14 +70,14 @@ class TestLifecycle:
     def test_a_clean_close_releases_at_once(self, reg):
         session, _ = _held(reg)
         reg.reserve(session.id, ["SIM-1"])
-        reg.detach(session.id, clean=True)
+        reg.detach(session.id, session.generation, clean=True)
         assert reg.holder_of("SIM-1") is None
         assert [s.id for s in reg.take_released()] == ["claude-a"]
 
     def test_an_abrupt_drop_holds_for_the_grace_period_then_releases(self, reg, clock):
         session, _ = _held(reg)
         reg.reserve(session.id, ["SIM-1"])
-        reg.detach(session.id, clean=False)
+        reg.detach(session.id, session.generation, clean=False)
         assert reg.get("claude-a").state == "grace"
         clock.t += 179
         assert reg.holder_of("SIM-1") is not None, "still held inside grace"
@@ -88,7 +88,7 @@ class TestLifecycle:
     def test_reconnecting_inside_grace_keeps_the_reservations(self, reg, clock):
         session, token = _held(reg)
         reg.reserve(session.id, ["SIM-1"])
-        reg.detach(session.id, clean=False)
+        reg.detach(session.id, session.generation, clean=False)
         clock.t += 170
         reg.attach(session.id, token)
         clock.t += 10_000
@@ -96,19 +96,48 @@ class TestLifecycle:
 
     def test_reconnecting_needs_the_right_token(self, reg):
         session, _ = _held(reg)
-        reg.detach(session.id, clean=False)
+        reg.detach(session.id, session.generation, clean=False)
         with pytest.raises(BadToken):
             reg.attach(session.id, "not-it")
         with pytest.raises(BadToken):
             reg.attach(session.id, "")
 
-    def test_only_the_last_connection_dropping_starts_grace(self, reg):
+    def test_the_newest_connection_wins_and_an_old_ones_end_changes_nothing(self, reg):
+        """A reconnect often arrives before the server notices the old socket
+        died. Two sockets on one token used to mean a clean close of either
+        released the session under the other (review)."""
         session, token = _held(reg)
-        reg.attach(session.id, token)                 # a second connection
-        reg.detach(session.id, clean=False)
+        old = session.generation
+        _, new = reg.attach(session.id, token)        # the reconnect
+        assert new != old
+        assert reg.detach(session.id, old, clean=True) is False, "the old socket's close"
         assert reg.get(session.id).state == "live"
-        reg.detach(session.id, clean=False)
+        assert reg.detach(session.id, new, clean=False) is True
         assert reg.get(session.id).state == "grace"
+
+    def test_a_stale_socket_cannot_touch_a_newer_session_of_the_same_name(self, reg):
+        """A forced release, then the name opened again: the first session's
+        socket closing late used to release the new one (review)."""
+        first, _ = _held(reg)
+        stale = first.generation
+        reg.release("claude-a")
+        second, _ = _held(reg)
+        reg.reserve("claude-a", ["SIM-1"])
+        assert reg.detach("claude-a", stale, clean=True) is False
+        assert reg.detach("claude-a", stale, clean=False) is False
+        assert reg.holder_of("SIM-1").session is second
+        assert second.state == "live"
+
+    def test_a_takeover_restarts_the_grace_clock(self, reg, clock):
+        """Taken over at 179s of 180, it used to leave one second to connect."""
+        session, _ = _held(reg)
+        reg.detach(session.id, session.generation, clean=False)
+        clock.t += 179
+        _, token = reg.open("claude-a", local=True)
+        clock.t += 100
+        assert reg.get("claude-a") is not None, "still in its fresh grace period"
+        reg.attach("claude-a", token)
+        assert reg.get("claude-a").state == "live"
 
     def test_a_live_session_cannot_be_opened_twice(self, reg):
         _held(reg)
@@ -119,7 +148,7 @@ class TestLifecycle:
         """An agent whose MCP restarted keeps its devices (decision 5)."""
         session, old_token = _held(reg)
         reg.reserve(session.id, ["SIM-1"])
-        reg.detach(session.id, clean=False)
+        reg.detach(session.id, session.generation, clean=False)
         again, new_token = reg.open("claude-a", local=True)
         assert again is session and new_token != old_token
         reg.attach("claude-a", new_token)
@@ -129,13 +158,13 @@ class TestLifecycle:
 
     def test_remotely_a_name_does_not_take_over_without_the_token(self, reg):
         session, _ = _held(reg)
-        reg.detach(session.id, clean=False)
+        reg.detach(session.id, session.generation, clean=False)
         with pytest.raises(SessionConflict):
             reg.open("claude-a", local=False)
 
     def test_another_principal_cannot_take_over_even_locally(self, reg):
         session, _ = _held(reg)
-        reg.detach(session.id, clean=False)
+        reg.detach(session.id, session.generation, clean=False)
         with pytest.raises(SessionConflict):
             reg.open("claude-a", principal="client-7")
 
@@ -192,6 +221,6 @@ class TestReservations:
         a, _ = _held(reg, "claude-a")
         b, _ = _held(reg, "claude-b")
         reg.reserve(a.id, ["SIM-1"])
-        reg.detach(a.id, clean=False)
+        reg.detach(a.id, a.generation, clean=False)
         clock.t += 181
         assert reg.reserve(b.id, ["SIM-1"])[0].udid == "SIM-1"

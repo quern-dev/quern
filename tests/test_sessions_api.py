@@ -304,7 +304,29 @@ class TestLifecycle:
         r = client.delete("/api/v1/sessions/claude-a", headers=_h("someone-else"))
         assert r.status_code == 200 and r.json()["freed"] == ["SIM-1"]
         assert registry.holder_of("SIM-1") is None
+        # And the client is told: its socket is closed with "unknown session",
+        # so it reopens instead of believing it still holds the device.
+        with pytest.raises(WebSocketDisconnect) as told:
+            a.ws.receive_json()
+        assert told.value.code == 4404
         a.close()
+
+    def test_a_newer_connection_replaces_the_old_one(self, client, registry):
+        a = Held(client, "claude-a")
+        _reserve(client, "claude-a", udids=["SIM-1"])
+        ctx = client.websocket_connect(
+            a.opened["live_path"],
+            headers={**_h("claude-a"), "X-Quern-Resume-Token": a.opened["resume_token"]})
+        newer = ctx.__enter__()
+        assert newer.receive_json()["event"] == "attached"
+        with pytest.raises(WebSocketDisconnect) as replaced:
+            a.ws.receive_json()
+        assert replaced.value.code == 4000
+        a.close(code=1000)                       # the old socket's clean close...
+        assert registry.holder_of("SIM-1") is not None, "...does not release the session"
+        newer.close(code=1000)
+        ctx.__exit__(None, None, None)
+        assert registry.holder_of("SIM-1") is None
 
     def test_listing_shows_state_and_grace(self, client, clock):
         a = Held(client, "claude-a")
