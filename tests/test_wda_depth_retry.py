@@ -49,6 +49,7 @@ class FakeWda:
         self.depths_set: list[int] = []
         self.queries: list[dict] = []
         self.delay = 0.0
+        self.deep_delay = 0.0
 
     async def set_depth(self, udid, depth):
         self.depth = depth
@@ -58,6 +59,8 @@ class FakeWda:
         self.queries.append({"depth": self.depth, "value": value, **kw})
         if self.delay:
             await asyncio.sleep(self.delay)
+        if self.deep_delay and self.depth == SNAPSHOT_MAX_DEPTH:
+            await asyncio.sleep(self.deep_delay)
         if "shallow_btn" in value:
             return [dict(SHALLOW_ROW)]
         if WIFI in value and self.depth is not None and self.depth >= 20:
@@ -323,3 +326,77 @@ class TestTheBoundedQueryAtTheTransport:
 
         await backend.find_elements_by_query(SIM, "accessibility id", WIFI)
         assert fake.reached("/elements") == 2, "the default read retry was lost"
+
+
+class TestTheRoundTwoGuards:
+    """The second review's findings: what happens after a deep hit and after a
+    deep query that ran out of time."""
+
+    async def test_a_slow_deep_miss_does_not_fall_back_to_source(self, phone, monkeypatch):
+        ctrl, wda = phone
+        monkeypatch.setattr(controller_ui, "SLOW_DEEP_MISS_SECONDS", 0.05)
+        wda.deep_delay = 0.08
+        elements, _ = await ctrl.get_ui_elements(
+            PHONE, filter_identifier="absent", snapshot_depth=ACTION_SNAPSHOT_DEPTH,
+            deepen_on_miss=True,
+        )
+        assert elements == []
+        ctrl.wda_client.describe_all.assert_not_called()
+
+    async def test_every_deep_query_is_bounded_including_the_predicate_retry(self, phone):
+        ctrl, wda = phone
+        await ctrl.get_ui_elements(
+            PHONE, filter_identifier="absent", snapshot_depth=ACTION_SNAPSHOT_DEPTH,
+            deepen_on_miss=True,
+        )
+        deep = wda.deep_queries()
+        assert len(deep) == 2, "expected the id query and its predicate retry"
+        assert all(q.get("no_resend") is True for q in deep)
+
+    async def test_get_element_on_a_slow_screen_does_not_look_deeper(self, phone, monkeypatch):
+        ctrl, wda = phone
+        monkeypatch.setattr(controller_ui, "DEEPEN_MAX_SHALLOW_SECONDS", 0.05)
+
+        async def slow_source(*a, **k):
+            await asyncio.sleep(0.08)
+            return []
+
+        ctrl.wda_client.describe_all = slow_source
+        with pytest.raises(DeviceError):
+            await ctrl.get_element(identifier=WIFI)
+        assert wda.deep_queries() == []
+
+    async def test_a_deep_hit_is_seen_by_reachability_and_then_put_back(self, phone):
+        """Reachability re-queries the element at the session depth, so it must
+        run at 25; after it, the depth goes back to 12 -- left at 25, the next
+        query that sets no depth walked the full tree."""
+        ctrl, wda = phone
+        depth_at_reachability = []
+
+        async def reachable(resolved, matches):
+            depth_at_reachability.append(wda.depth)
+            return matches, []
+
+        ctrl._wda_reachable_only = reachable
+        result = await ctrl.tap_element(identifier=WIFI, scroll_to_find=False)
+        assert result["status"] == "ok"
+        assert depth_at_reachability == [SNAPSHOT_MAX_DEPTH]
+        assert wda.depth == ACTION_SNAPSHOT_DEPTH, "the session was left at the full depth"
+
+    async def test_get_element_puts_the_depth_back_after_a_hit(self, phone):
+        ctrl, wda = phone
+        await ctrl.get_element(identifier=WIFI)
+        assert wda.depth == ACTION_SNAPSHOT_DEPTH
+
+    async def test_a_timed_out_deep_query_skips_the_full_read_and_says_so(
+        self, phone, monkeypatch,
+    ):
+        ctrl, wda = phone
+        monkeypatch.setattr(controller_ui, "DEEP_QUERY_TIMEOUT", 0.05)
+        wda.deep_delay = 0.06
+        result = await ctrl.tap_element(identifier="absent", scroll_to_find=False)
+        assert result["status"] == "not_found"
+        assert "timed out" in result["detail"], result["detail"]
+        assert "queried again" not in result["detail"]
+        for call in ctrl.wda_client.describe_all.call_args_list:
+            raise AssertionError(f"a full read queued behind the deep walk: {call}")
