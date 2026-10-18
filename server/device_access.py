@@ -162,19 +162,22 @@ def is_write(method: str, path: str) -> bool:
     return method.upper() not in ("GET", "HEAD", "OPTIONS") and path not in READ_POSTS
 
 
-def _named_devices(query: bytes, body: bytes, content_type: str) -> list[str]:
+def _named_devices(query: bytes, body: bytes) -> list[str]:
     from urllib.parse import parse_qsl
 
     found: list[str] = []
     for key, value in parse_qsl(query.decode("latin-1"), keep_blank_values=False):
         if key in DEVICE_KEYS and value:
             found.extend(v for v in value.split(",") if v)
-    # Every JSON body, whatever its size: a size cap was a way past the check
-    # for routes that act on the body's udid without resolve_udid (review).
-    if body and "json" in content_type:
+    # Every body that parses as JSON, whatever its size or its Content-Type
+    # claims. Deciding by the header was a way past the check: FastAPI reads
+    # `Application/JSON`, or the first of two Content-Type headers, as JSON and
+    # parsed the body this skipped (review, reproduced on WDA stop and crash
+    # clearing). A size cap was another (first review).
+    if body:
         try:
             data = json.loads(body)
-        except ValueError:
+        except (ValueError, UnicodeDecodeError):
             data = None
         if isinstance(data, dict):
             for key in DEVICE_KEYS:
@@ -217,11 +220,8 @@ class AccessMiddleware:
         try:
             if write and _REGISTRY is not None:
                 body, receive = await _buffer(receive)
-                headers = dict(scope.get("headers") or [])
-                content_type = headers.get(b"content-type", b"").decode("latin-1")
                 try:
-                    for udid in _named_devices(scope.get("query_string", b""), body,
-                                               content_type):
+                    for udid in _named_devices(scope.get("query_string", b""), body):
                         check(udid)
                 except DeviceHeld as e:
                     await _refuse(send, 423, e.detail)

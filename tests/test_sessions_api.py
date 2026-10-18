@@ -535,6 +535,32 @@ class TestReviewFindings:
         assert r.status_code == 423
         a.close()
 
+    @pytest.mark.parametrize("headers", [
+        {"Content-Type": "Application/JSON"},
+        {"Content-Type": "text/plain"},
+    ])
+    def test_the_content_type_header_does_not_decide(self, client, headers):
+        """FastAPI parses `Application/JSON` as JSON; deciding by the header
+        let that past the check (review). Any body that parses is checked."""
+        a = Held(client, "claude-a")
+        _reserve(client, "claude-a", udids=["SIM-1"])
+        r = client.post("/api/v1/device/raw-op", headers={**_h("claude-b"), **headers},
+                        content=b'{"udid": "SIM-1"}')
+        assert r.status_code == 423
+        a.close()
+
+    def test_two_content_type_headers_do_not_get_past(self, client):
+        a = Held(client, "claude-a")
+        _reserve(client, "claude-a", udids=["SIM-1"])
+        r = client.post("/api/v1/device/raw-op",
+                        headers=[("authorization", f"Bearer {KEY}"),
+                                 ("x-quern-session", "claude-b"),
+                                 ("content-type", "application/json"),
+                                 ("content-type", "text/plain")],
+                        content=b'{"udid": "SIM-1"}')
+        assert r.status_code == 423
+        a.close()
+
     def test_a_large_json_body_is_still_checked(self, client):
         a = Held(client, "claude-a")
         _reserve(client, "claude-a", udids=["SIM-1"])
@@ -607,22 +633,46 @@ class TestReservingThroughThePool:
         a.close()
         b.close()
 
-    def test_a_refused_reservation_shuts_down_what_it_booted(self, client, pool, registry,
-                                                              monkeypatch):
-        """Booting happens before the registry's all-or-nothing check; if that
-        refuses, the simulators booted for it are shut down again (review)."""
+    def test_losing_a_race_boots_nothing_and_shuts_down_nothing(self, client, pool, registry,
+                                                                monkeypatch):
+        """Two jobs ask for the one free (shut down) simulator. Booting before
+        claiming let the loser's undo shut down the winner's device (review).
+        Now the claim comes first: the loser is refused before any boot."""
         a = Held(client, "claude-a")
+        b = Held(client, "claude-b")
         original = registry.reserve
 
-        def refuse(*args, **kwargs):
-            from server.session_registry import SessionConflict
-            raise SessionConflict("raced: someone else got there first")
+        def winner_first(session_id, udids, **kw):
+            if session_id == "claude-a":            # B claims it a moment earlier
+                original("claude-b", ["SIM-2"])
+            return original(session_id, udids, **kw)
 
-        monkeypatch.setattr(registry, "reserve", refuse)
-        r = _reserve(client, "claude-a", count=2)
-        assert r.status_code == 409
-        assert client.app.state.device_controller.shutdowns == ["SIM-2"]
-        monkeypatch.setattr(registry, "reserve", original)
+        monkeypatch.setattr(registry, "reserve", winner_first)
+        r = _reserve(client, "claude-a", count=2)    # SIM-1 booted + SIM-2 to boot
+        assert r.status_code == 409 and "claude-b" in r.json()["detail"]
+        assert pool.booted == [], "the loser booted nothing"
+        assert client.app.state.device_controller.shutdowns == [], "and shut down nothing"
+        assert registry.holder_of("SIM-2").session.id == "claude-b"
+        a.close()
+        b.close()
+
+    def test_a_failed_boot_withdraws_the_whole_reservation(self, client, pool, registry):
+        a = Held(client, "claude-a")
+        calls = []
+
+        async def flaky(udid):
+            calls.append(udid)
+            if len(calls) == 2:
+                raise RuntimeError("simctl boot failed")
+            from server.models import DeviceState
+            pool.devices[udid].state = DeviceState.BOOTED
+
+        pool._boot_and_wait = flaky
+        r = _reserve(client, "claude-a", count=3)    # SIM-1 booted; boot SIM-2, SIM-3
+        assert r.status_code == 502 and "nothing was reserved" in r.json()["detail"]
+        assert all(registry.holder_of(u) is None for u in ("SIM-1", "SIM-2", "SIM-3"))
+        assert client.app.state.device_controller.shutdowns == ["SIM-2"], \
+            "what it did boot is shut down again"
         a.close()
 
     def test_release_policy_skips_a_device_reserved_again_meanwhile(self, client, registry):
@@ -715,3 +765,92 @@ class TestRoutesAddressedById:
             _refuse_if_held("PHONE-1", "restart")             # the holder may
         finally:
             _SESSION.reset(holder)
+
+
+class FakeWS:
+    """Enough of a WebSocket to drive `live()` with controlled interleaving."""
+
+    def __init__(self, app, token, session):
+        import asyncio
+
+        self.app = app
+        self.headers = {"x-quern-resume-token": token}
+        self.closed_with = None
+        self.close_gate = None              # an Event the close waits on, if set
+        self.inbox: asyncio.Queue = asyncio.Queue()
+        self.sent = []
+
+    async def accept(self):
+        pass
+
+    async def close(self, code=1000, reason=""):
+        if self.close_gate is not None:
+            await self.close_gate.wait()
+        if self.closed_with is None:
+            self.closed_with = code
+            await self.inbox.put({"type": "websocket.disconnect", "code": code})
+
+    async def send_json(self, data):
+        self.sent.append(data)
+
+    async def receive(self):
+        return await self.inbox.get()
+
+
+class TestSocketBookkeepingRaces:
+    async def test_two_reconnects_at_once_leave_the_newest_holding(self):
+        """B awaits A's close while C attaches: storing after the await let B
+        overwrite C, so a later release told B and left C, the real holder,
+        never told (review, reproduced with fakes)."""
+        import asyncio
+        from types import SimpleNamespace
+
+        from server.api.sessions import _sockets, live
+
+        reg = SessionRegistry()
+        app = SimpleNamespace(state=SimpleNamespace(sessions=reg))
+        _, token = reg.open("s")
+        a = FakeWS(app, token, "s")
+        task_a = asyncio.create_task(live(a, "s"))
+        await asyncio.sleep(0.01)
+        gate = asyncio.Event()
+        a.close_gate = gate                       # B's close of A will block here
+        b, c = FakeWS(app, token, "s"), FakeWS(app, token, "s")
+        task_b = asyncio.create_task(live(b, "s"))
+        await asyncio.sleep(0.01)                 # B attached, waiting on A's close
+        task_c = asyncio.create_task(live(c, "s"))
+        await asyncio.sleep(0.01)                 # C attached and stored
+        gate.set()
+        await asyncio.sleep(0.05)
+        assert _sockets(app)["s"][1] is c, "the newest connection holds the session"
+        assert b.closed_with == 4000, "B was told it was replaced"
+        assert c.closed_with is None and c.sent and c.sent[0]["event"] == "attached"
+        await c.inbox.put({"type": "websocket.disconnect", "code": 1000})
+        for t in (task_a, task_b, task_c):
+            await asyncio.wait_for(t, 2)
+        assert reg.get("s") is None, "C's clean close released the session"
+
+    async def test_a_release_during_attach_is_not_told_attached(self):
+        import asyncio
+        from types import SimpleNamespace
+
+        from server.api.sessions import close_socket, live
+
+        reg = SessionRegistry()
+        app = SimpleNamespace(state=SimpleNamespace(sessions=reg))
+        _, token = reg.open("s")
+        a = FakeWS(app, token, "s")
+        task_a = asyncio.create_task(live(a, "s"))
+        await asyncio.sleep(0.01)
+        gate = asyncio.Event()
+        a.close_gate = gate
+        b = FakeWS(app, token, "s")
+        task_b = asyncio.create_task(live(b, "s"))
+        await asyncio.sleep(0.01)                 # B attached, waiting on A's close
+        reg.release("s")                          # ...and the owner releases it now
+        await close_socket(app, "s", 4404, "session released")
+        gate.set()
+        await asyncio.wait_for(task_b, 2)
+        assert b.closed_with == 4404
+        assert not any(m.get("event") == "attached" for m in b.sent)
+        await asyncio.wait_for(task_a, 2)

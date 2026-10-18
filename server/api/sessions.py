@@ -179,18 +179,31 @@ async def reserve(request: Request, session_id: str, body: ReserveRequest) -> di
     if chosen != 1:
         raise HTTPException(400, "give exactly one of udids, count (with criteria), or group "
                                  "(optionally with count)")
-    udids, booted = await _choose(request, registry, session_id, body)
+    udids, to_boot = await _choose(request, registry, session_id, body)
+    # Claim first, boot after. Booting first let two concurrent requests both
+    # boot the one free simulator; the loser's undo then shut down the device
+    # the winner had just reserved (review). The claim is synchronous and all
+    # or nothing, so a loser never boots anything.
     try:
         reservations = registry.reserve(session_id, udids, on_release=body.on_release,
-                                        booted=booted)
+                                        booted=to_boot)
     except SessionError as e:
-        # Undo what this request booted: a refused reservation must not leave
-        # simulators running that nobody asked to keep (review).
-        controller = getattr(request.app.state, "device_controller", None)
-        for udid in booted:
+        raise _refused(e) from None
+    controller = getattr(request.app.state, "device_controller", None)
+    pool = getattr(controller, "_pool", None)
+    started: list[str] = []
+    try:
+        for udid in to_boot:
+            await pool._boot_and_wait(udid)
+            started.append(udid)
+    except Exception as e:  # noqa: BLE001 -- any failed boot withdraws the claim
+        registry.unreserve(session_id, udids)
+        registry.take_released()          # not a release to act on: undone below
+        for udid in started:
             with contextlib.suppress(Exception):
                 await controller.shutdown(udid)
-        raise _refused(e) from None
+        raise HTTPException(502, f"could not boot {to_boot[len(started)]} for the "
+                                 f"reservation, so nothing was reserved: {e}") from None
     if len(session.reservations) == 1:
         # One device: it becomes this session's active device, so unqualified
         # calls go to it (the per-session slot, #460).
@@ -220,7 +233,8 @@ async def unreserve(request: Request, session_id: str, udid: str | None = None) 
 
 async def _choose(request: Request, registry: SessionRegistry, session_id: str,
                   body: ReserveRequest) -> tuple[list[str], list[str]]:
-    """The udids a reservation asks for, and which of them it booted."""
+    """The udids a reservation asks for, and which of them need booting --
+    not booted here: the caller claims them first."""
     controller = getattr(request.app.state, "device_controller", None)
     pool = getattr(controller, "_pool", None)
     if body.udids is not None:
@@ -257,18 +271,17 @@ async def _choose(request: Request, registry: SessionRegistry, session_id: str,
     booted = [d for d in devices if d.state == DeviceState.BOOTED]
     shutdown = [d for d in devices if d.state == DeviceState.SHUTDOWN]
     picked = booted[:wanted]
-    started: list[str] = []
+    to_boot: list[str] = []
     if len(picked) < wanted and body.auto_boot:
         for d in shutdown[: wanted - len(picked)]:
-            await pool._boot_and_wait(d.udid)
             picked.append(d)
-            started.append(d.udid)
+            to_boot.append(d.udid)
     if len(picked) < wanted:
         raise HTTPException(409, (
             f"asked for {wanted} device(s), {len(picked)} free"
             + ("" if body.auto_boot else " and booted (auto_boot is off)")
             + f"; {len(held)} held by other sessions"))
-    return [d.udid for d in picked], started
+    return [d.udid for d in picked], to_boot
 
 
 def _group_members(group: str, devices: list, pool) -> list:
@@ -355,10 +368,27 @@ async def live(websocket: WebSocket, session_id: str) -> None:
         await websocket.close(code=CLOSE_BAD_TOKEN, reason=str(e)[:120])
         return
     # The newest connection holds the session; an older one is closed, and its
-    # end changes nothing (its generation is no longer current).
-    await close_socket(websocket.app, session_id, CLOSE_REPLACED,
-                       "replaced by a newer connection")
-    _sockets(websocket.app)[session_id] = (generation, websocket)
+    # end changes nothing (its generation is no longer current). The slot is
+    # taken before any await: popping the old entry, awaiting its close and
+    # only then storing let two reconnects at once overwrite each other, and a
+    # release in that window find nothing to close (review).
+    sockets = _sockets(websocket.app)
+    previous = sockets.get(session_id)
+    sockets[session_id] = (generation, websocket)
+    if previous is not None:
+        with contextlib.suppress(Exception):
+            await previous[1].close(code=CLOSE_REPLACED, reason="replaced by a newer connection")
+    # After that await: is this still the session's current connection, of a
+    # session that still exists?
+    current = registry.get(session_id)
+    if current is None or current.generation != generation:
+        if sockets.get(session_id, (None,))[0] == generation:
+            sockets.pop(session_id, None)
+        with contextlib.suppress(Exception):
+            await websocket.close(
+                code=CLOSE_UNKNOWN if current is None else CLOSE_REPLACED,
+                reason="session released" if current is None else "replaced")
+        return
     clean = False
     try:
         await websocket.send_json({"event": "attached", "session": session.id,
