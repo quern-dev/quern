@@ -610,6 +610,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # that is blind says so in its log; a setting it could not read says
     # what it fell back to.
     visibility.MODE = _sessions_cfg["visibility"]
+    # Recorded, so `doctor` reports the mode this server runs, not whatever
+    # config.json says now: edited without a restart, it read "blind" while
+    # every client still saw everything (CodeRabbit).
+    from server.lifecycle.state import update_state as _update_state
+
+    _update_state(visibility=visibility.MODE)
     if _sessions_cfg["visibility_note"]:
         logger.warning("%s", _sessions_cfg["visibility_note"])
     elif visibility.MODE == "blind":
@@ -1634,13 +1640,18 @@ def _report_bind() -> None:
     print(f"  ⚠ {exposed}" if exposed else f"  ✓ {host} (this Mac only)")
     from server.config import sessions_settings
 
-    sharing = sessions_settings()
-    if sharing["visibility_note"]:
-        print(f"  ⚠ {sharing['visibility_note']}")
-    else:
-        print(f"  ✓ sharing: {sharing['visibility']}"
-              + (" (client keys see only their own devices' data)"
-                 if sharing["visibility"] == "blind" else ""))
+    # The mode the running server took at start-up, from its state file; the
+    # configured one only to say a restart is due. A server from before the
+    # setting existed records none, and runs shared.
+    running = state.get("visibility") or "shared"
+    configured = sessions_settings()
+    print(f"  {'✓' if running == 'shared' or running == 'blind' else '?'} sharing: {running}"
+          + (" (client keys see only their own devices' data)" if running == "blind" else ""))
+    if configured["visibility_note"]:
+        print(f"  ⚠ {configured['visibility_note']}")
+    elif configured["visibility"] != running:
+        print(f"  ⚠ config.json now says {configured['visibility']!r}: restart the server "
+              f"(quern restart) for it to take effect")
 
 
 def _report_held_sessions() -> None:

@@ -285,7 +285,10 @@ class TestDevicesAndSetup:
 def test_the_next_holder_does_not_read_the_previous_holders_entries(world):
     """bob releases SIM-B and alice reserves it: bob's lines from before her
     reservation stay his."""
+    from server.api.sessions import run_release_policies
+
     world.registry.release("bob:s1")
+    asyncio.run(run_release_policies(world.app))    # bob's clean-up, which frees it
     world.registry.reserve("alice:s1", [SIM_B], on_release="none", booted=[])
     r = world.client.get("/api/v1/logs/query", params={"limit": 100}, headers=_h(world.alice))
     assert "bob-now" not in _messages(r)
@@ -492,7 +495,10 @@ def test_previous_holders_mock_rule_is_not_shown_to_next_holder(world):
     world.app.state.proxy_adapter = SimpleNamespace(_mock_rules=[
         {"rule_id": "bob-rule", "pattern": "~d secret.bob", "response": {"body": "bob-token"},
          "simulator_udid": SIM_B}])
+    from server.api.sessions import run_release_policies
+
     world.registry.release("bob:s1")
+    asyncio.run(run_release_policies(world.app))
     world.registry.reserve("alice:s1", [SIM_B], on_release="none")
     r = world.client.get("/api/v1/proxy/mocks", headers=_h(world.alice))
     assert "bob-rule" not in r.text, r.text
@@ -974,3 +980,71 @@ def test_a_clients_rules_and_recordings_end_with_its_hold(world):
     assert cleared == ["alice-rule"], "only the client's own rules on its released device"
     assert stopped == ["rec-alice"]
     assert {a["action"] for a in actions} == {"mock_removed", "recording_stopped"}
+
+
+class TestReleasingADevice:
+    """A client's device is not another key's until its clean-up has run
+    (CodeRabbit): in the gap its recording filmed, and its rules answered,
+    the next holder."""
+
+    def test_another_key_cannot_reserve_it_until_the_clean_up_has_run(self, world):
+        from server.api.sessions import run_release_policies
+        from server.session_registry import SessionConflict
+
+        world.registry.release("bob:s1")
+        import pytest as _pytest
+
+        with _pytest.raises(SessionConflict, match="being released"):
+            world.registry.reserve("alice:s1", [SIM_B], on_release="none")
+        assert SIM_B in world.registry.held_udids(), "the pool does not offer it either"
+        asyncio.run(run_release_policies(world.app))
+        world.registry.reserve("alice:s1", [SIM_B], on_release="none")
+
+    def test_the_same_key_may_take_it_back(self, world):
+        world.registry.unreserve("bob:s1", [SIM_B])
+        world.registry.open("bob:s2", principal="client:bob")
+        world.registry.get("bob:s2").state = "live"
+        world.registry.reserve("bob:s2", [SIM_B], on_release="none")
+
+    def test_the_owners_releases_do_not_wait(self, world):
+        world.registry.open("ci", principal="owner")
+        world.registry.get("ci").state = "live"
+        world.registry.reserve("ci", [FREE], on_release="none")
+        world.registry.release("ci")
+        world.registry.reserve("alice:s1", [FREE], on_release="none")
+
+    def test_a_blind_release_answers_only_its_own_actions(self):
+        from server.api.sessions import _answerable
+
+        actions = [{"udid": SIM_B, "action": "mock_removed", "_session": "bob:s1"},
+                   {"udid": SIM_B, "action": "shutdown", "_session": "alice:s1"}]
+        assert _answerable(actions, "alice:s1", blind=True) == [
+            {"udid": SIM_B, "action": "shutdown"}]
+        assert len(_answerable(actions, "alice:s1", blind=False)) == 2
+        assert all("_session" not in a for a in _answerable(actions, "x", blind=False))
+
+
+class TestDoctorReportsTheRunningMode:
+    def test_a_config_change_without_a_restart_is_called_out(self, monkeypatch, capsys):
+        import server.main as main_mod
+        from server import config
+
+        monkeypatch.setattr(main_mod, "read_state",
+                            lambda: {"server_host": "127.0.0.1", "visibility": "shared"})
+        monkeypatch.setattr(config, "read_user_config",
+                            lambda: {"sessions": {"visibility": "blind"}})
+        main_mod._report_bind()
+        out = capsys.readouterr().out
+        assert "sharing: shared" in out and "restart" in out
+
+    def test_the_running_mode_is_reported(self, monkeypatch, capsys):
+        import server.main as main_mod
+        from server import config
+
+        monkeypatch.setattr(main_mod, "read_state",
+                            lambda: {"server_host": "127.0.0.1", "visibility": "blind"})
+        monkeypatch.setattr(config, "read_user_config",
+                            lambda: {"sessions": {"visibility": "blind"}})
+        main_mod._report_bind()
+        out = capsys.readouterr().out
+        assert "sharing: blind" in out and "restart" not in out

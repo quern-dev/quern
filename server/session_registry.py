@@ -141,6 +141,12 @@ class SessionRegistry:
         #: whoever drains them (`take_released`): grace that ran out in a
         #: sweep has nobody waiting on it to act.
         self._released: list[HeldSession] = []
+        #: Devices a client key released whose clean-up -- its mock rules,
+        #: its recordings -- has not run yet, by the releasing principal. Not
+        #: reservable by anyone else until it has: in the gap the previous
+        #: holder's recording went on filming, and its rules on answering, the
+        #: next holder's work (CodeRabbit).
+        self._draining: dict[str, str] = {}
         self._generations = 0
 
     # -- lifecycle ---------------------------------------------------------
@@ -223,7 +229,18 @@ class SessionRegistry:
         session = self._sessions.pop(session_id, None)
         if session is not None:
             self._released.append(session)
+            self._drain(session.principal, session.reservations)
         return session
+
+    def _drain(self, principal: str, udids) -> None:
+        if principal != OWNER:
+            for udid in udids:
+                self._draining[udid] = principal
+
+    def drained(self, udids) -> None:
+        """The clean-up for these released devices has run: they are free."""
+        for udid in udids:
+            self._draining.pop(udid, None)
 
     def expire_due(self) -> list[HeldSession]:
         """Release every session whose grace has run out."""
@@ -260,6 +277,9 @@ class SessionRegistry:
             held = self.holder_of(udid)
             if held is not None and held.session.id != session_id:
                 raise SessionConflict(f"{udid} is reserved by session {held.session.id}")
+            releasing = self._draining.get(udid)
+            if releasing is not None and releasing != session.principal:
+                raise SessionConflict(f"{udid} is being released; try again in a moment")
         booted = set(booted)
         for udid in udids:
             session.reservations.setdefault(
@@ -287,6 +307,7 @@ class SessionRegistry:
             self._released.append(HeldSession(
                 id=session.id, principal=session.principal, token_digest="",
                 opened_at=session.opened_at, reservations={r.udid: r for r in freed}))
+            self._drain(session.principal, [r.udid for r in freed])
         return freed
 
     def holder_of(self, udid: str) -> Held | None:
@@ -300,8 +321,9 @@ class SessionRegistry:
     def held_udids(self, *, except_session: str = "") -> set[str]:
         """Every device some *other* session holds."""
         self.expire_due()
-        return {u for s in self._sessions.values() if s.id != except_session
+        held = {u for s in self._sessions.values() if s.id != except_session
                 for u in s.reservations}
+        return held | set(self._draining)
 
     # -- reading -----------------------------------------------------------
 

@@ -22,7 +22,7 @@ import contextlib
 import logging
 import secrets
 
-from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from server import principal, visibility
@@ -167,11 +167,8 @@ async def release_session(request: Request, session_id: str) -> dict:
     await close_socket(request.app, session_id, CLOSE_UNKNOWN, "session released")
     actions = await run_release_policies(request.app)
     freed = [r.udid for r in session.reservations.values()]
-    # The queue is global: another session's expired policies may run here,
-    # and on a blind server are not a client's to hear about (review).
-    if visibility.blind_for(caller):
-        actions = [a for a in actions if a["udid"] in freed]
-    return {"released": session_id, "freed": freed, "actions": actions}
+    return {"released": session_id, "freed": freed,
+            "actions": _answerable(actions, session_id, blind=visibility.blind_for(caller))}
 
 
 @router.post("/{session_id}/reservations")
@@ -282,9 +279,8 @@ async def unreserve(request: Request, session_id: str, udid: str | None = None) 
                                           "udids": [r.udid for r in freed], "by": by})
     actions = await run_release_policies(request.app)
     freed_ids = [r.udid for r in freed]
-    if visibility.blind_for(caller):
-        actions = [a for a in actions if a["udid"] in freed_ids]
-    return {"session": session_id, "freed": freed_ids, "actions": actions}
+    return {"session": session_id, "freed": freed_ids,
+            "actions": _answerable(actions, session_id, blind=visibility.blind_for(caller))}
 
 
 async def _choose(request: Request, registry: SessionRegistry, session_id: str,
@@ -375,7 +371,8 @@ def _group_members(group: str, devices: list, pool) -> list:
     return list(members.values())
 
 
-async def _end_client_work(app, registry: SessionRegistry, session: HeldSession) -> list[dict]:
+async def _end_client_work(app: FastAPI, registry: SessionRegistry,
+                           session: HeldSession) -> list[dict]:
     """A client key's mock rules and recordings on a device end when its hold
     on the device does. Left in place, the next holder's traffic was answered
     by the previous holder's rules -- whose patterns and bodies a blind
@@ -428,7 +425,11 @@ async def run_release_policies(app) -> list[dict]:
         return []
     actions = []
     for session in registry.take_released():
-        actions.extend(await _end_client_work(app, registry, session))
+        start = len(actions)
+        try:
+            actions.extend(await _end_client_work(app, registry, session))
+        finally:
+            registry.drained(session.reservations)
         for r in session.reservations.values():
             if r.on_release != "shutdown_booted" or not r.booted_here:
                 continue
@@ -442,7 +443,18 @@ async def run_release_policies(app) -> list[dict]:
                 logger.warning("Could not shut down %s on release: %s", r.udid, e)
                 actions.append({"udid": r.udid, "action": "shutdown", "ok": False,
                                 "error": str(e)})
+        for a in actions[start:]:
+            a["_session"] = session.id         # whose release it was; stripped before answering
     return actions
+
+
+def _answerable(actions: list[dict], session_id: str, *, blind: bool) -> list[dict]:
+    """Release actions as a route answers them: on a blind server only those
+    of the caller's own release -- the queue is global, and a device's udid
+    alone does not say whose release an action was (CodeRabbit) -- and never
+    the internal tag."""
+    return [{k: v for k, v in a.items() if k != "_session"} for a in actions
+            if not blind or a.get("_session") == session_id]
 
 
 async def release_revoked(app) -> list[str]:
