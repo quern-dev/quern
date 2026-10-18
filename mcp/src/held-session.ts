@@ -46,9 +46,9 @@ let everAttached = false;
 let lossPending = false;
 
 const LOSS_NOTICE =
-  "Your quern session ended on the server (it restarted, or its grace period ran " +
-  "out), so any devices you reserved were released. Reserve them again with " +
-  "reserve_devices if you need them.";
+  "Your quern session ended on the server (it was released, the server restarted, " +
+  "or its grace period ran out), so any devices you reserved are no longer yours. " +
+  "Reserve them again with reserve_devices if you need them.";
 
 export type HeldState = "idle" | "opening" | "connecting" | "live" | "retrying" | "stopped";
 let state: HeldState = "idle";

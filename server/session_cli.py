@@ -239,6 +239,11 @@ def _run(args: argparse.Namespace) -> int:
         for sig in (signal.SIGINT, signal.SIGTERM):
             signal.signal(sig, forward)
         rc = child.wait()
+        if not socket.lost and not _still_holding(url, key, session, udids):
+            # The socket thread may still have been reconnecting when the
+            # command ended -- a server restart takes seconds -- so ask the
+            # server directly whether the hold survived (found live).
+            socket._lose(4404)
         if socket.lost:
             print(f"quern session run: the command ran partly without its reservation "
                   f"(exit {rc if rc else HOLD_LOST})", file=sys.stderr)
@@ -246,6 +251,18 @@ def _run(args: argparse.Namespace) -> int:
         return rc
     finally:
         socket.close()
+
+
+def _still_holding(url: str, key: str, session: str, udids: list[str]) -> bool:
+    """Whether the server still has `session`, holding every one of `udids`."""
+    try:
+        status, answer = _call("GET", url, key, f"/api/v1/sessions/{session}", session=session)
+    except ConnectionError:
+        return False
+    if status != 200:
+        return False
+    held = {r.get("udid") for r in answer.get("reservations") or []}
+    return set(udids) <= held
 
 
 def _list() -> int:

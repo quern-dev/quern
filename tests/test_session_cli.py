@@ -31,6 +31,9 @@ def server(monkeypatch):
         def close(self):
             self.closed = True
 
+        def _lose(self, code):
+            self.lost = True
+
     monkeypatch.setattr(session_cli, "_server", lambda: ("http://127.0.0.1:9", "KEY"))
     monkeypatch.setattr(session_cli, "_call", fake_call)
     monkeypatch.setattr(session_cli, "_Socket", FakeSocket)
@@ -62,6 +65,8 @@ def _opened(server, name="ci-job"):
     server.answers[("POST", "/api/v1/sessions")] = (200, {"id": name, "resume_token": "TOK"})
     server.answers[("POST", f"/api/v1/sessions/{name}/reservations")] = (
         200, {"holding": ["SIM-1", "SIM-2"]})
+    server.answers[("GET", f"/api/v1/sessions/{name}")] = (
+        200, {"reservations": [{"udid": "SIM-1"}, {"udid": "SIM-2"}]})
 
 
 def test_run_holds_reserves_runs_and_releases(server, child):
@@ -168,6 +173,7 @@ def test_the_default_name_is_its_own_never_the_callers(server, child, monkeypatc
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "abc123")
     server.answers[("POST", "/api/v1/sessions")] = (200, {"id": "x", "resume_token": "T"})
     server.answers[("POST", "/api/v1/sessions/x/reservations")] = (200, {"holding": ["S"]})
+    server.answers[("GET", "/api/v1/sessions/x")] = (200, {"reservations": [{"udid": "S"}]})
     session_cli.main(["run", "--", "true"])
     opened = next(c for c in server.calls if c["path"] == "/api/v1/sessions")
     name = opened["body"]["name"]
@@ -185,3 +191,11 @@ def test_a_lost_hold_is_not_a_success(server, child):
             "a failing command keeps its own code"
     finally:
         server.Socket.lose = False
+
+
+def test_a_hold_lost_unnoticed_by_the_socket_is_caught_at_the_end(server, child):
+    """A server restart near the end of a run: the socket was still
+    reconnecting when the command finished. The final check asks the server."""
+    _opened(server)
+    server.answers[("GET", "/api/v1/sessions/ci-job")] = (404, {"detail": "no held session"})
+    assert session_cli.main(["run", "--name", "ci-job", "--", "true"]) == 4
