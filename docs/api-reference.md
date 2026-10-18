@@ -29,7 +29,11 @@ The server log notes unattributed callers that passed authentication: once every
 When several agents or CI jobs share one server, an agent can **reserve** devices so nobody else changes them (#254). A reservation stands on a **held session**: a client that keeps the session's WebSocket open.
 
 - **The MCP does this for you.** It opens a session under its `X-Quern-Session` id when it starts and holds the socket while it runs. Its tools are `reserve_devices`, `release_devices` and `session_status`.
-- **CI uses `quern session run`.** For example, `quern session run --reserve 2 --device-type simulator -- xcodebuild test …` holds a session for the command. It exports `QUERN_SESSION`, `QUERN_SESSION_TOKEN` and `QUERN_DEVICES` to it, and releases the devices when it exits. `quern session list` and `quern session release <id>` complete the set.
+- **CI uses `quern session run`.** For example, `quern session run --reserve 2 --device-type simulator -- xcodebuild test …` holds a session for the command. It exports `QUERN_SESSION`, `QUERN_SESSION_TOKEN` and `QUERN_DEVICES` to it, and releases the devices when it exits.
+  - The session gets its own name (`<caller>.run-<hex>`).
+  - A dropped connection is reconnected within the grace period.
+  - When the command finishes, the hold is confirmed with the server. If it was lost along the way (a server restart, say), a successful command exits **4**, not 0.
+  - `quern session list` and `quern session release <id>` complete the set.
 - **Over HTTP:**
   - `POST /api/v1/sessions` (`{name?}`) returns `{id, resume_token, grace_seconds, live_path}`. The token is shown once and only its hash is kept.
   - Then open the WebSocket at `live_path` with the API key, `X-Quern-Session` and `X-Quern-Resume-Token: <token>`. It answers `{"event": "attached", …}`.
@@ -41,7 +45,7 @@ When several agents or CI jobs share one server, an agent can **reserve** device
 - **A dropped connection enters a grace period:** a lost network, a killed process, or missed pings (the server pings every 10 s and gives up after 20 s more). The default is 180 s, set with `{"sessions": {"grace_seconds": N}}` in `~/.quern/config.json` and clamped to 120–300.
 - **Reconnecting** with the resume token inside the grace period keeps the reservations. On the server's own machine, opening the same name again also takes the session back, which is how an agent whose MCP restarted keeps its devices.
 - **Sessions don't survive a server restart.** A reconnect is closed with code 4404 and must reserve again.
-- **Other close codes:** 4403 means a wrong resume token; 4401 means a missing API key.
+- **Other close codes:** 4403 means a wrong resume token, and 4401 a missing API key. 4000 means a newer connection presented the same token and took the session over: one connection holds a session at a time, the newest winning. Releasing a session (`DELETE /api/v1/sessions/{id}`) closes its socket with 4404, so its client knows. When someone else frees some of a session's devices, its socket gets `{"event": "released", "udids": [...], "by": ...}`.
 - **A session without a socket can't reserve.** A plain `curl` with `X-Quern-Session` still gets attribution and its own active device, but a reservation request answers 409.
 
 **Reserving:** `POST /api/v1/sessions/{id}/reservations`, sent as the session itself (`X-Quern-Session: {id}`), with exactly one of:
@@ -57,7 +61,8 @@ It's all or nothing: **409** names the holder of any device another session has.
 - **Changes by anyone else are refused with 423:** another session, or a caller with no session at all. The body is `{message, udid, held_by, state, since, yours}`.
 - **What counts as a change:** any request that isn't a GET, apart from a few POSTs that only watch a device (UI waits, landmark identify/validate, flow waits, previews, screenshot timelines, log capture).
 - **Reads stay open to everyone:** screenshots, the UI tree, logs.
-- **Every route is covered:** a device a request names (`udid`, `udids`, `device_id`, `simulator_udid`, `device_serial` or `serial`, in the query string or a JSON body) is checked before the handler runs, and the device a request doesn't name (the active device, the pool's pick) is checked when it's resolved. The pool never picks a device another session holds.
+- **Every route is covered:** a device a request names (`udid`, `udids`, `device_id`, `simulator_udid`, `device_serial` or `serial`, in the query string or any body that parses as JSON) is checked before the handler runs, and the device a request doesn't name (the active device, the pool's pick) is checked when it's resolved. Routes that reach a device another way check it themselves: stopping a recording, capture, timeline or every preview; changing a mock rule scoped to a simulator; cert install; boot by name; WDA's automatic restarts; build-and-install, re-checked after the build. The pool never picks a device another session holds.
+- **Two known limits:** releasing an intercepted flow isn't tied to a reservation, because held flows carry no device. And a USB iPhone's preview is filed by its name, not its udid, so stopping every preview can't tell it's held.
 
 **Seeing who holds what:**
 

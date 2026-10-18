@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A reservation lasts as long as its holder's connection. A clean exit releases it at once; a dropped connection keeps it for a grace period (3 minutes by default, `sessions.grace_seconds`), so a network blip costs nothing, and a crashed agent holds its devices for no longer than that.
   - Reservations don't survive a server restart, and clients are told to reserve again.
   - `list_devices` shows who holds each device, and `quern session list` / `release` show and free them.
+  - `quern session run` exits 4 if its command succeeded but the hold was lost along the way (a server restart, say), since the devices weren't protected for the whole run.
   - Named groups of devices can be defined in `config.json` (`device_groups`), and `on_release: shutdown_booted` cleans up the simulators a reservation booted.
 - **WebSocket requests now need the API key.** The key check used to wave every WebSocket request through. Nothing used WebSockets until now, so nothing was exposed.
 - **Watch a simulator live from another machine (#449).** `start_recording` with `video` and `viewer: true` (`quern record start --video --viewer`) returns `viewer_url`, a link that plays the recording's simulator in a browser elsewhere on the LAN. For example, a CI job can post it when a UI test starts.
