@@ -193,6 +193,26 @@ def _closed_with(ws, timeout=3.0) -> int:
     return box["code"]
 
 
+def _received_within(ws, timeout=3.0):
+    """The next message on `ws`, or a test failure after `timeout`."""
+    import threading
+
+    box: dict = {}
+
+    def wait():
+        try:
+            box["msg"] = ws.receive_json()
+        except Exception as e:  # noqa: BLE001
+            box["msg"] = repr(e)
+
+    t = threading.Thread(target=wait, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        pytest.fail(f"nothing arrived on the socket within {timeout}s")
+    return box["msg"]
+
+
 def _reserve(client, name, **body):
     return client.post(f"/api/v1/sessions/{name}/reservations", headers=_h(name), json=body)
 
@@ -547,7 +567,7 @@ class TestReviewFindings:
         assert r.status_code == 200 and r.json()["freed"] == ["SIM-1"]
         assert registry.holder_of("SIM-1") is None and registry.holder_of("SIM-2") is not None
         # The holder is told over its socket, so the MCP can tell the agent.
-        event = a.ws.receive_json()
+        event = _received_within(a.ws)
         assert event == {"event": "released", "udids": ["SIM-1"], "by": "someone-else"}
         a.close()
 
@@ -852,7 +872,10 @@ class TestSocketBookkeepingRaces:
         assert c.closed_with is None and c.sent and c.sent[0]["event"] == "attached"
         await c.inbox.put({"type": "websocket.disconnect", "code": 1000})
         for t in (task_a, task_b, task_c):
-            await asyncio.wait_for(t, 2)
+            try:
+                await asyncio.wait_for(t, 2)
+            except TimeoutError:
+                pytest.fail("a connection handler did not finish")
         assert reg.get("s") is None, "C's clean close released the session"
 
     async def test_a_release_during_attach_is_not_told_attached(self):
@@ -873,7 +896,12 @@ class TestSocketBookkeepingRaces:
         task_b = asyncio.create_task(live(b, "s"))
         await asyncio.sleep(0.01)                 # B attached, waiting on A's close
         reg.release("s")                          # ...and the owner releases it now
-        await close_socket(app, "s", 4404, "session released")
+        try:
+            # Bounded: if B had not taken its slot before awaiting, this would
+            # wait on A's gated close and deadlock instead of failing.
+            await asyncio.wait_for(close_socket(app, "s", 4404, "session released"), 1)
+        except TimeoutError:
+            pass
         gate.set()
         await asyncio.wait_for(task_b, 2)
         assert b.closed_with == 4404
