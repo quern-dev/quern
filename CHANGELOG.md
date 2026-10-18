@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Reserve devices on a shared server (#254).** When several agents or CI jobs share one quern, an agent reserves devices and nobody else can change them. Another caller's taps, installs and other changes get **423** naming the holder, while reads (screenshots, UI tree, logs) stay open. The MCP holds a session for each agent automatically and adds `reserve_devices`, `release_devices` and `session_status`. A CI job uses `quern session run --reserve 2 -- xcodebuild test …`.
+  - A reservation lasts as long as its holder's connection. A clean exit releases it at once; a dropped connection keeps it for a grace period (3 minutes by default, `sessions.grace_seconds`), so a network blip costs nothing, and a crashed agent holds its devices for no longer than that.
+  - Reservations don't survive a server restart, and clients are told to reserve again.
+  - `list_devices` shows who holds each device, and `quern session list` / `release` show and free them.
+  - Named groups of devices can be defined in `config.json` (`device_groups`), and `on_release: shutdown_booted` cleans up the simulators a reservation booted.
+- **WebSocket requests now need the API key.** The key check used to wave every WebSocket request through. Nothing used WebSockets until now, so nothing was exposed.
 - **Watch a simulator live from another machine (#449).** `start_recording` with `video` and `viewer: true` (`quern record start --video --viewer`) returns `viewer_url`, a link that plays the recording's simulator in a browser elsewhere on the LAN. For example, a CI job can post it when a UI test starts.
   - It's off unless `viewer.enabled` is set in `~/.quern/config.json`.
   - It's served by a separate listener on port 9120 that carries only viewer pages and streams, never the API. quern's own port scan never takes that port.

@@ -450,6 +450,12 @@ quern record keyframe ID [--label TEXT]   # Make this moment a seek point, and m
 quern record start --udid UDID --video --keyframes requests   # Seek points at requests only (default: actions and requests)
 quern record start --udid UDID --requested-by NAME   # Name who asked, so runs on a shared server tell apart
 quern record list [--requested-by NAME]   # Recordings running on this server (only NAME's)
+quern session run --reserve N [--device-type simulator] -- CMD ...   # Hold a session, reserve devices for CMD, release on exit
+quern session run --udid UDID [--on-release shutdown_booted] -- CMD   # ...exactly these; shut down what it booted afterwards
+quern session run --group GROUP [--reserve N] [--name NAME] -- CMD   # A config.json device group; name the session
+quern session run --reserve N --os-version 18 --device-name "iPhone 16" --no-boot -- CMD   # Criteria; only already-booted devices
+quern session list           # Held sessions, their state (live / grace) and devices
+quern session release ID     # End a session and free its devices
 quern set-update-check [on|off]
                              # Show or set the automatic daily update check
                              #   (default: on). check-updates works either way.
@@ -480,7 +486,7 @@ quern tunneld <cmd>          # Manage the tunneld LaunchDaemon (install/uninstal
 
 ## MCP Tools
 
-123 tools available via MCP. All tools are lazy-loaded and won't hog your context just by connecting the MCP. They are lightweight API wrappers and are easy for the Agent to use.
+126 tools available via MCP. All tools are lazy-loaded and won't hog your context just by connecting the MCP. They are lightweight API wrappers and are easy for the Agent to use.
 
 | Category | Tools |
 |----------|-------|
@@ -497,6 +503,7 @@ quern tunneld <cmd>          # Manage the tunneld LaunchDaemon (install/uninstal
 | App State | `save_app_state`, `restore_app_state`, `list_app_states`, `delete_app_state` |
 | Plist | `read_app_plist`, `set_app_plist_value`, `set_app_plist_values`, `diff_app_plist`, `delete_app_plist_key`, `start_plist_watch`, `stop_plist_watch`, `configure_plist_watch`, `get_plist_watch_config`, `unconfigure_plist_watch` |
 | Device Pool | `resolve_device`, `ensure_devices` |
+| Sessions | `reserve_devices`, `release_devices`, `session_status` |
 | App Knowledge | `init_app_knowledge` |
 | Landmarks | `load_landmarks`, `identify_screen`, `list_landmarks`, `unload_landmarks`, `validate_landmarks` |
 | Preview | `preview_device`, `stop_preview`, `preview_status` |

@@ -521,11 +521,19 @@ Use `ensure_devices` to boot multiple simulators at once, then run different tes
 
 **Active device**: After `resolve_device` or `ensure_devices`, the resolved device becomes the active device for all subsequent tool calls. You don't need to pass `udid` to every tool — it defaults to the active device. To switch, call `resolve_device` with new criteria, or pass `udid` directly to `resolve_device` (faster than re-matching by name when you already know the UDID — e.g., from a `list_devices` call). The active device is persisted in `~/.quern/active-device.json` and survives `quern stop` / `quern restart`, so within one agent session you don't have to re-resolve after a restart.
 
-**It is yours alone.** Each agent session has its own active device (#254), keyed by the session id its MCP server sends, so another agent resolving a different device never redirects your calls. A session that hasn't chosen one yet doesn't inherit anyone else's: with several devices booted, an unqualified call is refused with "specify udid" until you resolve one or pass `udid`. This keeps agents from *redirecting* each other; it doesn't hand them *different* devices. Two agents that each ask `resolve_device` for "a simulator" can get the same one, and keeping devices apart is the reservations step of #254. Your choice is kept across a server restart for a day of inactivity. Callers that send no session (a plain curl, an MCP server older than #453) share one active device, as before.
+**It is yours alone.** Each agent session has its own active device (#254), keyed by the session id its MCP server sends, so another agent resolving a different device never redirects your calls. A session that hasn't chosen one yet doesn't inherit anyone else's: with several devices booted, an unqualified call is refused with "specify udid" until you resolve one or pass `udid`. This keeps agents from *redirecting* each other; it doesn't hand them *different* devices. Two agents that each ask `resolve_device` for "a simulator" can get the same one; to keep devices apart, reserve them (see "Sharing a server with other agents" below). Your choice is kept across a server restart for a day of inactivity. Callers that send no session (a plain curl, an MCP server older than #453) share one active device, as before.
 
 **Default behavior**: `resolve_device` and `ensure_devices` default to `type="simulator"` to prevent accidentally targeting physical devices (which may not have your app installed). Pass `type="device"` explicitly to target physical devices.
 
 ---
+
+### Sharing a server with other agents
+
+If another agent or a CI job may use the same quern server, **reserve your devices first** with `reserve_devices`, for example `reserve_devices(count=1, device_type="simulator")` or `reserve_devices(udids=[...])`. While you hold a device, nobody else can change it: their taps and installs get 423 naming you. Reading it (screenshots, UI tree, logs) still works for everyone. Reserving one device makes it your active device, so later tools need no `udid`.
+
+- You don't have to release: your reservation ends with your session. A brief network drop keeps it for a grace period (3 minutes by default). `release_devices` frees devices sooner.
+- A 423 on a device means someone else holds it. `session_status(all=true)` or `list_devices` (its `reservation` field) shows who. Pick a free device rather than waiting.
+- If a tool response carries `session_notices`, read it. It says, for example, that quern restarted and your reservations are gone, so reserve again.
 
 ## Common Mistakes
 
