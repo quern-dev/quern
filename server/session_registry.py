@@ -232,12 +232,21 @@ class SessionRegistry:
             self._drain(session.principal, session.reservations)
         return session
 
-    def _drain(self, principal: str, udids) -> None:
+    def retry_release(self, session: HeldSession, udids: Iterable[str]) -> None:
+        """Queue these devices' clean-up again, for the next sweep; they stay
+        unavailable to other keys until it succeeds."""
+        retry = {u: r for u, r in session.reservations.items() if u in set(udids)}
+        if retry:
+            self._released.append(HeldSession(
+                id=session.id, principal=session.principal, token_digest="",
+                opened_at=session.opened_at, reservations=retry))
+
+    def _drain(self, principal: str, udids: Iterable[str]) -> None:
         if principal != OWNER:
             for udid in udids:
                 self._draining[udid] = principal
 
-    def drained(self, udids) -> None:
+    def drained(self, udids: Iterable[str]) -> None:
         """The clean-up for these released devices has run: they are free."""
         for udid in udids:
             self._draining.pop(udid, None)
@@ -277,8 +286,12 @@ class SessionRegistry:
             held = self.holder_of(udid)
             if held is not None and held.session.id != session_id:
                 raise SessionConflict(f"{udid} is reserved by session {held.session.id}")
+            # The owner is not held back: a clean-up that keeps failing must
+            # not take a device out of service for good, and the owner can
+            # see and end what the client left running.
             releasing = self._draining.get(udid)
-            if releasing is not None and releasing != session.principal:
+            if releasing is not None and releasing != session.principal \
+                    and session.principal != OWNER:
                 raise SessionConflict(f"{udid} is being released; try again in a moment")
         booted = set(booted)
         for udid in udids:

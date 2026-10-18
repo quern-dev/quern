@@ -1013,6 +1013,38 @@ class TestReleasingADevice:
         world.registry.release("ci")
         world.registry.reserve("alice:s1", [FREE], on_release="none")
 
+    def test_a_failed_clean_up_keeps_the_device_and_tries_again(self, world):
+        """Freed anyway, another key could reserve a device the previous
+        client's rule still answered (CodeRabbit). Fails closed."""
+        from server.api.sessions import run_release_policies
+        from server.session_registry import SessionConflict
+
+        calls = []
+
+        async def clear_mock(rule_id=None):
+            calls.append(rule_id)
+            if len(calls) == 1:
+                raise RuntimeError("proxy busy")
+
+        world.app.state.proxy_adapter = SimpleNamespace(
+            clear_mock=clear_mock, _mock_rules=[{"rule_id": "bob-rule", "simulator_udid": SIM_B}])
+        world.app.state.mock_owners = {"bob-rule": "client:bob"}
+        world.registry.release("bob:s1")
+        asyncio.run(run_release_policies(world.app))          # fails
+        import pytest as _pytest
+
+        with _pytest.raises(SessionConflict, match="being released"):
+            world.registry.reserve("alice:s1", [SIM_B], on_release="none")
+        asyncio.run(run_release_policies(world.app))          # retried, succeeds
+        assert calls == ["bob-rule", "bob-rule"]
+        world.registry.reserve("alice:s1", [SIM_B], on_release="none")
+
+    def test_the_owner_can_take_a_device_whose_clean_up_keeps_failing(self, world):
+        world.registry.release("bob:s1")                      # clean-up never ran
+        world.registry.open("ci", principal="owner")
+        world.registry.get("ci").state = "live"
+        world.registry.reserve("ci", [SIM_B], on_release="none")
+
     def test_a_blind_release_answers_only_its_own_actions(self):
         from server.api.sessions import _answerable
 

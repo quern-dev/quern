@@ -426,10 +426,19 @@ async def run_release_policies(app) -> list[dict]:
     actions = []
     for session in registry.take_released():
         start = len(actions)
+        ended: list[dict] = []
         try:
-            actions.extend(await _end_client_work(app, registry, session))
+            ended = await _end_client_work(app, registry, session)
         finally:
-            registry.drained(session.reservations)
+            failed = {a["udid"] for a in ended if not a.get("ok")}
+            # A device whose clean-up failed stays unavailable, and is tried
+            # again at the next sweep: freed, another key could reserve it
+            # while the previous client's rule still answered its traffic or
+            # its recording still filmed (CodeRabbit). Fails closed.
+            registry.drained([u for u in session.reservations if u not in failed])
+            if failed:
+                registry.retry_release(session, failed)
+        actions.extend(ended)
         for r in session.reservations.values():
             if r.on_release != "shutdown_booted" or not r.booted_here:
                 continue

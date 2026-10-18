@@ -1335,6 +1335,25 @@ class RecordingManager:
                 rec._segment_number = tally.last_segment
                 gap = {"from": tally.last_at.isoformat() if tally.last_at else None,
                        "to": _now().isoformat(), "reason": "quern was not running"}
+                if rec.principal != "owner":
+                    # A client key's recording does not outlive its
+                    # reservation, and no reservation survives a restart: it
+                    # is finished here, not resumed. Resumed, it would film
+                    # whoever reserves the device next (CodeRabbit).
+                    rec.gaps.append(gap)
+                    rec.state, rec.stopped_at = "stopped", _now()
+                    rec.warnings.append("stopped at restart: a client key's recording ends "
+                                        "with its reservation, and reservations do not "
+                                        "survive a restart")
+                    await asyncio.to_thread(_append, rec.events, [
+                        _line("stopped", counts=dict(rec.counts), dropped=dict(rec.dropped),
+                              gaps=len(rec.gaps), complete=False,
+                              reason="quern restarted; the client's reservation ended")], True)
+                    with contextlib.suppress(OSError):
+                        await asyncio.to_thread(_write_json_atomic, rec.manifest,
+                                                rec.manifest_body())
+                    logger.info("Recording %s, a client key's, finished at restart", rec.id)
+                    continue
                 await asyncio.to_thread(_append, rec.events, [
                     _line("resumed", gap=gap, clock_anchor=_anchor())], True)
             except OSError as e:
