@@ -285,7 +285,13 @@ def _run_child(command: list[str], env: dict[str, str]) -> int:
     which xcodebuild and pytest read as "abort, skip cleanup".
     """
     tty = _terminal()
-    child = subprocess.Popen(command, env=env, process_group=0)
+    try:
+        child = subprocess.Popen(command, env=env, process_group=0)
+    except OSError as e:
+        # A traceback, before (CodeRabbit). The shell's statuses: 127 for a
+        # command that isn't there, 126 for one that cannot be run.
+        print(f"quern session run: cannot run {command[0]}: {e.strerror or e}", file=sys.stderr)
+        return 127 if isinstance(e, FileNotFoundError) else 126
     group = child.pid                     # process_group=0: the child leads its group
     if tty is not None and _foreground(tty):
         _hand_terminal_to(tty, group)

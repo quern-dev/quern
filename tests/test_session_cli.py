@@ -102,6 +102,22 @@ def test_the_childs_exit_code_is_the_answer(server, child):
     assert server.sockets[0].closed
 
 
+@pytest.mark.parametrize("error, rc", [(FileNotFoundError(2, "No such file or directory"), 127),
+                                       (PermissionError(13, "Permission denied"), 126)])
+def test_a_command_that_cannot_start_exits_as_a_shell_would(server, child, monkeypatch,
+                                                           capsys, error, rc):
+    """It raised out of main as a traceback (CodeRabbit)."""
+    _opened(server)
+
+    def refuse(*a, **kw):
+        raise error
+
+    monkeypatch.setattr(session_cli.subprocess, "Popen", refuse)
+    assert session_cli.main(["run", "--name", "ci-job", "--", "no-such-tool"]) == rc
+    assert "cannot run no-such-tool" in capsys.readouterr().err
+    assert server.sockets[0].closed, "the session is still released"
+
+
 def test_a_refused_reservation_exits_2_and_still_releases(server, child):
     _opened(server)
     server.answers[("POST", "/api/v1/sessions/ci-job/reservations")] = (
