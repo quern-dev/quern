@@ -238,7 +238,9 @@ class TestEnforcement:
     def test_a_named_device_in_the_query_string_or_a_list_is_checked(self, client):
         a = Held(client, "claude-a")
         _reserve(client, "claude-a", udids=["SIM-1"])
-        q = client.post("/api/v1/device/ui/tap?udid=SIM-1", headers=_h("claude-b"), json={})
+        # A route that never resolves, so only the middleware's reading of
+        # the query string stands between it and the held device.
+        q = client.post("/api/v1/device/raw-op?udid=SIM-1", headers=_h("claude-b"), json={})
         assert q.status_code == 423
         a.close()
 
