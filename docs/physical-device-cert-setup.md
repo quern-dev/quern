@@ -6,12 +6,9 @@ Step-by-step WDA UI automation flow for installing the mitmproxy CA cert and con
 
 ## Prerequisites
 
-1. **Server must listen on all interfaces** so the device can reach it over Wi-Fi:
-   ```bash
-   quern stop && quern start --host 0.0.0.0
-   ```
+1. **The proxy serves the certificate, so route the device first.** The quern API listens on 127.0.0.1 only (#254), out of a phone's reach. mitmproxy answers `http://mitm.it` itself, for any device routed through it, with the same CA quern installs on simulators -- so the Wi-Fi proxy is configured first (Phases 1-2), then the certificate fetched (Phases 3-5). Plain-HTTP pages load before the certificate is trusted. With two Macs running quern, whichever proxy the device points at answers, with that Mac's CA.
 
-2. **Cert endpoint is unauthenticated** — `/api/v1/proxy/cert` is whitelisted in `server/auth.py`. No API key needed from Safari.
+2. **No API key is needed from Safari**: `mitm.it` is answered by the proxy, not the API.
 
 3. **Cert download defaults to `.cer`** (`application/x-x509-ca-cert`) which triggers iOS's "Install Profile" dialog. The old `application/x-pem-file` was silently ignored by iOS.
 
@@ -27,74 +24,22 @@ Step-by-step WDA UI automation flow for installing the mitmproxy CA cert and con
 ## Automated Script Outline
 
 ```python
-local_ip   = proxy_status()["local_ip"]   # fallback default-route IP
-cert_url   = f"http://{local_ip}:9110/api/v1/proxy/cert"
+status     = proxy_status()
+# The proxy serves the certificate: it must be running before Phase 1, or
+# Safari has nothing to fetch mitm.it from once the Wi-Fi proxy points at it.
+if status["status"] != "running":
+    start_proxy()
+    status = proxy_status()
+local_ip   = status["local_ip"]             # fallback default-route IP
+proxy_port = status["port"]                  # 9101 unless started on another port
+cert_url   = "http://mitm.it/cert/cer"       # served by the proxy, once routed
 # NOTE: The actual proxy host used in Wi-Fi settings is derived by subnet
 # matching in record_device_proxy_config — you don't need to compute it manually.
 ```
 
-### Phase 1 — Download cert via Safari
+### Phase 1 — Configure Wi-Fi proxy
 
-```python
-launch_app("com.apple.mobilesafari")
-tap_element(label="Address", element_type="TextField")
-type_text(cert_url + "\n")
-
-# iOS prompt: "This website is trying to download a configuration profile."
-tap_element(label="Allow", element_type="Button")
-
-# iOS confirmation: "Profile Downloaded"
-tap_element(label="Close", element_type="Button")
-```
-
-### Phase 2 — Install profile in Settings
-
-```python
-launch_app("com.apple.Preferences")
-
-# "Profile Downloaded" banner appears at top of Settings root
-tap_element(label="Profile Downloaded", element_type="Button")
-
-# "Install Profile" screen
-tap_element(label="Install", element_type="Button")   # top-right nav button
-
-# Warning screen: "Unmanaged Root Certificate"
-tap_element(label="Install", element_type="Button")   # top-right nav button again
-
-# Alert: "Install Profile — Installing this profile will change settings on your iPhone."
-# Two "Install" buttons exist at this point — use coordinates for the alert button
-tap(x=269, y=481)
-
-# "Profile Installed ✓" screen — navigate away
-tap_element(label="Done", element_type="Button")      # or the ✓ checkmark top-right
-```
-
-### Phase 3 — Enable full trust
-
-```python
-launch_app("com.apple.Preferences")
-tap_element(label="General", element_type="Button")   # scroll down if not visible
-tap_element(label="About", element_type="Cell")
-
-# Scroll to Certificate Trust Settings using left-edge swipe
-# (avoid center — long-press on IP address text triggers "Copy" popup)
-while "Certificate Trust Settings" not on screen:
-    swipe(start_x=30, start_y=700, end_x=30, end_y=300)
-
-tap_element(label="Certificate Trust Settings", element_type="Cell")
-
-# mitmproxy toggle is OFF — tap to enable
-tap_element(label="mitmproxy", element_type="Switch")
-
-# Alert: "Root Certificate — Warning: enabling this certificate..."
-tap_element(label="Continue", element_type="Button")
-
-# mitmproxy toggle is now ON (green) ✓
-```
-
-### Phase 4 — Configure Wi-Fi proxy
-
-Before starting, read the current SSID and device IP from Settings > Wi-Fi (or from the network detail screen you're about to open). You'll need both for Phase 5.
+Before starting, read the current SSID and device IP from Settings > Wi-Fi (or from the network detail screen you're about to open). You'll need both for Phase 2.
 
 ```python
 launch_app("com.apple.Preferences")
@@ -124,16 +69,16 @@ tap_element(label="Server", element_type="TextField")
 type_text(local_ip)
 
 tap_element(label="Port", element_type="TextField")
-type_text("9101")
+type_text(str(proxy_port))
 
 tap_element(label="Save", element_type="Button")
 
 # Back at network detail — "Configure Proxy: Manual" ✓
 ```
 
-### Phase 5 — Record the proxy config
+### Phase 2 — Record the proxy config
 
-Call this after Phase 4 completes. It derives the correct Mac interface IP by
+Call this after Phase 1 completes. It derives the correct Mac interface IP by
 subnet-matching the device's `client_ip`, stores the config per SSID, and
 enables per-device flow filtering.
 
@@ -143,12 +88,71 @@ client_ip = "<device IP>"      # e.g. "192.168.31.139" — from network detail s
 
 result = record_device_proxy_config(udid=udid, ssid=ssid, client_ip=client_ip)
 # result["wifi_proxy_host"] is the Mac IP that was actually recorded.
-# If it differs from what you typed in Phase 4, go back and correct it in Settings.
+# If it differs from what you typed in Phase 1, go back and correct it in Settings.
 ```
 
 If the Mac is on multiple interfaces (e.g. Wi-Fi + Ethernet), `record_device_proxy_config`
 will pick the interface on the same /24 subnet as the device — always the right one,
 regardless of routing tables or interface names.
+
+### Phase 3 — Download cert via Safari
+
+```python
+launch_app("com.apple.mobilesafari")
+tap_element(label="Address", element_type="TextField")
+type_text(cert_url + "\n")
+
+# iOS prompt: "This website is trying to download a configuration profile."
+tap_element(label="Allow", element_type="Button")
+
+# iOS confirmation: "Profile Downloaded"
+tap_element(label="Close", element_type="Button")
+```
+
+### Phase 4 — Install profile in Settings
+
+```python
+launch_app("com.apple.Preferences")
+
+# "Profile Downloaded" banner appears at top of Settings root
+tap_element(label="Profile Downloaded", element_type="Button")
+
+# "Install Profile" screen
+tap_element(label="Install", element_type="Button")   # top-right nav button
+
+# Warning screen: "Unmanaged Root Certificate"
+tap_element(label="Install", element_type="Button")   # top-right nav button again
+
+# Alert: "Install Profile — Installing this profile will change settings on your iPhone."
+# Two "Install" buttons exist at this point — use coordinates for the alert button
+tap(x=269, y=481)
+
+# "Profile Installed ✓" screen — navigate away
+tap_element(label="Done", element_type="Button")      # or the ✓ checkmark top-right
+```
+
+### Phase 5 — Enable full trust
+
+```python
+launch_app("com.apple.Preferences")
+tap_element(label="General", element_type="Button")   # scroll down if not visible
+tap_element(label="About", element_type="Cell")
+
+# Scroll to Certificate Trust Settings using left-edge swipe
+# (avoid center — long-press on IP address text triggers "Copy" popup)
+while "Certificate Trust Settings" not on screen:
+    swipe(start_x=30, start_y=700, end_x=30, end_y=300)
+
+tap_element(label="Certificate Trust Settings", element_type="Cell")
+
+# mitmproxy toggle is OFF — tap to enable
+tap_element(label="mitmproxy", element_type="Switch")
+
+# Alert: "Root Certificate — Warning: enabling this certificate..."
+tap_element(label="Continue", element_type="Button")
+
+# mitmproxy toggle is now ON (green) ✓
+```
 
 ---
 
@@ -166,7 +170,7 @@ regardless of routing tables or interface names.
 
 | Port | What it is |
 |------|------------|
-| `9110` | Quern API server (cert download, status, etc.) |
-| `9101` | mitmproxy proxy listener (device points here for traffic capture) |
+| `9110` | Quern API server: 127.0.0.1 by default (#254); `--host 0.0.0.0` exposes it, with a warning |
+| `9101` | mitmproxy proxy listener: the device points here, and fetches the cert from `mitm.it` through it |
 
-The cert download uses **9110** (9100 before #446). The device's Wi-Fi proxy points to **9101**.
+The device's Wi-Fi proxy points to **9101**; the cert download goes through it.

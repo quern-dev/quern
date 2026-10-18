@@ -142,6 +142,12 @@ def test_list_and_release(server, capsys):
     assert "a  [live]  SIM-1" in out and "b  [grace, 42s left]  no devices" in out
     server.answers[("DELETE", "/api/v1/sessions/b")] = (200, {"freed": []})
     assert session_cli.main(["release", "b"]) == 0
+    # Both name a session: a client key that names none is refused with 400,
+    # and may release only a session it is (CodeRabbit, #254 phase 2).
+    listing = next(c for c in server.calls if c["method"] == "GET")
+    release = next(c for c in server.calls if c["method"] == "DELETE")
+    assert listing["session"], "list sends a session header"
+    assert release["session"] == "b", "release is sent as the session itself"
 
 
 def test_no_server_exits_1(monkeypatch, capsys):

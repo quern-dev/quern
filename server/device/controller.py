@@ -811,7 +811,7 @@ class DeviceController(DeviceControllerUI):
             # reader had silently lost track of its own. Found live.
             from server import device_access
 
-            if set_active and not device_access.held_by_another(canonical):
+            if set_active and not device_access.why_not(canonical):
                 self._active_udid = canonical
             return canonical
 

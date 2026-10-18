@@ -61,7 +61,7 @@ export function discoverServer(): {
           "`eval \"$(quern env)\"` sets it for you.",
       );
     }
-    return { url, apiKey: loadApiKey(), source: "env" };
+    return { url, apiKey: explicitKey() ?? loadApiKey(), source: "env" };
   }
 
   // Priority 2: State file
@@ -69,7 +69,7 @@ export function discoverServer(): {
   if (state) {
     return {
       url: `http://127.0.0.1:${state.server_port}`,
-      apiKey: state.api_key || loadApiKey(),
+      apiKey: explicitKey() ?? (state.api_key || loadApiKey()),
       source: "state",
     };
   }
@@ -80,9 +80,19 @@ export function discoverServer(): {
   // naming a port the server may never have been on.
   return {
     url: `http://127.0.0.1:${DEFAULT_SERVER_PORT}`,
-    apiKey: loadApiKey(),
+    apiKey: explicitKey() ?? loadApiKey(),
     source: "default",
   };
+}
+
+/** QUERN_CLIENT_KEY: a client key from `quern clients add` (#254, phase 2),
+ * which wins over the owner's key in state.json and ~/.quern/api-key. Unset or
+ * blank means "use the owner's". Not QUERN_API_KEY, which `quern env` exports
+ * with the owner's key: preferring that would pin an MCP to a key since
+ * regenerated. */
+function explicitKey(): string | undefined {
+  const key = process.env.QUERN_CLIENT_KEY?.trim();
+  return key ? key : undefined;
 }
 
 function loadApiKey(): string {

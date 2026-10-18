@@ -21,14 +21,23 @@ MAX_PORT_SCAN = 20
 
 
 def is_port_available(port: int, host: str = "127.0.0.1") -> bool:
-    """Check if a port is available for binding."""
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind((host, port))
-            return True
-    except OSError:
-        return False
+    """Check if a port is available for binding -- on `host`, and on loopback
+    and the wildcard address whatever `host` is.
+
+    A bind with SO_REUSEADDR does not see a listener on the *other* of those
+    two: measured on macOS, a probe of 127.0.0.1 succeeds while a server holds
+    0.0.0.0, and a probe of 0.0.0.0 while one holds 127.0.0.1. When the main
+    API moved to loopback (#254, phase 2) that would have read the port of an
+    older quern, still on 0.0.0.0, as free, and the proxy -- on 0.0.0.0 --
+    the same way. So every probe asks both."""
+    for address in dict.fromkeys((host, "127.0.0.1", "0.0.0.0")):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind((address, port))
+        except OSError:
+            return False
+    return True
 
 
 def _get_pid_on_port(port: int) -> int | None:

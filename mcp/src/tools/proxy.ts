@@ -402,8 +402,11 @@ TROUBLESHOOTING — no traffic from a physical device:
    This can be done fully via WDA automation — see the agent guide (quern://guide),
    "Autonomous proxy reconfiguration" under Physical Device Proxy Capture.
 2. wifi_proxy_configs: null → the device has never been configured. Run the full
-   physical device setup: install cert → trust cert → configure Wi-Fi proxy →
-   record_device_proxy_config. See the agent guide (quern://guide) for the full WDA script.
+   physical device setup: configure the Wi-Fi proxy and install and trust the cert in
+   the order proxy_setup_guide gives (proxy first: the cert comes from
+   http://mitm.it/cert/cer, which the proxy serves), then call
+   record_device_proxy_config -- a step of its own, which the guide does not list.
+   See the agent guide (quern://guide) for the full WDA script.
 3. wifi_proxy_stale: false and active_wifi_network is set, but still no flows → check:
    - The proxy is running (status: "running")
    - The cert is trusted on the device (Settings > General > About > Certificate Trust Settings)
@@ -749,7 +752,7 @@ For an Android emulator, pass device_serial (e.g. emulator-5554) — its traffic
   });
 
   server.registerTool("proxy_setup_guide", {
-    description: `Get device proxy configuration instructions with auto-detected local IP. Includes steps for both simulator and physical device setup. For physical devices, the response includes cert_install_url — a direct URL to download the Quern CA cert from Safari on the device. The correct order is: install cert → trust cert → configure Wi-Fi proxy. You can perform all of these steps yourself using WDA tools (launch_app to open Safari/Settings, tap_element to navigate, type_text to enter URLs and values). See docs/physical-device-cert-setup.md for the step-by-step tool sequence.`,
+    description: `Get device proxy configuration instructions with auto-detected local IP. Includes steps for both simulator and physical device setup. For physical devices, the response includes cert_install_url — the URL to download the Quern CA cert from Safari on the device. Follow the order the steps give: configure the Wi-Fi proxy first, because the cert is served by the proxy itself (http://mitm.it/cert/cer), then install and trust it. You can perform all of these steps yourself using WDA tools (launch_app to open Safari/Settings, tap_element to navigate, type_text to enter URLs and values). See docs/physical-device-cert-setup.md for the step-by-step tool sequence.`,
     inputSchema: strictParams({}),
   }, async () => {
     try {

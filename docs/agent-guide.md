@@ -470,9 +470,10 @@ The paths you will reach for most:
 | Scroll to an element | POST | `/api/v1/device/ui/scroll-to-element` |
 | Resolve a device | POST | `/api/v1/devices/resolve` |
 
-Everything needs `Authorization: Bearer <key>` from `~/.quern/api-key`, except
-`/`, `/health`, `/api/v1/health`, `/tools`, `/docs`, `/redoc`, `/openapi.json`,
-and `/api/v1/proxy/cert`.
+Everything needs `Authorization: Bearer <key>` from `~/.quern/api-key` (or a
+client key from `quern clients add`, which also needs `X-Quern-Session` on
+every request), except `/`, `/health`, `/api/v1/health`, `/tools`, `/docs`,
+`/redoc`, `/openapi.json`, and `/api/v1/proxy/cert`.
 
 ## Advanced Patterns
 
@@ -534,6 +535,7 @@ If another agent or a CI job may use the same quern server, **reserve your devic
 - You don't have to release: your reservation ends with your session. A brief network drop keeps it for a grace period (3 minutes by default). `release_devices` frees devices sooner.
 - A 423 on a device means someone else holds it. `session_status(all=true)` or `list_devices` (its `reservation` field) shows who. Pick a free device rather than waiting.
 - If a tool result ends with a `quern session notice:` line, read it. It says, for example, that quern restarted and your reservations are gone, so reserve again.
+- **On a client key** (`QUERN_CLIENT_KEY` set to a key from `quern clients add`), you may change only devices you have reserved: a 403 saying "reserve it first" means exactly that, so call `reserve_devices`. A 403 saying "owner-only" is something Mac-wide -- the proxy, capture, updates, the device pool's `resolve_device` -- that only the server's owner can do; ask them, don't retry.
 
 ## Common Mistakes
 

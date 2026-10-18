@@ -841,7 +841,7 @@ class TestRoutesAddressedById:
         from server.api import proxy_certs
 
         source = inspect.getsource(proxy_certs)
-        assert "device_access.held_by_another(d.udid)" in source
+        assert "device_access.why_not(d.udid)" in source
         assert "device_access.check(target_udid)" in source
 
     def test_wda_is_not_restarted_behind_a_read_of_a_held_device(self, registry):
@@ -1059,4 +1059,4 @@ class TestSecondReviewRoutes:
         for mod in (build_android, build_app):
             source = inspect.getsource(mod)
             assert "device_access.refusals_are_per_item()" in source, mod.__name__
-            assert "device_access.held_by_another(" in source, mod.__name__
+            assert "device_access.why_not(" in source, mod.__name__

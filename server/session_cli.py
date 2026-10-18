@@ -58,17 +58,15 @@ connection) and their devices. `release` ends one -- yours, or a stuck one.
 
 def _server() -> tuple[str, str]:
     from server.__main__ import _server_base_url
-    from server.config import API_KEY_FILE
+    from server.config import API_KEY_FILE, client_api_key
 
     url = _server_base_url()
     if url is None:
         raise ConnectionError("no server answering: start it with `quern start`")
-    try:
-        key = API_KEY_FILE.read_text().strip()
-    except OSError:
-        key = ""
+    key = client_api_key()
     if not key:
-        raise ConnectionError(f"no API key at {API_KEY_FILE}: run `quern setup`")
+        raise ConnectionError(f"no API key at {API_KEY_FILE} and no QUERN_CLIENT_KEY: "
+                              "run `quern setup`")
     return url, key
 
 
@@ -215,7 +213,9 @@ def _run(args: argparse.Namespace) -> int:
     # agent's own MCP session, which a `run` took over or collided with
     # (review). Prefixed with it, so a reader can still tell whose run it was.
     base = session_from_env(dict(os.environ), fallback="cli")
-    name = args.name or f"{base[:50]}.run-{secrets.token_hex(2)}"
+    # 33 characters of it: with ".run-xxxx" that is 42, which leaves room for
+    # a client key's `<label>:` prefix (up to 17) inside the server's 64.
+    name = args.name or f"{base[:33]}.run-{secrets.token_hex(2)}"
     status, opened = _call("POST", url, key, "/api/v1/sessions", session=name,
                            body={"name": name} if name else {})
     if status != 200:
@@ -406,7 +406,11 @@ def _still_holding(url: str, key: str, session: str, udids: list[str]) -> bool |
 
 def _list() -> int:
     url, key = _server()
-    status, answer = _call("GET", url, key, "/api/v1/sessions")
+    from server.session import session_from_env
+
+    # Named, because a client key must name its session (#254, phase 2).
+    caller = session_from_env(dict(os.environ), fallback="cli")
+    status, answer = _call("GET", url, key, "/api/v1/sessions", session=caller)
     if status != 200:
         print(f"quern session list: {_detail(answer)}", file=sys.stderr)
         return 2
@@ -425,7 +429,10 @@ def _list() -> int:
 
 def _release(session: str) -> int:
     url, key = _server()
-    status, answer = _call("DELETE", url, key, f"/api/v1/sessions/{session}")
+    # As the session itself: a client key may release only its own, and the
+    # server qualifies the id the same way whether or not it carries the
+    # client's label already. The owner may release any session either way.
+    status, answer = _call("DELETE", url, key, f"/api/v1/sessions/{session}", session=session)
     if status != 200:
         print(f"quern session release: {_detail(answer)}", file=sys.stderr)
         return 2

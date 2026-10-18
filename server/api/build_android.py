@@ -341,10 +341,10 @@ async def _install_one(controller, serial: str, metadata: dict, may_uninstall: b
     # uninstall the app and erase its data, so a device another session
     # reserved meanwhile is skipped, per device (#254 review).
     device_access.refusals_are_per_item()
-    if device_access.held_by_another(serial):
+    if why := device_access.why_not(serial):
         return DeviceInstallResult(
             udid=serial, installed=False,
-            error="reserved by another session since the build started; not installed")
+            error=f"{why} since the build started; not installed")
     asked = ""
     try:
         abis = await controller.adb.supported_abis(serial)

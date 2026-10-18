@@ -330,6 +330,13 @@ async def update_mock(request: Request, rule_id: str, body: UpdateMockRequest) -
             detail="Must provide at least one of 'pattern', 'response' or 'simulator_udid'",
         )
     _check_mock_scope(adapter, rule_id)
+    if scope_given and not body.simulator_udid:
+        # A new scope that names a simulator reaches the access middleware as
+        # a device; removing the scope names none, and makes the rule answer
+        # every device's traffic: Mac-wide (#254 review).
+        from server import device_access
+
+        device_access.require_owner("removing a mock rule's simulator_udid")
     try:
         rule = await adapter.update_mock(
             rule_id=rule_id,
@@ -367,6 +374,10 @@ def _check_mock_scope(adapter, rule_id: str | None = None) -> None:
             continue
         if rule.get("simulator_udid"):
             device_access.check(rule["simulator_udid"])
+        else:
+            # Unscoped, it answers every device's traffic: Mac-wide, so a
+            # client key may not change it (#254, phase 2).
+            device_access.require_owner("changing a mock rule with no simulator_udid")
 
 
 @router.delete("/mocks/{rule_id}")

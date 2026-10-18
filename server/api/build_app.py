@@ -549,10 +549,9 @@ async def _build_and_install_xcode(
         from server import device_access
 
         device_access.refusals_are_per_item()
-        if device_access.held_by_another(udid):
+        if why := device_access.why_not(udid):
             return DeviceInstallResult(
-                udid=udid, installed=False,
-                error="reserved by another session; not installed (reads still work)")
+                udid=udid, installed=False, error=f"{why}; not installed (reads still work)")
 
         # Auto-boot shutdown simulators (simctl install requires a booted sim)
         if not is_physical:

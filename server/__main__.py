@@ -876,9 +876,10 @@ def _valid_port(value: object) -> int | None:
 def _server_base_url() -> str | None:
     """Where a client on this machine should talk to the running server.
 
-    Loopback, never the bind host. The server listens on 0.0.0.0 by default,
-    and a script on this machine should not be sent out to the network and
-    back. The MCP wrapper builds its URL the same way.
+    Loopback, never the bind host. The server listens on 127.0.0.1 by default
+    (#254); one bound beyond it with --host still answers on loopback, and a
+    script on this machine should not be sent out to the network and back.
+    The MCP wrapper builds its URL the same way.
 
     None when nothing is actually answering. A readable state file is not a
     running server: a crash or a SIGKILL leaves the file behind, and without
@@ -1104,6 +1105,11 @@ def main() -> None:
         from server.session_cli import main as session_main
 
         sys.exit(session_main(sys.argv[2:]))
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "clients":
+        from server.clients_cli import main as clients_main
+
+        sys.exit(clients_main(sys.argv[2:]))
 
     if len(sys.argv) >= 2 and sys.argv[1] == "set-channel":
         sys.exit(_cmd_set_channel(_check_args("set-channel", sys.argv[2:], operands=1)))

@@ -1097,7 +1097,11 @@ async def stop_capture(request: Request, body: CaptureStopRequest) -> CaptureSto
     # middleware: stopping the capture of a held device is checked here (#254).
     from server import device_access
 
-    device_access.check(udid)
+    if udid:
+        device_access.check(udid)
+    else:
+        # A capture of every device's traffic: Mac-wide (#254, phase 2).
+        device_access.require_owner("stopping a capture session with no simulator_udid")
     if flow_store is None:
         return _with_tls_note(request, udid, CaptureStopResponse(
             session_id=body.session_id, duration_seconds=0, total_flows=0,
