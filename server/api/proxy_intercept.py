@@ -329,6 +329,7 @@ async def update_mock(request: Request, rule_id: str, body: UpdateMockRequest) -
             status_code=400,
             detail="Must provide at least one of 'pattern', 'response' or 'simulator_udid'",
         )
+    _check_mock_scope(adapter, rule_id)
     try:
         rule = await adapter.update_mock(
             rule_id=rule_id,
@@ -354,11 +355,26 @@ async def update_mock(request: Request, rule_id: str, body: UpdateMockRequest) -
     return result
 
 
+def _check_mock_scope(adapter, rule_id: str | None = None) -> None:
+    """Refuse to change mock rules scoped to a device another session holds
+    (#254): the rule is addressed by its id, so no device reaches the access
+    middleware, and deleting it would quietly change what the holder's app
+    sees (review). `rule_id` None means every rule (a clear-all)."""
+    from server import device_access
+
+    for rule in list(getattr(adapter, "_mock_rules", []) or []):
+        if rule_id is not None and rule.get("rule_id") != rule_id:
+            continue
+        if rule.get("simulator_udid"):
+            device_access.check(rule["simulator_udid"])
+
+
 @router.delete("/mocks/{rule_id}")
 @logged_action("delete_mock", category="proxy")
 async def delete_mock(request: Request, rule_id: str) -> dict:
     """Delete a specific mock rule."""
     adapter = _require_running_proxy(request)
+    _check_mock_scope(adapter, rule_id)
     removed = await adapter.clear_mock(rule_id=rule_id)
     if not removed:
         # 404, matching PATCH on the same id. Reporting "deleted" for a rule
@@ -376,6 +392,7 @@ async def delete_mock(request: Request, rule_id: str) -> dict:
 async def delete_all_mocks(request: Request) -> dict:
     """Delete all mock rules."""
     adapter = _require_running_proxy(request)
+    _check_mock_scope(adapter)
     # Clearing an empty set is legitimately a success here, unlike the
     # single-rule case: the caller asked for "none left", and none are left.
     count = await adapter.clear_mock()

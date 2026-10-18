@@ -41,8 +41,8 @@ DEVICE_KEYS = frozenset({"udid", "udids", "device_id", "simulator_udid",
                          "device_serial", "serial"})
 
 #: POST routes that only read. Anything not listed, and not a GET, is a change.
-#: Starting or stopping something that only watches a device -- a preview, a
-#: screenshot timeline, log capture -- reads it. A recording is not here: its
+#: Starting something that only watches a device -- a preview, a screenshot
+#: timeline, log capture -- reads it. A recording is not here: its
 #: start may install a CA on the device.
 READ_POSTS = frozenset({
     "/api/v1/device/ui/wait-for-element",
@@ -53,14 +53,12 @@ READ_POSTS = frozenset({
     "/api/v1/builds/parse",
     "/api/v1/builds/parse-file",
     "/api/v1/device/preview/start",
-    "/api/v1/device/preview/stop",
     "/api/v1/device/screenshot/timeline/start",
-    "/api/v1/device/screenshot/timeline/stop",
     "/api/v1/device/logging/start",
-    "/api/v1/device/logging/stop",
     "/api/v1/device/logging/device/start",
-    "/api/v1/device/logging/device/stop",
 })
+# Not the matching *stops*: stopping someone's preview, timeline or log
+# capture on their device is interfering with them, not watching (review).
 
 #: Routes the middleware leaves to themselves: the session routes decide who
 #: may reserve and release, and answer 409 for a device someone else holds --
@@ -234,7 +232,25 @@ class AccessMiddleware:
             if not write or _REGISTRY is None:
                 await self.app(scope, receive, send)
                 return
-            await self.app(scope, receive, _refusal_wins(send, refusals))
+            started = []
+
+            async def tracking(message: Message) -> None:
+                if message["type"] == "http.response.start":
+                    started.append(True)
+                await send(message)
+
+            try:
+                await self.app(scope, receive, _refusal_wins(tracking, refusals))
+            except (DeviceHeld, DeviceNotFound) as e:
+                # A route that does not catch it at all: the exception would
+                # reach Starlette as a 500. Answer with the refusal instead,
+                # if nothing has been sent yet (review).
+                if started:
+                    raise
+                if isinstance(e, DeviceHeld):
+                    await _refuse(send, 423, e.detail)
+                else:
+                    await _refuse(send, 404, str(e))
         finally:
             _WRITE.reset(token)
             _REFUSALS.reset(refusals_token)

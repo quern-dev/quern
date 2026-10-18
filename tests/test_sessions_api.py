@@ -385,6 +385,33 @@ class TestTheGuardCoversEveryRoute:
         assert seen >= 50, f"only {seen} device fields found -- is the walk still working?"
         assert suspicious == [], f"device fields the middleware does not check: {suspicious}"
 
+    #: Changes addressed by a path id, which no device field reaches. Each says
+    #: how it is guarded, or why it changes no device. A new one fails the test
+    #: below until someone decides (review: these were the unguarded ones).
+    ID_ROUTES = {
+        ("PATCH", "/api/v1/proxy/mocks/{rule_id}"): "route checks the rule's simulator_udid",
+        ("DELETE", "/api/v1/proxy/mocks/{rule_id}"): "route checks the rule's simulator_udid",
+        ("POST", "/api/v1/recordings/{recording_id}/stop"): "route checks the recording's udid",
+        ("POST", "/api/v1/recordings/{recording_id}/keyframe"): "route checks the recording's udid",
+        ("POST", "/api/v1/recordings/{recording_id}/viewer"): "issues a view link; no device",
+        ("DELETE", "/api/v1/recordings/{recording_id}/viewer"): "revokes view links; no device",
+        ("DELETE", "/api/v1/device/app/state/{label}"): "deletes a snapshot on the Mac's disk",
+        ("POST", "/api/v1/proxy/replay/{flow_id}"): "replays a request from the Mac; no device",
+    }
+
+    def test_every_change_addressed_by_an_id_has_been_decided(self):
+        import server.main as m
+        from server.config import ServerConfig
+
+        spec = m.create_app(ServerConfig(api_key=KEY)).openapi()
+        found = {(method.upper(), path) for path, ops in spec["paths"].items() for method in ops
+                 if "{" in path and device_access.is_write(method, path)
+                 and not path.startswith(device_access._OWN_RULES)}
+        undecided = sorted(found - set(self.ID_ROUTES))
+        assert undecided == [], f"id-addressed changes with no reservation decision: {undecided}"
+        stale = sorted(set(self.ID_ROUTES) - found)
+        assert stale == [], f"decisions for routes that no longer exist: {stale}"
+
     def test_the_read_only_posts_are_real_routes(self):
         import server.main as m
         from server.config import ServerConfig
@@ -585,3 +612,81 @@ class TestReservingThroughThePool:
         assert client.app.state.device_controller.shutdowns == []
         a.close()
         b.close()
+
+
+class TestRoutesAddressedById:
+    def test_stopping_a_recording_of_a_held_device_is_refused(self, client, registry):
+        from types import SimpleNamespace
+
+        from server.api import recordings as rec_api
+
+        class Manager:
+            def get(self, rid):
+                return SimpleNamespace(udid="SIM-1")
+
+            async def stop(self, rid):
+                raise AssertionError("must not be reached")
+
+        app = client.app
+        app.state.recordings = Manager()
+        app.include_router(rec_api.router)
+        a = Held(client, "claude-a")
+        _reserve(client, "claude-a", udids=["SIM-1"])
+        r = client.post("/api/v1/recordings/rec_1/stop", headers=_h("claude-b"))
+        assert r.status_code == 423 and r.json()["detail"]["held_by"] == "claude-a"
+        a.close()
+
+    def test_a_mock_scoped_to_a_held_device_cannot_be_deleted_by_others(self, registry):
+        from types import SimpleNamespace
+
+        from server.api.proxy_intercept import _check_mock_scope
+        from server.session import _SESSION
+
+        a, token = registry.open("claude-a")
+        registry.attach(a.id, token)
+        registry.reserve("claude-a", ["SIM-1"])
+        adapter = SimpleNamespace(_mock_rules=[
+            {"rule_id": "r1", "simulator_udid": "SIM-1"},
+            {"rule_id": "r2", "simulator_udid": None},
+        ])
+        write = device_access._WRITE.set(True)
+        who = _SESSION.set("claude-b")
+        try:
+            _check_mock_scope(adapter, "r2")                  # unscoped: fine
+            with pytest.raises(device_access.DeviceHeld):
+                _check_mock_scope(adapter, "r1")
+            with pytest.raises(device_access.DeviceHeld):
+                _check_mock_scope(adapter)                    # clear-all includes r1
+        finally:
+            _SESSION.reset(who)
+            device_access._WRITE.reset(write)
+
+    def test_cert_install_skips_a_held_device_in_its_batch(self):
+        import inspect
+
+        from server.api import proxy_certs
+
+        source = inspect.getsource(proxy_certs)
+        assert "device_access.held_by_another(d.udid)" in source
+        assert "device_access.check(target_udid)" in source
+
+    def test_wda_is_not_restarted_behind_a_read_of_a_held_device(self, registry):
+        from server.device.ios.wda_client import _refuse_if_held
+        from server.models import DeviceError
+        from server.session import _SESSION
+
+        a, token = registry.open("claude-a")
+        registry.attach(a.id, token)
+        registry.reserve("claude-a", ["PHONE-1"])
+        who = _SESSION.set("claude-b")
+        try:
+            with pytest.raises(DeviceError, match="only its holder"):
+                _refuse_if_held("PHONE-1", "restart")
+            _refuse_if_held("PHONE-2", "restart")             # free: fine
+        finally:
+            _SESSION.reset(who)
+        holder = _SESSION.set("claude-a")
+        try:
+            _refuse_if_held("PHONE-1", "restart")             # the holder may
+        finally:
+            _SESSION.reset(holder)

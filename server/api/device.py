@@ -1710,6 +1710,10 @@ async def stop_timeline(request: Request):
     timeline = getattr(request.app.state, "active_timeline", None)
     if timeline is None:
         raise HTTPException(status_code=404, detail="No active timeline")
+    # Stopping the holder's timeline is interfering, not watching (#254).
+    from server import device_access
+
+    device_access.check(getattr(timeline, "udid", None))
     request.app.state.active_timeline = None
     return timeline.get_manifest()
 

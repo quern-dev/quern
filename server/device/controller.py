@@ -1110,6 +1110,12 @@ class DeviceController(DeviceControllerUI):
             if not matches:
                 raise DeviceError(f"No simulator or AVD found with name '{name}'", tool="simctl")
             target = matches[0]
+            # Chosen by name, so AccessMiddleware never saw a udid: checked
+            # here (#254). (An AVD that is not running has no serial yet, so
+            # nothing can hold it.)
+            from server import device_access
+
+            device_access.check(target.udid)
             await self.simctl.boot(target.udid)
             self._active_udid = target.udid
             await self._restore_input_after_boot(target.udid)
