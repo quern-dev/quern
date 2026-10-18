@@ -184,6 +184,12 @@ async def reserve(request: Request, session_id: str, body: ReserveRequest) -> di
         reservations = registry.reserve(session_id, udids, on_release=body.on_release,
                                         booted=booted)
     except SessionError as e:
+        # Undo what this request booted: a refused reservation must not leave
+        # simulators running that nobody asked to keep (review).
+        controller = getattr(request.app.state, "device_controller", None)
+        for udid in booted:
+            with contextlib.suppress(Exception):
+                await controller.shutdown(udid)
         raise _refused(e) from None
     if len(session.reservations) == 1:
         # One device: it becomes this session's active device, so unqualified
@@ -215,12 +221,21 @@ async def unreserve(request: Request, session_id: str, udid: str | None = None) 
 async def _choose(request: Request, registry: SessionRegistry, session_id: str,
                   body: ReserveRequest) -> tuple[list[str], list[str]]:
     """The udids a reservation asks for, and which of them it booted."""
+    controller = getattr(request.app.state, "device_controller", None)
+    pool = getattr(controller, "_pool", None)
     if body.udids is not None:
         from server.device_access import _canonical
 
-        return [_canonical(u) for u in body.udids if u], []
-    controller = getattr(request.app.state, "device_controller", None)
-    pool = getattr(controller, "_pool", None)
+        udids = [_canonical(u) for u in body.udids if u]
+        if pool is not None:
+            # Only devices that exist: a typo used to be reserved, and reported
+            # as success, while the device it meant stayed free (review).
+            await pool.refresh()
+            known = set(pool._read_state().devices)
+            unknown = [u for u in udids if u not in known]
+            if unknown:
+                raise HTTPException(404, f"no such device: {', '.join(unknown)}")
+        return udids, []
     if pool is None:
         raise HTTPException(503, "the device pool is not available")
     from server.models import DeviceState, DeviceType

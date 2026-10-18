@@ -24,6 +24,7 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
+import re
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -61,9 +62,16 @@ READ_POSTS = frozenset({
     "/api/v1/device/logging/device/stop",
 })
 
-#: Bodies larger than this are not parsed for device fields. No device-taking
-#: route takes anything near it; a body that size is an upload.
-_MAX_BODY = 1_000_000
+#: Routes the middleware leaves to themselves: the session routes decide who
+#: may reserve and release, and answer 409 for a device someone else holds --
+#: the middleware's 423 used to get there first, and refused the owner's
+#: release of a single device (review).
+_OWN_RULES = "/api/v1/sessions"
+
+#: UUID-shaped ids: simulators, and iOS devices' hyphenated identifiers. Upper-
+#: cased before comparing -- a lowercase spelling of a held simulator passed the
+#: check (review). Android serials are case-sensitive and left as they are.
+_UUIDISH = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4,16}(-[0-9A-Fa-f]{4}){0,3}(-[0-9A-Fa-f]{12})?")
 
 _REGISTRY: SessionRegistry | None = None
 _WRITE: contextvars.ContextVar[bool] = contextvars.ContextVar("quern_write", default=False)
@@ -105,6 +113,9 @@ class DeviceNotFound(DeviceError):
 
 
 def _canonical(udid: str) -> str:
+    udid = udid.strip()
+    if _UUIDISH.fullmatch(udid):
+        udid = udid.upper()
     try:
         from server.device.ios.devicectl import canonical_device_id
 
@@ -160,7 +171,9 @@ def _named_devices(query: bytes, body: bytes, content_type: str) -> list[str]:
     for key, value in parse_qsl(query.decode("latin-1"), keep_blank_values=False):
         if key in DEVICE_KEYS and value:
             found.extend(v for v in value.split(",") if v)
-    if body and len(body) <= _MAX_BODY and "json" in content_type:
+    # Every JSON body, whatever its size: a size cap was a way past the check
+    # for routes that act on the body's udid without resolve_udid (review).
+    if body and "json" in content_type:
         try:
             data = json.loads(body)
         except ValueError:
@@ -198,7 +211,8 @@ class AccessMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        write = is_write(scope.get("method", "GET"), scope.get("path", ""))
+        path = scope.get("path", "")
+        write = is_write(scope.get("method", "GET"), path) and not path.startswith(_OWN_RULES)
         token = _WRITE.set(write)
         refusals: list = []
         refusals_token = _REFUSALS.set(refusals)

@@ -453,3 +453,135 @@ class TestThePoolAndTheListing:
         assert out[0]["reservation"]["held_by"] == "claude-a"
         assert out[0]["reservation"]["yours"] is False
         assert out[1]["reservation"] is None
+
+
+class TestReviewFindings:
+    def test_reserving_a_held_device_is_409_not_the_middlewares_423(self, client):
+        a = Held(client, "claude-a")
+        b = Held(client, "claude-b")
+        _reserve(client, "claude-a", udids=["SIM-1"])
+        r = _reserve(client, "claude-b", udids=["SIM-1"])
+        assert r.status_code == 409 and "claude-a" in r.json()["detail"]
+        a.close()
+        b.close()
+
+    def test_the_owner_can_free_a_single_device(self, client, registry):
+        a = Held(client, "claude-a")
+        _reserve(client, "claude-a", udids=["SIM-1", "SIM-2"])
+        r = client.delete("/api/v1/sessions/claude-a/reservations?udid=SIM-1",
+                          headers=_h("someone-else"))
+        assert r.status_code == 200 and r.json()["freed"] == ["SIM-1"]
+        assert registry.holder_of("SIM-1") is None and registry.holder_of("SIM-2") is not None
+        a.close()
+
+    def test_a_lowercase_spelling_of_a_held_simulator_is_refused(self, client):
+        udid = "5E6E8B35-4384-447E-84E8-4951BA26B181"
+        a = Held(client, "claude-a")
+        _reserve(client, "claude-a", udids=[udid.lower()])
+        r = client.post("/api/v1/device/raw-op", headers=_h("claude-b"),
+                        json={"udid": udid.lower()})
+        assert r.status_code == 423
+        a.close()
+
+    def test_a_large_json_body_is_still_checked(self, client):
+        a = Held(client, "claude-a")
+        _reserve(client, "claude-a", udids=["SIM-1"])
+        r = client.post("/api/v1/device/raw-op", headers=_h("claude-b"),
+                        json={"udid": "SIM-1", "note": "x" * 2_000_000})
+        assert r.status_code == 423
+        a.close()
+
+
+class FakePool:
+    def __init__(self, devices):
+        from types import SimpleNamespace
+
+        self.devices = {d: SimpleNamespace(udid=d, state=s, is_available=True)
+                        for d, s in devices.items()}
+        self.booted = []
+
+    async def refresh(self):
+        pass
+
+    def _read_state(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(devices=self.devices)
+
+    def _find_candidates(self, devices, **criteria):
+        return list(devices)
+
+    def _rank_candidate(self, d):
+        return d.udid
+
+    async def _boot_and_wait(self, udid):
+        from server.models import DeviceState
+
+        self.booted.append(udid)
+        self.devices[udid].state = DeviceState.BOOTED
+
+
+class TestReservingThroughThePool:
+    @pytest.fixture
+    def pool(self, client):
+        from server.models import DeviceState
+
+        pool = FakePool({"SIM-1": DeviceState.BOOTED, "SIM-2": DeviceState.SHUTDOWN,
+                         "SIM-3": DeviceState.SHUTDOWN})
+        client.app.state.device_controller._pool = pool
+        return pool
+
+    def test_a_typo_is_not_reserved(self, client, pool):
+        a = Held(client, "claude-a")
+        r = _reserve(client, "claude-a", udids=["SIM-TYPO"])
+        assert r.status_code == 404 and "SIM-TYPO" in r.json()["detail"]
+        a.close()
+
+    def test_count_takes_booted_first_then_boots(self, client, pool):
+        a = Held(client, "claude-a")
+        r = _reserve(client, "claude-a", count=2)
+        assert r.status_code == 200, r.text
+        assert [x["udid"] for x in r.json()["reserved"]] == ["SIM-1", "SIM-2"]
+        assert pool.booted == ["SIM-2"]
+        assert [x["booted_here"] for x in r.json()["reserved"]] == [False, True]
+        a.close()
+
+    def test_count_skips_devices_another_session_holds(self, client, pool, registry):
+        b = Held(client, "claude-b")
+        _reserve(client, "claude-b", udids=["SIM-1"])
+        a = Held(client, "claude-a")
+        r = _reserve(client, "claude-a", count=1, auto_boot=False)
+        assert r.status_code == 409 and "held by other sessions" in r.json()["detail"]
+        a.close()
+        b.close()
+
+    def test_a_refused_reservation_shuts_down_what_it_booted(self, client, pool, registry,
+                                                              monkeypatch):
+        """Booting happens before the registry's all-or-nothing check; if that
+        refuses, the simulators booted for it are shut down again (review)."""
+        a = Held(client, "claude-a")
+        original = registry.reserve
+
+        def refuse(*args, **kwargs):
+            from server.session_registry import SessionConflict
+            raise SessionConflict("raced: someone else got there first")
+
+        monkeypatch.setattr(registry, "reserve", refuse)
+        r = _reserve(client, "claude-a", count=2)
+        assert r.status_code == 409
+        assert client.app.state.device_controller.shutdowns == ["SIM-2"]
+        monkeypatch.setattr(registry, "reserve", original)
+        a.close()
+
+    def test_release_policy_skips_a_device_reserved_again_meanwhile(self, client, registry):
+        from server.api.sessions import run_release_policies
+        a = Held(client, "claude-a")
+        registry.reserve("claude-a", ["SIM-2"], on_release="shutdown_booted", booted=["SIM-2"])
+        registry.unreserve("claude-a", ["SIM-2"])          # queued for its policy
+        b = Held(client, "claude-b")
+        registry.reserve("claude-b", ["SIM-2"])            # ...and taken again first
+        import asyncio
+        asyncio.run(run_release_policies(client.app))
+        assert client.app.state.device_controller.shutdowns == []
+        a.close()
+        b.close()
