@@ -118,3 +118,42 @@ def test_no_server_exits_1(monkeypatch, capsys):
     monkeypatch.setattr(session_cli, "_server", nothing)
     assert session_cli.main(["list"]) == 1
     assert "no server answering" in capsys.readouterr().err
+
+
+def test_doctor_calls_out_a_session_in_grace(monkeypatch, capsys, tmp_path):
+    import io
+    import json
+
+    from server import main as main_mod
+
+    key = tmp_path / "api-key"
+    key.write_text("K")
+    monkeypatch.setattr("server.config.API_KEY_FILE", key)
+    monkeypatch.setattr("server.__main__._server_base_url", lambda: "http://127.0.0.1:9")
+    body = json.dumps({"sessions": [
+        {"id": "claude-a", "state": "live", "reservations": [{"udid": "SIM-1"}]},
+        {"id": "claude-b", "state": "grace", "grace_remaining_s": 95.2,
+         "reservations": [{"udid": "SIM-2"}]},
+    ]}).encode()
+
+    class Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout: Resp(body))
+    main_mod._report_held_sessions()
+    out = capsys.readouterr().out
+    assert "✓ claude-a: live, holding SIM-1" in out
+    assert "⚠ claude-b: connection lost, holding SIM-2 for 95s more" in out
+    assert "quern session release claude-b" in out
+
+
+def test_doctor_with_no_server_says_not_checked(monkeypatch, capsys):
+    from server import main as main_mod
+
+    monkeypatch.setattr("server.__main__._server_base_url", lambda: None)
+    main_mod._report_held_sessions()
+    assert "not checked" in capsys.readouterr().out

@@ -1591,6 +1591,47 @@ def _cmd_check_updates() -> int:
     return 0
 
 
+def _report_held_sessions() -> None:
+    """Held sessions and their devices (#254), with any in grace called out:
+    a device held by an agent that crashed is visible here rather than
+    mysterious. Informational -- it never changes doctor's exit code, and a
+    server that is down is already reported by the device-tool section."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    from server.__main__ import _server_base_url
+    from server.config import API_KEY_FILE
+
+    print("Held sessions:")
+    url = _server_base_url()
+    if url is None:
+        print("  ? not checked — no server answering")
+        return
+    try:
+        key = API_KEY_FILE.read_text().strip()
+        req = urllib.request.Request(url + "/api/v1/sessions",
+                                     headers={"Authorization": f"Bearer {key}",
+                                              "X-Quern-Session": "cli"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            sessions = json.loads(resp.read() or b"{}").get("sessions") or []
+    except (OSError, ValueError, urllib.error.URLError) as e:
+        print(f"  ? not checked — {e}")
+        return
+    if not sessions:
+        print("  none")
+        return
+    for s in sessions:
+        devices = ", ".join(r["udid"] for r in s.get("reservations") or []) or "no devices"
+        if s.get("state") == "grace":
+            left = s.get("grace_remaining_s")
+            print(f"  ⚠ {s['id']}: connection lost, holding {devices} for "
+                  f"{int(left) if left is not None else '?'}s more "
+                  f"(free now: quern session release {s['id']})")
+        else:
+            print(f"  ✓ {s['id']}: live, holding {devices}")
+
+
 def _cmd_doctor(args: argparse.Namespace) -> None:
     """Diagnostics: device tools, venv, tool versions, service health. Read-only,
     except that it records the MCP client finding the Quern app shows.
@@ -1627,6 +1668,7 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         for name, ok in sorted(tools.items()):
             print(f"  {'✓' if ok else '✗'} {name}")
 
+    _report_held_sessions()
     repaired = _report_python_deps(fix)
     _report_external_tools(fix)
     node_complete = _report_node()
