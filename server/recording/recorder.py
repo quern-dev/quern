@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import fnmatch
 import json
 import logging
@@ -293,6 +294,13 @@ class Recording:
     #: themselves, so subsystems sharing a server can tell their runs apart.
     #: A label, not ownership: anyone can still stop any recording.
     requested_by: str | None = None
+    #: Who started it (#254, phase 2): the owner, or a client key's principal.
+    #: A blind server lists a client's recordings to that client only.
+    principal: str = "owner"
+    #: Started by a caller held to blind mode: only what is attributable to
+    #: the device is written -- no device-less crash reports, no unattributed
+    #: logs or flows, whatever the filters asked.
+    blind: bool = False
     #: recording; interrupted (saved, but could not resume -- tried again at
     #: the next start, and stoppable); stopped; failed.
     state: str = "recording"
@@ -385,6 +393,7 @@ class Recording:
     def summary(self) -> dict:
         return {
             "id": self.id, "udid": self.udid, "requested_by": self.requested_by,
+            "principal": self.principal,
             "output_dir": str(self.dir), "events": str(self.events), "manifest": str(self.manifest),
             "state": self.state, "error": self.error,
             "started_at": self.started_at.isoformat(),
@@ -631,7 +640,7 @@ class RecordingManager:
         # A crash report with no device is kept, as the live trace keeps it:
         # host crash reports often carry none, and a crash is the one entry a
         # run most needs. They come a handful at a time, unlike log lines.
-        return e.device_id == rec.udid or not e.device_id
+        return e.device_id == rec.udid or (not e.device_id and not rec.blind)
 
     def _wants_flow(self, rec: Recording, f: FlowRecord) -> bool:
         work, _ = device_of(f, self._ip())
@@ -679,7 +688,8 @@ class RecordingManager:
                 raise RecordingError(_already_filmed(udid, holder))
 
     async def start(self, udid: str, output_dir: str | None, filters: Filters,
-                    requested_by: str | None = None) -> Recording:
+                    requested_by: str | None = None, *, principal: str = "owner",
+                    blind: bool = False) -> Recording:
         rec_id = f"rec_{uuid.uuid4().hex[:12]}"
         out = _output_dir(output_dir) if output_dir else (
             config_mod.CONFIG_DIR / "recordings" / rec_id)
@@ -687,8 +697,11 @@ class RecordingManager:
             out.mkdir(parents=True, exist_ok=True)
         except OSError as e:
             raise RecordingError(f"{out} could not be created: {e}") from e
+        if blind and filters.include_unattributed:
+            filters = dataclasses.replace(filters, include_unattributed=False)
         rec = Recording(id=rec_id, udid=udid, dir=out, filters=filters, started_at=_now(),
-                        requested_by=(requested_by or "").strip() or None)
+                        requested_by=(requested_by or "").strip() or None,
+                        principal=principal, blind=blind)
         if filters.video:
             # Asked for and impossible is a refusal, not a recording that
             # quietly has no video.

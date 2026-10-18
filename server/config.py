@@ -262,16 +262,28 @@ def _host_name(value: str) -> str:
 def sessions_settings() -> dict:
     """Held sessions' settings from config.json's `sessions` object (#254).
 
-        {"sessions": {"grace_seconds": 180}}
+        {"sessions": {"grace_seconds": 180, "visibility": "shared"}}
 
     `grace_seconds` is how long an abruptly dropped session keeps its devices,
     clamped to 120-300 (the maintainer's 2-5 minutes); anything that is not a
-    plain number is the default, so a typo never means "no grace"."""
+    plain number is the default, so a typo never means "no grace".
+
+    `visibility` is "shared" or "blind" (#254, phase 2). Anything else is
+    shared, and `visibility_note` says so: a typo must not quietly show every
+    client everyone's data -- but it must not lock the owner out either, and
+    shared is what the server did before the setting existed."""
     from server.session_registry import clamp_grace
 
     raw = read_user_config().get("sessions")
     raw = raw if isinstance(raw, dict) else {}
-    return {"grace_seconds": clamp_grace(raw.get("grace_seconds"))}
+    visibility = raw.get("visibility", "shared")
+    note = None
+    if visibility not in ("shared", "blind"):
+        note = (f"sessions.visibility is {visibility!r}, which is neither \"shared\" nor "
+                "\"blind\": running shared, so every client sees every device's data")
+        visibility = "shared"
+    return {"grace_seconds": clamp_grace(raw.get("grace_seconds")),
+            "visibility": visibility, "visibility_note": note}
 
 
 def viewer_settings() -> dict:

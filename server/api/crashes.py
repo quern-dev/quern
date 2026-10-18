@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from server import visibility
 from server.api.actions import logged_action
 from server.device.ios.devicectl import canonical_device_id, spellings_of
 from server.models import (
@@ -120,6 +121,14 @@ async def get_latest_crashes(
 
     if since:
         reports = [r for r in reports if r.timestamp >= since]
+
+    # Blind (#254): the caller's own devices' crashes since it reserved them.
+    # A report that names no device -- a Mac process, or one quern cannot
+    # place -- is not attributable, so it is not shown.
+    view = visibility.data_view()
+    if not view.everything:
+        reports = [r for r in reports
+                   if not r.mac_process and view.allows(r.device_id, r.timestamp)]
 
     # Most recent first
     reports = sorted(reports, key=lambda r: r.timestamp, reverse=True)

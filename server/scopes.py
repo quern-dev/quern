@@ -57,7 +57,7 @@ from urllib.parse import parse_qsl, urlencode
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from server import device_access, principal
+from server import device_access, principal, visibility
 from server.session import _SESSION, HEADER, parse_session
 from server.session_registry import OWNER
 
@@ -281,6 +281,70 @@ ROUTES: dict[tuple[str, str], Rule] = {
     ("GET", "/api/v1/system/update-status"): _OWNER,
 }
 
+#: What a caller held to blind mode (#254, phase 2) gets from each route a
+#: client may read. `tests/test_scopes.py` fails until every VIEW route has
+#: an entry, as ROUTES does for every route.
+#:
+#:     device    reads one device: another principal's device answers 404,
+#:               as one that does not exist would (device_access.check)
+#:     filtered  lists data: the route keeps only what is attributable to the
+#:               caller's own devices (visibility.data_view)
+#:     hidden    describes the Mac or the owner's set-up, not a device: 403
+#:     shared    nothing about anyone: answered as for everyone
+BLIND: dict[tuple[str, str], str] = {
+    ("GET", "/api/v1/device/app/list"): "device",
+    ("GET", "/api/v1/device/app/state/plist"): "device",
+    ("GET", "/api/v1/device/app/state/plist/diff"): "device",
+    ("GET", "/api/v1/device/screen-summary"): "device",
+    ("GET", "/api/v1/device/screenshot"): "device",
+    ("GET", "/api/v1/device/screenshot/annotated"): "device",
+    ("GET", "/api/v1/device/settings"): "device",
+    ("GET", "/api/v1/device/ui"): "device",
+    ("GET", "/api/v1/device/ui/element"): "device",
+    ("GET", "/api/v1/device/video"): "device",
+    ("POST", "/api/v1/device/ui/wait-for-element"): "device",
+    ("POST", "/api/v1/device/ui/wait-settled"): "device",
+    ("POST", "/api/v1/device/preview/start"): "device",
+    ("POST", "/api/v1/device/logging/start"): "device",
+    ("POST", "/api/v1/device/logging/device/start"): "device",
+    ("POST", "/api/v1/landmarks/identify"): "device",
+    ("GET", "/api/v1/device/list"): "filtered",
+    ("GET", "/api/v1/device/preview/devices"): "filtered",
+    ("GET", "/api/v1/device/preview/status"): "filtered",
+    ("GET", "/api/v1/device/screenshot/timeline"): "filtered",
+    ("GET", "/api/v1/crashes/latest"): "filtered",
+    ("GET", "/api/v1/logs/errors"): "filtered",
+    ("GET", "/api/v1/logs/query"): "filtered",
+    ("GET", "/api/v1/logs/stream"): "filtered",
+    ("GET", "/api/v1/logs/summary"): "filtered",
+    ("GET", "/api/v1/logs/sources"): "filtered",
+    ("GET", "/api/v1/proxy/status"): "filtered",
+    ("GET", "/api/v1/proxy/cert/status"): "filtered",
+    ("GET", "/api/v1/proxy/flows"): "filtered",
+    ("GET", "/api/v1/proxy/flows/pending"): "filtered",
+    ("GET", "/api/v1/proxy/flows/stream"): "filtered",
+    ("GET", "/api/v1/proxy/flows/summary"): "filtered",
+    ("GET", "/api/v1/proxy/flows/{flow_id}"): "filtered",
+    ("POST", "/api/v1/proxy/flows/wait"): "filtered",
+    ("GET", "/api/v1/proxy/mocks"): "filtered",
+    ("GET", "/api/v1/recordings"): "filtered",
+    ("GET", "/api/v1/trace"): "filtered",
+    # The owner's set-up: which apps have knowledge bases, which hosts are
+    # bypassed or filtered, what builds ran, the flows held for intercept
+    # (which carry no device), app checkpoints, the Mac's tool layout.
+    ("GET", "/api/v1/device/app/state/list"): "hidden",
+    ("GET", "/api/v1/device/app/state/plist/watch/config"): "hidden",
+    ("GET", "/api/v1/device/build-progress"): "hidden",
+    ("GET", "/api/v1/device/tools/sites"): "hidden",
+    ("GET", "/api/v1/landmarks/"): "hidden",
+    ("POST", "/api/v1/landmarks/validate"): "hidden",
+    ("GET", "/api/v1/logs/filter"): "hidden",
+    ("GET", "/api/v1/proxy/bypass"): "hidden",
+    ("GET", "/api/v1/proxy/intercept/held"): "hidden",
+    ("GET", "/api/v1/system/channel"): "shared",
+}
+
+
 def _compile(template: str) -> re.Pattern:
     return re.compile("^" + re.sub(r"\\\{[^/]+?\\\}", "[^/]+", re.escape(template)) + "$")
 
@@ -307,6 +371,13 @@ def match(method: str, path: str) -> tuple[str, Rule] | None:
         if m == method and pattern.match(path):
             return template, rule
     return None
+
+
+def _blind_kind(method: str, path: str) -> str:
+    """A VIEW route's blind-mode treatment; "hidden" when undecided."""
+    found = match(method, path)
+    return BLIND.get((method.upper() if method.upper() != "HEAD" else "GET", found[0]),
+                     "hidden") if found else "hidden"
 
 
 def rule_for(method: str, path: str) -> Rule:
@@ -434,6 +505,11 @@ class ScopeMiddleware:
             return
         if rule.access is Access.OWNER:
             await _deny(send, 403, f"{method} {path} is owner-only: a client key cannot use it")
+            return
+        if rule.access is Access.VIEW and _blind_kind(method, path) == "hidden" \
+                and visibility.blind_for():
+            await _deny(send, 403, (f"{method} {path} describes this server's own set-up, "
+                                    "which a blind server does not share with client keys"))
             return
         await self._as_session(who, scope, receive, send, rule=rule)
 

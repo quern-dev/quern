@@ -16,13 +16,15 @@ key's holder -- always sees everything.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from server.principal import current_principal
 from server.session import current_session
 from server.session_registry import OWNER, Held, HeldSession
 
-#: "shared" today. Phase 2 adds "blind", read from config, applying to
-#: callers whose principal is not the owner.
+#: "shared" or "blind", from config.json's `sessions.visibility` at start-up
+#: (server/config.py `sessions_settings`). Blind applies only to callers whose
+#: principal is not the owner.
 MODE = "shared"
 
 
@@ -76,3 +78,120 @@ def sees_unattributed(caller: Caller) -> bool:
     cannot attribute -- is visible: always in shared mode, never to a blind
     caller, by the same "could not tell, so show less" rule as local capture."""
     return not _blind(caller)
+
+
+@dataclass(frozen=True)
+class View:
+    """What data a caller may see: everything, or only data attributable to
+    the devices its principal holds, from the moment each was reserved.
+
+    `since` is None for everything. Otherwise it maps each held device to its
+    reservation's start, so the next holder of a device does not read the
+    previous holder's logs and flows still in the buffers. Data tied to no
+    device -- the host's own logs, flows quern cannot attribute -- is visible
+    only with everything: "could not tell, so show less"."""
+
+    since: dict[str, datetime] | None = None
+
+    @property
+    def everything(self) -> bool:
+        return self.since is None
+
+    def allows(self, udid: str | None, when: datetime | None = None) -> bool:
+        """Whether a record tied to `udid` (None or "": to no device), made
+        at `when`, is visible. A record with no time is judged by device."""
+        if self.since is None:
+            return True
+        if not udid:
+            return False
+        from server.device_access import _canonical
+
+        start = self.since.get(_canonical(udid))
+        if start is None:
+            return False
+        return when is None or _aware(when) >= start
+
+
+def _aware(when: datetime) -> datetime:
+    from datetime import UTC
+
+    return when if when.tzinfo is not None else when.replace(tzinfo=UTC)
+
+
+def data_view(caller: Caller | None = None) -> View:
+    """The view of the current caller's request: everything, unless blind."""
+    caller = caller or current_caller()
+    if not _blind(caller):
+        return View()
+    from server import device_access
+
+    registry = device_access._REGISTRY
+    since: dict[str, datetime] = {}
+    if registry is not None:
+        for session in registry.sessions():
+            if session.principal != caller.principal:
+                continue
+            for udid, reservation in session.reservations.items():
+                start = reservation.since
+                if udid not in since or start < since[udid]:
+                    since[udid] = start
+    return View(since=since)
+
+
+def blind_for(caller: Caller | None = None) -> bool:
+    """Whether the current caller is held to blind mode."""
+    return _blind(caller or current_caller())
+
+
+def entry_visible(view: View, entry) -> bool:
+    """Whether a log entry is visible: by the device it came from -- an action
+    entry's resolved `udid`, else the capture source's `device_id` -- and when.
+    The server's own lines (`device_id` "server") and the host's (empty) are
+    tied to no device."""
+    if view.everything:
+        return True
+    udid = getattr(entry, "udid", "") or getattr(entry, "device_id", "")
+    if udid == "server":
+        udid = ""
+    return view.allows(udid, getattr(entry, "timestamp", None))
+
+
+def flow_filter(view: View):
+    """A predicate for flows the view allows, or None when it allows all.
+
+    By the device the flow came from, as recordings attribute it
+    (`trace.device_of`): exactly, from the simulator or emulator its client
+    process belongs to; for a physical device, by the address its Wi-Fi proxy
+    was recorded with -- and only while that record is trusted. A stale or
+    unreadable record is "could not tell", so the flow is hidden."""
+    if view.everything:
+        return None
+    from server.trace import device_of
+
+    try:
+        from server.api.trace import read_ip_map
+
+        ip_map = read_ip_map()
+    except Exception:  # noqa: BLE001 -- unreadable: no physical flow is attributable
+        ip_map = {}
+
+    def visible(flow) -> bool:
+        udid, firm = device_of(flow, ip_map)
+        return firm and view.allows(udid, flow.timestamp)
+
+    return visible
+
+
+def listed(udid: str | None, caller: Caller | None = None) -> bool:
+    """Whether a device appears in a listing: what `device_visible` decides --
+    always when shared; when blind, a device nobody holds (one the caller could
+    reserve) or one its own principal holds."""
+    caller = caller or current_caller()
+    if not _blind(caller):
+        return True
+    from server import device_access
+
+    registry = device_access._REGISTRY
+    holder = registry.holder_of(device_access._canonical(udid)) \
+        if registry is not None and udid else None
+    return device_visible(holder, caller)

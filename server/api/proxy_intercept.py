@@ -9,6 +9,7 @@ from pathlib import Path
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from server import visibility
 from server.api.actions import logged_action
 from server.models import (
     HeldFlow,
@@ -315,6 +316,10 @@ async def list_mocks(request: Request) -> MockListResponse:
         )
         for r in adapter._mock_rules
     ]
+    # Blind (#254): the rules scoped to the caller's own devices. Unscoped
+    # rules answer every device's traffic and are the owner's set-up.
+    view = visibility.data_view()
+    rules = [r for r in rules if view.allows(r.simulator_udid)]
     return MockListResponse(rules=rules, total=len(rules))
 
 

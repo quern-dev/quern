@@ -12,6 +12,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from server import visibility
 from server.api.actions import logged_action
 from server.api.trace import _proxy_is_running
 from server.device.ios.devicectl import canonical_device_id
@@ -101,8 +102,11 @@ async def start_recording(request: Request, body: RecordingStartRequest) -> dict
             warnings.append(f"this simulator's HTTPS is passed through, not recorded: "
                             f"{simulator_tls.reason}")
     try:
+        caller = visibility.current_caller()
         rec = await manager.start(udid, body.output_dir, filters,
-                                  requested_by=body.requested_by)
+                                  requested_by=body.requested_by,
+                                  principal=caller.principal,
+                                  blind=visibility.blind_for(caller))
     except RecordingError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     if "flows" in rec.filters.kinds and not _proxy_is_running(request):
@@ -280,6 +284,10 @@ async def list_recordings(
     # Read as start stores it: " ci" was kept as "ci", and listing by what was
     # passed found nothing; blank is no filter, as the CLI and MCP send it.
     requested_by = (requested_by or "").strip() or None
+    # Blind (#254): a client's own principal's recordings only.
+    caller = visibility.current_caller()
+    blind = visibility.blind_for(caller)
     return {"recordings": [_with_rejections(request, r.summary())
                            for r in _manager(request).list()
-                           if requested_by is None or r.requested_by == requested_by]}
+                           if (requested_by is None or r.requested_by == requested_by)
+                           and (not blind or r.principal == caller.principal)]}

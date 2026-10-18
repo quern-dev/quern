@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 from starlette.responses import StreamingResponse
 
+from server import visibility
 from server.api.actions import action, logged_action
 from server.device.media import media_engine
 from server.device.media.preview import simulator_entries
@@ -1624,6 +1625,17 @@ async def preview_status(request: Request):
         ios_status["simulators_error"] = sims_error
     ios_status["quern_media_built"] = media_engine.is_available()
     android_status = sp.status()
+    view = visibility.data_view()
+    if not view.everything:
+        # Blind (#254): devices the caller could preview -- free or its own --
+        # and only its own devices' running previews.
+        ios_status["available"] = [d for d in ios_status["available"]
+                                   if visibility.listed(d.get("id"))]
+        ios_status["available_count"] = len(ios_status["available"])
+        for status in (ios_status, android_status):
+            status["active"] = {k: v for k, v in (status.get("active") or {}).items()
+                                if view.allows(k)}
+            status["active_count"] = len(status["active"])
     return {
         "ios": ios_status,
         "android": android_status,
@@ -1648,7 +1660,8 @@ async def preview_devices(request: Request):
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
     sims, sims_error = await simulator_entries()
-    result["devices"] = result["devices"] + sims
+    result["devices"] = [d for d in result["devices"] + sims
+                         if visibility.listed(d.get("id"))]    # blind (#254)
     if sims_error is not None:
         result["simulators_error"] = sims_error
     return result
@@ -1735,6 +1748,8 @@ async def stop_timeline(request: Request):
 async def get_timeline(request: Request):
     """Get the manifest of the active screenshot timeline."""
     timeline = getattr(request.app.state, "active_timeline", None)
-    if timeline is None:
+    # Blind (#254): the one timeline is the owner's, of whichever device it
+    # films; a client sees it only if that is a device its principal holds.
+    if timeline is None or not visibility.data_view().allows(getattr(timeline, "udid", None)):
         raise HTTPException(status_code=404, detail="No active timeline")
     return timeline.get_manifest()

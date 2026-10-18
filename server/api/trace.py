@@ -19,6 +19,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from server import visibility
 from server.device.ios.devicectl import canonical_device_id
 from server.models import LogEntry, LogQueryParams, LogSource, TraceResponse, UtcDatetime
 from server.recording import recorder as recording_mod
@@ -221,11 +222,17 @@ async def get_trace(
     # An action entry is one with an action name. `started` markers are the
     # DEBUG begin entries and are deliberately excluded: a trace wants one row
     # per thing that happened, and the pair only helps when something hung.
+    # Blind (#254): only what is attributable to the caller's own devices,
+    # from when it reserved them -- actions, logs, crashes and flows alike. What
+    # is tied to no device is dropped rather than attached by time, which is
+    # how a shared trace places it: "could not tell, so show less".
+    view = visibility.data_view()
     actions = [
         e for e in entries
         if e.action and e.outcome != "started"
         and (not udid or e.udid == udid)
         and (until is None or e.timestamp <= until)
+        and visibility.entry_visible(view, e)
     ]
     # `limit` bounds what the caller gets back.
     #
@@ -278,7 +285,8 @@ async def get_trace(
     # entries push out older app logs and crash reports -- and the trace then
     # looked empty for a reason that had nothing to do with the app.
     device_logs = [e for e in device_logs if e.source in APP_LOG_SOURCES
-                   and (until is None or e.timestamp <= until)]
+                   and (until is None or e.timestamp <= until)
+                   and visibility.entry_visible(view, e)]
     # And the caller's device, for the same reason. With `udid` set, bounding
     # first spends the budget on other devices' lines -- which attribution
     # then discards -- so a busy neighbour could empty this caller's trace.
@@ -292,6 +300,7 @@ async def get_trace(
     # session from a buffer of their own, and letting a burst of newer app
     # lines slice them off would undo the reason that buffer exists.
     crashes = await crash_buffer.filter_entries(LogQueryParams(since=window_start, until=until))
+    crashes = [e for e in crashes if visibility.entry_visible(view, e)]
     if udid:
         crashes = [e for e in crashes if not e.device_id or e.device_id == udid]
     device_logs = sorted(device_logs + crashes, key=lambda e: e.timestamp)
@@ -360,6 +369,9 @@ async def get_trace(
                 f for f in flows
                 if owns(udid, device_of(f, ip_map)[0]) is not Ownership.FOREIGN
             ]
+        allowed = visibility.flow_filter(view)
+        if allowed is not None:
+            flows = [f for f in flows if allowed(f)]
         flows_over_limit = len(flows) > log_limit
         if flows_over_limit:
             flows = flows[-log_limit:]

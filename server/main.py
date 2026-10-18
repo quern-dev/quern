@@ -598,13 +598,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Held sessions and reservations (#254). In memory only: nothing holding
     # one survives a restart, so neither do they.
-    from server import device_access
+    from server import device_access, visibility
     from server.api.sessions import sweep as _sweep_sessions
     from server.config import sessions_settings
     from server.session_registry import SessionRegistry
 
-    app.state.sessions = SessionRegistry(grace_seconds=sessions_settings()["grace_seconds"])
+    _sessions_cfg = sessions_settings()
+    app.state.sessions = SessionRegistry(grace_seconds=_sessions_cfg["grace_seconds"])
     device_access.install(app.state.sessions)
+    # Shared or blind (#254, phase 2): read once, as the grace is. A server
+    # that is blind says so in its log; a setting it could not read says
+    # what it fell back to.
+    visibility.MODE = _sessions_cfg["visibility"]
+    if _sessions_cfg["visibility_note"]:
+        logger.warning("%s", _sessions_cfg["visibility_note"])
+    elif visibility.MODE == "blind":
+        logger.info("Blind sharing: each client key sees only its own devices' data")
     sessions_task = asyncio.create_task(_sweep_sessions(app), name="session-sweep")
 
     # The LAN viewer (#449), opt-in. Started after the recordings it serves.
@@ -1623,6 +1632,15 @@ def _report_bind() -> None:
     exposed = bind_warning(host)
     print("API listener:")
     print(f"  ⚠ {exposed}" if exposed else f"  ✓ {host} (this Mac only)")
+    from server.config import sessions_settings
+
+    sharing = sessions_settings()
+    if sharing["visibility_note"]:
+        print(f"  ⚠ {sharing['visibility_note']}")
+    else:
+        print(f"  ✓ sharing: {sharing['visibility']}"
+              + (" (client keys see only their own devices' data)"
+                 if sharing["visibility"] == "blind" else ""))
 
 
 def _report_held_sessions() -> None:

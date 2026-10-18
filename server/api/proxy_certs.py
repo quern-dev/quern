@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from server import visibility
 from server.api.actions import action, logged_action
 from server.device.ios.devicectl import canonical_device_id
 from server.models import (
@@ -145,9 +146,11 @@ async def cert_status(request: Request) -> CertStatusResponse:
     device_certs_dict = read_cert_state()
 
     # Convert to DeviceCertState models
+    view = visibility.data_view()
     devices = {
         udid: DeviceCertState(**cert_data)
         for udid, cert_data in device_certs_dict.items()
+        if view.allows(udid)                # blind (#254): the caller's devices only
     }
 
     return CertStatusResponse(

@@ -96,6 +96,17 @@ Give it to the client as `QUERN_CLIENT_KEY` (not `QUERN_API_KEY`, which `quern e
 
 Every route is classified in `server/scopes.py`, and a route with no classification is owner-only; a test fails until each new route is given one.
 
+**Blind sharing.** `{"sessions": {"visibility": "blind"}}` in `~/.quern/config.json` (read at start-up; the default is `"shared"`) keeps client keys out of each other's work, for a server shared between people or teams:
+
+- **Devices:** a client sees the devices nobody holds and the ones its own key holds. A device another key holds reads as one that does not exist: 404, for reads as well as changes, not 423 naming the holder.
+- **Data:** logs, flows, crashes, the trace, recordings, mock rules, proxy and certificate status, previews and the screenshot timeline show only what is attributable to the client's own devices, from the moment each was reserved -- so whoever reserves a device next does not read the previous holder's entries still in the buffers. What is tied to no device -- the Mac's own logs, flows quern cannot place, crash reports naming no device -- is not shown: could not tell, so show less.
+- **Sessions:** `GET /api/v1/sessions` lists only the key's own.
+- **The owner's set-up** -- knowledge bases, bypassed hosts, log filters, intercepted flows, app-state checkpoints, build progress, the Mac's tool layout -- answers 403.
+- **The owner sees everything**, as on a shared server. `quern doctor` reports which mode is in effect, and a value other than "shared" or "blind" runs shared and says so.
+- **Not shown to a blind client either:** totals that count everyone's data (buffer statistics, the proxy's flow store figures). The `truncated` flag on log summaries still reflects evictions across the whole buffer, so it may say "may be low" about entries the client could not see anyway.
+
+It keeps cooperating users' work apart; it is not a sandbox (see above).
+
 **The API listens on 127.0.0.1.** `quern start --host 0.0.0.0` still exposes it, with a warning from `start`, `status` and `doctor`: every key, the owner's included, crosses the network unencrypted. A separate TLS listener is the planned way to reach quern from another machine. The proxy (9101) is unaffected and stays reachable from devices on the LAN; a phone fetches the CA from `http://mitm.it/cert/cer` through it (see `proxy_setup_guide`).
 
 ## The LAN viewer
