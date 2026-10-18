@@ -406,7 +406,11 @@ def _still_holding(url: str, key: str, session: str, udids: list[str]) -> bool |
 
 def _list() -> int:
     url, key = _server()
-    status, answer = _call("GET", url, key, "/api/v1/sessions")
+    from server.session import session_from_env
+
+    # Named, because a client key must name its session (#254, phase 2).
+    caller = session_from_env(dict(os.environ), fallback="cli")
+    status, answer = _call("GET", url, key, "/api/v1/sessions", session=caller)
     if status != 200:
         print(f"quern session list: {_detail(answer)}", file=sys.stderr)
         return 2
@@ -425,7 +429,10 @@ def _list() -> int:
 
 def _release(session: str) -> int:
     url, key = _server()
-    status, answer = _call("DELETE", url, key, f"/api/v1/sessions/{session}")
+    # As the session itself: a client key may release only its own, and the
+    # server qualifies the id the same way whether or not it carries the
+    # client's label already. The owner may release any session either way.
+    status, answer = _call("DELETE", url, key, f"/api/v1/sessions/{session}", session=session)
     if status != 200:
         print(f"quern session release: {_detail(answer)}", file=sys.stderr)
         return 2

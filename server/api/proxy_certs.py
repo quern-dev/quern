@@ -1095,7 +1095,10 @@ async def setup_guide(request: Request) -> dict:
 
     config = request.app.state.config
     via_api = bind_warning(config.host) is not None
-    cert_url = (f"http://{local_ip}:{config.port}/api/v1/proxy/cert" if via_api
+    # The address it answers on: the LAN one only for a wildcard bind, else
+    # the host it was bound to -- as `quern status` shows it (CodeRabbit).
+    api_host = local_ip if config.host in ("0.0.0.0", "::") else config.host
+    cert_url = (f"http://{api_host}:{config.port}/api/v1/proxy/cert" if via_api
                 else "http://mitm.it/cert/cer")
 
     # Physical-device step 5: when multiple interfaces are active, the
