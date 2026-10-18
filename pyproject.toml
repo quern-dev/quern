@@ -28,6 +28,11 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",                 # inherited
     "uvicorn[standard]>=0.34.0",        # inherited
+    # Also pulled in by uvicorn[standard], and named because quern now uses it
+    # directly: the held-session socket (#254) on the server, and
+    # `quern session run`'s client. 14.0 is where the sync client takes
+    # `additional_headers`.
+    "websockets>=14.0",
     # verified. Web Inspector transport for simulator webview inspection.
     # Floored at 8.0 deliberately: send_plist/recv_plist are synchronous in 7.x
     # and coroutines from 8.0 onward. webinspector.py awaits them, so on 7.x the

@@ -1,0 +1,252 @@
+"""`quern session run|list|release`: held sessions from a shell or CI (#254).
+
+A CI job made of shell steps can't hold a WebSocket, so `run` holds it for
+them: it opens a session, holds its live socket, reserves devices, and runs a
+command with the session in its environment --
+
+    quern session run --reserve 2 --device-type simulator -- xcodebuild test ...
+
+The child gets `QUERN_SESSION` (so its quern calls are attributed to the
+session and act on its devices), `QUERN_SESSION_TOKEN` and `QUERN_DEVICES`
+(the reserved udids, comma-separated). When the child exits, the session is
+released cleanly. If `run` itself is killed, the server sees the socket drop
+and holds the devices for the grace period, as for any crashed client.
+
+Exit codes: the child's own when it ran; 1 when the server could not be
+asked; 2 when it refused (a device held, nothing free, a bad argument).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import signal
+import subprocess
+import sys
+import threading
+import urllib.error
+import urllib.request
+
+USAGE = """\
+Usage: quern session run [--name NAME] [--reserve N | --udid UDID ... | --group GROUP]
+                         [--device-type TYPE] [--os-version V] [--device-name NAME]
+                         [--no-boot] [--on-release none|shutdown_booted] -- COMMAND ...
+       quern session list
+       quern session release SESSION_ID
+
+`run` holds a session for COMMAND: it reserves the devices, exports
+QUERN_SESSION, QUERN_SESSION_TOKEN and QUERN_DEVICES to it, and releases them
+when it exits. Another caller changing a reserved device gets 423; reading it
+still works. `--on-release shutdown_booted` shuts down the simulators the
+session booted to satisfy the reservation.
+
+`list` shows held sessions, their state (live, or in grace after a dropped
+connection) and their devices. `release` ends one -- yours, or a stuck one.
+"""
+
+
+def _server() -> tuple[str, str]:
+    from server.__main__ import _server_base_url
+    from server.config import API_KEY_FILE
+
+    url = _server_base_url()
+    if url is None:
+        raise ConnectionError("no server answering: start it with `quern start`")
+    try:
+        key = API_KEY_FILE.read_text().strip()
+    except OSError:
+        key = ""
+    if not key:
+        raise ConnectionError(f"no API key at {API_KEY_FILE}: run `quern setup`")
+    return url, key
+
+
+def _call(method: str, url: str, key: str, path: str, session: str = "",
+          body: dict | None = None) -> tuple[int, dict]:
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    if session:
+        headers["X-Quern-Session"] = session
+    req = urllib.request.Request(url + path, method=method, headers=headers,
+                                 data=json.dumps(body).encode() if body is not None else None)
+    try:
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            return resp.status, json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.loads(e.read() or b"{}").get("detail", "")
+        except ValueError:
+            detail = ""
+        return e.code, {"detail": detail or str(e)}
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise ConnectionError(f"the server did not answer: {e}") from e
+
+
+def _detail(answer: dict) -> str:
+    detail = answer.get("detail")
+    if isinstance(detail, dict):
+        return detail.get("message", json.dumps(detail))
+    return str(detail)
+
+
+class _Socket:
+    """The session's live socket, held on a thread until `close()`."""
+
+    def __init__(self, url: str, key: str, session: str, token: str) -> None:
+        from websockets.sync.client import connect
+
+        ws_url = "ws" + url[len("http"):] + f"/api/v1/sessions/{session}/live"
+        self._ws = connect(ws_url, additional_headers={
+            "Authorization": f"Bearer {key}", "X-Quern-Session": session,
+            "X-Quern-Resume-Token": token}, open_timeout=10)
+        first = json.loads(self._ws.recv(timeout=10))
+        if first.get("event") != "attached":
+            raise ConnectionError(f"the session socket said {first!r}, not attached")
+        self._thread = threading.Thread(target=self._drain, daemon=True)
+        self._thread.start()
+
+    def _drain(self) -> None:
+        # Server events are informational here; reading keeps the connection
+        # serviced (pings are answered by the library while it reads).
+        try:
+            for _ in self._ws:
+                pass
+        except Exception:  # noqa: BLE001 -- the socket ending is handled by close()
+            pass
+
+    def close(self) -> None:
+        """A clean close: the server releases the session at once."""
+        try:
+            self._ws.close(code=1000, reason="done")
+        except Exception:  # noqa: BLE001 -- already gone: the server's grace applies
+            pass
+
+
+def _run(args: argparse.Namespace) -> int:
+    if not args.command:
+        print("quern session run: give a command after --", file=sys.stderr)
+        return 2
+    from server.session import session_from_env
+
+    url, key = _server()
+    name = args.name or session_from_env(dict(os.environ), fallback="")
+    status, opened = _call("POST", url, key, "/api/v1/sessions", session=name,
+                           body={"name": name} if name else {})
+    if status != 200:
+        print(f"quern session run: {_detail(opened)}", file=sys.stderr)
+        return 2
+    session, token = opened["id"], opened["resume_token"]
+    try:
+        socket = _Socket(url, key, session, token)
+    except Exception as e:  # noqa: BLE001 -- any failure to hold it is the same answer
+        print(f"quern session run: could not hold the session's socket: {e}", file=sys.stderr)
+        _call("DELETE", url, key, f"/api/v1/sessions/{session}", session=session)
+        return 1
+    try:
+        body: dict = {"on_release": args.on_release, "auto_boot": not args.no_boot}
+        if args.udid:
+            body["udids"] = args.udid
+        elif args.group:
+            body["group"] = args.group
+            if args.reserve:
+                body["count"] = args.reserve
+        else:
+            body["count"] = args.reserve or 1
+            for field, value in (("device_type", args.device_type),
+                                 ("os_version", args.os_version), ("name", args.device_name)):
+                if value:
+                    body[field] = value
+        status, reserved = _call("POST", url, key, f"/api/v1/sessions/{session}/reservations",
+                                 session=session, body=body)
+        if status != 200:
+            print(f"quern session run: {_detail(reserved)}", file=sys.stderr)
+            return 2
+        udids = reserved["holding"]
+        print(f"quern session run: session {session} holds {', '.join(udids)}", file=sys.stderr)
+        env = {**os.environ, "QUERN_SESSION": session, "QUERN_SESSION_TOKEN": token,
+               "QUERN_DEVICES": ",".join(udids)}
+        child = subprocess.Popen(args.command, env=env)
+
+        def forward(signum, _frame):
+            child.send_signal(signum)
+
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(sig, forward)
+        return child.wait()
+    finally:
+        socket.close()
+
+
+def _list() -> int:
+    url, key = _server()
+    status, answer = _call("GET", url, key, "/api/v1/sessions")
+    if status != 200:
+        print(f"quern session list: {_detail(answer)}", file=sys.stderr)
+        return 2
+    sessions = answer.get("sessions") or []
+    if not sessions:
+        print("No held sessions.")
+        return 0
+    for s in sessions:
+        devices = ", ".join(r["udid"] for r in s["reservations"]) or "no devices"
+        state = s["state"]
+        if state == "grace" and s.get("grace_remaining_s") is not None:
+            state = f"grace, {int(s['grace_remaining_s'])}s left"
+        print(f"{s['id']}  [{state}]  {devices}")
+    return 0
+
+
+def _release(session: str) -> int:
+    url, key = _server()
+    status, answer = _call("DELETE", url, key, f"/api/v1/sessions/{session}")
+    if status != 200:
+        print(f"quern session release: {_detail(answer)}", file=sys.stderr)
+        return 2
+    freed = ", ".join(answer.get("freed") or []) or "no devices"
+    print(f"Released {session} ({freed})")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(USAGE)
+        return 0 if argv else 2
+    command: list[str] = []
+    if "--" in argv:
+        at = argv.index("--")
+        argv, command = argv[:at], argv[at + 1:]
+    parser = argparse.ArgumentParser(prog="quern session", add_help=False)
+    sub = parser.add_subparsers(dest="what")
+    run = sub.add_parser("run", add_help=False)
+    run.add_argument("--name")
+    choice = run.add_mutually_exclusive_group()
+    choice.add_argument("--udid", action="append")
+    choice.add_argument("--group")
+    run.add_argument("--reserve", type=int)
+    run.add_argument("--device-type",
+                     choices=("simulator", "device", "android_emulator", "android_device"))
+    run.add_argument("--os-version")
+    run.add_argument("--device-name")
+    run.add_argument("--no-boot", action="store_true")
+    run.add_argument("--on-release", choices=("none", "shutdown_booted"), default="none")
+    sub.add_parser("list", add_help=False)
+    release = sub.add_parser("release", add_help=False)
+    release.add_argument("session_id")
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit:
+        print(USAGE, file=sys.stderr)
+        return 2
+    try:
+        if args.what == "run":
+            args.command = command
+            return _run(args)
+        if args.what == "list":
+            return _list()
+        if args.what == "release":
+            return _release(args.session_id)
+    except ConnectionError as e:
+        print(f"quern session: {e}", file=sys.stderr)
+        return 1
+    print(USAGE, file=sys.stderr)
+    return 2

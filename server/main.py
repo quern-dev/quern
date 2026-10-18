@@ -2236,6 +2236,23 @@ def cli() -> None:
     # Dispatched early in `server.__main__`, like setup. Declared here so
     # `quern --help` lists them and the two entry points agree about what
     # exists.
+    session_parser = subparsers.add_parser(
+        "session", help="Hold a session and reserve devices for a command (#254)")
+    session_sub = session_parser.add_subparsers(dest="session_command")
+    session_run = session_sub.add_parser("run")
+    session_run.add_argument("--name")
+    session_run.add_argument("--reserve", type=int)
+    session_run.add_argument("--udid", action="append")
+    session_run.add_argument("--group")
+    session_run.add_argument("--device-type")
+    session_run.add_argument("--os-version")
+    session_run.add_argument("--device-name")
+    session_run.add_argument("--no-boot", action="store_true")
+    session_run.add_argument("--on-release")
+    session_sub.add_parser("list")
+    session_release = session_sub.add_parser("release")
+    session_release.add_argument("session_id")
+
     record_parser = subparsers.add_parser(
         "record", help="Record a device's actions, flows and logs to disk")
     record_sub = record_parser.add_subparsers(dest="record_command")
@@ -2378,6 +2395,10 @@ def cli() -> None:
         from server.recording.cli import main as record_main
 
         sys.exit(record_main(sys.argv[sys.argv.index("record") + 1:]))
+    elif args.command == "session":
+        from server.session_cli import main as session_main
+
+        sys.exit(session_main(sys.argv[sys.argv.index("session") + 1:]))
     elif args.command == "url":
         from server.__main__ import _cmd_url
         sys.exit(_cmd_url())
