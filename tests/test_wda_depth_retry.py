@@ -400,3 +400,22 @@ class TestTheRoundTwoGuards:
         assert "queried again" not in result["detail"]
         for call in ctrl.wda_client.describe_all.call_args_list:
             raise AssertionError(f"a full read queued behind the deep walk: {call}")
+
+
+async def test_the_sweep_after_an_unreachable_deep_hit_starts_shallow(phone):
+    """The second review's finding 1: found only at 25 but not reachable, with
+    scroll_to_find=True, the sweep's first read is an Application query that
+    sets no depth of its own -- it ran at 25, a full-tree walk on a long list."""
+    ctrl, wda = phone
+    ctrl._wda_reachable_only = AsyncMock(
+        side_effect=lambda r, m: ([], [{"why": "off screen", "label": "Wi-Fi"}]))
+    depth_at_sweep = []
+
+    async def sweep(*a, **k):
+        depth_at_sweep.append(wda.depth)
+        return None
+
+    ctrl._ios_scroll_to_element = sweep
+    await ctrl.tap_element(identifier=WIFI, scroll_to_find=True)
+    assert depth_at_sweep, "the sweep never ran, so this test checks nothing"
+    assert depth_at_sweep == [ACTION_SNAPSHOT_DEPTH], depth_at_sweep
