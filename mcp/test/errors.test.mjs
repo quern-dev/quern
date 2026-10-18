@@ -102,9 +102,67 @@ test("a server too slow to answer is not called unreachable", async () => {
   }
 });
 
+test("a server that drops the connection mid-request says so, without the start hint", async () => {
+  // A crash or restart mid-request. The request may have run, so this is not
+  // "unreachable" -- but "Error: fetch failed" alone told the agent nothing
+  // (#471 review). Also pins that a coded error is not called unreachable
+  // just for having a code.
+  const server = await serve((req) => req.socket.destroy());
+  process.env.QUERN_SERVER_URL = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const e = await failureOf(apiRequest("GET", "/api/v1/logs/summary"));
+    assert.ok(!(e instanceof ServerUnreachable), "a connection that was made was called unreachable");
+    const text = errorText(e);
+    assert.ok(!text.includes(HINT));
+    assert.match(text, /ECONNRESET|socket|closed/i, `the reason was dropped: ${text}`);
+  } finally {
+    server.close();
+  }
+});
+
+test("the no-timeout path (builds) classifies a refused connection the same way", async () => {
+  process.env.QUERN_SERVER_URL = `http://127.0.0.1:${await closedPort()}`;
+  const e = await failureOf(apiRequest("POST", "/api/v1/build", undefined, {}, "none"));
+  assert.ok(e instanceof ServerUnreachable, `got ${e?.name}: ${e?.message}`);
+  assert.ok(errorText(e).includes(HINT));
+});
+
+test("a sub-second timeout says milliseconds, not 0s", () => {
+  assert.match(new ServerTimeout("http://x", 300).message, /within 300ms$/);
+  assert.match(new ServerTimeout("http://x", 30000).message, /within 30s$/);
+});
+
+test("a label replaces Error: without losing the classification", () => {
+  const e = Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }) });
+  const text = errorText(e, "Error setting channel");
+  assert.ok(text.startsWith("Error setting channel: fetch failed"));
+  assert.ok(text.includes(HINT));
+});
+
 test("anything else is reported as itself", () => {
   assert.equal(errorText(new Error("label is required")), "Error: label is required");
   assert.equal(errorText("plain string"), "Error: plain string");
+});
+
+test("every tool's failure goes through errorText", () => {
+  // Stronger than matching old strings: every catch block that returns an
+  // isError result must use errorText( or failure(. ensure_server's own
+  // start-up report is the one deliberate exception.
+  const allowed = new Set(["logs.ts"]);
+  const dir = new URL("../src/tools/", import.meta.url);
+  const offenders = [];
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith(".ts") || name === "helpers.ts") continue;
+    const src = readFileSync(new URL(name, dir), "utf8");
+    for (const m of src.matchAll(/catch \((\w+)\) \{([\s\S]*?)\n\s{4,8}\}/g)) {
+      const block = m[2];
+      if (!block.includes("isError")) continue;
+      if (/errorText\(|failure\(/.test(block)) continue;
+      if (allowed.has(name) && /Failed to start Quern|could not|Could not/.test(block)) continue;
+      offenders.push(`${name}: ${block.trim().split("\n")[0].slice(0, 80)}`);
+    }
+  }
+  assert.deepEqual(offenders, []);
 });
 
 test("no tool builds its own error string any more", () => {

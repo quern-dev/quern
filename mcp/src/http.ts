@@ -115,8 +115,9 @@ export class ServerUnreachable extends Error {
 /** Connected (or may have), but no answer arrived in time. Not "unreachable":
  * a long tree read or a build can keep a healthy server busy. */
 export class ServerTimeout extends Error {
-  constructor(readonly url: string, readonly seconds: number, options?: { cause?: unknown }) {
-    super(`Quern at ${url} did not answer within ${seconds}s`, options);
+  constructor(readonly url: string, readonly ms: number, options?: { cause?: unknown }) {
+    const wait = ms < 1000 ? `${ms}ms` : `${Math.round(ms / 1000)}s`;
+    super(`Quern at ${url} did not answer within ${wait}`, options);
     this.name = "ServerTimeout";
   }
 }
@@ -127,6 +128,10 @@ export class ServerTimeout extends Error {
  * Anything else -- a reset, a timeout -- may have arrived first. */
 export const NEVER_CONNECTED = new Set([
   "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH", "EADDRNOTAVAIL",
+  // fetch's own connect timeout (undici), and the OS connect timeout node's
+  // http client reports on the no-timeout path: a blackholed host, never
+  // connected (#471 review, both reproduced).
+  "UND_ERR_CONNECT_TIMEOUT", "ETIMEDOUT",
 ]);
 
 export function connectionCode(e: unknown): string | undefined {
@@ -198,7 +203,7 @@ export async function apiRequest(
     }
     const name = (e as { name?: unknown })?.name;
     if ((name === "TimeoutError" || name === "AbortError") && typeof timeoutMs === "number") {
-      throw new ServerTimeout(server.url, Math.round(timeoutMs / 1000), { cause: e });
+      throw new ServerTimeout(server.url, timeoutMs, { cause: e });
     }
     throw e; // a reset or similar: may have been delivered, so reported as it is
   }

@@ -187,7 +187,7 @@ export async function autoloadKnowledge(
   } catch (e) {
     const code = connectionCode(e);
     const message = e instanceof Error ? e.message : String(e);
-    const reason = code ? `${message} (${code})` : message;
+    const reason = code && !message.includes(code) ? `${message} (${code})` : message;
     // A load that was sent and never answered may still finish: the server
     // does not cancel the scan when this side gives up, so "not loaded"
     // could be false a moment later (CodeRabbit). Two failures are answers
