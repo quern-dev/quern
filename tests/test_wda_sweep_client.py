@@ -259,3 +259,13 @@ class TestSetSnapshotDepth:
         with pytest.raises(DeviceError, match="was not read"):
             await wda.describe_all_nested(SIM, snapshot_depth=12)
         assert fake.reached("/source") == 0
+
+    async def test_a_shallow_read_sends_the_depth_even_when_it_is_on_record(self, wda):
+        """/source uses no session, so a session replaced behind quern's back
+        -- at WDA's default depth -- left the record saying 12 and the read
+        walking the full tree (live: 175 elements where 12 gives 44)."""
+        fake = wda.install()
+        await wda.describe_all(SIM, snapshot_depth=12)
+        fake.depth = 50          # another client's session, at WDA's default
+        await wda.describe_all(SIM, snapshot_depth=12)
+        assert fake.depth == 12, "read at a depth quern only believed it had"

@@ -798,7 +798,7 @@ class WdaBackend:
 
             return session_id
 
-    async def _set_snapshot_depth(self, udid: str, depth: int) -> bool:
+    async def _set_snapshot_depth(self, udid: str, depth: int, *, force: bool = False) -> bool:
         """Update WDA snapshotMaxDepth if it differs from the current value.
 
         True when the session is known to be at `depth`. A failure -- an
@@ -808,7 +808,7 @@ class WdaBackend:
         shallow, sent nothing and walked the tree at the full depth (#478
         review). Unknown, the next call always sends.
         """
-        if self._current_depth.get(udid) == depth:
+        if not force and self._current_depth.get(udid) == depth:
             return True
 
         # Raised as before when there is no session to be had at all.
@@ -842,8 +842,14 @@ class WdaBackend:
         iPhone 11's 200-row table, and a timed-out /source restarts the runner
         (#470). A shallow read the session cannot be put at is refused, with
         the reason, rather than run.
+
+        Sent every time, not taken from the record: /source uses no session,
+        so a session another client replaced -- which starts at WDA's own
+        default depth -- went unnoticed, and a "depth 12" read came back at
+        full depth (measured live: 175 elements where 12 gives 44). A shallow
+        full read costs 0.2-4s; the setting, one small request.
         """
-        if await self._set_snapshot_depth(udid, depth):
+        if await self._set_snapshot_depth(udid, depth, force=depth < SNAPSHOT_MAX_DEPTH):
             return
         if depth < SNAPSHOT_MAX_DEPTH:
             raise DeviceError(
