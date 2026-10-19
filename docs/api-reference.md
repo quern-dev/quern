@@ -146,6 +146,7 @@ quern mcp-install --remote office      # or QUERN_REMOTE=office for `session run
 **Paths, when the disk is not shared.** A path in a request is read on the server's disk, so from another machine it names nothing, and from a client key on this one it would be the server reading whatever it is told to:
 
 - **Apps are uploaded.** `POST /api/v1/uploads?name=MyApp.ipa` with the file as the raw body -- an `.ipa` or `.apk` as it is, a `.app` bundle as a gzipped tar named `MyApp.app.tar.gz` with the bundle at its top -- answers an `upload_id`, which `install_app` takes in place of `app_path`. The MCP does this for you whenever it uses a client key. `app_path` is owner-only. Uploads are kept per key: one key never sees, installs or deletes another's. They are deleted once installed (a failed install keeps it, to try again), after an hour, or when the key is revoked, and none survive a restart. What one key holds at once is capped at 2048 MB, set with `{"uploads": {"max_mb": 2048}}`.
+- **Recordings are downloaded.** A recording's `output_dir` is on the server. `download_recording` copies its files to a directory on the agent's machine, from `GET /api/v1/recordings/{id}/files`; a client key gets its own recordings only.
 
 ## The LAN viewer
 
@@ -185,6 +186,8 @@ quern mcp-install --remote office      # or QUERN_REMOTE=office for `session run
 | `recording_keyframe` | POST | `/api/v1/recordings/{id}/keyframe` | Ask the recording's movie for a keyframe now, so this moment is a seek point -- for a driver quern does not see, such as a CI step or a test. Body: optional `label`. The moment is written into the recording as a `mark` line (returned with the `actions` kind). `{"requested": true}` when quern-media was asked; **409** when the recording is not filming, **404** for an unknown id |
 | `get_recording` | GET | `/api/v1/recordings/events` | A recording's events for any combination of `kinds` (`actions,flows,logs`) and window (`since`, `until`), in written order, a page at a time (`cursor` from `next_cursor`, `limit` up to 2000). `recording` is an id or a recording's directory. `detail=summary` gives one line per event (the MCP tool's default); `flow_id` gives one flow in full. Markers (`dropped`, `paused`, `resumed`, `stopped`) come with every page, and `holes` lists what the recording says it does not hold in the window. A flow the store updated appears twice: read the last |
 | `list_recordings` | GET | `/api/v1/recordings` | Recordings this server is making or has made since it started; `requested_by` lists only those started with it |
+| `download_recording` | GET | `/api/v1/recordings/{id}/files` | A recording's files (`events.jsonl`, `manifest.json`, `video-N.mp4`, `video-N.log`) with their sizes, and `live` while it is still being written. The owner's for any recording, a client key's for its own only -- another's is 404. The MCP tool copies them all to a directory on its own machine |
+| `download_recording` | GET | `/api/v1/recordings/{id}/files/{name}` | One of those files, streamed |
 | `get_log_summary` | GET | `/api/v1/logs/summary` | LLM-optimized summary with cursor support |
 | `get_errors` | GET | `/api/v1/logs/errors` | Errors and crashes only |
 | `get_build_result` | GET | `/api/v1/builds/latest` | Most recent build result |

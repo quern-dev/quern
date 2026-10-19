@@ -38,6 +38,8 @@ _NOT_ACTIONS: frozenset[str] = frozenset({
     "remote.py:status",
     "remote.py:pair_hello",
     "uploads.py:list_uploads",          # a read of the caller's own uploads
+    "recordings.py:recording_files",    # reads: a recording's files, downloaded
+    "recordings.py:recording_file",
     "sessions.py:get_session",
     "proxy.py:pending_flows",
     "recordings.py:recording_events",

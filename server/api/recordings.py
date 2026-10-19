@@ -7,6 +7,7 @@ is shaped the way it is.
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -272,6 +273,57 @@ async def recording_events(
         "stopped": loaded_holes.stopped,
         "warnings": loaded_holes.warnings,
     }
+
+
+#: The files a recording writes, and so the only names served from its
+#: directory: whatever else is there is not the recording's to hand out.
+_FILE = re.compile(r"(events\.jsonl|manifest\.json|video-[0-9]{1,4}\.(mp4|log))")
+
+
+def _own_recording(request: Request, recording_id: str):
+    """A recording the caller may download: any for the owner, its own
+    principal's for a client key -- another's reads as missing (#254, 3b)."""
+    caller = visibility.current_caller()
+    try:
+        rec = _manager(request).get(recording_id)
+    except RecordingError:
+        rec = None
+    if rec is None or not (caller.is_owner or rec.principal == caller.principal):
+        raise HTTPException(status_code=404, detail=f"no recording {recording_id!r}")
+    return rec
+
+
+def _files_of(rec) -> list[Path]:
+    try:
+        children = sorted(rec.dir.iterdir())
+    except OSError:
+        return []
+    return [p for p in children
+            if _FILE.fullmatch(p.name) and p.is_file() and not p.is_symlink()]
+
+
+@router.get("/{recording_id}/files")
+async def recording_files(request: Request, recording_id: str) -> dict:
+    """A recording's files, to download from another machine (#254, 3b)."""
+    rec = _own_recording(request, recording_id)
+    manager = _manager(request)
+    return {"recording_id": rec.id, "live": manager.is_live(rec.dir),
+            "files": [{"name": p.name, "bytes": p.stat().st_size} for p in _files_of(rec)]}
+
+
+@router.get("/{recording_id}/files/{name}")
+async def recording_file(request: Request, recording_id: str, name: str):
+    """One of a recording's files, streamed."""
+    from fastapi.responses import FileResponse
+
+    rec = _own_recording(request, recording_id)
+    match = next((p for p in _files_of(rec) if p.name == name), None)
+    if match is None:
+        raise HTTPException(status_code=404,
+                            detail=f"{name!r} is not one of recording {rec.id}'s files")
+    media = "video/mp4" if name.endswith(".mp4") else (
+        "application/json" if name.endswith(".json") else "text/plain")
+    return FileResponse(match, media_type=media, filename=name)
 
 
 @router.get("")
