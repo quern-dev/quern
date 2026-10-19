@@ -68,7 +68,11 @@ READ_POSTS = frozenset({
 #: may reserve and release, and answer 409 for a device someone else holds --
 #: the middleware's 423 used to get there first, and refused the owner's
 #: release of a single device (review).
-_OWN_RULES = "/api/v1/sessions"
+_OWN_RULES = ("/api/v1/sessions",
+              # An upload names no device and changes none; its body is an app,
+              # not JSON, and up to the cap in size -- never read into memory
+              # to look for device ids (#254, phase 3b).
+              "/api/v1/uploads")
 
 #: UUID-shaped ids: simulators, and iOS devices' hyphenated identifiers. Upper-
 #: cased before comparing -- a lowercase spelling of a held simulator passed the

@@ -623,6 +623,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("Blind sharing: each client key sees only its own devices' data")
     sessions_task = asyncio.create_task(_sweep_sessions(app), name="session-sweep")
 
+    # Uploaded apps (#254, phase 3b): none survive a restart, and those not
+    # installed go after an hour, or with their key.
+    from server.api.uploads import sweep as _sweep_uploads
+    from server.config import upload_settings as _upload_settings
+
+    if _upload_settings()["note"]:
+        logger.warning("%s", _upload_settings()["note"])
+    app.state.uploads.reset()
+    uploads_task = asyncio.create_task(_sweep_uploads(app), name="upload-sweep")
+
     # The LAN viewer (#449), opt-in. Started after the recordings it serves.
     from server.config import viewer_settings as _viewer_settings
     from server.viewer.listener import start_viewer
@@ -671,6 +681,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     for task in (
         watchdog_task, update_check_task, network_monitor_task,
         sim_bridge_resync_task, mcp_clients_task, sim_tls_task, sessions_task,
+        uploads_task,
     ):
         if task and not task.done():
             task.cancel()
@@ -841,6 +852,12 @@ def create_app(
     # Auth middleware: the owner's key, or a client key from `quern clients add`.
     from server.clients import ClientKeys
     app.state.clients = ClientKeys()
+    from server.config import CONFIG_DIR as _CONFIG_DIR
+    from server.config import upload_settings as _upload_settings
+    from server.uploads import UploadStore
+
+    app.state.uploads = UploadStore(_CONFIG_DIR / "uploads",
+                                    _upload_settings()["max_bytes"])
     app.add_middleware(APIKeyMiddleware, api_key=config.api_key, clients=app.state.clients)
 
     # Session attribution (#254). Outside auth, so it is set before anything
@@ -867,6 +884,10 @@ def create_app(
     app.include_router(sessions_router)
     from server.api.remote import router as remote_router
     app.include_router(remote_router)
+    from server.api.uploads import router as uploads_router
+    app.include_router(uploads_router)
+    from server.api.screenshots import router as screenshots_router
+    app.include_router(screenshots_router)
     app.include_router(crashes_router)
     app.include_router(builds_router)
     app.include_router(proxy_router)

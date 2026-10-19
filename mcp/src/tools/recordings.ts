@@ -1,6 +1,12 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { apiRequest } from "../http.js";
+import { createWriteStream } from "node:fs";
+import { mkdir, rename, rm, stat } from "node:fs/promises";
+import { basename, join, resolve } from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { discoverServer } from "../config.js";
+import { apiRequest, quernHeaders, serverFetch } from "../http.js";
 import { strictParams, errorText } from "./helpers.js";
 
 function answer(data: unknown) {
@@ -109,6 +115,55 @@ detail="summary" (the default here) gives one line per event: a flow's method, U
   }, async ({ requested_by }) => {
     try {
       return answer(await apiRequest("GET", "/api/v1/recordings", requested_by ? { requested_by } : undefined));
+    } catch (e) {
+      return failure(e);
+    }
+  });
+
+  server.registerTool("download_recording", {
+    description: "Copy a recording's files -- events.jsonl, manifest.json, video-N.mp4 -- from the quern server to a directory on this machine, for when the server is another machine (its paths are on its disk, not this one). A client key downloads only its own recordings. A recording still being made gives what has been written so far.",
+    inputSchema: strictParams({
+      recording_id: z.string().describe("The recording's id, from start_recording or list_recordings"),
+      dest: z.string().optional().describe("Directory to write into, on this machine (default ./quern-recordings/<id>); made if missing"),
+    }),
+  }, async ({ recording_id, dest }) => {
+    try {
+      // The server's ids, and nothing else: the default dest is built from it,
+      // and "../x" would have made a directory outside it (CodeRabbit).
+      if (!/^rec_[0-9a-f]{12}$/.test(recording_id)) {
+        throw new Error(`${JSON.stringify(recording_id)} is not a recording id (rec_ and 12 hex digits, from start_recording or list_recordings)`);
+      }
+      const id = encodeURIComponent(recording_id);
+      const listing = await apiRequest("GET", `/api/v1/recordings/${id}/files`) as {
+        live: boolean; files: { name: string; bytes: number }[];
+      };
+      const target = resolve(dest ?? join("quern-recordings", recording_id));
+      await mkdir(target, { recursive: true });
+      const srv = discoverServer();
+      const written: { name: string; bytes: number }[] = [];
+      for (const file of listing.files) {
+        const resp = await serverFetch(srv, `${srv.url}/api/v1/recordings/${id}/files/${encodeURIComponent(file.name)}`,
+          { headers: quernHeaders(srv.apiKey) }, { noTimeouts: true });
+        if (!resp.ok || !resp.body) {
+          throw new Error(`HTTP ${resp.status}: ${await resp.text()} (downloading ${file.name})`);
+        }
+        const out = join(target, basename(file.name));
+        // Written aside and moved into place: a download cut off leaves no
+        // half file under the real name (review).
+        const part = `${out}.part`;
+        try {
+          await pipeline(Readable.fromWeb(resp.body as never), createWriteStream(part));
+          await rename(part, out);
+        } catch (e) {
+          await rm(part, { force: true });
+          throw e;
+        }
+        written.push({ name: file.name, bytes: (await stat(out)).size });
+      }
+      return answer({
+        recording_id, dest: target, files: written,
+        ...(listing.live ? { note: "still recording: these are the files as written so far" } : {}),
+      });
     } catch (e) {
       return failure(e);
     }

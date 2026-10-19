@@ -8,8 +8,6 @@ import contextvars
 import logging
 import math
 import time
-from datetime import UTC, datetime
-from pathlib import Path
 
 from server.device import gestures
 from server.device.element_types import equivalence, related_type_names
@@ -241,21 +239,11 @@ def _web_content_hint(elements: list[UIElement]) -> str | None:
     )
 
 
-_SCREENSHOT_DIR = Path("/tmp/quern/screenshots")
-
-
 async def _capture_screenshot(controller, udid: str, label: str) -> str | None:
     """Best-effort screenshot capture. Returns file path or None."""
-    try:
-        _SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%S")
-        filename = f"{ts}_{label}.png"
-        filepath = _SCREENSHOT_DIR / filename
-        image_bytes, _ = await controller.screenshot(udid=udid, scale=0.5)
-        filepath.write_bytes(image_bytes)
-        return str(filepath)
-    except Exception:
-        return None
+    from server import screenshots
+
+    return await screenshots.capture(controller, udid, label)
 
 
 def _effective_filter_label(

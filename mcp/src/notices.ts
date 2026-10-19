@@ -8,7 +8,9 @@
  * result itself, as its own text item, whatever the tool did.
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { discoverServer } from "./config.js";
 import { sessionNotices } from "./http.js";
+import { withRemotePaths } from "./remote-paths.js";
 
 type ToolResult = { content?: { type: string; text?: string }[]; [k: string]: unknown };
 
@@ -21,11 +23,14 @@ export function withSessionNotices<T>(result: T): T {
   return { ...r, content: [...r.content, ...notes] } as unknown as T;
 }
 
-/** Make every tool registered on `server` from now on deliver notices. */
+/** Make every tool registered on `server` from now on deliver notices -- and,
+ * when the server is another machine, say whose paths its answers carry and
+ * attach the screenshots it saved (remote-paths.ts, #254 phase 3b). */
 export function deliverSessionNotices(server: McpServer): void {
   const register = server.registerTool.bind(server) as (...a: unknown[]) => unknown;
   (server as unknown as { registerTool: (...a: unknown[]) => unknown }).registerTool = (
     name: unknown, config: unknown, handler: unknown,
   ) => register(name, config, async (...args: unknown[]) =>
-    withSessionNotices(await (handler as (...a: unknown[]) => Promise<unknown>)(...args)));
+    withSessionNotices(await withRemotePaths(String(name),
+      await (handler as (...a: unknown[]) => Promise<unknown>)(...args), discoverServer)));
 }

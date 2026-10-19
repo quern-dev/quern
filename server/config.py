@@ -397,7 +397,44 @@ def remote_settings() -> dict:
     host, port, bind_error = _parse_bind(raw.get("bind"), "remote.bind",
                                          REMOTE_DEFAULT_HOST, REMOTE_DEFAULT_PORT)
     return {"enabled": raw.get("enabled") is True, "host": host, "port": port,
-            "bind_error": bind_error, "hosts": _host_names(raw.get("hosts"))}
+            "bind_error": bind_error, "hosts": _host_names(raw.get("hosts")),
+            "key_warning": _unused_remote_keys(raw)}
+
+
+_REMOTE_KEYS = ("enabled", "bind", "hosts")
+
+
+def _unused_remote_keys(raw: dict) -> str | None:
+    """Words for keys in `remote` that nothing reads, or None. A `port` set
+    here was ignored without a word, and the listener came up on 9130."""
+    unused = sorted(k for k in raw if k not in _REMOTE_KEYS)
+    if not unused:
+        return None
+    hint = (' -- the address and port are one key, "bind": "0.0.0.0:9130"'
+            if {"port", "host", "address"} & set(unused) else "")
+    return (f"config.json's remote has keys quern does not use: {', '.join(unused)}"
+            f"{hint}. It reads {', '.join(_REMOTE_KEYS)}.")
+
+
+#: The default cap on what one key may have uploaded at once (#254, phase 3b).
+UPLOAD_DEFAULT_MB = 2048
+
+
+def upload_settings() -> dict:
+    """The upload cap from config.json's `uploads` object:
+
+        {"uploads": {"max_mb": 2048}}
+
+    Anything but a positive whole number reads as the default, with a note."""
+    raw = read_user_config().get("uploads")
+    raw = raw if isinstance(raw, dict) else {}
+    value = raw.get("max_mb", UPLOAD_DEFAULT_MB)
+    note = None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        note = (f"config.json's uploads.max_mb is {value!r}, not a positive whole number "
+                f"of megabytes: using {UPLOAD_DEFAULT_MB}")
+        value = UPLOAD_DEFAULT_MB
+    return {"max_bytes": value * 1024 * 1024, "note": note}
 
 
 def get_auto_install_cert() -> bool:

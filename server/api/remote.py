@@ -12,14 +12,19 @@ proofs to be bound to: anywhere else they read as not there.
 
 from __future__ import annotations
 
+from typing import TypeVar
+
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from server.api.actions import logged_action
 from server.remote.listener import REMOTE
 from server.remote.pairing import PairingError
 
 router = APIRouter(prefix="/api/v1/remote", tags=["remote"])
+
+M = TypeVar("M", bound=BaseModel)
 
 
 def _listener(request: Request):
@@ -75,14 +80,33 @@ def _remote_only(request: Request):
     return _listener(request)
 
 
+async def _body(request: Request, model: type[M]) -> M:
+    """The request body as `model`, read only once the listener is known to be
+    the remote one. Declared as a parameter, FastAPI validates it first, and a
+    malformed body on the local listener answered 422 -- the route showing
+    itself where it should read as not there (conformance review)."""
+    try:
+        return model.model_validate_json(await request.body() or b"{}")
+    except ValidationError as e:
+        # Located in the body, as FastAPI says when it validates (CodeRabbit).
+        raise RequestValidationError([{**err, "loc": ("body", *err["loc"])}
+                                      for err in e.errors(include_url=False)]) from None
+
+
+def _schema(model: type[BaseModel]) -> dict:
+    return {"requestBody": {"required": True, "content": {
+        "application/json": {"schema": model.model_json_schema()}}}}
+
+
 class HelloRequest(BaseModel):
     code_id: str
     nonce: str
 
 
-@router.post("/pair/hello")
-async def pair_hello(request: Request, body: HelloRequest) -> dict:
+@router.post("/pair/hello", openapi_extra=_schema(HelloRequest))
+async def pair_hello(request: Request) -> dict:
     listener = _remote_only(request)
+    body = await _body(request, HelloRequest)
     try:
         nonce_s, proof = listener.codes.hello(body.code_id, body.nonce,
                                               listener.cert.fingerprint)
@@ -98,12 +122,13 @@ class FinishRequest(BaseModel):
     proof: str
 
 
-@router.post("/pair/finish")
+@router.post("/pair/finish", openapi_extra=_schema(FinishRequest))
 @logged_action("pair_client", category="session")
-async def pair_finish(request: Request, body: FinishRequest) -> dict:
+async def pair_finish(request: Request) -> dict:
     from server.clients import ClientKeyError
 
     listener = _remote_only(request)
+    body = await _body(request, FinishRequest)
     try:
         label = listener.codes.finish(body.code_id, body.client_nonce, body.server_nonce,
                                       body.proof, listener.cert.fingerprint)

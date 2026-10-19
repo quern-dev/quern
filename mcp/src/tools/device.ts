@@ -4,6 +4,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { discoverServer } from "../config.js";
 import { apiRequest, quernHeaders, ServerRefused, serverFetch } from "../http.js";
+import { mustUpload, type Uploaded, uploadApp } from "../remote-paths.js";
 import { strictParams, errorText } from "./helpers.js";
 
 export function registerDeviceTools(server: McpServer): void {
@@ -185,9 +186,9 @@ export function registerDeviceTools(server: McpServer): void {
   });
 
   server.registerTool("install_app", {
-    description: `Install an app (.app, .ipa, or .apk) on an iOS or Android device.`,
+    description: `Install an app (.app, .ipa, or .apk) on an iOS or Android device. app_path is on the machine this MCP runs on: when the quern server is on another machine, or this MCP uses a client key, the app is sent to the server first (a .app bundle as a gzipped tar), and the answer carries what was uploaded.`,
     inputSchema: strictParams({
-      app_path: z.string().describe("Path to the .app, .ipa, or .apk file"),
+      app_path: z.string().describe("Path to the .app, .ipa, or .apk file, on this machine"),
       udid: z
         .string()
         .optional()
@@ -195,8 +196,18 @@ export function registerDeviceTools(server: McpServer): void {
     }),
   }, async ({ app_path, udid }) => {
     try {
-      const body: Record<string, unknown> = { app_path };
+      const body: Record<string, unknown> = {};
       if (udid) body.udid = udid;
+      // Sent, not named, when the server's disk is not this one or the key
+      // may not name server paths (#254, phase 3b).
+      const target = discoverServer();
+      let uploaded: Uploaded | undefined;
+      if (await mustUpload(target)) {
+        uploaded = await uploadApp(target, app_path);
+        body.upload_id = uploaded.upload_id;
+      } else {
+        body.app_path = app_path;
+      }
 
       const data = await apiRequest(
         "POST",
@@ -204,10 +215,13 @@ export function registerDeviceTools(server: McpServer): void {
         undefined,
         body
       );
+      const answer = uploaded
+        ? { ...(data as object), uploaded: { name: uploaded.name, bytes: uploaded.bytes } }
+        : data;
 
       return {
         content: [
-          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+          { type: "text" as const, text: JSON.stringify(answer, null, 2) },
         ],
       };
     } catch (e) {

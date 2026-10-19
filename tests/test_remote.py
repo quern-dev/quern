@@ -480,6 +480,30 @@ class TestTheListener:
         assert r.status_code == 404
         assert client.pair(running.url, typed, "lan").fingerprint, "the code was still good"
 
+    @pytest.mark.parametrize("body", [b"", b"not json", b'{"code_id": 5}'])
+    def test_a_malformed_pairing_body_on_the_local_listener_is_a_bare_404(self, running, body):
+        """Not 422: validation ran first and showed the route was there."""
+        from fastapi.testclient import TestClient
+
+        local = TestClient(running.app)
+        for step in ("hello", "finish"):
+            r = local.post(f"/api/v1/remote/pair/{step}", content=body,
+                           headers={"Content-Type": "application/json"})
+            assert (r.status_code, r.json()) == (404, {"detail": "Not Found"}), step
+
+    def test_a_malformed_pairing_body_on_the_remote_listener_is_still_422(self, running):
+        req = urllib.request.Request(running.url + "/api/v1/remote/pair/hello", method="POST",
+                                     data=b'{"code_id": 5}',
+                                     headers={"Content-Type": "application/json"})
+        remote = client.Remote(name="x", url=running.url,
+                               fingerprint=running.listener.cert.fingerprint, key="qc_none")
+        with pytest.raises(urllib.error.HTTPError) as e:
+            client.opener(remote).open(req, timeout=10)
+        assert e.value.code == 422
+        # Located in the body, as FastAPI says when it validates (CodeRabbit).
+        locs = [err["loc"] for err in json.loads(e.value.read())["detail"]]
+        assert locs and all(loc[0] == "body" for loc in locs), locs
+
     def test_the_owners_key_is_refused_on_a_websocket_too(self, running):
         from websockets.exceptions import InvalidStatus
 
@@ -577,6 +601,21 @@ def test_remote_settings_are_off_unless_literally_enabled(monkeypatch):
                         lambda: {"remote": {"enabled": True, "bind": "[::]:9444"}})
     s = config.remote_settings()
     assert (s["enabled"], s["host"], s["port"]) == (True, "::", 9444)
+    assert s["key_warning"] is None
+
+
+def test_a_key_the_remote_settings_do_not_use_is_named(monkeypatch, caplog):
+    """`port` was ignored without a word, and the listener came up on 9130."""
+    from server import config
+    from server.remote.listener import start_remote
+
+    monkeypatch.setattr(config, "read_user_config",
+                        lambda: {"remote": {"enabled": False, "port": 9555}})
+    s = config.remote_settings()
+    assert "port" in s["key_warning"] and '"bind"' in s["key_warning"]
+    with caplog.at_level("WARNING"):
+        assert asyncio.run(start_remote(None, s)) is None
+    assert any("port" in r.getMessage() for r in caplog.records), "said even while off"
 
 
 def test_host_id_is_made_once_and_kept(tmp_path, monkeypatch):

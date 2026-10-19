@@ -209,6 +209,9 @@ async def start_remote(app, settings: dict) -> RemoteListener | None:
     bound, is reported -- the listener comes back with `error` and no URL --
     and never stops the server. The port is not moved: clients were given it.
     """
+    if settings.get("key_warning"):
+        # Before the enabled check: a misspelt key can be why it is off.
+        logger.warning("%s", settings["key_warning"])
     if not settings.get("enabled"):
         return None
     if settings.get("bind_error"):

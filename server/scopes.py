@@ -121,6 +121,10 @@ ROUTES: dict[tuple[str, str], Rule] = {
     ("POST", "/api/v1/sessions/{session_id}/reservations"): _RESERVE,
     ("DELETE", "/api/v1/sessions/{session_id}/reservations"): _RESERVE,
     ("WS", "/api/v1/sessions/{session_id}/live"): _RESERVE,
+    # Uploaded apps (#254, phase 3b): any key may send one, kept as its own.
+    ("POST", "/api/v1/uploads"): _RESERVE,
+    ("GET", "/api/v1/uploads"): _RESERVE,
+    ("DELETE", "/api/v1/uploads/{upload_id}"): _RESERVE,
 
     # -- devices: reading -----------------------------------------------------
     ("GET", "/api/v1/device/list"): _VIEW,
@@ -151,7 +155,10 @@ ROUTES: dict[tuple[str, str], Rule] = {
 
     # -- devices: changing one ------------------------------------------------
     ("POST", "/api/v1/device/active"): _NAMED,
-    ("POST", "/api/v1/device/app/install"): _RESOLVED,
+    # A path is the server reading the Mac's disk: a client key installs what
+    # it uploaded, by `upload_id` (#254, phase 3b).
+    ("POST", "/api/v1/device/app/install"): Rule(Access.CONTROL, "resolved",
+                                                 owner_fields=frozenset({"app_path"})),
     ("POST", "/api/v1/device/app/launch"): _RESOLVED,
     ("POST", "/api/v1/device/app/terminate"): _RESOLVED,
     ("POST", "/api/v1/device/app/uninstall"): _RESOLVED,
@@ -259,6 +266,10 @@ ROUTES: dict[tuple[str, str], Rule] = {
     # -- recordings ------------------------------------------------------------
     ("GET", "/api/v1/recordings"): _VIEW,
     ("GET", "/api/v1/recordings/events"): _OWNER,            # reads any directory on the Mac
+    # Downloaded by their own principal, from another machine (#254, phase 3b).
+    ("GET", "/api/v1/recordings/{recording_id}/files"): _VIEW,
+    ("GET", "/api/v1/screenshots"): _VIEW,     # the caller's own session's only
+    ("GET", "/api/v1/recordings/{recording_id}/files/{name}"): _VIEW,
     ("POST", "/api/v1/recordings/{recording_id}/viewer"): _OWNER,
     ("DELETE", "/api/v1/recordings/{recording_id}/viewer"): _OWNER,
 
@@ -334,6 +345,9 @@ BLIND: dict[tuple[str, str], str] = {
     ("POST", "/api/v1/proxy/flows/wait"): "filtered",
     ("GET", "/api/v1/proxy/mocks"): "filtered",
     ("GET", "/api/v1/recordings"): "filtered",
+    ("GET", "/api/v1/recordings/{recording_id}/files"): "filtered",
+    ("GET", "/api/v1/screenshots"): "filtered",
+    ("GET", "/api/v1/recordings/{recording_id}/files/{name}"): "filtered",
     ("GET", "/api/v1/trace"): "filtered",
     # The owner's set-up: which apps have knowledge bases, which hosts are
     # bypassed or filtered, what builds ran, the flows held for intercept
