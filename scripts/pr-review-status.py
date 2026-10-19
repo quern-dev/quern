@@ -197,6 +197,14 @@ def open_prs() -> list[int]:
 # CodeRabbit's replies to "@coderabbitai review", observed. It answers whether
 # the current head has been reviewed, which nothing else in the API does.
 _ALREADY_REVIEWED = "already reviewed the last commit"
+# The same answer in CodeRabbit's later wording, inside an "Action failed"
+# block: "CodeRabbit is an incremental review system and does not re-review
+# already reviewed commits". Unrecognised, it read as no answer: #483's gate
+# polled out its timeout and reported "awaiting review" on a head CodeRabbit
+# had reviewed -- whose commit status said "Internal error occurred during
+# review" and whose summary carried no coverage marker, so nothing else on the
+# page could say so either (2026-10-19).
+_ALREADY_REVIEWED_INCREMENTAL = "does not re-review already reviewed commits"
 _FINISHED = "review finished"
 _TRIGGERED = "review triggered"
 # Not a "no answer yet". Treating it as one polled out the whole timeout in
@@ -403,7 +411,8 @@ def _reviewed_by_asking(number: int, head: str, timeout: float = 600.0) -> str:
     while time.monotonic() < deadline:
         time.sleep(20)
         reply = _reply_after(number, since)
-        if _ALREADY_REVIEWED in reply or _FINISHED in reply:
+        if (_ALREADY_REVIEWED in reply or _ALREADY_REVIEWED_INCREMENTAL in reply
+                or _FINISHED in reply):
             return "reviewed"
         if _RATE_LIMITED in reply:
             # A refusal no longer proves nothing is running: with usage-based
