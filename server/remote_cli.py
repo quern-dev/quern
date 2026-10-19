@@ -93,7 +93,7 @@ def _connect(args: list[str]) -> int:
             if not opts.url.lower().startswith("https://"):
                 raise client.RemoteError(f"{opts.url!r} is not an https:// address: the "
                                          "remote listener speaks only TLS")
-            remote = client.Remote(name=name, url=opts.url.rstrip("/"),
+            remote = client.Remote(name=name, url=client.with_port(opts.url),
                                    fingerprint=cert_mod.normalise(opts.fingerprint),
                                    key=opts.key)
             # Checked before it is kept: a typo in either is found now, not

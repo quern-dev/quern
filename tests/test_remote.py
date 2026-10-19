@@ -19,6 +19,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -379,20 +380,34 @@ class Relay:
                              daemon=True).start()
 
     def _splice(self, down, up, select):
+        # Reads are non-blocking: a readable TLS socket may hold only a
+        # record with no data in it (TLS 1.3's session tickets), and a
+        # blocking recv then waited for data while the other side's request
+        # sat unforwarded -- the client timed out about one run in five.
+        for s in (down, up):
+            s.setblocking(False)
         try:
             while True:
                 ready, _, _ = select.select([down, up], [], [], 5)
                 if not ready:
                     return
                 for src in ready:
-                    data = src.recv(65536)
-                    if not data:
-                        return
-                    while src.pending():        # decrypted already: select can't see it
-                        data += src.recv(src.pending())
+                    data = b""
+                    try:
+                        data = src.recv(65536)
+                        if not data:
+                            return
+                        while src.pending():    # decrypted already: select can't see it
+                            data += src.recv(src.pending())
+                    except ssl.SSLWantReadError:
+                        if not data:
+                            continue
+                    dst = up if src is down else down
                     if src is down:
                         self.sent += data
-                    (up if src is down else down).sendall(data)
+                    dst.setblocking(True)
+                    dst.sendall(data)
+                    dst.setblocking(False)
         except OSError:
             pass
         finally:
@@ -609,6 +624,52 @@ def test_mcp_install_points_each_client_at_the_remote_and_back(tmp_path):
     assert env == {"KEEP": "1", "QUERN_REMOTE": "office"}
     cli._install_json_mcpservers(claude, tmp_path / "launcher.cjs", "node", None)
     assert json.loads(claude.read_text())["mcpServers"]["quern-debug"]["env"] == {"KEEP": "1"}
+
+
+class TestCodexRegistration:
+    """~/.codex/config.toml, which codex cannot read at all if it is not valid
+    TOML -- so every case is read back with tomllib (review)."""
+
+    def _install(self, home, monkeypatch, remote):
+        import server.__main__ as cli
+
+        monkeypatch.setattr(Path, "home", lambda: home)
+        assert cli._install_codex(home / "launcher.cjs", "node", remote)[0]
+        import tomllib
+
+        return tomllib.loads((home / ".codex" / "config.toml").read_text())["mcp_servers"]["quern"]
+
+    def _write(self, home, text):
+        (home / ".codex").mkdir(exist_ok=True)
+        (home / ".codex" / "config.toml").write_text(text)
+
+    def test_an_inline_env_keeps_its_other_variables_both_ways(self, tmp_path, monkeypatch):
+        self._write(tmp_path, '[mcp_servers.quern]\ncommand = "node"\nenv = { KEEP = "1" }\n')
+        assert self._install(tmp_path, monkeypatch, "office")["env"] == {
+            "KEEP": "1", "QUERN_REMOTE": "office"}
+        assert self._install(tmp_path, monkeypatch, None)["env"] == {"KEEP": "1"}
+
+    def test_an_env_sub_table_is_edited_in_place_not_doubled(self, tmp_path, monkeypatch):
+        self._write(tmp_path, '[mcp_servers.quern]\ncommand = "node"\n\n'
+                              '[mcp_servers.quern.env]\nKEEP = "1"\n')
+        assert self._install(tmp_path, monkeypatch, "office")["env"] == {
+            "KEEP": "1", "QUERN_REMOTE": "office"}
+        assert self._install(tmp_path, monkeypatch, None)["env"] == {"KEEP": "1"}
+
+    def test_another_servers_quern_remote_does_not_touch_querns_env(self, tmp_path, monkeypatch):
+        self._write(tmp_path, '[mcp_servers.other]\nenv = { QUERN_REMOTE = "x" }\n\n'
+                              '[mcp_servers.quern]\ncommand = "node"\nenv = { KEEP = "1" }\n')
+        assert self._install(tmp_path, monkeypatch, None)["env"] == {"KEEP": "1"}
+
+    def test_a_fresh_file(self, tmp_path, monkeypatch):
+        assert self._install(tmp_path, monkeypatch, "office")["env"] == {"QUERN_REMOTE": "office"}
+
+
+def test_a_paired_url_keeps_the_port_it_paired_on():
+    """No port typed meant 9130 for pairing, then 443 for every request after."""
+    assert client.with_port("https://ci.lan") == "https://ci.lan:9130"
+    assert client.with_port("https://ci.lan:9443/") == "https://ci.lan:9443"
+    assert client.with_port("https://[fe80::1]") == "https://[fe80::1]:9130"
 
 
 def test_an_unverified_tls_context_still_refuses_old_protocols():

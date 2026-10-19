@@ -432,11 +432,13 @@ def _install_opencode(mcp_entry: Path, node: str = "node",
     return True, f"{verb} quern in {config_path}"
 
 
-def _toml_upsert_section(text: str, section: str, fields: dict) -> str:
+def _toml_upsert_section(text: str, section: str, fields: dict,
+                         drop: tuple[str, ...] = ()) -> str:
     """Insert or replace a TOML section using text manipulation.
 
     If the section header exists, replaces content from that line until
-    the next section header (or EOF). If not found, appends at end.
+    the next section header (or EOF). If not found, appends at end. Keys in
+    `drop` are removed from the section.
     """
     header = f"[{section}]"
     lines = text.splitlines(keepends=True)
@@ -478,7 +480,7 @@ def _toml_upsert_section(text: str, section: str, fields: dict) -> str:
         stripped = line.strip()
         key = stripped.split("=", 1)[0].strip() if "=" in stripped else None
         if key is not None and not stripped.startswith("#"):
-            dropping = key in fields
+            dropping = key in fields or key in drop
             if dropping and stripped.count("[") <= stripped.count("]"):
                 dropping = False            # a one-line value: nothing follows
                 continue
@@ -491,6 +493,31 @@ def _toml_upsert_section(text: str, section: str, fields: dict) -> str:
 
     lines[start:end] = block + kept + ["\n"]
     return "".join(lines)
+
+
+def _codex_quern_env(text: str) -> dict:
+    """The env codex's config gives quern, read as TOML; empty when there is
+    none, or when the file does not parse (it is then rewritten as before)."""
+    import tomllib
+
+    try:
+        env = tomllib.loads(text).get("mcp_servers", {}).get("quern", {}).get("env", {})
+    except (tomllib.TOMLDecodeError, AttributeError):
+        return {}
+    return dict(env) if isinstance(env, dict) else {}
+
+
+def _toml_inline_table(values: dict) -> str:
+    import json
+    import re
+
+    def key(k: str) -> str:
+        return k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else json.dumps(k, ensure_ascii=False)
+
+    if not values:
+        return "{ }"
+    return "{ " + ", ".join(f"{key(k)} = {json.dumps(v, ensure_ascii=False)}"
+                            for k, v in values.items()) + " }"
 
 
 def _install_codex(mcp_entry: Path, node: str = "node",
@@ -515,15 +542,27 @@ def _install_codex(mcp_entry: Path, node: str = "node",
         "args": json.dumps([str(mcp_entry)], ensure_ascii=False),
         "enabled": "true",
     }
-    # The env table is written whole: TOML's inline table cannot be merged by
-    # line. So --remote replaces any env table there (variables someone else
-    # put in it are not kept, unlike the JSON clients), and registering for
-    # this Mac's own server empties one an earlier --remote wrote.
-    if remote:
-        fields["env"] = "{ QUERN_REMOTE = " + json.dumps(remote, ensure_ascii=False) + " }"
-    elif "QUERN_REMOTE" in existing_text:
-        fields["env"] = "{ }"
-    new_text = _toml_upsert_section(existing_text, "mcp_servers.quern", fields)
+    # QUERN_REMOTE is set for --remote and removed otherwise; any other
+    # variable in quern's env is kept. Codex takes the env as an inline table
+    # or as its own [mcp_servers.quern.env] table: an inline one written
+    # beside that table would define env twice, and codex could read none of
+    # its config (review).
+    remote_value = json.dumps(remote, ensure_ascii=False) if remote else None
+    env_table = "[mcp_servers.quern.env]" in (line.strip() for line in existing_text.splitlines())
+    new_text = existing_text
+    if env_table:
+        new_text = _toml_upsert_section(
+            new_text, "mcp_servers.quern.env",
+            {"QUERN_REMOTE": remote_value} if remote_value else {},
+            drop=() if remote_value else ("QUERN_REMOTE",))
+    else:
+        env = _codex_quern_env(existing_text)
+        if remote_value or "QUERN_REMOTE" in env:
+            env.pop("QUERN_REMOTE", None)
+            if remote:
+                env["QUERN_REMOTE"] = remote
+            fields["env"] = _toml_inline_table(env)
+    new_text = _toml_upsert_section(new_text, "mcp_servers.quern", fields)
     config_path.write_text(new_text)
 
     verb = "Updated" if existing else "Added"

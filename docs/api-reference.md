@@ -8,7 +8,9 @@ agents can read it over MCP as `quern://api-reference`.
 
 All endpoints require `Authorization: Bearer <key>` except these public paths: `/`,
 `/health`, `/api/v1/health`, `/tools`, `/docs`, `/redoc`, `/openapi.json`,
-and `/api/v1/proxy/cert`.
+`/api/v1/proxy/cert`, and the two pairing steps `/api/v1/remote/pair/hello` and
+`/api/v1/remote/pair/finish` -- which answer only on the remote listener (see
+[Remote access](#remote-access)).
 
 `/api/v1/proxy/cert` is deliberately unauthenticated — devices and simulators fetch the
 mitmproxy CA certificate from it during setup, before they hold a key. It serves only the
@@ -108,7 +110,7 @@ Every route is classified in `server/scopes.py`, and a route with no classificat
 
 It keeps cooperating users' work apart; it is not a sandbox (see above).
 
-**The API listens on 127.0.0.1.** `quern start --host 0.0.0.0` still exposes it, with a warning from `start`, `status` and `doctor`: every key, the owner's included, crosses the network unencrypted. A separate TLS listener is the planned way to reach quern from another machine. The proxy (9101) is unaffected and stays reachable from devices on the LAN; a phone fetches the CA from `http://mitm.it/cert/cer` through it (see `proxy_setup_guide`).
+**The API listens on 127.0.0.1.** `quern start --host 0.0.0.0` still exposes it, with a warning from `start`, `status` and `doctor`: every key, the owner's included, crosses the network unencrypted. To reach quern from another machine, use the TLS remote listener instead (see [Remote access](#remote-access)). The proxy (9101) is unaffected and stays reachable from devices on the LAN; a phone fetches the CA from `http://mitm.it/cert/cer` through it (see `proxy_setup_guide`).
 
 ## Remote access
 

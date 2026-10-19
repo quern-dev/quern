@@ -221,6 +221,14 @@ def ws_connect(remote: Remote, url: str, **kwargs):
 # -- pairing ------------------------------------------------------------------------
 
 
+def with_port(url: str) -> str:
+    """`url` as https://host:port, the listener's 9130 when it names none."""
+    parts = urllib.parse.urlsplit(url)
+    host = parts.hostname or ""
+    host = f"[{host}]" if ":" in host else host
+    return f"https://{host}:{parts.port or 9130}"
+
+
 def pair(url: str, code: str, name: str, *, timeout: float = 15.0) -> Remote:
     """Pair with the server at `url` using `code`, and return what to store.
 
@@ -264,7 +272,9 @@ def pair(url: str, code: str, name: str, *, timeout: float = 15.0) -> Remote:
         raise RemoteError(f"could not reach {url}: {e}") from e
     finally:
         conn.close()
-    return Remote(name=name, url=f"https://{parts.netloc}", fingerprint=seen,
+    # The port it paired on, written out: a URL without one means 443 to
+    # every later request, not the 9130 used here (review).
+    return Remote(name=name, url=with_port(url), fingerprint=seen,
                   key=str(done["key"]), label=str(done.get("label", "")),
                   paired_at=datetime.now(UTC).isoformat(timespec="seconds"))
 
