@@ -88,12 +88,17 @@ async def sweep(app) -> None:
     while True:
         await asyncio.sleep(SWEEP_SECONDS)
         try:
-            # Chosen on the loop; only the deleting is done in a thread.
-            dirs = app.state.uploads.expire(still_valid)
-            for d in dirs:
+            # Chosen on the loop; only the deleting is done in a thread, and
+            # the room is freed once each is gone -- retried next time if not.
+            store = app.state.uploads
+            gone = []
+            for d in store.expire(still_valid):
                 await asyncio.to_thread(shutil.rmtree, d, True)
-            if dirs:
-                logger.info("Deleted %d upload(s) not installed: %s", len(dirs),
-                            ", ".join(d.name for d in dirs))
+                if store.deleted(d):
+                    gone.append(d.name)
+                else:
+                    logger.warning("Could not delete upload %s; will try again", d)
+            if gone:
+                logger.info("Deleted %d upload(s) not installed: %s", len(gone), ", ".join(gone))
         except Exception:  # noqa: BLE001 -- the sweep must outlive one bad pass
             logger.exception("Upload sweep failed")

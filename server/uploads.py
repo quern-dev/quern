@@ -88,6 +88,9 @@ class UploadStore:
         self._inflight: dict[str, int] = {}
         #: Uploads being installed: not swept or deleted from under it.
         self._busy: set[str] = set()
+        #: Swept but not yet gone from disk: still counted against their key,
+        #: and tried again by the next sweep if deleting failed (CodeRabbit).
+        self._deleting: dict[str, Upload] = {}
 
     def reset(self) -> None:
         """Start empty: what a previous run received has no ids any more."""
@@ -97,6 +100,7 @@ class UploadStore:
     def held(self, principal: str) -> int:
         """What `principal` has on disk here, and on the way."""
         return (sum(u.size for u in self._uploads.values() if u.principal == principal)
+                + sum(u.size for u in self._deleting.values() if u.principal == principal)
                 + self._inflight.get(principal, 0))
 
     def list(self, principal: str) -> list[Upload]:
@@ -139,14 +143,14 @@ class UploadStore:
                 # (review). Measured first and reserved before unpacking, so
                 # bundles unpacking side by side cannot each take the room
                 # (CodeRabbit).
-                unpacked = await asyncio.to_thread(
-                    _unpack_app, target, None, self.max_bytes - self.held(principal))
+                unpacked = await _to_thread_to_the_end(
+                    _measure_app, target, self.max_bytes - self.held(principal))
                 if self.held(principal) + unpacked > self.max_bytes:
                     raise UploadError(self._too_big(unpacked, self.max_bytes
                                                     - self.held(principal)), 413)
                 self._inflight[principal] = self._inflight.get(principal, 0) + unpacked
                 reserved = unpacked
-                path, held = await asyncio.to_thread(
+                path, held = await _to_thread_to_the_end(
                     _unpack_app, target, directory / "app", unpacked)
                 target.unlink()
         except BaseException:
@@ -188,24 +192,35 @@ class UploadStore:
             shutil.rmtree(self.root / upload.id, ignore_errors=True)
 
     def expire(self, still_valid: Callable[[str], bool]) -> list[Path]:
-        """Forget the expired, and those of principals no longer valid (a
-        revoked key's), returning the directories to delete. On the event
-        loop: chosen and popped in a worker thread, the dict changed under
-        the loop's own reads of it (CodeRabbit)."""
+        """The directories to delete: the expired uploads, those of principals
+        no longer valid (a revoked key's), and any a previous sweep failed to
+        delete. Chosen on the event loop -- chosen in a worker thread, the
+        dict changed under the loop's own reads of it -- and still counted
+        against their key until `deleted` says they are gone (CodeRabbit)."""
         now = self._clock()
         gone = [u for u in self._uploads.values()
                 if u.id not in self._busy
                 and (now - u.created >= TTL_SECONDS or not still_valid(u.principal))]
         for upload in gone:
             del self._uploads[upload.id]
-        return [self.root / u.id for u in gone]
+            self._deleting[upload.id] = upload
+        return [self.root / upload_id for upload_id in self._deleting]
+
+    def deleted(self, directory: Path) -> bool:
+        """After deleting `directory`: True, and its bytes freed, if it is gone."""
+        if directory.exists():
+            return False
+        self._deleting.pop(directory.name, None)
+        return True
 
     def sweep(self, still_valid: Callable[[str], bool]) -> list[str]:
         """`expire`, and the directories deleted here. The ids deleted."""
-        dirs = self.expire(still_valid)
-        for d in dirs:
+        gone = []
+        for d in self.expire(still_valid):
             shutil.rmtree(d, ignore_errors=True)
-        return [d.name for d in dirs]
+            if self.deleted(d):
+                gone.append(d.name)
+        return gone
 
     def _too_big(self, size: int, room: int) -> str:
         cap = self.max_bytes // (1024 * 1024)
@@ -249,12 +264,38 @@ def unsafe_member(members: list[tarfile.TarInfo]) -> str | None:
     return None
 
 
-def _unpack_app(archive: Path, dest: Path | None, room: int):
-    """The .app inside `archive`, unpacked under `dest`, and what it holds:
-    (path, bytes). With no `dest`, only checked and measured: the bytes.
-    tarfile's `data` filter refuses absolute names, `..`, links that leave
-    `dest`, and device files; the sizes are summed first, so a small archive
-    cannot unpack into more than the cap."""
+async def _to_thread_to_the_end(fn, *args):
+    """`fn(*args)` in a worker thread, and, if the caller is cancelled -- the
+    client went away -- not returning until the thread has stopped too: the
+    caller's cleanup would otherwise delete the directory and free its room
+    while the thread still wrote into it (CodeRabbit)."""
+    work = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+    try:
+        return await asyncio.shield(work)
+    except asyncio.CancelledError:
+        with contextlib.suppress(BaseException):
+            await work
+        raise
+
+
+def _measure_app(archive: Path, room: int) -> int:
+    """What the .app in `archive` unpacks to, once checked: see `_unpack_app`."""
+    return _open_app(archive, None, room)[1]
+
+
+def _unpack_app(archive: Path, dest: Path, room: int) -> tuple[Path, int]:
+    """The .app inside `archive`, unpacked under `dest`, and its bytes."""
+    path, total = _open_app(archive, dest, room)
+    assert path is not None
+    return path, total
+
+
+def _open_app(archive: Path, dest: Path | None, room: int) -> tuple[Path | None, int]:
+    """Check the .app inside `archive`, and with a `dest` unpack it there:
+    (its path, or None unpacked nowhere, and its bytes). tarfile's `data`
+    filter refuses absolute names, `..`, links that leave `dest`, and device
+    files; the sizes are summed first, so a small archive cannot unpack into
+    more than the cap."""
     if not hasattr(tarfile, "data_filter"):
         raise UploadError("this Python cannot unpack an archive safely (it needs 3.11.4 "
                           "or later): send an .ipa instead", 501)
@@ -275,7 +316,7 @@ def _unpack_app(archive: Path, dest: Path | None, room: int):
                 raise UploadError("a .app.tar.gz holds one .app bundle at its top: "
                                   f"found {sorted(tops)[:5] or 'nothing'}")
             if dest is None:
-                return total
+                return None, total
             dest.mkdir(mode=0o700)
             tar.extractall(dest, members=members, filter="data")
     except (tarfile.TarError, EOFError, OSError) as e:

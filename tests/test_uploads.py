@@ -479,3 +479,55 @@ class TestInstallingKeepsTheUpload:
                    headers=_h(alice))
         assert r.status_code >= 400
         assert str(app.state.uploads.root) not in r.text and "My.ipa" in r.text
+
+
+class TestCleanupWaitsForTheDisk:
+    def test_a_cancelled_upload_cleans_up_only_once_unpacking_has_stopped(self, store, monkeypatch):
+        """Cancelled mid-unpack (the client went away), the directory was
+        removed and the room freed while the worker still wrote (CodeRabbit)."""
+        import threading
+        import time
+
+        import server.uploads as uploads
+
+        started = threading.Event()
+
+        def slow_unpack(archive, dest, room):
+            started.set()
+            time.sleep(0.3)
+            dest.mkdir(parents=True, exist_ok=True)     # still writing after the cancel
+            (dest / "late").write_bytes(b"x")
+            return dest, 1
+
+        monkeypatch.setattr(uploads, "_unpack_app", slow_unpack)
+        zeros = _tar([("My.app", "dir", b""), ("My.app/f", "file", b"x")])
+
+        async def go():
+            task = asyncio.create_task(
+                store.receive("client:alice", "My.app.tar.gz", _chunks(zeros)))
+            while not started.is_set():
+                await asyncio.sleep(0.01)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(go())
+        assert list(store.root.iterdir()) == [], "nothing written after the cleanup"
+        assert store._inflight == {} and store.held("client:alice") == 0
+
+    def test_swept_bytes_stay_counted_until_their_files_are_gone(self, tmp_path, monkeypatch):
+        import server.uploads as uploads
+
+        now = [1000.0]
+        store = UploadStore(tmp_path / "u", max_bytes=1 << 20, clock=lambda: now[0])
+        up = _receive(store, "client:alice", "Old.ipa", b"x" * 900_000)
+        now[0] += TTL_SECONDS
+        real = uploads.shutil.rmtree
+        monkeypatch.setattr(uploads.shutil, "rmtree", lambda *a, **k: None)   # deleting fails
+        assert store.sweep(lambda who: True) == []
+        assert store.held("client:alice") == 900_000, "still on disk, still counted"
+        with pytest.raises(UploadError):
+            _receive(store, "client:alice", "New.ipa", b"x" * 200_000)
+        monkeypatch.setattr(uploads.shutil, "rmtree", real)
+        assert store.sweep(lambda who: True) == [up.id], "tried again"
+        assert store.held("client:alice") == 0
