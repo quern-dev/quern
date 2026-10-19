@@ -635,10 +635,12 @@ class LazyDeepList:
 
     ROW_H, TOP, VIEW = 50, 100, 700
 
-    def __init__(self, wda: FakeWda, rows: int = 200, lazy: bool = True):
+    def __init__(self, wda: FakeWda, rows: int = 200, lazy: bool = True,
+                 min_depth: int = 18):
         self.wda = wda
         self.ROWS = rows
         self.lazy = lazy
+        self.min_depth = min_depth
         self.offset = 0.0
         self.animated = False
         self.frames = 0
@@ -666,7 +668,7 @@ class LazyDeepList:
                 and self.swipes >= self.timeout_from_swipe):
             from server.device.ios.wda_client import QueryTimedOut
             raise QueryTimedOut(value)
-        if self.wda.depth is None or self.wda.depth < 18:
+        if self.wda.depth is None or self.wda.depth < self.min_depth:
             return []
         for i in range(self.ROWS):
             if f"'lazy_{i}'" in value or value == f"lazy_{i}":
@@ -876,3 +878,15 @@ class TestTheSweepOnALazyDeepList:
         assert result["status"] == "not_found"
         assert world._pulled or world.swipes, "never pulled at the top"
         assert world.swipes < 12, f"{world.swipes} swipes: the pull read as movement"
+
+    async def test_every_scroll_runs_at_the_containers_depth(self, phone):
+        """A container found at 25 (Settings' is) while the sweep looks for its
+        target at 12: the second redo, with the container cached, came with the
+        session at 12, where WDA could not find the container again (#475)."""
+        ctrl, wda = phone
+        ctrl._warn_if_input_is_suppressed = AsyncMock()
+        world = self._install(ctrl, wda, lazy=False, min_depth=12)
+        world.dropped = {2, 6}
+        await ctrl.scroll_to_element(identifier="lazy_150")
+        assert len(world.scrolls) == 2, world.scrolls
+        assert [d for _, _, d in world.scrolls] == [SNAPSHOT_MAX_DEPTH] * 2, world.scrolls
