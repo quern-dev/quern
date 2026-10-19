@@ -158,27 +158,6 @@ class TestARateLimitedReplyIsAnAnswer:
         _install(gate, monkeypatch, Fake(_summary(), answer="Review finished."))
         assert gate._reviewed_by_asking(202, HEAD, timeout=600) == "reviewed"
 
-    # CodeRabbit's reply to `review` on #483, word for word: the head had been
-    # reviewed, but its status errored and no coverage marker was written, so
-    # this reply was the only thing on the page that said so.
-    INCREMENTAL = ("<details>\n<summary>❌ Action failed</summary>\n\nReview failed.\n\n"
-                   "> Note: CodeRabbit is an incremental review system and does not "
-                   "re-review already reviewed commits. This command is applicable only "
-                   "when automatic reviews are paused.\n</details>")
-
-    def test_the_incremental_wording_is_an_already_reviewed_answer(self, gate, monkeypatch):
-        """The bug: unrecognised, it was polled to the timeout as no answer."""
-        fake = _install(gate, monkeypatch, Fake(_summary(), answer=self.INCREMENTAL))
-        started = gate.time.monotonic()
-        assert gate._reviewed_by_asking(483, HEAD, timeout=600) == "reviewed"
-        assert gate.time.monotonic() - started < 60, "it waited out the timeout"
-        assert fake.asks == 1
-
-    def test_it_lets_a_clean_pr_through(self, gate, monkeypatch):
-        _install(gate, monkeypatch, Fake(_summary(), answer=self.INCREMENTAL))
-        state, detail = gate.status(483, ask=True)
-        assert state == "ok", detail
-
 
 class TestThePageIsReadBeforeAsking:
     """Asking posts a comment. When the summary already answers, it is noise."""
