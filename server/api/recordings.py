@@ -329,11 +329,15 @@ def _stat_sized(path: Path):
     import os
 
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    # A file object now, not a bare descriptor: a stream abandoned before it
+    # starts never enters the generator, and the file closes when collected
+    # (CodeRabbit). The route also closes it when the response ends.
+    f = os.fdopen(fd, "rb")
     size = os.fstat(fd).st_size
 
     def chunks():
         left = size
-        with os.fdopen(fd, "rb") as f:
+        with f:
             while left > 0:
                 data = f.read(min(left, 1024 * 1024))
                 if not data:
@@ -341,7 +345,7 @@ def _stat_sized(path: Path):
                 left -= len(data)
                 yield data
 
-    return size, chunks()
+    return size, chunks(), f
 
 
 def _files_of(rec) -> list[Path]:
@@ -358,8 +362,14 @@ async def recording_files(request: Request, recording_id: str) -> dict:
     """A recording's files, to download from another machine (#254, 3b)."""
     rec = _own_recording(request, recording_id)
     manager = getattr(request.app.state, "recordings", None)
+    files = []
+    for p in _files_of(rec):
+        try:
+            files.append({"name": p.name, "bytes": p.stat().st_size})
+        except OSError:
+            continue        # gone since it was listed: a live recording moves (CodeRabbit)
     return {"recording_id": rec.id, "live": bool(manager and manager.is_live(rec.dir)),
-            "files": [{"name": p.name, "bytes": p.stat().st_size} for p in _files_of(rec)]}
+            "files": files}
 
 
 @router.get("/{recording_id}/files/{name}")
@@ -374,12 +384,15 @@ async def recording_file(request: Request, recording_id: str, name: str):
 
     media = "video/mp4" if name.endswith(".mp4") else (
         "application/json" if name.endswith(".json") else "text/plain")
+    from starlette.background import BackgroundTask
+
     try:
-        size, chunks = _stat_sized(match)
+        size, chunks, opened = _stat_sized(match)
     except OSError:
         raise HTTPException(status_code=404,
                             detail=f"{name!r} is not one of recording {rec.id}'s files") from None
-    return StreamingResponse(chunks, media_type=media, headers={
+    return StreamingResponse(chunks, media_type=media, background=BackgroundTask(opened.close),
+                             headers={
         "Content-Length": str(size), "Content-Disposition": f'attachment; filename="{name}"'})
 
 

@@ -150,7 +150,7 @@ def test_a_file_still_growing_is_sent_as_it_was_when_opened(tmp_path):
 
     f = tmp_path / "events.jsonl"
     f.write_bytes(b"a" * 3_000_000)
-    size, chunks = _stat_sized(f)
+    size, chunks, _ = _stat_sized(f)
     with open(f, "ab") as more:
         more.write(b"b" * 1_000_000)
     assert size == 3_000_000 and b"".join(chunks) == b"a" * 3_000_000

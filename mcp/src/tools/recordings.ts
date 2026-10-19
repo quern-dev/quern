@@ -128,6 +128,11 @@ detail="summary" (the default here) gives one line per event: a flow's method, U
     }),
   }, async ({ recording_id, dest }) => {
     try {
+      // The server's ids, and nothing else: the default dest is built from it,
+      // and "../x" would have made a directory outside it (CodeRabbit).
+      if (!/^rec_[0-9a-f]{12}$/.test(recording_id)) {
+        throw new Error(`${JSON.stringify(recording_id)} is not a recording id (rec_ and 12 hex digits, from start_recording or list_recordings)`);
+      }
       const id = encodeURIComponent(recording_id);
       const listing = await apiRequest("GET", `/api/v1/recordings/${id}/files`) as {
         live: boolean; files: { name: string; bytes: number }[];

@@ -358,6 +358,23 @@ class TestTheCapHolds:
         assert store.held("client:alice") <= store.max_bytes
         assert store._inflight == {}, "nothing left counted in flight"
 
+    def test_bundles_unpacking_side_by_side_cannot_both_take_the_room(self, store):
+        """Unpacking runs in a thread, and the unpacked bytes were not counted
+        until it ended: two bundles each unpacked to most of the cap
+        (CodeRabbit)."""
+        zeros = _tar([("My.app", "dir", b""), ("My.app/zeros", "file", b"\0" * 600_000)])
+
+        async def both():
+            return await asyncio.gather(
+                store.receive("client:alice", "A.app.tar.gz", _chunks(zeros)),
+                store.receive("client:alice", "B.app.tar.gz", _chunks(zeros)),
+                return_exceptions=True)
+
+        results = asyncio.run(both())
+        assert sum(isinstance(r, UploadError) for r in results) == 1, results
+        assert store.held("client:alice") <= store.max_bytes
+        assert store._inflight == {}
+
     def test_a_failed_upload_gives_its_room_back(self, store):
         with pytest.raises(UploadError):
             _receive(store, "client:alice", "My.app.tar.gz", b"\x1f\x8b broken")

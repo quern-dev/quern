@@ -500,6 +500,9 @@ class TestTheListener:
         with pytest.raises(urllib.error.HTTPError) as e:
             client.opener(remote).open(req, timeout=10)
         assert e.value.code == 422
+        # Located in the body, as FastAPI says when it validates (CodeRabbit).
+        locs = [err["loc"] for err in json.loads(e.value.read())["detail"]]
+        assert locs and all(loc[0] == "body" for loc in locs), locs
 
     def test_the_owners_key_is_refused_on_a_websocket_too(self, running):
         from websockets.exceptions import InvalidStatus

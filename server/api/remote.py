@@ -12,6 +12,8 @@ proofs to be bound to: anywhere else they read as not there.
 
 from __future__ import annotations
 
+from typing import TypeVar
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field, ValidationError
@@ -21,6 +23,8 @@ from server.remote.listener import REMOTE
 from server.remote.pairing import PairingError
 
 router = APIRouter(prefix="/api/v1/remote", tags=["remote"])
+
+M = TypeVar("M", bound=BaseModel)
 
 
 def _listener(request: Request):
@@ -76,7 +80,7 @@ def _remote_only(request: Request):
     return _listener(request)
 
 
-async def _body(request: Request, model: type[BaseModel]):
+async def _body(request: Request, model: type[M]) -> M:
     """The request body as `model`, read only once the listener is known to be
     the remote one. Declared as a parameter, FastAPI validates it first, and a
     malformed body on the local listener answered 422 -- the route showing
@@ -84,7 +88,9 @@ async def _body(request: Request, model: type[BaseModel]):
     try:
         return model.model_validate_json(await request.body() or b"{}")
     except ValidationError as e:
-        raise RequestValidationError(e.errors(include_url=False)) from None
+        # Located in the body, as FastAPI says when it validates (CodeRabbit).
+        raise RequestValidationError([{**err, "loc": ("body", *err["loc"])}
+                                      for err in e.errors(include_url=False)]) from None
 
 
 def _schema(model: type[BaseModel]) -> dict:

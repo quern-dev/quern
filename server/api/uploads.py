@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -87,9 +88,12 @@ async def sweep(app) -> None:
     while True:
         await asyncio.sleep(SWEEP_SECONDS)
         try:
-            gone = await asyncio.to_thread(app.state.uploads.sweep, still_valid)
-            if gone:
-                logger.info("Deleted %d upload(s) not installed: %s", len(gone),
-                            ", ".join(gone))
+            # Chosen on the loop; only the deleting is done in a thread.
+            dirs = app.state.uploads.expire(still_valid)
+            for d in dirs:
+                await asyncio.to_thread(shutil.rmtree, d, True)
+            if dirs:
+                logger.info("Deleted %d upload(s) not installed: %s", len(dirs),
+                            ", ".join(d.name for d in dirs))
         except Exception:  # noqa: BLE001 -- the sweep must outlive one bad pass
             logger.exception("Upload sweep failed")

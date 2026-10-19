@@ -17,7 +17,7 @@ router = APIRouter(prefix="/api/v1/screenshots", tags=["screenshots"])
 @router.get("")
 async def screenshot_file(request: Request, path: str = Query(
         description="A screenshot path from an answer: screenshots.before/after, "
-                    "screen_context.screenshot, a timeline entry")):
+                    "screen_context.screenshot, a timeline entry")) -> Response:
     """The screenshot at `path`, for the session that caused it, or the owner."""
     owner = screenshots.owner_of(path)
     caller = visibility.current_caller()
