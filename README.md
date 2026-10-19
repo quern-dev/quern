@@ -446,11 +446,13 @@ quern record start --udid UDID --kinds flows,logs --host H --exclude-host H --in
 quern record start --udid UDID --allow-passthrough   # Record even if the simulator lacks quern's CA (no HTTPS captured)
 quern record start --udid UDID --kinds flows --bodies errors --max-body-bytes 4096 --exclude-content-type image/
                              # A small recording of a long run: every flow, few bodies
+quern record start --udid UDID --video --viewer   # Also print a LAN viewer link to post (needs viewer.enabled)
 quern record stop ID [--require-complete]    # ...until stopped; exit 3 if anything was lost
 quern record keyframe ID [--label TEXT]   # Make this moment a seek point, and mark it in the recording
 quern record start --udid UDID --video --keyframes requests   # Seek points at requests only (default: actions and requests)
 quern record start --udid UDID --requested-by NAME   # Name who asked, so runs on a shared server tell apart
 quern record list [--requested-by NAME]   # Recordings running on this server (only NAME's)
+quern record download ID [--dest DIR]   # Copy a recording's files here, from a remote quern too (QUERN_REMOTE)
 quern session run --reserve N [--device-type simulator] -- CMD ...   # Hold a session, reserve devices for CMD, release on exit
 quern session run --udid UDID [--on-release shutdown_booted] -- CMD   # ...exactly these; shut down what it booted afterwards
 quern session run --group GROUP [--reserve N] [--name NAME] -- CMD   # A config.json device group; name the session

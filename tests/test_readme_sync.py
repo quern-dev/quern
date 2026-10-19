@@ -30,7 +30,13 @@ SERVER_DIR = REPO_ROOT / "server"
 # The CLI surface is split across two files: argparse subparsers are built in
 # main.py, while several commands are intercepted off sys.argv in __main__.py
 # before argparse ever runs.
-CLI_SOURCES = (REPO_ROOT / "server" / "__main__.py", REPO_ROOT / "server" / "main.py")
+CLI_SOURCES = (REPO_ROOT / "server" / "__main__.py", REPO_ROOT / "server" / "main.py",
+               # The subcommands that parse their own flags: without them a
+               # README flag of `quern record` passed only when main.py
+               # happened to define one of the same name (#482).
+               REPO_ROOT / "server" / "recording" / "cli.py",
+               REPO_ROOT / "server" / "session_cli.py",
+               REPO_ROOT / "server" / "remote_cli.py")
 
 # Routes deliberately left out of the endpoint tables. Both are named in the
 # README's public-paths sentence, so they aren't hidden — they just don't earn
