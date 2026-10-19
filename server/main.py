@@ -856,8 +856,9 @@ def create_app(
     from server.config import upload_settings as _upload_settings
     from server.uploads import UploadStore
 
-    app.state.uploads = UploadStore(_CONFIG_DIR / "uploads",
-                                    _upload_settings()["max_bytes"])
+    _uploads_cfg = _upload_settings()
+    app.state.uploads = UploadStore(_CONFIG_DIR / "uploads", _uploads_cfg["max_bytes"],
+                                    min_free_bytes=_uploads_cfg["min_free_bytes"])
     app.add_middleware(APIKeyMiddleware, api_key=config.api_key, clients=app.state.clients)
 
     # Session attribution (#254). Outside auth, so it is set before anything

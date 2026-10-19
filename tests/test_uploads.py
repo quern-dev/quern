@@ -536,3 +536,78 @@ class TestCleanupWaitsForTheDisk:
         monkeypatch.setattr(uploads.shutil, "rmtree", real)
         assert store.sweep(lambda who: True) == [up.id], "tried again"
         assert store.held("client:alice") == 0
+
+
+class TestTheDiskKeepsItsFloor:
+    """The cap is per key and the owner decides how many keys exist; the
+    volume's free space is kept whatever they hold together (#481)."""
+
+    MB = 1024 * 1024
+
+    def _store(self, tmp_path, free, floor=4):
+        return UploadStore(tmp_path / "u", max_bytes=1 << 30, min_free_bytes=floor * self.MB,
+                           disk_free=free)
+
+    def test_an_upload_that_would_cross_the_floor_is_refused_before_reading(self, tmp_path):
+        store = self._store(tmp_path, lambda: 5 * self.MB)
+        with pytest.raises(UploadError) as e:
+            _receive(store, "client:alice", "My.ipa", b"x", declared=2 * self.MB)
+        assert e.value.status == 507 and "min_free_mb" in str(e.value)
+
+    def test_it_is_checked_as_the_bytes_arrive(self, tmp_path, monkeypatch):
+        """Content-Length can be absent: the volume is looked at again as the
+        upload streams, and it is cut off at the floor."""
+        import server.uploads as uploads
+
+        monkeypatch.setattr(uploads, "DISK_CHECK_BYTES", 100_000)
+        written = [0]
+        store = self._store(tmp_path, lambda: 5 * self.MB - written[0])
+
+        async def chunks():
+            for _ in range(30):
+                written[0] += 100_000
+                yield b"x" * 100_000
+
+        with pytest.raises(UploadError) as e:
+            asyncio.run(store.receive("client:alice", "My.ipa", chunks()))
+        assert e.value.status == 507
+        assert written[0] < 3_000_000, "stopped near the floor, not at the end"
+        assert list(store.root.iterdir()) == [] and store._inflight == {}
+
+    def test_a_bundle_is_checked_for_what_it_unpacks_to(self, tmp_path):
+        store = self._store(tmp_path, lambda: 5 * self.MB)
+        zeros = _tar([("My.app", "dir", b""), ("My.app/zeros", "file", b"\0" * (2 * self.MB))])
+        with pytest.raises(UploadError) as e:
+            _receive(store, "client:alice", "My.app.tar.gz", zeros)
+        assert e.value.status == 507
+
+    def test_room_above_the_floor_is_fine_and_zero_turns_it_off(self, tmp_path):
+        assert _receive(self._store(tmp_path, lambda: 50 * self.MB), "client:alice",
+                        "My.ipa", b"x" * 1000, declared=1000)
+        off = self._store(tmp_path / "off", lambda: 0, floor=0)
+        assert _receive(off, "client:alice", "My.ipa", b"x")
+
+
+def test_the_upload_settings_read_both_limits(monkeypatch):
+    from server import config
+
+    monkeypatch.setattr(config, "read_user_config", lambda: {})
+    s = config.upload_settings()
+    assert (s["max_bytes"], s["min_free_bytes"], s["note"]) == (2048 << 20, 4096 << 20, None)
+    monkeypatch.setattr(config, "read_user_config",
+                        lambda: {"uploads": {"max_mb": 10, "min_free_mb": 0}})
+    s = config.upload_settings()
+    assert (s["max_bytes"], s["min_free_bytes"], s["note"]) == (10 << 20, 0, None)
+    monkeypatch.setattr(config, "read_user_config",
+                        lambda: {"uploads": {"max_mb": 0, "min_free_mb": -5}})
+    s = config.upload_settings()
+    assert (s["max_bytes"], s["min_free_bytes"]) == (2048 << 20, 4096 << 20)
+    assert "max_mb" in s["note"] and "min_free_mb" in s["note"]
+
+
+def test_the_route_answers_507_when_the_disk_is_full(world):
+    c, app, alice, _ = world
+    app.state.uploads.min_free_bytes = 4 * 1024 * 1024
+    app.state.uploads._disk_free = lambda: 1024 * 1024
+    r = _upload(c, alice, "My.ipa", b"x")
+    assert r.status_code == 507 and "too full" in r.json()["detail"]
