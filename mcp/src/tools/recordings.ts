@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { createWriteStream } from "node:fs";
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, rename, rm, stat } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -143,7 +143,16 @@ detail="summary" (the default here) gives one line per event: a flow's method, U
           throw new Error(`HTTP ${resp.status}: ${await resp.text()} (downloading ${file.name})`);
         }
         const out = join(target, basename(file.name));
-        await pipeline(Readable.fromWeb(resp.body as never), createWriteStream(out));
+        // Written aside and moved into place: a download cut off leaves no
+        // half file under the real name (review).
+        const part = `${out}.part`;
+        try {
+          await pipeline(Readable.fromWeb(resp.body as never), createWriteStream(part));
+          await rename(part, out);
+        } catch (e) {
+          await rm(part, { force: true });
+          throw e;
+        }
         written.push({ name: file.name, bytes: (await stat(out)).size });
       }
       return answer({

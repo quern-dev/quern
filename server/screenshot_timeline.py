@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -97,7 +98,12 @@ class ScreenshotTimeline:
         self.started_at = datetime.now(UTC)
         self.entries: list[TimelineEntry] = []
         self.output_dir = _TIMELINE_BASE / self.session_id
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        # Ours and private: its names are predictable (NNN.png), so in a /tmp
+        # directory someone else made, a symlink there would have been written
+        # through (review).
+        from server import screenshots
+
+        screenshots.private_dir(self.output_dir, root=_TIMELINE_BASE.parent)
         self._counter = 0
         logger.info("Screenshot timeline started: %s -> %s", self.session_id, self.output_dir)
 
@@ -110,11 +116,15 @@ class ScreenshotTimeline:
             filename = f"{self._counter:03d}.png"
             filepath = self.output_dir / filename
             image_bytes, _ = await controller.screenshot(udid=udid, scale=0.5)
-            filepath.write_bytes(image_bytes)
-            # Fetchable by the session whose action it follows (#254, 3b).
+            fd = os.open(filepath, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "wb") as out:
+                out.write(image_bytes)
+            # The timeline films its own device, whatever the request acted
+            # on: recorded as the owner's, or a client's tap elsewhere would
+            # have credited it with this device's screen (review).
             from server import screenshots
 
-            screenshots.record(str(filepath))
+            screenshots.record(str(filepath), as_owner=True)
             entry = TimelineEntry(
                 timestamp=datetime.now(UTC).isoformat(),
                 action=action,

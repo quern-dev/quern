@@ -69,7 +69,12 @@ test("a client key always uploads; the owner's key does not by that alone", () =
 function recorder(reply) {
   const seen = [];
   const server = createServer(async (req, res) => {
-    const body = await collect(req);
+    let body;
+    try {
+      body = await collect(req);
+    } catch {
+      return;           // the client gave up mid-upload: nothing to answer
+    }
     seen.push({ method: req.method, url: req.url, headers: req.headers, body });
     const [status, json] = reply(req);
     res.writeHead(status, { "Content-Type": "application/json" });
@@ -229,6 +234,62 @@ test("a server path with no screenshot is labelled; this machine's own paths are
     const plain = text(JSON.stringify({ status: "ok", count: 3 }));
     assert.equal(await withRemotePaths("tap", plain, () => r.info), plain);
     assert.equal(r.seen.length, before, "nothing path-like: the server is not even asked");
+  } finally {
+    r.server.close();
+  }
+});
+
+// -- review ------------------------------------------------------------------
+
+test("an unreadable file in a bundle fails the upload, not the MCP process", async () => {
+  const bad = join(dir, "Bad.app");
+  mkdirSync(bad);
+  writeFileSync(join(bad, "locked"), "x");
+  chmodSync(join(bad, "locked"), 0o000);
+  let uncaught = null;
+  const onUncaught = (e) => { uncaught = e; };
+  process.on("uncaughtException", onUncaught);
+  const r = await recorder(() => [200, { upload_id: "up_x" }]);
+  try {
+    await assert.rejects(uploadApp({ url: r.url, apiKey: "qc_k" }, bad));
+    await new Promise((res) => setTimeout(res, 100));
+    assert.equal(uncaught, null, "nothing escaped as an uncaught exception");
+  } finally {
+    process.off("uncaughtException", onUncaught);
+    chmodSync(join(bad, "locked"), 0o644);
+    r.server.close();
+  }
+});
+
+test("a symlinked .app is sent as the bundle it points at", async () => {
+  const link = join(dir, "Linked.app");
+  symlinkSync(app, link);
+  const r = await recorder(() => [200, { upload_id: "up_l" }]);
+  try {
+    await uploadApp({ url: r.url, apiKey: "qc_k" }, link);
+    const out = mkdtempSync(join(dir, "l-"));
+    writeFileSync(join(out, "c.tar"), gunzipSync(r.seen[0].body));
+    execFileSync("tar", ["-xf", join(out, "c.tar"), "-C", out]);
+    assert.equal(r.seen[0].url, "/api/v1/uploads?name=Linked.app.tar.gz");
+    assert.equal(readFileSync(join(out, "Linked.app/My"), "utf-8"), "binary");
+  } finally {
+    r.server.close();
+  }
+});
+
+test("a real 'not shared' answer is kept: /health is asked once, not per result", async () => {
+  const r = await remoteServer();
+  const mod = fileURLToPath(new URL("../dist/remote-paths.js", import.meta.url));
+  const out = await new Promise((resolve) => execFile(process.execPath, ["--input-type=module", "-e",
+    `const m = await import(${JSON.stringify(mod)});
+     const s = { url: ${JSON.stringify(r.info.url)}, apiKey: "k" };
+     for (let i = 0; i < 5; i++) await m.mustUpload(s);
+     for (let i = 0; i < 5; i++) await m.withRemotePaths("get_latest_crash",
+       { content: [{ type: "text", text: '{"file_path": "/x/y.ips"}' }] }, () => s);
+     console.log("done");`], (err, stdout, stderr) => resolve(stdout.trim() || stderr)));
+  try {
+    assert.equal(out, "done");
+    assert.equal(r.seen.filter((u) => u === "/health").length, 1);
   } finally {
     r.server.close();
   }

@@ -69,6 +69,8 @@ async def delete_upload(request: Request, upload_id: str) -> dict:
         store.get(upload_id, visibility.current_caller().principal)
     except UploadError as e:
         raise HTTPException(e.status, str(e)) from None
+    if store.busy(upload_id):
+        raise HTTPException(409, f"{upload_id} is being installed; delete it after")
     store.discard(upload_id)
     return {"deleted": upload_id}
 

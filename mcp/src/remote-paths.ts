@@ -9,10 +9,10 @@
  */
 
 import { createReadStream } from "node:fs";
-import { lstat, readFile, readdir, readlink, stat } from "node:fs/promises";
+import { lstat, readFile, readdir, readlink, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
-import { Readable } from "node:stream";
+import { pipeline, Readable } from "node:stream";
 import { createGzip } from "node:zlib";
 
 import { quernHeaders, serverFetch } from "./http.js";
@@ -28,7 +28,12 @@ export function isClientKey(apiKey: string): boolean {
   return apiKey.startsWith("qc_");
 }
 
-const HOST_ID_FILE = join(homedir(), ".quern", "host-id");
+// Where a server on this machine keeps it: QUERN_STATE_DIR moves the whole
+// of ~/.quern for it, so a scratch server run that way is not "another
+// machine" to an MCP given the same variable (review).
+function hostIdFile(): string {
+  return join(process.env.QUERN_STATE_DIR || join(homedir(), ".quern"), "host-id");
+}
 const shared = new Map<string, Promise<boolean>>();
 
 /** Whether the server at `server.url` reads the same disk as this process.
@@ -39,22 +44,30 @@ const shared = new Map<string, Promise<boolean>>();
 export function sharesDisk(server: Server): Promise<boolean> {
   let answer = shared.get(server.url);
   if (!answer) {
+    // A real answer either way is kept; only a server that could not be
+    // asked is asked again. Forgetting every "not shared" made each remote
+    // result that held a path cost a /health round trip (review).
+    let keep = true;
     answer = (async () => {
+      let theirs: unknown;
       try {
         const resp = await serverFetch(server, `${server.url}/health`, {
           signal: AbortSignal.timeout(5000),
         });
-        const theirs = ((await resp.json()) as { host_id?: unknown }).host_id;
-        if (typeof theirs !== "string" || !/^[0-9a-f]{32}$/.test(theirs)) return false;
-        const ours = (await readFile(HOST_ID_FILE, "utf-8")).trim();
-        return ours === theirs;
+        theirs = ((await resp.json()) as { host_id?: unknown }).host_id;
       } catch {
+        keep = false;
         return false;
+      }
+      if (typeof theirs !== "string" || !/^[0-9a-f]{32}$/.test(theirs)) return false;
+      try {
+        return (await readFile(hostIdFile(), "utf-8")).trim() === theirs;
+      } catch {
+        return false;      // no host-id here: no server has run on this disk
       }
     })();
     shared.set(server.url, answer);
-    // A failure is not remembered: the next call asks again.
-    answer.then((ok) => { if (!ok) shared.delete(server.url); }, () => shared.delete(server.url));
+    answer.then(() => { if (!keep) shared.delete(server.url); });
   }
   return answer;
 }
@@ -90,6 +103,9 @@ export async function uploadApp(server: Server, appPath: string): Promise<Upload
     throw new Error(`${appPath} is not on this machine: install_app sends the app from ` +
       "the machine this MCP runs on to the quern server, so app_path must be a local path");
   }
+  // A symlinked bundle (a build system's output link) is sent as the bundle
+  // it points at, not as one symlink the server would refuse (review).
+  const real = await realpath(appPath);
   const base = basename(appPath.replace(/\/+$/, ""));
   let name: string;
   let body: Readable;
@@ -98,10 +114,15 @@ export async function uploadApp(server: Server, appPath: string): Promise<Upload
   };
   if (info.isDirectory() && base.endsWith(".app")) {
     name = `${base}.tar.gz`;
-    body = Readable.from(tarTree(appPath.replace(/\/+$/, ""), base)).pipe(createGzip());
+    // pipeline, not pipe: pipe does not pass a source's error on, and an
+    // unreadable file in the bundle was an uncaught exception that ended the
+    // MCP (review). Here it fails the gzip stream, and so the upload.
+    const gzip = createGzip();
+    pipeline(Readable.from(tarTree(real, base)), gzip, () => {});
+    body = gzip;
   } else if (info.isFile() && (base.endsWith(".ipa") || base.endsWith(".apk"))) {
     name = base;
-    body = createReadStream(appPath);
+    body = createReadStream(real);
     headers["Content-Length"] = String(info.size);
   } else {
     throw new Error(`${appPath} is not an app: give a .app bundle, an .ipa or an .apk`);

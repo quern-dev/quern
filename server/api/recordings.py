@@ -280,6 +280,34 @@ async def recording_events(
 _FILE = re.compile(r"(events\.jsonl|manifest\.json|video-[0-9]{1,4}\.(mp4|log))")
 
 
+_REC_ID = re.compile(r"rec_[0-9a-f]{12}")
+
+
+def _from_disk(recording_id: str):
+    """A recording this server made before it restarted: found in the default
+    directory by id, its principal read from its manifest -- an old one with
+    none is the owner's. Only the running and interrupted are kept across a
+    restart, so a client's finished recording otherwise could never be
+    downloaded again (review)."""
+    import json
+    from types import SimpleNamespace
+
+    from server.config import CONFIG_DIR
+
+    if not _REC_ID.fullmatch(recording_id):
+        return None
+    directory = CONFIG_DIR / "recordings" / recording_id
+    try:
+        manifest = json.loads((directory / recording_mod.MANIFEST).read_text())
+    except (OSError, ValueError):
+        return None
+    if directory.is_symlink() or not isinstance(manifest, dict):
+        return None
+    who = manifest.get("principal")
+    return SimpleNamespace(id=recording_id, dir=directory,
+                           principal=who if isinstance(who, str) and who else "owner")
+
+
 def _own_recording(request: Request, recording_id: str):
     """A recording the caller may download: any for the owner, its own
     principal's for a client key -- another's reads as missing (#254, 3b)."""
@@ -287,10 +315,33 @@ def _own_recording(request: Request, recording_id: str):
     try:
         rec = _manager(request).get(recording_id)
     except RecordingError:
-        rec = None
+        rec = _from_disk(recording_id)
     if rec is None or not (caller.is_owner or rec.principal == caller.principal):
         raise HTTPException(status_code=404, detail=f"no recording {recording_id!r}")
     return rec
+
+
+def _stat_sized(path: Path):
+    """(size, chunks): the file opened without following a symlink, and read
+    up to the size it had when opened. A recording still being written grows
+    while it is sent, and a response longer than its Content-Length was
+    dropped mid-way with a traceback (review)."""
+    import os
+
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    size = os.fstat(fd).st_size
+
+    def chunks():
+        left = size
+        with os.fdopen(fd, "rb") as f:
+            while left > 0:
+                data = f.read(min(left, 1024 * 1024))
+                if not data:
+                    break
+                left -= len(data)
+                yield data
+
+    return size, chunks()
 
 
 def _files_of(rec) -> list[Path]:
@@ -306,24 +357,30 @@ def _files_of(rec) -> list[Path]:
 async def recording_files(request: Request, recording_id: str) -> dict:
     """A recording's files, to download from another machine (#254, 3b)."""
     rec = _own_recording(request, recording_id)
-    manager = _manager(request)
-    return {"recording_id": rec.id, "live": manager.is_live(rec.dir),
+    manager = getattr(request.app.state, "recordings", None)
+    return {"recording_id": rec.id, "live": bool(manager and manager.is_live(rec.dir)),
             "files": [{"name": p.name, "bytes": p.stat().st_size} for p in _files_of(rec)]}
 
 
 @router.get("/{recording_id}/files/{name}")
 async def recording_file(request: Request, recording_id: str, name: str):
     """One of a recording's files, streamed."""
-    from fastapi.responses import FileResponse
-
     rec = _own_recording(request, recording_id)
     match = next((p for p in _files_of(rec) if p.name == name), None)
     if match is None:
         raise HTTPException(status_code=404,
                             detail=f"{name!r} is not one of recording {rec.id}'s files")
+    from fastapi.responses import StreamingResponse
+
     media = "video/mp4" if name.endswith(".mp4") else (
         "application/json" if name.endswith(".json") else "text/plain")
-    return FileResponse(match, media_type=media, filename=name)
+    try:
+        size, chunks = _stat_sized(match)
+    except OSError:
+        raise HTTPException(status_code=404,
+                            detail=f"{name!r} is not one of recording {rec.id}'s files") from None
+    return StreamingResponse(chunks, media_type=media, headers={
+        "Content-Length": str(size), "Content-Disposition": f'attachment; filename="{name}"'})
 
 
 @router.get("")

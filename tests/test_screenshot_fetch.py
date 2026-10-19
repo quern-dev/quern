@@ -40,7 +40,8 @@ def _as(who: str, session: str, coro_fn):
 
 @pytest.fixture(autouse=True)
 def fresh(tmp_path, monkeypatch):
-    monkeypatch.setattr(screenshots, "DIR", tmp_path / "shots")
+    monkeypatch.setattr(screenshots, "ROOT", tmp_path / "quern")
+    monkeypatch.setattr(screenshots, "DIR", tmp_path / "quern" / "shots")
     monkeypatch.setattr(screenshots, "_recorded", type(screenshots._recorded)())
 
 
@@ -126,11 +127,46 @@ def test_a_recorded_file_since_deleted_says_so(world):
     assert r.status_code == 404 and "gone" in r.json()["detail"]
 
 
-def test_the_timeline_records_its_shots_too(tmp_path, monkeypatch):
+def test_the_timelines_shots_are_the_owners(tmp_path, monkeypatch):
+    """It films its own device whatever the request acted on: a client's tap
+    on its own device must not credit it with this one's screen (review)."""
     import server.screenshot_timeline as tl
 
-    monkeypatch.setattr(tl, "_TIMELINE_BASE", tmp_path / "tl")
-    timeline = tl.ScreenshotTimeline(udid="SIM")
+    monkeypatch.setattr(tl, "_TIMELINE_BASE", tmp_path / "quern" / "timeline")
+    timeline = tl.ScreenshotTimeline(udid="OWNERS-SIM")
     entry = _as("client:alice", "alice:s1",
-                lambda: timeline.capture(Shooter(), "tap", "SIM"))
-    assert screenshots.owner_of(entry.screenshot) == ("client:alice", "alice:s1")
+                lambda: timeline.capture(Shooter(), "tap", "OWNERS-SIM"))
+    assert screenshots.owner_of(entry.screenshot) == ("owner", "")
+
+
+def test_a_screenshot_swapped_for_a_symlink_is_not_served(world, tmp_path):
+    """/tmp is shared: a recorded png replaced by a link to the API key must
+    not hand the key out (review)."""
+    import os
+
+    c, alice, _, shot = world
+    secret = tmp_path / "api-key"
+    secret.write_text("the api key")
+    os.unlink(shot)
+    os.symlink(secret, shot)
+    for key, session in ((alice, "s1"), (KEY, None)):
+        r = _get(c, key, shot, session=session)
+        assert r.status_code == 404 and b"the api key" not in r.content
+
+
+def test_a_directory_someone_else_owns_is_not_used(monkeypatch):
+    import os
+
+    real = os.getuid()
+    monkeypatch.setattr(os, "getuid", lambda: real + 1)     # every dir reads as another's
+    assert _as("owner", "x", lambda: screenshots.capture(Shooter(), "SIM", "l")) is None
+
+
+def test_the_directories_are_kept_private(tmp_path):
+    import os
+    import stat
+
+    (tmp_path / "quern").mkdir(mode=0o755)
+    screenshots.private_dir(screenshots.DIR)
+    for d in (tmp_path / "quern", screenshots.DIR):
+        assert stat.S_IMODE(os.lstat(d).st_mode) == 0o700, d

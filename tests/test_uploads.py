@@ -201,7 +201,9 @@ class FakeController:
         p = Path(app_path)
         self.installed.append((app_path, udid, p.read_bytes() if p.is_file() else None))
         if self.fail:
-            raise DeviceError("install failed", tool="simctl")
+            raise DeviceError(f"install failed: {app_path} is not an app"
+                              if getattr(self, "message_with_path", False) else "install failed",
+                              tool="simctl")
         return udid
 
 
@@ -318,3 +320,125 @@ class TestTheRoutes:
                    headers=_h(alice))
         assert r.status_code == 200, r.text
         assert app.state.device_controller.installed[-1][0].endswith("/My.app")
+
+
+# ---------------------------------------------------------------------------
+# Review: the cap held against compression and concurrency; tar by name
+# ---------------------------------------------------------------------------
+
+
+class TestTheCapHolds:
+    def test_a_bundle_counts_what_it_unpacks_to(self, store):
+        """A small archive of zeros counted as small, and five of them put
+        many times the cap on disk (review, reproduced)."""
+        zeros = [("My.app", "dir", b""), ("My.app/zeros", "file", b"\0" * 600_000)]
+        up = _receive(store, "client:alice", "My.app.tar.gz", _tar(zeros))
+        assert up.size >= 600_000, "held is the unpacked size, not the archive's"
+        with pytest.raises(UploadError) as e:
+            _receive(store, "client:alice", "Two.app.tar.gz", _tar(zeros))
+        assert e.value.status == 413
+
+    def test_uploads_side_by_side_cannot_both_take_the_room(self, store):
+        """Each took the room free at its start, and four together held
+        several times the cap (review, reproduced)."""
+        async def slow(n):
+            for _ in range(n):
+                await asyncio.sleep(0)
+                yield b"x" * 100_000
+
+        async def both():
+            return await asyncio.gather(
+                store.receive("client:alice", "A.ipa", slow(7)),
+                store.receive("client:alice", "B.ipa", slow(7)),
+                return_exceptions=True)
+
+        results = asyncio.run(both())
+        refused = [r for r in results if isinstance(r, UploadError)]
+        assert len(refused) == 1 and refused[0].status == 413
+        assert store.held("client:alice") <= store.max_bytes
+        assert store._inflight == {}, "nothing left counted in flight"
+
+    def test_a_failed_upload_gives_its_room_back(self, store):
+        with pytest.raises(UploadError):
+            _receive(store, "client:alice", "My.app.tar.gz", b"\x1f\x8b broken")
+        assert store.held("client:alice") == 0
+        assert _receive(store, "client:alice", "My.ipa", b"x" * 900_000)
+
+    def test_an_archive_with_too_many_members_is_refused(self, store, monkeypatch):
+        import server.uploads as uploads
+
+        monkeypatch.setattr(uploads, "MAX_MEMBERS", 3)
+        members = [("My.app", "dir", b"")] + [(f"My.app/f{i}", "file", b"x") for i in range(5)]
+        with pytest.raises(UploadError) as e:
+            _receive(store, "client:alice", "My.app.tar.gz", _tar(members))
+        assert e.value.status == 413
+
+    @pytest.mark.parametrize("name", ["a\0b.ipa", "x" * 250 + ".ipa"])
+    def test_names_the_disk_would_refuse_are_refused_first(self, name):
+        with pytest.raises(UploadError) as e:
+            kind_of(name)
+        assert e.value.status == 400
+
+
+def _info(name, kind="file", link=""):
+    info = tarfile.TarInfo(name)
+    info.type = {"file": tarfile.REGTYPE, "dir": tarfile.DIRTYPE, "sym": tarfile.SYMTYPE,
+                 "hard": tarfile.LNKTYPE, "fifo": tarfile.FIFOTYPE}[kind]
+    info.linkname = link
+    return info
+
+
+class TestByNameBeforeTarfile:
+    """Old Pythons' `data` filter had escapes through symlinks; this check
+    does not depend on it (review)."""
+
+    def test_a_real_bundle_passes(self):
+        from server.uploads import unsafe_member
+
+        members = [_info("My.app", "dir"), _info("My.app/F/K.framework", "dir"),
+                   _info("My.app/F/K.framework/Versions", "dir"),
+                   _info("My.app/F/K.framework/Versions/A", "dir"),
+                   _info("My.app/F/K.framework/Versions/A/K"),
+                   _info("My.app/F/K.framework/Versions/Current", "sym", "A"),
+                   _info("My.app/F/K.framework/K", "sym", "Versions/Current/K"),
+                   _info("My.app/PlugIns/x", "sym", "../F/K.framework")]
+        assert unsafe_member(members) is None
+
+    @pytest.mark.parametrize("members, why", [
+        ([_info("My.app", "dir"), _info("My.app/h", "hard", "My.app/x")], "hard link"),
+        ([_info("My.app", "dir"), _info("My.app/p", "fifo")], "not a file"),
+        ([_info("My.app", "dir"), _info("My.app/l", "sym", "/etc")], "links outside"),
+        ([_info("My.app", "dir"), _info("My.app/l", "sym", "../..")], "links outside"),
+        ([_info("My.app", "dir"), _info("My.app/a/l", "sym", "../../../x")], "links outside"),
+        ([_info("My.app", "dir"), _info("My.app/l", "sym", "."), _info("My.app/l/f")],
+         "inside a symlink"),
+        ([_info("My.app", "dir"), _info("My.app/f"), _info("My.app/./f")], "twice"),
+        ([_info("../x")], "not a name"),
+        ([_info("/abs")], "not a name"),
+    ])
+    def test_anything_that_could_write_outside_is_named(self, members, why):
+        from server.uploads import unsafe_member
+
+        assert why in (unsafe_member(members) or "")
+
+
+class TestInstallingKeepsTheUpload:
+    def test_neither_the_sweep_nor_a_delete_takes_one_being_installed(self, world):
+        c, app, alice, _ = world
+        up = _upload(c, alice, "My.ipa", b"x").json()["upload_id"]
+        store = app.state.uploads
+        with store.installing(up):
+            assert store.sweep(lambda who: False) == []
+            r = c.delete(f"/api/v1/uploads/{up}", headers=_h(alice))
+            assert r.status_code == 409
+        assert store.sweep(lambda who: False) == [up]
+
+    def test_a_failed_install_names_the_upload_not_the_servers_path(self, world):
+        c, app, alice, _ = world
+        app.state.device_controller.fail = True
+        app.state.device_controller.message_with_path = True
+        up = _upload(c, alice, "My.ipa", b"x").json()["upload_id"]
+        r = c.post("/api/v1/device/app/install", json={"upload_id": up, "udid": SIM},
+                   headers=_h(alice))
+        assert r.status_code >= 400
+        assert str(app.state.uploads.root) not in r.text and "My.ipa" in r.text

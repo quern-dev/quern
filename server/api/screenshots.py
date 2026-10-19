@@ -6,10 +6,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 
 from server import screenshots, visibility
 
@@ -26,6 +24,10 @@ async def screenshot_file(request: Request, path: str = Query(
     # Not recorded, or another's, reads the same: no such screenshot.
     if owner is None or not (caller.is_owner or owner == (caller.principal, caller.session)):
         raise HTTPException(404, f"no screenshot {path!r} for this session")
-    if not Path(path).is_file():
-        raise HTTPException(404, f"{path} is gone from the server (its /tmp was cleared)")
-    return FileResponse(path, media_type="image/png")
+    try:
+        data = screenshots.read(path)
+    except FileNotFoundError:
+        raise HTTPException(404, f"{path} is gone from the server (its /tmp was cleared)") from None
+    except OSError:
+        raise HTTPException(404, f"no screenshot {path!r} for this session") from None
+    return Response(data, media_type="image/png")

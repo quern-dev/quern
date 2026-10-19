@@ -116,3 +116,41 @@ def test_a_recording_still_being_made_says_so(world):
     c, app, alice, _, d = world
     app.state.recordings.live.add(d)
     assert c.get("/api/v1/recordings/rec_alice/files", headers=_h(alice)).json()["live"] is True
+
+
+def test_a_finished_recording_is_still_found_after_a_restart(world, tmp_path, monkeypatch):
+    """Only running recordings are kept across a restart; a client's finished
+    one could never be downloaded again (review)."""
+    import json
+
+    from server import config
+
+    c, app, alice, bob, _ = world
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    old = tmp_path / "cfg" / "recordings" / "rec_0123456789ab"
+    old.mkdir(parents=True)
+    (old / "manifest.json").write_text(json.dumps({"principal": "client:alice"}))
+    (old / "events.jsonl").write_text("{}\n")
+    legacy = tmp_path / "cfg" / "recordings" / "rec_ba9876543210"
+    legacy.mkdir()
+    (legacy / "manifest.json").write_text("{}")
+    assert c.get("/api/v1/recordings/rec_0123456789ab/files",
+                 headers=_h(alice)).status_code == 200
+    assert c.get("/api/v1/recordings/rec_0123456789ab/files/events.jsonl",
+                 headers=_h(alice)).content == b"{}\n"
+    assert c.get("/api/v1/recordings/rec_0123456789ab/files", headers=_h(bob)).status_code == 404
+    assert c.get("/api/v1/recordings/rec_ba9876543210/files", headers=_h(alice)).status_code == 404
+    assert c.get("/api/v1/recordings/rec_ba9876543210/files", headers=OWNER).status_code == 200
+
+
+def test_a_file_still_growing_is_sent_as_it_was_when_opened(tmp_path):
+    """A live recording grows while it is sent: past its Content-Length, the
+    connection was dropped with a traceback (review)."""
+    from server.api.recordings import _stat_sized
+
+    f = tmp_path / "events.jsonl"
+    f.write_bytes(b"a" * 3_000_000)
+    size, chunks = _stat_sized(f)
+    with open(f, "ab") as more:
+        more.write(b"b" * 1_000_000)
+    assert size == 3_000_000 and b"".join(chunks) == b"a" * 3_000_000

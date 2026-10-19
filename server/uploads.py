@@ -16,6 +16,7 @@ after an hour, or when the key that sent it is revoked.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import secrets
 import shutil
@@ -63,7 +64,8 @@ class Upload:
 def kind_of(name: str) -> str:
     """The kind an upload's name says it is; UploadError for anything else, or
     a name that is not a plain file name."""
-    if not name or name != Path(name).name or name.startswith("."):
+    if (not name or "\0" in name or len(name.encode()) > 200 or name != Path(name).name
+            or name.startswith(".")):
         raise UploadError(f"{name!r} is not a file name: send the app's own name, "
                           "like MyApp.ipa or MyApp.app.tar.gz")
     for suffix, kind in KINDS.items():
@@ -80,6 +82,12 @@ class UploadStore:
         self.max_bytes = max_bytes
         self._clock = clock
         self._uploads: dict[str, Upload] = {}
+        #: Bytes each principal has on the way in: counted against the cap as
+        #: they arrive, or uploads side by side each saw the whole room free
+        #: and together held several times the cap (review).
+        self._inflight: dict[str, int] = {}
+        #: Uploads being installed: not swept or deleted from under it.
+        self._busy: set[str] = set()
 
     def reset(self) -> None:
         """Start empty: what a previous run received has no ids any more."""
@@ -87,7 +95,9 @@ class UploadStore:
         self._uploads.clear()
 
     def held(self, principal: str) -> int:
-        return sum(u.size for u in self._uploads.values() if u.principal == principal)
+        """What `principal` has on disk here, and on the way."""
+        return (sum(u.size for u in self._uploads.values() if u.principal == principal)
+                + self._inflight.get(principal, 0))
 
     def list(self, principal: str) -> list[Upload]:
         return [u for u in self._uploads.values() if u.principal == principal]
@@ -109,20 +119,36 @@ class UploadStore:
         try:
             with open(target, "wb") as out:
                 async for chunk in chunks:
+                    # Checked against everything held now, in-flight bytes
+                    # included -- each chunk between awaits, so two uploads
+                    # cannot both take the last of the room.
+                    if self.held(principal) + len(chunk) > self.max_bytes:
+                        raise UploadError(self._too_big(size + len(chunk),
+                                                        self.max_bytes - self.held(principal)
+                                                        + size), 413)
                     size += len(chunk)
-                    if size > room:
-                        raise UploadError(self._too_big(size, room), 413)
+                    self._inflight[principal] = self._inflight.get(principal, 0) + len(chunk)
                     out.write(chunk)
             if size == 0:
                 raise UploadError("the upload was empty")
-            path = target
+            path, held = target, size
             if kind == "app":
-                path = await asyncio.to_thread(_unpack_app, target, directory / "app", room)
+                # Held is what it unpacks to: a small archive of zeros
+                # unpacked to many times the cap while counting as small (review).
+                path, held = await asyncio.to_thread(
+                    _unpack_app, target, directory / "app",
+                    self.max_bytes - self.held(principal))
                 target.unlink()
         except BaseException:
             shutil.rmtree(directory, ignore_errors=True)
             raise
-        upload = Upload(upload_id, principal, name, kind, size, self._clock(), path)
+        finally:
+            left = self._inflight.get(principal, 0) - size
+            if left > 0:
+                self._inflight[principal] = left
+            else:
+                self._inflight.pop(principal, None)
+        upload = Upload(upload_id, principal, name, kind, held, self._clock(), path)
         self._uploads[upload_id] = upload
         return upload
 
@@ -134,6 +160,18 @@ class UploadStore:
                               "an hour, or was never yours -- send it again", 404)
         return upload
 
+    @contextlib.contextmanager
+    def installing(self, upload_id: str):
+        """While installing: neither the sweep nor a DELETE removes it."""
+        self._busy.add(upload_id)
+        try:
+            yield
+        finally:
+            self._busy.discard(upload_id)
+
+    def busy(self, upload_id: str) -> bool:
+        return upload_id in self._busy
+
     def discard(self, upload_id: str) -> None:
         upload = self._uploads.pop(upload_id, None)
         if upload is not None:
@@ -144,7 +182,8 @@ class UploadStore:
         revoked key's). The ids deleted."""
         now = self._clock()
         gone = [u.id for u in self._uploads.values()
-                if now - u.created >= TTL_SECONDS or not still_valid(u.principal)]
+                if u.id not in self._busy
+                and (now - u.created >= TTL_SECONDS or not still_valid(u.principal))]
         for upload_id in gone:
             self.discard(upload_id)
         return gone
@@ -157,7 +196,41 @@ class UploadStore:
                 "uploads free their space)")
 
 
-def _unpack_app(archive: Path, dest: Path, room: int) -> Path:
+def unsafe_member(members: list[tarfile.TarInfo]) -> str | None:
+    """Why these members could write outside the directory they unpack into,
+    or None. Checked by name alone, before tarfile is asked: its `data`
+    filter had escapes through symlinks, fixed only in 3.11.13, 3.12.11 and
+    3.13.4 (CVE-2025-4517 and others), and this runs on 3.11 up (review)."""
+    import posixpath
+
+    links: set[str] = set()
+    seen: set[str] = set()
+    for m in members:
+        name = posixpath.normpath(m.name)
+        parts = name.split("/")
+        if m.name.startswith("/") or ".." in parts or name in ("", "."):
+            return f"{m.name!r} is not a name inside the bundle"
+        if name in seen:
+            return f"{m.name!r} appears twice"
+        seen.add(name)
+        if m.islnk():
+            return f"{m.name!r} is a hard link"
+        if not (m.isfile() or m.isdir() or m.issym()):
+            return f"{m.name!r} is not a file, directory or symlink"
+        # Written through a link -- a member under a name that is a link.
+        for i in range(1, len(parts)):
+            if "/".join(parts[:i]) in links:
+                return f"{m.name!r} is inside a symlink"
+        if m.issym():
+            target = m.linkname
+            resolved = posixpath.normpath(posixpath.join(posixpath.dirname(name), target))
+            if target.startswith("/") or resolved == ".." or resolved.startswith("../"):
+                return f"{m.name!r} links outside the bundle ({target!r})"
+            links.add(name)
+    return None
+
+
+def _unpack_app(archive: Path, dest: Path, room: int) -> tuple[Path, int]:
     """The .app inside `archive`, unpacked under `dest`. tarfile's `data`
     filter refuses absolute names, `..`, links that leave `dest`, and device
     files; the sizes are summed first, so a small archive cannot unpack into
@@ -175,6 +248,8 @@ def _unpack_app(archive: Path, dest: Path, room: int) -> Path:
                 if len(members) > MAX_MEMBERS or total > room:
                     raise UploadError("the .app archive unpacks to more than the upload "
                                       "cap allows", 413)
+            if (why := unsafe_member(members)) is not None:
+                raise UploadError(f"the .app archive is refused: {why}")
             tops = {Path(m.name).parts[0] for m in members if Path(m.name).parts}
             if len(tops) != 1 or not next(iter(tops)).endswith(".app"):
                 raise UploadError("a .app.tar.gz holds one .app bundle at its top: "
@@ -184,6 +259,6 @@ def _unpack_app(archive: Path, dest: Path, room: int) -> Path:
     except (tarfile.TarError, EOFError, OSError) as e:
         raise UploadError(f"the .app archive could not be unpacked: {e}") from None
     app = dest / next(iter(tops))
-    if not app.is_dir():
+    if not app.is_dir() or app.is_symlink():
         raise UploadError("the .app in the archive is not a directory")
-    return app
+    return app, total

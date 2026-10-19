@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -607,6 +608,20 @@ async def set_active_device(request: Request, body: ShutdownDeviceRequest):
 # ---------------------------------------------------------------------------
 
 
+def _without_upload_path(exc: HTTPException, upload) -> HTTPException:
+    """The refusal, naming the upload rather than where the server keeps it:
+    that path is the owner's home directory, not the client's business."""
+    if upload is None:
+        return exc
+    where, name = str(upload.path), upload.name
+    if isinstance(exc.detail, str):
+        exc.detail = exc.detail.replace(where, name)
+    elif isinstance(exc.detail, dict):
+        exc.detail = {k: v.replace(where, name) if isinstance(v, str) else v
+                      for k, v in exc.detail.items()}
+    return exc
+
+
 @router.post("/app/install")
 async def install_app(request: Request, body: InstallAppRequest):
     """Install an app: from a path on the server, or from an upload."""
@@ -622,12 +637,14 @@ async def install_app(request: Request, body: InstallAppRequest):
         except UploadError as e:
             raise HTTPException(e.status, str(e)) from None
     app_path = str(upload.path) if upload else body.app_path
-    with action("install_app", category="device.lifecycle") as act:
+    store = request.app.state.uploads
+    with action("install_app", category="device.lifecycle") as act, (
+            store.installing(upload.id) if upload else contextlib.nullcontext()):
         act.detail = upload.name if upload else body.app_path
         try:
             udid = await controller.install_app(app_path=app_path, udid=body.udid)
         except DeviceError as e:
-            raise _handle_device_error(e)
+            raise _without_upload_path(_handle_device_error(e), upload) from None
         act.udid = udid
         if upload:
             # Installed, so gone: kept on a failure, to try again within the hour.
