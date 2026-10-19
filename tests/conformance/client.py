@@ -49,6 +49,17 @@ PUBLIC_PATHS = frozenset({
     "/api/v1/proxy/cert",
 })
 
+#: Public, but only on the remote listener (#254, phase 3): a client pairing
+#: holds no key yet, and its proofs are the authentication. On the local
+#: listener these must refuse -- pairing is how a key is handed out, so a route
+#: that paired over localhost would mint client keys for anything on the Mac.
+#: Kept apart from `PUBLIC_PATHS` because the checks differ: those must answer
+#: a keyless GET, these must answer a well-formed POST with 404 here.
+REMOTE_ONLY_PUBLIC = frozenset({
+    ("POST", "/api/v1/remote/pair/hello"),
+    ("POST", "/api/v1/remote/pair/finish"),
+})
+
 
 class ServerUnreachable(RuntimeError):
     """The suite could not reach a Quern server to test."""
