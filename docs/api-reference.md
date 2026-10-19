@@ -141,7 +141,11 @@ quern mcp-install --remote office      # or QUERN_REMOTE=office for `session run
 - **What a remote client may do** is what any client key may do (above): blind sharing, scopes and revocation apply unchanged.
 - **Remotes on the client** are kept in `~/.quern/remotes.json` (0600): `quern remote list`, `quern remote forget NAME`. A key issued by hand with `quern clients add` can be recorded with `quern connect URL --key KEY --fingerprint SHA256:...`.
 - **`QUERN_REMOTE` that cannot be read fails**, rather than falling back to this machine's own server: an agent's work must not land on a machine nobody named. `ensure_server` checks a remote's health and never starts a server locally for it.
-- **`/health` carries `host_id`**, a random id made once per installation, so a client can tell whether it shares the server's disk -- which decides what a path it sends means (the paths phase of #254).
+- **`/health` carries `host_id`**, a random id made once per installation, so a client can tell whether it shares the server's disk -- which decides what a path it sends means.
+
+**Paths, when the disk is not shared.** A path in a request is read on the server's disk, so from another machine it names nothing, and from a client key on this one it would be the server reading whatever it is told to:
+
+- **Apps are uploaded.** `POST /api/v1/uploads?name=MyApp.ipa` with the file as the raw body -- an `.ipa` or `.apk` as it is, a `.app` bundle as a gzipped tar named `MyApp.app.tar.gz` with the bundle at its top -- answers an `upload_id`, which `install_app` takes in place of `app_path`. The MCP does this for you whenever it uses a client key. `app_path` is owner-only. Uploads are kept per key: one key never sees, installs or deletes another's. They are deleted once installed (a failed install keeps it, to try again), after an hour, or when the key is revoked, and none survive a restart. What one key holds at once is capped at 2048 MB, set with `{"uploads": {"max_mb": 2048}}`.
 
 ## The LAN viewer
 
@@ -454,7 +458,7 @@ holds in `flow_store`. `flows_captured` is only what survived.
 | `boot_device` | POST | `/api/v1/device/boot` | Boot simulator |
 | `shutdown_device` | POST | `/api/v1/device/shutdown` | Shutdown simulator |
 | `erase_device` | POST | `/api/v1/device/erase` | Erase a simulator or Android emulator, resetting it to factory state (an emulator is relaunched, possibly on a new serial) |
-| `install_app` | POST | `/api/v1/device/app/install` | Install app |
+| `install_app` | POST | `/api/v1/device/app/install` | Install an app: `app_path` on the server (owner only), or `upload_id` from `POST /api/v1/uploads` |
 | `launch_app` | POST | `/api/v1/device/app/launch` | Launch app. `env` sets environment variables on an iOS simulator or physical iPhone; since they reach only a starting process, a running app is restarted, and the response carries `env_applied` and `restarted` (null when it could not tell whether the app was running). On a physical iPhone, `launch_confirmed` is null with `launch_check_error` when quern could not read whether the app reached the foreground. Android takes no environment: `env_applied` is false, with a `warning`. An env name that is empty or contains `=` or NUL is a 422 |
 | `terminate_app` | POST | `/api/v1/device/app/terminate` | Terminate app |
 | `uninstall_app` | POST | `/api/v1/device/app/uninstall` | Uninstall app |
@@ -551,6 +555,9 @@ holds in `flow_store`. `flows_captured` is only what survived.
 | — | GET | `/api/v1/remote/status` | Owner only (`quern remote status`): whether the remote listener is on and listening, its `url` and certificate `fingerprint` |
 | — | POST | `/api/v1/remote/pair/hello` | No key, remote listener only: the server's half of pairing, `{code_id, nonce}` → `{nonce, proof}`. See "Remote access" above |
 | — | POST | `/api/v1/remote/pair/finish` | No key, remote listener only: the client's proof → `{key, label, fingerprint}`, a new client key |
+| `install_app` | POST | `/api/v1/uploads` | `?name=MyApp.ipa`: an app to install, as the raw body (`.ipa`, `.apk`, or `.app.tar.gz`): → `{upload_id, name, kind, bytes, expires_in}`. 413 past the cap. Kept for the key that sent it. See "Remote access" above |
+| — | GET | `/api/v1/uploads` | The caller's own uploads, and `max_bytes` |
+| — | DELETE | `/api/v1/uploads/{id}` | Delete one of the caller's own uploads |
 
 ### App knowledge and landmarks
 

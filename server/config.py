@@ -416,6 +416,27 @@ def _unused_remote_keys(raw: dict) -> str | None:
             f"{hint}. It reads {', '.join(_REMOTE_KEYS)}.")
 
 
+#: The default cap on what one key may have uploaded at once (#254, phase 3b).
+UPLOAD_DEFAULT_MB = 2048
+
+
+def upload_settings() -> dict:
+    """The upload cap from config.json's `uploads` object:
+
+        {"uploads": {"max_mb": 2048}}
+
+    Anything but a positive whole number reads as the default, with a note."""
+    raw = read_user_config().get("uploads")
+    raw = raw if isinstance(raw, dict) else {}
+    value = raw.get("max_mb", UPLOAD_DEFAULT_MB)
+    note = None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        note = (f"config.json's uploads.max_mb is {value!r}, not a positive whole number "
+                f"of megabytes: using {UPLOAD_DEFAULT_MB}")
+        value = UPLOAD_DEFAULT_MB
+    return {"max_bytes": value * 1024 * 1024, "note": note}
+
+
 def get_auto_install_cert() -> bool:
     """Whether to install the mitmproxy CA automatically when capture needs it.
 

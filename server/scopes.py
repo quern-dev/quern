@@ -121,6 +121,10 @@ ROUTES: dict[tuple[str, str], Rule] = {
     ("POST", "/api/v1/sessions/{session_id}/reservations"): _RESERVE,
     ("DELETE", "/api/v1/sessions/{session_id}/reservations"): _RESERVE,
     ("WS", "/api/v1/sessions/{session_id}/live"): _RESERVE,
+    # Uploaded apps (#254, phase 3b): any key may send one, kept as its own.
+    ("POST", "/api/v1/uploads"): _RESERVE,
+    ("GET", "/api/v1/uploads"): _RESERVE,
+    ("DELETE", "/api/v1/uploads/{upload_id}"): _RESERVE,
 
     # -- devices: reading -----------------------------------------------------
     ("GET", "/api/v1/device/list"): _VIEW,
@@ -151,7 +155,10 @@ ROUTES: dict[tuple[str, str], Rule] = {
 
     # -- devices: changing one ------------------------------------------------
     ("POST", "/api/v1/device/active"): _NAMED,
-    ("POST", "/api/v1/device/app/install"): _RESOLVED,
+    # A path is the server reading the Mac's disk: a client key installs what
+    # it uploaded, by `upload_id` (#254, phase 3b).
+    ("POST", "/api/v1/device/app/install"): Rule(Access.CONTROL, "resolved",
+                                                 owner_fields=frozenset({"app_path"})),
     ("POST", "/api/v1/device/app/launch"): _RESOLVED,
     ("POST", "/api/v1/device/app/terminate"): _RESOLVED,
     ("POST", "/api/v1/device/app/uninstall"): _RESOLVED,

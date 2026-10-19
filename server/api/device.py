@@ -620,16 +620,31 @@ async def set_active_device(request: Request, body: ShutdownDeviceRequest):
 
 @router.post("/app/install")
 async def install_app(request: Request, body: InstallAppRequest):
-    """Install an app on a simulator."""
+    """Install an app: from a path on the server, or from an upload."""
+    from server import visibility
+    from server.uploads import UploadError
+
     controller = _get_controller(request)
-    with action("install_app", category="device.lifecycle") as act:
-        act.detail = body.app_path
+    upload = None
+    if body.upload_id:
         try:
-            udid = await controller.install_app(app_path=body.app_path, udid=body.udid)
-            act.udid = udid
-            return {"status": "installed", "udid": udid, "app_path": body.app_path}
+            upload = request.app.state.uploads.get(body.upload_id,
+                                                   visibility.current_caller().principal)
+        except UploadError as e:
+            raise HTTPException(e.status, str(e)) from None
+    app_path = str(upload.path) if upload else body.app_path
+    with action("install_app", category="device.lifecycle") as act:
+        act.detail = upload.name if upload else body.app_path
+        try:
+            udid = await controller.install_app(app_path=app_path, udid=body.udid)
         except DeviceError as e:
             raise _handle_device_error(e)
+        act.udid = udid
+        if upload:
+            # Installed, so gone: kept on a failure, to try again within the hour.
+            request.app.state.uploads.discard(upload.id)
+            return {"status": "installed", "udid": udid, "upload": upload.name}
+        return {"status": "installed", "udid": udid, "app_path": body.app_path}
 
 
 @router.post("/app/launch")

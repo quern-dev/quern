@@ -37,6 +37,7 @@ _NOT_ACTIONS: frozenset[str] = frozenset({
     # changes nothing -- the pairing it starts is logged when it completes.
     "remote.py:status",
     "remote.py:pair_hello",
+    "uploads.py:list_uploads",          # a read of the caller's own uploads
     "sessions.py:get_session",
     "proxy.py:pending_flows",
     "recordings.py:recording_events",

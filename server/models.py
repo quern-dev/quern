@@ -1979,10 +1979,19 @@ class ShutdownDeviceRequest(BaseModel):
 
 
 class InstallAppRequest(BaseModel):
-    """Request body for POST /device/app/install."""
+    """Request body for POST /device/app/install: a path on the server's disk
+    (the owner's), or an app sent to POST /api/v1/uploads."""
 
-    app_path: str
+    app_path: str | None = None
+    upload_id: str | None = None
     udid: str | None = None
+
+    @model_validator(mode="after")
+    def _one_source(self) -> InstallAppRequest:
+        if bool(self.app_path) == bool(self.upload_id):
+            raise ValueError("give app_path (a path on the server) or upload_id (from "
+                             "POST /api/v1/uploads), not both or neither")
+        return self
 
 
 class LaunchAppRequest(BaseModel):
