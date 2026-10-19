@@ -1187,12 +1187,20 @@ class WdaBackend:
 
         For comparing frames inside a sweep (#475): measured at 0.07s on a
         simulator and 0.10s on an iPhone 11, where the general capture path
-        (simctl, pymobiledevice3) took 0.4s and 1.0s. A read, so the transport
-        retry is safe.
+        (simctl, pymobiledevice3) took 0.4s and 1.0s.
+
+        A timeout raises rather than dropping the connection and re-sending:
+        WDA may be busy behind a deep query, and the re-send drops a phone's
+        forward (#470 review). The sweep treats a failed frame as unknown.
         """
         import base64
 
-        resp = await self._request("get", udid, "/screenshot", timeout=timeout)
+        try:
+            resp = await self._request(
+                "get", udid, "/screenshot", timeout=timeout, raise_on_timeout=True,
+            )
+        except httpx.TimeoutException as exc:
+            raise DeviceError(f"WDA screenshot timed out on {udid[:8]}", tool="wda") from exc
         value = resp.json().get("value")
         if not isinstance(value, str):
             raise DeviceError(f"WDA returned no screenshot on {udid[:8]}", tool="wda")
@@ -1203,16 +1211,29 @@ class WdaBackend:
 
     async def find_scroll_container(
         self, udid: str, depths: tuple[int, ...],
+        point: tuple[float, float] | None = None,
     ) -> tuple[str, int] | None:
-        """The largest scroll container on screen, and the depth it was found at.
+        """The scroll container under `point` -- the innermost, if they nest --
+        and the depth it was found at.
 
         For a sweep's element scroll (#475). Measured: 0.01-0.5s on a
         simulator and 0.2-1.6s on an iPhone 11 per query, the dearest being
         the Table on a 200-row table. iOS 26 Settings' container appears only
         at 25, so the caller passes the depths to try in turn. Each query is
-        bounded and never re-sent; a timeout is treated as nothing found.
-        Leaves the session at the last depth tried.
+        bounded and never re-sent. A timeout ends the search: WDA may still be
+        walking, and the next query would queue behind it (#470). Leaves the
+        session at the last depth tried.
+
+        Under the point, because the swipe scrolls whatever is under the
+        finger: the largest container on screen can be an outer pager, and
+        scrolling it moves nothing, which the sweep would then believe.
         """
+        def under(f: dict) -> bool:
+            if point is None:
+                return True
+            x, y, w, h = (f["frame"][k] for k in ("x", "y", "width", "height"))
+            return x <= point[0] <= x + w and y <= point[1] <= y + h
+
         for depth in depths:
             await self._set_snapshot_depth(udid, depth)
             found: list[dict] = []
@@ -1223,11 +1244,12 @@ class WdaBackend:
                         timeout=5.0, no_resend=True,
                     )
                 except QueryTimedOut:
-                    continue
-            found = [f for f in found if f.get("_wda_element_id") and f.get("frame")]
+                    return None
+            found = [f for f in found
+                     if f.get("_wda_element_id") and f.get("frame") and under(f)]
             if found:
-                biggest = max(found, key=lambda f: f["frame"]["width"] * f["frame"]["height"])
-                return biggest["_wda_element_id"], depth
+                inner = min(found, key=lambda f: f["frame"]["width"] * f["frame"]["height"])
+                return inner["_wda_element_id"], depth
         return None
 
     async def scroll_element(

@@ -655,6 +655,11 @@ class LazyDeepList:
         #: Settings' search field does live: 0.5% of the screen, toggling.
         self.top_pull_artifact = False
         self._pulled = False
+        #: A status-bar clock that changes on every frame.
+        self.clock = False
+        #: Rows drawn as short dashes: a sparse list, ~1% change per step.
+        self.sparse = False
+        self.screenshot_fails = False
 
     @property
     def max_offset(self):
@@ -686,8 +691,9 @@ class LazyDeepList:
             self._pulled = not self._pulled
         self.offset = min(max(self.offset + (y1 - y2), 0), self.max_offset)
 
-    async def find_scroll_container(self, udid, depths):
+    async def find_scroll_container(self, udid, depths, point=None):
         self.lookups = getattr(self, "lookups", 0) + 1
+        self.lookup_point = point
         if not self.has_container:
             return None
         await self.wda.set_depth(udid, depths[-1])
@@ -709,12 +715,19 @@ class LazyDeepList:
         from PIL import Image, ImageDraw
 
         self.frames += 1
+        if self.screenshot_fails:
+            raise DeviceError("WDA screenshot timed out", tool="wda")
         image = Image.new("L", (390, 852), 255)
         draw = ImageDraw.Draw(image)
         first = int(self.offset // self.ROW_H)
         for i in range(first, min(self.ROWS, first + self.VIEW // self.ROW_H + 2)):
             y = self.TOP + i * self.ROW_H - self.offset
-            draw.rectangle((0, y, 390, y + self.ROW_H - 2), fill=(i * 37) % 200)
+            if self.sparse:
+                draw.rectangle((12, y + 20, 12 + 5 * (1 + i % 2), y + 22), fill=0)
+            else:
+                draw.rectangle((0, y, 390, y + self.ROW_H - 2), fill=(i * 37) % 200)
+        if self.clock:
+            draw.rectangle((40, 4, 350, 44), fill=self.frames * 53 % 256)
         if self.animated:
             draw.rectangle((0, 400, 390, 440), fill=random.randrange(256))
         if self._pulled:
@@ -890,3 +903,163 @@ class TestTheSweepOnALazyDeepList:
         await ctrl.scroll_to_element(identifier="lazy_150")
         assert len(world.scrolls) == 2, world.scrolls
         assert [d for _, _, d in world.scrolls] == [SNAPSHOT_MAX_DEPTH] * 2, world.scrolls
+
+
+class TestTheReviewFindings:
+    """The #475 adversarial review."""
+
+    @staticmethod
+    def _world(ctrl, wda, **kw):
+        ctrl._warn_if_input_is_suppressed = AsyncMock()
+        return TestTheSweepOnALazyDeepList._install(ctrl, wda, **kw)
+
+    async def test_a_deep_sweep_hit_is_used_at_its_depth_then_put_back(self, phone):
+        """Finding 1: the sweep put the shallow depth back before tap_element's
+        reachability, value and stability checks looked the row up again."""
+        ctrl, wda = phone
+        self._world(ctrl, wda)
+        depth_at_check: list[int | None] = []
+
+        async def reachable(r, matches):
+            depth_at_check.append(wda.depth)
+            return matches, []
+
+        ctrl._wda_reachable_only = reachable
+        ctrl.wait_for_settle = AsyncMock(return_value={"settled": True})
+        result = await ctrl.tap_element(identifier="lazy_40", scroll_to_find=True)
+        assert result["status"] == "ok", result
+        assert depth_at_check == [SNAPSHOT_MAX_DEPTH], depth_at_check
+        assert result.get("snapshot_depth") == SNAPSHOT_MAX_DEPTH, "the deep hit was not reported"
+        assert wda.depth == ACTION_SNAPSHOT_DEPTH, "the tap left the session deep"
+
+    async def test_scroll_to_element_puts_a_deep_hit_back_at_once(self, phone):
+        ctrl, wda = phone
+        self._world(ctrl, wda)
+        result = await ctrl.scroll_to_element(identifier="lazy_40")
+        assert result["status"] == "ok"
+        assert wda.depth == ACTION_SNAPSHOT_DEPTH
+
+    async def test_a_slow_deep_hit_is_kept(self, phone, monkeypatch):
+        """Finding 2: a slow deep query that *found* the target was dropped like
+        a slow miss, and the sweep gave up on a row it had located."""
+        ctrl, wda = phone
+        monkeypatch.setattr(controller_ui, "SLOW_DEEP_MISS_SECONDS", 0.0)
+        world = self._world(ctrl, wda, lazy=False)
+        result = await ctrl.scroll_to_element(identifier="lazy_40")
+        assert result["status"] == "ok", result
+        assert world.swipes > 0
+
+    async def test_a_failing_restore_does_not_replace_the_sweeps_answer(self, phone):
+        """Finding 3: the restore in the finally raised over the sweep's result."""
+        ctrl, wda = phone
+        world = self._world(ctrl, wda)
+        real_set, real_query = wda.set_depth, world.query
+        seen = {"found": False}
+
+        async def query(udid, using, value, **kw):
+            found = await real_query(udid, using, value, **kw)
+            seen["found"] = seen["found"] or bool(found)
+            return found
+
+        async def flaky(udid, depth):
+            # Only the set after the row is found: the sweep's finally.
+            if seen["found"]:
+                raise DeviceError("Failed to create WDA session", tool="wda")
+            await real_set(udid, depth)
+
+        ctrl.wda_client.find_elements_by_query = query
+        ctrl.wda_client._set_snapshot_depth = flaky
+        found = await ctrl._ios_scroll_to_element(
+            PHONE, None, "lazy_150", 10, snapshot_depth=ACTION_SNAPSHOT_DEPTH, deepen=True,
+        )
+        assert found is not None and found.identifier == "lazy_150"
+
+    async def test_a_failing_restore_does_not_replace_the_sweeps_error(self, phone):
+        ctrl, wda = phone
+        world = self._world(ctrl, wda)
+
+        async def swipe_dies(*a, **k):
+            raise DeviceError("WDA did not answer the swipe; it may already have been performed",
+                              tool="wda")
+
+        async def no_session(udid, depth):
+            raise DeviceError("Failed to create WDA session", tool="wda")
+
+        ctrl.wda_client.swipe = swipe_dies
+        world.wda.set_depth = no_session
+        with pytest.raises(DeviceError, match="may already have been performed"):
+            await ctrl._ios_scroll_to_element(
+                PHONE, None, "lazy_150", 10, snapshot_depth=ACTION_SNAPSHOT_DEPTH,
+            )
+
+    async def test_two_failed_frames_end_the_sweep(self, phone, caplog):
+        """Finding 6: blind, a failed frame counted as movement on every swipe,
+        to the end of the budget -- pulls at the top included."""
+        ctrl, wda = phone
+        world = self._world(ctrl, wda, rows=30)
+        world.screenshot_fails = True
+        caplog.set_level("INFO")
+        result = await ctrl.scroll_to_element(identifier="absent")
+        assert result["status"] == "not_found"
+        assert world.swipes <= 2, world.swipes
+        assert "two screenshots in a row failed" in caplog.text
+
+    async def test_the_container_is_looked_for_under_the_swipe(self, phone):
+        """Finding 7."""
+        ctrl, wda = phone
+        world = self._world(ctrl, wda)
+        world.dropped = {2}
+        await ctrl.scroll_to_element(identifier="lazy_150")
+        x, y = world.lookup_point
+        assert 150 < x < 250 and 140 < y < 750, world.lookup_point
+
+    async def test_a_redo_stays_inside_the_budget(self, phone):
+        """Finding 8: the redo ran after the last budgeted swipe."""
+        ctrl, wda = phone
+        world = self._world(ctrl, wda)
+        world.dropped = set(range(1, 100))
+        report: dict = {}
+        await ctrl._ios_scroll_to_element(
+            PHONE, None, "absent", 1, snapshot_depth=ACTION_SNAPSHOT_DEPTH, report=report,
+        )
+        assert world.swipes + len(world.scrolls) <= 3, (world.swipes, world.scrolls)
+
+    async def test_the_report_counts_element_scrolls_as_swipes(self, phone):
+        """Finding 9: a real gesture the caller must hear about (#274)."""
+        ctrl, wda = phone
+        world = self._world(ctrl, wda)
+        world.dropped = {3, 7}
+        report: dict = {}
+        await ctrl._ios_scroll_to_element(
+            PHONE, None, "lazy_150", 10, snapshot_depth=ACTION_SNAPSHOT_DEPTH,
+            deepen=True, report=report,
+        )
+        assert world.scrolls, "no scroll ran, so this checks nothing"
+        assert report["swipes"] == world.swipes + len(world.scrolls), (report, world.swipes)
+
+    async def test_a_ticking_clock_is_not_movement(self, phone):
+        """Finding 9: the frame is cropped to the content area."""
+        ctrl, wda = phone
+        world = self._world(ctrl, wda, rows=30)
+        world.clock = True
+        result = await ctrl.scroll_to_element(identifier="absent")
+        assert result["status"] == "not_found"
+        assert world.swipes < 12, f"{world.swipes} swipes: the clock read as movement"
+
+    async def test_a_sparse_list_still_reads_as_moving(self, phone):
+        """Finding 5: text-only rows change ~1% of the frame per step; read as
+        unmoved, the sweep turned round mid-list."""
+        ctrl, wda = phone
+        world = self._world(ctrl, wda)
+        world.sparse = True
+        result = await ctrl.scroll_to_element(identifier="lazy_150")
+        assert result["status"] == "ok", result
+
+    async def test_a_redo_toward_a_located_row_scrolls_proportionally(self, phone):
+        """Finding 9: a short move toward a row above is not a full page."""
+        ctrl, wda = phone
+        world = self._world(ctrl, wda, lazy=False)
+        world.offset, world.dropped = 300, {1}
+        await ctrl.scroll_to_element(identifier="lazy_3")
+        assert world.scrolls and world.scrolls[0][0] == "up", world.scrolls
+        assert world.scrolls[0][1] < 0.5, world.scrolls
