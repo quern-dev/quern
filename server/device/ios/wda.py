@@ -549,7 +549,8 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
             previous.rename(WDA_DERIVED)
             logger.warning("WDA build failed; the previous build is kept")
         raise
-    shutil.rmtree(previous, ignore_errors=True)
+    # Off the event loop: an old build is tens of thousands of files (review).
+    await asyncio.to_thread(shutil.rmtree, previous, ignore_errors=True)
 
     # Update state
     now = datetime.now(UTC).isoformat()
@@ -1368,7 +1369,7 @@ async def _build_wda_simulator(force: bool) -> bool:
             # retried after a shutdown mid-build (review).
             raise
         return _keep_sim_build(exc)
-    shutil.rmtree(previous, ignore_errors=True)
+    await asyncio.to_thread(shutil.rmtree, previous, ignore_errors=True)
     _name_simulator_runner()
 
     xcode = await _xcode_build_id()
