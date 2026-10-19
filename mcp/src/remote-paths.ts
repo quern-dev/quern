@@ -208,3 +208,70 @@ export async function* tarTree(root: string, top: string): AsyncGenerator<Buffer
   yield* walk(root, top);
   yield Buffer.alloc(BLOCK * 2);
 }
+
+// -- paths in answers ----------------------------------------------------------
+
+/** Screenshots the server saved for an answer (server/screenshots.py, the
+ * timeline): fetched and returned inline when its disk is not this one. */
+const SHOT = /\/tmp\/quern\/(?:screenshots|timeline)\/[A-Za-z0-9._\/-]+?\.png/g;
+
+/** A JSON field holding an absolute path: what a reader would take for a
+ * file on this machine. */
+const SERVER_PATH = /"[a-z_]*(?:path|dir|directory|file|dsym|dwarf|mapping|manifest|events|screenshot|before|after|source)"\s*:\s*"\//i;
+
+/** Tools whose paths are this machine's own: a screenshot saved where it was
+ * asked, a recording downloaded here, a knowledge base made here. */
+const LOCAL_PATHS = new Set([
+  "take_screenshot", "take_annotated_screenshot", "download_recording", "init_app_knowledge",
+]);
+
+/** Images attached to one answer, at most: a timeline can name hundreds. */
+export const MAX_INLINE = 6;
+
+type Content = { type: string; text?: string; data?: string; mimeType?: string };
+type Result = { content?: Content[]; [k: string]: unknown };
+
+/** `result`, when the server is another machine: with the screenshots it
+ * names attached as images, and a line saying its paths are the server's.
+ * Unchanged otherwise -- and unchanged, not failed, if anything here does. */
+export async function withRemotePaths<T>(tool: string, result: T,
+                                         find: () => Server): Promise<T> {
+  const r = result as unknown as Result;
+  if (LOCAL_PATHS.has(tool) || !r || !Array.isArray(r.content)) return result;
+  const text = r.content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("\n");
+  const shots = [...new Set(text.match(SHOT) ?? [])];
+  if (!shots.length && !SERVER_PATH.test(text)) return result;
+  try {
+    const server = find();
+    if (!(await pathsAreRemote(server))) return result;
+    const images: Content[] = [];
+    const missing: string[] = [];
+    for (const path of shots.slice(0, MAX_INLINE)) {
+      try {
+        const resp = await serverFetch(server,
+          `${server.url}/api/v1/screenshots?path=${encodeURIComponent(path)}`,
+          { headers: quernHeaders(server.apiKey), signal: AbortSignal.timeout(15000) });
+        if (!resp.ok) {
+          missing.push(path);
+          continue;
+        }
+        images.push({ type: "text", text: `screenshot ${path}:` });
+        images.push({ type: "image", data: Buffer.from(await resp.arrayBuffer()).toString("base64"),
+                      mimeType: "image/png" });
+      } catch {
+        missing.push(path);
+      }
+    }
+    const notes = [`Paths in this answer are on the quern server's disk (${server.url}), not ` +
+      "this machine's" + (shots.length ? "; the screenshots it saved are attached below" : "") +
+      ". download_recording copies a recording's files here."];
+    if (shots.length > MAX_INLINE) {
+      notes.push(`${shots.length - MAX_INLINE} more screenshot(s) named above are not attached.`);
+    }
+    if (missing.length) notes.push(`Could not fetch: ${missing.join(", ")}.`);
+    return { ...r, content: [...r.content, { type: "text", text: notes.join(" ") }, ...images] } as
+      unknown as T;
+  } catch {
+    return result;
+  }
+}

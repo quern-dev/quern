@@ -257,9 +257,15 @@ const INDEX = join(dirname(fileURLToPath(import.meta.url)), "..", "dist", "index
 /** Start dist/index.js in `cwd` against `serverUrl`, send initialize, and
  * return the instructions it answers with. HOME is a temporary directory, so
  * nothing reads the real ~/.quern. */
-function handshake(cwd, serverUrl) {
+const HOST_ID = "e".repeat(32);
+
+/** `hostId`: this machine's host-id, as a server here would have written it.
+ * The fake servers below answer HOST_ID, so the default shares their disk. */
+function handshake(cwd, serverUrl, { hostId = HOST_ID } = {}) {
   return new Promise((resolve, reject) => {
     const home = mkdtempSync(join(tmpdir(), "quern-pk-home-"));
+    mkdirSync(join(home, ".quern"));
+    writeFileSync(join(home, ".quern", "host-id"), hostId);
     const child = spawn(process.execPath, [INDEX], {
       cwd,
       env: { PATH: process.env.PATH, HOME: home, QUERN_SERVER_URL: serverUrl },
@@ -301,21 +307,40 @@ test("started in a project with no server, it says the load did not happen", asy
   assert.doesNotMatch(instructions, /loaded \d+ screens/);
 });
 
-test("started in a project with a server, it loads and says so", async () => {
-  const dir = project({ knowledge: true, bundle: APP });
-  const seen = [];
+function knowledgeServer(seen) {
   const fake = createServer((req, res) => {
     let body = "";
     req.on("data", (d) => { body += d; });
     req.on("end", () => {
       seen.push([req.method, req.url, body]);
       res.setHeader("content-type", "application/json");
-      if (req.url === "/health") res.end(JSON.stringify({ status: "ok" }));
+      if (req.url === "/health") res.end(JSON.stringify({ status: "ok", host_id: HOST_ID }));
       else if (req.method === "GET") res.end(JSON.stringify({ sets: {}, sources: {} }));
       else res.end(JSON.stringify({ loaded: APP, screens: 2 }));
     });
   });
-  await new Promise((r) => fake.listen(0, "127.0.0.1", r));
+  return new Promise((r) => fake.listen(0, "127.0.0.1", () => r(fake)));
+}
+
+test("started on another machine's server, it does not send this machine's path", async () => {
+  const dir = project({ knowledge: true, bundle: APP });
+  const seen = [];
+  const fake = await knowledgeServer(seen);
+  try {
+    const instructions = await handshake(dir, `http://127.0.0.1:${fake.address().port}`,
+                                         { hostId: "f".repeat(32) });
+    assert.match(instructions, /not loaded: the quern server is another machine/);
+    assert.ok(!seen.some(([m, url]) => m === "POST" && url === "/api/v1/landmarks/load"),
+              JSON.stringify(seen));
+  } finally {
+    fake.close();
+  }
+});
+
+test("started in a project with a server, it loads and says so", async () => {
+  const dir = project({ knowledge: true, bundle: APP });
+  const seen = [];
+  const fake = await knowledgeServer(seen);
   try {
     const instructions = await handshake(dir, `http://127.0.0.1:${fake.address().port}`);
     assert.match(instructions, /loaded 2 screens for com\.example\.app at the start of this session/);
@@ -325,4 +350,18 @@ test("started in a project with a server, it loads and says so", async () => {
   } finally {
     fake.close();
   }
+});
+
+test("autoload skipped for a reason sends nothing and says why, not load_landmarks with a path", async () => {
+  // A server on another disk cannot read this path, and a client key may not
+  // load the server-wide sets (#254, phase 3b).
+  const dir = project({ knowledge: true, bundle: APP });
+  const pk = detectProjectKnowledge(dir);
+  const { calls, request } = fakeRequest();
+  const outcome = await autoloadKnowledge(pk, request, true, "the quern server is another machine");
+  assert.deepEqual(outcome, { kind: "skipped", reason: "the quern server is another machine" });
+  assert.equal(calls.length, 0, "nothing was sent");
+  const lines = knowledgeInstructions(pk, outcome).join("\n");
+  assert.match(lines, /not loaded: the quern server is another machine/);
+  assert.doesNotMatch(lines, /load_landmarks\(path=/, "a local path would mean nothing there");
 });

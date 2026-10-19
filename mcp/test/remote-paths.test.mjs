@@ -152,3 +152,84 @@ test("the disk is shared only when /health's host_id is this machine's", async (
     r.server.close();
   }
 });
+
+// -- paths in answers --------------------------------------------------------
+
+import { MAX_INLINE, withRemotePaths } from "../dist/remote-paths.js";
+
+function remoteServer() {
+  // Another machine's id, so this process's disk is not the server's.
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push(req.url);
+    if (req.url === "/health") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", host_id: "c".repeat(32) }));
+    } else if (req.url.startsWith("/api/v1/screenshots?path=") && !req.url.includes("gone")) {
+      res.writeHead(200, { "Content-Type": "image/png" });
+      res.end(Buffer.from("PNG:" + decodeURIComponent(req.url.split("=")[1])));
+    } else {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end('{"detail": "no screenshot"}');
+    }
+  });
+  return new Promise((resolve) => server.listen(0, "127.0.0.1", () =>
+    resolve({ server, seen, info: { url: `http://127.0.0.1:${server.address().port}`, apiKey: "qc_k" } })));
+}
+
+const text = (t) => ({ content: [{ type: "text", text: t }] });
+
+test("a remote answer's screenshots come inline, with a line saying whose paths these are", async () => {
+  const r = await remoteServer();
+  try {
+    const answer = JSON.stringify({ tapped: true, screenshots: {
+      before: "/tmp/quern/screenshots/2026_tap_before_aa11bb.png",
+      after: "/tmp/quern/screenshots/2026_tap_after_cc22dd.png" } });
+    const out = await withRemotePaths("tap_element", text(answer), () => r.info);
+    const images = out.content.filter((c) => c.type === "image");
+    assert.equal(images.length, 2);
+    assert.equal(Buffer.from(images[0].data, "base64").toString(),
+                 "PNG:/tmp/quern/screenshots/2026_tap_before_aa11bb.png");
+    assert.equal(out.content[0].text, answer, "the answer itself is untouched");
+    assert.match(out.content[1].text, /on the quern server's disk/);
+    assert.ok(r.seen.some((u) => u.includes("screenshots?path=")), "fetched by path");
+  } finally {
+    r.server.close();
+  }
+});
+
+test("an error answer's screenshot comes too; a missing one is named, and the count is capped", async () => {
+  const r = await remoteServer();
+  try {
+    const miss = "HTTP 404: " + JSON.stringify({ detail: { screen_context: {
+      screenshot: "/tmp/quern/screenshots/x_tap_not_found_gone.png" } } });
+    const out = await withRemotePaths("tap_element", { ...text(miss), isError: true }, () => r.info);
+    assert.equal(out.isError, true, "still an error");
+    assert.match(out.content.at(-1).text, /Could not fetch: .*gone\.png/);
+    const many = JSON.stringify({ entries: Array.from({ length: 9 }, (_, i) => ({
+      screenshot: `/tmp/quern/timeline/tl_abc/${String(i).padStart(3, "0")}.png` })) });
+    const timeline = await withRemotePaths("stop_screenshot_timeline", text(many), () => r.info);
+    assert.equal(timeline.content.filter((c) => c.type === "image").length, MAX_INLINE);
+    assert.match(timeline.content[1].text, /3 more screenshot/);
+  } finally {
+    r.server.close();
+  }
+});
+
+test("a server path with no screenshot is labelled; this machine's own paths are not", async () => {
+  const r = await remoteServer();
+  try {
+    const crash = text(JSON.stringify({ file_path: "/Users/ci/Library/Logs/x.ips" }));
+    const labelled = await withRemotePaths("get_latest_crash", crash, () => r.info);
+    assert.equal(labelled.content.length, 2);
+    assert.match(labelled.content[1].text, /on the quern server's disk/);
+    const saved = text("Screenshot saved to /Users/me/shot.png");
+    assert.equal(await withRemotePaths("take_screenshot", saved, () => r.info), saved);
+    const before = r.seen.length;
+    const plain = text(JSON.stringify({ status: "ok", count: 3 }));
+    assert.equal(await withRemotePaths("tap", plain, () => r.info), plain);
+    assert.equal(r.seen.length, before, "nothing path-like: the server is not even asked");
+  } finally {
+    r.server.close();
+  }
+});

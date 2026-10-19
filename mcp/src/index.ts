@@ -16,6 +16,7 @@ import { apiRequest, probeServer, serverFetch } from "./http.js";
 import { startHeldSession, stopHeldSession } from "./held-session.js";
 import { registerSessionTools } from "./tools/sessions.js";
 import { deliverSessionNotices } from "./notices.js";
+import { isClientKey, sharesDisk } from "./remote-paths.js";
 import { registerLogTools } from "./tools/logs.js";
 import { registerProxyTools } from "./tools/proxy.js";
 import { registerInterceptTools } from "./tools/intercept.js";
@@ -267,6 +268,27 @@ async function checkVersionSkew(): Promise<void> {
   }
 }
 
+/** Why the session-start load is not attempted, or undefined to attempt it.
+ * It sends this machine's path, which a server on another disk cannot read;
+ * and landmark sets are server-wide, so loading them is the owner's
+ * (#254, phase 3b). Said, rather than failing as an unreadable path. */
+async function knowledgeSkip(): Promise<string | undefined> {
+  try {
+    const target = discoverServer();
+    if (!(await sharesDisk(target))) {
+      return "the quern server is another machine, which cannot read this project's " +
+        "knowledge base, and its landmark sets are loaded on that machine by its owner";
+    }
+    if (isClientKey(target.apiKey)) {
+      return "this MCP uses a client key, and loading landmark sets -- which every key " +
+        "on the server shares -- is the owner's";
+    }
+  } catch {
+    // Discovery failing is reported elsewhere; attempt the load as before.
+  }
+  return undefined;
+}
+
 async function main(): Promise<void> {
   const reachable = await probeServer();
   if (reachable) await checkVersionSkew();
@@ -275,7 +297,7 @@ async function main(): Promise<void> {
     // Best-effort, bounded, and skipped outright when the probe found no
     // server -- the client is waiting on this before it can connect.
     const outcome: KnowledgeOutcome = await autoloadKnowledge(
-      PROJECT_KNOWLEDGE, apiRequest, reachable);
+      PROJECT_KNOWLEDGE, apiRequest, reachable, reachable ? await knowledgeSkip() : undefined);
     if (outcome.kind !== "none") console.error(`Knowledge base: ${JSON.stringify(outcome)}`);
     knowledge = knowledgeInstructions(PROJECT_KNOWLEDGE, outcome);
   }

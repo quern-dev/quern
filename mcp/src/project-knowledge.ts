@@ -37,7 +37,10 @@ export type KnowledgeOutcome =
   | { kind: "already"; app: string; screens: number }
   | { kind: "other"; app: string; from: string }
   | { kind: "not_loaded"; reason: string }
-  | { kind: "load_unknown"; reason: string };
+  | { kind: "load_unknown"; reason: string }
+  /** Not attempted: the server cannot read this machine's path, or this
+   * key may not load the server-wide sets (#254, phase 3b). */
+  | { kind: "skipped"; reason: string };
 
 function isDir(path: string): boolean {
   try {
@@ -154,9 +157,11 @@ export async function autoloadKnowledge(
   pk: ProjectKnowledge,
   request: Request,
   reachable: boolean,
+  skip?: string,
 ): Promise<KnowledgeOutcome> {
   if (!pk.knowledgeDir) return { kind: "none" };
   if (pk.screenFiles === 0) return { kind: "empty" };
+  if (skip) return { kind: "skipped", reason: skip };
   if (!pk.bundleId) {
     return { kind: "not_loaded", reason: "its .quern/config.json names no bundle_id" };
   }
@@ -223,6 +228,9 @@ export function knowledgeInstructions(pk: ProjectKnowledge, outcome: KnowledgeOu
       return ["", `${kb} -- NOT loaded: ${outcome.reason}. identify_screen will find nothing ` +
         `until you call ${loadCall}` + (pk.bundleId ? "" : " with the app's bundle id") +
         ` (after ensure_server, if the server was down). ${readIt}`];
+    case "skipped":
+      return ["", `${kb} -- not loaded: ${outcome.reason}. identify_screen names only the ` +
+        `screens the server already has (list_landmarks shows them). ${readIt}`];
     case "load_unknown":
       return ["", `${kb} -- load sent but not confirmed: ${outcome.reason}. It may still ` +
         "finish on the server. Call list_landmarks to see whether it did, and " +
