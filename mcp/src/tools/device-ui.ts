@@ -802,7 +802,7 @@ Returns where the fingers went. An app's recogniser reports a little less than w
         .min(1)
         .max(50)
         .optional()
-        .describe("WDA snapshot depth for the sweep's reads (a physical iPhone, or a simulator after start_driver). Default 12, as for tap_element; a miss looks once more at the full depth, even when you pass a depth (see deepen)."),
+        .describe("WDA snapshot depth for the sweep's reads (a physical iPhone, or a simulator after start_driver). Default 12, as for tap_element; a miss looks once more at the full depth (25), even when you pass a depth below it (see deepen); a not-found answer says how deep it looked."),
       deepen: z
         .boolean()
         .optional()
