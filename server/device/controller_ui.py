@@ -1450,7 +1450,7 @@ class DeviceControllerUI:
         #: when there is none or it stopped working, None before the lookup.
         container: tuple[str, int] | bool | None = None
 
-        async def _scroll_instead(y1: float, y2: float) -> bool:
+        async def _scroll_instead(y1: float, y2: float) -> bool | None:
             """Redo a drag that seems to have moved nothing as an element scroll.
 
             Through WDA only (#475). Measured on a simulator and an iPhone 11:
@@ -1464,7 +1464,10 @@ class DeviceControllerUI:
 
             True when the scroll ran, so that whatever the next read says can
             be believed; False when there is no container to scroll, and the
-            sweep falls back on asking twice.
+            sweep falls back on asking twice; None when the scroll failed in a
+            way that may still have scrolled -- the screen is read again before
+            anything else is sent, or a drag on top of it could carry a row
+            past (#478 review).
             """
             nonlocal container, swipes
             if container is None:
@@ -1493,7 +1496,7 @@ class DeviceControllerUI:
             except DeviceError as exc:
                 container = False
                 _note(f"  element scroll failed ({exc}); trusting drags from here")
-                return False
+                return None
             finally:
                 self._invalidate_ui_cache(resolved)
             return True
@@ -1728,8 +1731,11 @@ class DeviceControllerUI:
                 trusted = False
                 if (via_wda and not moved and swipes < total_budget
                         and time.perf_counter() < deadline):
-                    if await _scroll_instead(y1, y2):
-                        trusted = True
+                    redone = await _scroll_instead(y1, y2)
+                    if redone is not False:
+                        # Read again either way; a failed scroll that may have
+                        # run is looked at, not trusted (#478 review).
+                        trusted = redone is True
                         el, fingerprint = await _read_at_rest(sweep_probe)
                         moved = _moved(last_fingerprint, fingerprint)
                         if moved:

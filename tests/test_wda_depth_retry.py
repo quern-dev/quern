@@ -660,6 +660,9 @@ class LazyDeepList:
         #: Rows drawn as short dashes: a sparse list, ~1% change per step.
         self.sparse = False
         self.screenshot_fails = False
+        #: The scroll is performed, and then the answer is lost (#478 review).
+        self.scroll_runs_then_fails = False
+        self.events: list[str] = []
 
     @property
     def max_offset(self):
@@ -684,6 +687,7 @@ class LazyDeepList:
         return []
 
     async def swipe(self, udid, x1, y1, x2, y2, *a, **k):
+        self.events.append("drag")
         self.swipes += 1
         if self.swipes in self.dropped:
             return
@@ -702,11 +706,14 @@ class LazyDeepList:
     async def scroll_element(self, udid, element_id, direction, distance):
         """Never dropped, as measured; travels its share of the viewport."""
         self.scrolls.append((direction, distance, self.wda.depth))
-        if self.scroll_fails:
+        self.events.append("scroll")
+        if self.scroll_fails and not self.scroll_runs_then_fails:
             raise DeviceError("WDA did not answer the scroll", tool="wda")
         delta = distance * self.VIEW / 0.75 * 0.9
         self.offset = min(max(self.offset + (delta if direction == "down" else -delta), 0),
                           self.max_offset)
+        if self.scroll_runs_then_fails:
+            raise DeviceError("WDA did not answer the scroll; it may have run", tool="wda")
 
     async def screenshot(self, udid, **k):
         import io
@@ -715,6 +722,7 @@ class LazyDeepList:
         from PIL import Image, ImageDraw
 
         self.frames += 1
+        self.events.append("frame")
         if self.screenshot_fails:
             raise DeviceError("WDA screenshot timed out", tool="wda")
         image = Image.new("L", (390, 852), 255)
@@ -1070,3 +1078,15 @@ class TestTheReviewFindings:
         await ctrl.scroll_to_element(identifier="lazy_3")
         assert world.scrolls and world.scrolls[0][0] == "up", world.scrolls
         assert world.scrolls[0][1] < 0.5, world.scrolls
+
+    async def test_a_scroll_that_failed_but_ran_is_looked_at_before_any_drag(self, phone):
+        """#478 review: a failed element scroll may still have scrolled; the
+        sweep dragged again without looking, and the two together could carry a
+        row past between reads."""
+        ctrl, wda = phone
+        world = self._world(ctrl, wda)
+        world.dropped, world.scroll_runs_then_fails = {2}, True
+        result = await ctrl.scroll_to_element(identifier="lazy_150")
+        assert result["status"] == "ok", result
+        i = world.events.index("scroll")
+        assert world.events[i + 1] == "frame", world.events[i - 2:i + 4]

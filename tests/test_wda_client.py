@@ -541,6 +541,9 @@ class TestWdaBackendDescribeAll:
         with patch("httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(return_value=mock_response)
+            # The depth set before /source is answered too, as WDA answers it.
+            mock_client.post = AsyncMock(return_value=httpx.Response(
+                200, json={"value": None}, request=httpx.Request("POST", "http://wda/x")))
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
@@ -910,6 +913,9 @@ class TestDescribeAllTimeoutFallback:
         with patch("httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(return_value=mock_response)
+            # The depth set before /source is answered too, as WDA answers it.
+            mock_client.post = AsyncMock(return_value=httpx.Response(
+                200, json={"value": None}, request=httpx.Request("POST", "http://wda/x")))
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
