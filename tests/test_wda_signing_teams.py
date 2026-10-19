@@ -152,3 +152,13 @@ def test_a_free_teams_week_long_profile_marks_it_free(tmp_path):
     ids = {i["team_id"]: i for i in wda.discover_signing_identities(_prefs(tmp_path), (d,), NOW)}
     assert ids["FREE1"]["team_type"] == "Free" and wda._is_free_account("Free")
     assert ids["PAID1"]["team_type"] == ""
+
+
+def test_a_team_identifier_that_is_not_a_list_is_skipped(tmp_path):
+    d = tmp_path / "profiles"
+    d.mkdir()
+    (d / "odd.mobileprovision").write_bytes(plistlib.dumps({
+        "TeamIdentifier": "TEAMB", "Platform": ["iOS"],
+        "Entitlements": {"get-task-allow": True},
+        "ExpirationDate": (NOW + timedelta(days=90)).replace(tzinfo=None)}))
+    assert wda.discover_signing_identities(_prefs(tmp_path), (d,), NOW) == []

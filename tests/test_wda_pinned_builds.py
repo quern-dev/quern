@@ -468,3 +468,16 @@ async def test_the_simulator_start_says_an_update_failed(state, monkeypatch, tmp
     state.update({"sim_build_wda_version": "16.15.3", "sim_build_failed_version": PIN})
     result = await wda.start_driver_simulator("SIM-1")
     assert result["wda_version"] == "16.15.3" and "failed" in result["wda_update_failed"]
+
+
+async def test_a_failed_first_build_leaves_no_partial_build_behind(device, state, monkeypatch):
+    """Nothing to restore, and half a build must not be left looking like one."""
+    async def half_built(*cmd, **kw):
+        device["app"].mkdir(parents=True)
+        (device["app"] / "partial").write_text("x")
+        return _proc(65, b"Signing failed")
+
+    monkeypatch.setattr(wda.asyncio, "create_subprocess_exec", half_built)
+    with pytest.raises(RuntimeError):
+        await wda.build_wda("TEAM")
+    assert not device["app"].exists()
