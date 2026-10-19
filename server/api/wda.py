@@ -55,17 +55,30 @@ async def setup_wda(request: Request, body: SetupWdaRequest):
 
     if device.device_type == DeviceType.SIMULATOR:
         # No team, no provisioning, no install: just the simulator build (#336).
-        from server.device.ios.wda import build_wda_simulator
+        from server.device.ios.wda import (
+            build_wda_simulator,
+            pinned_wda_version,
+            read_wda_state,
+            wda_version_report,
+        )
 
         try:
             built = await build_wda_simulator(force=body.force)
         except (RuntimeError, OSError) as e:
             raise HTTPException(status_code=500, detail=str(e))
-        return {
+        state = read_wda_state()
+        answer = {
             "status": "ok", "udid": body.udid, "simulator": True, "built": built,
             "message": "WDA is built for the iOS Simulator. start_driver on this "
                        "simulator to serve its UI through WDA -- XCUITest's view.",
+            # The version, as start_driver and the device setup report it (#479).
+            **wda_version_report(state.get("sim_build_wda_version")),
         }
+        if state.get("sim_build_failed_version") == pinned_wda_version():
+            answer["wda_update_failed"] = (
+                f"building WebDriverAgent {pinned_wda_version()} failed, so the build "
+                "before it is kept; the server log has the xcodebuild output")
+        return answer
 
     if device.device_type != DeviceType.DEVICE:
         raise HTTPException(
