@@ -152,6 +152,7 @@ parametrisation; probe-driven tests run once per platform present.
 | 19 | WDA lifecycle | `test_wda.py` | todo — physical tier |
 | 20 | Android-specific backends | `test_android.py` | todo |
 | 21 | Session attribution (`X-Quern-Session`, #254) | `test_session.py` | **done** — 7 tests; the client sends `conformance-<run id>` on every request, the tests read it back from `/trace`, and check `X-Quern-Session-Warning` (`missing`, `malformed`, none when tagged or public) |
+| 22 | Lazy lists through WDA (#475) | `test_lazy_list.py` | **done** — 4 tests, each on the default backend and through WDA, on the iOS probe's Lazy tab; fail through WDA against the server before #478 |
 
 ### The fixture apps already exist
 
