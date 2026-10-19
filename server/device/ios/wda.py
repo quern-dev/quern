@@ -137,30 +137,91 @@ def _is_free_account(team_type: str) -> bool:
     return team_type in _FREE_TEAM_TYPES
 
 
-def discover_signing_identities() -> list[dict[str, str]]:
-    """Read provisioning teams from Xcode's account preferences.
+def _profile_dirs() -> tuple[Path, ...]:
+    """Where Xcode keeps provisioning profiles: the current place, and the
+    one before Xcode 16."""
+    library = Path.home() / "Library"
+    return (library / "Developer" / "Xcode" / "UserData" / "Provisioning Profiles",
+            library / "MobileDevice" / "Provisioning Profiles")
 
-    Returns list of dicts with keys: team_id, team_name, team_type.
+
+def _read_profile(path: Path) -> dict[str, Any] | None:
+    """A provisioning profile's plist -- it is CMS-signed, with the plist
+    inside in the clear -- or None if it is not one."""
+    try:
+        data = path.read_bytes()
+        start, end = data.find(b"<?xml"), data.find(b"</plist>")
+        if start < 0 or end < 0:
+            return None
+        loaded = plistlib.loads(data[start:end + len(b"</plist>")])
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def _teams_from_profiles(dirs: tuple[Path, ...], now: datetime) -> list[dict[str, str]]:
+    """Teams with an unexpired iOS development profile installed: what an
+    xcodebuild of WDA can actually sign with. Its `TeamIdentifier` is the ID
+    xcodebuild takes as DEVELOPMENT_TEAM -- not a certificate's OU."""
+    teams: dict[str, dict[str, str]] = {}
+    for d in dirs:
+        try:
+            files = sorted(f for f in d.iterdir()
+                           if f.suffix in (".mobileprovision", ".provisionprofile"))
+        except OSError:
+            continue
+        for f in files:
+            profile = _read_profile(f)
+            if not profile or "iOS" not in (profile.get("Platform") or []):
+                continue
+            expires = profile.get("ExpirationDate")
+            if isinstance(expires, datetime):
+                if expires.tzinfo is None:
+                    expires = expires.replace(tzinfo=UTC)       # plist dates are UTC
+                if expires <= now:
+                    continue
+            if not (profile.get("Entitlements") or {}).get("get-task-allow"):
+                continue                                         # distribution, not development
+            for team_id in profile.get("TeamIdentifier") or []:
+                if isinstance(team_id, str) and team_id:
+                    teams.setdefault(team_id, {"team_id": team_id,
+                                               "team_name": str(profile.get("TeamName", "")),
+                                               "team_type": "",
+                                               "source": "provisioning profile"})
+    return list(teams.values())
+
+
+def discover_signing_identities(plist_path: Path | None = None,
+                                profile_dirs: tuple[Path, ...] | None = None,
+                                now: datetime | None = None) -> list[dict[str, str]]:
+    """Signing teams: Xcode's account list, or -- when that is empty -- the
+    installed provisioning profiles.
+
+    Returns list of dicts with keys: team_id, team_name, team_type (and, from
+    profiles, `source`, and `last_selected` on the team Xcode last used).
 
     Important: the team_id here is the *Xcode/App Store Connect* team ID,
     NOT the Organizational Unit from the keychain certificate (those can
     differ and xcodebuild only accepts the Xcode team ID).
+
+    Xcode 27 leaves `IDEProvisioningTeamByIdentifier` empty on a machine that
+    is signed in and signs WDA without trouble (#480), so reading it alone
+    told such a user to sign in to an account they were signed in to.
     """
-    import plistlib
-
-    plist_path = Path.home() / "Library" / "Preferences" / "com.apple.dt.Xcode.plist"
-    if not plist_path.exists():
+    plist_path = plist_path or (
+        Path.home() / "Library" / "Preferences" / "com.apple.dt.Xcode.plist")
+    prefs: dict[str, Any] = {}
+    if plist_path.exists():
+        try:
+            with open(plist_path, "rb") as f:
+                loaded = plistlib.load(f)
+            prefs = loaded if isinstance(loaded, dict) else {}
+        except Exception as e:  # noqa: BLE001 -- unreadable prefs read as empty
+            logger.warning("Failed to read Xcode preferences: %s", e)
+    else:
         logger.warning("Xcode preferences not found at %s", plist_path)
-        return []
 
-    try:
-        with open(plist_path, "rb") as f:
-            prefs = plistlib.load(f)
-    except Exception as e:
-        logger.warning("Failed to read Xcode preferences: %s", e)
-        return []
-
-    teams_by_account = prefs.get("IDEProvisioningTeamByIdentifier", {})
+    teams_by_account = prefs.get("IDEProvisioningTeamByIdentifier") or {}
 
     seen: set[str] = set()
     identities: list[dict[str, str]] = []
@@ -175,7 +236,18 @@ def discover_signing_identities() -> list[dict[str, str]]:
                 "team_name": team.get("teamName", ""),
                 "team_type": team.get("teamType", ""),
             })
+    if identities:
+        return identities
 
+    identities = _teams_from_profiles(profile_dirs or _profile_dirs(),
+                                      now or datetime.now(UTC))
+    # Xcode's own last choice settles between several teams; it is used only
+    # to choose, never to invent a team no profile vouches for.
+    last = prefs.get("IDEProvisioningTeamManagerLastSelectedTeamID")
+    for identity in identities:
+        if identity["team_id"] == last:
+            identity["last_selected"] = True        # type: ignore[assignment]
+    identities.sort(key=lambda i: not i.get("last_selected"))
     return identities
 
 
@@ -1516,9 +1588,13 @@ async def setup_wda(
     if not identities:
         return {
             "status": "error",
-            "error": "No provisioning teams found in Xcode preferences. "
-                     "Open Xcode → Settings → Accounts and sign in with "
-                     "an Apple Developer account.",
+            # Two places were read, and the advice is for the situation found
+            # -- not "sign in" to someone already signed in (#480).
+            "error": "No signing team found: Xcode's account list has none, and no "
+                     "unexpired iOS development provisioning profile is installed. "
+                     "Open Xcode → Settings → Accounts, sign in with an Apple "
+                     "Developer account and choose Download Manual Profiles -- or build "
+                     "any iOS app to a device once, which makes Xcode create one.",
         }
 
     # Step 2: Resolve team_id
@@ -1531,6 +1607,9 @@ async def setup_wda(
             team_id = saved_team
             logger.info("Reusing previously selected team %s", team_id)
         elif len(identities) == 1:
+            team_id = identities[0]["team_id"]
+        elif identities[0].get("last_selected"):
+            # Teams found from profiles: Xcode's last choice decides (#480).
             team_id = identities[0]["team_id"]
         else:
             return {

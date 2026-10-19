@@ -155,13 +155,14 @@ class TestDiscoverSigningIdentities:
 
         assert ids == []
 
-    def test_empty_prefs(self):
+    def test_empty_prefs(self, tmp_path):
         with (
             patch("builtins.open", create=True),
             patch("server.device.ios.wda.Path.exists", return_value=True),
             patch("server.device.ios.wda.plistlib.load", return_value={}),
         ):
-            ids = discover_signing_identities()
+            # No profiles either -- and never this machine's own (#480).
+            ids = discover_signing_identities(profile_dirs=(tmp_path / "none",))
 
         assert ids == []
 
@@ -628,7 +629,8 @@ class TestSetupWda:
             result = await setup_wda("DEV1", "iOS 17.4")
 
         assert result["status"] == "error"
-        assert "No provisioning teams" in result["error"]
+        assert "No signing team found" in result["error"]
+        assert "provisioning profile" in result["error"], "both places read are named"
 
     async def test_multiple_identities_no_team_id(self):
         identities = [
