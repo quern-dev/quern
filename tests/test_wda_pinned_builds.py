@@ -89,7 +89,7 @@ class TestTheDeviceBuild:
         assert await wda.build_wda("TEAM") is True
         assert (device["app"] / "new").exists(), "built where the old one was"
         assert state["build_wda_version"] == PIN
-        assert not list(device["app"].parents[3].parent.glob("*-previous")), "snapshot gone"
+        assert not list(device["app"].parents[3].parent.glob("*-previous*")), "snapshot gone"
 
     async def test_a_new_build_that_fails_puts_the_old_one_back(self, device, state):
         """The case #479 must not get wrong: a phone that worked, stranded."""
@@ -333,6 +333,39 @@ class TestSetupWdaFallsBackOnlyOnAnUpdate:
         monkeypatch.setattr(wda, "_post_process_runner_app", AsyncMock())
         await wda.setup_wda("UDID", "18.0")
         assert held == [True]
+
+
+class TestDiscardingTheKeptBuild:
+    """After a successful rebuild the kept build is deleted off the event loop
+    -- renamed out of `-previous` first, so a deletion that outlives a cancel
+    or is cut short by a crash never leaves a half-deleted directory where
+    _recover_previous would restore it over the good build (#498 review)."""
+
+    async def test_it_is_renamed_away_before_the_deletion_starts(self, tmp_path, monkeypatch):
+        previous = tmp_path / "derived-previous"
+        (previous / "Build").mkdir(parents=True)
+        seen: list[bool] = []
+        real = wda.asyncio.to_thread
+
+        async def spy(fn, *a, **kw):
+            seen.append(previous.exists())
+            return await real(fn, *a, **kw)
+
+        monkeypatch.setattr(wda.asyncio, "to_thread", spy)
+        await wda._discard_previous(previous)
+        assert seen == [False], "-previous must be gone before deleting begins"
+        assert list(tmp_path.iterdir()) == []
+
+    async def test_a_deletion_cut_short_is_not_restored_by_the_next_build(self, tmp_path):
+        derived = tmp_path / "derived"
+        (derived / "good").mkdir(parents=True)
+        previous = tmp_path / "derived-previous"
+        retired = tmp_path / "derived-previous-retired-deadbeef"
+        (retired / "half").mkdir(parents=True)
+        wda._recover_previous(derived, previous)
+        assert (derived / "good").exists(), "a retired leftover is not a kept build"
+        await wda._discard_previous(previous)
+        assert not retired.exists(), "and the next discard sweeps it"
 
 
 class TestTheKeptDeviceBuild:

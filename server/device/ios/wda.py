@@ -15,6 +15,7 @@ import plistlib
 import re
 import shutil
 import signal
+import uuid
 import weakref
 from datetime import UTC, datetime
 from pathlib import Path
@@ -549,8 +550,7 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
             previous.rename(WDA_DERIVED)
             logger.warning("WDA build failed; the previous build is kept")
         raise
-    # Off the event loop: an old build is tens of thousands of files (review).
-    await asyncio.to_thread(shutil.rmtree, previous, ignore_errors=True)
+    await _discard_previous(previous)
 
     # Update state
     now = datetime.now(UTC).isoformat()
@@ -605,6 +605,23 @@ def _recover_previous(derived: Path, previous: Path) -> None:
                    previous)
     shutil.rmtree(derived, ignore_errors=True)
     previous.rename(derived)
+
+
+async def _discard_previous(previous: Path) -> None:
+    """Delete the build a successful rebuild kept, off the event loop -- it is
+    tens of thousands of files (review). Renamed out of `previous` first, in
+    one step: a deletion still running after a cancel, or cut short by a
+    crash, must never leave a half-deleted directory where _recover_previous
+    would put it back over the good build (review). Retired leftovers from an
+    earlier crash go with it."""
+    if previous.exists():
+        previous.rename(previous.with_name(f"{previous.name}-retired-{uuid.uuid4().hex[:8]}"))
+
+    def _sweep() -> None:
+        for retired in previous.parent.glob(f"{previous.name}-retired-*"):
+            shutil.rmtree(retired, ignore_errors=True)
+
+    await asyncio.to_thread(_sweep)
 
 
 def _source_version() -> str | None:
@@ -1369,7 +1386,7 @@ async def _build_wda_simulator(force: bool) -> bool:
             # retried after a shutdown mid-build (review).
             raise
         return _keep_sim_build(exc)
-    await asyncio.to_thread(shutil.rmtree, previous, ignore_errors=True)
+    await _discard_previous(previous)
     _name_simulator_runner()
 
     xcode = await _xcode_build_id()
