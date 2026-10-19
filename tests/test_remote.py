@@ -9,6 +9,7 @@ the owner's key, a wrong pin, a foreign Host -- over real sockets.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import socket
@@ -343,7 +344,87 @@ class TestAWrongPinSendsNothing:
         assert recorder.handshakes == 1 and recorder.received == b""
 
 
+class Relay:
+    """A man in the middle: TLS with its own certificate toward the client,
+    TLS to the real listener, and every decrypted byte the client sent kept."""
+
+    def __init__(self, upstream_port, cert_path, key_path):
+        self.ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self.ctx.load_cert_chain(str(cert_path), str(key_path))
+        self.up = upstream_port
+        self.sent = b""
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen()
+        self.port = self.sock.getsockname()[1]
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        import select
+
+        while True:
+            try:
+                raw, _ = self.sock.accept()
+            except OSError:
+                return
+            try:
+                down = self.ctx.wrap_socket(raw, server_side=True)
+                up = client._unverified_context().wrap_socket(
+                    socket.create_connection(("127.0.0.1", self.up)))
+            except (OSError, ssl.SSLError):
+                continue
+            # One thread per connection: an SSL socket is not safe to read
+            # on one thread while another writes to it.
+            threading.Thread(target=self._splice, args=(down, up, select),
+                             daemon=True).start()
+
+    def _splice(self, down, up, select):
+        try:
+            while True:
+                ready, _, _ = select.select([down, up], [], [], 5)
+                if not ready:
+                    return
+                for src in ready:
+                    data = src.recv(65536)
+                    if not data:
+                        return
+                    while src.pending():        # decrypted already: select can't see it
+                        data += src.recv(src.pending())
+                    if src is down:
+                        self.sent += data
+                    (up if src is down else down).sendall(data)
+        except OSError:
+            pass
+        finally:
+            for s in (down, up):
+                with contextlib.suppress(OSError):
+                    s.close()
+
+    def close(self):
+        self.sock.close()
+
+
 class TestTheListener:
+    def test_pairing_through_a_man_in_the_middle_is_refused_before_finish(self, running,
+                                                                         tmp_path):
+        """The real client against the real listener, through a relay that
+        terminates TLS with its own certificate: the server's proof is over
+        its certificate, the client saw another, and it stops after hello --
+        no finish, no secret, nothing the relay could complete pairing with."""
+        cert_mod._generate(tmp_path / "mitm.pem", tmp_path / "mitm.key", ["127.0.0.1"])
+        relay = Relay(running.port, tmp_path / "mitm.pem", tmp_path / "mitm.key")
+        try:
+            typed, _ = running.listener.codes.create("victim")
+            with pytest.raises(client.RemoteError, match="could not prove"):
+                client.pair(f"https://127.0.0.1:{relay.port}", typed, "office")
+            time.sleep(0.2)
+            assert b"/pair/hello" in relay.sent, "the relay was really in the path"
+            assert b"/pair/finish" not in relay.sent
+            assert pairing.parse(typed)[1].encode() not in relay.sent
+            assert not running.app.state.clients.is_active("victim")
+        finally:
+            relay.close()
+
     def test_pair_then_use_it_with_the_key_pairing_issued(self, running):
         typed, _ = running.listener.codes.create("laptop")
         remote = client.pair(running.url, typed, "office")
@@ -500,6 +581,19 @@ def test_remotes_are_kept_private_and_read_back(isolated):
     assert client.forget("ci") and not client.forget("ci")
     with pytest.raises(client.RemoteError, match="pair"):
         client.load("ci")
+
+
+def test_a_remote_that_is_not_https_is_refused(isolated):
+    """Through urllib's plain handler it would go unpinned, the key in clear."""
+    client.save(client.Remote(name="ci", url="http://ci.lan:9130", fingerprint="ab" * 32,
+                              key="qc_x"))
+    with pytest.raises(client.RemoteError, match="https"):
+        client.load("ci")
+    from server.remote_cli import main as remote_main
+
+    assert remote_main("connect", ["http://ci.lan:9130", "--key", "qc_x",
+                        "--fingerprint", "ab" * 32, "--name", "plain"]) == 1
+    assert "plain" not in client._read()
 
 
 def test_mcp_install_points_each_client_at_the_remote_and_back(tmp_path):
