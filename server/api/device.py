@@ -140,20 +140,9 @@ async def _identify_for_context(controller, udid: str, registry, elements) -> di
 
 async def _capture_action_screenshot(controller, udid: str, label: str) -> str | None:
     """Best-effort screenshot capture for action before/after pairs."""
-    try:
-        from datetime import UTC, datetime
-        from pathlib import Path
+    from server import screenshots
 
-        screenshot_dir = Path("/tmp/quern/screenshots")
-        screenshot_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%S")
-        filename = f"{ts}_{label}.png"
-        filepath = screenshot_dir / filename
-        image_bytes, _ = await controller.screenshot(udid=udid, scale=0.5)
-        filepath.write_bytes(image_bytes)
-        return str(filepath)
-    except Exception:
-        return None
+    return await screenshots.capture(controller, udid, label)
 
 
 def _logging_lock(request: Request, udid: str) -> asyncio.Lock:

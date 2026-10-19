@@ -886,6 +886,8 @@ def create_app(
     app.include_router(remote_router)
     from server.api.uploads import router as uploads_router
     app.include_router(uploads_router)
+    from server.api.screenshots import router as screenshots_router
+    app.include_router(screenshots_router)
     app.include_router(crashes_router)
     app.include_router(builds_router)
     app.include_router(proxy_router)

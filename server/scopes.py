@@ -268,6 +268,7 @@ ROUTES: dict[tuple[str, str], Rule] = {
     ("GET", "/api/v1/recordings/events"): _OWNER,            # reads any directory on the Mac
     # Downloaded by their own principal, from another machine (#254, phase 3b).
     ("GET", "/api/v1/recordings/{recording_id}/files"): _VIEW,
+    ("GET", "/api/v1/screenshots"): _VIEW,     # the caller's own session's only
     ("GET", "/api/v1/recordings/{recording_id}/files/{name}"): _VIEW,
     ("POST", "/api/v1/recordings/{recording_id}/viewer"): _OWNER,
     ("DELETE", "/api/v1/recordings/{recording_id}/viewer"): _OWNER,
@@ -345,6 +346,7 @@ BLIND: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/proxy/mocks"): "filtered",
     ("GET", "/api/v1/recordings"): "filtered",
     ("GET", "/api/v1/recordings/{recording_id}/files"): "filtered",
+    ("GET", "/api/v1/screenshots"): "filtered",
     ("GET", "/api/v1/recordings/{recording_id}/files/{name}"): "filtered",
     ("GET", "/api/v1/trace"): "filtered",
     # The owner's set-up: which apps have knowledge bases, which hosts are

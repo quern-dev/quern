@@ -146,6 +146,7 @@ quern mcp-install --remote office      # or QUERN_REMOTE=office for `session run
 **Paths, when the disk is not shared.** A path in a request is read on the server's disk, so from another machine it names nothing, and from a client key on this one it would be the server reading whatever it is told to:
 
 - **Apps are uploaded.** `POST /api/v1/uploads?name=MyApp.ipa` with the file as the raw body -- an `.ipa` or `.apk` as it is, a `.app` bundle as a gzipped tar named `MyApp.app.tar.gz` with the bundle at its top -- answers an `upload_id`, which `install_app` takes in place of `app_path`. The MCP does this for you whenever it uses a client key. `app_path` is owner-only. Uploads are kept per key: one key never sees, installs or deletes another's. They are deleted once installed (a failed install keeps it, to try again), after an hour, or when the key is revoked, and none survive a restart. What one key holds at once is capped at 2048 MB, set with `{"uploads": {"max_mb": 2048}}`.
+- **Screenshots come inline.** Screenshots the server saved for an answer -- `capture_screenshots`' before and after, `screen_context.screenshot` when an element was not found, the screenshot timeline -- are recorded against the session that caused them and served at `GET /api/v1/screenshots?path=`. When the server is another machine the MCP fetches them and returns the images with the answer.
 - **Recordings are downloaded.** A recording's `output_dir` is on the server. `download_recording` copies its files to a directory on the agent's machine, from `GET /api/v1/recordings/{id}/files`; a client key gets its own recordings only.
 
 ## The LAN viewer
@@ -188,6 +189,7 @@ quern mcp-install --remote office      # or QUERN_REMOTE=office for `session run
 | `list_recordings` | GET | `/api/v1/recordings` | Recordings this server is making or has made since it started; `requested_by` lists only those started with it |
 | `download_recording` | GET | `/api/v1/recordings/{id}/files` | A recording's files (`events.jsonl`, `manifest.json`, `video-N.mp4`, `video-N.log`) with their sizes, and `live` while it is still being written. The owner's for any recording, a client key's for its own only -- another's is 404. The MCP tool copies them all to a directory on its own machine |
 | `download_recording` | GET | `/api/v1/recordings/{id}/files/{name}` | One of those files, streamed |
+| — | GET | `/api/v1/screenshots` | `?path=`: a screenshot the server saved and named in an answer (`screenshots.before`/`after`, `screen_context.screenshot`, a timeline entry), for the session whose request took it, or the owner; 404 for anything else. A remote MCP fetches these and returns them inline |
 | `get_log_summary` | GET | `/api/v1/logs/summary` | LLM-optimized summary with cursor support |
 | `get_errors` | GET | `/api/v1/logs/errors` | Errors and crashes only |
 | `get_build_result` | GET | `/api/v1/builds/latest` | Most recent build result |

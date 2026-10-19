@@ -111,6 +111,10 @@ class ScreenshotTimeline:
             filepath = self.output_dir / filename
             image_bytes, _ = await controller.screenshot(udid=udid, scale=0.5)
             filepath.write_bytes(image_bytes)
+            # Fetchable by the session whose action it follows (#254, 3b).
+            from server import screenshots
+
+            screenshots.record(str(filepath))
             entry = TimelineEntry(
                 timestamp=datetime.now(UTC).isoformat(),
                 action=action,
