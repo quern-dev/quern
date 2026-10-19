@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
 import {
-  chmodSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync,
+  chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:http";
@@ -271,6 +271,9 @@ test("a symlinked .app is sent as the bundle it points at", async () => {
     writeFileSync(join(out, "c.tar"), gunzipSync(r.seen[0].body));
     execFileSync("tar", ["-xf", join(out, "c.tar"), "-C", out]);
     assert.equal(r.seen[0].url, "/api/v1/uploads?name=Linked.app.tar.gz");
+    // A directory, not a link: extracted here a link would still read
+    // through to the original, and the server refuses one anyway.
+    assert.ok(lstatSync(join(out, "Linked.app")).isDirectory(), "the bundle itself was sent");
     assert.equal(readFileSync(join(out, "Linked.app/My"), "utf-8"), "binary");
   } finally {
     r.server.close();

@@ -422,6 +422,26 @@ class TestByNameBeforeTarfile:
         assert why in (unsafe_member(members) or "")
 
 
+def test_the_check_by_name_runs_on_a_real_upload(store):
+    """A hard link inside the bundle is one the data filter itself allows:
+    refused, it shows the name check is on the upload path, not just a unit."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        d = tarfile.TarInfo("My.app")
+        d.type = tarfile.DIRTYPE
+        tar.addfile(d)
+        f = tarfile.TarInfo("My.app/f")
+        f.size = 1
+        tar.addfile(f, io.BytesIO(b"x"))
+        h = tarfile.TarInfo("My.app/h")
+        h.type = tarfile.LNKTYPE
+        h.linkname = "My.app/f"
+        tar.addfile(h)
+    with pytest.raises(UploadError) as e:
+        _receive(store, "client:alice", "My.app.tar.gz", buf.getvalue())
+    assert "hard link" in str(e.value)
+
+
 class TestInstallingKeepsTheUpload:
     def test_neither_the_sweep_nor_a_delete_takes_one_being_installed(self, world):
         c, app, alice, _ = world
