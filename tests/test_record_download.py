@@ -230,3 +230,42 @@ def test_start_under_a_remote_names_the_download_command(monkeypatch, capsys):
     out = capsys.readouterr()
     assert out.out.splitlines()[0] == REC, "the id stays alone on stdout's first line"
     assert f"quern record download {REC}" in out.err
+
+
+def test_a_chunked_answer_cut_off_mid_chunk_is_one_line_and_no_part(tmp_path, monkeypatch, capsys):
+    """IncompleteRead is an HTTPException, not an OSError: it escaped as a
+    traceback and left the .part behind (CodeRabbit)."""
+    import socket
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen()
+
+    def serve():
+        while True:
+            try:
+                conn, _ = sock.accept()
+            except OSError:
+                return
+            with conn:
+                path = conn.recv(65536).decode("latin-1").split(" ")[1]
+                if path.endswith("/files"):
+                    body = json.dumps({"recording_id": REC, "live": True,
+                                       "files": [{"name": "events.jsonl", "bytes": 1}]})
+                    conn.sendall(f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\n"
+                                 f"Connection: close\r\n\r\n{body}".encode())
+                else:
+                    conn.sendall(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+                                 b"Connection: close\r\n\r\n400\r\n" + b"x" * 10)
+
+    threading.Thread(target=serve, daemon=True).start()
+    url = f"http://127.0.0.1:{sock.getsockname()[1]}"
+    monkeypatch.setattr(cli, "_target", lambda: (url, "qc_key", None))
+    dest = tmp_path / "out"
+    try:
+        assert cli.main(["download", REC, "--dest", str(dest)]) == 1
+    finally:
+        sock.close()
+    err = capsys.readouterr().err
+    assert "events.jsonl" in err and "Traceback" not in err
+    assert not list(dest.glob("*")), "no .part and no file"

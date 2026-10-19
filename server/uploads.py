@@ -174,6 +174,11 @@ class UploadStore:
                         raise UploadError(self._too_big(size + len(chunk),
                                                         self.max_bytes - self.held(principal)
                                                         + size), 413)
+                    if declared is None:
+                        # No length promised: each chunk is checked before it
+                        # is written, or an upload ending between periodic
+                        # checks finished under the floor (CodeRabbit).
+                        self._check_disk(len(chunk))
                     size += len(chunk)
                     self._inflight[principal] = self._inflight.get(principal, 0) + len(chunk)
                     out.write(chunk)

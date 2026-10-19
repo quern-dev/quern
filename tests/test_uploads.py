@@ -679,3 +679,21 @@ class TestTheFloorAcrossKeys:
                             lambda: {"uploads": {"min_free_mb": 123}})
         app = m.create_app(ServerConfig(api_key="k" * 32))
         assert app.state.uploads.min_free_bytes == 123 * self.MB
+
+
+def test_an_upload_of_unknown_length_cannot_end_under_the_floor(tmp_path):
+    """Checked only every 16 MB, one ending between checks finished below
+    the floor (CodeRabbit)."""
+    MB = 1024 * 1024
+    written = [0]
+    store = UploadStore(tmp_path / "u", max_bytes=1 << 30, min_free_bytes=4 * MB,
+                        disk_free=lambda: 5 * MB - written[0])
+
+    async def chunks():
+        for _ in range(12):          # 1.2 MB in all: well under one 16 MB interval
+            written[0] += 100_000
+            yield b"x" * 100_000
+
+    with pytest.raises(UploadError) as e:
+        asyncio.run(store.receive("client:alice", "My.ipa", chunks()))
+    assert e.value.status == 507

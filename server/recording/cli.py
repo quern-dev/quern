@@ -12,6 +12,7 @@ no key), 2 the server refused, 3 a recording that failed, or with
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -173,7 +174,10 @@ def _download(recording_id: str, dest: str | None) -> int:
             part.unlink(missing_ok=True)
             print(f"quern record download: {name}: HTTP {e.code}", file=sys.stderr)
             return 2
-        except (client.RemoteError, urllib.error.URLError, OSError) as e:
+        except (client.RemoteError, urllib.error.URLError, OSError,
+                http.client.HTTPException) as e:
+            # HTTPException too: a chunked answer cut off mid-chunk raises
+            # IncompleteRead, which is not an OSError (CodeRabbit).
             part.unlink(missing_ok=True)
             print(f"quern record download: {name}: {e}", file=sys.stderr)
             return 1
