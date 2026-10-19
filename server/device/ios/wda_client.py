@@ -775,7 +775,7 @@ class WdaBackend:
             # type and label.
             try:
                 async with httpx.AsyncClient() as client:
-                    await client.post(
+                    resp = await client.post(
                         f"{base_url}/session/{session_id}/appium/settings",
                         json={"settings": {
                             "snapshotMaxDepth": SNAPSHOT_MAX_DEPTH,
@@ -784,30 +784,71 @@ class WdaBackend:
                         }},
                         timeout=WDA_TIMEOUT,
                     )
+                resp.raise_for_status()
                 self._current_depth[udid] = SNAPSHOT_MAX_DEPTH
-            except Exception:
-                logger.debug("Failed to configure WDA settings for %s", udid[:8])
+            except Exception as exc:
+                # Not recorded: an error answer used to set the depth on record
+                # all the same (#478 review). Unknown, the next set sends.
+                self._current_depth.pop(udid, None)
+                logger.warning(
+                    "Failed to configure WDA settings for %s (%s): the depth is "
+                    "unknown, and query results may lack frames",
+                    udid[:8], type(exc).__name__,
+                )
 
             return session_id
 
-    async def _set_snapshot_depth(self, udid: str, depth: int) -> None:
-        """Update WDA snapshotMaxDepth if it differs from the current value."""
+    async def _set_snapshot_depth(self, udid: str, depth: int) -> bool:
+        """Update WDA snapshotMaxDepth if it differs from the current value.
+
+        True when the session is known to be at `depth`. A failure -- an
+        error answer as much as no answer -- forgets the depth instead of
+        keeping the old one or recording the new: an error answer used to be
+        recorded as success, and the next read, believing the session
+        shallow, sent nothing and walked the tree at the full depth (#478
+        review). Unknown, the next call always sends.
+        """
         if self._current_depth.get(udid) == depth:
-            return
+            return True
 
         session_id = await self._ensure_session(udid)
         base_url = self._connections[udid].base_url
         try:
             async with httpx.AsyncClient() as client:
-                await client.post(
+                resp = await client.post(
                     f"{base_url}/session/{session_id}/appium/settings",
                     json={"settings": {"snapshotMaxDepth": depth}},
                     timeout=WDA_TIMEOUT,
                 )
-            self._current_depth[udid] = depth
-            logger.info("WDA snapshotMaxDepth set to %d for %s", depth, udid[:8])
-        except Exception:
-            logger.debug("Failed to set snapshotMaxDepth=%d for %s", depth, udid[:8])
+            resp.raise_for_status()
+        except Exception as exc:
+            self._current_depth.pop(udid, None)
+            logger.warning(
+                "Failed to set snapshotMaxDepth=%d for %s (%s); the depth is unknown "
+                "until the next set succeeds", depth, udid[:8], type(exc).__name__,
+            )
+            return False
+        self._current_depth[udid] = depth
+        logger.info("WDA snapshotMaxDepth set to %d for %s", depth, udid[:8])
+        return True
+
+    async def _require_depth(self, udid: str, depth: int) -> None:
+        """Set the depth before a full read, or refuse the read.
+
+        A /source at an unknown depth may be a full-depth walk: 34s on an
+        iPhone 11's 200-row table, and a timed-out /source restarts the runner
+        (#470). A shallow read the session cannot be put at is refused, with
+        the reason, rather than run.
+        """
+        if await self._set_snapshot_depth(udid, depth):
+            return
+        if depth < SNAPSHOT_MAX_DEPTH:
+            raise DeviceError(
+                f"Could not set WDA's snapshot depth to {depth} on {udid[:8]}, so the "
+                "tree was not read: at an unknown depth it may walk every element "
+                "and time out. Retry; if it persists, restart the driver.",
+                tool="wda",
+            )
 
     async def delete_session(self, udid: str) -> None:
         """Delete the active WDA session for a device. No-op if no session."""
@@ -1440,7 +1481,7 @@ class WdaBackend:
         # Always ensure depth is set — covers stale sessions where the
         # settings POST in _ensure_session failed silently.
         target_depth = snapshot_depth if snapshot_depth is not None else SNAPSHOT_MAX_DEPTH
-        await self._set_snapshot_depth(udid, target_depth)
+        await self._require_depth(udid, target_depth)
 
         effective_timeout = (
             source_timeout if source_timeout is not None
@@ -1514,7 +1555,7 @@ class WdaBackend:
             source_timeout: Override /source timeout in seconds (default: auto per device).
         """
         target_depth = snapshot_depth if snapshot_depth is not None else SNAPSHOT_MAX_DEPTH
-        await self._set_snapshot_depth(udid, target_depth)
+        await self._require_depth(udid, target_depth)
 
         effective_timeout = (
             source_timeout if source_timeout is not None
