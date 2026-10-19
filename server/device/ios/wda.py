@@ -70,7 +70,6 @@ SIM_MJPEG_PORT_LAST = 8399
 SIM_DRIVER_START_TIMEOUT = 90
 DRIVER_STOP_TIMEOUT = 5
 
-CLONE_TIMEOUT = 60
 BUILD_TIMEOUT = 600
 
 
@@ -257,40 +256,43 @@ def discover_signing_identities(plist_path: Path | None = None,
 
 
 async def clone_wda() -> bool:
-    """Clone WebDriverAgent repo if not already present.
+    """The pinned WebDriverAgent source in WDA_REPO (#479): fetched from npm's
+    appium-webdriveragent at the version wda-pin.json names, unless that
+    version is already there. True if it was fetched now.
 
-    Returns True if a fresh clone was performed, False if skipped.
+    It was a `git clone` of appium/WebDriverAgent made once and never
+    updated -- every install kept whatever was latest on its first setup --
+    and that repository has since moved into the appium-ios monorepo. An old
+    clone carries no version marker, so it is replaced on the next call.
+    RuntimeError, saying why, if the source cannot be had.
     """
-    if WDA_REPO.exists() and (WDA_REPO / ".git").exists():
-        logger.info("WDA repo already cloned at %s", WDA_REPO)
-        return False
+    from server.device.ios import wda_source
 
-    WDA_DIR.mkdir(parents=True, exist_ok=True)
-
-    logger.info("Cloning WebDriverAgent into %s", WDA_REPO)
-    proc = await asyncio.create_subprocess_exec(
-        "git", "clone", "--depth", "1",
-        "https://github.com/appium/WebDriverAgent.git",
-        str(WDA_REPO),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
     try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=CLONE_TIMEOUT
-        )
-    except TimeoutError:
-        proc.kill()
-        raise RuntimeError(
-            f"git clone timed out after {CLONE_TIMEOUT}s"
-        )
+        return await wda_source.fetch(WDA_REPO)
+    except wda_source.SourceError as e:
+        raise RuntimeError(str(e)) from None
 
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"git clone failed (rc={proc.returncode}): {stderr.decode()}"
-        )
 
-    return True
+def wda_version_report(built: str | None) -> dict[str, Any]:
+    """`wda_version` (what the build is), `wda_pinned` (what quern builds) and,
+    when they differ, `wda_update` saying how to move onto the pin."""
+    pinned = pinned_wda_version()
+    report: dict[str, Any] = {"wda_version": built or "unknown (built before quern "
+                                                       "pinned a WebDriverAgent version)",
+                              "wda_pinned": pinned}
+    if built != pinned:
+        report["wda_update"] = (f"this WebDriverAgent is not the {pinned} quern pins: run "
+                                "setup_wda to rebuild it (a few minutes; the current build "
+                                "is kept if the new one fails)")
+    return report
+
+
+def pinned_wda_version() -> str:
+    """The WebDriverAgent version this quern builds (wda-pin.json)."""
+    from server.device.ios import wda_source
+
+    return wda_source.pinned().version
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +437,16 @@ async def _build_is_current(state: dict[str, Any], team_id: str) -> bool:
     """
     if state.get("build_team_id") != team_id:
         return False
+    # Built from another WebDriverAgent than the one pinned -- or before quern
+    # pinned one at all, which is every install made so far. Unlike the Xcode
+    # fingerprint below, absent here means stale: moving those installs onto
+    # the pinned version is the point (#479). build_wda keeps the old build
+    # if the new one cannot be made.
+    if state.get("build_wda_version") != pinned_wda_version():
+        logger.info("WDA was built from %s, quern pins %s — rebuilding",
+                    state.get("build_wda_version") or "an unpinned clone",
+                    pinned_wda_version())
+        return False
     if not (WDA_APP.exists() and XCTESTRUN.exists()):
         logger.info("WDA state claims a build for %s, but the artifacts are "
                     "missing — rebuilding", team_id)
@@ -475,11 +487,63 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
     if not WDA_REPO.exists():
         raise RuntimeError("WDA repo not cloned — call clone_wda() first")
 
-    if force and WDA_DERIVED.exists():
-        import shutil
-        logger.info("Force rebuild: removing derived data at %s", WDA_DERIVED)
-        shutil.rmtree(WDA_DERIVED)
+    # The build it replaces is moved aside, not deleted, and put back if this
+    # one fails in any way: a new WebDriverAgent that cannot be signed or
+    # built must not strand a phone the old one worked on (#479). It used to
+    # be deleted first on `force`, which is also how #188 began.
+    previous = WDA_DERIVED.with_name(WDA_DERIVED.name + "-previous")
+    shutil.rmtree(previous, ignore_errors=True)
+    moved = False
+    if WDA_DERIVED.exists():
+        WDA_DERIVED.rename(previous)
+        moved = True
+    try:
+        await _xcodebuild_device(team_id)
+    except BaseException:
+        shutil.rmtree(WDA_DERIVED, ignore_errors=True)
+        if moved:
+            previous.rename(WDA_DERIVED)
+            logger.warning("WDA build failed; the previous build is kept")
+        raise
+    shutil.rmtree(previous, ignore_errors=True)
 
+    # Update state
+    now = datetime.now(UTC).isoformat()
+    state = read_wda_state()
+    state["cloned"] = True
+    state["build_team_id"] = team_id
+    state["built_at"] = now
+    state["build_wda_version"] = _source_version()
+    # What this artifact was built *with*, so the next run can tell whether it
+    # still matches. Written only here, after a build that returned zero.
+    state["build_deployment_target"] = WDA_MIN_DEPLOYMENT_TARGET
+    # Cleared, not merely skipped, when the probe fails. Leaving the previous
+    # value would describe *this* artifact with the fingerprint of the one
+    # before it -- and the window in which the probe fails is xcodebuild hanging
+    # during Xcode's first-launch tasks (#180), which is exactly when the
+    # toolchain has just changed. CONTRIBUTING: a success marker must not
+    # survive a failure, and not writing it is insufficient when it may already
+    # be current from an earlier success.
+    xcode = await _xcode_build_id()
+    if xcode:
+        state["build_xcode"] = xcode
+    else:
+        state.pop("build_xcode", None)
+    save_wda_state(state)
+
+    return True
+
+
+def _source_version() -> str | None:
+    """The version of the source in WDA_REPO, as its marker says."""
+    from server.device.ios import wda_source
+
+    return wda_source.fetched_version(WDA_REPO)
+
+
+async def _xcodebuild_device(team_id: str) -> None:
+    """xcodebuild the device runner into WDA_DERIVED, post-process it, and
+    check it is there: RuntimeError, saying why, otherwise."""
     logger.info("Building WDA for team %s", team_id)
     proc = await asyncio.create_subprocess_exec(
         "xcodebuild", "build-for-testing",
@@ -577,31 +641,6 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
             "xcodebuild reported success but did not produce "
             f"{', '.join(missing)} under {WDA_DERIVED}"
         )
-
-    # Update state
-    now = datetime.now(UTC).isoformat()
-    state = read_wda_state()
-    state["cloned"] = True
-    state["build_team_id"] = team_id
-    state["built_at"] = now
-    # What this artifact was built *with*, so the next run can tell whether it
-    # still matches. Written only here, after a build that returned zero.
-    state["build_deployment_target"] = WDA_MIN_DEPLOYMENT_TARGET
-    # Cleared, not merely skipped, when the probe fails. Leaving the previous
-    # value would describe *this* artifact with the fingerprint of the one
-    # before it -- and the window in which the probe fails is xcodebuild hanging
-    # during Xcode's first-launch tasks (#180), which is exactly when the
-    # toolchain has just changed. CONTRIBUTING: a success marker must not
-    # survive a failure, and not writing it is insufficient when it may already
-    # be current from an earlier success.
-    xcode = await _xcode_build_id()
-    if xcode:
-        state["build_xcode"] = xcode
-    else:
-        state.pop("build_xcode", None)
-    save_wda_state(state)
-
-    return True
 
 
 async def _post_process_runner_app(team_id: str) -> None:
@@ -1037,6 +1076,9 @@ async def start_driver(udid: str, os_version: str) -> dict:
         "udid": udid,
         "pid": proc.pid,
         "ready": ready,
+        # The phone's build is never replaced here -- a rebuild is minutes and
+        # needs signing -- so a build behind the pin starts as it is and says so.
+        **wda_version_report(read_wda_state().get("build_wda_version")),
     }
 
     # If WDA failed to become ready, diagnose from the runner log
@@ -1158,6 +1200,12 @@ async def _sim_build_is_current(state: dict[str, Any]) -> bool:
     """
     if _find_sim_xctestrun() is None:
         return False
+    pinned = pinned_wda_version()
+    if state.get("sim_build_wda_version") != pinned:
+        # Unless building the pinned version already failed and the build
+        # before it was kept: then this one is what there is, and it is not
+        # rebuilt on every start until the pin moves or setup_wda forces it.
+        return state.get("sim_build_failed_version") == pinned
     recorded = state.get("sim_build_xcode")
     if recorded is None:
         return False
@@ -1182,6 +1230,7 @@ def _clear_sim_build_fingerprint() -> None:
     state = read_wda_state()
     state.pop("sim_build_xcode", None)
     state.pop("sim_build_deployment_target", None)
+    state.pop("sim_build_wda_version", None)
     save_wda_state(state)
 
 
@@ -1190,18 +1239,57 @@ async def _build_wda_simulator(force: bool) -> bool:
     if not force and await _sim_build_is_current(state):
         return False
 
-    if not WDA_REPO.exists():
-        await clone_wda()
-        customize_wda()
+    # Fetched whenever the pin moved, not only when there is no source: an
+    # existing clone of another version would otherwise be built forever.
+    await clone_wda()
+    customize_wda()
 
-    # Cleared before anything is removed or built, so no failure path -- a
-    # timeout included -- can leave a fingerprint describing an artifact that
-    # is gone. (The first version cleared it after the build, which a timeout
-    # raised past.)
-    _clear_sim_build_fingerprint()
+    # The build it replaces is moved aside and put back, with its fingerprint,
+    # if this one fails -- so a simulator that ran WDA still does (#479).
+    kept = {k: state[k] for k in ("sim_build_xcode", "sim_build_deployment_target",
+                                  "sim_build_wda_version") if k in state}
+    previous = WDA_DERIVED_SIM.with_name(WDA_DERIVED_SIM.name + "-previous")
+    shutil.rmtree(previous, ignore_errors=True)
+    moved = False
     if WDA_DERIVED_SIM.exists():
-        import shutil
-        shutil.rmtree(WDA_DERIVED_SIM)
+        WDA_DERIVED_SIM.rename(previous)
+        moved = True
+    # Cleared before anything is built, so no failure path -- a timeout
+    # included -- can leave a fingerprint describing an artifact that is gone.
+    _clear_sim_build_fingerprint()
+    try:
+        await _xcodebuild_simulator()
+    except BaseException as exc:
+        shutil.rmtree(WDA_DERIVED_SIM, ignore_errors=True)
+        if not moved:
+            raise
+        previous.rename(WDA_DERIVED_SIM)
+        state = read_wda_state()
+        state.update(kept)
+        state["sim_build_failed_version"] = pinned_wda_version()
+        save_wda_state(state)
+        if not isinstance(exc, Exception):
+            raise           # cancelled: the old build is back, and so is the cancel
+        logger.warning("WDA simulator build of %s failed (%s); the previous build is "
+                       "kept", pinned_wda_version(), str(exc).splitlines()[0])
+        return False
+    shutil.rmtree(previous, ignore_errors=True)
+
+    xcode = await _xcode_build_id()
+    state = read_wda_state()
+    if xcode:
+        state["sim_build_xcode"] = xcode
+    state["sim_build_deployment_target"] = WDA_MIN_DEPLOYMENT_TARGET
+    state["sim_build_wda_version"] = _source_version()
+    state.pop("sim_build_failed_version", None)
+    state["sim_built_at"] = datetime.now(UTC).isoformat()
+    save_wda_state(state)
+    return True
+
+
+async def _xcodebuild_simulator() -> None:
+    """xcodebuild the simulator runner into WDA_DERIVED_SIM: RuntimeError,
+    saying why, if it does not end with an .xctestrun there."""
 
     logger.info("Building WDA for the iOS Simulator")
     proc = await asyncio.create_subprocess_exec(
@@ -1247,15 +1335,6 @@ async def _build_wda_simulator(force: bool) -> bool:
             f"xcodebuild (simulator) reported success but produced no .xctestrun "
             f"under {WDA_DERIVED_SIM}"
         )
-
-    xcode = await _xcode_build_id()
-    state = read_wda_state()
-    if xcode:
-        state["sim_build_xcode"] = xcode
-    state["sim_build_deployment_target"] = WDA_MIN_DEPLOYMENT_TARGET
-    state["sim_built_at"] = datetime.now(UTC).isoformat()
-    save_wda_state(state)
-    return True
 
 
 def _port_is_free(port: int) -> bool:
@@ -1436,7 +1515,13 @@ async def start_driver_simulator(udid: str) -> dict:
     result: dict[str, Any] = {
         "status": "started", "udid": udid, "pid": proc.pid,
         "port": port, "mjpeg_port": mjpeg_port, "ready": ready, "built": built,
+        **wda_version_report(read_wda_state().get("sim_build_wda_version")),
     }
+    if read_wda_state().get("sim_build_failed_version"):
+        result["wda_update_failed"] = (
+            f"building WebDriverAgent {pinned_wda_version()} for the simulator failed, "
+            "so the build before it is running; setup_wda with force retries it "
+            "(the server log has the xcodebuild output)")
     if not ready:
         # Not left registered: routing would send this simulator's reads to a
         # WDA that is not answering. Stopped and removed, so it stays on its
@@ -1639,8 +1724,21 @@ async def setup_wda(
     # Step 4: Customize (inject app icon)
     customize_wda()
 
-    # Step 5: Build (device-independent, keyed by team_id only)
-    built = await build_wda(team_id, force=force)
+    # Step 5: Build (device-independent, keyed by team_id only). A build that
+    # fails where one for this team already worked -- a new WebDriverAgent that
+    # cannot be signed, say -- leaves that build in place (build_wda), and it
+    # is used rather than the device stranded; the answer says so (#479).
+    update_failed = None
+    try:
+        built = await build_wda(team_id, force=force)
+    except RuntimeError as e:
+        state = read_wda_state()
+        if not (state.get("build_team_id") == team_id
+                and WDA_APP.exists() and XCTESTRUN.exists()):
+            raise
+        update_failed = str(e)
+        built = False
+        logger.warning("WDA build failed; using the build already there: %s", e)
 
     # Step 5b: Self-heal a stale signature. build_wda is cached by team, so a
     # skipped build won't re-run the post-process re-sign. If a *previous* run
@@ -1669,7 +1767,13 @@ async def setup_wda(
         "cloned": cloned,
         "built": built,
         "installed": True,
+        **wda_version_report(read_wda_state().get("build_wda_version")),
     }
+    if update_failed:
+        result["wda_update_failed"] = (
+            f"building WebDriverAgent {pinned_wda_version()} failed, so the build "
+            f"already there ({result['wda_version']}) is installed instead: "
+            f"{update_failed.splitlines()[0]}")
 
     # Surface warnings for free/personal developer accounts
     if _is_free_account(team_type):

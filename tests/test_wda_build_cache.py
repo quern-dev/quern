@@ -45,6 +45,7 @@ def _state(**over):
     base = {
         "build_team_id": "TEAM123",
         "build_deployment_target": wda.WDA_MIN_DEPLOYMENT_TARGET,
+        "build_wda_version": wda.pinned_wda_version(),
     }
     base.update(over)
     return base
@@ -141,7 +142,7 @@ class TestTheFingerprintIsRecorded:
             return P()
 
         monkeypatch.setattr(wda, "WDA_REPO", repo)
-        monkeypatch.setattr(wda, "WDA_DERIVED", tmp_path / "build")
+        monkeypatch.setattr(wda, "WDA_DERIVED", tmp_path / "derived")
         monkeypatch.setattr(wda, "read_wda_state", lambda: {"cloned": True})
         monkeypatch.setattr(wda, "save_wda_state", lambda st: saved.update(st))
         monkeypatch.setattr(wda, "_post_process_runner_app", AsyncMock())
@@ -176,7 +177,7 @@ class TestTheFingerprintIsRecorded:
             return P()
 
         monkeypatch.setattr(wda, "WDA_REPO", repo)
-        monkeypatch.setattr(wda, "WDA_DERIVED", tmp_path / "build")
+        monkeypatch.setattr(wda, "WDA_DERIVED", tmp_path / "derived")
         monkeypatch.setattr(wda, "read_wda_state", lambda: {"cloned": True})
         monkeypatch.setattr(wda, "save_wda_state", lambda st: saved.update(st))
         monkeypatch.setattr(wda, "_post_process_runner_app", AsyncMock())
@@ -287,7 +288,7 @@ class TestABuildFailureSaysWhatWentWrong:
             return P()
 
         monkeypatch.setattr(wda, "WDA_REPO", repo)
-        monkeypatch.setattr(wda, "WDA_DERIVED", tmp_path / "build")
+        monkeypatch.setattr(wda, "WDA_DERIVED", tmp_path / "derived")
         monkeypatch.setattr(wda, "read_wda_state", lambda: {"cloned": True})
         monkeypatch.setattr(wda, "save_wda_state", lambda st: None)
         monkeypatch.setattr(wda.asyncio, "create_subprocess_exec", failing)
@@ -512,7 +513,7 @@ class TestAFailedProbeDoesNotLeaveTheOldFingerprint:
             return P()
 
         monkeypatch.setattr(wda, "WDA_REPO", repo)
-        monkeypatch.setattr(wda, "WDA_DERIVED", tmp_path / "build")
+        monkeypatch.setattr(wda, "WDA_DERIVED", tmp_path / "derived")
         monkeypatch.setattr(wda, "read_wda_state", lambda: dict(state))
         monkeypatch.setattr(wda, "save_wda_state", lambda st: saved.update(st))
         monkeypatch.setattr(wda, "_post_process_runner_app", AsyncMock())

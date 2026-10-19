@@ -303,6 +303,9 @@ class TestTheSimulatorBuild:
     @pytest.fixture
     def env(self, monkeypatch, tmp_path, state):
         monkeypatch.setattr(wda, "WDA_REPO", tmp_path / "repo")
+        # The pinned source is fetched from npm (#479): never from a test.
+        monkeypatch.setattr(wda, "clone_wda", AsyncMock(return_value=False))
+        monkeypatch.setattr(wda, "customize_wda", lambda *a, **k: False)
         (tmp_path / "repo").mkdir()
         monkeypatch.setattr(wda, "WDA_DERIVED_SIM", tmp_path / "build-sim")
         monkeypatch.setattr(wda, "_xcode_build_id", AsyncMock(return_value="27A1"))
@@ -347,6 +350,7 @@ class TestTheSimulatorBuild:
         (products / "W.xctestrun").write_text("x")
         state["sim_build_xcode"] = "27A1"
         state["sim_build_deployment_target"] = wda.WDA_MIN_DEPLOYMENT_TARGET
+        state["sim_build_wda_version"] = wda.pinned_wda_version()
         monkeypatch.setattr(wda.asyncio, "create_subprocess_exec",
                             AsyncMock(side_effect=AssertionError("rebuilt")))
         assert await wda.build_wda_simulator() is False
@@ -494,6 +498,9 @@ class TestTheSimulatorBuildInDetail:
     @pytest.fixture
     def env(self, monkeypatch, tmp_path, state):
         monkeypatch.setattr(wda, "WDA_REPO", tmp_path / "repo")
+        # The pinned source is fetched from npm (#479): never from a test.
+        monkeypatch.setattr(wda, "clone_wda", AsyncMock(return_value=False))
+        monkeypatch.setattr(wda, "customize_wda", lambda *a, **k: False)
         (tmp_path / "repo").mkdir()
         monkeypatch.setattr(wda, "WDA_DERIVED_SIM", tmp_path / "build-sim")
         monkeypatch.setattr(wda, "_xcode_build_id", AsyncMock(return_value="27A1"))
@@ -685,6 +692,9 @@ class TestACancelledBuildDoesNotLeaveXcodebuildRunning:
         import asyncio
 
         monkeypatch.setattr(wda, "WDA_REPO", tmp_path / "repo")
+        # The pinned source is fetched from npm (#479): never from a test.
+        monkeypatch.setattr(wda, "clone_wda", AsyncMock(return_value=False))
+        monkeypatch.setattr(wda, "customize_wda", lambda *a, **k: False)
         (tmp_path / "repo").mkdir()
         monkeypatch.setattr(wda, "WDA_DERIVED_SIM", tmp_path / "build-sim")
         monkeypatch.setattr(wda, "_xcode_build_id", AsyncMock(return_value="27A1"))
