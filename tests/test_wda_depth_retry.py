@@ -512,3 +512,88 @@ class TestTheSecondCodeRabbitPass:
         ctrl.wait_for_settle.assert_awaited()  # the row moved, so the final re-check ran
         assert moves["n"] >= 3, "the final re-check did not find it deep"
         ctrl.wda_client.describe_all.assert_not_called()
+
+
+#: On a long list, below the viewport, and nested as deep as the Wi-Fi row.
+OFF_SCREEN = "com.apple.settings.privacy"
+
+
+class TestTheScrollSweepLooksDeeperFirst:
+    """#475: scroll_to_element's opening lookup read at 12 with no deeper look,
+    so a row on screen but nested at 20 read as absent and the sweep swiped."""
+
+    @pytest.fixture
+    def sweeping(self, phone, monkeypatch):
+        ctrl, wda = phone
+        real = wda.query
+
+        async def query(udid, using, value, **kw):
+            if OFF_SCREEN in value and wda.depth is not None and wda.depth >= 20:
+                wda.queries.append({"depth": wda.depth, "value": value, **kw})
+                return [dict(WIFI_ROW, AXUniqueId=OFF_SCREEN, AXLabel="Privacy",
+                             frame=dict(WIFI_ROW["frame"], y=2000))]
+            return await real(udid, using, value, **kw)
+
+        ctrl.wda_client.find_elements_by_query = query
+        ctrl._warn_if_input_is_suppressed = AsyncMock()
+        depth_at_swipe: list[int | None] = []
+
+        async def swipe(*a, **k):
+            depth_at_swipe.append(wda.depth)
+
+        ctrl.wda_client.swipe = swipe
+        return ctrl, wda, depth_at_swipe
+
+    async def test_an_on_screen_row_nested_deep_is_found_without_a_swipe(self, sweeping):
+        ctrl, wda, swipes = sweeping
+        result = await ctrl.scroll_to_element(identifier=WIFI)
+        assert result["status"] == "ok", result
+        assert result["element"]["identifier"] == WIFI
+        assert swipes == []
+        assert len(wda.deep_queries()) == 1
+        assert wda.depth == ACTION_SNAPSHOT_DEPTH, "the full depth was left on the session"
+
+    async def test_an_off_screen_deep_row_sweeps_at_the_shallow_depth(self, sweeping):
+        ctrl, wda, swipes = sweeping
+        await ctrl.scroll_to_element(identifier=OFF_SCREEN)
+        assert swipes, "the sweep never swiped, so this test checks nothing"
+        assert all(d == ACTION_SNAPSHOT_DEPTH for d in swipes), swipes
+        assert len(wda.deep_queries()) == 1, "the sweep's own reads went deep"
+        _no_deep_source(ctrl)
+        # The viewport read sets no depth of its own and inherits the session's,
+        # which is why the session has to be shallow again before it.
+        assert ctrl.wda_client.describe_all.call_args_list, "no sweep read ran"
+
+    async def test_a_dense_screen_sweeps_without_looking_deeper(self, sweeping, monkeypatch):
+        ctrl, wda, swipes = sweeping
+        monkeypatch.setattr(controller_ui, "DEEPEN_MAX_SHALLOW_SECONDS", 0.05)
+        wda.delay = 0.08
+        await ctrl.scroll_to_element(identifier=WIFI)
+        assert wda.deep_queries() == []
+        assert swipes, "a miss with no deeper look still sweeps"
+
+    async def test_a_depth_the_caller_chose_is_not_overridden(self, sweeping):
+        ctrl, wda, swipes = sweeping
+        result = await ctrl.scroll_to_element(identifier=WIFI, snapshot_depth=12)
+        assert result["status"] == "not_found"
+        assert wda.deep_queries() == []
+
+    async def test_a_timed_out_deeper_look_is_not_re_sent_and_the_depth_goes_back(
+        self, sweeping,
+    ):
+        ctrl, wda, swipes = sweeping
+        wda.deep_timeouts = {"accessibility id", "predicate string"}
+        await ctrl.scroll_to_element(identifier=WIFI)
+        assert len(wda.deep_queries()) == 1
+        assert wda.deep_queries()[0]["no_resend"] is True
+        assert swipes and all(d == ACTION_SNAPSHOT_DEPTH for d in swipes), swipes
+        _no_deep_source(ctrl)
+
+    async def test_tap_elements_sweep_does_not_look_deeper_a_second_time(self, sweeping):
+        """tap_element's own lookup already looked deeper (#470)."""
+        ctrl, wda, swipes = sweeping
+        ctrl._wda_reachable_only = AsyncMock(
+            side_effect=lambda r, m: ([], [{"why": "off screen", "label": "Privacy"}]))
+        await ctrl.tap_element(identifier=OFF_SCREEN, scroll_to_find=True)
+        assert swipes, "the sweep never ran, so this test checks nothing"
+        assert len(wda.deep_queries()) == 1

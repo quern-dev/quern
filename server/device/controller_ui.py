@@ -1030,6 +1030,7 @@ class DeviceControllerUI:
         deadline_s: float | None = None,
         report: dict | None = None,
         snapshot_depth: int | None = None,
+        deepen: bool = False,
     ) -> UIElement | None:
         """Scroll an iOS scroll container until the target element is on-screen.
 
@@ -1075,6 +1076,12 @@ class DeviceControllerUI:
         pull-to-refresh and sheet-dismiss drag -- and a caller that gets
         `not_found` with no mention of them acts next against a screen it does
         not know has changed. See #274.
+
+        `deepen`: through WDA, the opening lookup looks once more at the full
+        depth after a miss at the shallow one (#475). A row on screen but nested
+        below the action depth -- iOS 26's Settings, from depth 20 -- otherwise
+        reads as absent, and the sweep swipes away from what it is looking at.
+        The sweep's own reads stay shallow.
         """
         # The viewport comes from the Application element, which is the
         # device's own answer. A *targeted* query (filter_type) -- on physical
@@ -1162,11 +1169,21 @@ class DeviceControllerUI:
             ~3.5s), and what the sweep hunts is a row in a scroll container,
             always present in the static tree.
             """
-            els, _ = await self.get_ui_elements(
-                resolved, use_cache=False,
-                filter_label=label, filter_identifier=identifier,
-                probe_containers=probe, snapshot_depth=snapshot_depth,
-            )
+            if deepen:
+                _begin_lookup()
+            try:
+                els, _ = await self.get_ui_elements(
+                    resolved, use_cache=False,
+                    filter_label=label, filter_identifier=identifier,
+                    probe_containers=probe, snapshot_depth=snapshot_depth,
+                    deepen_on_miss=deepen,
+                )
+            finally:
+                if deepen:
+                    # Nothing after this looks the element up again -- the
+                    # sweep judges it by its frame -- so the shallow depth goes
+                    # back now, before any read or swipe of the sweep's.
+                    await self._done_with_deep_element(resolved, snapshot_depth)
             return _pick(find_element(els, label=label, identifier=identifier))
 
         def _pick(matches: list[UIElement]) -> UIElement | None:
@@ -3714,9 +3731,13 @@ class DeviceControllerUI:
         # in the sweep used whatever depth WDA was last left at -- 25 after any
         # full read, 34s a read on an iPhone 11's 200-row table -- and the
         # sweep ran out of deadline before reaching the row (F35).
+        #
+        # A depth the caller did not choose also gets one deeper look before
+        # the first swipe (#475), the rule tap_element's lookup follows (#470).
         el = await self._ios_scroll_to_element(
             resolved, label=label, identifier=identifier, max_swipes=max_swipes,
             snapshot_depth=self._read_depth(resolved, snapshot_depth),
+            deepen=snapshot_depth is None,
         )
         self._invalidate_ui_cache(resolved)  # scrolling changes the viewport
         if el is None:
