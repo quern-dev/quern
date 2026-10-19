@@ -950,6 +950,24 @@ def create_app(
     return app
 
 
+def _home_relative(path: str | Path) -> str:
+    """`path` as a person reads it: under the home directory, with `~`."""
+    p = Path(path).expanduser()
+    try:
+        return "~/" + str(p.relative_to(Path.home()))
+    except ValueError:
+        return str(p)
+
+
+def _crash_dir_shown(crash_dir: str | None) -> str:
+    """The directory the crash watcher really uses: --crash-dir, or the state
+    directory's -- not a fixed ~/.quern, which under QUERN_STATE_DIR named a
+    directory this server never wrote to (#487)."""
+    from server.sources import crash as crash_mod
+
+    return _home_relative(crash_dir or crash_mod.CRASH_DIR)
+
+
 def _add_server_flags(parser: argparse.ArgumentParser) -> None:
     """Add shared server flags to a subcommand parser."""
     parser.add_argument(
@@ -1307,18 +1325,19 @@ def _cmd_start(args: argparse.Namespace) -> None:
         print(f"  Warning: {exposed}", file=sys.stderr)
 
     if args.foreground:
+        from server import config as _config_mod
+
         print(f"Quern v{get_version()}")
         print(f"  http://{config.host}:{server_port}")
         print(f"  API key: {config.api_key[:8]}...{config.api_key[-4:]}")
-        print("  API key file: ~/.quern/api-key")
+        print(f"  API key file: {_home_relative(_config_mod.API_KEY_FILE)}")
         if args.process:
             print(f"  Process filter: {args.process}")
         if enable_oslog:
             sub = args.subsystem or "(all)"
             print(f"  OSLog: enabled (subsystem: {sub})")
         if enable_crash:
-            crash_path = args.crash_dir or "~/.quern/crashes"
-            print(f"  Crash watcher: enabled (dir: {crash_path})")
+            print(f"  Crash watcher: enabled (dir: {_crash_dir_shown(args.crash_dir)})")
             if args.simulator_crashes:
                 print(f"  Simulator crashes: enabled ({DIAGNOSTIC_REPORTS_DIR})")
             if args.crash_process_filter:
