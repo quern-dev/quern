@@ -173,6 +173,25 @@ def test_pairing_does_not_answer_on_the_local_listener(quern: QuernClient) -> No
     assert all(a == (404, "Not Found") for a in answers.values()), answers
 
 
+def test_pairing_refuses_a_malformed_body_on_the_local_listener_too(
+    quern: QuernClient,
+) -> None:
+    """The listener is checked before the body, so a malformed request here
+    learns nothing about the route's schema: the same bare 404, not a 422."""
+    answers = {}
+    for method, path in sorted(REMOTE_ONLY_PUBLIC):
+        resp = quern.request(
+            method, path, json={"unexpected": True},
+            authenticated=False, timeout=15.0,
+        )
+        try:
+            detail = resp.json().get("detail")
+        except ValueError:
+            detail = resp.text[:200]
+        answers[path] = (resp.status_code, detail)
+    assert all(a == (404, "Not Found") for a in answers.values()), answers
+
+
 # -- the protected set -------------------------------------------------------
 
 
