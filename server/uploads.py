@@ -273,8 +273,11 @@ async def _to_thread_to_the_end(fn, *args):
     try:
         return await asyncio.shield(work)
     except asyncio.CancelledError:
-        with contextlib.suppress(BaseException):
-            await work
+        # Shielded each time: a second cancel during this wait would cancel
+        # the wrapper and return while the OS thread ran on (CodeRabbit).
+        while not work.done():
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(work)
         raise
 
 

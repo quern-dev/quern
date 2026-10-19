@@ -505,7 +505,12 @@ class TestCleanupWaitsForTheDisk:
         async def go():
             task = asyncio.create_task(
                 store.receive("client:alice", "My.app.tar.gz", _chunks(zeros)))
+            deadline = time.monotonic() + 5
             while not started.is_set():
+                # Bounded, and failing with the upload's own error if it ended
+                # before unpacking -- not a hang (CodeRabbit).
+                assert not task.done(), f"ended before unpacking: {task.exception()!r}"
+                assert time.monotonic() < deadline, "never reached unpacking"
                 await asyncio.sleep(0.01)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
