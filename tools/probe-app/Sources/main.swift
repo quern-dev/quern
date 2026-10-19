@@ -41,6 +41,8 @@ enum ProbeTabs {
             // Pinch, rotate, two-finger pan, multi-tap and scroll, each
             // reported by a label (#252).
             (GesturesViewController(), "Gestures", "hand.draw"),
+            // A long list that is lazy and deep, as iOS 26 draws one (#475).
+            (LazyListViewController(), "Lazy", "square.stack"),
         ]
 
         let tabBarController = UITabBarController()

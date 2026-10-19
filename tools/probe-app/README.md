@@ -73,13 +73,14 @@ does, and the mismatch surfaces at install as a signature error.
 | Widgets | *(in More)* | One of each standard control the other tabs lack — search bar, progress and activity indicators, page control, image, menu button, colour well, compact date picker, text view, picker wheel, toolbar (`widget_*`) — all on screen at once, for comparing how the accessibility tree and XCUITest name each type ([landmark-conventions](../../docs/proposals/landmark-conventions.md)) |
 | Gestures | *(in More)* | What a pinch, rotation, two-finger pan, scroll, double tap, two-finger tap and long press actually did, as the app's recognisers saw it: `gesture_pinch` (`pinch 5.00 ended`), `gesture_rotate` (degrees), `gesture_pan` and `gesture_scroll` (translation), and counters `gesture_tap`, `gesture_double_tap`, `gesture_two_finger_tap`, `gesture_long_press`, all on `gesture_pad`; `gesture_reset` clears them. A single tap waits for the double tap and the long press to fail, and a two-finger tap for the moving gestures, so each label means one thing (#252) |
 | Lists | *(in More)* | A table with a section header, footer and three accessory types (`lists_row_0`…`2`), and a collection view (`lists_tile_0`…`5`), for the same comparison |
+| Lazy | *(in More)* | A long list the way iOS 26 draws one: a `UICollectionView` list (`lazy_list`) of 200 rows (`lazy_row_0` … `lazy_row_199`) that is **lazy** — only the rows on screen are in the tree, where the Scroll tab's table reports all 200 — and **deep**: through WDA the rows appear from depth 14 here, 18 on the tab bar, both below quern's shallow read depth of 12. Settings, a SwiftUI `List` and any `UICollectionView` list measured the same way; the Scroll tab cannot show it (#475). Even the More list's own "Lazy" row is found only at depth 25 |
 
 The tab bar itself doubles as a fixture for hidden tab-bar-children probing.
 
 **Tab order is load bearing.** An iPhone tab bar shows five items and moves the
 rest into a More list, which keeps its own navigation stack and is markedly
 harder to drive. The five the self-test exercises on every run are on the bar;
-Location, Web, Diag, State, Widgets and Lists are reached through More by
+Location, Web, Diag, State, Widgets, Lists, Gestures and Lazy are reached through More by
 `goto()`, which handles the list, the nav stack, and the fact that "More" names
 two different elements — the tab (a `RadioButton`) and the back button (a
 `Button`).
