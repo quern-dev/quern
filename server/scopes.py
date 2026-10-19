@@ -107,6 +107,10 @@ ROUTES: dict[tuple[str, str], Rule] = {
     ("GET", "/redoc"): _PUBLIC,
     ("GET", "/openapi.json"): _PUBLIC,
     ("GET", "/api/v1/proxy/cert"): _PUBLIC,
+    ("POST", "/api/v1/remote/pair/hello"): _PUBLIC,
+    ("POST", "/api/v1/remote/pair/finish"): _PUBLIC,
+    ("POST", "/api/v1/remote/pairing-codes"): _OWNER,
+    ("GET", "/api/v1/remote/status"): _OWNER,
     ("GET", "/docs/oauth2-redirect"): _OWNER,
 
     # -- sessions and reservations ------------------------------------------

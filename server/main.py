@@ -58,6 +58,7 @@ from server.config import (
     ServerConfig,
     get_crash_retention_days,
     get_local_capture_processes,
+    host_id,
     leading_exclusion,
     set_local_capture_processes,
     with_capture_minimum,
@@ -631,13 +632,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.exception("Could not start the viewer listener")
         app.state.viewer = None
 
+    # The remote listener (#254, phase 3), opt-in: the same app over TLS, to
+    # client keys. Like the viewer, it never stops the server starting.
+    from server.config import remote_settings as _remote_settings
+    from server.remote.listener import start_remote
+    try:
+        app.state.remote = await start_remote(app, _remote_settings())
+    except Exception:  # noqa: BLE001 -- never fatal
+        logger.exception("Could not start the remote listener")
+        app.state.remote = None
+
     yield
 
     # Sessions end with the server; a reconnect will be told so (4404).
     from server import device_access as _device_access
     _device_access.install(None)
 
-    # Viewers first: their streams relay recordings stopped below.
+    # Remote clients first: they come in from elsewhere and should stop
+    # arriving before anything below is torn down.
+    remote = getattr(app.state, "remote", None)
+    if remote is not None:
+        await remote.stop()
+    # Viewers next: their streams relay recordings stopped below.
     viewer = getattr(app.state, "viewer", None)
     if viewer is not None:
         await viewer.stop()
@@ -849,6 +865,8 @@ def create_app(
     app.include_router(trace_router)
     app.include_router(recordings_router)
     app.include_router(sessions_router)
+    from server.api.remote import router as remote_router
+    app.include_router(remote_router)
     app.include_router(crashes_router)
     app.include_router(builds_router)
     app.include_router(proxy_router)
@@ -877,13 +895,17 @@ def create_app(
         slow probe like `idb list-targets` (~5s) previously pushed /health past
         the CLI's 2s health-check timeout — making `quern status`/`start` wrongly
         report the server as down/stale. Keep this endpoint sub-millisecond.
+
+        `host_id` names this installation (#254, phase 3): a client compares
+        it with its own to tell whether it shares this server's disk, which
+        decides whether a path it sends means anything here.
         """
-        return {"status": "ok", "version": get_version()}
+        return {"status": "ok", "version": get_version(), "host_id": host_id()}
 
     @app.get("/api/v1/health")
     async def api_health() -> dict:
         """Fast liveness ping — see health()."""
-        return {"status": "ok", "version": get_version()}
+        return {"status": "ok", "version": get_version(), "host_id": host_id()}
 
     @app.get("/tools")
     async def tools() -> dict:
@@ -1087,21 +1109,26 @@ def _cmd_start(args: argparse.Namespace) -> None:
     # Resolve ports — try to reclaim from stale quern processes first,
     # only scan upward if occupied by something else
     server_port = args.port
-    # Never scan onto the viewer's port (#449): its links must not move, and a
-    # default range shifted by #446 would otherwise reach it.
-    from server.config import viewer_settings
+    # Never scan onto the viewer's port (#449) or the remote listener's (#254):
+    # their addresses are given out and must not move, and a default range
+    # shifted by #446 would otherwise reach them.
+    from server.config import remote_settings, viewer_settings
     viewer_port = viewer_settings()["port"]
-    if server_port == viewer_port:
-        # The viewer's port is never the server's, asked for or not.
-        print(f"Port {server_port} is the viewer's (viewer.bind)")
+    remote_port = remote_settings()["port"]
+    if server_port in (viewer_port, remote_port):
+        # Neither is ever the server's, asked for or not.
+        print(f"Port {server_port} is the "
+              f"{'viewer' if server_port == viewer_port else 'remote listener'}'s")
         server_port = find_available_port(
-            server_port + 1, host=args.host, exclude={args.proxy_port, viewer_port},
+            server_port + 1, host=args.host,
+            exclude={args.proxy_port, viewer_port, remote_port},
         )
         print(f"Using port {server_port} instead (override with --port)")
     elif not reclaim_port(server_port, args.host):
         print(f"Port {server_port} is in use by another application")
         server_port = find_available_port(
-            server_port + 1, host=args.host, exclude={args.proxy_port, viewer_port},
+            server_port + 1, host=args.host,
+            exclude={args.proxy_port, viewer_port, remote_port},
         )
         print(f"Using port {server_port} instead (override with --port)")
 
@@ -1112,12 +1139,13 @@ def _cmd_start(args: argparse.Namespace) -> None:
         # found it free for both: a restart that moved the server to 9110
         # while the proxy had scanned up to 9110 put the two on one port
         # (review, #446).
-        if proxy_port == server_port or proxy_port == viewer_port:
-            print(f"Proxy port {proxy_port} is taken by quern's server or viewer")
+        if proxy_port in (server_port, viewer_port, remote_port):
+            print(f"Proxy port {proxy_port} is taken by quern's server, viewer or "
+                  "remote listener")
             proxy_port = find_available_port(
                 proxy_port + 1,
                 host=args.host,
-                exclude={server_port, viewer_port},
+                exclude={server_port, viewer_port, remote_port},
             )
             print(f"Using proxy port {proxy_port} instead (override with --proxy-port)")
         elif not reclaim_port(proxy_port, args.host):
@@ -1125,7 +1153,7 @@ def _cmd_start(args: argparse.Namespace) -> None:
             proxy_port = find_available_port(
                 proxy_port + 1,
                 host=args.host,
-                exclude={server_port, viewer_port},
+                exclude={server_port, viewer_port, remote_port},
             )
             print(f"Using proxy port {proxy_port} instead (override with --proxy-port)")
 
@@ -2366,6 +2394,25 @@ def cli() -> None:
     clients_sub.add_parser("list")
     clients_sub.add_parser("revoke").add_argument("label")
 
+    # Reaching quern from another machine (#254, phase 3).
+    subparsers.add_parser(
+        "pair", help="Make a one-time code for another machine to pair with").add_argument(
+        "label")
+    connect_parser = subparsers.add_parser(
+        "connect", help="Pair with a remote quern and remember it")
+    connect_parser.add_argument("url")
+    connect_parser.add_argument("--code")
+    connect_parser.add_argument("--key")
+    connect_parser.add_argument("--fingerprint")
+    connect_parser.add_argument("--name")
+    remote_parser = subparsers.add_parser(
+        "remote", help="The remote listener here, or the remote querns paired with")
+    remote_sub = remote_parser.add_subparsers(dest="remote_command")
+    remote_sub.add_parser("status")
+    remote_sub.add_parser("rotate-cert")
+    remote_sub.add_parser("list")
+    remote_sub.add_parser("forget").add_argument("name")
+
     record_parser = subparsers.add_parser(
         "record", help="Record a device's actions, flows and logs to disk")
     record_sub = record_parser.add_subparsers(dest="record_command")
@@ -2512,6 +2559,10 @@ def cli() -> None:
         from server.session_cli import main as session_main
 
         sys.exit(session_main(sys.argv[sys.argv.index("session") + 1:]))
+    elif args.command in ("pair", "connect", "remote"):
+        from server.remote_cli import main as remote_main
+
+        sys.exit(remote_main(args.command, sys.argv[sys.argv.index(args.command) + 1:]))
     elif args.command == "clients":
         from server.clients_cli import main as clients_main
 

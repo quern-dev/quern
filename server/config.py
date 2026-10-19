@@ -6,6 +6,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -307,8 +308,25 @@ name. `bind` takes an IPv6 host in brackets, `[::]:9120`.
     """
     raw = read_user_config().get("viewer")
     raw = raw if isinstance(raw, dict) else {}
-    host, port, bind_error = VIEWER_DEFAULT_HOST, VIEWER_DEFAULT_PORT, None
-    bind = raw.get("bind")
+    host, port, bind_error = _parse_bind(raw.get("bind"), "viewer.bind",
+                                         VIEWER_DEFAULT_HOST, VIEWER_DEFAULT_PORT)
+    jmuxer = raw.get("jmuxer_path")
+    return {
+        "enabled": raw.get("enabled") is True,
+        "host": host,
+        "port": port,
+        "bind_error": bind_error,
+        "hosts": _host_names(raw.get("hosts")),
+        "jmuxer_path": jmuxer if isinstance(jmuxer, str) and jmuxer else None,
+        "grace_seconds": VIEWER_GRACE_SECONDS,
+    }
+
+
+def _parse_bind(bind, key: str, default_host: str, default_port: int
+                ) -> tuple[str, int, str | None]:
+    """`host:port` from a listener's `bind`, an IPv6 host in brackets; the
+    defaults and a reason when it is malformed, never an exception."""
+    host, port, bind_error = default_host, default_port, None
     if isinstance(bind, str) and bind:
         h, sep, p = bind.rpartition(":")
         if h.startswith("[") and h.endswith("]"):
@@ -319,22 +337,67 @@ name. `bind` takes an IPv6 host in brackets, `[::]:9120`.
                 raise ValueError(bind)
             if ":" in h and not bind.startswith("["):
                 raise ValueError(bind)           # "::1:9120" is ambiguous
-            host, port = (h or VIEWER_DEFAULT_HOST), port_n
+            host, port = (h or default_host), port_n
         except ValueError:
-            bind_error = (f"viewer.bind {bind!r} is not host:port (an IPv6 host in "
+            bind_error = (f"{key} {bind!r} is not host:port (an IPv6 host in "
                           f"brackets); using {host}:{port}")
-    hosts = raw.get("hosts")
-    jmuxer = raw.get("jmuxer_path")
-    return {
-        "enabled": raw.get("enabled") is True,
-        "host": host,
-        "port": port,
-        "bind_error": bind_error,
-        "hosts": [n for n in (_host_name(h) for h in hosts if isinstance(h, str)) if n]
-                 if isinstance(hosts, list) else [],
-        "jmuxer_path": jmuxer if isinstance(jmuxer, str) and jmuxer else None,
-        "grace_seconds": VIEWER_GRACE_SECONDS,
-    }
+    return host, port, bind_error
+
+
+def _host_names(hosts) -> list[str]:
+    return ([n for n in (_host_name(h) for h in hosts if isinstance(h, str)) if n]
+            if isinstance(hosts, list) else [])
+
+
+_HOST_ID: str | None = None
+
+
+def host_id() -> str:
+    """This installation's id: random, made once, kept in ~/.quern/host-id
+    (#254, phase 3). Not the Mac's hardware id -- nothing about the machine
+    is given to whoever asks /health -- just enough for a client to tell
+    "same disk as me" from "another machine". Read once per process; an
+    unreadable or unwritable file gives a per-process id, which errs towards
+    "not the same machine"."""
+    global _HOST_ID
+    if _HOST_ID is not None:
+        return _HOST_ID
+    path = CONFIG_DIR / "host-id"
+    try:
+        value = path.read_text().strip()
+    except OSError:
+        value = ""
+    if not re.fullmatch(r"[0-9a-f]{32}", value):
+        value = secrets.token_hex(16)
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            path.write_text(value + "\n")
+        except OSError:
+            pass
+    _HOST_ID = value
+    return value
+
+
+REMOTE_DEFAULT_HOST = "0.0.0.0"
+REMOTE_DEFAULT_PORT = 9130
+
+
+def remote_settings() -> dict:
+    """The remote listener's settings from config.json's `remote` object
+    (#254, phase 3): quern reached from another machine, over TLS, by client
+    keys only.
+
+        {"remote": {"enabled": true, "bind": "0.0.0.0:9130", "hosts": ["ci.lan"]}}
+
+    Off unless `enabled` is literally true, as the viewer is: a typo must
+    mean off for a listener other machines can reach. `hosts` are extra names
+    the listener answers to, besides this Mac's LAN address."""
+    raw = read_user_config().get("remote")
+    raw = raw if isinstance(raw, dict) else {}
+    host, port, bind_error = _parse_bind(raw.get("bind"), "remote.bind",
+                                         REMOTE_DEFAULT_HOST, REMOTE_DEFAULT_PORT)
+    return {"enabled": raw.get("enabled") is True, "host": host, "port": port,
+            "bind_error": bind_error, "hosts": _host_names(raw.get("hosts"))}
 
 
 def get_auto_install_cert() -> bool:

@@ -343,8 +343,21 @@ def _ensure_mcp_built(quiet: bool = False) -> bool:
     return True
 
 
+def _with_remote(env, remote: str | None) -> dict | None:
+    """An MCP entry's environment with `QUERN_REMOTE` set to `remote` (#254,
+    phase 3) -- or removed, when registering for this Mac's own server, so
+    an MCP once pointed at a remote does not stay pointed there unseen. Other
+    variables someone added are kept. None when nothing is left."""
+    out = dict(env) if isinstance(env, dict) else {}
+    if remote:
+        out["QUERN_REMOTE"] = remote
+    else:
+        out.pop("QUERN_REMOTE", None)
+    return out or None
+
+
 def _install_json_mcpservers(config_path: Path, mcp_entry: Path,
-                             node: str = "node") -> tuple[bool, str]:
+                             node: str = "node", remote: str | None = None) -> tuple[bool, str]:
     """Install quern-debug into a config file that uses the mcpServers JSON format.
 
     Used by claude-code, claude-desktop, and cursor.
@@ -371,6 +384,11 @@ def _install_json_mcpservers(config_path: Path, mcp_entry: Path,
     # workaround for this very problem, say -- survives re-registering.
     entry = dict(existing) if isinstance(existing, dict) else {}
     entry.update({"command": node, "args": [str(mcp_entry)]})
+    env = _with_remote(entry.get("env"), remote)
+    if env:
+        entry["env"] = env
+    else:
+        entry.pop("env", None)
     config["mcpServers"]["quern-debug"] = entry
 
     config_path.write_text(json.dumps(config, indent=2) + "\n")
@@ -379,7 +397,8 @@ def _install_json_mcpservers(config_path: Path, mcp_entry: Path,
     return True, f"{verb} quern-debug in {config_path}"
 
 
-def _install_opencode(mcp_entry: Path, node: str = "node") -> tuple[bool, str]:
+def _install_opencode(mcp_entry: Path, node: str = "node",
+                      remote: str | None = None) -> tuple[bool, str]:
     """Install quern into ~/.config/opencode/opencode.json."""
     import json
 
@@ -400,6 +419,11 @@ def _install_opencode(mcp_entry: Path, node: str = "node") -> tuple[bool, str]:
     existing = config["mcp"].get("quern")
     entry = dict(existing) if isinstance(existing, dict) else {}
     entry.update({"type": "local", "command": [node, str(mcp_entry)]})
+    env = _with_remote(entry.get("environment"), remote)
+    if env:
+        entry["environment"] = env
+    else:
+        entry.pop("environment", None)
     config["mcp"]["quern"] = entry
 
     config_path.write_text(json.dumps(config, indent=2) + "\n")
@@ -469,7 +493,8 @@ def _toml_upsert_section(text: str, section: str, fields: dict) -> str:
     return "".join(lines)
 
 
-def _install_codex(mcp_entry: Path, node: str = "node") -> tuple[bool, str]:
+def _install_codex(mcp_entry: Path, node: str = "node",
+                   remote: str | None = None) -> tuple[bool, str]:
     """Install quern into ~/.codex/config.toml."""
     import json
 
@@ -490,6 +515,14 @@ def _install_codex(mcp_entry: Path, node: str = "node") -> tuple[bool, str]:
         "args": json.dumps([str(mcp_entry)], ensure_ascii=False),
         "enabled": "true",
     }
+    # The env table is written whole: TOML's inline table cannot be merged by
+    # line. So --remote replaces any env table there (variables someone else
+    # put in it are not kept, unlike the JSON clients), and registering for
+    # this Mac's own server empties one an earlier --remote wrote.
+    if remote:
+        fields["env"] = "{ QUERN_REMOTE = " + json.dumps(remote, ensure_ascii=False) + " }"
+    elif "QUERN_REMOTE" in existing_text:
+        fields["env"] = "{ }"
     new_text = _toml_upsert_section(existing_text, "mcp_servers.quern", fields)
     config_path.write_text(new_text)
 
@@ -707,7 +740,20 @@ def _cmd_mcp_install() -> int:
         metavar="TARGET",
         help=f"Targets to install into: {', '.join(ALL_TARGETS)}, all (default: claude-code)",
     )
+    parser.add_argument(
+        "--remote", metavar="NAME", default=None,
+        help="Point the MCP at a paired remote quern (quern connect) instead of this Mac's")
     args = parser.parse_args(sys.argv[2:])
+    if args.remote:
+        # Checked before anything is written: an MCP registered for a remote
+        # this machine has not paired with would fail at every start.
+        from server.remote import client as remote_client
+
+        try:
+            remote_client.load(args.remote)
+        except remote_client.RemoteError as e:
+            print(f"Error: {e}")
+            return 1
 
     # Expand "all"
     targets: list[str] = []
@@ -760,15 +806,17 @@ def _cmd_mcp_install() -> int:
     if chosen:
         print(f"  node: {chosen.path} ({chosen.version}, from your {chosen.found_in})")
 
+    remote = args.remote
     dispatch = {
         "claude-code":    lambda: _install_json_mcpservers(
-            Path.home() / ".claude.json", mcp_entry, node),
-        "claude-desktop": lambda: _install_json_mcpservers(CLAUDE_DESKTOP_CONFIG, mcp_entry, node),
+            Path.home() / ".claude.json", mcp_entry, node, remote),
+        "claude-desktop": lambda: _install_json_mcpservers(
+            CLAUDE_DESKTOP_CONFIG, mcp_entry, node, remote),
         "cursor":         lambda: _install_json_mcpservers(
-            Path.home() / ".cursor" / "mcp.json", mcp_entry, node,
+            Path.home() / ".cursor" / "mcp.json", mcp_entry, node, remote,
         ),
-        "opencode":       lambda: _install_opencode(mcp_entry, node),
-        "codex":          lambda: _install_codex(mcp_entry, node),
+        "opencode":       lambda: _install_opencode(mcp_entry, node, remote),
+        "codex":          lambda: _install_codex(mcp_entry, node, remote),
     }
 
     all_ok = True
@@ -1059,7 +1107,14 @@ def main() -> None:
         sys.exit(run_uninstall())
 
     if len(sys.argv) >= 2 and sys.argv[1] == "mcp-install":
-        _check_args("mcp-install", sys.argv[2:], choices=(*MCP_INSTALL_TARGETS, "all"))
+        rest = sys.argv[2:]
+        # `--remote NAME` (#254, phase 3): its value is not a target, so it is
+        # taken out before the targets are checked.
+        if "--remote" in rest:
+            i = rest.index("--remote")
+            rest = rest[:i] + rest[i + 2:]
+        _check_args("mcp-install", rest, choices=(*MCP_INSTALL_TARGETS, "all"),
+                    allowed=("--remote",))
         sys.exit(_cmd_mcp_install())
 
     if len(sys.argv) >= 2 and sys.argv[1] == "grant-full-perms":
@@ -1105,6 +1160,11 @@ def main() -> None:
         from server.session_cli import main as session_main
 
         sys.exit(session_main(sys.argv[2:]))
+
+    if len(sys.argv) >= 2 and sys.argv[1] in ("pair", "connect", "remote"):
+        from server.remote_cli import main as remote_main
+
+        sys.exit(remote_main(sys.argv[1], sys.argv[2:]))
 
     if len(sys.argv) >= 2 and sys.argv[1] == "clients":
         from server.clients_cli import main as clients_main

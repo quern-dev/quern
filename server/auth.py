@@ -29,6 +29,9 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from server import principal
 from server.session_registry import OWNER
 
+#: Set on a scope by the remote listener (server/remote/listener.py).
+REMOTE = "quern.remote"
+
 if TYPE_CHECKING:
     from server.clients import ClientKeys
 
@@ -36,6 +39,9 @@ if TYPE_CHECKING:
 PUBLIC_PATHS = frozenset({
     "/", "/health", "/api/v1/health", "/tools", "/docs", "/redoc",
     "/openapi.json", "/api/v1/proxy/cert",
+    # Pairing (#254, phase 3): a client pairing has no key yet. Its proofs are
+    # the authentication, and the routes answer only on the remote listener.
+    "/api/v1/remote/pair/hello", "/api/v1/remote/pair/finish",
 })
 
 #: The close code for a WebSocket refused for its key: 4000-4999 are the
@@ -68,6 +74,8 @@ class APIKeyMiddleware:
         # a failed handshake (HTTP 403).
         if scope["type"] == "websocket":
             who = self._principal(scope)
+            if who == OWNER and scope.get(REMOTE):
+                who = None                  # the owner's key, from another machine
             if who is not None:
                 await self._as(who, scope, receive, send)
                 return
@@ -80,6 +88,14 @@ class APIKeyMiddleware:
             return
 
         who = self._principal(scope)
+        if who == OWNER and scope.get(REMOTE):
+            # Never accepted from another machine (#254, phase 3, decided):
+            # the key that reaches everything stays off the network. The owner
+            # works on the Mac, or over SSH to it.
+            await _refuse(send, 403, "the owner's API key is not accepted on the remote "
+                                     "listener: pair this machine with `quern pair`, or "
+                                     "use the server's own Mac")
+            return
         if who is not None:
             await self._as(who, scope, receive, send)
             return
@@ -176,3 +192,11 @@ def _presented_keys(scope: Scope) -> list[bytes]:
     if api_key_header is not None:
         found.append(api_key_header)
     return found
+
+
+async def _refuse(send: Send, status: int, detail: str) -> None:
+    body = json.dumps({"detail": detail}).encode()
+    await send({"type": "http.response.start", "status": status,
+                "headers": [(b"content-type", b"application/json"),
+                            (b"content-length", str(len(body)).encode())]})
+    await send({"type": "http.response.body", "body": body})

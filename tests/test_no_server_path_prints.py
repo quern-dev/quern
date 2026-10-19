@@ -46,6 +46,7 @@ _TERMINAL_FACING = {
     "recording/cli.py",  # `quern record ...`, run in a shell or a CI step
     "session_cli.py",  # `quern session ...`, run in a shell or a CI step
     "clients_cli.py",  # `quern clients ...`, run by the owner in a shell
+    "remote_cli.py",   # `quern pair/connect/remote ...`, run in a shell
 }
 
 #: The one deliberate exception on a server path: logging from inside the log

@@ -12,7 +12,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { apiRequest, probeServer } from "./http.js";
+import { apiRequest, probeServer, serverFetch } from "./http.js";
 import { startHeldSession, stopHeldSession } from "./held-session.js";
 import { registerSessionTools } from "./tools/sessions.js";
 import { deliverSessionNotices } from "./notices.js";
@@ -243,8 +243,8 @@ async function checkVersionSkew(): Promise<void> {
   // warns about unreachable). Cap timeout to 2s so a slow server
   // never blocks MCP startup.
   try {
-    const serverUrl = discoverServer().url;
-    const resp = await fetch(new URL("/health", serverUrl).toString(), {
+    const server = discoverServer();
+    const resp = await serverFetch(server, new URL("/health", server.url).toString(), {
       signal: AbortSignal.timeout(2000),
     });
     if (!resp.ok) return;

@@ -2,8 +2,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { execSync } from "node:child_process";
 import { homedir } from "node:os";
 import { z } from "zod";
-import { readStateFile } from "../config.js";
-import { apiRequest, SESSION_ID } from "../http.js";
+import { discoverServer, readStateFile } from "../config.js";
+import { apiRequest, SESSION_ID, serverFetch } from "../http.js";
 import { strictParams, errorText } from "./helpers.js";
 import { type LogQueryAnswer, tailLogsResult } from "./log-responses.js";
 
@@ -12,6 +12,28 @@ export function registerLogTools(server: McpServer): void {
     description: `Ensure Quern is running. Reads state.json, health checks, and starts the server if needed. This is the recommended first tool call for any agent session. Returns connection info including server URL, proxy port, and API key.`,
     inputSchema: strictParams({}),
   }, async () => {
+      // A remote quern (QUERN_REMOTE, #254 phase 3): checked over the pinned
+      // connection, and never started here -- starting this Mac's server would
+      // answer a question nobody asked about a machine nobody named.
+      const target = discoverServer();
+      if (target.source === "remote") {
+        try {
+          const resp = await serverFetch(target, new URL("/health", target.url).toString(), {
+            signal: AbortSignal.timeout(5000),
+          });
+          const health = (await resp.json()) as Record<string, unknown>;
+          return { content: [{ type: "text" as const, text: JSON.stringify({
+            status: resp.ok ? "running" : "unhealthy", remote: process.env.QUERN_REMOTE,
+            server_url: target.url, version: health.version,
+            note: "a remote quern: it is started on its own machine, never from here",
+          }, null, 2) }] };
+        } catch (e) {
+          return { content: [{ type: "text" as const, text:
+            `The remote quern ${process.env.QUERN_REMOTE} at ${target.url} did not answer: ` +
+            `${errorText(e)}. It is started on its own machine, not from here.` }],
+            isError: true };
+        }
+      }
       try {
         // Check if already running via state file
         const state = readStateFile();
