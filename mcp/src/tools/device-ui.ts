@@ -113,7 +113,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
         .min(1)
         .max(50)
         .optional()
-        .describe("WDA snapshot depth for this read (a physical iPhone, or a simulator after start_driver). Default 12: tab bars, controls and list rows are within it, and on a long list it reads ~9x faster than the full walk (34.5s vs 3.9s measured on an iPhone 11). A miss looks once more at the full depth, even when you pass a depth (see deepen); a not-found answer says how deep it looked."),
+        .describe("WDA snapshot depth for this read (a physical iPhone, or a simulator after start_driver). Default 12: tab bars, controls and list rows are within it, and on a long list it reads ~9x faster than the full walk (34.5s vs 3.9s measured on an iPhone 11). A miss looks once more at the full depth (25), even when you pass a depth below it (see deepen); a not-found answer says how deep it looked."),
       deepen: z
         .boolean()
         .optional()
@@ -211,7 +211,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
         .min(1)
         .max(50)
         .optional()
-        .describe("WDA snapshot depth for this read (a physical iPhone, or a simulator after start_driver). Default 12: tab bars, controls and list rows are within it, and on a long list it reads ~9x faster than the full walk (34.5s vs 3.9s measured on an iPhone 11). A miss looks once more at the full depth, even when you pass a depth (see deepen); a not-found answer says how deep it looked."),
+        .describe("WDA snapshot depth for this read (a physical iPhone, or a simulator after start_driver). Default 12: tab bars, controls and list rows are within it, and on a long list it reads ~9x faster than the full walk (34.5s vs 3.9s measured on an iPhone 11). A miss looks once more at the full depth (25), even when you pass a depth below it (see deepen); a not-found answer says how deep it looked."),
       deepen: z
         .boolean()
         .optional()
@@ -513,7 +513,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         .min(1)
         .max(50)
         .optional()
-        .describe("WDA snapshot depth for this read (a physical iPhone, or a simulator after start_driver). Default 12: tab bars, controls and list rows are within it, and on a long list it reads ~9x faster than the full walk (34.5s vs 3.9s measured on an iPhone 11). A miss looks once more at the full depth, even when you pass a depth (see deepen); a not-found answer says how deep it looked."),
+        .describe("WDA snapshot depth for this read (a physical iPhone, or a simulator after start_driver). Default 12: tab bars, controls and list rows are within it, and on a long list it reads ~9x faster than the full walk (34.5s vs 3.9s measured on an iPhone 11). A miss looks once more at the full depth (25), even when you pass a depth below it (see deepen); a not-found answer says how deep it looked."),
       deepen: z
         .boolean()
         .optional()

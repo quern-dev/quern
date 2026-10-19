@@ -345,6 +345,12 @@ def _depth_detail(
     """
     from server.device.ios.wda_client import SNAPSHOT_MAX_DEPTH
 
+    if read_depth >= SNAPSHOT_MAX_DEPTH:
+        # deepen has nothing to add here, so it is not offered as the way on.
+        return (
+            f" (read through WDA at snapshot_depth={read_depth}, the full depth; "
+            "if the element is nested deeper still, pass a larger snapshot_depth)"
+        )
     if opted_out:
         return (
             f" (read through WDA at snapshot_depth={read_depth} only, as deepen=false "
@@ -2717,7 +2723,7 @@ class DeviceControllerUI:
                 }
                 if hint:
                     result["web_content_hint"] = hint
-                if (last_element is None and poll_depth is not None
+                if (not ever_found and poll_depth is not None
                         and self._served_by_wda(resolved)):
                     # Never seen: say how deep the polls looked, or a shallow
                     # miss reads as "never appeared" (#494). Not for a
