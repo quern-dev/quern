@@ -153,6 +153,13 @@ detail="summary" (the default here) gives one line per event: a flow's method, U
         const part = `${out}.part`;
         try {
           await pipeline(Readable.fromWeb(resp.body as never), createWriteStream(part));
+          // A connection closed early can read as the end of the file: the
+          // length promised is what says it is whole (review, #482).
+          const expected = Number(resp.headers.get("content-length") ?? NaN);
+          const got = (await stat(part)).size;
+          if (Number.isFinite(expected) && got !== expected) {
+            throw new Error(`the server sent ${got} of ${expected} bytes of ${file.name}`);
+          }
           await rename(part, out);
         } catch (e) {
           await rm(part, { force: true });

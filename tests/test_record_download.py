@@ -147,3 +147,86 @@ def test_start_and_stop_say_a_remote_recordings_paths_are_on_the_server(monkeypa
     monkeypatch.delenv("QUERN_REMOTE")
     cli._remote_note(REC)
     assert capsys.readouterr().err == ""
+
+
+# ---------------------------------------------------------------------------
+# Review
+# ---------------------------------------------------------------------------
+
+
+def _truncating_server():
+    """Promises 100000 bytes of video, sends 100, and closes cleanly."""
+    import socket
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen()
+
+    def serve():
+        while True:
+            try:
+                conn, _ = sock.accept()
+            except OSError:
+                return
+            with conn:
+                request = conn.recv(65536).decode("latin-1")
+                path = request.split(" ")[1]
+                if path.endswith("/files"):
+                    body = json.dumps({"recording_id": REC, "live": False,
+                                       "files": [{"name": "video-1.mp4", "bytes": 100000}]})
+                    conn.sendall(f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                                 f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n"
+                                 f"{body}".encode())
+                else:
+                    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n"
+                                 b"Connection: close\r\n\r\n" + b"v" * 100)
+
+    threading.Thread(target=serve, daemon=True).start()
+    return sock, f"http://127.0.0.1:{sock.getsockname()[1]}"
+
+
+def test_a_download_cut_off_is_not_saved_as_whole(tmp_path, monkeypatch, capsys):
+    """A connection closed early read as the end of the file, and a 100-byte
+    video was kept under its name with exit 0 (review, reproduced)."""
+    sock, url = _truncating_server()
+    monkeypatch.setattr(cli, "_target", lambda: (url, "qc_key", None))
+    dest = tmp_path / "out"
+    try:
+        assert cli.main(["download", REC, "--dest", str(dest)]) == 1
+    finally:
+        sock.close()
+    assert "100 of 100000" in capsys.readouterr().err
+    assert not (dest / "video-1.mp4").exists() and not list(dest.glob("*.part"))
+
+
+def test_an_id_with_a_path_in_it_is_refused(serve, tmp_path, monkeypatch):
+    s = serve()
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["download", f"{REC}/../../x"]) == 2
+    assert s.seen == []
+
+
+def test_a_listed_name_with_a_path_in_it_is_not_written(serve, tmp_path):
+    serve(listing_extra=["../events.jsonl", "x/manifest.json"])
+    dest = tmp_path / "out"
+    assert cli.main(["download", REC, "--dest", str(dest)]) == 0
+    assert not (tmp_path / "events.jsonl").exists() and not (dest / "x").exists()
+
+
+def test_a_dest_that_cannot_be_made_is_one_line(serve, tmp_path, capsys):
+    serve()
+    blocker = tmp_path / "a-file"
+    blocker.write_text("x")
+    assert cli.main(["download", REC, "--dest", str(blocker)]) == 1
+    err = capsys.readouterr().err
+    assert "cannot write to" in err and "Traceback" not in err
+
+
+def test_start_under_a_remote_names_the_download_command(monkeypatch, capsys):
+    monkeypatch.setenv("QUERN_REMOTE", "office")
+    monkeypatch.setattr(cli, "_call", lambda *a, **k: (200, {
+        "id": REC, "udid": "SIM", "output_dir": "/server/recordings/" + REC}))
+    assert cli.main(["start", "--udid", "SIM"]) == 0
+    out = capsys.readouterr()
+    assert out.out.splitlines()[0] == REC, "the id stays alone on stdout's first line"
+    assert f"quern record download {REC}" in out.err

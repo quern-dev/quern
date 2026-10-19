@@ -146,7 +146,11 @@ def _download(recording_id: str, dest: str | None) -> int:
         print(f"quern record download: {_detail(listing.get('detail'))}", file=sys.stderr)
         return 2
     target = Path(dest or Path("quern-recordings") / recording_id).expanduser()
-    target.mkdir(parents=True, exist_ok=True)
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f"quern record download: cannot write to {target}: {e}", file=sys.stderr)
+        return 1
     url, key, remote = _target()
     got = []
     for entry in listing.get("files") or []:
@@ -157,7 +161,13 @@ def _download(recording_id: str, dest: str | None) -> int:
         req = _request(url, key, f"/api/v1/recordings/{recording_id}/files/{name}")
         try:
             with _opener(remote)(req, timeout=60) as resp, open(part, "wb") as out:
+                expected = resp.headers.get("Content-Length")
                 shutil.copyfileobj(resp, out, 1024 * 1024)
+                written = out.tell()
+            # A connection closed early reads as the end of the file: the
+            # length it promised is what says the file is whole (review).
+            if expected is not None and expected.isdigit() and written != int(expected):
+                raise OSError(f"the server sent {written} of {expected} bytes")
             part.replace(target / name)
         except urllib.error.HTTPError as e:
             part.unlink(missing_ok=True)

@@ -87,6 +87,11 @@ class UploadStore:
         #: (#481). 0 for no floor.
         self.min_free_bytes = min_free_bytes
         self._disk_free = disk_free or self._free_on_volume
+        #: Bytes promised to the disk but not on it yet -- the rest of a
+        #: declared upload, a bundle about to unpack -- across every key, so
+        #: uploads side by side cannot each find the same room above the
+        #: floor (review).
+        self._disk_pending = 0
         self.root = root
         self.max_bytes = max_bytes
         self._clock = clock
@@ -116,7 +121,13 @@ class UploadStore:
         """Refuse when `more` bytes would leave the volume under its floor."""
         if not self.min_free_bytes:
             return
-        free = self._disk_free()
+        try:
+            free = self._disk_free()
+        except OSError as e:
+            # Not known is not room: refused, rather than read as plenty.
+            raise UploadError(f"the server could not read its free disk space ({e}); "
+                              "try again", 507) from None
+        free -= self._disk_pending
         if free - more < self.min_free_bytes:
             mb = 1024 * 1024
             raise UploadError(
@@ -150,7 +161,10 @@ class UploadStore:
         size = 0
         reserved = 0
         checked_at = 0
+        promised = 0
         try:
+            promised = declared or 0
+            self._disk_pending += promised
             with open(target, "wb") as out:
                 async for chunk in chunks:
                     # Checked against everything held now, in-flight bytes
@@ -163,6 +177,10 @@ class UploadStore:
                     size += len(chunk)
                     self._inflight[principal] = self._inflight.get(principal, 0) + len(chunk)
                     out.write(chunk)
+                    # Written now, so no longer only promised.
+                    paid = min(promised, len(chunk))
+                    promised -= paid
+                    self._disk_pending -= paid
                     if size - checked_at >= DISK_CHECK_BYTES:
                         checked_at = size
                         self._check_disk()
@@ -183,6 +201,8 @@ class UploadStore:
                 self._check_disk(unpacked)
                 self._inflight[principal] = self._inflight.get(principal, 0) + unpacked
                 reserved = unpacked
+                self._disk_pending += unpacked
+                promised += unpacked
                 path, held = await _to_thread_to_the_end(
                     _unpack_app, target, directory / "app", unpacked)
                 target.unlink()
@@ -190,6 +210,7 @@ class UploadStore:
             shutil.rmtree(directory, ignore_errors=True)
             raise
         finally:
+            self._disk_pending -= promised
             left = self._inflight.get(principal, 0) - size - reserved
             if left > 0:
                 self._inflight[principal] = left

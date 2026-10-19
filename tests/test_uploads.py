@@ -611,3 +611,71 @@ def test_the_route_answers_507_when_the_disk_is_full(world):
     app.state.uploads._disk_free = lambda: 1024 * 1024
     r = _upload(c, alice, "My.ipa", b"x")
     assert r.status_code == 507 and "too full" in r.json()["detail"]
+
+
+class TestTheFloorAcrossKeys:
+    MB = 1024 * 1024
+
+    def test_bundles_side_by_side_cannot_both_take_the_room_above_the_floor(self, tmp_path,
+                                                                            monkeypatch):
+        """Each was checked against free space now, not what the other had
+        reserved and not yet written, so together they went below the floor
+        (review, reproduced)."""
+        import time
+
+        import server.uploads as uploads
+
+        real_unpack = uploads._unpack_app
+
+        def slow_unpack(*a):
+            time.sleep(0.2)
+            return real_unpack(*a)
+
+        monkeypatch.setattr(uploads, "_unpack_app", slow_unpack)
+
+        def free():
+            used = sum(f.stat().st_size for f in (tmp_path / "u").rglob("*") if f.is_file())
+            return 9 * self.MB - used
+
+        store = UploadStore(tmp_path / "u", max_bytes=1 << 30, min_free_bytes=4 * self.MB,
+                            disk_free=free)
+        zeros = _tar([("My.app", "dir", b""), ("My.app/zeros", "file", b"\0" * (3 * self.MB))])
+
+        async def both():
+            return await asyncio.gather(
+                store.receive("client:alice", "A.app.tar.gz", _chunks(zeros)),
+                store.receive("client:bob", "B.app.tar.gz", _chunks(zeros)),
+                return_exceptions=True)
+
+        results = asyncio.run(both())
+        refused = [r for r in results if isinstance(r, UploadError)]
+        assert len(refused) == 1 and refused[0].status == 507, results
+        assert free() >= 4 * self.MB
+        assert store._disk_pending == 0
+
+    def test_free_space_that_cannot_be_read_is_refused_not_assumed(self, tmp_path):
+        def broken():
+            raise OSError("no such volume")
+
+        store = UploadStore(tmp_path / "u", max_bytes=1 << 30, min_free_bytes=self.MB,
+                            disk_free=broken)
+        with pytest.raises(UploadError) as e:
+            _receive(store, "client:alice", "My.ipa", b"x")
+        assert e.value.status == 507 and "could not read" in str(e.value)
+
+    def test_the_volume_is_read_where_the_uploads_will_go(self, tmp_path):
+        """Not yet made: the nearest directory above it, on the same volume."""
+        import shutil
+
+        store = UploadStore(tmp_path / "not" / "yet", max_bytes=1, min_free_bytes=1)
+        assert store._free_on_volume() == shutil.disk_usage(tmp_path).free
+
+    def test_the_server_gives_the_store_its_configured_floor(self, monkeypatch):
+        import server.main as m
+        from server import config
+        from server.config import ServerConfig
+
+        monkeypatch.setattr(config, "read_user_config",
+                            lambda: {"uploads": {"min_free_mb": 123}})
+        app = m.create_app(ServerConfig(api_key="k" * 32))
+        assert app.state.uploads.min_free_bytes == 123 * self.MB

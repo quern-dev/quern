@@ -441,7 +441,8 @@ def upload_settings() -> dict:
         value = raw.get(key, default)
         if isinstance(value, bool) or not isinstance(value, int) or value < least:
             notes.append(f"config.json's uploads.{key} is {value!r}, not a whole number of "
-                         f"megabytes{' above 0' if least else ''}: using {default}")
+                         f"megabytes {'above 0' if least else 'of 0 or more'}: "
+                         f"using {default}")
             return default
         return value
 
