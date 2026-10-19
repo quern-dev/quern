@@ -2314,6 +2314,14 @@ class TapElementRequest(BaseModel):
             "list. Pass more if the element is nested deeper."
         ),
     )
+    deepen: bool = Field(
+        default=True,
+        description=(
+            "Through WDA, a miss at snapshot_depth (a floor, not a ceiling) looks once "
+            "more at the full depth, bounded and only after a quick shallow read (#494). "
+            "false keeps the read at exactly snapshot_depth."
+        ),
+    )
     include_screen_context: bool = False
     capture_screenshots: bool = False
     settle_delay: float = Field(default=1.0, ge=0, le=10)
@@ -2412,6 +2420,14 @@ class ScrollToElementRequest(BaseModel):
         description=(
             "WDA snapshot depth for the sweep's reads. Default 12 through WDA, as "
             "for tap_element; pass more if the element is nested deeper."
+        ),
+    )
+    deepen: bool = Field(
+        default=True,
+        description=(
+            "Through WDA, a miss at snapshot_depth (a floor, not a ceiling) looks once "
+            "more at the full depth, bounded and only after a quick shallow read (#494). "
+            "false keeps the read at exactly snapshot_depth."
         ),
     )
 
@@ -2623,6 +2639,14 @@ class WaitForElementRequest(BaseModel):
             "after start_driver). Default 12: deep enough for tab bars, controls "
             "and list rows, and nine times faster than the full walk on a long "
             "list. Pass more if the element is nested deeper."
+        ),
+    )
+    deepen: bool = Field(
+        default=True,
+        description=(
+            "Through WDA, a miss at snapshot_depth (a floor, not a ceiling) looks once "
+            "more at the full depth, bounded and only after a quick shallow read (#494). "
+            "false keeps the read at exactly snapshot_depth."
         ),
     )
 

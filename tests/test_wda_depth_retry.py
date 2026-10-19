@@ -199,12 +199,31 @@ class TestTapElement:
             "the whole-screen read never ran, so this test checks nothing")
         _no_deep_source(ctrl)
 
-    async def test_a_depth_the_caller_chose_is_not_overridden(self, phone):
+    async def test_a_depth_the_caller_chose_is_a_floor(self, phone):
+        """#494: an explicit 12 turned the deeper look off, so a caller pinning
+        the default for speed got a 404 a caller passing nothing did not."""
         ctrl, wda = phone
         result = await ctrl.tap_element(identifier=WIFI, snapshot_depth=12, scroll_to_find=False)
+        assert result["status"] == "ok", result
+        assert result["snapshot_depth"] == SNAPSHOT_MAX_DEPTH
+        assert len(wda.deep_queries()) >= 1
+        assert wda.depth == 12, "not put back at the caller's depth"
+
+    async def test_deepen_false_keeps_the_depth_exact_and_says_so(self, phone):
+        ctrl, wda = phone
+        result = await ctrl.tap_element(identifier=WIFI, snapshot_depth=12,
+                                         scroll_to_find=False, deepen=False)
         assert result["status"] == "not_found"
         assert wda.deep_queries() == []
         assert "queried again" not in result["detail"]
+        assert "deepen=false" in result["detail"]
+
+    async def test_a_depth_at_the_full_depth_has_nothing_deeper_to_try(self, phone):
+        ctrl, wda = phone
+        await ctrl.tap_element(identifier="absent", snapshot_depth=SNAPSHOT_MAX_DEPTH,
+                               scroll_to_find=False)
+        assert all(q.get("no_resend") is not True for q in wda.queries), (
+            "a bounded deeper query ran on top of a full-depth read")
 
     async def test_not_found_says_it_looked_deeper_only_when_it_did(self, phone):
         ctrl, wda = phone
@@ -230,11 +249,35 @@ class TestTheOtherActions:
         assert f"snapshot_depth={SNAPSHOT_MAX_DEPTH}" in result["depth_note"]
         _no_deep_source(ctrl)
 
-    async def test_get_element_respects_a_chosen_depth(self, phone):
+    async def test_get_element_treats_a_chosen_depth_as_a_floor(self, phone):
+        """#494: the conformance driver pins 12; a row at 14 was a 404."""
         ctrl, wda = phone
-        with pytest.raises(DeviceError, match="No element found"):
-            await ctrl.get_element(identifier=WIFI, snapshot_depth=12)
+        result, _ = await ctrl.get_element(identifier=WIFI, snapshot_depth=12)
+        assert result["identifier"] == WIFI
+        assert result["snapshot_depth"] == SNAPSHOT_MAX_DEPTH
+
+    async def test_get_element_with_deepen_false_reads_exactly_and_says_how_deep(self, phone):
+        ctrl, wda = phone
+        with pytest.raises(DeviceError, match="snapshot_depth=12 only, as deepen=false"):
+            await ctrl.get_element(identifier=WIFI, snapshot_depth=12, deepen=False)
         assert wda.deep_queries() == []
+
+    async def test_get_elements_404_says_how_deep_it_looked(self, phone):
+        """It said only "No element found", which reads as "not there"."""
+        ctrl, wda = phone
+        with pytest.raises(DeviceError, match="queried again at 25"):
+            await ctrl.get_element(identifier="absent")
+
+    async def test_get_elements_404_does_not_claim_a_look_it_did_not_take(self, phone):
+        """The lookup state is per request; an earlier deeper look in the same
+        context must not show up in this 404."""
+        ctrl, wda = phone
+        controller_ui._DEEPEN_TRIED.set(True)
+        # At the full depth no deeper look can run, so "queried again" could
+        # only come from the stale flag.
+        with pytest.raises(DeviceError) as err:
+            await ctrl.get_element(identifier="absent", snapshot_depth=SNAPSHOT_MAX_DEPTH)
+        assert "queried again" not in str(err.value), str(err.value)
 
     async def test_wait_finds_an_element_that_appears_after_the_first_poll(self, phone):
         """The common wait: tap, then wait for a row on the next screen. Looking
@@ -591,11 +634,19 @@ class TestTheScrollSweepLooksDeeperFirst:
         assert wda.deep_queries() == []
         assert swipes, "a miss with no deeper look still sweeps"
 
-    async def test_a_depth_the_caller_chose_is_not_overridden(self, sweeping):
+    async def test_a_depth_the_caller_chose_is_a_floor(self, sweeping):
         ctrl, wda, swipes = sweeping
         result = await ctrl.scroll_to_element(identifier=WIFI, snapshot_depth=12)
+        assert result["status"] == "ok", result
+        assert swipes == []
+
+    async def test_deepen_false_keeps_the_sweep_exact_and_says_how_deep(self, sweeping):
+        ctrl, wda, swipes = sweeping
+        result = await ctrl.scroll_to_element(identifier=WIFI, snapshot_depth=12, deepen=False)
         assert result["status"] == "not_found"
         assert wda.deep_queries() == []
+        assert result["snapshot_depth"] == 12
+        assert "deepen=false" in result["detail"]
 
     async def test_a_timed_out_deeper_look_is_not_re_sent_and_the_depth_goes_back(
         self, sweeping,
@@ -619,11 +670,18 @@ class TestTheScrollSweepLooksDeeperFirst:
         assert len(wda.deep_queries()) > 1
         assert wda.depth == ACTION_SNAPSHOT_DEPTH
 
-    async def test_a_chosen_depth_keeps_tap_elements_sweep_at_it(self, sweeping):
+    async def test_deepen_false_keeps_tap_elements_sweep_at_the_chosen_depth(self, sweeping):
+        ctrl, wda, swipes = sweeping
+        await ctrl.tap_element(identifier="absent", scroll_to_find=True, snapshot_depth=12,
+                               deepen=False)
+        assert swipes, "the sweep never ran, so this test checks nothing"
+        assert wda.deep_queries() == []
+
+    async def test_a_chosen_depth_still_lets_tap_elements_sweep_look_deeper(self, sweeping):
         ctrl, wda, swipes = sweeping
         await ctrl.tap_element(identifier="absent", scroll_to_find=True, snapshot_depth=12)
         assert swipes, "the sweep never ran, so this test checks nothing"
-        assert wda.deep_queries() == []
+        assert wda.deep_queries(), "a chosen depth turned the deeper look off (#494)"
 
 
 class LazyDeepList:
@@ -1090,3 +1148,43 @@ class TestTheReviewFindings:
         assert result["status"] == "ok", result
         i = world.events.index("scroll")
         assert world.events[i + 1] == "frame", world.events[i - 2:i + 4]
+
+
+class TestWaitSaysHowDeepItLooked:
+    """#494: a wait that never saw its element said nothing about depth."""
+
+    async def test_a_timed_out_wait_reports_the_depth_and_the_deeper_look(self, phone):
+        ctrl, wda = phone
+        result, _ = await ctrl.wait_for_element(
+            condition=WaitCondition.EXISTS, identifier="absent", timeout=0.3, interval=0.1,
+        )
+        assert result["matched"] is False
+        assert result["snapshot_depth"] == ACTION_SNAPSHOT_DEPTH
+        assert "queried again at 25" in result["depth_note"]
+
+    async def test_a_wait_with_a_chosen_depth_finds_a_deeper_element(self, phone):
+        ctrl, wda = phone
+        result, _ = await ctrl.wait_for_element(
+            condition=WaitCondition.EXISTS, identifier=WIFI, timeout=1, interval=0.1,
+            snapshot_depth=12,
+        )
+        assert result["matched"] is True
+
+    async def test_deepen_false_wait_stays_at_its_depth_and_says_so(self, phone):
+        ctrl, wda = phone
+        result, _ = await ctrl.wait_for_element(
+            condition=WaitCondition.EXISTS, identifier=WIFI, timeout=0.3, interval=0.1,
+            snapshot_depth=12, deepen=False,
+        )
+        assert result["matched"] is False
+        assert wda.deep_queries() == []
+        assert "deepen=false" in result["depth_note"]
+
+    async def test_a_not_exists_wait_carries_no_depth_note(self, phone):
+        ctrl, wda = phone
+        result, _ = await ctrl.wait_for_element(
+            condition=WaitCondition.NOT_EXISTS, identifier="shallow_btn", timeout=0.3,
+            interval=0.1,
+        )
+        assert result["matched"] is False
+        assert "depth_note" not in result

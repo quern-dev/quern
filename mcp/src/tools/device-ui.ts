@@ -113,9 +113,13 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
         .min(1)
         .max(50)
         .optional()
-        .describe("WDA snapshot depth for this read (a physical iPhone, or a simulator after start_driver). Default 12: tab bars, controls and list rows are within it, and on a long list it reads ~9x faster than the full walk (34.5s vs 3.9s measured on an iPhone 11). If the element is nested deeper -- some SwiftUI layouts -- a not-found answer says the depth it used; retry with a larger value."),
+        .describe("WDA snapshot depth for this read (a physical iPhone, or a simulator after start_driver). Default 12: tab bars, controls and list rows are within it, and on a long list it reads ~9x faster than the full walk (34.5s vs 3.9s measured on an iPhone 11). A miss looks once more at the full depth, even when you pass a depth (see deepen); a not-found answer says how deep it looked."),
+      deepen: z
+        .boolean()
+        .optional()
+        .describe("Through WDA, a miss at snapshot_depth looks once more at the full depth -- bounded, and only after a quick shallow read -- so the depth you pass is a floor, not a ceiling (#494). Default true. Pass false for a read at exactly snapshot_depth: diagnostics, or checking that an element is NOT within a depth."),
     }),
-  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, snapshot_depth }) => {
+  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, snapshot_depth, deepen }) => {
     try {
       const data = await apiRequest("GET", "/api/v1/device/ui/element", {
         label,
@@ -126,6 +130,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
         udid,
         source_timeout,
         snapshot_depth,
+        deepen,
       });
 
       return {
@@ -206,7 +211,11 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
         .min(1)
         .max(50)
         .optional()
-        .describe("WDA snapshot depth for this read (a physical iPhone, or a simulator after start_driver). Default 12: tab bars, controls and list rows are within it, and on a long list it reads ~9x faster than the full walk (34.5s vs 3.9s measured on an iPhone 11). If the element is nested deeper -- some SwiftUI layouts -- a not-found answer says the depth it used; retry with a larger value."),
+        .describe("WDA snapshot depth for this read (a physical iPhone, or a simulator after start_driver). Default 12: tab bars, controls and list rows are within it, and on a long list it reads ~9x faster than the full walk (34.5s vs 3.9s measured on an iPhone 11). A miss looks once more at the full depth, even when you pass a depth (see deepen); a not-found answer says how deep it looked."),
+      deepen: z
+        .boolean()
+        .optional()
+        .describe("Through WDA, a miss at snapshot_depth looks once more at the full depth -- bounded, and only after a quick shallow read -- so the depth you pass is a floor, not a ceiling (#494). Default true. Pass false for a read at exactly snapshot_depth: diagnostics, or checking that an element is NOT within a depth."),
     }),
   }, async ({
     label,
@@ -220,7 +229,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
     interval,
     udid,
     mode,
-    snapshot_depth,
+    snapshot_depth, deepen,
   }) => {
     try {
       const body: Record<string, unknown> = {
@@ -238,6 +247,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
       if (mode !== undefined) body.mode = mode;
       if (udid !== undefined) body.udid = udid;
       if (snapshot_depth !== undefined) body.snapshot_depth = snapshot_depth;
+      if (deepen !== undefined) body.deepen = deepen;
 
       const data = await apiRequest(
         "POST",
@@ -503,7 +513,11 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         .min(1)
         .max(50)
         .optional()
-        .describe("WDA snapshot depth for this read (a physical iPhone, or a simulator after start_driver). Default 12: tab bars, controls and list rows are within it, and on a long list it reads ~9x faster than the full walk (34.5s vs 3.9s measured on an iPhone 11). If the element is nested deeper -- some SwiftUI layouts -- a not-found answer says the depth it used; retry with a larger value."),
+        .describe("WDA snapshot depth for this read (a physical iPhone, or a simulator after start_driver). Default 12: tab bars, controls and list rows are within it, and on a long list it reads ~9x faster than the full walk (34.5s vs 3.9s measured on an iPhone 11). A miss looks once more at the full depth, even when you pass a depth (see deepen); a not-found answer says how deep it looked."),
+      deepen: z
+        .boolean()
+        .optional()
+        .describe("Through WDA, a miss at snapshot_depth looks once more at the full depth -- bounded, and only after a quick shallow read -- so the depth you pass is a floor, not a ceiling (#494). Default true. Pass false for a read at exactly snapshot_depth: diagnostics, or checking that an element is NOT within a depth."),
       settle_delay: z
         .coerce.number()
         .min(0)
@@ -518,7 +532,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         .optional()
         .describe("Hold the touch this many seconds: a long press, for context menus, drag handles and press-and-hold controls. Omit for an ordinary tap. 1.0 clears the long-press threshold on iOS (0.5s) and Android (~0.4s)."),
     }),
-  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value, scroll_to_find, include_screen_context, capture_screenshots, settle_delay, snapshot_depth, duration, skip_stability_check }) => {
+  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value, scroll_to_find, include_screen_context, capture_screenshots, settle_delay, snapshot_depth, deepen, duration, skip_stability_check }) => {
     try {
       const body: Record<string, unknown> = {};
       if (duration !== undefined) body.duration = duration;
@@ -543,6 +557,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
       if (capture_screenshots) body.capture_screenshots = true;
       if (settle_delay !== undefined) body.settle_delay = settle_delay;
       if (snapshot_depth !== undefined) body.snapshot_depth = snapshot_depth;
+      if (deepen !== undefined) body.deepen = deepen;
 
       const data = await apiRequest(
         "POST",
@@ -787,19 +802,24 @@ Returns where the fingers went. An app's recogniser reports a little less than w
         .min(1)
         .max(50)
         .optional()
-        .describe("WDA snapshot depth for the sweep's reads (a physical iPhone, or a simulator after start_driver). Default 12, as for tap_element; pass more if the element is nested deeper."),
+        .describe("WDA snapshot depth for the sweep's reads (a physical iPhone, or a simulator after start_driver). Default 12, as for tap_element; a miss looks once more at the full depth, even when you pass a depth (see deepen)."),
+      deepen: z
+        .boolean()
+        .optional()
+        .describe("Through WDA, a miss at snapshot_depth looks once more at the full depth -- bounded, and only after a quick shallow read -- so the depth you pass is a floor, not a ceiling (#494). Default true. Pass false for a read at exactly snapshot_depth: diagnostics, or checking that an element is NOT within a depth."),
       udid: z
         .string()
         .optional()
         .describe("Target device UDID (defaults to active device)"),
     }),
-  }, async ({ label, identifier, max_swipes, udid, snapshot_depth }) => {
+  }, async ({ label, identifier, max_swipes, udid, snapshot_depth, deepen }) => {
     try {
       const body: Record<string, unknown> = { max_swipes };
       if (label) body.label = label;
       if (identifier) body.identifier = identifier;
       if (udid) body.udid = udid;
       if (snapshot_depth !== undefined) body.snapshot_depth = snapshot_depth;
+      if (deepen !== undefined) body.deepen = deepen;
 
       const data = await apiRequest(
         "POST",
