@@ -430,6 +430,81 @@ def _contains(outer: dict, inner: dict, slack: float = 1.0) -> bool:
             and inner["y"] + inner["height"] <= outer["y"] + outer["height"] + slack)
 
 
+#: The outer element a part may be folded into: something a tap is aimed at.
+_CONTROL_TYPES = frozenset({
+    "Button", "Cell", "Link", "RadioButton", "Switch", "Toggle", "TextField",
+    "SecureTextField", "SearchField", "MenuItem", "Tab", "CheckBox",
+})
+#: The parts that may be folded: decoration a control carries -- its icon, its
+#: title -- never something a tap could mean on its own.
+_DECORATION_TYPES = frozenset({"Image", "Icon", "StaticText", "Text", "Heading"})
+
+
+def _fold_nested_matches(matches: list[UIElement]) -> tuple[list[UIElement], list[UIElement]]:
+    """Fold matches that are parts of another match into it (#490).
+
+    A tab-bar item and its own icon both carry the label "More"; a cell and
+    its text, a button and its title, the same. Each pair is one control, and
+    answering `ambiguous` made the caller add an element_type to tap the one
+    obvious thing -- on WDA, where both "More"s read as Button once a More
+    screen is pushed, the probe README had to say to tell them apart by
+    position.
+
+    A decoration match (an image, text) whose frame lies inside a control
+    match's (a button, a cell) with the same, non-empty label is folded into
+    the control. Nothing else folds, and each limit is a case review found
+    tapping the wrong thing:
+    - a control inside a container -- a Switch in its Cell, a Delete button in
+      an Alert titled "Delete" -- stays ambiguous: the outer one's centre is
+      not the inner control;
+    - unlabelled matches never fold: two empty labels are not "the same", and
+      an identifier SwiftUI copies onto a container's children would fold the
+      button into the container;
+    - matches side by side, with different labels or without a frame stay.
+
+    Returns (kept, folded).
+    """
+    def key(e: UIElement) -> str:
+        return (e.label or "").strip().lower()
+
+    def absorbs(outer: UIElement, part: UIElement) -> bool:
+        return (outer.type in _CONTROL_TYPES and part.type in _DECORATION_TYPES
+                and key(outer) != "" and key(outer) == key(part)
+                and _contains(outer.frame, part.frame))
+
+    def area(e: UIElement) -> float:
+        return e.frame["width"] * e.frame["height"] if e.frame else 0.0
+
+    framed = [m for m in matches if m.frame]
+    if len(framed) < 2:
+        return matches, []
+    # Largest first; among equals, a control before its text or icon.
+    order = sorted(framed, key=lambda e: (-area(e), e.type not in _CONTROL_TYPES))
+    kept: list[UIElement] = []
+    folded: list[UIElement] = []
+    for m in order:
+        if any(absorbs(k, m) for k in kept):
+            folded.append(m)
+        else:
+            kept.append(m)
+    if not folded:
+        return matches, []
+    # The caller's order, so the rest of the code sees what it saw before.
+    # By identity: two equal elements, one folded and one kept, compare equal.
+    folded_ids = {id(f) for f in folded}
+    survivors = [m for m in matches if id(m) not in folded_ids]
+    return survivors, folded
+
+
+def _note_collapsed(result: dict, folded: list[UIElement]) -> None:
+    """Say which matches were folded into the tapped one, so a tap on a
+    container is never silent (#490)."""
+    if folded:
+        result["collapsed"] = [
+            {"type": f.type, "label": f.label, "identifier": f.identifier} for f in folded
+        ]
+
+
 def _covering_element(target: UIElement, hit: dict | None) -> dict | None:
     """What a tap at the target's point would land on instead, or None.
 
@@ -3267,6 +3342,11 @@ class DeviceControllerUI:
                 )
             return result
 
+        # One control and its own parts -- an icon, a title -- are one match.
+        folded: list[UIElement] = []
+        if len(matches) > 1:
+            matches, folded = _fold_nested_matches(matches)
+
         if len(matches) == 1:
             el = matches[0]
 
@@ -3305,6 +3385,7 @@ class DeviceControllerUI:
                 }
                 if web_settled_ms is not None:
                     result["waited_for_settle_ms"] = web_settled_ms
+                _note_collapsed(result, folded)
                 _note_equivalence(result, element_type, el)
                 _note_deepened(result, deepened, shallow_depth)
                 if sweep.get("attempted"):
@@ -3334,7 +3415,7 @@ class DeviceControllerUI:
             if value is not None:
                 current_value = el.value or ""
                 if current_value == value:
-                    return {
+                    result = {
                         "status": "already_set",
                         "value": current_value,
                         "element": {
@@ -3343,6 +3424,8 @@ class DeviceControllerUI:
                             "identifier": el.identifier,
                         },
                     }
+                    _note_collapsed(result, folded)
+                    return result
 
             cx, cy = get_tap_point(el)
 
@@ -3417,6 +3500,9 @@ class DeviceControllerUI:
                     element_type=element_type,
                 )
 
+                # Folded as the first read was, or a part listed before its
+                # control is taken for the target (#490 review, CodeRabbit).
+                matches_check, _ = _fold_nested_matches(matches_check)
                 if matches_check:
                     # Check if position changed (element is animating)
                     current_frame = matches_check[0].frame
@@ -3449,6 +3535,7 @@ class DeviceControllerUI:
                             identifier=identifier,
                             element_type=element_type,
                         )
+                        matches_final, _ = _fold_nested_matches(matches_final)
                         if matches_final:
                             el = matches_final[0]
                             cx, cy = get_tap_point(el)
@@ -3468,6 +3555,7 @@ class DeviceControllerUI:
                                    "identifier": el.identifier, "x": cx, "y": cy},
                         **obstruction,
                     }
+                    _note_collapsed(result, folded)
                     if settled_ms is not None:
                         result["waited_for_settle_ms"] = settled_ms
                     if sweep.get("attempted"):
@@ -3504,6 +3592,7 @@ class DeviceControllerUI:
                 result["requested_value"] = value
             if settled_ms is not None:
                 result["waited_for_settle_ms"] = settled_ms
+            _note_collapsed(result, folded)
             _note_equivalence(result, element_type, el)
             _note_deepened(result, deepened, shallow_depth)
             if sweep.get("attempted"):
