@@ -196,8 +196,16 @@ async def get_element(
     snapshot_depth: int | None = Query(
         default=None, ge=1, le=50,
         description=(
-            "WDA snapshot depth for this read. Default 12 through WDA; pass more "
-            "if the element is nested deeper."
+            "WDA snapshot depth for this read. Default 12 through WDA; a miss "
+            "looks again at the full depth unless deepen=false."
+        ),
+    ),
+    deepen: bool = Query(
+        default=True,
+        description=(
+            "Through WDA, a miss at snapshot_depth (a floor, not a ceiling) looks once "
+            "more at the full depth, bounded and only after a quick shallow read (#494). "
+            "false keeps the read at exactly snapshot_depth."
         ),
     ),
 ):
@@ -240,6 +248,7 @@ async def get_element(
             udid=udid,
             source_timeout=source_timeout,
             snapshot_depth=snapshot_depth,
+            deepen=deepen,
         )
         return {"element": element, "udid": resolved_udid}
     except DeviceError as e:
@@ -297,6 +306,7 @@ async def wait_for_element(request: Request, body: WaitForElementRequest):
                 udid=body.udid,
                 mode=body.mode,
                 snapshot_depth=body.snapshot_depth,
+                deepen=body.deepen,
             )
             result["udid"] = resolved_udid
             # A read happened, so say which backend did it. This route's own
@@ -514,6 +524,7 @@ async def tap_element(request: Request, body: TapElementRequest):
                     scroll_to_find=body.scroll_to_find,
                     snapshot_depth=body.snapshot_depth,
                     duration=body.duration,
+                    deepen=body.deepen,
                 ),
                 what="tap_element",
             )
@@ -755,6 +766,7 @@ async def scroll_to_element(request: Request, body: ScrollToElementRequest):
                 udid=body.udid,
                 max_swipes=body.max_swipes,
                 snapshot_depth=body.snapshot_depth,
+                deepen=body.deepen,
             ),
             what="scroll_to_element",
         )

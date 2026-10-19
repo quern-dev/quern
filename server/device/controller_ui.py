@@ -317,6 +317,64 @@ def _with_queried_identifier(raw: list[dict], identifier: str | None) -> list[di
     return raw
 
 
+def _deepen_allowed(snapshot_depth: int | None, deepen: bool) -> bool:
+    """Whether a miss at the read depth may look again deeper (#494).
+
+    An explicit depth below the full depth is a floor, not a ceiling: it used
+    to turn the deeper look off, so a caller pinning the default 12 for speed
+    got a 404 for an element at 14 that a caller passing nothing found (the
+    conformance driver hit it on the probe's Lazy tab). The look itself keeps
+    its gates (#470): only after a quick shallow miss, bounded, never /source.
+    `deepen=False` keeps an exact-depth read, for diagnostics and for checking
+    a recorded depth (#375).
+    """
+    from server.device.ios.wda_client import SNAPSHOT_MAX_DEPTH
+
+    # At or above the full depth there is nothing deeper to try; _deeper_query
+    # also returns early there, so this is the reason rather than the guard.
+    return deepen and (snapshot_depth is None or snapshot_depth < SNAPSHOT_MAX_DEPTH)
+
+
+def _depth_detail(
+    read_depth: int, *, tried: bool, timed_out: bool, opted_out: bool,
+) -> str:
+    """How deep a WDA miss looked, and how to look deeper (#470, #494).
+
+    Every not-found from a depth-limited read says this: without it "not
+    found" reads as "not there", which a shallow miss is not.
+    """
+    from server.device.ios.wda_client import SNAPSHOT_MAX_DEPTH
+
+    if read_depth >= SNAPSHOT_MAX_DEPTH:
+        # deepen has nothing to add here, so it is not offered as the way on.
+        return (
+            f" (read through WDA at snapshot_depth={read_depth}, the full depth; "
+            "if the element is nested deeper still, pass a larger snapshot_depth)"
+        )
+    if opted_out:
+        return (
+            f" (read through WDA at snapshot_depth={read_depth} only, as deepen=false "
+            "asked; drop it, or pass a larger snapshot_depth, to look deeper)"
+        )
+    if timed_out:
+        return (
+            f" (read through WDA at snapshot_depth={read_depth}; the deeper "
+            f"query at {SNAPSHOT_MAX_DEPTH} timed out, so this screen may be "
+            "too dense to search deeper automatically -- pass snapshot_depth "
+            "if the element is nested deeper)"
+        )
+    if tried:
+        return (
+            f" (read through WDA at snapshot_depth={read_depth}, and "
+            f"queried again at {SNAPSHOT_MAX_DEPTH}; if the element is "
+            "nested deeper still, retry with a larger snapshot_depth)"
+        )
+    return (
+        f" (read through WDA at snapshot_depth={read_depth}; if the "
+        "element is nested deeper, retry with a larger snapshot_depth)"
+    )
+
+
 def _note_deepened(result: dict, deepened: int | None, shallow: int | None) -> None:
     """Say a lookup found its element only by reading deeper (#470), and how to
     skip the shallow miss next time on this screen."""
@@ -2369,6 +2427,7 @@ class DeviceControllerUI:
         udid: str | None = None,
         source_timeout: float | None = None,
         snapshot_depth: int | None = None,
+        deepen: bool = True,
     ) -> tuple[dict, str]:
         """Get a single element's state without fetching the entire UI tree.
 
@@ -2394,6 +2453,9 @@ class DeviceControllerUI:
         backend = self._backend_name(udid)
         resolved = await self.resolve_udid(udid)
         shallow = self._read_depth(resolved, snapshot_depth)
+        # Here, not only in the deeper look's branch: the 404 below reports
+        # whether that look ran, and must not read an earlier lookup's answer.
+        _begin_lookup()
         elements, resolved = await self.get_ui_elements(
             resolved, source_timeout=source_timeout, snapshot_depth=shallow,
         )
@@ -2403,7 +2465,8 @@ class DeviceControllerUI:
             element_type=element_type,
         )
         deepened = None
-        if not matches and snapshot_depth is None and self._served_by_wda(resolved):
+        if (not matches and _deepen_allowed(snapshot_depth, deepen)
+                and self._served_by_wda(resolved)):
             # This read is unfiltered, so it never reaches the query path that
             # deepens. One bounded query at the full depth does -- gated on how
             # quick this read was, never a second /source (#470 review).
@@ -2442,8 +2505,15 @@ class DeviceControllerUI:
             if element_type:
                 search_desc += f", type='{element_type}'"
             hint = self._web_hint_for(resolved, elements)
+            depth = ""
+            if shallow is not None and self._served_by_wda(resolved):
+                depth = _depth_detail(
+                    shallow, tried=_DEEPEN_TRIED.get(), timed_out=_DEEP_TIMED_OUT.get(),
+                    opted_out=not deepen,
+                )
             raise DeviceError(
-                f"No element found matching {search_desc}" + (f". {hint}" if hint else ""),
+                f"No element found matching {search_desc}{depth}"
+                + (f". {hint}" if hint else ""),
                 tool=self._last_read_backend.get(resolved, backend),
             )
 
@@ -2471,6 +2541,7 @@ class DeviceControllerUI:
         udid: str | None = None,
         mode: str | None = None,
         snapshot_depth: int | None = None,
+        deepen: bool = True,
     ) -> tuple[dict, str]:
         """Wait for an element to satisfy a condition (server-side polling).
 
@@ -2568,6 +2639,8 @@ class DeviceControllerUI:
         poll_depth = self._read_depth(resolved, snapshot_depth)
         shallow_depth = poll_depth
         deepened = None
+        # Across polls, for the timed-out answer: whether any looked deeper.
+        deepen_tried = deep_timed_out = False
         while True:
             polls += 1
             elapsed = time.time() - start_time
@@ -2583,9 +2656,11 @@ class DeviceControllerUI:
                 filter_type=element_type,
                 mode=mode,
                 snapshot_depth=poll_depth,
-                deepen_on_miss=snapshot_depth is None,
+                deepen_on_miss=_deepen_allowed(snapshot_depth, deepen),
             )
             deepened = _DEEPENED.get()
+            deepen_tried = deepen_tried or _DEEPEN_TRIED.get()
+            deep_timed_out = deep_timed_out or _DEEP_TIMED_OUT.get()
             await self._done_with_deep_element(resolved, poll_depth)
 
             matches = find_element(
@@ -2648,6 +2723,17 @@ class DeviceControllerUI:
                 }
                 if hint:
                     result["web_content_hint"] = hint
+                if (not ever_found and poll_depth is not None
+                        and self._served_by_wda(resolved)):
+                    # Never seen: say how deep the polls looked, or a shallow
+                    # miss reads as "never appeared" (#494). Not for a
+                    # not_exists wait, which only times out on an element it
+                    # keeps seeing.
+                    result["snapshot_depth"] = poll_depth
+                    result["depth_note"] = _depth_detail(
+                        poll_depth, tried=deepen_tried, timed_out=deep_timed_out,
+                        opted_out=not deepen,
+                    ).strip(" ()")
                 return result, resolved
 
             # Sleep before next poll
@@ -2851,6 +2937,7 @@ class DeviceControllerUI:
         scroll_to_find: bool | None = None,
         snapshot_depth: int | None = None,
         duration: float | None = None,
+        deepen: bool = True,
     ) -> dict:
         """Find an element by label/identifier and tap its center.
 
@@ -2975,7 +3062,7 @@ class DeviceControllerUI:
             filter_type=element_type,
             source_timeout=source_timeout,
             snapshot_depth=read_depth,
-            deepen_on_miss=snapshot_depth is None,
+            deepen_on_miss=_deepen_allowed(snapshot_depth, deepen),
         )
         served_from_cache = self._cache_hits > cache_hits_before
         # A deep hit changes what is reported, never the depth of the reads
@@ -3082,7 +3169,7 @@ class DeviceControllerUI:
                     resolved, label=label, identifier=identifier, max_swipes=10,
                     target_known_absent=not served_from_cache,
                     report=sweep, snapshot_depth=read_depth,
-                    deepen=snapshot_depth is None,
+                    deepen=_deepen_allowed(snapshot_depth, deepen),
                 )
                 if scrolled is not None:
                     # Found deep by the sweep: the checks below look it up
@@ -3166,26 +3253,10 @@ class DeviceControllerUI:
                 # answer says how deep it looked and how to look deeper --
                 # otherwise "not found" reads as "not there".
                 result["snapshot_depth"] = read_depth
-                if deep_timed_out:
-                    from server.device.ios.wda_client import SNAPSHOT_MAX_DEPTH
-                    result["detail"] += (
-                        f" (read through WDA at snapshot_depth={read_depth}; the deeper "
-                        f"query at {SNAPSHOT_MAX_DEPTH} timed out, so this screen may be "
-                        "too dense to search deeper automatically -- pass snapshot_depth "
-                        "if the element is nested deeper)"
-                    )
-                elif deepen_tried:
-                    from server.device.ios.wda_client import SNAPSHOT_MAX_DEPTH
-                    result["detail"] += (
-                        f" (read through WDA at snapshot_depth={read_depth}, and "
-                        f"queried again at {SNAPSHOT_MAX_DEPTH}; if the element is "
-                        "nested deeper still, retry with a larger snapshot_depth)"
-                    )
-                else:
-                    result["detail"] += (
-                        f" (read through WDA at snapshot_depth={read_depth}; if the "
-                        "element is nested deeper, retry with a larger snapshot_depth)"
-                    )
+                result["detail"] += _depth_detail(
+                    read_depth, tried=deepen_tried, timed_out=deep_timed_out,
+                    opted_out=not deepen,
+                )
             if unreachable:
                 # Found, but not tappable -- a different fact from "not there",
                 # and the one that decides what the caller does next.
@@ -3938,6 +4009,7 @@ class DeviceControllerUI:
         udid: str | None = None,
         max_swipes: int = 10,
         snapshot_depth: int | None = None,
+        deepen: bool = True,
     ) -> dict:
         """Scroll until an element is in view, without interacting with it.
 
@@ -3998,23 +4070,34 @@ class DeviceControllerUI:
         # full read, 34s a read on an iPhone 11's 200-row table -- and the
         # sweep ran out of deadline before reaching the row (F35).
         #
-        # A depth the caller did not choose also gets one deeper look before
-        # the first swipe (#475), the rule tap_element's lookup follows (#470).
+        # A miss at that depth gets one deeper look before the first swipe
+        # (#475) -- a depth the caller chose included, as a floor (#494) --
+        # the rule tap_element's lookup follows (#470).
+        read_depth = self._read_depth(resolved, snapshot_depth)
+        _begin_lookup()  # the not-found below reports on this sweep's looks only
         el = await self._ios_scroll_to_element(
             resolved, label=label, identifier=identifier, max_swipes=max_swipes,
-            snapshot_depth=self._read_depth(resolved, snapshot_depth),
-            deepen=snapshot_depth is None,
+            snapshot_depth=read_depth,
+            deepen=_deepen_allowed(snapshot_depth, deepen),
         )
         # Only its frame is reported, so a deep hit is done with now.
-        await self._done_with_deep_element(resolved, self._read_depth(resolved, snapshot_depth))
+        await self._done_with_deep_element(resolved, read_depth)
         self._invalidate_ui_cache(resolved)  # scrolling changes the viewport
         if el is None:
-            return {
+            detail = f"Element not found after scrolling ({target})"
+            result = {
                 "udid": resolved,
                 "backend": self.backend_that_served(resolved),
                 "status": "not_found",
-                "detail": f"Element not found after scrolling ({target})",
+                "detail": detail,
             }
+            if read_depth is not None and self._served_by_wda(resolved):
+                result["snapshot_depth"] = read_depth
+                result["detail"] += _depth_detail(
+                    read_depth, tried=_DEEPEN_TRIED.get(), timed_out=_DEEP_TIMED_OUT.get(),
+                    opted_out=not deepen,
+                )
+            return result
         cx, cy = get_tap_point(el)
         return {
             "udid": resolved,

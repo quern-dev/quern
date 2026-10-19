@@ -595,6 +595,8 @@ class TestTapElement:
             scroll_to_find=None,
             snapshot_depth=None,
             duration=None,
+            # A depth is a floor unless the caller opts out (#494).
+            deepen=True,
         )
 
     async def test_tap_element_by_identifier(self, app, auth_headers, mock_controller):
@@ -622,6 +624,8 @@ class TestTapElement:
             scroll_to_find=None,
             snapshot_depth=None,
             duration=None,
+            # A depth is a floor unless the caller opts out (#494).
+            deepen=True,
         )
 
     async def test_tap_element_with_type_filter(self, app, auth_headers, mock_controller):
@@ -649,6 +653,8 @@ class TestTapElement:
             scroll_to_find=None,
             snapshot_depth=None,
             duration=None,
+            # A depth is a floor unless the caller opts out (#494).
+            deepen=True,
         )
 
     async def test_tap_element_ambiguous(self, app, auth_headers, mock_controller):
@@ -1170,7 +1176,8 @@ class TestScrollToElement:
         assert resp.status_code == 200
         assert resp.json()["status"] == "ok"
         mock_controller.scroll_to_element.assert_called_once_with(
-            label=None, identifier="button_log", udid=None, max_swipes=10, snapshot_depth=None,
+            label=None, identifier="button_log", udid=None, max_swipes=10,
+            snapshot_depth=None, deepen=True,
         )
 
     async def test_scroll_to_element_by_label_and_max_swipes(
@@ -1188,7 +1195,8 @@ class TestScrollToElement:
             )
         assert resp.status_code == 200
         mock_controller.scroll_to_element.assert_called_once_with(
-            label="Log cache", identifier=None, udid=None, max_swipes=5, snapshot_depth=None,
+            label="Log cache", identifier=None, udid=None, max_swipes=5,
+            snapshot_depth=None, deepen=True,
         )
 
     async def test_scroll_to_element_not_found(self, app, auth_headers, mock_controller):
@@ -1409,3 +1417,49 @@ class TestSnapshotDepthReachesTheController:
             await c.post("/api/v1/device/ui/clear", headers=auth_headers,
                          json={"label": "Search", "snapshot_depth": 20})
         assert mock_controller.clear_text.call_args.kwargs["snapshot_depth"] == 20
+
+
+class TestDeepenReachesTheController:
+    """#494: `deepen: false` asks for an exact-depth read. A route that dropped
+    it would read deeper anyway and still look like it honoured the opt-out."""
+
+    async def _post(self, app, auth_headers, path, body):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(f"/api/v1/device/ui/{path}", json=body, headers=auth_headers)
+
+    async def test_tap_element(self, app, auth_headers, mock_controller):
+        mock_controller.tap_element = AsyncMock(return_value={"status": "ok", "tapped": {}})
+        await self._post(app, auth_headers, "tap-element",
+                         {"label": "Row", "snapshot_depth": 12, "deepen": False})
+        assert mock_controller.tap_element.call_args.kwargs["deepen"] is False
+
+    async def test_scroll_to_element(self, app, auth_headers, mock_controller):
+        mock_controller.scroll_to_element = AsyncMock(return_value={"status": "ok", "element": {}})
+        await self._post(app, auth_headers, "scroll-to-element",
+                         {"identifier": "row_9", "deepen": False})
+        assert mock_controller.scroll_to_element.call_args.kwargs["deepen"] is False
+
+    async def test_wait_for_element(self, app, auth_headers, mock_controller):
+        mock_controller.wait_for_element = AsyncMock(
+            return_value=({"matched": True}, "AAAA-1111"))
+        await self._post(app, auth_headers, "wait-for-element",
+                         {"identifier": "row_9", "condition": "exists", "deepen": False})
+        assert mock_controller.wait_for_element.call_args.kwargs["deepen"] is False
+
+    async def test_get_element(self, app, auth_headers, mock_controller):
+        mock_controller.get_element = AsyncMock(return_value=({"label": "x"}, "AAAA-1111"))
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            await client.get("/api/v1/device/ui/element",
+                             params={"identifier": "row_9", "deepen": "false"},
+                             headers=auth_headers)
+        assert mock_controller.get_element.call_args.kwargs["deepen"] is False
+
+    async def test_the_default_is_to_look_deeper(self, app, auth_headers, mock_controller):
+        mock_controller.get_element = AsyncMock(return_value=({"label": "x"}, "AAAA-1111"))
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            await client.get("/api/v1/device/ui/element", params={"identifier": "row_9"},
+                             headers=auth_headers)
+        assert mock_controller.get_element.call_args.kwargs["deepen"] is True
