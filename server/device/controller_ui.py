@@ -430,6 +430,68 @@ def _contains(outer: dict, inner: dict, slack: float = 1.0) -> bool:
             and inner["y"] + inner["height"] <= outer["y"] + outer["height"] + slack)
 
 
+#: Types that are the control itself when they and a part of them share a
+#: frame -- a cell and its full-width label, a button and its title.
+_CONTROL_TYPES = frozenset({
+    "Button", "Cell", "Link", "RadioButton", "Switch", "Toggle", "TextField",
+    "SecureTextField", "SearchField", "MenuItem", "Tab", "CheckBox",
+})
+
+
+def _fold_nested_matches(matches: list[UIElement]) -> tuple[list[UIElement], list[UIElement]]:
+    """Fold matches that are parts of another match into it (#490).
+
+    A tab-bar item and its own icon both carry the label "More"; a cell and
+    its text, a button and its title, the same. Each pair is one control, and
+    answering `ambiguous` made the caller add an element_type to tap the one
+    obvious thing -- on WDA, where both "More"s read as Button once a More
+    screen is pushed, the probe README had to say to tell them apart by
+    position.
+
+    A match whose frame lies inside another match's, and whose label is the
+    same, is folded into the outer one. Matches side by side, neither inside
+    the other, stay -- two controls with one label is a real ambiguity -- as do
+    matches without a frame or with different labels. For identical frames the
+    control type is kept over text or an image.
+
+    Returns (kept, folded).
+    """
+    def key(e: UIElement) -> str:
+        return (e.label or "").strip().lower()
+
+    def area(e: UIElement) -> float:
+        return e.frame["width"] * e.frame["height"] if e.frame else 0.0
+
+    framed = [m for m in matches if m.frame]
+    if len(framed) < 2:
+        return matches, []
+    # Largest first; among equals, a control before its text or icon.
+    order = sorted(framed, key=lambda e: (-area(e), e.type not in _CONTROL_TYPES))
+    kept: list[UIElement] = []
+    folded: list[UIElement] = []
+    for m in order:
+        if any(key(k) == key(m) and _contains(k.frame, m.frame) for k in kept):
+            folded.append(m)
+        else:
+            kept.append(m)
+    if not folded:
+        return matches, []
+    # The caller's order, so the rest of the code sees what it saw before.
+    # By identity: two equal elements, one folded and one kept, compare equal.
+    folded_ids = {id(f) for f in folded}
+    survivors = [m for m in matches if id(m) not in folded_ids]
+    return survivors, folded
+
+
+def _note_collapsed(result: dict, folded: list[UIElement]) -> None:
+    """Say which matches were folded into the tapped one, so a tap on a
+    container is never silent (#490)."""
+    if folded:
+        result["collapsed"] = [
+            {"type": f.type, "label": f.label, "identifier": f.identifier} for f in folded
+        ]
+
+
 def _covering_element(target: UIElement, hit: dict | None) -> dict | None:
     """What a tap at the target's point would land on instead, or None.
 
@@ -3267,6 +3329,11 @@ class DeviceControllerUI:
                 )
             return result
 
+        # One control and its own parts -- an icon, a title -- are one match.
+        folded: list[UIElement] = []
+        if len(matches) > 1:
+            matches, folded = _fold_nested_matches(matches)
+
         if len(matches) == 1:
             el = matches[0]
 
@@ -3305,6 +3372,7 @@ class DeviceControllerUI:
                 }
                 if web_settled_ms is not None:
                     result["waited_for_settle_ms"] = web_settled_ms
+                _note_collapsed(result, folded)
                 _note_equivalence(result, element_type, el)
                 _note_deepened(result, deepened, shallow_depth)
                 if sweep.get("attempted"):
@@ -3504,6 +3572,7 @@ class DeviceControllerUI:
                 result["requested_value"] = value
             if settled_ms is not None:
                 result["waited_for_settle_ms"] = settled_ms
+            _note_collapsed(result, folded)
             _note_equivalence(result, element_type, el)
             _note_deepened(result, deepened, shallow_depth)
             if sweep.get("attempted"):
