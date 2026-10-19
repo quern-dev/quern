@@ -975,18 +975,25 @@ class TestTheReviewFindings:
         assert found is not None and found.identifier == "lazy_150"
 
     async def test_a_failing_restore_does_not_replace_the_sweeps_error(self, phone):
+        """The restore must fail only after the swipe has: the opening lookup and
+        the first read set the depth too (CodeRabbit, #478)."""
         ctrl, wda = phone
-        world = self._world(ctrl, wda)
+        self._world(ctrl, wda)
+        swiped = {"yes": False}
+        real_set = wda.set_depth
 
         async def swipe_dies(*a, **k):
+            swiped["yes"] = True
             raise DeviceError("WDA did not answer the swipe; it may already have been performed",
                               tool="wda")
 
         async def no_session(udid, depth):
-            raise DeviceError("Failed to create WDA session", tool="wda")
+            if swiped["yes"]:
+                raise DeviceError("Failed to create WDA session", tool="wda")
+            await real_set(udid, depth)
 
         ctrl.wda_client.swipe = swipe_dies
-        world.wda.set_depth = no_session
+        ctrl.wda_client._set_snapshot_depth = no_session
         with pytest.raises(DeviceError, match="may already have been performed"):
             await ctrl._ios_scroll_to_element(
                 PHONE, None, "lazy_150", 10, snapshot_depth=ACTION_SNAPSHOT_DEPTH,
