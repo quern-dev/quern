@@ -811,17 +811,20 @@ class WdaBackend:
         if self._current_depth.get(udid) == depth:
             return True
 
-        session_id = await self._ensure_session(udid)
-        base_url = self._connections[udid].base_url
+        # Raised as before when there is no session to be had at all.
+        await self._ensure_session(udid)
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    f"{base_url}/session/{session_id}/appium/settings",
-                    json={"settings": {"snapshotMaxDepth": depth}},
-                    timeout=WDA_TIMEOUT,
-                )
-            resp.raise_for_status()
-        except Exception as exc:
+            # Through _request, which reads WDA's error answers and, for a
+            # session another client has replaced, makes a new one and sends
+            # again. Its own client did neither, so a stale session failed
+            # every set -- and every shallow /source behind it (review of the
+            # #478 follow-up). A settings write is idempotent: resending is safe.
+            await self._request(
+                "post", udid, "/appium/settings", use_session=True,
+                timeout=WDA_TIMEOUT,
+                json={"settings": {"snapshotMaxDepth": depth}},
+            )
+        except (DeviceError, httpx.HTTPError) as exc:
             self._current_depth.pop(udid, None)
             logger.warning(
                 "Failed to set snapshotMaxDepth=%d for %s (%s); the depth is unknown "

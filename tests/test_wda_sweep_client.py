@@ -34,6 +34,10 @@ class ScreenWDA(FakeWDA):
         self.png = b"\x89PNG fake"
         #: The status the settings endpoint answers with.
         self.settings_status = 200
+        #: Settings requests to answer "invalid session id" first, as WDA does
+        #: once another client has replaced quern's session.
+        self.stale_settings = 0
+        self.sessions = 0
 
     async def _do(self, method: str, url: str, **kw):
         body = kw.get("json") or {}
@@ -42,6 +46,11 @@ class ScreenWDA(FakeWDA):
             for suffix, queue in self.faults.items():
                 if url.endswith(suffix) and queue:
                     raise queue.pop(0)
+            if self.stale_settings:
+                self.stale_settings -= 1
+                return httpx.Response(404, json={"value": {
+                    "error": "invalid session id", "message": "Session does not exist"}},
+                    request=httpx.Request("POST", url))
             if self.settings_status != 200:
                 return httpx.Response(self.settings_status, json={"value": {"error": "x"}},
                                       request=httpx.Request("POST", url))
@@ -57,6 +66,15 @@ class ScreenWDA(FakeWDA):
             found = [e for e in self.containers.get(self.depth, []) if e["type"].endswith(kind)]
             return httpx.Response(200, json={"value": found},
                                   request=httpx.Request("POST", url))
+        if url.endswith("/session"):
+            self.sessions += 1
+        if url.endswith("/source"):
+            self.calls.append((method, url))
+            return httpx.Response(200, json={"value": {"type": "XCUIElementTypeApplication",
+                                                       "rect": {"x": 0, "y": 0, "width": 400,
+                                                                "height": 880},
+                                                       "children": []}},
+                                  request=httpx.Request("GET", url))
         if url.endswith("/screenshot"):
             self.calls.append((method, url))
             for suffix, queue in self.faults.items():
@@ -191,8 +209,9 @@ class TestSetSnapshotDepth:
         assert fake.reached("/appium/settings") == sent + 1, "trusted a depth WDA may not have"
 
     async def test_no_answer_is_a_failure(self, wda):
-        # Session creation sends its own settings first; both go unanswered.
-        wda.install(faults={"/appium/settings": [_timeout(), _timeout()]})
+        # Every settings request goes unanswered: session creation's own, the
+        # set, and whatever reconnecting and resending _request adds.
+        wda.install(faults={"/appium/settings": [_timeout() for _ in range(10)]})
         assert await wda._set_snapshot_depth(SIM, 12) is False
         assert SIM not in wda._current_depth
 
@@ -202,10 +221,41 @@ class TestSetSnapshotDepth:
         fake.settings_status = 500
         with pytest.raises(DeviceError, match="was not read"):
             await wda.describe_all(SIM, snapshot_depth=12)
-        assert fake.reached("/source?format=json") == 0, "read /source anyway"
+        assert fake.reached("/source") == 0, "read /source anyway"
 
     async def test_a_session_whose_settings_were_refused_records_no_depth(self, wda):
         fake = wda.install()
         fake.settings_status = 500
         await wda._ensure_session(SIM)
         assert SIM not in wda._current_depth, "recorded a depth WDA refused"
+
+    async def test_a_session_another_client_replaced_is_made_again(self, wda):
+        """Review of the #478 follow-up: the set used its own client, so a stale
+        session failed every set -- and every shallow /source behind it -- until
+        the driver was restarted."""
+        fake = wda.install()
+        await wda._ensure_session(SIM)
+        wda._current_depth.pop(SIM, None)
+        before = fake.sessions
+        fake.stale_settings = 1
+        assert await wda._set_snapshot_depth(SIM, 12) is True
+        assert fake.sessions == before + 1, "the stale session was not replaced"
+        assert fake.depth == 12
+        await wda.describe_all(SIM, snapshot_depth=12)
+        assert fake.reached("/source") == 1
+
+    async def test_a_failed_set_to_the_default_depth_still_reads(self, wda):
+        """Only a shallow read is refused: the default depth is the full walk
+        anyway, and refusing it would fail every default tree read whenever WDA
+        refused a setting."""
+        fake = wda.install()
+        fake.settings_status = 500
+        await wda.describe_all(SIM)
+        assert fake.reached("/source") == 1
+
+    async def test_the_nested_read_refuses_too(self, wda):
+        fake = wda.install()
+        fake.settings_status = 500
+        with pytest.raises(DeviceError, match="was not read"):
+            await wda.describe_all_nested(SIM, snapshot_depth=12)
+        assert fake.reached("/source") == 0
