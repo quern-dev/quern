@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -47,6 +48,17 @@ PUBLIC_PATHS = frozenset({
     # The suite caught its removal as a failure, which is the suite working:
     # the list is the contract, and the contract changed.
     "/api/v1/proxy/cert",
+})
+
+#: Public, but only on the remote listener (#254, phase 3): a client pairing
+#: holds no key yet, and its proofs are the authentication. On the local
+#: listener these must refuse -- pairing is how a key is handed out, so a route
+#: that paired over localhost would mint client keys for anything on the Mac.
+#: Kept apart from `PUBLIC_PATHS` because the checks differ: those must answer
+#: a keyless GET, these must answer a well-formed POST with 404 here.
+REMOTE_ONLY_PUBLIC = frozenset({
+    ("POST", "/api/v1/remote/pair/hello"),
+    ("POST", "/api/v1/remote/pair/finish"),
 })
 
 
@@ -195,9 +207,17 @@ class QuernClient:
     #: installing). Everything else gets the default.
     DEFAULT_TIMEOUT = 30.0
 
-    def __init__(self, target: ServerTarget, *, record: list[Call] | None = None):
+    def __init__(
+        self, target: ServerTarget, *, record: list[Call] | None = None,
+        session: str | None = None,
+    ):
         self.target = target
         self.calls: list[Call] = record if record is not None else []
+        #: Sent as `X-Quern-Session` on every request (#254), so this run's
+        #: actions are attributed to it rather than read as an unidentified
+        #: caller -- which the server warns about. One per client, so two
+        #: runs against the same server can be told apart in a trace.
+        self.session = session or f"conformance-{uuid.uuid4().hex[:12]}"
         self._client = httpx.Client(
             base_url=target.url,
             timeout=httpx.Timeout(self.DEFAULT_TIMEOUT),
@@ -215,12 +235,19 @@ class QuernClient:
         *,
         timeout: float | None = None,
         authenticated: bool = True,
+        tagged: bool = True,
         **kwargs: Any,
     ) -> httpx.Response:
-        """Issue a request and record it. Non-2xx is returned, not raised."""
+        """Issue a request and record it. Non-2xx is returned, not raised.
+
+        `tagged=False` sends no `X-Quern-Session` at all, for the tests of
+        what an unidentified caller is told.
+        """
         headers = dict(kwargs.pop("headers", {}) or {})
         if authenticated and self.target.api_key:
             headers.setdefault("Authorization", f"Bearer {self.target.api_key}")
+        if tagged:
+            headers.setdefault("X-Quern-Session", self.session)
 
         import time
 
