@@ -550,7 +550,6 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
             previous.rename(WDA_DERIVED)
             logger.warning("WDA build failed; the previous build is kept")
         raise
-    await _discard_previous(previous)
 
     # Update state
     now = datetime.now(UTC).isoformat()
@@ -575,7 +574,9 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
     else:
         state.pop("build_xcode", None)
     save_wda_state(state)
-
+    # Last, once the new build is recorded: a cancel during the deletion must
+    # not leave the new build on disk under the old one's version (review).
+    await _discard_previous(previous)
     return True
 
 
@@ -614,10 +615,21 @@ async def _discard_previous(previous: Path) -> None:
     crash, must never leave a half-deleted directory where _recover_previous
     would put it back over the good build (review). Retired leftovers from an
     earlier crash go with it."""
+    stuck = False
     if previous.exists():
-        previous.rename(previous.with_name(f"{previous.name}-retired-{uuid.uuid4().hex[:8]}"))
+        try:
+            previous.rename(previous.with_name(f"{previous.name}-retired-{uuid.uuid4().hex[:8]}"))
+        except OSError as e:
+            # The build succeeded and is recorded, so this must not fail it;
+            # left in place, the next build would restore the old one over it.
+            # Deleted where it stands instead (review).
+            logger.warning("Could not retire the kept WDA build %s (%s); deleting it in place",
+                           previous, e)
+            stuck = True
 
     def _sweep() -> None:
+        if stuck:
+            shutil.rmtree(previous, ignore_errors=True)
         for retired in previous.parent.glob(f"{previous.name}-retired-*"):
             shutil.rmtree(retired, ignore_errors=True)
 
@@ -1386,7 +1398,6 @@ async def _build_wda_simulator(force: bool) -> bool:
             # retried after a shutdown mid-build (review).
             raise
         return _keep_sim_build(exc)
-    await _discard_previous(previous)
     _name_simulator_runner()
 
     xcode = await _xcode_build_id()
@@ -1398,6 +1409,7 @@ async def _build_wda_simulator(force: bool) -> bool:
     state.pop("sim_build_failed_version", None)
     state["sim_built_at"] = datetime.now(UTC).isoformat()
     save_wda_state(state)
+    await _discard_previous(previous)   # last, as in build_wda (review)
     return True
 
 

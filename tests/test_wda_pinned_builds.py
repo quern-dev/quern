@@ -91,6 +91,21 @@ class TestTheDeviceBuild:
         assert state["build_wda_version"] == PIN
         assert not list(device["app"].parents[3].parent.glob("*-previous*")), "snapshot gone"
 
+    async def test_the_new_build_is_recorded_before_the_old_is_deleted(self, device, state,
+                                                                       monkeypatch):
+        """A cancel during the deletion left the new build on disk under the
+        old one's version, which setup_wda would then fall back to (review)."""
+        device["old_build"]()
+        device["builds"](ok=True)
+        seen = []
+
+        async def spy(previous):
+            seen.append(state.get("build_wda_version"))
+
+        monkeypatch.setattr(wda, "_discard_previous", spy)
+        assert await wda.build_wda("TEAM") is True
+        assert seen == [PIN]
+
     async def test_a_new_build_that_fails_puts_the_old_one_back(self, device, state):
         """The case #479 must not get wrong: a phone that worked, stranded."""
         device["old_build"]()
@@ -190,6 +205,23 @@ class TestTheSimulatorBuild:
         assert await wda.build_wda_simulator() is True
         assert (sim["products"] / "New.xctestrun").exists()
         assert state["sim_build_wda_version"] == PIN
+        tmp = sim["products"].parents[2]
+        assert not list(tmp.glob("derived-sim-previous*")), "the kept build is gone"
+
+    async def test_the_new_build_is_recorded_before_the_old_is_deleted(self, sim, state,
+                                                                       monkeypatch):
+        """A cancel during the deletion must not leave the new build unrecorded
+        (review)."""
+        sim["old_build"]()
+        sim["builds"](ok=True)
+        seen = []
+
+        async def spy(previous):
+            seen.append(state.get("sim_build_wda_version"))
+
+        monkeypatch.setattr(wda, "_discard_previous", spy)
+        assert await wda.build_wda_simulator() is True
+        assert seen == [PIN]
 
     async def test_a_failed_update_keeps_the_old_build_and_its_fingerprint(self, sim, state):
         sim["old_build"]()
@@ -355,6 +387,36 @@ class TestDiscardingTheKeptBuild:
         await wda._discard_previous(previous)
         assert seen == [False], "-previous must be gone before deleting begins"
         assert list(tmp_path.iterdir()) == []
+
+    async def test_it_is_renamed_not_deleted_on_the_loop(self, tmp_path, monkeypatch):
+        """Deleting -previous synchronously would also pass the test above."""
+        previous = tmp_path / "derived-previous"
+        (previous / "Build").mkdir(parents=True)
+
+        async def nothing(fn, *a, **kw):
+            return None
+
+        monkeypatch.setattr(wda.asyncio, "to_thread", nothing)
+        await wda._discard_previous(previous)
+        assert not previous.exists()
+        retired = list(tmp_path.glob("derived-previous-retired-*"))
+        assert len(retired) == 1 and (retired[0] / "Build").is_dir()
+
+    async def test_a_rename_that_fails_deletes_it_in_place(self, tmp_path, monkeypatch):
+        """The build succeeded and is recorded: no failure, and no -previous
+        left for the next build to restore over it (review)."""
+        previous = tmp_path / "derived-previous"
+        (previous / "Build").mkdir(parents=True)
+        real = Path.rename
+
+        def refuse(self, target):
+            if "-retired-" in str(target):
+                raise PermissionError("nope")
+            return real(self, target)
+
+        monkeypatch.setattr(Path, "rename", refuse)
+        await wda._discard_previous(previous)
+        assert not previous.exists()
 
     async def test_a_deletion_cut_short_is_not_restored_by_the_next_build(self, tmp_path):
         derived = tmp_path / "derived"
