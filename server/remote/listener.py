@@ -19,6 +19,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import ssl
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -26,6 +27,7 @@ import uvicorn
 
 from server.remote.cert import RemoteCert
 from server.remote.pairing import PairingCodes
+from server.viewer import protocol as guard
 from server.viewer.listener import LanAddress, allowed_hosts, raise_fd_limit
 from server.viewer.protocol import GuardedH11Protocol
 
@@ -50,6 +52,89 @@ class RemoteH11Protocol(GuardedH11Protocol):
             self._request_timer.cancel()
             self._request_timer = None
         super().handle_websocket_upgrade(event)
+
+
+#: Seconds a connection has to finish its TLS handshake.
+HANDSHAKE_TIMEOUT = 5.0
+
+
+def tls_gate(ctx: ssl.SSLContext):
+    """uvicorn's `http` protocol factory, terminating TLS itself.
+
+    Given the context, uvicorn would hand it to asyncio, which calls the
+    protocol's `connection_made` only once the handshake is done -- so the
+    guard's connection cap and requestless timeout never saw a socket that
+    connected and sent nothing, and asyncio's own handshake timeout is a
+    minute: a LAN host could hold thousands, the descriptor exhaustion the
+    guard exists to stop (review). So uvicorn is given plain TCP, and each
+    connection is counted against the cap as it arrives, upgraded with a
+    short handshake timeout, then handed to the guarded protocol."""
+    handshaking: set[asyncio.Transport] = set()
+
+    def factory(**kwargs):
+        return _TLSGate(RemoteH11Protocol(**kwargs), ctx, handshaking)
+
+    return factory
+
+
+class _TLSGate(asyncio.Protocol):
+    """One connection: counted, upgraded, then the guarded protocol's.
+
+    It stands in as start_tls's protocol too, buffering what arrives with the
+    handshake's last flight -- a TLS 1.3 client sends its request alongside
+    -- until the guarded protocol has its transport."""
+
+    def __init__(self, app: RemoteH11Protocol, ctx: ssl.SSLContext,
+                 handshaking: set) -> None:
+        self._app = app
+        self._ctx = ctx
+        self._handshaking = handshaking
+        self._early: list[bytes] = []
+        self._eof = False
+        self._lost: tuple[Exception | None] | None = None
+
+    def connection_made(self, transport) -> None:  # type: ignore[override]
+        if len(self._handshaking) + len(self._app.connections) >= guard.MAX_CONNECTIONS:
+            transport.abort()
+            return
+        # Paused until start_tls takes over: a ClientHello read here is lost.
+        transport.pause_reading()
+        self._handshaking.add(transport)
+        asyncio.get_running_loop().create_task(self._upgrade(transport))
+
+    async def _upgrade(self, transport) -> None:
+        try:
+            tls = await asyncio.get_running_loop().start_tls(
+                transport, self, self._ctx, server_side=True,
+                ssl_handshake_timeout=HANDSHAKE_TIMEOUT)
+        except Exception:  # noqa: BLE001 -- a failed handshake, or gone before it
+            transport.abort()
+            return
+        finally:
+            self._handshaking.discard(transport)
+        if tls is None:
+            return
+        app = self._app
+        app.connection_made(tls)
+        tls.set_protocol(app)
+        for data in self._early:
+            app.data_received(data)
+        self._early.clear()
+        if self._eof:
+            app.eof_received()
+        if self._lost is not None:
+            app.connection_lost(self._lost[0])
+
+    # Between the handshake and the hand-over only.
+    def data_received(self, data) -> None:
+        self._early.append(data)
+
+    def eof_received(self) -> bool:
+        self._eof = True
+        return True
+
+    def connection_lost(self, exc) -> None:
+        self._lost = (exc,)
 
 
 def _host_of(scope) -> str:
@@ -141,12 +226,15 @@ async def start_remote(app, settings: dict) -> RemoteListener | None:
         return RemoteListener(cert=None, port=None, error=error)
     raise_fd_limit()
     gate = RemoteGate(app, allowed_hosts(host, settings.get("hosts", []), lan))
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.load_cert_chain(str(cert.cert_path), str(cert.key_path))
     server = uvicorn.Server(uvicorn.Config(
         gate, host=host, port=port, lifespan="off",
-        ssl_certfile=str(cert.cert_path), ssl_keyfile=str(cert.key_path),
         # The viewer's limits -- a connection cap, and requestless sockets
-        # closed -- since this too is reachable from the LAN without a key.
-        http=RemoteH11Protocol, timeout_graceful_shutdown=2, log_config=None))
+        # closed -- since this too is reachable from the LAN without a key;
+        # TLS is terminated inside them, so they count the handshake too.
+        http=tls_gate(ctx), timeout_graceful_shutdown=2, log_config=None))
     server.capture_signals = contextlib.nullcontext  # type: ignore[method-assign]
 
     async def serve() -> None:

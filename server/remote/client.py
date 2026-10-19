@@ -72,6 +72,9 @@ def load(name: str) -> Remote:
     if not isinstance(entry, dict):
         raise RemoteError(f"no remote called {name!r}: pair with one first "
                           f"(quern connect <url> --code <code> --name {name})")
+    if not str(entry.get("url", "")).lower().startswith("https://"):
+        raise RemoteError(f"the remote {name!r} in {remotes_path()} is not an https:// "
+                          "address: its key would travel in clear; pair with it again")
     try:
         return Remote(name=name, url=str(entry["url"]).rstrip("/"),
                       fingerprint=cert_mod.normalise(str(entry["fingerprint"])),
@@ -183,17 +186,36 @@ def opener(remote: Remote) -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(_PinnedHandler(remote.fingerprint))
 
 
+class _PinningContext(ssl.SSLContext):
+    """A context whose sockets are pin-checked as the handshake completes.
+
+    websockets' `connect` wraps the socket and sends the upgrade -- the key
+    and resume token in its headers -- before it returns, so a check on the
+    connection it hands back comes after they have gone (review). Here the
+    check is inside `wrap_socket`, before anything is written."""
+
+    fingerprint = ""
+
+    def wrap_socket(self, *args, **kwargs):
+        sock = super().wrap_socket(*args, **kwargs)
+        try:
+            check_pin(sock, self.fingerprint)
+        except RemoteError:
+            sock.close()
+            raise
+        return sock
+
+
 def ws_connect(remote: Remote, url: str, **kwargs):
     """A websockets sync connection to `url`, pinned to `remote`."""
     from websockets.sync.client import connect
 
-    ws = connect(url, ssl=_unverified_context(), **kwargs)
-    try:
-        check_pin(ws.socket, remote.fingerprint)
-    except RemoteError:
-        ws.close()
-        raise
-    return ws
+    ctx = _PinningContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.fingerprint = remote.fingerprint
+    return connect(url, ssl=ctx, **kwargs)
 
 
 # -- pairing ------------------------------------------------------------------------
@@ -212,6 +234,8 @@ def pair(url: str, code: str, name: str, *, timeout: float = 15.0) -> Remote:
                           "speaks only TLS")
     conn = http.client.HTTPSConnection(parts.hostname, parts.port or 9130,
                                        context=_unverified_context(), timeout=timeout)
+    # Never a second connection: the proofs are over this one's certificate.
+    conn.auto_open = 0
     try:
         conn.connect()
         seen = presented(conn.sock)

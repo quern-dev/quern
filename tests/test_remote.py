@@ -62,6 +62,13 @@ class TestCertificate:
             cert_mod.load_or_create([])
         assert made.cert_path.read_text() == "not a certificate", "ending every pin silently"
 
+    def test_a_missing_key_beside_its_certificate_is_raised_not_replaced(self, isolated):
+        made = cert_mod.load_or_create([])
+        made.key_path.unlink()
+        with pytest.raises(FileNotFoundError):
+            cert_mod.load_or_create([])
+        assert not made.key_path.exists(), "a new pair would end every pin silently"
+
     def test_fingerprints_read_however_they_are_written(self):
         fp = "ab" * 32
         assert cert_mod.normalise(cert_mod.show(fp)) == fp
@@ -136,6 +143,48 @@ class TestPairingProofs:
         with pytest.raises(PairingError) as e:
             _exchange(codes, typed)
         assert e.value.status == 404, "void, even with the right secret"
+
+    def test_failed_finishes_count_against_the_code(self):
+        codes = PairingCodes()
+        typed, _ = codes.create("ci")
+        code_id, _ = pairing.parse(typed)
+        assert pairing.MAX_ATTEMPTS == 5
+        for _ in range(2):              # hello + failed finish: two attempts each
+            nonce_c = pairing.new_nonce()
+            nonce_s, _ = codes.hello(code_id, nonce_c, FP)
+            with pytest.raises(PairingError):
+                codes.finish(code_id, nonce_c, nonce_s, "0" * 64, FP)
+        codes.hello(code_id, pairing.new_nonce(), FP)       # the fifth
+        # The sixth voids it -- but only if the finishes counted: three
+        # hellos alone would leave room for a good exchange.
+        with pytest.raises(PairingError) as e:
+            _exchange(codes, typed)
+        assert e.value.status == 403
+
+    def test_a_malformed_hello_counts_as_an_attempt(self):
+        """Or a live id answers 400 where an unknown one answers 404, for free."""
+        codes = PairingCodes()
+        typed, _ = codes.create("ci")
+        code_id, _ = pairing.parse(typed)
+        for _ in range(pairing.MAX_ATTEMPTS):
+            with pytest.raises(PairingError):
+                codes.hello(code_id, "not-a-nonce", FP)
+        with pytest.raises(PairingError) as e:
+            _exchange(codes, typed)
+        assert e.value.status in (403, 404), "voided by the malformed attempts"
+
+    def test_a_new_code_replaces_one_pending_for_the_same_label(self):
+        """A leftover second code would pair the label again after its key
+        was revoked."""
+        codes = PairingCodes()
+        first, _ = codes.create("ci")
+        second, _ = codes.create("ci")
+        other, _ = codes.create("build")
+        with pytest.raises(PairingError) as e:
+            _exchange(codes, first)
+        assert e.value.status == 404
+        assert _exchange(codes, second) == "ci"
+        assert _exchange(codes, other) == "build"
 
     def test_a_finish_for_another_hello_is_refused(self):
         codes = PairingCodes()
@@ -214,6 +263,50 @@ def running(isolated):
         r.stop()
 
 
+class Recorder:
+    """A TLS server with a certificate nobody paired with, keeping every
+    byte it is sent: a wrong pin must leave it with nothing."""
+
+    def __init__(self, cert):
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(str(cert.cert_path), str(cert.key_path))
+        self.received = b""
+        self.handshakes = 0
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen()
+        self.port = self.sock.getsockname()[1]
+        self._ctx = ctx
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        while True:
+            try:
+                raw, _ = self.sock.accept()
+            except OSError:
+                return
+            try:
+                with self._ctx.wrap_socket(raw, server_side=True) as conn:
+                    self.handshakes += 1
+                    conn.settimeout(2)
+                    while data := conn.recv(65536):
+                        self.received += data
+            except (OSError, ssl.SSLError):
+                pass
+
+    def close(self):
+        self.sock.close()
+
+
+@pytest.fixture
+def recorder(isolated):
+    r = Recorder(cert_mod.load_or_create(["127.0.0.1"]))
+    try:
+        yield r
+    finally:
+        r.close()
+
+
 def _get(remote, path, *, key=None, host=None):
     req = urllib.request.Request(remote.url + path, headers={
         "Authorization": f"Bearer {key or remote.key}", "X-Quern-Session": "s1",
@@ -223,6 +316,31 @@ def _get(remote, path, *, key=None, host=None):
             return resp.status, json.loads(resp.read() or b"{}")
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read() or b"{}")
+
+
+class TestAWrongPinSendsNothing:
+    """Against a server that keeps what it is sent: the handshake happens,
+    and then not one byte -- the key travels in the first request's headers."""
+
+    def _remote(self, recorder):
+        return client.Remote(name="x", url=f"https://127.0.0.1:{recorder.port}",
+                             fingerprint="0" * 64, key="qc_secret")
+
+    def test_over_https(self, recorder):
+        with pytest.raises(client.PinMismatch):
+            _get(self._remote(recorder), "/api/v1/sessions")
+        time.sleep(0.2)
+        assert recorder.handshakes == 1 and recorder.received == b""
+
+    def test_over_the_session_websocket(self, recorder):
+        """websockets sends its upgrade -- the key, the resume token -- before
+        connect() returns: a check on what it returns came too late (review)."""
+        with pytest.raises(client.PinMismatch):
+            client.ws_connect(self._remote(recorder), f"wss://127.0.0.1:{recorder.port}/live",
+                              additional_headers={"Authorization": "Bearer qc_secret"},
+                              open_timeout=5)
+        time.sleep(0.2)
+        assert recorder.handshakes == 1 and recorder.received == b""
 
 
 class TestTheListener:
@@ -258,9 +376,63 @@ class TestTheListener:
     def test_pairing_answers_only_on_the_remote_listener(self, running):
         from fastapi.testclient import TestClient
 
+        # A real code, so a 404 is the listener check and not an unknown id.
+        typed, _ = running.listener.codes.create("lan")
+        code_id, _ = pairing.parse(typed)
         local = TestClient(running.app)
-        r = local.post("/api/v1/remote/pair/hello", json={"code_id": "ABCD", "nonce": "0" * 64})
+        r = local.post("/api/v1/remote/pair/hello", json={"code_id": code_id, "nonce": "0" * 64})
         assert r.status_code == 404
+        assert client.pair(running.url, typed, "lan").fingerprint, "the code was still good"
+
+    def test_the_owners_key_is_refused_on_a_websocket_too(self, running):
+        from websockets.exceptions import InvalidStatus
+
+        remote = client.Remote(name="x", url=running.url,
+                               fingerprint=running.listener.cert.fingerprint, key=KEY)
+        with pytest.raises(InvalidStatus) as e:
+            ws = client.ws_connect(remote, f"wss://127.0.0.1:{running.port}/api/v1/sessions/s1/live",
+                                   additional_headers={"Authorization": f"Bearer {KEY}"},
+                                   open_timeout=5)
+            ws.close()
+        assert e.value.response.status_code in (401, 403)
+
+    def test_a_connection_is_counted_and_timed_before_its_tls_handshake(self, running,
+                                                                         monkeypatch):
+        """asyncio hands a protocol its connection only after the handshake,
+        so sockets that never sent a ClientHello escaped the cap and the
+        timeout -- a minute each, as many as a LAN host liked (review)."""
+        from server.remote import listener
+        from server.viewer import protocol
+
+        monkeypatch.setattr(protocol, "MAX_CONNECTIONS", 4)
+        monkeypatch.setattr(listener, "HANDSHAKE_TIMEOUT", 0.5)
+        idle = [socket.create_connection(("127.0.0.1", running.port)) for _ in range(8)]
+        try:
+            time.sleep(0.2)
+            closed = 0
+            for s in idle:
+                s.settimeout(0.05)
+                try:
+                    closed += s.recv(1) == b""
+                except TimeoutError:
+                    pass
+                except ConnectionResetError:
+                    closed += 1
+            assert closed == 4, "past the cap, closed on arrival"
+            time.sleep(0.8)
+            for s in idle:
+                s.settimeout(0.5)
+                try:
+                    assert s.recv(1) == b"", "no handshake: closed at the timeout"
+                except ConnectionResetError:
+                    pass
+        finally:
+            for s in idle:
+                s.close()
+        # And the listener still answers once they are gone.
+        remote = client.Remote(name="x", url=running.url,
+                               fingerprint=running.listener.cert.fingerprint, key="qc_none")
+        assert _get(remote, "/health")[0] == 200
 
     def test_a_held_session_socket_outlives_the_requestless_timeout(self, running, monkeypatch):
         """The viewer's guard closes connections that send no request; an

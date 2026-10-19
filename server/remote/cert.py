@@ -70,8 +70,13 @@ def load_or_create(names: list[str]) -> RemoteCert:
     raised, so the listener reports it and stays off."""
     directory = cert_dir()
     cert_path, key_path = directory / "cert.pem", directory / "key.pem"
-    if not cert_path.exists() or not key_path.exists():
+    if not cert_path.exists() and not key_path.exists():
         _generate(cert_path, key_path, names)
+    elif not key_path.exists():
+        # Half a pair is damage, not a first run: replacing it would end
+        # every pin with nothing but a log line (review).
+        raise FileNotFoundError(f"{key_path} is missing beside {cert_path}: restore it, "
+                                "or `quern remote rotate-cert` and pair every client again")
     from cryptography import x509
     from cryptography.hazmat.primitives.serialization import Encoding
 

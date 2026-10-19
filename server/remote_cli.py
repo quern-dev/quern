@@ -90,6 +90,9 @@ def _connect(args: list[str]) -> int:
                 raise client.RemoteError("give --code, or --key and --fingerprint, not both")
             remote = client.pair(opts.url, opts.code, name)
         elif opts.key and opts.fingerprint:
+            if not opts.url.lower().startswith("https://"):
+                raise client.RemoteError(f"{opts.url!r} is not an https:// address: the "
+                                         "remote listener speaks only TLS")
             remote = client.Remote(name=name, url=opts.url.rstrip("/"),
                                    fingerprint=cert_mod.normalise(opts.fingerprint),
                                    key=opts.key)

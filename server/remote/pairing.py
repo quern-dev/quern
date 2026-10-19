@@ -96,8 +96,12 @@ class PairingCodes:
         self._clock = clock
 
     def create(self, label: str) -> tuple[str, int]:
-        """A new code for a client to be labelled `label`; (code, seconds)."""
+        """A new code for a client to be labelled `label`; (code, seconds).
+        It replaces any code still pending for the label: one left over could
+        otherwise issue that label a key again after it was revoked (review)."""
         self._prune()
+        for stale in [c.id for c in self._codes.values() if c.label == label]:
+            del self._codes[stale]
         code_id = _random(ID_LEN)
         while code_id in self._codes:
             code_id = _random(ID_LEN)
@@ -111,9 +115,11 @@ class PairingCodes:
         certificate. Counts as an attempt, so the proofs an eavesdropper can
         collect are bounded too."""
         code = self._get(code_id)
+        # Counted first: a malformed hello must not tell a live id from an
+        # unknown one for free (review).
+        self._attempt(code)
         if not _valid_nonce(nonce_c):
             raise PairingError("a pairing nonce is 64 lowercase hex characters")
-        self._attempt(code)
         nonce_s = new_nonce()
         code.nonces = (nonce_c, nonce_s)
         return nonce_s, proof("server", code.secret, code.id, nonce_c, nonce_s, fingerprint)
