@@ -583,7 +583,7 @@ def test_remotes_are_kept_private_and_read_back(isolated):
         client.load("ci")
 
 
-def test_a_remote_that_is_not_https_is_refused(isolated):
+def test_a_remote_that_is_not_https_is_refused(isolated, capsys):
     """Through urllib's plain handler it would go unpinned, the key in clear."""
     client.save(client.Remote(name="ci", url="http://ci.lan:9130", fingerprint="ab" * 32,
                               key="qc_x"))
@@ -593,6 +593,9 @@ def test_a_remote_that_is_not_https_is_refused(isolated):
 
     assert remote_main("connect", ["http://ci.lan:9130", "--key", "qc_x",
                         "--fingerprint", "ab" * 32, "--name", "plain"]) == 1
+    # Refused for the scheme, before any connection -- not because ci.lan
+    # happens not to answer.
+    assert "not an https:// address" in capsys.readouterr().err
     assert "plain" not in client._read()
 
 
