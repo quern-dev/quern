@@ -1,4 +1,4 @@
-"""`quern record start|stop|list`: recordings from a shell or a CI step (#364).
+"""`quern record start|stop|list|download`: recordings from a shell or a CI step (#364).
 
 A CI job should not have to read ~/.quern for a port and a key and hand-roll
 curl. This finds the running server the way `quern url` does and calls the
@@ -12,12 +12,16 @@ no key), 2 the server refused, 3 a recording that failed, or with
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
+import re
+import shutil
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 from server.session import session_from_env
 
@@ -31,6 +35,7 @@ Usage: quern record start --udid UDID [--out DIR] [--kinds actions,flows,logs]
        quern record stop RECORDING_ID [--require-complete]
        quern record keyframe RECORDING_ID [--label TEXT]
        quern record list [--requested-by NAME]
+       quern record download RECORDING_ID [--dest DIR]
 
 A host is a domain and its subdomains, or a glob: --exclude-host '*.s3.*.amazonaws.com'.
 For a small recording of a long run, keep the flows and limit their bodies:
@@ -53,37 +58,61 @@ script can keep it:
     quern record stop "$REC" --require-complete
 
 Then GET /api/v1/trace?recording=<id or DIR> gives the trace over any window.
+
+`download` copies a recording's files -- events.jsonl, manifest.json, the
+video -- into DIR (default quern-recordings/ID, here), for when the server is
+another machine (QUERN_REMOTE) and its output directory is on its disk. A
+client key downloads its own recordings only.
 """
 
 
-def _call(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
+def _target():
+    """(url, key, remote): the server to ask -- the paired remote QUERN_REMOTE
+    names (#254, phase 3), else this Mac's -- and the key to ask it with."""
     from server.__main__ import _server_base_url
     from server.config import API_KEY_FILE, client_api_key
     from server.remote import client
 
     try:
-        remote = client.from_env()      # QUERN_REMOTE (#254, phase 3)
+        remote = client.from_env()
     except client.RemoteError as e:
         raise ConnectionError(str(e)) from e
     if remote is not None:
-        url, key = remote.url, remote.key
-    else:
-        url = _server_base_url()
-        if url is None:
-            raise ConnectionError("no server answering: start it with `quern start`")
-        key = client_api_key()
-        if not key:
-            raise ConnectionError(f"no API key at {API_KEY_FILE} and no QUERN_CLIENT_KEY: "
-                                  "run `quern setup`")
-    req = urllib.request.Request(
+        return remote.url, remote.key, remote
+    url = _server_base_url()
+    if url is None:
+        raise ConnectionError("no server answering: start it with `quern start`")
+    key = client_api_key()
+    if not key:
+        raise ConnectionError(f"no API key at {API_KEY_FILE} and no QUERN_CLIENT_KEY: "
+                              "run `quern setup`")
+    return url, key, None
+
+
+def _request(url: str, key: str, path: str, method: str = "GET",
+             body: dict | None = None) -> urllib.request.Request:
+    return urllib.request.Request(
         url + path, method=method, data=json.dumps(body).encode() if body is not None else None,
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
                  # Who is asking (#254): an agent's Bash command is attributed
                  # to that agent's session, anything else to "cli".
                  "X-Quern-Session": session_from_env(dict(os.environ), fallback="cli")})
+
+
+def _opener(remote):
+    """urllib's open, pinned to the remote's certificate when there is one."""
+    from server.remote import client
+
+    return client.opener(remote).open if remote is not None else urllib.request.urlopen
+
+
+def _call(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
+    from server.remote import client
+
+    url, key, remote = _target()
+    req = _request(url, key, path, method, body)
     try:
-        open_ = client.opener(remote).open if remote is not None else urllib.request.urlopen
-        with open_(req, timeout=60) as resp:
+        with _opener(remote)(req, timeout=60) as resp:
             return resp.status, json.loads(resp.read() or b"{}")
     except urllib.error.HTTPError as e:
         try:
@@ -95,6 +124,77 @@ def _call(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
         raise ConnectionError(str(e)) from e
     except (urllib.error.URLError, OSError, ValueError) as e:
         raise ConnectionError(f"the server did not answer: {e}") from e
+
+
+#: The server's recording ids: the default destination is built from one.
+_REC_ID = re.compile(r"rec_[0-9a-f]{12}")
+
+#: The names a recording writes, as the server serves them.
+_FILE = re.compile(r"(events\.jsonl|manifest\.json|video-[0-9]{1,4}\.(mp4|log))")
+
+
+def _download(recording_id: str, dest: str | None) -> int:
+    """Copy a recording's files into `dest` (#482). Each lands through a
+    .part file, so a download cut off leaves no half file under its name."""
+    from server.remote import client
+
+    if not _REC_ID.fullmatch(recording_id):
+        print(f"quern record download: {recording_id!r} is not a recording id (rec_ and 12 "
+              "hex digits, as `start` and `list` print)", file=sys.stderr)
+        return 2
+    status, listing = _call("GET", f"/api/v1/recordings/{recording_id}/files")
+    if status >= 400:
+        print(f"quern record download: {_detail(listing.get('detail'))}", file=sys.stderr)
+        return 2
+    target = Path(dest or Path("quern-recordings") / recording_id).expanduser()
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f"quern record download: cannot write to {target}: {e}", file=sys.stderr)
+        return 1
+    url, key, remote = _target()
+    got = []
+    for entry in listing.get("files") or []:
+        name = str(entry.get("name", ""))
+        if not _FILE.fullmatch(name):
+            continue        # nothing but the names a recording writes lands here
+        part = target / f"{name}.part"
+        req = _request(url, key, f"/api/v1/recordings/{recording_id}/files/{name}")
+        try:
+            with _opener(remote)(req, timeout=60) as resp, open(part, "wb") as out:
+                expected = resp.headers.get("Content-Length")
+                shutil.copyfileobj(resp, out, 1024 * 1024)
+                written = out.tell()
+            # A connection closed early reads as the end of the file: the
+            # length it promised is what says the file is whole (review).
+            if expected is not None and expected.isdigit() and written != int(expected):
+                raise OSError(f"the server sent {written} of {expected} bytes")
+            part.replace(target / name)
+        except urllib.error.HTTPError as e:
+            part.unlink(missing_ok=True)
+            print(f"quern record download: {name}: HTTP {e.code}", file=sys.stderr)
+            return 2
+        except (client.RemoteError, urllib.error.URLError, OSError,
+                http.client.HTTPException) as e:
+            # HTTPException too: a chunked answer cut off mid-chunk raises
+            # IncompleteRead, which is not an OSError (CodeRabbit).
+            part.unlink(missing_ok=True)
+            print(f"quern record download: {name}: {e}", file=sys.stderr)
+            return 1
+        got.append(f"{name} ({(target / name).stat().st_size} bytes)")
+    print(str(target))
+    for line in got:
+        print(f"  {line}", file=sys.stderr)
+    if listing.get("live"):
+        print("note: still recording -- these are the files as written so far", file=sys.stderr)
+    return 0
+
+
+def _remote_note(recording_id: str) -> None:
+    """Under QUERN_REMOTE, a recording's paths are on the server's disk."""
+    if os.environ.get("QUERN_REMOTE", "").strip():
+        print(f"(those paths are on the server: `quern record download {recording_id}` "
+              "copies the files here)", file=sys.stderr)
 
 
 def _detail(detail) -> str:
@@ -142,11 +242,20 @@ def main(argv: list[str]) -> int:
     stop.add_argument("--require-complete", action="store_true")
     listing = sub.add_parser("list", add_help=False)
     listing.add_argument("--requested-by")
+    download = sub.add_parser("download", add_help=False)
+    download.add_argument("recording_id")
+    download.add_argument("--dest")
     try:
         args = parser.parse_args(argv)
     except SystemExit:
         print(USAGE, file=sys.stderr)
         return 2
+    if args.what == "download":
+        try:
+            return _download(args.recording_id, args.dest)
+        except ConnectionError as e:
+            print(f"quern record: {e}", file=sys.stderr)
+            return 1
     try:
         if args.what == "start":
             kinds = [k.strip() for k in args.kinds.split(",") if k.strip()] if args.kinds \
@@ -189,11 +298,13 @@ def main(argv: list[str]) -> int:
         if answer.get("viewer_url"):
             print(answer["viewer_url"])
         print(f"recording {answer['udid']} into {answer['output_dir']}", file=sys.stderr)
+        _remote_note(answer["id"])
         for w in answer.get("warnings") or []:
             print(f"warning: {w}", file=sys.stderr)
         return 0
     if args.what == "stop":
         print(json.dumps(answer, indent=2))
+        _remote_note(answer.get("id", args.recording_id))
         if answer.get("state") not in ("stopped", None):
             # A failed recording is not a success, flag or no flag.
             print(f"quern record stop: {answer.get('id')} {answer.get('state')}: "

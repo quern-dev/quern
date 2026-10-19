@@ -34,6 +34,9 @@ KINDS = {".app.tar.gz": "app", ".ipa": "ipa", ".apk": "apk"}
 #: Seconds an upload is kept when nothing installs it.
 TTL_SECONDS = 3600
 
+#: Bytes received between checks of the volume's free space.
+DISK_CHECK_BYTES = 16 * 1024 * 1024
+
 #: Members a .app's archive may hold: a bundle has thousands, not millions.
 MAX_MEMBERS = 200_000
 
@@ -77,7 +80,18 @@ def kind_of(name: str) -> str:
 
 class UploadStore:
     def __init__(self, root: Path, max_bytes: int,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time, *, min_free_bytes: int = 0,
+                 disk_free: Callable[[], int] | None = None) -> None:
+        #: Free space the uploads' volume keeps, whatever the keys hold: the
+        #: cap is per key, and the owner decides how many keys there are
+        #: (#481). 0 for no floor.
+        self.min_free_bytes = min_free_bytes
+        self._disk_free = disk_free or self._free_on_volume
+        #: Bytes promised to the disk but not on it yet -- the rest of a
+        #: declared upload, a bundle about to unpack -- across every key, so
+        #: uploads side by side cannot each find the same room above the
+        #: floor (review).
+        self._disk_pending = 0
         self.root = root
         self.max_bytes = max_bytes
         self._clock = clock
@@ -97,6 +111,30 @@ class UploadStore:
         shutil.rmtree(self.root, ignore_errors=True)
         self._uploads.clear()
 
+    def _free_on_volume(self) -> int:
+        existing = self.root
+        while not existing.exists() and existing != existing.parent:
+            existing = existing.parent
+        return shutil.disk_usage(existing).free
+
+    def _check_disk(self, more: int = 0) -> None:
+        """Refuse when `more` bytes would leave the volume under its floor."""
+        if not self.min_free_bytes:
+            return
+        try:
+            free = self._disk_free()
+        except OSError as e:
+            # Not known is not room: refused, rather than read as plenty.
+            raise UploadError(f"the server could not read its free disk space ({e}); "
+                              "try again", 507) from None
+        free -= self._disk_pending
+        if free - more < self.min_free_bytes:
+            mb = 1024 * 1024
+            raise UploadError(
+                f"the server's disk is too full for this upload: {free // mb} MB free, and "
+                f"it keeps {self.min_free_bytes // mb} MB free (config.json's "
+                '{"uploads": {"min_free_mb": ...}}) -- try again once space is freed', 507)
+
     def held(self, principal: str) -> int:
         """What `principal` has on disk here, and on the way."""
         return (sum(u.size for u in self._uploads.values() if u.principal == principal)
@@ -115,13 +153,18 @@ class UploadStore:
         room = self.max_bytes - self.held(principal)
         if declared is not None and declared > room:
             raise UploadError(self._too_big(declared, room), 413)
+        self._check_disk(declared or 0)
         upload_id = "up_" + secrets.token_hex(8)
         directory = self.root / upload_id
         directory.mkdir(parents=True, mode=0o700)
         target = directory / name
         size = 0
         reserved = 0
+        checked_at = 0
+        promised = 0
         try:
+            promised = declared or 0
+            self._disk_pending += promised
             with open(target, "wb") as out:
                 async for chunk in chunks:
                     # Checked against everything held now, in-flight bytes
@@ -131,9 +174,21 @@ class UploadStore:
                         raise UploadError(self._too_big(size + len(chunk),
                                                         self.max_bytes - self.held(principal)
                                                         + size), 413)
+                    if declared is None:
+                        # No length promised: each chunk is checked before it
+                        # is written, or an upload ending between periodic
+                        # checks finished under the floor (CodeRabbit).
+                        self._check_disk(len(chunk))
                     size += len(chunk)
                     self._inflight[principal] = self._inflight.get(principal, 0) + len(chunk)
                     out.write(chunk)
+                    # Written now, so no longer only promised.
+                    paid = min(promised, len(chunk))
+                    promised -= paid
+                    self._disk_pending -= paid
+                    if size - checked_at >= DISK_CHECK_BYTES:
+                        checked_at = size
+                        self._check_disk()
             if size == 0:
                 raise UploadError("the upload was empty")
             path, held = target, size
@@ -148,8 +203,11 @@ class UploadStore:
                 if self.held(principal) + unpacked > self.max_bytes:
                     raise UploadError(self._too_big(unpacked, self.max_bytes
                                                     - self.held(principal)), 413)
+                self._check_disk(unpacked)
                 self._inflight[principal] = self._inflight.get(principal, 0) + unpacked
                 reserved = unpacked
+                self._disk_pending += unpacked
+                promised += unpacked
                 path, held = await _to_thread_to_the_end(
                     _unpack_app, target, directory / "app", unpacked)
                 target.unlink()
@@ -157,6 +215,7 @@ class UploadStore:
             shutil.rmtree(directory, ignore_errors=True)
             raise
         finally:
+            self._disk_pending -= promised
             left = self._inflight.get(principal, 0) - size - reserved
             if left > 0:
                 self._inflight[principal] = left

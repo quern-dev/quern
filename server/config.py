@@ -420,21 +420,36 @@ def _unused_remote_keys(raw: dict) -> str | None:
 UPLOAD_DEFAULT_MB = 2048
 
 
+#: Free space the uploads' volume keeps by default (#481).
+UPLOAD_DEFAULT_MIN_FREE_MB = 4096
+
+
 def upload_settings() -> dict:
-    """The upload cap from config.json's `uploads` object:
+    """The upload limits from config.json's `uploads` object:
 
-        {"uploads": {"max_mb": 2048}}
+        {"uploads": {"max_mb": 2048, "min_free_mb": 4096}}
 
-    Anything but a positive whole number reads as the default, with a note."""
+    `max_mb` is what one key may hold at once; `min_free_mb` the free space
+    the volume keeps, whatever every key holds together (0 turns it off).
+    A value that is not a whole number of megabytes -- or, for `max_mb`,
+    not positive -- reads as the default, with a note."""
     raw = read_user_config().get("uploads")
     raw = raw if isinstance(raw, dict) else {}
-    value = raw.get("max_mb", UPLOAD_DEFAULT_MB)
-    note = None
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        note = (f"config.json's uploads.max_mb is {value!r}, not a positive whole number "
-                f"of megabytes: using {UPLOAD_DEFAULT_MB}")
-        value = UPLOAD_DEFAULT_MB
-    return {"max_bytes": value * 1024 * 1024, "note": note}
+    notes = []
+
+    def whole(key: str, default: int, least: int) -> int:
+        value = raw.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < least:
+            notes.append(f"config.json's uploads.{key} is {value!r}, not a whole number of "
+                         f"megabytes {'above 0' if least else 'of 0 or more'}: "
+                         f"using {default}")
+            return default
+        return value
+
+    max_mb = whole("max_mb", UPLOAD_DEFAULT_MB, 1)
+    min_free_mb = whole("min_free_mb", UPLOAD_DEFAULT_MIN_FREE_MB, 0)
+    return {"max_bytes": max_mb * 1024 * 1024, "min_free_bytes": min_free_mb * 1024 * 1024,
+            "note": "; ".join(notes) or None}
 
 
 def get_auto_install_cert() -> bool:
