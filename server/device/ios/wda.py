@@ -347,6 +347,19 @@ def customize_wda(repo: Path | None = None) -> bool:
     shutil.copy2(ICON_PATH, appiconset_dir / "AppIcon-1024.png")
     logger.debug("Created AppIcon asset catalog at %s", appiconset_dir)
 
+    # WebDriverAgent 16 ships the runner's own AppIcon -- Appium's logo -- and
+    # it wins over the one above wherever the build is not post-processed: a
+    # simulator showed Appium's icon, not quern's (#479, found checking).
+    # Its images are replaced with ours, the set kept so the project still
+    # finds it.
+    runner_icons = repo / "WebDriverAgentRunner" / "Assets.xcassets" / "AppIcon.appiconset"
+    if runner_icons.is_dir():
+        for old_png in runner_icons.glob("*.png"):
+            old_png.unlink()
+        shutil.copy2(ICON_PATH, runner_icons / "AppIcon-1024.png")
+        (runner_icons / "Contents.json").write_text(json.dumps(contents_json, indent=2) + "\n")
+        logger.debug("Replaced the runner's AppIcon at %s", runner_icons)
+
     # --- Step 2: Patch build settings for PRODUCT_NAME ---
     pbxproj_path = repo / "WebDriverAgent.xcodeproj" / "project.pbxproj"
     if not pbxproj_path.exists():

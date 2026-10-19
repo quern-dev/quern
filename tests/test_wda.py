@@ -316,6 +316,25 @@ class TestCustomizeWda:
         content = (repo / "WebDriverAgent.xcodeproj" / "project.pbxproj").read_text()
         assert content.count("PRODUCT_NAME = QuernDriver") == 2
 
+    def test_the_runners_own_icon_is_replaced_by_querns(self, tmp_path):
+        """WebDriverAgent 16 ships the runner an AppIcon of its own, Appium's
+        logo, and a simulator showed it instead of quern's (#479)."""
+        repo = _setup_wda_repo(tmp_path)
+        upstream = repo / "WebDriverAgentRunner" / "Assets.xcassets" / "AppIcon.appiconset"
+        upstream.mkdir(parents=True)
+        (upstream / "icon-1024.png").write_bytes(b"appium logo")
+        (upstream / "Contents.json").write_text(
+            '{"images": [{"filename": "icon-1024.png", "idiom": "universal"}]}')
+        customize_wda(repo)
+        assert not (upstream / "icon-1024.png").exists()
+        assert (upstream / "AppIcon-1024.png").read_bytes() == ICON_PATH.read_bytes()
+        assert json.loads((upstream / "Contents.json").read_text())["images"][0]["filename"] \
+            == "AppIcon-1024.png"
+        # And on a source customised before this, whose project is already patched.
+        (upstream / "AppIcon-1024.png").write_bytes(b"appium logo")
+        assert customize_wda(repo) is False
+        assert (upstream / "AppIcon-1024.png").read_bytes() == ICON_PATH.read_bytes()
+
     def test_icon_file_exists_in_resources(self):
         """The wda-icon.png must be checked into the repo."""
         assert ICON_PATH.exists(), f"Icon not found at {ICON_PATH}"
