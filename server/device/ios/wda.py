@@ -367,7 +367,12 @@ def customize_wda(repo: Path | None = None) -> bool:
 
     content = pbxproj_path.read_text()
 
-    # Idempotency: check if PRODUCT_NAME is already set
+    # Idempotency: check if PRODUCT_NAME is already set. It is a marker and
+    # nothing more: the Runner configs end with upstream's own
+    # `PRODUCT_NAME = "$(TARGET_NAME)"`, which Xcode reads instead -- true of
+    # 11.4.0 as well -- so the products keep WebDriverAgentRunner's names and
+    # the name a person sees is set on the built bundle: by the device build's
+    # post-processing, and by _name_simulator_runner (#479).
     if "PRODUCT_NAME = QuernDriver" in content:
         logger.info("WDA already customized — skipping")
         return False
@@ -1287,6 +1292,7 @@ async def _build_wda_simulator(force: bool) -> bool:
                        "kept", pinned_wda_version(), str(exc).splitlines()[0])
         return False
     shutil.rmtree(previous, ignore_errors=True)
+    _name_simulator_runner()
 
     xcode = await _xcode_build_id()
     state = read_wda_state()
@@ -1298,6 +1304,28 @@ async def _build_wda_simulator(force: bool) -> bool:
     state["sim_built_at"] = datetime.now(UTC).isoformat()
     save_wda_state(state)
     return True
+
+
+def _name_simulator_runner() -> None:
+    """Give the simulator's runner the display name the device's gets.
+
+    The device build's post-processing sets CFBundleDisplayName and re-signs;
+    the simulator build had nothing after xcodebuild, so its runner showed as
+    "WebDriverAgentRunner-Runner" -- and has since quern first built for
+    simulators. It is unsigned (CODE_SIGNING_ALLOWED=NO), so its Info.plist is
+    simply edited. Best effort: a name is not worth failing a build over.
+    """
+    products = WDA_DERIVED_SIM / "Build" / "Products"
+    for app in products.glob("*-iphonesimulator/*-Runner.app"):
+        info = app / "Info.plist"
+        try:
+            with open(info, "rb") as f:
+                plist = plistlib.load(f)
+            plist["CFBundleDisplayName"] = "QuernDriver"
+            with open(info, "wb") as f:
+                plistlib.dump(plist, f)
+        except (OSError, ValueError, plistlib.InvalidFileException) as e:
+            logger.warning("Could not name the simulator runner %s: %s", app, e)
 
 
 async def _xcodebuild_simulator() -> None:

@@ -244,3 +244,26 @@ def test_status_calls_a_build_from_before_the_pin_unpinned(state):
     state.update({"build_team_id": "TEAM"})
     line = wda_status_line()
     assert "device unpinned" in line and "behind the pin" in line
+
+
+async def test_the_simulator_runner_is_named_as_the_devices_is(sim, state, monkeypatch):
+    """It was "WebDriverAgentRunner-Runner": the device's name comes from its
+    post-processing, and the simulator build had none (#479)."""
+    import plistlib
+
+    calls = []
+
+    async def fake_exec(*cmd, **kw):
+        calls.append(cmd)
+        app = sim["products"] / "Debug-iphonesimulator" / "WebDriverAgentRunner-Runner.app"
+        app.mkdir(parents=True, exist_ok=True)
+        (app / "Info.plist").write_bytes(plistlib.dumps(
+            {"CFBundleName": "WebDriverAgentRunner-Runner"}))
+        (sim["products"] / "New.xctestrun").write_text("new")
+        return _proc(0)
+
+    monkeypatch.setattr(wda.asyncio, "create_subprocess_exec", fake_exec)
+    assert await wda.build_wda_simulator() is True
+    app = sim["products"] / "Debug-iphonesimulator" / "WebDriverAgentRunner-Runner.app"
+    info = app / "Info.plist"
+    assert plistlib.loads(info.read_bytes())["CFBundleDisplayName"] == "QuernDriver"
