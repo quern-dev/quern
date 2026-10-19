@@ -121,8 +121,23 @@ class TestTheVocabularyIsClosed:
         which a test failure is the prompt for."""
         assert set(logging_ext.CATEGORIES) == {
             "device.action", "device.read", "device.lifecycle",
-            "proxy", "logs", "media", "build", "knowledge", "server.lifecycle",
+            "proxy", "logs", "media", "build", "knowledge", "session", "server.lifecycle",
         }
+
+    def test_every_category_the_server_names_is_published(self):
+        """An unpublished one only warns at run time -- `session` did, on every
+        held-session call, from #254's first phase until it was noticed live."""
+        import re
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent / "server"
+        # The vocabulary's own calls only: a captured log entry's os_log-style
+        # `category=` (the plist watcher's "plist") is the device's, not ours.
+        call = re.compile(r'(?:\blogged_action|\b_?action|logging_ext\.\w+)\('
+                          r'(?:[^()]|\([^()]*\))*?\bcategory="([a-z.]+)"')
+        named = {m.group(1) for f in root.rglob("*.py") for m in call.finditer(f.read_text())}
+        assert named, "the scan found nothing: it is not looking where the calls are"
+        assert named - set(logging_ext.CATEGORIES) == set()
 
     def test_the_outcomes_are_the_ones_the_spec_publishes(self):
         assert set(logging_ext.OUTCOMES) == {
