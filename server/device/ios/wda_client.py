@@ -1182,6 +1182,72 @@ class WdaBackend:
                 "WDA restart on %s: driver started but not responsive", udid[:8],
             )
 
+    async def screenshot(self, udid: str, timeout: float = 5.0) -> bytes:
+        """The screen as PNG, from WDA itself.
+
+        For comparing frames inside a sweep (#475): measured at 0.07s on a
+        simulator and 0.10s on an iPhone 11, where the general capture path
+        (simctl, pymobiledevice3) took 0.4s and 1.0s. A read, so the transport
+        retry is safe.
+        """
+        import base64
+
+        resp = await self._request("get", udid, "/screenshot", timeout=timeout)
+        value = resp.json().get("value")
+        if not isinstance(value, str):
+            raise DeviceError(f"WDA returned no screenshot on {udid[:8]}", tool="wda")
+        return base64.b64decode(value)
+
+    #: The scroll containers a sweep can scroll by element, in the order asked.
+    SCROLL_CONTAINER_TYPES = ("CollectionView", "Table", "ScrollView")
+
+    async def find_scroll_container(
+        self, udid: str, depths: tuple[int, ...],
+    ) -> tuple[str, int] | None:
+        """The largest scroll container on screen, and the depth it was found at.
+
+        For a sweep's element scroll (#475). Measured: 0.01-0.5s on a
+        simulator and 0.2-1.6s on an iPhone 11 per query, the dearest being
+        the Table on a 200-row table. iOS 26 Settings' container appears only
+        at 25, so the caller passes the depths to try in turn. Each query is
+        bounded and never re-sent; a timeout is treated as nothing found.
+        Leaves the session at the last depth tried.
+        """
+        for depth in depths:
+            await self._set_snapshot_depth(udid, depth)
+            found: list[dict] = []
+            for kind in self.SCROLL_CONTAINER_TYPES:
+                try:
+                    found += await self.find_elements_by_query(
+                        udid, "class name", f"XCUIElementType{kind}",
+                        timeout=5.0, no_resend=True,
+                    )
+                except QueryTimedOut:
+                    continue
+            found = [f for f in found if f.get("_wda_element_id") and f.get("frame")]
+            if found:
+                biggest = max(found, key=lambda f: f["frame"]["width"] * f["frame"]["height"])
+                return biggest["_wda_element_id"], depth
+        return None
+
+    async def scroll_element(
+        self, udid: str, element_id: str, direction: str, distance: float,
+    ) -> None:
+        """XCUITest's own scroll of one container, by a share of its height.
+
+        For a sweep (#475): it is the one gesture measured never to be dropped,
+        to travel the same distance every time, and to return with the list at
+        rest -- on a simulator and an iPhone 11, across a full table, a lazy
+        list and Settings. WDA's drag is faster but the app ignored up to half
+        of them, and WDA's element swipe returned while the list still flung.
+        The session must be at the depth the container was found at: WDA looks
+        the element up again before scrolling. A write, so never re-sent.
+        """
+        await self._write(
+            udid, f"/wda/element/{element_id}/scroll", action="scroll",
+            json={"direction": direction, "distance": distance},
+        )
+
     async def find_elements_by_query(
         self, udid: str, using: str, value: str,
         *, scope_element_id: str | None = None, timeout: float | None = None,

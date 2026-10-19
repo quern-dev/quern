@@ -77,6 +77,16 @@ class FakeWda:
         return [q for q in self.queries if q["depth"] == SNAPSHOT_MAX_DEPTH]
 
 
+def _png(shade: int = 128) -> bytes:
+    import io
+
+    from PIL import Image
+
+    out = io.BytesIO()
+    Image.new("L", (390, 844), shade).save(out, format="PNG")
+    return out.getvalue()
+
+
 @pytest.fixture
 def phone(monkeypatch):
     # A timed-out wait attaches a screenshot of the screen it gave up on.
@@ -92,6 +102,11 @@ def phone(monkeypatch):
     # The /source fallback: nothing at the shallow depth either.
     ctrl.wda_client.describe_all = AsyncMock(return_value=[])
     ctrl.wda_client.tap = AsyncMock()
+    # The sweep's frames (#475). Unstubbed, the real one opens a usbmux forward.
+    ctrl.wda_client.screenshot = AsyncMock(return_value=_png())
+    # The sweep's element scroll (#475): no container unless a test gives one.
+    ctrl.wda_client.find_scroll_container = AsyncMock(return_value=None)
+    ctrl.wda_client.scroll_element = AsyncMock()
     # On-screen marking asks the device for its viewport; not under test here.
     ctrl._mark_on_screen = AsyncMock()
     # A wait that times out describes the screen it gave up on.
@@ -553,16 +568,20 @@ class TestTheScrollSweepLooksDeeperFirst:
         assert len(wda.deep_queries()) == 1
         assert wda.depth == ACTION_SNAPSHOT_DEPTH, "the full depth was left on the session"
 
-    async def test_an_off_screen_deep_row_sweeps_at_the_shallow_depth(self, sweeping):
+    async def test_an_off_screen_row_found_only_deep_is_looked_for_deep(self, sweeping):
+        """Found at 25 and not on screen: the sweep looks for it there, by bounded
+        query, and reads no tree (#475)."""
         ctrl, wda, swipes = sweeping
         await ctrl.scroll_to_element(identifier=OFF_SCREEN)
         assert swipes, "the sweep never swiped, so this test checks nothing"
-        assert all(d == ACTION_SNAPSHOT_DEPTH for d in swipes), swipes
-        assert len(wda.deep_queries()) == 1, "the sweep's own reads went deep"
-        _no_deep_source(ctrl)
-        # The viewport read sets no depth of its own and inherits the session's,
-        # which is why the session has to be shallow again before it.
-        assert ctrl.wda_client.describe_all.call_args_list, "no sweep read ran"
+        deep = wda.deep_queries()
+        assert len(deep) > 1, "the sweep's reads did not look deep"
+        assert all(q.get("no_resend") is True for q in deep)
+        assert [q["depth"] for q in wda.queries[1:]].count(ACTION_SNAPSHOT_DEPTH) <= 2, (
+            "a target found only deep was also looked for shallow on every swipe")
+        # The viewport read, before anything else; none in the sweep.
+        assert ctrl.wda_client.describe_all.await_count == 1
+        assert wda.depth == ACTION_SNAPSHOT_DEPTH, "the sweep left the session deep"
 
     async def test_a_dense_screen_sweeps_without_looking_deeper(self, sweeping, monkeypatch):
         ctrl, wda, swipes = sweeping
@@ -589,11 +608,250 @@ class TestTheScrollSweepLooksDeeperFirst:
         assert swipes and all(d == ACTION_SNAPSHOT_DEPTH for d in swipes), swipes
         _no_deep_source(ctrl)
 
-    async def test_tap_elements_sweep_does_not_look_deeper_a_second_time(self, sweeping):
-        """tap_element's own lookup already looked deeper (#470)."""
+    async def test_tap_elements_sweep_looks_where_its_lookup_found_the_target(self, sweeping):
+        """tap_element's own lookup found it only deep (#470); its sweep looks
+        there too, from what that lookup learned (#475)."""
         ctrl, wda, swipes = sweeping
         ctrl._wda_reachable_only = AsyncMock(
             side_effect=lambda r, m: ([], [{"why": "off screen", "label": "Privacy"}]))
         await ctrl.tap_element(identifier=OFF_SCREEN, scroll_to_find=True)
         assert swipes, "the sweep never ran, so this test checks nothing"
-        assert len(wda.deep_queries()) == 1
+        assert len(wda.deep_queries()) > 1
+        assert wda.depth == ACTION_SNAPSHOT_DEPTH
+
+    async def test_a_chosen_depth_keeps_tap_elements_sweep_at_it(self, sweeping):
+        ctrl, wda, swipes = sweeping
+        await ctrl.tap_element(identifier="absent", scroll_to_find=True, snapshot_depth=12)
+        assert swipes, "the sweep never ran, so this test checks nothing"
+        assert wda.deep_queries() == []
+
+
+class LazyDeepList:
+    """A long list the way iOS 26 draws one, as #475 measured it live: lazy (only
+    rows on screen exist) and deep (only from depth 18). Swipes move it, and its
+    screenshot changes exactly when its content does.
+
+    Rows are 50pt from y=100; the viewport shows 700pt."""
+
+    ROW_H, TOP, VIEW = 50, 100, 700
+
+    def __init__(self, wda: FakeWda, rows: int = 200, lazy: bool = True):
+        self.wda = wda
+        self.ROWS = rows
+        self.lazy = lazy
+        self.offset = 0.0
+        self.animated = False
+        self.frames = 0
+        self.timeout_from_swipe: int | None = None
+        self.swipes = 0
+        #: Swipes (1-based) that WDA accepts and the app ignores, as live.
+        self.dropped: set[int] = set()
+        self.scrolls: list[tuple[str, float, int | None]] = []
+        self.has_container = True
+        self.scroll_fails = False
+
+    @property
+    def max_offset(self):
+        return self.ROWS * self.ROW_H - self.VIEW
+
+    async def query(self, udid, using, value, **kw):
+        self.wda.queries.append(
+            {"depth": self.wda.depth, "value": value, "swipes": self.swipes, **kw})
+        deep = self.wda.depth == SNAPSHOT_MAX_DEPTH
+        if (deep and kw.get("no_resend") and self.timeout_from_swipe is not None
+                and self.swipes >= self.timeout_from_swipe):
+            from server.device.ios.wda_client import QueryTimedOut
+            raise QueryTimedOut(value)
+        if self.wda.depth is None or self.wda.depth < 18:
+            return []
+        for i in range(self.ROWS):
+            if f"'lazy_{i}'" in value or value == f"lazy_{i}":
+                y = self.TOP + i * self.ROW_H - self.offset
+                if not self.lazy or self.TOP - self.ROW_H < y < self.TOP + self.VIEW:
+                    return [{"type": "Cell", "AXUniqueId": f"lazy_{i}", "AXLabel": f"Row {i}",
+                             "frame": {"x": 0, "y": y, "width": 390, "height": self.ROW_H}}]
+        return []
+
+    async def swipe(self, udid, x1, y1, x2, y2, *a, **k):
+        self.swipes += 1
+        if self.swipes in self.dropped:
+            return
+        self.offset = min(max(self.offset + (y1 - y2), 0), self.max_offset)
+
+    async def find_scroll_container(self, udid, depths):
+        self.lookups = getattr(self, "lookups", 0) + 1
+        if not self.has_container:
+            return None
+        await self.wda.set_depth(udid, depths[-1])
+        return "cv-1", depths[-1]
+
+    async def scroll_element(self, udid, element_id, direction, distance):
+        """Never dropped, as measured; travels its share of the viewport."""
+        self.scrolls.append((direction, distance, self.wda.depth))
+        if self.scroll_fails:
+            raise DeviceError("WDA did not answer the scroll", tool="wda")
+        delta = distance * self.VIEW / 0.75 * 0.9
+        self.offset = min(max(self.offset + (delta if direction == "down" else -delta), 0),
+                          self.max_offset)
+
+    async def screenshot(self, udid, **k):
+        import io
+        import random
+
+        from PIL import Image, ImageDraw
+
+        self.frames += 1
+        image = Image.new("L", (390, 852), 255)
+        draw = ImageDraw.Draw(image)
+        first = int(self.offset // self.ROW_H)
+        for i in range(first, min(self.ROWS, first + self.VIEW // self.ROW_H + 2)):
+            y = self.TOP + i * self.ROW_H - self.offset
+            draw.rectangle((0, y, 390, y + self.ROW_H - 2), fill=(i * 37) % 200)
+        if self.animated:
+            draw.rectangle((0, 400, 390, 440), fill=random.randrange(256))
+        out = io.BytesIO()
+        image.save(out, format="PNG")
+        return out.getvalue()
+
+
+class TestTheSweepOnALazyDeepList:
+    """End to end through the sweep: the case that failed live on main, where
+    the shallow sweep saw neither the row nor the list move (#475)."""
+
+    @staticmethod
+    def _install(ctrl, wda, **kw):
+        world = LazyDeepList(wda, **kw)
+        ctrl.wda_client.find_elements_by_query = world.query
+        ctrl.wda_client.swipe = world.swipe
+        ctrl.wda_client.screenshot = world.screenshot
+        ctrl.wda_client.find_scroll_container = world.find_scroll_container
+        ctrl.wda_client.scroll_element = world.scroll_element
+        world.sources_at = []
+
+        async def describe_all(*a, **k):
+            world.sources_at.append(world.swipes)
+            return []
+
+        ctrl.wda_client.describe_all = describe_all
+        return world
+
+    @pytest.fixture
+    def lazy(self, phone):
+        ctrl, wda = phone
+        ctrl._warn_if_input_is_suppressed = AsyncMock()
+        return ctrl, wda, self._install(ctrl, wda)
+
+    async def test_it_scrolls_to_an_off_screen_row(self, lazy):
+        ctrl, wda, world = lazy
+        result = await ctrl.scroll_to_element(identifier="lazy_150")
+        assert result["status"] == "ok", result
+        assert result["element"]["identifier"] == "lazy_150"
+        assert 0 < world.swipes < 20
+        assert all(q.get("no_resend") for q in wda.deep_queries())
+        # The viewport read and the cold lookup's own fallback, both at 12 and
+        # both before the first swipe; none in the sweep.
+        assert world.sources_at and set(world.sources_at) == {0}, world.sources_at
+        assert wda.depth == ACTION_SNAPSHOT_DEPTH
+
+    async def test_an_absent_row_ends_at_both_ends_of_the_list(self, phone):
+        """Frames that stop changing are the ends; without them the sweep spent
+        its whole budget, or on main stopped after two swipes."""
+        ctrl, wda = phone
+        ctrl._warn_if_input_is_suppressed = AsyncMock()
+        world = self._install(ctrl, wda, rows=60)
+        result = await ctrl.scroll_to_element(identifier="absent")
+        assert result["status"] == "not_found"
+        down = -(-world.max_offset // (0.88 * 852 - 0.13 * 852))  # swipes to the end
+        assert world.offset == 0, "it did not come back up to the top"
+        assert down < world.swipes <= 2 * down + 4, world.swipes
+
+    async def test_an_animated_screen_costs_swipes_not_a_wrong_answer(self, lazy):
+        ctrl, wda, world = lazy
+        world.animated = True
+        result = await ctrl.scroll_to_element(identifier="lazy_150")
+        assert result["status"] == "ok"
+        world.offset = 0
+        result = await ctrl.scroll_to_element(identifier="absent", max_swipes=4)
+        assert result["status"] == "not_found"
+        assert world.swipes <= 12 + 20, "the budget did not bound it"
+
+    async def test_a_deep_query_that_times_out_is_dropped_not_re_sent(self, lazy):
+        ctrl, wda, world = lazy
+        world.timeout_from_swipe = 2
+        await ctrl.scroll_to_element(identifier="lazy_150")
+        deep = wda.deep_queries()
+        assert any(q["swipes"] < 2 for q in deep), "never looked deep before the timeout"
+        late = [q for q in deep if q["swipes"] >= 2]
+        assert len(late) == 1, f"it went on querying deep after a timeout: {late}"
+        assert all(q.get("no_resend") for q in deep)
+        assert wda.depth == ACTION_SNAPSHOT_DEPTH
+
+    async def test_a_target_only_deep_and_a_timeout_gives_up_and_says_why(
+        self, phone, caplog,
+    ):
+        """Located off screen at 25 only, so the sweep looks only there; when that
+        query times out there is nowhere left to look."""
+        ctrl, wda = phone
+        ctrl._warn_if_input_is_suppressed = AsyncMock()
+        world = self._install(ctrl, wda, lazy=False)
+        world.timeout_from_swipe = 1
+        caplog.set_level("INFO")
+        result = await ctrl.scroll_to_element(identifier="lazy_15")
+        assert result["status"] == "not_found"
+        assert "that query timed out" in caplog.text
+        assert world.swipes <= 2
+
+    async def test_a_dropped_drag_is_redone_as_an_element_scroll(self, lazy):
+        """Live, WDA accepted drags the app then ignored; one frame unchanged
+        turned the sweep round part way down the list (#475)."""
+        ctrl, wda, world = lazy
+        world.dropped = {4}
+        result = await ctrl.scroll_to_element(identifier="lazy_150")
+        assert result["status"] == "ok", result
+        assert world.swipes > 4, "the drop never happened, so this checks nothing"
+        assert [d for d, _, _ in world.scrolls] == ["down"], world.scrolls
+
+    async def test_the_scroll_runs_at_the_depth_its_container_was_found_at(self, lazy):
+        ctrl, wda, world = lazy
+        world.dropped = {2}
+        await ctrl.scroll_to_element(identifier="lazy_150")
+        assert world.scrolls and world.scrolls[0][2] == SNAPSHOT_MAX_DEPTH
+        assert wda.depth == ACTION_SNAPSHOT_DEPTH, "the sweep left the session deep"
+
+    async def test_the_container_is_looked_up_once_and_only_when_needed(self, phone):
+        ctrl, wda = phone
+        ctrl._warn_if_input_is_suppressed = AsyncMock()
+        world = self._install(ctrl, wda)
+        await ctrl.scroll_to_element(identifier="lazy_100")
+        assert getattr(world, "lookups", 0) == 0, "looked up with nothing dropped"
+        world.offset, world.swipes, world.dropped = 0, 0, {2, 5, 7}
+        await ctrl.scroll_to_element(identifier="lazy_150")
+        assert world.lookups == 1
+
+    async def test_an_element_scroll_that_also_moves_nothing_is_believed(self, phone):
+        """At the end of the list: one scroll confirms it, not a second drag."""
+        ctrl, wda = phone
+        ctrl._warn_if_input_is_suppressed = AsyncMock()
+        world = self._install(ctrl, wda, rows=30)
+        result = await ctrl.scroll_to_element(identifier="absent")
+        assert result["status"] == "not_found"
+        assert len(world.scrolls) == 2, world.scrolls  # one at each end
+        assert [d for d, _, _ in world.scrolls] == ["down", "up"]
+
+    async def test_without_a_container_a_second_drag_settles_it(self, phone):
+        ctrl, wda = phone
+        ctrl._warn_if_input_is_suppressed = AsyncMock()
+        world = self._install(ctrl, wda)
+        world.has_container, world.dropped = False, {4}
+        result = await ctrl.scroll_to_element(identifier="lazy_150")
+        assert result["status"] == "ok", result
+        assert world.scrolls == []
+
+    async def test_a_failing_element_scroll_falls_back_to_drags(self, phone):
+        ctrl, wda = phone
+        ctrl._warn_if_input_is_suppressed = AsyncMock()
+        world = self._install(ctrl, wda)
+        world.scroll_fails, world.dropped = True, {4, 9}
+        result = await ctrl.scroll_to_element(identifier="lazy_150")
+        assert result["status"] == "ok", result
+        assert len(world.scrolls) == 1, "kept trying a scroll that had failed"
