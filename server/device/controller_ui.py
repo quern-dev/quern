@@ -790,6 +790,28 @@ class DeviceControllerUI:
     #: sim-bridge.swift.
     _SWIPE_HOLD_S = 0.15
 
+    #: Through WDA, the share of the content area's pixels that must change
+    #: across a swipe for the list to count as having moved (#475). Measured:
+    #: a swipe that moved a list changed 0.038-0.12 on a simulator and
+    #: 0.32-0.40 on an iPhone 11; a swipe at either end, 0 -- except a pull at
+    #: the top of Settings, which changes 0.0051 (simulator) and 0.0017 (phone)
+    #: with the list not moving. Below that, the sweep read the top of Settings
+    #: as movement on every pull and spent its whole budget there.
+    #:
+    #: Not higher: a sparse list moves less. Review measured 1.10% for a page
+    #: of text-only rows shifted by whole rows and 1.16% for a list in a 200pt
+    #: region, and a real move read as none turns the sweep round mid-list --
+    #: a wrong answer, where a pull read as a move only costs swipes. So this
+    #: sits between the two, nearer the artefact. A list of identical rows
+    #: shifted by exactly whole rows still reads as unmoved (0%); nothing in
+    #: a frame can tell those apart.
+    _SWEEP_FRAME_MOVED = 0.008
+
+    #: Through WDA, how far an element scroll travels, as a share of its
+    #: container: measured at 629pt on a simulator and 662pt on an iPhone 11,
+    #: about the step a sweep drag takes (#475).
+    _WDA_SCROLL_DISTANCE = 0.75
+
     async def _all_elements_for_context(
         self,
         resolved: str,
@@ -1030,6 +1052,7 @@ class DeviceControllerUI:
         deadline_s: float | None = None,
         report: dict | None = None,
         snapshot_depth: int | None = None,
+        deepen: bool = False,
     ) -> UIElement | None:
         """Scroll an iOS scroll container until the target element is on-screen.
 
@@ -1075,6 +1098,24 @@ class DeviceControllerUI:
         pull-to-refresh and sheet-dismiss drag -- and a caller that gets
         `not_found` with no mention of them acts next against a screen it does
         not know has changed. See #274.
+
+        `deepen`: through WDA, the depth was not the caller's choice, so the
+        target may be looked for below it (#475). The opening lookup looks once
+        more at the full depth after a miss at the shallow one, and the sweep
+        looks at the depths that lookup found necessary. A row on screen but
+        nested below the action depth -- iOS 26's Settings, from depth 20 --
+        otherwise reads as absent, and the sweep swipes away from it.
+
+        Through WDA the sweep reads no tree at all (#475). Measured on iOS 26,
+        every lazy list -- Settings, a SwiftUI List, a UICollectionView list --
+        nests its rows at 17-18 or deeper, so a read at the action depth saw
+        neither the target nor the list move, and gave up after two swipes
+        saying nothing scrolled. A deep /source sees them but costs 34s on an
+        iPhone 11's 200-row table, and nothing cheap tells the two kinds of
+        list apart in advance. So the two jobs a read did are split: the target
+        is found by an id query (0.07s on a simulator, 0.4s on the phone, at any
+        depth) and movement by comparing screenshots of the content area
+        (0.1s, depth-blind).
         """
         # The viewport comes from the Application element, which is the
         # device's own answer. A *targeted* query (filter_type) -- on physical
@@ -1147,6 +1188,92 @@ class DeviceControllerUI:
         # device, and taking each one twice would double the sweep.
         at_rest = getattr(backend, "swipe_returns_at_rest", False) is True
 
+        # By the backend serving the sweep, which is the question: are its
+        # reads WDA's? (Also what keeps a fake screen without a WDA client off
+        # this path.)
+        via_wda = backend is getattr(self, "wda_client", None)
+        #: The depths the sweep looks for the target at, through WDA; settled
+        #: after the opening lookup, from what it learned.
+        target_depths: list[int | None] = [snapshot_depth]
+        #: Through WDA, the depth the last read found the target at.
+        found_depth: int | None = None
+        #: Through WDA, frames in a row that could not be taken (finding 6 of
+        #: the #475 review: blind, the sweep swiped to the end of its budget).
+        blind_frames = 0
+
+        async def _frame():
+            """The content area as a small grayscale image, or None.
+
+            Cropped to between the chrome: the status-bar clock ticks, and a
+            tab bar or navigation bar stays put while the list under it moves.
+            """
+            from server.device.settle import _prepare
+
+            nonlocal blind_frames
+            try:
+                png = await self.wda_client.screenshot(resolved)
+            except Exception as exc:
+                _note(f"  screenshot failed ({type(exc).__name__})")
+                blind_frames += 1
+                return None
+            image = _prepare(png)
+            if image is None:
+                blind_frames += 1
+                return None
+            blind_frames = 0
+            top = int(image.height * top_safe / screen_height)
+            bottom = max(top + 1, int(image.height * bottom_safe / screen_height))
+            return image.crop((0, top, image.width, bottom))
+
+        async def _wda_read() -> tuple[UIElement | None, object]:
+            """The target, by query at each depth in turn, and a frame."""
+            from server.device.ios.wda_client import SNAPSHOT_MAX_DEPTH
+
+            nonlocal found_depth
+            found = None
+            found_depth = None
+            for depth in list(target_depths):
+                deep = depth == SNAPSHOT_MAX_DEPTH and depth != snapshot_depth
+                if depth is not None:
+                    await self.wda_client._set_snapshot_depth(resolved, depth)
+                earlier = _DEEP_TIMED_OUT.get()
+                _DEEP_TIMED_OUT.set(False)
+                els, took = await self._wda_direct_query(
+                    resolved, label=label, identifier=identifier,
+                    **({"timeout": DEEP_QUERY_TIMEOUT, "no_resend": True} if deep else {}),
+                )
+                timed_out = _DEEP_TIMED_OUT.get()
+                _DEEP_TIMED_OUT.set(earlier or timed_out)
+                if deep and (timed_out or (not els and took > SLOW_DEEP_MISS_SECONDS)):
+                    # The guards of the opening lookup (#470), per read.
+                    target_depths.remove(depth)
+                    _note(
+                        f"  the query at {depth} "
+                        f"{'timed out' if timed_out else f'took {took:.1f}s'}; "
+                        "not looking that deep again"
+                    )
+                found = _pick(find_element(els, label=label, identifier=identifier))
+                if found is not None:
+                    found_depth = depth
+                    break
+            return found, await _frame()
+
+        def _frames_moved(before, after) -> bool:
+            """Did the content move between two frames?
+
+            Trusted one way only. Frames that match mean nothing moved, which
+            ends that direction of the sweep; anything animating can only make
+            them differ, which costs swipes, never a wrong answer. A frame that
+            could not be taken counts as moved for the same reason.
+            """
+            from server.device.settle import changed_fraction
+
+            if before is None or after is None:
+                return True
+            change = changed_fraction(before, after)
+            _note(f"  frame change {change:.4f}")
+            return change >= self._SWEEP_FRAME_MOVED
+
         async def _fetch(probe: bool = False) -> UIElement | None:
             """The cold lookup: filtered, and probing.
 
@@ -1162,11 +1289,21 @@ class DeviceControllerUI:
             ~3.5s), and what the sweep hunts is a row in a scroll container,
             always present in the static tree.
             """
-            els, _ = await self.get_ui_elements(
-                resolved, use_cache=False,
-                filter_label=label, filter_identifier=identifier,
-                probe_containers=probe, snapshot_depth=snapshot_depth,
-            )
+            if deepen:
+                _begin_lookup()
+            try:
+                els, _ = await self.get_ui_elements(
+                    resolved, use_cache=False,
+                    filter_label=label, filter_identifier=identifier,
+                    probe_containers=probe, snapshot_depth=snapshot_depth,
+                    deepen_on_miss=deepen,
+                )
+            finally:
+                if deepen:
+                    # Nothing after this looks the element up again -- the
+                    # sweep judges it by its frame -- so the shallow depth goes
+                    # back now, before any read or swipe of the sweep's.
+                    await self._done_with_deep_element(resolved, snapshot_depth)
             return _pick(find_element(els, label=label, identifier=identifier))
 
         def _pick(matches: list[UIElement]) -> UIElement | None:
@@ -1208,6 +1345,8 @@ class DeviceControllerUI:
             turning. An absolute limit of two put five "N min ago" labels
             ticking together straight back into the old failure mode.
             """
+            if via_wda:
+                return _frames_moved(before, after)
             if any(before[k] != after[k] for k in before.keys() & after.keys()):
                 return True
             appeared = [k for k in after if k not in before]
@@ -1232,6 +1371,9 @@ class DeviceControllerUI:
             that a filtered lookup falls back to anyway whenever the target is
             absent, which inside the sweep is nearly every time.
             """
+            if via_wda:
+                # A query and a frame instead: see the docstring (#475).
+                return await _wda_read()
             els, _ = await self.get_ui_elements(
                 resolved, use_cache=False, probe_containers=probe,
                 snapshot_depth=snapshot_depth,
@@ -1302,6 +1444,59 @@ class DeviceControllerUI:
                 resolved, mid_x, y1, mid_x, y2, 0.3, hold=self._SWIPE_HOLD_S,
             )
             self._invalidate_ui_cache(resolved)
+
+        #: Through WDA, the list's scroll container, looked up the first time a
+        #: drag seems not to have moved anything: (element id, depth), False
+        #: when there is none or it stopped working, None before the lookup.
+        container: tuple[str, int] | bool | None = None
+
+        async def _scroll_instead(y1: float, y2: float) -> bool:
+            """Redo a drag that seems to have moved nothing as an element scroll.
+
+            Through WDA only (#475). Measured on a simulator and an iPhone 11:
+            the app ignored up to half of WDA's drags -- which drags depended on
+            the list, the gap between them and where the drag ended, so no wait
+            avoided it everywhere -- and a dropped drag reads exactly like the
+            end of the list. WDA's element scroll was never dropped, returned at
+            rest and travelled the same every time, at 1.5-2x a drag's cost. So
+            drags do the work and the scroll settles each doubt: if it moves
+            nothing either, the end really has been reached.
+
+            True when the scroll ran, so that whatever the next read says can
+            be believed; False when there is no container to scroll, and the
+            sweep falls back on asking twice.
+            """
+            nonlocal container, swipes
+            if container is None:
+                from server.device.ios.wda_client import SNAPSHOT_MAX_DEPTH
+
+                depths = tuple(dict.fromkeys(
+                    d for d in (snapshot_depth, SNAPSHOT_MAX_DEPTH) if d is not None))
+                found = await self.wda_client.find_scroll_container(
+                    resolved, depths, point=(mid_x, (y_far + y_near) / 2),
+                )
+                container = found or False
+                _note(f"  scroll container: {found or 'none found'}")
+            if container is False:
+                return False
+            element_id, depth = container
+            swipes += 1
+            direction = "down" if y1 > y2 else "up"
+            # A full step is the measured 0.75; a shorter move toward a located
+            # target, proportionally less.
+            distance = min(1.0, max(0.05, self._WDA_SCROLL_DISTANCE * abs(y1 - y2) / step))
+            _note(f"swipe {swipes}/{total_budget} element scroll ({direction}) {distance:.2f}")
+            try:
+                # WDA looks the container up again at the session depth.
+                await self.wda_client._set_snapshot_depth(resolved, depth)
+                await self.wda_client.scroll_element(resolved, element_id, direction, distance)
+            except DeviceError as exc:
+                container = False
+                _note(f"  element scroll failed ({exc}); trusting drags from here")
+                return False
+            finally:
+                self._invalidate_ui_cache(resolved)
+            return True
 
         sweep_trace: list[str] = []
         sweep_started = time.perf_counter()
@@ -1409,6 +1604,20 @@ class DeviceControllerUI:
             el = None if target_known_absent else await _fetch(probe=True)
             if el is not None and _visible(el):
                 return _finish(el)
+            if via_wda and deepen:
+                # Where the opening lookup -- this one, or tap_element's own --
+                # had to look: deep only for a target found only deep, both for
+                # one found at neither, and the action depth alone when the
+                # deeper look did not run (found shallow, or a dense screen) or
+                # timed out.
+                from server.device.ios.wda_client import SNAPSHOT_MAX_DEPTH
+
+                if _DEEPEN_TRIED.get() and not _DEEP_TIMED_OUT.get():
+                    target_depths[:] = (
+                        [SNAPSHOT_MAX_DEPTH] if _DEEPENED.get() is not None
+                        else [snapshot_depth, SNAPSHOT_MAX_DEPTH]
+                    )
+                    _note(f"  looking for the target at depth {target_depths}")
 
             # The baseline the first swipe is compared against, and the read
             # that tells whether the sweep can skip probing.
@@ -1436,8 +1645,22 @@ class DeviceControllerUI:
             moved_at_all = False
             last_cy: float | None = None
             stalls = 0
+            # Through WDA, "nothing moved" is believed once an element scroll
+            # says so too, or on a second drag where there is no container: a
+            # dropped drag says it as well (see _scroll_instead), and taking it
+            # for the end of the list turned the sweep round part way down.
+            unmoved = 0
 
             while True:
+                if via_wda and blind_frames >= 2:
+                    _give_up(
+                        "two screenshots in a row failed, so whether the list "
+                        "moves cannot be seen"
+                    )
+                    return None
+                if via_wda and not target_depths:
+                    _give_up("the target can only be looked for deeper, and that query timed out")
+                    return None
                 if el is not None and el.frame is None:
                     # Matched, but with nowhere to be: no swipe changes that,
                     # and sweeping on spent the whole budget finding it out.
@@ -1502,6 +1725,15 @@ class DeviceControllerUI:
 
                 el, fingerprint = await _read_at_rest(sweep_probe)
                 moved = _moved(last_fingerprint, fingerprint)
+                trusted = False
+                if (via_wda and not moved and swipes < total_budget
+                        and time.perf_counter() < deadline):
+                    if await _scroll_instead(y1, y2):
+                        trusted = True
+                        el, fingerprint = await _read_at_rest(sweep_probe)
+                        moved = _moved(last_fingerprint, fingerprint)
+                        if moved:
+                            _note("  the drag was dropped; the element scroll moved it")
                 last_fingerprint = fingerprint
                 # Here, not in the one branch that used to set it. `moved` is
                 # computed on every iteration and was only recorded when the
@@ -1526,8 +1758,16 @@ class DeviceControllerUI:
 
                 if moved:
                     moved_at_all = True
+                    unmoved = 0
                     _note("  not in tree")
                     continue
+
+                unmoved += 1
+                if via_wda and not trusted and unmoved < 2:
+                    # No container to settle it: ask a second time instead.
+                    _note("  not in tree, and nothing moved; swiping again to be sure")
+                    continue
+                unmoved = 0
 
                 # A swipe that changed nothing: that end of the list is reached.
                 if going_down:
@@ -1540,13 +1780,43 @@ class DeviceControllerUI:
                 )
                 return None
 
+        result: UIElement | None = None
         try:
-            return await _sweep()
+            result = await _sweep()
+            return result
         except BaseException as exc:
             # A read or a swipe failing mid-sweep, or the caller cancelling,
             # used to take the trace of every step before it down with it.
             _give_up(f"stopped by {type(exc).__name__}: {exc!r}")
             raise
+        finally:
+            if via_wda and snapshot_depth is not None:
+                if result is not None and found_depth is None and _DEEPENED.get() is not None:
+                    # Found by the opening lookup's deeper query.
+                    from server.device.ios.wda_client import SNAPSHOT_MAX_DEPTH
+
+                    found_depth = SNAPSHOT_MAX_DEPTH
+                deep_hit = result is not None and found_depth not in (None, snapshot_depth)
+                if result is not None:
+                    _DEEPENED.set(found_depth if deep_hit else None)
+                try:
+                    # A deep hit stays at its depth while the caller still uses
+                    # the element -- tap_element's value, reachability and
+                    # stability checks look it up again at the session depth
+                    # -- and the caller puts the shallow depth back (#475
+                    # review, finding 1; the rule #474 set for the lookup).
+                    # Anything else goes back now: the next read that sets no
+                    # depth inherits whatever is left.
+                    await self.wda_client._set_snapshot_depth(
+                        resolved, found_depth if deep_hit else snapshot_depth,
+                    )
+                except DeviceError as exc:
+                    # Never in place of the sweep's own answer or error: a
+                    # swipe that may have run must still be reported as such.
+                    logger.warning(
+                        "ios scroll-to-element: could not set the WDA depth after "
+                        "the sweep on %s: %s", resolved[:8], exc,
+                    )
 
     async def _deeper_query(
         self, resolved: str, shallow_depth: int | None, shallow_elapsed: float,
@@ -2806,8 +3076,15 @@ class DeviceControllerUI:
                     resolved, label=label, identifier=identifier, max_swipes=10,
                     target_known_absent=not served_from_cache,
                     report=sweep, snapshot_depth=read_depth,
+                    deepen=snapshot_depth is None,
                 )
                 if scrolled is not None:
+                    # Found deep by the sweep: the checks below look it up
+                    # again at the session depth, which the sweep left there;
+                    # the wrapper puts the shallow depth back (#475 review).
+                    deepened = _DEEPENED.get()
+                    if deepened is not None and shallow_depth is not None:
+                        _PENDING_RESTORE.set((resolved, shallow_depth))
                     # The sweep finds by label or identifier alone, so the
                     # element it lands on must still pass the type rule. It
                     # used to replace the matches unchecked: a Button request
@@ -3714,10 +3991,16 @@ class DeviceControllerUI:
         # in the sweep used whatever depth WDA was last left at -- 25 after any
         # full read, 34s a read on an iPhone 11's 200-row table -- and the
         # sweep ran out of deadline before reaching the row (F35).
+        #
+        # A depth the caller did not choose also gets one deeper look before
+        # the first swipe (#475), the rule tap_element's lookup follows (#470).
         el = await self._ios_scroll_to_element(
             resolved, label=label, identifier=identifier, max_swipes=max_swipes,
             snapshot_depth=self._read_depth(resolved, snapshot_depth),
+            deepen=snapshot_depth is None,
         )
+        # Only its frame is reported, so a deep hit is done with now.
+        await self._done_with_deep_element(resolved, self._read_depth(resolved, snapshot_depth))
         self._invalidate_ui_cache(resolved)  # scrolling changes the viewport
         if el is None:
             return {

@@ -95,6 +95,9 @@ WRITES = [
     ("press_button", "/wda/pressButton", lambda w: w.press_button(SIM, "home")),
     ("launch_app", "/wda/apps/launch", lambda w: w.launch_app(SIM, "com.example", {})),
     ("open_url", "/url", lambda w: w.open_url(SIM, "https://example.com/x")),
+    # The sweep's element scroll (#475): a second one scrolls twice as far.
+    ("scroll_element", "/wda/element/el-1/scroll",
+     lambda w: w.scroll_element(SIM, "el-1", "down", 0.75)),
 ]
 
 #: Errors that can arrive after WDA already has the request.

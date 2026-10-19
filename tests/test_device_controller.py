@@ -1959,6 +1959,9 @@ class TestTapElementIosScroll:
             report=ANY,
             # Off WDA there is no depth to set (F35).
             snapshot_depth=None,
+            # The caller chose no depth, so through WDA the sweep may look
+            # below the action depth (#475).
+            deepen=True,
         )
         backend.tap.assert_awaited_once()
 
