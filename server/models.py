@@ -2417,6 +2417,14 @@ class TypeTextRequest(BaseModel):
     """Request body for POST /device/ui/type."""
 
     text: str
+    snapshot_depth: int | None = Field(
+        default=None, ge=1, le=50,
+        description=(
+            "WDA snapshot depth for the field lookup (a physical device, or a "
+            "simulator after start_driver). Default: the full depth, 25. Pass "
+            "less to make the read faster on a long list (#470)."
+        ),
+    )
     udid: str | None = None
     label: str | None = None
     identifier: str | None = None
@@ -2478,6 +2486,14 @@ class WaitSettledRequest(BaseModel):
 class ClearTextRequest(BaseModel):
     """Request body for POST /device/ui/clear."""
 
+    snapshot_depth: int | None = Field(
+        default=None, ge=1, le=50,
+        description=(
+            "WDA snapshot depth for the field lookup (a physical device, or a "
+            "simulator after start_driver). Default: the full depth, 25. Pass "
+            "less to make the read faster on a long list (#470)."
+        ),
+    )
     udid: str | None = None
     label: str | None = None
     identifier: str | None = None

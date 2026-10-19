@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import logging
 import math
 import time
@@ -272,6 +273,41 @@ def _effective_filter_label(
 
 logger = logging.getLogger(__name__)
 
+#: The deeper WDA look after a miss at the action depth (#470). Per request, as
+#: context variables rather than per-device state: two requests on one device
+#: must not read each other's result (#470 review). A caller resets them before
+#: a lookup and reads them after it.
+_DEEPENED: contextvars.ContextVar[int | None] = contextvars.ContextVar("_deepened", default=None)
+_DEEPEN_TRIED: contextvars.ContextVar[bool] = contextvars.ContextVar("_deepen_tried", default=False)
+#: The deeper query ran out of time: it established nothing, and WDA may still
+#: be walking, so the caller must not queue a full read behind it.
+_DEEP_TIMED_OUT: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_deep_timed_out", default=False,
+)
+#: A deep hit tap_element is still using: (udid, shallow depth) to put back
+#: once the tap is done.
+_PENDING_RESTORE: contextvars.ContextVar[tuple[str, int] | None] = contextvars.ContextVar(
+    "_pending_restore", default=None,
+)
+
+#: Look deeper only when the shallow look was this quick. A slow shallow query
+#: means a dense screen, where a deep walk is slower still: the 200-row table
+#: that took 34.5s at full depth (F35) is exactly the screen to leave alone.
+DEEPEN_MAX_SHALLOW_SECONDS = 1.0
+#: The deeper query's own bound. It times out without being re-sent or dropping
+#: the connection, so a miss costs at most this much (#470 review).
+DEEP_QUERY_TIMEOUT = 5.0
+#: A deep miss slower than this is a dense screen, like a slow shallow one: no
+#: /source fallback behind a runner that may still be walking.
+SLOW_DEEP_MISS_SECONDS = 3.0
+
+
+def _begin_lookup() -> None:
+    _DEEPENED.set(None)
+    _DEEPEN_TRIED.set(False)
+    _DEEP_TIMED_OUT.set(False)
+
+
 
 def _with_queried_identifier(raw: list[dict], identifier: str | None) -> list[dict]:
     """Restore the identifier a WDA query matched on, where WDA left it out.
@@ -291,6 +327,18 @@ def _with_queried_identifier(raw: list[dict], identifier: str | None) -> list[di
             if not item.get("AXUniqueId"):
                 item["AXUniqueId"] = identifier
     return raw
+
+
+def _note_deepened(result: dict, deepened: int | None, shallow: int | None) -> None:
+    """Say a lookup found its element only by reading deeper (#470), and how to
+    skip the shallow miss next time on this screen."""
+    if deepened is None:
+        return
+    result["snapshot_depth"] = deepened
+    result["depth_note"] = (
+        f"found only at snapshot_depth={deepened}, after a miss at {shallow}; "
+        f"pass snapshot_depth={deepened} on this screen to skip the shallow read"
+    )
 
 
 def _note_equivalence(result: dict, element_type: str | None, element: UIElement) -> None:
@@ -1512,6 +1560,59 @@ class DeviceControllerUI:
             _give_up(f"stopped by {type(exc).__name__}: {exc!r}")
             raise
 
+    async def _deeper_query(
+        self, resolved: str, shallow_depth: int | None, shallow_elapsed: float,
+        *, label: str | None = None, label_contains: str | None = None,
+        label_prefix: str | None = None, identifier: str | None = None,
+        element_type: str | None = None,
+    ) -> tuple[list[UIElement], float | None]:
+        """After a miss at the shallow action depth, one bounded query at the full
+        depth (#470). Returns (elements, elapsed); elapsed is None when it did
+        not run.
+
+        A query, never /source: a timed-out /source restarts the runner. It runs
+        only after a quick shallow look, has its own short timeout, and is never
+        re-sent -- each of those a defect the first version had (#470 review).
+
+        A hit leaves the session at the full depth: `tap_element`'s reachability
+        check re-queries the element (`is_hittable`) at the session's depth and
+        must find it where it was found. The caller puts the shallow depth back
+        when it is done with the element -- left at 25, the next query that sets
+        no depth of its own (the sweep's Application query) walked the full tree
+        (#470 review). A miss puts the shallow depth back here.
+        """
+        from server.device.ios.wda_client import SNAPSHOT_MAX_DEPTH
+
+        if shallow_depth is None or shallow_depth >= SNAPSHOT_MAX_DEPTH:
+            return [], None
+        if shallow_elapsed >= DEEPEN_MAX_SHALLOW_SECONDS:
+            logger.info(
+                "[WDA DIRECT] miss at snapshot_depth=%d took %.1fs; a dense screen, "
+                "not looking deeper on %s", shallow_depth, shallow_elapsed, resolved[:8],
+            )
+            return [], None
+        _DEEPEN_TRIED.set(True)
+        await self.wda_client._set_snapshot_depth(resolved, SNAPSHOT_MAX_DEPTH)
+        deep, elapsed = await self._wda_direct_query(
+            resolved, label=label, label_contains=label_contains,
+            label_prefix=label_prefix, identifier=identifier, element_type=element_type,
+            timeout=DEEP_QUERY_TIMEOUT, no_resend=True,
+        )
+        logger.info(
+            "[WDA DIRECT] miss at snapshot_depth=%d; at %d: %d result(s) in %.1fs on %s",
+            shallow_depth, SNAPSHOT_MAX_DEPTH, len(deep), elapsed, resolved[:8],
+        )
+        if deep:
+            _DEEPENED.set(SNAPSHOT_MAX_DEPTH)
+            return deep, elapsed
+        await self.wda_client._set_snapshot_depth(resolved, shallow_depth)
+        return [], elapsed
+
+    async def _done_with_deep_element(self, resolved: str, shallow_depth: int | None) -> None:
+        """Put the shallow depth back after a deep hit has been used (#470 review)."""
+        if _DEEPENED.get() is not None and shallow_depth is not None:
+            await self.wda_client._set_snapshot_depth(resolved, shallow_depth)
+
     async def _wda_direct_query(
         self,
         udid: str,
@@ -1520,6 +1621,8 @@ class DeviceControllerUI:
         label_prefix: str | None = None,
         identifier: str | None = None,
         element_type: str | None = None,
+        timeout: float | None = None,
+        no_resend: bool = False,
     ) -> tuple[list[UIElement], float]:
         """Query WDA directly for specific elements without fetching the full tree.
 
@@ -1578,7 +1681,14 @@ class DeviceControllerUI:
 
         logger.info("[WDA DIRECT] %s=%s on %s", using, value, udid[:8])
         start = time.perf_counter()
-        raw = await self.wda_client.find_elements_by_query(udid, using, value)
+        # Only the deeper look sets these; an ordinary query keeps its call.
+        bounded = ({"timeout": timeout, "no_resend": True} if no_resend else {})
+        from server.device.ios.wda_client import QueryTimedOut
+        try:
+            raw = await self.wda_client.find_elements_by_query(udid, using, value, **bounded)
+        except QueryTimedOut:
+            _DEEP_TIMED_OUT.set(True)
+            return [], time.perf_counter() - start
         elapsed = time.perf_counter() - start
         elements = parse_elements(_with_queried_identifier(raw, identifier))
 
@@ -1592,8 +1702,17 @@ class DeviceControllerUI:
                 "[WDA DIRECT] retrying with predicate string=%s on %s",
                 pred_value, udid[:8],
             )
-            raw = await self.wda_client.find_elements_by_query(udid, "predicate string", pred_value)
+            try:
+                raw = await self.wda_client.find_elements_by_query(
+                    udid, "predicate string", pred_value, **bounded,
+                )
+            except QueryTimedOut:
+                _DEEP_TIMED_OUT.set(True)
+                return [], time.perf_counter() - start
             elements = parse_elements(_with_queried_identifier(raw, identifier))
+            if no_resend:
+                # The bounded caller judges the cost from this; count the retry.
+                elapsed = time.perf_counter() - start
         elif not elements and elapsed >= 2.0:
             logger.info(
                 "[WDA DIRECT] skipping predicate retry "
@@ -1750,6 +1869,7 @@ class DeviceControllerUI:
         source_timeout: float | None = None,
         mode: str | None = None,
         probe_containers: bool = True,
+        deepen_on_miss: bool = False,
     ) -> tuple[list[UIElement], str]:
         """Native UI elements, plus any web content read by get_web_content.
 
@@ -1760,7 +1880,7 @@ class DeviceControllerUI:
         elements, resolved = await self._native_ui_elements(
             udid, use_cache, filter_label, filter_identifier, filter_type,
             snapshot_depth, source_timeout, mode,
-            probe_containers=probe_containers,
+            probe_containers=probe_containers, deepen_on_miss=deepen_on_miss,
         )
         if self._served_by_wda(resolved):
             await self._mark_on_screen(resolved, elements)
@@ -1781,8 +1901,13 @@ class DeviceControllerUI:
         source_timeout: float | None = None,
         mode: str | None = None,
         probe_containers: bool = True,
+        deepen_on_miss: bool = False,
     ) -> tuple[list[UIElement], str]:
         """Get UI accessibility elements with TTL-based caching and optional filtering.
+
+        `deepen_on_miss`: through WDA, when a filtered query at the shallow action
+        depth finds nothing, query once more at the full depth before falling
+        back (#470). For reads whose depth the caller did not choose.
 
         Returns (elements, resolved_udid).
         Requires idb to be installed.
@@ -1844,6 +1969,19 @@ class DeviceControllerUI:
             )
             if elements:
                 return elements, resolved
+            if deepen_on_miss:
+                deep, deep_elapsed = await self._deeper_query(
+                    resolved, snapshot_depth, query_elapsed,
+                    label=filter_label, identifier=filter_identifier,
+                    element_type=filter_type,
+                )
+                if deep:
+                    return deep, resolved
+                slow = deep_elapsed is not None and deep_elapsed > SLOW_DEEP_MISS_SECONDS
+                if slow or _DEEP_TIMED_OUT.get():
+                    # A slow deep miss is a dense screen like a slow shallow
+                    # one: no /source behind a runner still walking (#470 review).
+                    return [], resolved
             # Direct query found nothing. If the query was slow (>3s), the screen
             # is too dense for any WDA query to work — skip /source to avoid a
             # 30s+ cascade of timeouts and WDA restarts.
@@ -1991,15 +2129,44 @@ class DeviceControllerUI:
         # thing this change exists to get right.
         backend = self._backend_name(udid)
         resolved = await self.resolve_udid(udid)
+        shallow = self._read_depth(resolved, snapshot_depth)
         elements, resolved = await self.get_ui_elements(
-            resolved, source_timeout=source_timeout,
-            snapshot_depth=self._read_depth(resolved, snapshot_depth),
+            resolved, source_timeout=source_timeout, snapshot_depth=shallow,
         )
         matches = find_element(
             elements, label=label, label_contains=label_contains,
             label_prefix=label_prefix, identifier=identifier,
             element_type=element_type,
         )
+        deepened = None
+        if not matches and snapshot_depth is None and self._served_by_wda(resolved):
+            # This read is unfiltered, so it never reaches the query path that
+            # deepens. One bounded query at the full depth does -- gated on how
+            # quick this read was, never a second /source (#470 review).
+            _begin_lookup()
+            # The gate times a filtered query at the shallow depth, the same
+            # thing tap_element times -- not the unfiltered /source above, which
+            # on a phone can take over a second on a screen where the query is
+            # quick (CodeRabbit, #474).
+            await self.wda_client._set_snapshot_depth(resolved, shallow)
+            found_shallow, shallow_seconds = await self._wda_direct_query(
+                resolved, label=label, label_contains=label_contains,
+                label_prefix=label_prefix, identifier=identifier, element_type=element_type,
+            )
+            # The filtered query can find what the unfiltered read missed --
+            # used, not only timed (CodeRabbit, #474).
+            deep = found_shallow or (await self._deeper_query(
+                resolved, shallow, shallow_seconds,
+                label=label, label_contains=label_contains, label_prefix=label_prefix,
+                identifier=identifier, element_type=element_type,
+            ))[0]
+            deepened = _DEEPENED.get()
+            await self._done_with_deep_element(resolved, shallow)
+            matches = find_element(
+                deep, label=label, label_contains=label_contains,
+                label_prefix=label_prefix, identifier=identifier,
+                element_type=element_type,
+            )
 
         if len(matches) == 0:
             search_desc = (
@@ -2022,6 +2189,7 @@ class DeviceControllerUI:
         if len(matches) > 1:
             result["match_count"] = len(matches)
         _note_equivalence(result, element_type, el)
+        _note_deepened(result, deepened, shallow)
 
         return result, resolved
 
@@ -2129,6 +2297,13 @@ class DeviceControllerUI:
         # a lookup that missed, and gets no web-content hint.
         ever_found = False
 
+        # Every poll may look deeper on a miss (#470): the common wait is for a
+        # row on the screen a tap just opened, which appears after the first
+        # poll. Safe on a long list because the deeper look runs only after a
+        # quick shallow one, and is bounded (#470 review).
+        poll_depth = self._read_depth(resolved, snapshot_depth)
+        shallow_depth = poll_depth
+        deepened = None
         while True:
             polls += 1
             elapsed = time.time() - start_time
@@ -2136,14 +2311,18 @@ class DeviceControllerUI:
             # Fast path not applicable or failed - use traditional describe-all
             # Fetch UI elements with filtering for performance
             filter_label = _effective_filter_label(label, label_contains, label_prefix)
+            _begin_lookup()
             elements, _ = await self.get_ui_elements(
                 resolved,
                 filter_label=filter_label,
                 filter_identifier=identifier,
                 filter_type=element_type,
                 mode=mode,
-                snapshot_depth=self._read_depth(resolved, snapshot_depth),
+                snapshot_depth=poll_depth,
+                deepen_on_miss=snapshot_depth is None,
             )
+            deepened = _DEEPENED.get()
+            await self._done_with_deep_element(resolved, poll_depth)
 
             matches = find_element(
                 elements,
@@ -2169,6 +2348,7 @@ class DeviceControllerUI:
                 }
                 if current_element is not None:
                     _note_equivalence(result, element_type, current_element)
+                _note_deepened(result, deepened, shallow_depth)
                 return result, resolved
 
             # Check timeout
@@ -2380,7 +2560,20 @@ class DeviceControllerUI:
         self._invalidate_ui_cache(resolved)  # UI changed
         return resolved
 
-    async def tap_element(
+    async def tap_element(self, *args, **kwargs) -> dict:
+        """Tap an element (see `_tap_element`), then put back the shallow WDA
+        depth if a deep hit held it at the full depth through the tap's own
+        lookups -- on every exit, including one that raises (#470)."""
+        _PENDING_RESTORE.set(None)
+        try:
+            return await self._tap_element(*args, **kwargs)
+        finally:
+            pending = _PENDING_RESTORE.get()
+            if pending is not None:
+                _PENDING_RESTORE.set(None)
+                await self.wda_client._set_snapshot_depth(*pending)
+
+    async def _tap_element(
         self,
         label: str | None = None,
         label_contains: str | None = None,
@@ -2510,6 +2703,7 @@ class DeviceControllerUI:
         cache_hits_before = self._cache_hits
         depth_for = await self.resolve_udid(udid)
         read_depth = self._read_depth(depth_for, snapshot_depth)
+        _begin_lookup()
         elements, resolved = await self.get_ui_elements(
             depth_for,
             filter_label=filter_label,
@@ -2517,8 +2711,17 @@ class DeviceControllerUI:
             filter_type=element_type,
             source_timeout=source_timeout,
             snapshot_depth=read_depth,
+            deepen_on_miss=snapshot_depth is None,
         )
         served_from_cache = self._cache_hits > cache_hits_before
+        # A deep hit changes what is reported, never the depth of the reads
+        # after it: escalating them sent the context read, the sweep and the
+        # stability checks to the full depth -- an unfiltered deep /source on
+        # a long list (#470 review).
+        shallow_depth = read_depth
+        deepened = _DEEPENED.get()
+        deepen_tried = _DEEPEN_TRIED.get()
+        deep_timed_out = _DEEP_TIMED_OUT.get()
 
         # Use shared search helper
         matches = find_element(
@@ -2535,6 +2738,15 @@ class DeviceControllerUI:
         unreachable: list[dict] = []
         if matches and self._served_by_wda(resolved):
             matches, unreachable = await self._wda_reachable_only(resolved, matches)
+        if not matches:
+            # Nothing to tap: what follows is the sweep or the not-found report,
+            # whose first read sets no depth of its own (#470 review).
+            await self._done_with_deep_element(resolved, shallow_depth)
+        elif deepened is not None:
+            # The value check and the stability re-check look the element up
+            # again at the session depth; the wrapper restores after the tap
+            # (CodeRabbit, #474).
+            _PENDING_RESTORE.set((resolved, shallow_depth))
 
         # iOS off-screen retry: on a tree-path miss, scroll the target into view
         # and retry. Android selector-misses are handled by the fast path above,
@@ -2571,10 +2783,13 @@ class DeviceControllerUI:
                 # The full tree, which the not-found path below fetches anyway.
                 # Doing it here instead pays for identification and that context
                 # at once, and `identify_screen` needs no device read of its own.
-                all_elements, complete = await self._all_elements_for_context(
-                    resolved, elements, filter_label, identifier, element_type,
-                    snapshot_depth=read_depth,
-                )
+                # After a timed-out deeper query WDA may still be walking; a
+                # full read queued behind it times out in turn (#470 review).
+                all_elements, complete = (elements, False) if deep_timed_out else (
+                    await self._all_elements_for_context(
+                        resolved, elements, filter_label, identifier, element_type,
+                        snapshot_depth=read_depth,
+                    ))
                 all_elements_complete = complete
                 if not complete:
                     # The full read failed and this is the *filtered* list --
@@ -2635,7 +2850,7 @@ class DeviceControllerUI:
             if element_type:
                 search_desc += f", type='{element_type}'"
             if all_elements is None:
-                all_elements, all_elements_complete = (
+                all_elements, all_elements_complete = (elements, False) if deep_timed_out else (
                     await self._all_elements_for_context(
                         resolved, elements, filter_label, identifier,
                         element_type, snapshot_depth=read_depth,
@@ -2680,10 +2895,26 @@ class DeviceControllerUI:
                 # answer says how deep it looked and how to look deeper --
                 # otherwise "not found" reads as "not there".
                 result["snapshot_depth"] = read_depth
-                result["detail"] += (
-                    f" (read through WDA at snapshot_depth={read_depth}; if the "
-                    "element is nested deeper, retry with a larger snapshot_depth)"
-                )
+                if deep_timed_out:
+                    from server.device.ios.wda_client import SNAPSHOT_MAX_DEPTH
+                    result["detail"] += (
+                        f" (read through WDA at snapshot_depth={read_depth}; the deeper "
+                        f"query at {SNAPSHOT_MAX_DEPTH} timed out, so this screen may be "
+                        "too dense to search deeper automatically -- pass snapshot_depth "
+                        "if the element is nested deeper)"
+                    )
+                elif deepen_tried:
+                    from server.device.ios.wda_client import SNAPSHOT_MAX_DEPTH
+                    result["detail"] += (
+                        f" (read through WDA at snapshot_depth={read_depth}, and "
+                        f"queried again at {SNAPSHOT_MAX_DEPTH}; if the element is "
+                        "nested deeper still, retry with a larger snapshot_depth)"
+                    )
+                else:
+                    result["detail"] += (
+                        f" (read through WDA at snapshot_depth={read_depth}; if the "
+                        "element is nested deeper, retry with a larger snapshot_depth)"
+                    )
             if unreachable:
                 # Found, but not tappable -- a different fact from "not there",
                 # and the one that decides what the caller does next.
@@ -2733,6 +2964,7 @@ class DeviceControllerUI:
                 if web_settled_ms is not None:
                     result["waited_for_settle_ms"] = web_settled_ms
                 _note_equivalence(result, element_type, el)
+                _note_deepened(result, deepened, shallow_depth)
                 if sweep.get("attempted"):
                     result["scroll"] = _scroll_report(sweep, scroll_to_find)
                 return result
@@ -2810,16 +3042,30 @@ class DeviceControllerUI:
                 initial_frame = el.frame
                 await asyncio.sleep(0.1)
 
+                async def recheck() -> list[UIElement]:
+                    """The element again, uncached. Found only deep: re-queried
+                    there, the session still at that depth, with no /source
+                    fallback -- a shallow miss would fall back to an unfiltered
+                    read that cannot see it either. Both re-checks use this
+                    (CodeRabbit, #474)."""
+                    if deepened is not None:
+                        found, _ = await self._wda_direct_query(
+                            resolved, label=filter_label, identifier=identifier,
+                            element_type=element_type,
+                        )
+                        return found
+                    found, _ = await self.get_ui_elements(
+                        resolved,
+                        use_cache=False,
+                        filter_label=filter_label,
+                        filter_identifier=identifier,
+                        filter_type=element_type,
+                        snapshot_depth=read_depth,
+                    )
+                    return found
+
                 # Re-fetch UI and find element again (bypass cache to detect changes!)
-                # Use filtering for performance
-                elements_check, _ = await self.get_ui_elements(
-                    resolved,
-                    use_cache=False,
-                    filter_label=filter_label,
-                    filter_identifier=identifier,
-                    filter_type=element_type,
-                    snapshot_depth=read_depth,
-                )
+                elements_check = await recheck()
 
                 matches_check = find_element(
                     elements_check, label=label,
@@ -2852,15 +3098,7 @@ class DeviceControllerUI:
                             )
 
                         # Re-fetch one more time to get final position (bypass cache again)
-                        # Use filtering for performance
-                        elements_final, _ = await self.get_ui_elements(
-                            resolved,
-                            use_cache=False,
-                            filter_label=filter_label,
-                            filter_identifier=identifier,
-                            filter_type=element_type,
-                            snapshot_depth=read_depth,
-                        )
+                        elements_final = await recheck()
 
                         matches_final = find_element(
                             elements_final, label=label,
@@ -2925,6 +3163,7 @@ class DeviceControllerUI:
             if settled_ms is not None:
                 result["waited_for_settle_ms"] = settled_ms
             _note_equivalence(result, element_type, el)
+            _note_deepened(result, deepened, shallow_depth)
             if sweep.get("attempted"):
                 result["scroll"] = _scroll_report(sweep, scroll_to_find)
             return result
@@ -3519,6 +3758,7 @@ class DeviceControllerUI:
         udid: str | None = None,
         label: str | None = None,
         identifier: str | None = None,
+        snapshot_depth: int | None = None,
     ) -> dict:
         """Type text, into a named field if one is given.
 
@@ -3540,7 +3780,9 @@ class DeviceControllerUI:
             self._invalidate_ui_cache(resolved)
             return {"udid": resolved, "verified": False}
 
-        target = await self._find_text_field(resolved, label=label, identifier=identifier)
+        target = await self._find_text_field(
+            resolved, label=label, identifier=identifier, snapshot_depth=snapshot_depth,
+        )
         before = target.value or ""
         cx, cy = get_tap_point(target)
         await self._ui_backend(resolved).tap(resolved, cx, cy)
@@ -3552,7 +3794,9 @@ class DeviceControllerUI:
         self._invalidate_ui_cache(resolved)
         await asyncio.sleep(0.3)
 
-        after = await self._read_field_value(resolved, target, label, identifier)
+        after = await self._read_field_value(
+            resolved, target, label, identifier, snapshot_depth=snapshot_depth,
+        )
         secure = self._is_secure_field(target)
         outcome = self._typing_outcome(before, after, text, secure)
         if outcome != "landed":
@@ -3681,6 +3925,7 @@ class DeviceControllerUI:
 
     async def _find_text_field(
         self, udid: str, *, label: str | None, identifier: str | None,
+        snapshot_depth: int | None = None,
     ):
         # Read fresh. A cached tree can describe a screen that has since
         # changed, and typing at stale coordinates would put the text in
@@ -3691,7 +3936,9 @@ class DeviceControllerUI:
         if self._web_overlay.get(udid):
             with contextlib.suppress(DeviceError):
                 await self.get_web_content(udid=udid)
-        elements, read_udid = await self.get_ui_elements(udid=udid, use_cache=False)
+        elements, read_udid = await self.get_ui_elements(
+            udid=udid, use_cache=False, snapshot_depth=snapshot_depth,
+        )
         matches = self._matching_fields(elements, label, identifier)
         if not matches:
             hint = self._web_hint_for(read_udid, elements)
@@ -3706,6 +3953,7 @@ class DeviceControllerUI:
 
     async def _read_field_value(
         self, udid: str, target, label: str | None, identifier: str | None,
+        snapshot_depth: int | None = None,
     ) -> str | None:
         """The field's value now, read fresh.
 
@@ -3727,7 +3975,9 @@ class DeviceControllerUI:
                     raise
                 return None
         try:
-            elements, _ = await self.get_ui_elements(udid=udid, use_cache=False)
+            elements, _ = await self.get_ui_elements(
+                udid=udid, use_cache=False, snapshot_depth=snapshot_depth,
+            )
         except DeviceError as e:
             # A read that could not happen is not a read that found nothing.
             #
@@ -3772,6 +4022,7 @@ class DeviceControllerUI:
         udid: str | None = None,
         label: str | None = None,
         identifier: str | None = None,
+        snapshot_depth: int | None = None,
     ) -> str:
         """Clear a text field: triple-tap to select, then Backspace.
 
@@ -3785,7 +4036,7 @@ class DeviceControllerUI:
         resolved = await self.resolve_udid(udid)
         await self._warn_if_input_is_suppressed(resolved)
 
-        elements, _ = await self.get_ui_elements(udid=resolved)
+        elements, _ = await self.get_ui_elements(udid=resolved, snapshot_depth=snapshot_depth)
         text_fields = [
             e for e in elements
             if e.type.lower() in self._TEXT_FIELD_TYPES and e.frame

@@ -852,6 +852,7 @@ class TestTypeText:
         assert resp.json()["verified"] is False
         mock_controller.type_text.assert_called_once_with(
             text="hello world", udid="AAAA-1111", label=None, identifier=None,
+            snapshot_depth=None,
         )
 
     async def test_a_verified_type_returns_the_field_s_value(
@@ -900,7 +901,7 @@ class TestClearText:
         assert resp.json()["status"] == "ok"
         assert resp.json()["udid"] == "AAAA-1111"
         mock_controller.clear_text.assert_called_once_with(
-            udid=None, label=None, identifier=None,
+            udid=None, label=None, identifier=None, snapshot_depth=None,
         )
 
     async def test_clear_text_with_udid(self, app, auth_headers, mock_controller):
@@ -913,7 +914,7 @@ class TestClearText:
             )
         assert resp.status_code == 200
         mock_controller.clear_text.assert_called_once_with(
-            udid="BBBB-2222", label=None, identifier=None,
+            udid="BBBB-2222", label=None, identifier=None, snapshot_depth=None,
         )
 
     async def test_clear_text_no_auth(self, app):
@@ -1387,3 +1388,24 @@ class TestSimulatorSettings:
             resp = await client.get("/api/v1/device/settings", headers=auth_headers)
         assert resp.status_code == 200
         assert resp.json()["runtime"] == "iOS 26.5"
+
+
+class TestSnapshotDepthReachesTheController:
+    """#470: type_text and clear_text take snapshot_depth, and it must arrive."""
+
+    async def test_type_text_passes_it(self, app, auth_headers, mock_controller):
+        from httpx import ASGITransport, AsyncClient
+        mock_controller.resolve_udid = AsyncMock(return_value="AAAA-1111")
+        mock_controller.type_text = AsyncMock(return_value={"udid": "AAAA-1111", "verified": True})
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            await c.post("/api/v1/device/ui/type", headers=auth_headers,
+                         json={"text": "x", "label": "Search", "snapshot_depth": 20})
+        assert mock_controller.type_text.call_args.kwargs["snapshot_depth"] == 20
+
+    async def test_clear_text_passes_it(self, app, auth_headers, mock_controller):
+        from httpx import ASGITransport, AsyncClient
+        mock_controller.clear_text = AsyncMock(return_value="AAAA-1111")
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            await c.post("/api/v1/device/ui/clear", headers=auth_headers,
+                         json={"label": "Search", "snapshot_depth": 20})
+        assert mock_controller.clear_text.call_args.kwargs["snapshot_depth"] == 20

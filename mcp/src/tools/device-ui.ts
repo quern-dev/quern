@@ -840,6 +840,13 @@ Returns where the fingers went. An app's recogniser reports a little less than w
         .optional()
         .describe("Field to type into, by accessibility identifier. Enables verification."),
       text: z.string().describe("Text to type"),
+      snapshot_depth: z
+        .coerce.number()
+        .int()
+        .min(1)
+        .max(50)
+        .optional()
+        .describe("WDA snapshot depth for the field lookup (a physical iPhone, or a simulator after start_driver). Default: the full depth, 25. Pass less to read faster on a long list."),
       udid: z
         .string()
         .optional()
@@ -859,12 +866,13 @@ Returns where the fingers went. An app's recogniser reports a little less than w
         .optional()
         .describe("Seconds to wait before capturing after screenshot/screen context (default 1.0)."),
     }),
-  }, async ({ text, label, identifier, udid, include_screen_context, capture_screenshots, settle_delay }) => {
+  }, async ({ text, label, identifier, udid, snapshot_depth, include_screen_context, capture_screenshots, settle_delay }) => {
     try {
       const body: Record<string, unknown> = { text };
       if (label) body.label = label;
       if (identifier) body.identifier = identifier;
       if (udid) body.udid = udid;
+      if (snapshot_depth !== undefined) body.snapshot_depth = snapshot_depth;
       if (include_screen_context) body.include_screen_context = true;
       if (capture_screenshots) body.capture_screenshots = true;
       if (settle_delay !== undefined) body.settle_delay = settle_delay;
@@ -905,17 +913,25 @@ Returns where the fingers went. An app's recogniser reports a little less than w
         .string()
         .optional()
         .describe("Accessibility identifier of the field to clear"),
+      snapshot_depth: z
+        .coerce.number()
+        .int()
+        .min(1)
+        .max(50)
+        .optional()
+        .describe("WDA snapshot depth for the field lookup (a physical iPhone, or a simulator after start_driver). Default: the full depth, 25. Pass less to read faster on a long list."),
       udid: z
         .string()
         .optional()
         .describe("Target device UDID (defaults to active device)"),
     }),
-  }, async ({ label, identifier, udid }) => {
+  }, async ({ label, identifier, udid, snapshot_depth }) => {
     try {
       const body: Record<string, unknown> = {};
       if (label) body.label = label;
       if (identifier) body.identifier = identifier;
       if (udid) body.udid = udid;
+      if (snapshot_depth !== undefined) body.snapshot_depth = snapshot_depth;
 
       const data = await apiRequest(
         "POST",
