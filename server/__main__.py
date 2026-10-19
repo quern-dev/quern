@@ -343,8 +343,21 @@ def _ensure_mcp_built(quiet: bool = False) -> bool:
     return True
 
 
+def _with_remote(env, remote: str | None) -> dict | None:
+    """An MCP entry's environment with `QUERN_REMOTE` set to `remote` (#254,
+    phase 3) -- or removed, when registering for this Mac's own server, so
+    an MCP once pointed at a remote does not stay pointed there unseen. Other
+    variables someone added are kept. None when nothing is left."""
+    out = dict(env) if isinstance(env, dict) else {}
+    if remote:
+        out["QUERN_REMOTE"] = remote
+    else:
+        out.pop("QUERN_REMOTE", None)
+    return out or None
+
+
 def _install_json_mcpservers(config_path: Path, mcp_entry: Path,
-                             node: str = "node") -> tuple[bool, str]:
+                             node: str = "node", remote: str | None = None) -> tuple[bool, str]:
     """Install quern-debug into a config file that uses the mcpServers JSON format.
 
     Used by claude-code, claude-desktop, and cursor.
@@ -371,6 +384,11 @@ def _install_json_mcpservers(config_path: Path, mcp_entry: Path,
     # workaround for this very problem, say -- survives re-registering.
     entry = dict(existing) if isinstance(existing, dict) else {}
     entry.update({"command": node, "args": [str(mcp_entry)]})
+    env = _with_remote(entry.get("env"), remote)
+    if env:
+        entry["env"] = env
+    else:
+        entry.pop("env", None)
     config["mcpServers"]["quern-debug"] = entry
 
     config_path.write_text(json.dumps(config, indent=2) + "\n")
@@ -379,7 +397,8 @@ def _install_json_mcpservers(config_path: Path, mcp_entry: Path,
     return True, f"{verb} quern-debug in {config_path}"
 
 
-def _install_opencode(mcp_entry: Path, node: str = "node") -> tuple[bool, str]:
+def _install_opencode(mcp_entry: Path, node: str = "node",
+                      remote: str | None = None) -> tuple[bool, str]:
     """Install quern into ~/.config/opencode/opencode.json."""
     import json
 
@@ -400,6 +419,11 @@ def _install_opencode(mcp_entry: Path, node: str = "node") -> tuple[bool, str]:
     existing = config["mcp"].get("quern")
     entry = dict(existing) if isinstance(existing, dict) else {}
     entry.update({"type": "local", "command": [node, str(mcp_entry)]})
+    env = _with_remote(entry.get("environment"), remote)
+    if env:
+        entry["environment"] = env
+    else:
+        entry.pop("environment", None)
     config["mcp"]["quern"] = entry
 
     config_path.write_text(json.dumps(config, indent=2) + "\n")
@@ -408,11 +432,28 @@ def _install_opencode(mcp_entry: Path, node: str = "node") -> tuple[bool, str]:
     return True, f"{verb} quern in {config_path}"
 
 
-def _toml_upsert_section(text: str, section: str, fields: dict) -> str:
+def _toml_key(raw: str) -> str:
+    """A key as TOML reads it: `"QUERN_REMOTE"` and `'QUERN_REMOTE'` are the
+    bare key, and must be replaced as it, not written beside it (review).
+    tomllib decodes it, escapes and all; a spelling it cannot read is kept."""
+    import tomllib
+
+    key = raw.strip()
+    try:
+        parsed = tomllib.loads(f"{key} = 0")
+    except tomllib.TOMLDecodeError:
+        return key
+    return next(iter(parsed)) if len(parsed) == 1 and not isinstance(
+        next(iter(parsed.values())), dict) else key
+
+
+def _toml_upsert_section(text: str, section: str, fields: dict,
+                         drop: tuple[str, ...] = ()) -> str:
     """Insert or replace a TOML section using text manipulation.
 
     If the section header exists, replaces content from that line until
-    the next section header (or EOF). If not found, appends at end.
+    the next section header (or EOF). If not found, appends at end. Keys in
+    `drop` are removed from the section.
     """
     header = f"[{section}]"
     lines = text.splitlines(keepends=True)
@@ -452,9 +493,9 @@ def _toml_upsert_section(text: str, section: str, fields: dict) -> str:
     dropping = False
     for line in lines[start + 1:end]:
         stripped = line.strip()
-        key = stripped.split("=", 1)[0].strip() if "=" in stripped else None
+        key = _toml_key(stripped.split("=", 1)[0]) if "=" in stripped else None
         if key is not None and not stripped.startswith("#"):
-            dropping = key in fields
+            dropping = key in fields or key in drop
             if dropping and stripped.count("[") <= stripped.count("]"):
                 dropping = False            # a one-line value: nothing follows
                 continue
@@ -469,7 +510,33 @@ def _toml_upsert_section(text: str, section: str, fields: dict) -> str:
     return "".join(lines)
 
 
-def _install_codex(mcp_entry: Path, node: str = "node") -> tuple[bool, str]:
+def _codex_quern_env(text: str) -> dict:
+    """The env codex's config gives quern, read as TOML; empty when there is
+    none, or when the file does not parse (it is then rewritten as before)."""
+    import tomllib
+
+    try:
+        env = tomllib.loads(text).get("mcp_servers", {}).get("quern", {}).get("env", {})
+    except (tomllib.TOMLDecodeError, AttributeError):
+        return {}
+    return dict(env) if isinstance(env, dict) else {}
+
+
+def _toml_inline_table(values: dict) -> str:
+    import json
+    import re
+
+    def key(k: str) -> str:
+        return k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else json.dumps(k, ensure_ascii=False)
+
+    if not values:
+        return "{ }"
+    return "{ " + ", ".join(f"{key(k)} = {json.dumps(v, ensure_ascii=False)}"
+                            for k, v in values.items()) + " }"
+
+
+def _install_codex(mcp_entry: Path, node: str = "node",
+                   remote: str | None = None) -> tuple[bool, str]:
     """Install quern into ~/.codex/config.toml."""
     import json
 
@@ -490,7 +557,27 @@ def _install_codex(mcp_entry: Path, node: str = "node") -> tuple[bool, str]:
         "args": json.dumps([str(mcp_entry)], ensure_ascii=False),
         "enabled": "true",
     }
-    new_text = _toml_upsert_section(existing_text, "mcp_servers.quern", fields)
+    # QUERN_REMOTE is set for --remote and removed otherwise; any other
+    # variable in quern's env is kept. Codex takes the env as an inline table
+    # or as its own [mcp_servers.quern.env] table: an inline one written
+    # beside that table would define env twice, and codex could read none of
+    # its config (review).
+    remote_value = json.dumps(remote, ensure_ascii=False) if remote else None
+    env_table = "[mcp_servers.quern.env]" in (line.strip() for line in existing_text.splitlines())
+    new_text = existing_text
+    if env_table:
+        new_text = _toml_upsert_section(
+            new_text, "mcp_servers.quern.env",
+            {"QUERN_REMOTE": remote_value} if remote_value else {},
+            drop=() if remote_value else ("QUERN_REMOTE",))
+    else:
+        env = _codex_quern_env(existing_text)
+        if remote_value or "QUERN_REMOTE" in env:
+            env.pop("QUERN_REMOTE", None)
+            if remote:
+                env["QUERN_REMOTE"] = remote
+            fields["env"] = _toml_inline_table(env)
+    new_text = _toml_upsert_section(new_text, "mcp_servers.quern", fields)
     config_path.write_text(new_text)
 
     verb = "Updated" if existing else "Added"
@@ -707,7 +794,20 @@ def _cmd_mcp_install() -> int:
         metavar="TARGET",
         help=f"Targets to install into: {', '.join(ALL_TARGETS)}, all (default: claude-code)",
     )
+    parser.add_argument(
+        "--remote", metavar="NAME", default=None,
+        help="Point the MCP at a paired remote quern (quern connect) instead of this Mac's")
     args = parser.parse_args(sys.argv[2:])
+    if args.remote:
+        # Checked before anything is written: an MCP registered for a remote
+        # this machine has not paired with would fail at every start.
+        from server.remote import client as remote_client
+
+        try:
+            remote_client.load(args.remote)
+        except remote_client.RemoteError as e:
+            print(f"Error: {e}")
+            return 1
 
     # Expand "all"
     targets: list[str] = []
@@ -760,15 +860,17 @@ def _cmd_mcp_install() -> int:
     if chosen:
         print(f"  node: {chosen.path} ({chosen.version}, from your {chosen.found_in})")
 
+    remote = args.remote
     dispatch = {
         "claude-code":    lambda: _install_json_mcpservers(
-            Path.home() / ".claude.json", mcp_entry, node),
-        "claude-desktop": lambda: _install_json_mcpservers(CLAUDE_DESKTOP_CONFIG, mcp_entry, node),
+            Path.home() / ".claude.json", mcp_entry, node, remote),
+        "claude-desktop": lambda: _install_json_mcpservers(
+            CLAUDE_DESKTOP_CONFIG, mcp_entry, node, remote),
         "cursor":         lambda: _install_json_mcpservers(
-            Path.home() / ".cursor" / "mcp.json", mcp_entry, node,
+            Path.home() / ".cursor" / "mcp.json", mcp_entry, node, remote,
         ),
-        "opencode":       lambda: _install_opencode(mcp_entry, node),
-        "codex":          lambda: _install_codex(mcp_entry, node),
+        "opencode":       lambda: _install_opencode(mcp_entry, node, remote),
+        "codex":          lambda: _install_codex(mcp_entry, node, remote),
     }
 
     all_ok = True
@@ -1059,7 +1161,14 @@ def main() -> None:
         sys.exit(run_uninstall())
 
     if len(sys.argv) >= 2 and sys.argv[1] == "mcp-install":
-        _check_args("mcp-install", sys.argv[2:], choices=(*MCP_INSTALL_TARGETS, "all"))
+        rest = sys.argv[2:]
+        # `--remote NAME` (#254, phase 3): its value is not a target, so it is
+        # taken out before the targets are checked.
+        if "--remote" in rest:
+            i = rest.index("--remote")
+            rest = rest[:i] + rest[i + 2:]
+        _check_args("mcp-install", rest, choices=(*MCP_INSTALL_TARGETS, "all"),
+                    allowed=("--remote",))
         sys.exit(_cmd_mcp_install())
 
     if len(sys.argv) >= 2 and sys.argv[1] == "grant-full-perms":
@@ -1105,6 +1214,11 @@ def main() -> None:
         from server.session_cli import main as session_main
 
         sys.exit(session_main(sys.argv[2:]))
+
+    if len(sys.argv) >= 2 and sys.argv[1] in ("pair", "connect", "remote"):
+        from server.remote_cli import main as remote_main
+
+        sys.exit(remote_main(sys.argv[1], sys.argv[2:]))
 
     if len(sys.argv) >= 2 and sys.argv[1] == "clients":
         from server.clients_cli import main as clients_main

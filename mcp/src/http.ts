@@ -2,7 +2,33 @@ import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 
 import { randomBytes } from "node:crypto";
+import { fetch as undiciFetch } from "undici";
 import { discoverServer } from "./config.js";
+import { PinMismatch, pinnedAgent } from "./remote.js";
+
+/** fetch, pinned to a remote quern's certificate when the server is one
+ * (#254, phase 3); Node's own fetch otherwise. `noTimeouts` drops undici's
+ * header and body timeouts, for requests that wait on a build. */
+export async function serverFetch(
+  server: { fingerprint?: string },
+  url: string,
+  init: RequestInit = {},
+  { noTimeouts = false } = {},
+): Promise<Response> {
+  if (!server.fingerprint) return fetch(url, init);
+  try {
+    return (await undiciFetch(url, {
+      ...(init as object),
+      dispatcher: pinnedAgent(server.fingerprint, { timeouts: !noTimeouts }),
+    })) as unknown as Response;
+  } catch (e) {
+    // undici reports a refused connector as "fetch failed", the reason on
+    // `cause`: a pin mismatch must reach the agent in its own words.
+    const cause = (e as { cause?: unknown })?.cause;
+    if (cause instanceof PinMismatch) throw cause;
+    throw e;
+  }
+}
 
 /** The server's rule for a session id (server/session.py).
  *
@@ -188,7 +214,14 @@ export async function apiRequest(
   let status: number;
   let text: string;
   try {
-    if (timeoutMs === "none") {
+    if (server.fingerprint) {
+      // A remote quern: undici, pinned -- with its own timeouts dropped for
+      // a request that must wait as long as the server takes.
+      const resp = await serverFetch(server, url.toString(), init,
+                                     { noTimeouts: timeoutMs === "none" });
+      status = resp.status;
+      text = await resp.text();
+    } else if (timeoutMs === "none") {
       ({ status, text } = await requestWithoutTimeout(
         url, method, headers, init.body as string | undefined));
     } else {
@@ -197,6 +230,7 @@ export async function apiRequest(
       text = await resp.text();
     }
   } catch (e) {
+    if (e instanceof PinMismatch) throw e;
     const code = connectionCode(e);
     if (code && NEVER_CONNECTED.has(code)) {
       throw new ServerUnreachable(server.url, code, { cause: e });
@@ -223,7 +257,7 @@ export async function apiRequest(
 export async function probeServer(): Promise<boolean> {
   const server = discoverServer();
   try {
-    await fetch(new URL("/health", server.url).toString(), {
+    await serverFetch(server, new URL("/health", server.url).toString(), {
       signal: AbortSignal.timeout(3000),
     });
     console.error(`Connected to Quern at ${server.url}`);

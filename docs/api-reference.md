@@ -8,7 +8,9 @@ agents can read it over MCP as `quern://api-reference`.
 
 All endpoints require `Authorization: Bearer <key>` except these public paths: `/`,
 `/health`, `/api/v1/health`, `/tools`, `/docs`, `/redoc`, `/openapi.json`,
-and `/api/v1/proxy/cert`.
+`/api/v1/proxy/cert`, and the two pairing steps `/api/v1/remote/pair/hello` and
+`/api/v1/remote/pair/finish` -- which answer only on the remote listener (see
+[Remote access](#remote-access)).
 
 `/api/v1/proxy/cert` is deliberately unauthenticated — devices and simulators fetch the
 mitmproxy CA certificate from it during setup, before they hold a key. It serves only the
@@ -108,7 +110,38 @@ Every route is classified in `server/scopes.py`, and a route with no classificat
 
 It keeps cooperating users' work apart; it is not a sandbox (see above).
 
-**The API listens on 127.0.0.1.** `quern start --host 0.0.0.0` still exposes it, with a warning from `start`, `status` and `doctor`: every key, the owner's included, crosses the network unencrypted. A separate TLS listener is the planned way to reach quern from another machine. The proxy (9101) is unaffected and stays reachable from devices on the LAN; a phone fetches the CA from `http://mitm.it/cert/cer` through it (see `proxy_setup_guide`).
+**The API listens on 127.0.0.1.** `quern start --host 0.0.0.0` still exposes it, with a warning from `start`, `status` and `doctor`: every key, the owner's included, crosses the network unencrypted. To reach quern from another machine, use the TLS remote listener instead (see [Remote access](#remote-access)). The proxy (9101) is unaffected and stays reachable from devices on the LAN; a phone fetches the CA from `http://mitm.it/cert/cer` through it (see `proxy_setup_guide`).
+
+## Remote access
+
+To drive quern from another machine -- a laptop reaching a CI Mac, a team sharing one -- turn on the **remote listener** (#254). It serves the same API over TLS, to client keys only, and is off by default:
+
+```json
+{"remote": {"enabled": true, "bind": "0.0.0.0:9130", "hosts": ["ci.lan"]}}
+```
+
+`hosts` are extra names it answers to besides this Mac's LAN address (a request naming anything else gets 421). The main API stays on 127.0.0.1.
+
+**Pairing** gives the other machine a client key and the listener's certificate fingerprint in one step:
+
+```text
+# on the server's Mac
+quern pair laptop
+#   Pairing code for laptop (one use, 5 minutes):  ABCD-EFGH-JKMN-PQRS
+#   On the client machine:  quern connect https://192.168.1.20:9130 --code ABCD-EFGH-JKMN-PQRS
+
+# on the other machine
+quern connect https://192.168.1.20:9130 --code ABCD-EFGH-JKMN-PQRS --name office
+quern mcp-install --remote office      # or QUERN_REMOTE=office for `session run` / `record`
+```
+
+- **No CA, no domain.** Quern makes its own certificate the first time the listener starts, and clients pin its SHA-256 fingerprint. Every connection -- each request and the held-session socket, from the MCP and from `quern session run` and `quern record` -- checks it before anything is sent, and refuses a mismatch naming both fingerprints. `quern remote rotate-cert` replaces it; every client then pairs again.
+- **The code never crosses the network.** The client connects without trusting the certificate, and the two sides exchange HMAC proofs keyed by the code and bound to the certificate the client actually sees, so a machine in the middle presenting its own certificate can neither pass the server's proof nor turn the client's into one the server accepts. A code lasts five minutes, works once, and is void after five failed attempts. Pairing answers only on the remote listener.
+- **The owner's key is refused** on the remote listener, with 403: the key that reaches everything stays on the server's Mac. Pair even the owner's own laptop as a client.
+- **What a remote client may do** is what any client key may do (above): blind sharing, scopes and revocation apply unchanged.
+- **Remotes on the client** are kept in `~/.quern/remotes.json` (0600): `quern remote list`, `quern remote forget NAME`. A key issued by hand with `quern clients add` can be recorded with `quern connect URL --key KEY --fingerprint SHA256:...`.
+- **`QUERN_REMOTE` that cannot be read fails**, rather than falling back to this machine's own server: an agent's work must not land on a machine nobody named. `ensure_server` checks a remote's health and never starts a server locally for it.
+- **`/health` carries `host_id`**, a random id made once per installation, so a client can tell whether it shares the server's disk -- which decides what a path it sends means (the paths phase of #254).
 
 ## The LAN viewer
 
@@ -509,6 +542,15 @@ holds in `flow_store`. `flows_captured` is only what survived.
 | `reserve_devices` | POST | `/api/v1/sessions/{id}/reservations` | Reserve devices for this session (udids, count plus criteria, or a group), all or nothing; 409 names a holder. See "Sessions and reservations" above |
 | `release_devices` | DELETE | `/api/v1/sessions/{id}/reservations` | Release one device (`?udid=`) or all |
 | `session_status` | GET | `/api/v1/sessions/{id}` | One session: state (`live`, `grace` with `grace_remaining_s`) and reservations. With `all`, the MCP tool lists every session |
+
+### Remote access
+
+| MCP Tool | Method | Path | Description |
+|---|---|---|---|
+| — | POST | `/api/v1/remote/pairing-codes` | Owner only, on the server's own Mac (`quern pair LABEL`): a one-time pairing code, valid 5 minutes, for a client to be labelled `label`; answers `{code, expires_in, url, fingerprint}`. 409 when the remote listener is off |
+| — | GET | `/api/v1/remote/status` | Owner only (`quern remote status`): whether the remote listener is on and listening, its `url` and certificate `fingerprint` |
+| — | POST | `/api/v1/remote/pair/hello` | No key, remote listener only: the server's half of pairing, `{code_id, nonce}` → `{nonce, proof}`. See "Remote access" above |
+| — | POST | `/api/v1/remote/pair/finish` | No key, remote listener only: the client's proof → `{key, label, fingerprint}`, a new client key |
 
 ### App knowledge and landmarks
 

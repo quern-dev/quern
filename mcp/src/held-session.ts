@@ -16,7 +16,9 @@
  * travels on its next tool result (see notices.ts).
  */
 
+import { WebSocket as UndiciWebSocket } from "undici";
 import { discoverServer } from "./config.js";
+import { pinnedAgent } from "./remote.js";
 import { SESSION_ID, apiRequest, quernHeaders, sessionNotices } from "./http.js";
 
 /** The server's close codes (server/api/sessions.py). */
@@ -139,7 +141,15 @@ function connect(): void {
   } as unknown as string[];
   let ws: WebSocket;
   try {
-    ws = new WebSocket(url, init);
+    // A remote quern's socket is pinned like its requests (#254, phase 3):
+    // undici's WebSocket takes the pinned dispatcher; Node's global one has
+    // no way to.
+    ws = server.fingerprint
+      ? (new UndiciWebSocket(url, {
+          headers: { ...quernHeaders(server.apiKey), "X-Quern-Resume-Token": token },
+          dispatcher: pinnedAgent(server.fingerprint),
+        }) as unknown as WebSocket)
+      : new WebSocket(url, init);
   } catch {
     retry(connect);
     return;

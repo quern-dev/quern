@@ -152,6 +152,7 @@ quern update               # update to latest release and rebuild
 quern update --tools       # ...and upgrade external tools (pipx/brew) too
 quern grant-full-perms     # allow all quern MCP tools in Claude Code without prompting
 quern mcp-install          # register quern MCP server with AI coding tools
+quern mcp-install --remote NAME   # ...pointed at a paired remote quern instead of this Mac's
 quern uninstall            # remove Quern and its dependencies
 ```
 
@@ -459,6 +460,13 @@ quern session release ID     # End a session and free its devices
 quern clients add LABEL      # Issue a client key for another caller (printed once)
 quern clients list           # Issued client keys: created, last used, revoked
 quern clients revoke LABEL   # Revoke one; its sessions end and its devices are freed
+quern pair LABEL             # A one-time code for another machine to pair with (remote listener)
+quern connect URL --code CODE   # On that machine: pair, and remember the server for QUERN_REMOTE
+quern connect URL --key KEY --fingerprint SHA256   # ...or remember one whose key was issued by hand
+quern remote status          # The remote listener here: its address and certificate
+quern remote rotate-cert     # A new certificate for it; every client pairs again
+quern remote list            # The remote querns this machine is paired with
+quern remote forget NAME     # Forget one
 quern set-update-check [on|off]
                              # Show or set the automatic daily update check
                              #   (default: on). check-updates works either way.

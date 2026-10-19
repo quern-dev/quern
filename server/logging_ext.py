@@ -38,6 +38,7 @@ CATEGORIES: Final[tuple[str, ...]] = (
     "media",              # screenshot timeline, live preview, video
     "build",              # build orchestration and output parsing
     "knowledge",          # landmarks, screen identification, app knowledge
+    "session",            # held sessions, reservations, pairing (#254)
     "server.lifecycle",   # startup, shutdown, port reclaim, updates
 )
 

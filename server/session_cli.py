@@ -56,10 +56,37 @@ connection) and their devices. `release` ends one -- yours, or a stuck one.
 """
 
 
+def _remote():
+    """The remote quern `QUERN_REMOTE` names (#254, phase 3), or None for this
+    Mac's own server."""
+    from server.remote import client
+
+    try:
+        return client.from_env()
+    except client.RemoteError as e:
+        raise ConnectionError(str(e)) from e
+
+
+def _open(req, timeout: float):
+    """urllib's open, pinned to the remote's certificate when there is one."""
+    remote = _remote()
+    if remote is None:
+        return urllib.request.urlopen(req, timeout=timeout)
+    from server.remote import client
+
+    try:
+        return client.opener(remote).open(req, timeout=timeout)
+    except client.RemoteError as e:     # a pin mismatch: one line, not a traceback
+        raise ConnectionError(str(e)) from e
+
+
 def _server() -> tuple[str, str]:
     from server.__main__ import _server_base_url
     from server.config import API_KEY_FILE, client_api_key
 
+    remote = _remote()
+    if remote is not None:
+        return remote.url, remote.key
     url = _server_base_url()
     if url is None:
         raise ConnectionError("no server answering: start it with `quern start`")
@@ -78,7 +105,7 @@ def _call(method: str, url: str, key: str, path: str, session: str = "",
     req = urllib.request.Request(url + path, method=method, headers=headers,
                                  data=json.dumps(body).encode() if body is not None else None)
     try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
+        with _open(req, timeout=300) as resp:
             return resp.status, json.loads(resp.read() or b"{}")
     except urllib.error.HTTPError as e:
         try:
@@ -86,6 +113,8 @@ def _call(method: str, url: str, key: str, path: str, session: str = "",
         except ValueError:
             detail = ""
         return e.code, {"detail": detail or str(e)}
+    except ConnectionError:
+        raise                           # already in words (a pin mismatch)
     except (urllib.error.URLError, OSError, ValueError) as e:
         raise ConnectionError(f"the server did not answer: {e}") from e
 
@@ -123,9 +152,19 @@ class _Socket:
         self._thread.start()
 
     def _connect(self):
-        from websockets.sync.client import connect
+        remote = _remote()
+        if remote is not None:
+            from server.remote import client
 
-        ws = connect(self._url, additional_headers=self._headers, open_timeout=10)
+            try:
+                ws = client.ws_connect(remote, self._url, additional_headers=self._headers,
+                                       open_timeout=10)
+            except client.RemoteError as e:
+                raise ConnectionError(str(e)) from e
+        else:
+            from websockets.sync.client import connect
+
+            ws = connect(self._url, additional_headers=self._headers, open_timeout=10)
         first = json.loads(ws.recv(timeout=10))
         if first.get("event") != "attached":
             raise ConnectionError(f"the session socket said {first!r}, not attached")

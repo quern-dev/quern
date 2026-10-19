@@ -59,14 +59,22 @@ Then GET /api/v1/trace?recording=<id or DIR> gives the trace over any window.
 def _call(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
     from server.__main__ import _server_base_url
     from server.config import API_KEY_FILE, client_api_key
+    from server.remote import client
 
-    url = _server_base_url()
-    if url is None:
-        raise ConnectionError("no server answering: start it with `quern start`")
-    key = client_api_key()
-    if not key:
-        raise ConnectionError(f"no API key at {API_KEY_FILE} and no QUERN_CLIENT_KEY: "
-                              "run `quern setup`")
+    try:
+        remote = client.from_env()      # QUERN_REMOTE (#254, phase 3)
+    except client.RemoteError as e:
+        raise ConnectionError(str(e)) from e
+    if remote is not None:
+        url, key = remote.url, remote.key
+    else:
+        url = _server_base_url()
+        if url is None:
+            raise ConnectionError("no server answering: start it with `quern start`")
+        key = client_api_key()
+        if not key:
+            raise ConnectionError(f"no API key at {API_KEY_FILE} and no QUERN_CLIENT_KEY: "
+                                  "run `quern setup`")
     req = urllib.request.Request(
         url + path, method=method, data=json.dumps(body).encode() if body is not None else None,
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
@@ -74,7 +82,8 @@ def _call(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
                  # to that agent's session, anything else to "cli".
                  "X-Quern-Session": session_from_env(dict(os.environ), fallback="cli")})
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        open_ = client.opener(remote).open if remote is not None else urllib.request.urlopen
+        with open_(req, timeout=60) as resp:
             return resp.status, json.loads(resp.read() or b"{}")
     except urllib.error.HTTPError as e:
         try:
@@ -82,6 +91,8 @@ def _call(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
         except ValueError:
             detail = ""
         return e.code, {"detail": detail or str(e)}
+    except client.RemoteError as e:     # a pin mismatch: one line, not a traceback
+        raise ConnectionError(str(e)) from e
     except (urllib.error.URLError, OSError, ValueError) as e:
         raise ConnectionError(f"the server did not answer: {e}") from e
 

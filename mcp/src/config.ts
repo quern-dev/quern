@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { loadRemote } from "./remote.js";
 
 export const CONFIG_DIR = join(homedir(), ".quern");
 export const STATE_FILE = join(CONFIG_DIR, "state.json");
@@ -40,13 +41,26 @@ export const DEFAULT_SERVER_PORT = 9110;
 
 /** Where the URL came from, so a caller can tell "unreachable" from
  * "nothing told us where to look". */
-export type ServerSource = "env" | "state" | "default";
+export type ServerSource = "remote" | "env" | "state" | "default";
 
 export function discoverServer(): {
   url: string;
   apiKey: string;
   source: ServerSource;
+  /** Set for a remote quern: every connection is pinned to it (remote.ts). */
+  fingerprint?: string;
 } {
+  // Priority 0: a paired remote quern (#254, phase 3). Named explicitly, so
+  // it wins over everything -- and if it cannot be read this throws rather
+  // than falling back: quietly driving this Mac's server instead of the one
+  // asked for would put an agent's work on the wrong machine.
+  const remoteName = process.env.QUERN_REMOTE?.trim();
+  if (remoteName) {
+    const remote = loadRemote(remoteName);
+    return { url: remote.url, apiKey: remote.key, source: "remote",
+             fingerprint: remote.fingerprint };
+  }
+
   // Priority 1: Environment variable.
   //
   // QUERN_DEBUG_SERVER_URL is the prototype's name and is deprecated. It is

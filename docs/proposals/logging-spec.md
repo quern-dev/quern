@@ -128,6 +128,7 @@ turned a seven-item guess into this nine-item list. A first draft left **25 of
 | `media` | screenshot timeline, live preview, and the timestamped video later | 6 |
 | `build` | build orchestration and output parsing | 3 |
 | `knowledge` | landmarks, screen identification, app knowledge base | 6 |
+| `session` | held sessions, device reservations, remote pairing (#254) | 2 |
 | `server.lifecycle` | startup, shutdown, port reclaim, updates, daemonization | 1 |
 
 `perf` is deliberately **not** a category — duration is a field on an action

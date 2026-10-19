@@ -33,6 +33,10 @@ _NOT_ACTIONS: frozenset[str] = frozenset({
     "build_app.py:build_progress",  # a read, polled every 10s during a build
     "recordings.py:list_recordings",
     "sessions.py:list_sessions",
+    # Remote listener (#254, phase 3): its status is a read; the hello step
+    # changes nothing -- the pairing it starts is logged when it completes.
+    "remote.py:status",
+    "remote.py:pair_hello",
     "sessions.py:get_session",
     "proxy.py:pending_flows",
     "recordings.py:recording_events",
