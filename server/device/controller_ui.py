@@ -2149,15 +2149,17 @@ class DeviceControllerUI:
             # on a phone can take over a second on a screen where the query is
             # quick (CodeRabbit, #474).
             await self.wda_client._set_snapshot_depth(resolved, shallow)
-            _, shallow_seconds = await self._wda_direct_query(
+            found_shallow, shallow_seconds = await self._wda_direct_query(
                 resolved, label=label, label_contains=label_contains,
                 label_prefix=label_prefix, identifier=identifier, element_type=element_type,
             )
-            deep, _ = await self._deeper_query(
+            # The filtered query can find what the unfiltered read missed --
+            # used, not only timed (CodeRabbit, #474).
+            deep = found_shallow or (await self._deeper_query(
                 resolved, shallow, shallow_seconds,
                 label=label, label_contains=label_contains, label_prefix=label_prefix,
                 identifier=identifier, element_type=element_type,
-            )
+            ))[0]
             deepened = _DEEPENED.get()
             await self._done_with_deep_element(resolved, shallow)
             matches = find_element(
@@ -3040,19 +3042,19 @@ class DeviceControllerUI:
                 initial_frame = el.frame
                 await asyncio.sleep(0.1)
 
-                # Re-fetch UI and find element again (bypass cache to detect changes!)
-                # Use filtering for performance
-                if deepened is not None:
-                    # Found only deep: re-query there, session still at that
-                    # depth, with no /source fallback -- a fast shallow miss
-                    # would otherwise fall back to an unfiltered read that
-                    # cannot see it either (CodeRabbit, #474).
-                    elements_check, _ = await self._wda_direct_query(
-                        resolved, label=filter_label, identifier=identifier,
-                        element_type=element_type,
-                    )
-                else:
-                    elements_check, _ = await self.get_ui_elements(
+                async def recheck() -> list[UIElement]:
+                    """The element again, uncached. Found only deep: re-queried
+                    there, the session still at that depth, with no /source
+                    fallback -- a shallow miss would fall back to an unfiltered
+                    read that cannot see it either. Both re-checks use this
+                    (CodeRabbit, #474)."""
+                    if deepened is not None:
+                        found, _ = await self._wda_direct_query(
+                            resolved, label=filter_label, identifier=identifier,
+                            element_type=element_type,
+                        )
+                        return found
+                    found, _ = await self.get_ui_elements(
                         resolved,
                         use_cache=False,
                         filter_label=filter_label,
@@ -3060,6 +3062,10 @@ class DeviceControllerUI:
                         filter_type=element_type,
                         snapshot_depth=read_depth,
                     )
+                    return found
+
+                # Re-fetch UI and find element again (bypass cache to detect changes!)
+                elements_check = await recheck()
 
                 matches_check = find_element(
                     elements_check, label=label,
@@ -3092,15 +3098,7 @@ class DeviceControllerUI:
                             )
 
                         # Re-fetch one more time to get final position (bypass cache again)
-                        # Use filtering for performance
-                        elements_final, _ = await self.get_ui_elements(
-                            resolved,
-                            use_cache=False,
-                            filter_label=filter_label,
-                            filter_identifier=identifier,
-                            filter_type=element_type,
-                            snapshot_depth=read_depth,
-                        )
+                        elements_final = await recheck()
 
                         matches_final = find_element(
                             elements_final, label=label,

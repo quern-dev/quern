@@ -479,3 +479,36 @@ class TestTheCodeRabbitFindings:
             await ctrl.tap_element(identifier=WIFI, scroll_to_find=False,
                                    skip_stability_check=True)
         assert wda.depth == ACTION_SNAPSHOT_DEPTH
+
+
+class TestTheSecondCodeRabbitPass:
+    async def test_get_element_uses_what_its_filtered_query_found(self, phone):
+        """The unfiltered read missed; the filtered query at the shallow depth
+        found it. It was timed and thrown away, then a deep query ran."""
+        ctrl, wda = phone
+        result, _ = await ctrl.get_element(identifier="shallow_btn")
+        assert result["identifier"] == "shallow_btn"
+        assert "depth_note" not in result
+        assert wda.deep_queries() == [], "it went deeper for an element it already had"
+
+    async def test_the_final_stability_re_check_also_queries_deep(self, phone):
+        """When the row moved between reads, the final re-check still read at
+        12 and fell back to an unfiltered /source (CodeRabbit, #474)."""
+        ctrl, wda = phone
+        moves = {"n": 0}
+        real = wda.query
+
+        async def moving(udid, using, value, **kw):
+            found = await real(udid, using, value, **kw)
+            if found and WIFI in value:
+                moves["n"] += 1
+                found[0]["frame"] = dict(found[0]["frame"], y=200 + moves["n"])
+            return found
+
+        ctrl.wda_client.find_elements_by_query = moving
+        ctrl.wait_for_settle = AsyncMock(return_value={"settled": True})
+        result = await ctrl.tap_element(identifier=WIFI, scroll_to_find=False)
+        assert result["status"] == "ok"
+        ctrl.wait_for_settle.assert_awaited()  # the row moved, so the final re-check ran
+        assert moves["n"] >= 3, "the final re-check did not find it deep"
+        ctrl.wda_client.describe_all.assert_not_called()
