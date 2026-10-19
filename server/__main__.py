@@ -432,6 +432,22 @@ def _install_opencode(mcp_entry: Path, node: str = "node",
     return True, f"{verb} quern in {config_path}"
 
 
+def _toml_key(raw: str) -> str:
+    """A key as TOML reads it: `"QUERN_REMOTE"` and `'QUERN_REMOTE'` are the
+    bare key, and must be replaced as it, not written beside it (review)."""
+    import json
+
+    key = raw.strip()
+    if len(key) >= 2 and key[0] == key[-1] == '"':
+        try:
+            return json.loads(key)
+        except ValueError:
+            return key
+    if len(key) >= 2 and key[0] == key[-1] == "'":
+        return key[1:-1]
+    return key
+
+
 def _toml_upsert_section(text: str, section: str, fields: dict,
                          drop: tuple[str, ...] = ()) -> str:
     """Insert or replace a TOML section using text manipulation.
@@ -478,7 +494,7 @@ def _toml_upsert_section(text: str, section: str, fields: dict,
     dropping = False
     for line in lines[start + 1:end]:
         stripped = line.strip()
-        key = stripped.split("=", 1)[0].strip() if "=" in stripped else None
+        key = _toml_key(stripped.split("=", 1)[0]) if "=" in stripped else None
         if key is not None and not stripped.startswith("#"):
             dropping = key in fields or key in drop
             if dropping and stripped.count("[") <= stripped.count("]"):

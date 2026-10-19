@@ -656,6 +656,15 @@ class TestCodexRegistration:
             "KEEP": "1", "QUERN_REMOTE": "office"}
         assert self._install(tmp_path, monkeypatch, None)["env"] == {"KEEP": "1"}
 
+    @pytest.mark.parametrize("spelled", ['"QUERN_REMOTE"', "'QUERN_REMOTE'", "QUERN_REMOTE"])
+    def test_a_quoted_key_in_the_sub_table_is_replaced_not_doubled(self, tmp_path, monkeypatch,
+                                                                    spelled):
+        self._write(tmp_path, '[mcp_servers.quern]\ncommand = "node"\n\n'
+                              f'[mcp_servers.quern.env]\n{spelled} = "old"\nKEEP = "1"\n')
+        assert self._install(tmp_path, monkeypatch, "office")["env"] == {
+            "KEEP": "1", "QUERN_REMOTE": "office"}
+        assert self._install(tmp_path, monkeypatch, None)["env"] == {"KEEP": "1"}
+
     def test_another_servers_quern_remote_does_not_touch_querns_env(self, tmp_path, monkeypatch):
         self._write(tmp_path, '[mcp_servers.other]\nenv = { QUERN_REMOTE = "x" }\n\n'
                               '[mcp_servers.quern]\ncommand = "node"\nenv = { KEEP = "1" }\n')
