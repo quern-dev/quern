@@ -241,6 +241,7 @@ IOS = ProbeContract(
         "location": "location_auth", "web": "web_heading_native",
         "diag": "diag_crash_uncaught", "state": "state_counter",
         "widgets": "widget_nav_done", "lists": "lists_table",
+        "lazy": "lazy_list",
     },
     row_identifier_template="row_{index}",
     row_label_template="Row {index}",
@@ -293,6 +294,13 @@ IOS = ProbeContract(
         "lists": {"landmarks": [
             {"element": "Heading", "label": "Lists"},
             {"element": "Group", "identifier": "lists_table"},
+        ]},
+        # A UICollectionView list that builds cells only as they scroll into
+        # view, so a read holds the ~15 on screen and never the rest -- the
+        # shape #475 was about. Scrolls, unlike the other More screens.
+        "lazy": {"scrollable": True, "landmarks": [
+            {"element": "Heading", "label": "Lazy"},
+            {"element": "Group", "identifier": "lazy_list"},
         ]},
     },
 )
@@ -397,7 +405,13 @@ CONTRACTS = {"ios": IOS, "android": ANDROID}
 #: tabs. Measured against the live screen, which reports exactly
 #: `Text, Controls, Scroll, Links, More`.
 IOS_BAR_TABS = ("text", "controls", "scroll", "links")
-IOS_MORE_TABS = ("logs", "location", "web", "diag", "state", "widgets", "lists")
+IOS_MORE_TABS = ("logs", "location", "web", "diag", "state", "widgets", "lists", "lazy")
+
+#: The depth `goto` reads the More list at, through WDA, to find a tab's row.
+#: 13 finds the first seven (measured on an iPhone 11: absent at 12, 1.2s at
+#: 13). The Lazy row is found only at 25 -- measured on an iOS 26.5
+#: simulator -- so it is asked for there and nowhere else (#375).
+IOS_MORE_ROW_DEPTH = {"lazy": 25}
 
 
 class ProbeUnavailable(RuntimeError):
@@ -833,7 +847,7 @@ class ProbeDriver:
         # 13 on the 200-row Scroll table costs 26s -- so the depth is asked for
         # here, where it is known to be needed, not raised for every read.
         # Ignored off WDA. See #375.
-        self.tap_label(tab.capitalize(), snapshot_depth=13)
+        self.tap_label(tab.capitalize(), snapshot_depth=IOS_MORE_ROW_DEPTH.get(name, 13))
         time.sleep(1.2)
 
     def _goto_android(self, label: str) -> None:
