@@ -791,12 +791,14 @@ class DeviceControllerUI:
     _SWIPE_HOLD_S = 0.15
 
     #: Through WDA, the share of the content area's pixels that must change
-    #: across a swipe for the list to count as having moved (#475). Measured
-    #: on an iOS 26.5 simulator: a swipe that moved a list changed 0.038-0.12,
-    #: the last few points of travel at the top of Settings 0.0051, and a swipe
-    #: at either end exactly 0. Low on purpose: reading "moved" wrongly costs a
-    #: swipe, and reading "unmoved" wrongly ends the sweep.
-    _SWEEP_FRAME_MOVED = 0.002
+    #: across a swipe for the list to count as having moved (#475). Measured:
+    #: a swipe that moved a list changed 0.038-0.12 on a simulator and
+    #: 0.32-0.40 on an iPhone 11; a swipe at either end, 0 -- except a pull at
+    #: the top of Settings, which changes 0.0051 (simulator) and 0.0017 (phone)
+    #: with the list not moving. Below that, the sweep read the top of Settings
+    #: as movement on every pull and spent its whole budget there. A move too
+    #: small to clear this happens only at an end, where "unmoved" is right.
+    _SWEEP_FRAME_MOVED = 0.015
 
     #: Through WDA, how far an element scroll travels, as a share of its
     #: container: measured at 629pt on a simulator and 662pt on an iPhone 11,

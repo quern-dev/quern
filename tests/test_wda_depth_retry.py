@@ -649,6 +649,10 @@ class LazyDeepList:
         self.scrolls: list[tuple[str, float, int | None]] = []
         self.has_container = True
         self.scroll_fails = False
+        #: A pull at the top that redraws a strip without moving the list, as
+        #: Settings' search field does live: 0.5% of the screen, toggling.
+        self.top_pull_artifact = False
+        self._pulled = False
 
     @property
     def max_offset(self):
@@ -676,6 +680,8 @@ class LazyDeepList:
         self.swipes += 1
         if self.swipes in self.dropped:
             return
+        if self.top_pull_artifact and self.offset == 0 and y2 > y1:
+            self._pulled = not self._pulled
         self.offset = min(max(self.offset + (y1 - y2), 0), self.max_offset)
 
     async def find_scroll_container(self, udid, depths):
@@ -709,6 +715,8 @@ class LazyDeepList:
             draw.rectangle((0, y, 390, y + self.ROW_H - 2), fill=(i * 37) % 200)
         if self.animated:
             draw.rectangle((0, 400, 390, 440), fill=random.randrange(256))
+        if self._pulled:
+            draw.rectangle((0, 120, 190, 121), fill=255)
         out = io.BytesIO()
         image.save(out, format="PNG")
         return out.getvalue()
@@ -855,3 +863,16 @@ class TestTheSweepOnALazyDeepList:
         result = await ctrl.scroll_to_element(identifier="lazy_150")
         assert result["status"] == "ok", result
         assert len(world.scrolls) == 1, "kept trying a scroll that had failed"
+
+    async def test_a_pull_at_the_top_that_moves_nothing_is_not_movement(self, phone):
+        """Live, a pull at the top of Settings redrew a strip (0.5% of the
+        frame) without the list moving, and the sweep read it as movement on
+        every pull until its budget ran out (#475)."""
+        ctrl, wda = phone
+        ctrl._warn_if_input_is_suppressed = AsyncMock()
+        world = self._install(ctrl, wda, rows=30)
+        world.top_pull_artifact = True
+        result = await ctrl.scroll_to_element(identifier="absent")
+        assert result["status"] == "not_found"
+        assert world._pulled or world.swipes, "never pulled at the top"
+        assert world.swipes < 12, f"{world.swipes} swipes: the pull read as movement"
