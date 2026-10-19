@@ -72,7 +72,8 @@ export class PinMismatch extends Error {
   constructor(readonly expected: string, readonly presented: string) {
     super(
       `the server's certificate is not the one paired with: expected ` +
-        `${showFingerprint(expected)}, presented ${showFingerprint(presented)}. Its ` +
+        `${showFingerprint(expected)}, presented ` +
+        `${/^[0-9a-f]{64}$/.test(presented) ? showFingerprint(presented) : presented}. Its ` +
         "certificate was rotated (pair again: quern connect), or something is between " +
         "you and it",
     );
@@ -89,7 +90,10 @@ export function pinnedAgent(fingerprint: string, { timeouts = true } = {}): Agen
   const cacheKey = `${fingerprint}:${timeouts}`;
   const cached = agents.get(cacheKey);
   if (cached) return cached;
-  const base = buildConnector({ rejectUnauthorized: false });
+  // No TLS session cache: a resumed session presents no certificate, so
+  // every connection after the first would read as unpinned and be refused
+  // -- the held-session socket, and any request once keep-alive lapsed.
+  const base = buildConnector({ rejectUnauthorized: false, maxCachedSessions: 0 });
   const agent = new Agent({
     ...(timeouts ? {} : { headersTimeout: 0, bodyTimeout: 0 }),
     connect: (options, callback) => {

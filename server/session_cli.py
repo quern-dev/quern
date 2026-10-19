@@ -74,7 +74,10 @@ def _open(req, timeout: float):
         return urllib.request.urlopen(req, timeout=timeout)
     from server.remote import client
 
-    return client.opener(remote).open(req, timeout=timeout)
+    try:
+        return client.opener(remote).open(req, timeout=timeout)
+    except client.RemoteError as e:     # a pin mismatch: one line, not a traceback
+        raise ConnectionError(str(e)) from e
 
 
 def _server() -> tuple[str, str]:
@@ -110,6 +113,8 @@ def _call(method: str, url: str, key: str, path: str, session: str = "",
         except ValueError:
             detail = ""
         return e.code, {"detail": detail or str(e)}
+    except ConnectionError:
+        raise                           # already in words (a pin mismatch)
     except (urllib.error.URLError, OSError, ValueError) as e:
         raise ConnectionError(f"the server did not answer: {e}") from e
 
@@ -151,8 +156,11 @@ class _Socket:
         if remote is not None:
             from server.remote import client
 
-            ws = client.ws_connect(remote, self._url, additional_headers=self._headers,
-                                   open_timeout=10)
+            try:
+                ws = client.ws_connect(remote, self._url, additional_headers=self._headers,
+                                       open_timeout=10)
+            except client.RemoteError as e:
+                raise ConnectionError(str(e)) from e
         else:
             from websockets.sync.client import connect
 

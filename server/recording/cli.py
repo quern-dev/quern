@@ -91,6 +91,8 @@ def _call(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
         except ValueError:
             detail = ""
         return e.code, {"detail": detail or str(e)}
+    except client.RemoteError as e:     # a pin mismatch: one line, not a traceback
+        raise ConnectionError(str(e)) from e
     except (urllib.error.URLError, OSError, ValueError) as e:
         raise ConnectionError(f"the server did not answer: {e}") from e
 

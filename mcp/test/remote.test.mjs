@@ -10,14 +10,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 
+import { WebSocket } from "undici";
+
 import { serverFetch } from "../dist/http.js";
-import { loadRemote, PinMismatch, showFingerprint } from "../dist/remote.js";
+import { loadRemote, pinnedAgent, PinMismatch, showFingerprint } from "../dist/remote.js";
 
 let dir;
 let server;
 let port;
 let fingerprint;
 let requests = 0;
+const sockets = new Set();
 
 before(async () => {
   dir = mkdtempSync(join(tmpdir(), "quern-remote-"));
@@ -28,14 +31,28 @@ before(async () => {
   fingerprint = createHash("sha256").update(new X509Certificate(pem).raw).digest("hex");
   server = createServer({ key: readFileSync(join(dir, "key.pem")), cert: pem }, (req, res) => {
     requests += 1;
-    res.writeHead(200, { "Content-Type": "application/json" });
+    // Closing makes the client's next request a new connection -- the one
+    // that would resume the TLS session.
+    res.writeHead(200, { "Content-Type": "application/json", Connection: "close" });
     res.end(JSON.stringify({ status: "ok", auth: req.headers.authorization ?? null }));
+  });
+  // Tracked so teardown can end them: an upgraded socket keeps close() waiting.
+  server.on("secureConnection", (s) => { sockets.add(s); s.on("close", () => sockets.delete(s)); });
+  server.on("upgrade", (req, socket) => {
+    const accept = createHash("sha1")
+      .update(req.headers["sec-websocket-key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+      .digest("base64");
+    socket.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n" +
+      `Connection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+    const text = Buffer.from(JSON.stringify({ event: "attached" }));
+    socket.write(Buffer.concat([Buffer.from([0x81, text.length]), text]));
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   port = server.address().port;
 });
 
 after(() => {
+  for (const s of sockets) s.destroy();
   server?.close();
   rmSync(dir, { recursive: true, force: true });
 });
@@ -44,6 +61,27 @@ test("a pinned connection to the paired certificate goes through", async () => {
   const resp = await serverFetch({ fingerprint }, `https://127.0.0.1:${port}/health`);
   assert.equal(resp.status, 200);
   assert.equal((await resp.json()).status, "ok");
+});
+
+test("every connection is pinned, not only the first: a resumed TLS session shows no certificate", async () => {
+  // Each response closes its connection, so these are three handshakes; with
+  // the TLS session cache on, the second resumes and was refused (found live).
+  for (let i = 0; i < 3; i++) {
+    const resp = await serverFetch({ fingerprint }, `https://127.0.0.1:${port}/health`);
+    assert.equal(resp.status, 200, `request ${i + 1}`);
+    await resp.text();
+  }
+});
+
+test("the held-session WebSocket goes through the pinned dispatcher", async () => {
+  // After a request, as the MCP does it: the socket is a later connection.
+  await (await serverFetch({ fingerprint }, `https://127.0.0.1:${port}/health`)).text();
+  const message = await new Promise((resolve, reject) => {
+    const ws = new WebSocket(`wss://127.0.0.1:${port}/live`, { dispatcher: pinnedAgent(fingerprint) });
+    ws.onmessage = (e) => { resolve(String(e.data)); ws.close(); };
+    ws.onerror = (e) => reject(e.error ?? new Error("websocket error"));
+  });
+  assert.equal(JSON.parse(message).event, "attached");
 });
 
 test("a wrong pin is refused before anything is sent, naming both fingerprints", async () => {
