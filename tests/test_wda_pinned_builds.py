@@ -220,3 +220,27 @@ class TestTheSimulatorBuild:
         sim["builds"](ok=False)
         with pytest.raises(RuntimeError):
             await wda.build_wda_simulator()
+
+
+# ---------------------------------------------------------------------------
+# quern status
+# ---------------------------------------------------------------------------
+
+
+def test_status_names_the_builds_against_the_pin(state):
+    from server.lifecycle.daemon import wda_status_line
+
+    assert wda_status_line() is None, "never built: nothing to say"
+    state.update({"build_team_id": "TEAM", "build_wda_version": PIN})
+    assert wda_status_line() == f"  WebDriverAgent: device {PIN} (quern pins {PIN})"
+    state.update({"sim_built_at": "x", "sim_build_wda_version": "16.15.3"})
+    line = wda_status_line()
+    assert f"device {PIN}, simulator 16.15.3" in line and "behind the pin" in line
+
+
+def test_status_calls_a_build_from_before_the_pin_unpinned(state):
+    from server.lifecycle.daemon import wda_status_line
+
+    state.update({"build_team_id": "TEAM"})
+    line = wda_status_line()
+    assert "device unpinned" in line and "behind the pin" in line

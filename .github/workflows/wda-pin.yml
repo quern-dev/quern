@@ -1,0 +1,55 @@
+# Is quern's pinned WebDriverAgent behind npm's latest? (#479)
+#
+# WDA used to drift silently: each install kept whatever was current on its
+# first setup. Now the version is pinned in server/device/ios/wda-pin.json, and
+# moving it is deliberate -- a bump, then a live test on a simulator and a phone.
+# This makes sure someone knows when there is one to do: it keeps a single
+# tracking issue open while the pin is behind, and comments on it as npm moves.
+name: wda-pin
+
+on:
+  schedule:
+    - cron: "17 15 * * 1"        # Mondays
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare the pin with npm
+        id: pin
+        run: |
+          set +e
+          python3 scripts/wda-pin.py --check --json > pin.json
+          code=$?
+          set -e
+          cat pin.json
+          # 2 is "npm could not be asked": a failure, not a verdict either way.
+          if [ "$code" -eq 2 ]; then exit 1; fi
+          echo "behind=$(jq -r .behind pin.json)" >> "$GITHUB_OUTPUT"
+          echo "pinned=$(jq -r .pinned pin.json)" >> "$GITHUB_OUTPUT"
+          echo "latest=$(jq -r .latest pin.json)" >> "$GITHUB_OUTPUT"
+      - name: Open or update the tracking issue
+        if: steps.pin.outputs.behind == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PINNED: ${{ steps.pin.outputs.pinned }}
+          LATEST: ${{ steps.pin.outputs.latest }}
+        run: |
+          title="WebDriverAgent pin is behind npm"
+          body="quern pins appium-webdriveragent **${PINNED}**; npm's latest is **${LATEST}**.
+
+          To move it: \`scripts/wda-pin.py --bump ${LATEST}\`, then live-test on a simulator and a phone before merging (existing installs rebuild at their next setup_wda, a simulator at its next start). See #479."
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -1)
+          if [ -n "$existing" ]; then
+            if ! gh issue view "$existing" --repo "$GITHUB_REPOSITORY" --json comments --jq '.comments[].body' | grep -qF "**${LATEST}**"; then
+              gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+            fi
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
