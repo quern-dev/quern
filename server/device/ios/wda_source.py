@@ -99,7 +99,9 @@ async def fetch(dest: Path, pin: Pin | None = None, *,
         if own:
             await client.aclose()
     _check_integrity(data, pin.integrity)
-    _unpack(data, dest, pin.version)
+    import asyncio
+
+    await asyncio.to_thread(_unpack, data, dest, pin.version)
     return True
 
 
@@ -123,14 +125,29 @@ def _unpack(data: bytes, dest: Path, version: str) -> None:
                        if m.name.startswith("package/") and len(m.name) > len("package/")]
             for m in members:
                 m.name = m.name[len("package/"):]
+                # A hard link names its target by archive path, prefix and all:
+                # unrewritten, extraction raised a bare KeyError (review).
+                if m.islnk() and m.linkname.startswith("package/"):
+                    m.linkname = m.linkname[len("package/"):]
             tar.extractall(scratch, members=members, filter="data")
         if not (scratch / "WebDriverAgent.xcodeproj" / "project.pbxproj").is_file():
             raise SourceError(f"WebDriverAgent {version}'s package holds no "
                               "WebDriverAgent.xcodeproj")
         (scratch / MARKER).write_text(version + "\n")
-        shutil.rmtree(dest, ignore_errors=True)
-        scratch.rename(dest)
-    except (tarfile.TarError, OSError) as e:
+        # Swapped, not deleted then renamed: there is no moment with no source,
+        # and a rename that fails puts the old one back (review).
+        old = parent / f".{dest.name}.old"
+        shutil.rmtree(old, ignore_errors=True)
+        if dest.exists():
+            dest.rename(old)
+        try:
+            scratch.rename(dest)
+        except OSError:
+            if old.exists():
+                old.rename(dest)
+            raise
+        shutil.rmtree(old, ignore_errors=True)
+    except (tarfile.TarError, OSError, KeyError) as e:
         shutil.rmtree(scratch, ignore_errors=True)
         raise SourceError(f"could not unpack WebDriverAgent {version}: {e}") from None
     except BaseException:

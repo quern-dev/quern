@@ -153,7 +153,7 @@ def _read_profile(path: Path) -> dict[str, Any] | None:
         if start < 0 or end < 0:
             return None
         loaded = plistlib.loads(data[start:end + len(b"</plist>")])
-    except (OSError, ValueError, plistlib.InvalidFileException):
+    except Exception:  # noqa: BLE001 -- expat's errors are not ValueErrors (review)
         return None
     return loaded if isinstance(loaded, dict) else None
 
@@ -179,14 +179,26 @@ def _teams_from_profiles(dirs: tuple[Path, ...], now: datetime) -> list[dict[str
                     expires = expires.replace(tzinfo=UTC)       # plist dates are UTC
                 if expires <= now:
                     continue
-            if not (profile.get("Entitlements") or {}).get("get-task-allow"):
+            entitlements = profile.get("Entitlements")
+            if not (isinstance(entitlements, dict) and entitlements.get("get-task-allow")):
                 continue                                         # distribution, not development
-            for team_id in profile.get("TeamIdentifier") or []:
+            team_ids = profile.get("TeamIdentifier")
+            if not isinstance(team_ids, list):
+                continue        # a string here split into one team per character (review)
+            # A free (personal) team's profiles last 7 days, a paid team's a
+            # year: the account list said "Free", and its warnings -- the
+            # weekly re-sign, the 3-app limit -- need saying here too (review).
+            created = profile.get("CreationDate")
+            short = (isinstance(created, datetime) and isinstance(expires, datetime)
+                     and (expires.replace(tzinfo=None) - created.replace(tzinfo=None)).days <= 8)
+            for team_id in team_ids:
                 if isinstance(team_id, str) and team_id:
-                    teams.setdefault(team_id, {"team_id": team_id,
-                                               "team_name": str(profile.get("TeamName", "")),
-                                               "team_type": "",
-                                               "source": "provisioning profile"})
+                    team = teams.setdefault(team_id, {"team_id": team_id,
+                                                      "team_name": str(profile.get("TeamName", "")),
+                                                      "team_type": "",
+                                                      "source": "provisioning profile"})
+                    if short:
+                        team["team_type"] = "Free"
     return list(teams.values())
 
 
@@ -272,6 +284,16 @@ async def clone_wda() -> bool:
         return await wda_source.fetch(WDA_REPO)
     except wda_source.SourceError as e:
         raise RuntimeError(str(e)) from None
+
+
+def _can_keep_device_build(team_id: str, force: bool) -> bool:
+    """Whether a failed update may fall back on the device build already there."""
+    if force:
+        return False
+    state = read_wda_state()
+    return (state.get("build_team_id") == team_id
+            and state.get("build_wda_version") != pinned_wda_version()
+            and WDA_APP.exists() and XCTESTRUN.exists())
 
 
 def wda_version_report(built: str | None) -> dict[str, Any]:
@@ -505,21 +527,25 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
     if not WDA_REPO.exists():
         raise RuntimeError("WDA repo not cloned — call clone_wda() first")
 
-    # The build it replaces is moved aside, not deleted, and put back if this
-    # one fails in any way: a new WebDriverAgent that cannot be signed or
-    # built must not strand a phone the old one worked on (#479). It used to
-    # be deleted first on `force`, which is also how #188 began.
+    # The build it replaces is kept, and put back if this one fails in any
+    # way: a new WebDriverAgent that cannot be signed or built must not strand
+    # a phone the old one worked on (#479). Kept as a snapshot -- an APFS clone,
+    # instant and free -- rather than moved: the build directory stays where
+    # another phone's driver start looks for it, and an ordinary rebuild stays
+    # incremental. `force` still builds from clean (#188), after the snapshot.
     previous = WDA_DERIVED.with_name(WDA_DERIVED.name + "-previous")
-    shutil.rmtree(previous, ignore_errors=True)
-    moved = False
+    _recover_previous(WDA_DERIVED, previous)
+    kept = False
     if WDA_DERIVED.exists():
-        WDA_DERIVED.rename(previous)
-        moved = True
+        await asyncio.to_thread(_snapshot, WDA_DERIVED, previous)
+        kept = True
     try:
+        if force:
+            shutil.rmtree(WDA_DERIVED, ignore_errors=True)
         await _xcodebuild_device(team_id)
     except BaseException:
         shutil.rmtree(WDA_DERIVED, ignore_errors=True)
-        if moved:
+        if kept:
             previous.rename(WDA_DERIVED)
             logger.warning("WDA build failed; the previous build is kept")
         raise
@@ -550,6 +576,34 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
     save_wda_state(state)
 
     return True
+
+
+def _snapshot(src: Path, dst: Path) -> None:
+    """A copy of `src` at `dst`: an APFS clone where `cp -c` makes one --
+    instant, and no space until either side changes -- else a plain copy."""
+    import subprocess
+
+    shutil.rmtree(dst, ignore_errors=True)
+    try:
+        subprocess.run(["cp", "-cR", str(src), str(dst)], check=True,
+                       capture_output=True, timeout=600)
+    except (OSError, subprocess.SubprocessError):
+        shutil.rmtree(dst, ignore_errors=True)
+        shutil.copytree(src, dst, symlinks=True)
+
+
+def _recover_previous(derived: Path, previous: Path) -> None:
+    """A build kept as `previous` and still there means the build that kept it
+    never finished -- the server was stopped or killed mid-build -- so
+    `derived` is whatever that build left: the kept one goes back. Deleting it
+    instead (the first version did) threw away the good build and kept the
+    partial one (review)."""
+    if not previous.exists():
+        return
+    logger.warning("A WDA build was interrupted; restoring the build before it from %s",
+                   previous)
+    shutil.rmtree(derived, ignore_errors=True)
+    previous.rename(derived)
 
 
 def _source_version() -> str | None:
@@ -603,11 +657,19 @@ async def _xcodebuild_device(team_id: str) -> None:
         stdout, stderr = await asyncio.wait_for(
             proc.communicate(), timeout=BUILD_TIMEOUT
         )
-    except TimeoutError:
-        proc.kill()
-        raise RuntimeError(
-            f"xcodebuild timed out after {BUILD_TIMEOUT}s"
-        )
+    except BaseException as exc:
+        # Cancellation too: build_wda puts the kept build back when this
+        # raises, and an xcodebuild left running would go on writing into it
+        # (review). Reaped under a shield, as the simulator build does.
+        if proc.returncode is None:
+            proc.kill()
+            try:
+                await asyncio.shield(proc.wait())
+            except BaseException:
+                pass
+        if isinstance(exc, TimeoutError):
+            raise RuntimeError(f"xcodebuild timed out after {BUILD_TIMEOUT}s") from exc
+        raise
 
     if proc.returncode != 0:
         stderr_text = stderr.decode()
@@ -1020,7 +1082,8 @@ async def start_driver(udid: str, os_version: str) -> dict:
         pid = existing.get("pid")
         if pid and _is_process_alive(pid):
             logger.info("WDA driver already running for %s (pid %d)", udid[:8], pid)
-            return {"status": "already_running", "udid": udid, "pid": pid, "ready": True}
+            return {"status": "already_running", "udid": udid, "pid": pid, "ready": True,
+                    **wda_version_report(read_wda_state().get("build_wda_version"))}
         # Stale PID — clean up
         logger.info("Cleaning stale WDA runner for %s (pid %s)", udid[:8], pid)
         del runners[udid]
@@ -1219,11 +1282,14 @@ async def _sim_build_is_current(state: dict[str, Any]) -> bool:
     if _find_sim_xctestrun() is None:
         return False
     pinned = pinned_wda_version()
-    if state.get("sim_build_wda_version") != pinned:
-        # Unless building the pinned version already failed and the build
-        # before it was kept: then this one is what there is, and it is not
-        # rebuilt on every start until the pin moves or setup_wda forces it.
-        return state.get("sim_build_failed_version") == pinned
+    # Another version is stale -- unless building the pinned one already
+    # failed and the build before it was kept: then that is what there is, and
+    # it is not rebuilt on every start until the pin moves or setup_wda forces
+    # it. Only the version question: an Xcode or deployment-target change
+    # still rebuilds it (review).
+    if (state.get("sim_build_wda_version") != pinned
+            and state.get("sim_build_failed_version") != pinned):
+        return False
     recorded = state.get("sim_build_xcode")
     if recorded is None:
         return False
@@ -1257,17 +1323,28 @@ async def _build_wda_simulator(force: bool) -> bool:
     if not force and await _sim_build_is_current(state):
         return False
 
+    previous = WDA_DERIVED_SIM.with_name(WDA_DERIVED_SIM.name + "-previous")
+    _recover_previous(WDA_DERIVED_SIM, previous)
+
     # Fetched whenever the pin moved, not only when there is no source: an
-    # existing clone of another version would otherwise be built forever.
-    await clone_wda()
-    customize_wda()
+    # existing clone of another version would otherwise be built forever. A
+    # fetch that fails is a failed update like any other: a simulator with a
+    # build keeps it rather than refusing to start (review).
+    try:
+        await clone_wda()
+        customize_wda()
+    except (RuntimeError, OSError) as e:
+        if _find_sim_xctestrun() is None:
+            raise
+        return _keep_sim_build(e)
 
     # The build it replaces is moved aside and put back, with its fingerprint,
     # if this one fails -- so a simulator that ran WDA still does (#479).
+    # Moved rather than snapshotted: simulator starts wait on this lock, so
+    # nothing reads the directory meanwhile.
+    state = read_wda_state()
     kept = {k: state[k] for k in ("sim_build_xcode", "sim_build_deployment_target",
                                   "sim_build_wda_version") if k in state}
-    previous = WDA_DERIVED_SIM.with_name(WDA_DERIVED_SIM.name + "-previous")
-    shutil.rmtree(previous, ignore_errors=True)
     moved = False
     if WDA_DERIVED_SIM.exists():
         WDA_DERIVED_SIM.rename(previous)
@@ -1284,13 +1361,13 @@ async def _build_wda_simulator(force: bool) -> bool:
         previous.rename(WDA_DERIVED_SIM)
         state = read_wda_state()
         state.update(kept)
-        state["sim_build_failed_version"] = pinned_wda_version()
         save_wda_state(state)
         if not isinstance(exc, Exception):
-            raise           # cancelled: the old build is back, and so is the cancel
-        logger.warning("WDA simulator build of %s failed (%s); the previous build is "
-                       "kept", pinned_wda_version(), str(exc).splitlines()[0])
-        return False
+            # Cancelled: the old build is back, and so is the cancel -- but not
+            # recorded as a failed version, which would stop it ever being
+            # retried after a shutdown mid-build (review).
+            raise
+        return _keep_sim_build(exc)
     shutil.rmtree(previous, ignore_errors=True)
     _name_simulator_runner()
 
@@ -1326,6 +1403,17 @@ def _name_simulator_runner() -> None:
                 plistlib.dump(plist, f)
         except (OSError, ValueError, plistlib.InvalidFileException) as e:
             logger.warning("Could not name the simulator runner %s: %s", app, e)
+
+
+def _keep_sim_build(exc: BaseException) -> bool:
+    """A simulator update that failed, with a build to fall back on: recorded,
+    so the next start uses that build instead of retrying; False (not built)."""
+    state = read_wda_state()
+    state["sim_build_failed_version"] = pinned_wda_version()
+    save_wda_state(state)
+    logger.warning("WDA simulator build of %s failed (%s); the previous build is kept",
+                   pinned_wda_version(), (str(exc).splitlines() or [""])[0])
+    return False
 
 
 async def _xcodebuild_simulator() -> None:
@@ -1754,32 +1842,35 @@ async def setup_wda(
                      f"Available: {sorted(valid_teams)}",
         }
 
-    # Step 3: Clone
-    cloned = await clone_wda()
-
-    # Update clone state
-    state = read_wda_state()
-    state["cloned"] = True
-    save_wda_state(state)
-
-    # Step 4: Customize (inject app icon)
-    customize_wda()
-
-    # Step 5: Build (device-independent, keyed by team_id only). A build that
-    # fails where one for this team already worked -- a new WebDriverAgent that
-    # cannot be signed, say -- leaves that build in place (build_wda), and it
-    # is used rather than the device stranded; the answer says so (#479).
+    # Steps 3-5 under the one WDA build lock: two setups at once destroyed
+    # each other's kept build, and a fetch replacing the source under a
+    # simulator build broke that (review).
     update_failed = None
-    try:
-        built = await build_wda(team_id, force=force)
-    except RuntimeError as e:
-        state = read_wda_state()
-        if not (state.get("build_team_id") == team_id
-                and WDA_APP.exists() and XCTESTRUN.exists()):
-            raise
-        update_failed = str(e)
-        built = False
-        logger.warning("WDA build failed; using the build already there: %s", e)
+    cloned = built = False
+    async with _sim_lock("build"):
+        try:
+            # Step 3: the pinned source, fetched if it is not there (#479)
+            cloned = await clone_wda()
+            state = read_wda_state()
+            state["cloned"] = True
+            save_wda_state(state)
+            # Step 4: Customize (inject app icon)
+            customize_wda()
+            # Step 5: Build (device-independent, keyed by team_id only)
+            built = await build_wda(team_id, force=force)
+        except (RuntimeError, OSError) as e:
+            # An *update* that failed -- the fetch or the build of a new
+            # WebDriverAgent -- where a build for this team already works:
+            # that build is installed rather than the device stranded, and the
+            # answer says so (#479). Not on `force`, or when the build there is
+            # already the pinned version: then the build itself was asked for
+            # and failed, and installing the old one (an expired profile, on a
+            # free account's weekly re-sign) would bury why (review).
+            if not _can_keep_device_build(team_id, force):
+                raise
+            update_failed = str(e)
+            built = False
+            logger.warning("WDA update failed; using the build already there: %s", e)
 
     # Step 5b: Self-heal a stale signature. build_wda is cached by team, so a
     # skipped build won't re-run the post-process re-sign. If a *previous* run

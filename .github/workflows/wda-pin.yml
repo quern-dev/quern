@@ -29,27 +29,36 @@ jobs:
           code=$?
           set -e
           cat pin.json
-          # 2 is "npm could not be asked": a failure, not a verdict either way.
-          if [ "$code" -eq 2 ]; then exit 1; fi
+          # 0 current, 1 behind; anything else -- npm unreachable, a crash --
+          # is a failure, not a verdict, and must not read as "up to date".
+          if [ "$code" -ne 0 ] && [ "$code" -ne 1 ]; then exit 1; fi
+          jq -e 'has("behind") and has("pinned") and has("latest")' pin.json > /dev/null
           echo "behind=$(jq -r .behind pin.json)" >> "$GITHUB_OUTPUT"
           echo "pinned=$(jq -r .pinned pin.json)" >> "$GITHUB_OUTPUT"
           echo "latest=$(jq -r .latest pin.json)" >> "$GITHUB_OUTPUT"
-      - name: Open or update the tracking issue
-        if: steps.pin.outputs.behind == 'true'
+      - name: Open, update or close the tracking issue
         env:
           GH_TOKEN: ${{ github.token }}
+          BEHIND: ${{ steps.pin.outputs.behind }}
           PINNED: ${{ steps.pin.outputs.pinned }}
           LATEST: ${{ steps.pin.outputs.latest }}
         run: |
           title="WebDriverAgent pin is behind npm"
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -1)
+          if [ "$BEHIND" != "true" ]; then
+            # Caught up: the issue has nothing left to track.
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" --repo "$GITHUB_REPOSITORY" --comment "The pin is at ${PINNED}, npm's latest."
+            fi
+            exit 0
+          fi
           body="quern pins appium-webdriveragent **${PINNED}**; npm's latest is **${LATEST}**.
 
           To move it: \`scripts/wda-pin.py --bump ${LATEST}\`, then live-test on a simulator and a phone before merging (existing installs rebuild at their next setup_wda, a simulator at its next start). See #479."
-          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -1)
-          if [ -n "$existing" ]; then
-            if ! gh issue view "$existing" --repo "$GITHUB_REPOSITORY" --json comments --jq '.comments[].body' | grep -qF "**${LATEST}**"; then
-              gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
-            fi
-          else
+          if [ -z "$existing" ]; then
             gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          # Body and comments both: the week after it is opened the version is
+          # in the body only, and was commented again (review).
+          elif ! gh issue view "$existing" --repo "$GITHUB_REPOSITORY" --json body,comments --jq '.body, .comments[].body' | grep -qF "**${LATEST}**"; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
           fi

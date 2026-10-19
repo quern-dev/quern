@@ -31,6 +31,11 @@ def _get(url: str) -> dict:
         return json.load(resp)
 
 
+def _version(text: str) -> tuple:
+    """1.2.10 > 1.2.9: compared as numbers. A part that is not one sorts first."""
+    return tuple(int(p) if p.isdigit() else -1 for p in text.split("-")[0].split("."))
+
+
 def _pin() -> dict:
     return json.loads(PIN_FILE.read_text())
 
@@ -42,7 +47,9 @@ def check(as_json: bool) -> int:
     except (urllib.error.URLError, OSError, ValueError, KeyError) as e:
         print(f"could not ask npm for {pin['package']}'s latest version: {e}", file=sys.stderr)
         return 2
-    behind = latest != pin["version"]
+    # Behind only if npm's is newer: a pin moved ahead of `latest` (a release
+    # npm has not tagged latest yet) is not something to catch up with.
+    behind = _version(latest) > _version(pin["version"])
     if as_json:
         print(json.dumps({"pinned": pin["version"], "latest": latest, "behind": behind}))
     elif behind:

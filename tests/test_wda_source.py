@@ -151,3 +151,26 @@ def test_the_pin_in_the_repo_is_well_formed():
     algo, _, digest = pin.integrity.partition("-")
     assert algo == "sha512" and len(base64.b64decode(digest)) == 64
     assert json.loads(wda_source.PIN_FILE.read_text())["version"] == pin.version
+
+
+async def test_a_hard_link_in_the_package_is_unpacked(tmp_path):
+    """It named its target with npm's package/ prefix: a bare KeyError (review)."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, data in PROJECT.items():
+            info = tarfile.TarInfo("package/" + name)
+            if data is None:
+                info.type = tarfile.DIRTYPE
+                tar.addfile(info)
+            else:
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+        link = tarfile.TarInfo("package/WebDriverAgentLib/FBAlert-link.m")
+        link.type = tarfile.LNKTYPE
+        link.linkname = "package/WebDriverAgentLib/FBAlert.m"
+        tar.addfile(link)
+    data = buf.getvalue()
+    dest = tmp_path / "WebDriverAgent"
+    async with _client(data, []) as client:
+        await fetch(dest, _pin(data), client=client)
+    assert (dest / "WebDriverAgentLib" / "FBAlert-link.m").read_bytes() == b"// alert"

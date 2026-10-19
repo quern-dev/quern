@@ -123,3 +123,32 @@ async def test_setup_wda_still_asks_when_nothing_decides(monkeypatch):
     monkeypatch.setattr(wda, "read_wda_state", lambda: {})
     result = await wda.setup_wda("UDID", "18.0")
     assert result["status"] == "needs_identity_selection"
+
+
+def test_a_malformed_profile_is_skipped_not_fatal(tmp_path):
+    """Mismatched tags raise expat's error, not a ValueError (review)."""
+    d = tmp_path / "profiles"
+    d.mkdir()
+    mismatched = b"<?xml version='1.0'?><plist><dict><key>a</dict></plist>"
+    (d / "bad.mobileprovision").write_bytes(mismatched)
+    _profile(d, "good", team="TEAMA")
+    weird = plistlib.dumps({"TeamIdentifier": "TEAMB", "Platform": ["iOS"],
+                            "Entitlements": "not a dict"})
+    (d / "weird.mobileprovision").write_bytes(weird)
+    ids = wda.discover_signing_identities(_prefs(tmp_path), (d,), NOW)
+    assert [i["team_id"] for i in ids] == ["TEAMA"], "one team per character, before"
+
+
+def test_a_free_teams_week_long_profile_marks_it_free(tmp_path):
+    """The free-account warnings -- weekly re-sign, 3 apps -- need saying."""
+    d = tmp_path / "profiles"
+    d.mkdir()
+    body = plistlib.dumps({"TeamIdentifier": ["FREE1"], "TeamName": "Me (Personal Team)",
+                           "Platform": ["iOS"], "Entitlements": {"get-task-allow": True},
+                           "CreationDate": (NOW - timedelta(days=1)).replace(tzinfo=None),
+                           "ExpirationDate": (NOW + timedelta(days=6)).replace(tzinfo=None)})
+    (d / "free.mobileprovision").write_bytes(body)
+    _profile(d, "paid", team="PAID1")
+    ids = {i["team_id"]: i for i in wda.discover_signing_identities(_prefs(tmp_path), (d,), NOW)}
+    assert ids["FREE1"]["team_type"] == "Free" and wda._is_free_account("Free")
+    assert ids["PAID1"]["team_type"] == ""

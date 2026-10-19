@@ -6,6 +6,7 @@ fails puts the old one back, so a device or simulator that ran WDA still does.
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -86,9 +87,9 @@ class TestTheDeviceBuild:
         device["old_build"]()
         device["builds"](ok=True)
         assert await wda.build_wda("TEAM") is True
-        assert (device["app"] / "new").exists() and not (device["app"] / "old").exists()
+        assert (device["app"] / "new").exists(), "built where the old one was"
         assert state["build_wda_version"] == PIN
-        assert not list(device["app"].parents[3].parent.glob("*-previous"))
+        assert not list(device["app"].parents[3].parent.glob("*-previous")), "snapshot gone"
 
     async def test_a_new_build_that_fails_puts_the_old_one_back(self, device, state):
         """The case #479 must not get wrong: a phone that worked, stranded."""
@@ -267,3 +268,203 @@ async def test_the_simulator_runner_is_named_as_the_devices_is(sim, state, monke
     app = sim["products"] / "Debug-iphonesimulator" / "WebDriverAgentRunner-Runner.app"
     info = app / "Info.plist"
     assert plistlib.loads(info.read_bytes())["CFBundleDisplayName"] == "QuernDriver"
+
+
+# ---------------------------------------------------------------------------
+# Review: what keeping the old build has to survive
+# ---------------------------------------------------------------------------
+
+
+def _identities(monkeypatch, team="TEAM"):
+    monkeypatch.setattr(wda, "discover_signing_identities",
+                        lambda: [{"team_id": team, "team_name": "T", "team_type": "Company"}])
+    monkeypatch.setattr(wda, "_runner_app_signature_valid", AsyncMock(return_value=True))
+    installed = AsyncMock()
+    monkeypatch.setattr(wda, "install_wda", installed)
+    return installed
+
+
+class TestSetupWdaFallsBackOnlyOnAnUpdate:
+    async def test_a_failed_download_keeps_the_build_there(self, device, state, monkeypatch):
+        """Every install's first setup after the upgrade fetches: offline, it
+        refused to reinstall a phone that had a good build (review)."""
+        device["old_build"]()
+        installed = _identities(monkeypatch)
+
+        async def offline():
+            raise RuntimeError("could not download WebDriverAgent from npm: offline")
+
+        monkeypatch.setattr(wda, "clone_wda", offline)
+        result = await wda.setup_wda("UDID", "18.0")
+        assert result["status"] == "ok" and "offline" in result["wda_update_failed"]
+        installed.assert_awaited_once()
+        assert (device["app"] / "old").exists()
+
+    @pytest.mark.parametrize("why", ["force", "already pinned", "other team", "no artifacts"])
+    async def test_otherwise_the_failure_is_the_answer(self, device, state, monkeypatch, why):
+        """A rebuild that was asked for, a build already on the pin, another
+        team's build, or nothing on disk: installing the old would hide why."""
+        device["old_build"]()
+        device["builds"](ok=False)
+        installed = _identities(monkeypatch, team="OTHER" if why == "other team" else "TEAM")
+        monkeypatch.setattr(wda, "clone_wda", AsyncMock(return_value=False))
+        monkeypatch.setattr(wda, "customize_wda", lambda *a, **k: False)
+        if why == "already pinned":
+            state["build_wda_version"] = PIN
+            monkeypatch.setattr(wda, "_build_is_current", AsyncMock(return_value=False))
+        if why == "no artifacts":
+            device["xctestrun"].unlink()
+        with pytest.raises(RuntimeError):
+            await wda.setup_wda("UDID", "18.0", force=(why == "force"))
+        installed.assert_not_awaited()
+
+    async def test_the_build_lock_is_held_while_building(self, device, state, monkeypatch):
+        """Two setups at once destroyed each other's kept build (review)."""
+        held = []
+
+        async def build(team_id, force=False):
+            held.append(wda._sim_lock("build").locked())
+            return True
+
+        _identities(monkeypatch)
+        monkeypatch.setattr(wda, "clone_wda", AsyncMock(return_value=False))
+        monkeypatch.setattr(wda, "customize_wda", lambda *a, **k: False)
+        monkeypatch.setattr(wda, "build_wda", build)
+        monkeypatch.setattr(wda, "_post_process_runner_app", AsyncMock())
+        await wda.setup_wda("UDID", "18.0")
+        assert held == [True]
+
+
+class TestTheKeptDeviceBuild:
+    async def test_a_build_interrupted_by_a_crash_is_rolled_back_not_kept(self, device, state):
+        """A -previous still there means the build that made it never ended:
+        it was deleted, keeping the partial build (review, reproduced)."""
+        device["old_build"]()
+        derived = device["app"].parents[3]
+        previous = derived.with_name(derived.name + "-previous")
+        import shutil
+
+        shutil.copytree(derived, previous)
+        (device["app"] / "partial").write_text("half-written")
+        device["builds"](ok=False)
+        with pytest.raises(RuntimeError):
+            await wda.build_wda("TEAM")
+        assert (device["app"] / "old").exists() and not (device["app"] / "partial").exists()
+
+    async def test_a_failed_build_s_partial_output_is_cleared_before_the_restore(
+            self, device, state, monkeypatch):
+        device["old_build"]()
+
+        async def half_built(*cmd, **kw):
+            (device["app"] / "partial").write_text("x")
+            return _proc(65, b"Signing failed")
+
+        monkeypatch.setattr(wda.asyncio, "create_subprocess_exec", half_built)
+        with pytest.raises(RuntimeError):
+            await wda.build_wda("TEAM")
+        assert not (device["app"] / "partial").exists() and (device["app"] / "old").exists()
+
+    async def test_a_cancelled_build_kills_xcodebuild_before_the_restore(self, device, state,
+                                                                         monkeypatch):
+        """Left running, it wrote into the build just put back (review)."""
+        import asyncio
+
+        device["old_build"]()
+        proc = MagicMock(returncode=None)
+        proc.communicate = AsyncMock(side_effect=asyncio.CancelledError)
+        proc.wait = AsyncMock()
+        monkeypatch.setattr(wda.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc))
+        with pytest.raises(asyncio.CancelledError):
+            await wda.build_wda("TEAM")
+        proc.kill.assert_called_once()
+        proc.wait.assert_awaited()
+        assert (device["app"] / "old").exists()
+
+    async def test_already_running_reports_the_version_too(self, state, monkeypatch):
+        state.update({"build_wda_version": "11.4.0",
+                      "runners": {"UDID": {"pid": 1234, "started_at": "x"}}})
+        monkeypatch.setattr(wda, "_is_process_alive", lambda pid: True)
+        monkeypatch.setattr(wda, "_find_xctestrun", lambda: Path("/x.xctestrun"))
+        result = await wda.start_driver("UDID", "18.0")
+        assert result["status"] == "already_running"
+        assert result["wda_version"] == "11.4.0" and "wda_update" in result
+
+
+class TestTheKeptSimulatorBuild:
+    async def test_a_failed_download_keeps_the_build_and_is_remembered(self, sim, state,
+                                                                       monkeypatch):
+        """It raised on every start, retrying npm each time (review)."""
+        sim["old_build"]()
+        calls = sim["builds"](ok=True)
+
+        async def offline():
+            raise RuntimeError("could not download WebDriverAgent from npm")
+
+        monkeypatch.setattr(wda, "clone_wda", offline)
+        assert await wda.build_wda_simulator() is False
+        assert calls == [] and state["sim_build_failed_version"] == PIN
+        assert (sim["products"] / "Old.xctestrun").exists()
+
+    async def test_with_no_build_a_failed_download_still_raises(self, sim, state, monkeypatch):
+        async def offline():
+            raise RuntimeError("could not download WebDriverAgent from npm")
+
+        monkeypatch.setattr(wda, "clone_wda", offline)
+        with pytest.raises(RuntimeError, match="download"):
+            await wda.build_wda_simulator()
+
+    async def test_the_source_is_fetched_before_building(self, sim, state, monkeypatch):
+        """Removed, the simulator would build a stale source forever."""
+        fetched = AsyncMock(return_value=True)
+        monkeypatch.setattr(wda, "clone_wda", fetched)
+        sim["builds"](ok=True)
+        await wda.build_wda_simulator()
+        fetched.assert_awaited_once()
+
+    async def test_a_cancelled_build_is_not_recorded_as_a_failed_version(self, sim, state,
+                                                                         monkeypatch):
+        """A shutdown mid-build would otherwise stop it ever being retried."""
+        import asyncio
+
+        sim["old_build"]()
+        proc = MagicMock(returncode=None)
+        proc.communicate = AsyncMock(side_effect=asyncio.CancelledError)
+        proc.wait = AsyncMock()
+        monkeypatch.setattr(wda.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc))
+        with pytest.raises(asyncio.CancelledError):
+            await wda.build_wda_simulator()
+        assert "sim_build_failed_version" not in state
+        assert (sim["products"] / "Old.xctestrun").exists()
+
+    async def test_the_memo_does_not_skip_an_xcode_change(self, sim, state):
+        sim["old_build"]()
+        state["sim_build_failed_version"] = PIN
+        assert await wda._sim_build_is_current(state) is True
+        state["sim_build_xcode"] = "26Z9"            # Xcode moved since
+        assert await wda._sim_build_is_current(state) is False
+
+    async def test_a_build_interrupted_by_a_crash_is_rolled_back(self, sim, state):
+        sim["old_build"]()
+        derived = sim["products"].parents[1]
+        previous = derived.with_name(derived.name + "-previous")
+        import shutil
+
+        shutil.copytree(derived, previous)
+        (sim["products"] / "Partial.xctestrun").write_text("x")
+        sim["builds"](ok=False)
+        assert await wda.build_wda_simulator() is False
+        assert (sim["products"] / "Old.xctestrun").exists()
+        assert not (sim["products"] / "Partial.xctestrun").exists()
+
+
+async def test_the_simulator_start_says_an_update_failed(state, monkeypatch, tmp_path):
+    monkeypatch.setattr(wda, "build_wda_simulator", AsyncMock(return_value=False))
+    monkeypatch.setattr(wda, "_find_sim_xctestrun", lambda: tmp_path / "x.xctestrun")
+    monkeypatch.setattr(wda, "WDA_LOG_DIR", tmp_path)
+    monkeypatch.setattr(wda, "_port_is_free", lambda port: True)
+    monkeypatch.setattr(wda.asyncio, "create_subprocess_exec",
+                        AsyncMock(return_value=MagicMock(pid=4242)))
+    monkeypatch.setattr(wda, "_answers", AsyncMock(return_value=True))
+    state.update({"sim_build_wda_version": "16.15.3", "sim_build_failed_version": PIN})
+    result = await wda.start_driver_simulator("SIM-1")
+    assert result["wda_version"] == "16.15.3" and "failed" in result["wda_update_failed"]
