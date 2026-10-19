@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from tests.conformance.client import PUBLIC_PATHS, QuernClient
+from tests.conformance.client import PUBLIC_PATHS, REMOTE_ONLY_PUBLIC, QuernClient
 
 #: Substituted into `{param}` path segments. Deliberately a value no real
 #: resource can have, so that an endpoint reached without auth operates on
@@ -133,6 +133,46 @@ def test_the_certificate_endpoint_serves_a_certificate_unauthenticated(
     )
 
 
+#: A body each pairing route accepts as well-formed, so the answer is about
+#: the listener and not about validation (an empty body is a 422 first).
+_PAIRING_BODIES = {
+    "/api/v1/remote/pair/hello": {"code_id": "conformance", "nonce": "00"},
+    "/api/v1/remote/pair/finish": {
+        "code_id": "conformance", "client_nonce": "00",
+        "server_nonce": "00", "proof": "00",
+    },
+}
+
+
+def test_pairing_routes_are_in_the_schema(openapi: dict) -> None:
+    """Else the test below checks a list nobody serves, and passes."""
+    served = {(m, p) for m, p, _ in _operations(openapi)}
+    assert REMOTE_ONLY_PUBLIC <= served, sorted(REMOTE_ONLY_PUBLIC - served)
+
+
+def test_pairing_does_not_answer_on_the_local_listener(quern: QuernClient) -> None:
+    """Keyless by design, so the refusal must come from the listener instead:
+    a well-formed pairing request here is a bare 404, never a pairing.
+
+    The body matters as well as the status. Pairing itself answers 404 for an
+    unknown code, so a route that skipped the listener check could still
+    produce a 404 here -- one that explains the code. The listener's refusal
+    is the generic `Not Found`.
+    """
+    answers = {}
+    for method, path in sorted(REMOTE_ONLY_PUBLIC):
+        resp = quern.request(
+            method, path, json=_PAIRING_BODIES[path],
+            authenticated=False, timeout=15.0,
+        )
+        try:
+            detail = resp.json().get("detail")
+        except ValueError:
+            detail = resp.text[:200]
+        answers[path] = (resp.status_code, detail)
+    assert all(a == (404, "Not Found") for a in answers.values()), answers
+
+
 # -- the protected set -------------------------------------------------------
 
 
@@ -146,7 +186,7 @@ def test_every_operation_is_either_public_or_protected(openapi: dict) -> None:
     """
     undeclared = []
     for method, path, _ in _operations(openapi):
-        if path in PUBLIC_PATHS:
+        if path in PUBLIC_PATHS or (method, path) in REMOTE_ONLY_PUBLIC:
             continue
         if (method, path) in UNSAFE_TO_PROBE:
             continue
@@ -179,6 +219,7 @@ def probeable(openapi: dict) -> list[tuple[str, str, dict]]:
         (m, p, op)
         for m, p, op in _operations(openapi)
         if p not in PUBLIC_PATHS and (m, p) not in UNSAFE_TO_PROBE
+        and (m, p) not in REMOTE_ONLY_PUBLIC
     ]
 
 
