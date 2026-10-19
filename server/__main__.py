@@ -434,18 +434,17 @@ def _install_opencode(mcp_entry: Path, node: str = "node",
 
 def _toml_key(raw: str) -> str:
     """A key as TOML reads it: `"QUERN_REMOTE"` and `'QUERN_REMOTE'` are the
-    bare key, and must be replaced as it, not written beside it (review)."""
-    import json
+    bare key, and must be replaced as it, not written beside it (review).
+    tomllib decodes it, escapes and all; a spelling it cannot read is kept."""
+    import tomllib
 
     key = raw.strip()
-    if len(key) >= 2 and key[0] == key[-1] == '"':
-        try:
-            return json.loads(key)
-        except ValueError:
-            return key
-    if len(key) >= 2 and key[0] == key[-1] == "'":
-        return key[1:-1]
-    return key
+    try:
+        parsed = tomllib.loads(f"{key} = 0")
+    except tomllib.TOMLDecodeError:
+        return key
+    return next(iter(parsed)) if len(parsed) == 1 and not isinstance(
+        next(iter(parsed.values())), dict) else key
 
 
 def _toml_upsert_section(text: str, section: str, fields: dict,

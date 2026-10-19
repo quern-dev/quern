@@ -656,7 +656,8 @@ class TestCodexRegistration:
             "KEEP": "1", "QUERN_REMOTE": "office"}
         assert self._install(tmp_path, monkeypatch, None)["env"] == {"KEEP": "1"}
 
-    @pytest.mark.parametrize("spelled", ['"QUERN_REMOTE"', "'QUERN_REMOTE'", "QUERN_REMOTE"])
+    @pytest.mark.parametrize("spelled", ['"QUERN_REMOTE"', "'QUERN_REMOTE'", "QUERN_REMOTE",
+                                         '"\\U00000051UERN_REMOTE"', '"\\u0051UERN_REMOTE"'])
     def test_a_quoted_key_in_the_sub_table_is_replaced_not_doubled(self, tmp_path, monkeypatch,
                                                                     spelled):
         self._write(tmp_path, '[mcp_servers.quern]\ncommand = "node"\n\n'
