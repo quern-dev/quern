@@ -208,11 +208,18 @@ class TestSetSnapshotDepth:
         await wda._set_snapshot_depth(SIM, 12)
         assert fake.reached("/appium/settings") == sent + 1, "trusted a depth WDA may not have"
 
-    async def test_no_answer_is_a_failure(self, wda):
-        # Every settings request goes unanswered: session creation's own, the
-        # set, and whatever reconnecting and resending _request adds.
-        wda.install(faults={"/appium/settings": [_timeout() for _ in range(10)]})
+    async def test_no_answer_is_a_failure_and_is_not_sent_again(self, wda):
+        """Behind a walk still running, a re-send queues behind it and the
+        dropped connection kills a phone's forward (#470; CodeRabbit, #486)."""
+        fake = wda.install()
+        await wda._ensure_session(SIM)
+        conn = wda._connections[SIM]
+        wda._current_depth.pop(SIM, None)
+        fake.faults["/appium/settings"] = [_timeout(), _timeout()]
+        before = fake.reached("/appium/settings")
         assert await wda._set_snapshot_depth(SIM, 12) is False
+        assert fake.reached("/appium/settings") == before + 1, "a timed-out set was sent again"
+        assert wda._connections.get(SIM) is conn, "the connection was dropped"
         assert SIM not in wda._current_depth
 
     async def test_a_shallow_full_read_at_an_unknown_depth_is_refused(self, wda):

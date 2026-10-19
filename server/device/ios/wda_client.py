@@ -819,9 +819,14 @@ class WdaBackend:
             # again. Its own client did neither, so a stale session failed
             # every set -- and every shallow /source behind it (review of the
             # #478 follow-up). A settings write is idempotent: resending is safe.
+            # Except after a timeout: WDA answers one request at a time, so a
+            # set that times out is waiting behind a walk still running, and
+            # the transport's answer -- drop the connection, which kills a
+            # phone's forward, and send again behind the same walk -- is the
+            # one #470 ruled out. A timeout is a failed set (CodeRabbit, #486).
             await self._request(
                 "post", udid, "/appium/settings", use_session=True,
-                timeout=WDA_TIMEOUT,
+                timeout=WDA_TIMEOUT, raise_on_timeout=True,
                 json={"settings": {"snapshotMaxDepth": depth}},
             )
         except (DeviceError, httpx.HTTPError) as exc:
