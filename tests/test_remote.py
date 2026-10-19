@@ -501,27 +501,28 @@ class TestTheListener:
         from server.viewer import protocol
 
         monkeypatch.setattr(protocol, "MAX_CONNECTIONS", 4)
-        monkeypatch.setattr(listener, "HANDSHAKE_TIMEOUT", 0.5)
+        monkeypatch.setattr(listener, "HANDSHAKE_TIMEOUT", 2.0)
+        import select
+
+        def closed(socks, wait):
+            """How many of `socks` the server has closed, read all at once:
+            one socket at a time took long enough on CI to reach the
+            handshake timeout and count its closes as the cap's."""
+            ready, _, _ = select.select(socks, [], [], wait)
+            n = 0
+            for s in ready:
+                try:
+                    n += s.recv(1) == b""
+                except ConnectionResetError:
+                    n += 1
+            return n
+
         idle = [socket.create_connection(("127.0.0.1", running.port)) for _ in range(8)]
         try:
-            time.sleep(0.2)
-            closed = 0
-            for s in idle:
-                s.settimeout(0.05)
-                try:
-                    closed += s.recv(1) == b""
-                except TimeoutError:
-                    pass
-                except ConnectionResetError:
-                    closed += 1
-            assert closed == 4, "past the cap, closed on arrival"
-            time.sleep(0.8)
-            for s in idle:
-                s.settimeout(0.5)
-                try:
-                    assert s.recv(1) == b"", "no handshake: closed at the timeout"
-                except ConnectionResetError:
-                    pass
+            time.sleep(0.3)
+            assert closed(idle, 0) == 4, "past the cap, closed on arrival"
+            time.sleep(2.2)
+            assert closed(idle, 1) == 8, "no handshake: closed at the timeout"
         finally:
             for s in idle:
                 s.close()
