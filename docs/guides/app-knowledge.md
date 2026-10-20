@@ -99,8 +99,8 @@ the screen the edge leads to and reports whether it arrived
 (`navigation.arrived`). For an edge to be checked:
 
 - its `action` is a `tap_element` call naming a `label` (or `label_contains`,
-  `label_prefix`) or an `identifier` -- the way the agent will call it, since
-  the call and the edge have to name the element the same way;
+  `label_prefix`) or an `identifier` -- the way the agent will call it: the
+  check at the tap needs the call and the edge to share one;
 - its `screen` links to a screen file that loads.
 
 `load_landmarks` reports the count under `navigation.edges`, and lists any entry
