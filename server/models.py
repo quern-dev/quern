@@ -2202,6 +2202,26 @@ class Landmark(BaseModel):
         return self
 
 
+class NavEdge(BaseModel):
+    """One `leads_to` entry: a `tap_element` call and the screen it reaches.
+
+    The selector fields are the action's own arguments, so an edge matches a
+    tap by the same rules `tap_element` finds an element by.
+    """
+
+    #: The screen this tap leads to, by name.
+    target: str
+    label: str | None = None
+    identifier: str | None = None
+    label_contains: str | None = None
+    label_prefix: str | None = None
+    element_type: str | None = None
+    #: When the edge exists only in some states. A conditional edge can
+    #: confirm an arrival, but never reports a missed one: the condition may
+    #: simply not have held.
+    condition: str | None = None
+
+
 class ScreenLandmarks(BaseModel):
     """Named screen with its identifying landmarks."""
 
@@ -2225,6 +2245,11 @@ class ScreenLandmarks(BaseModel):
     #: so a wrong entry costs a slowdown rather than making an element
     #: unreachable.
     scrollable: bool | None = None
+    #: The documented navigation out of this screen: which tap leads where.
+    #: Read from `leads_to`, so `tap_element` can check that a documented tap
+    #: actually arrived (#491). Only `tap_element` actions become edges.
+    leads_to: list[NavEdge] = Field(default_factory=list)
+
 
 
 class LoadLandmarksRequest(BaseModel):
@@ -2320,6 +2345,14 @@ class TapElementRequest(BaseModel):
             "Through WDA, a miss at snapshot_depth (a floor, not a ceiling) looks once "
             "more at the full depth, bounded and only after a quick shallow read (#494). "
             "false keeps the read at exactly snapshot_depth."
+        ),
+    )
+    verify_navigation: bool = Field(
+        default=True,
+        description=(
+            "When a loaded knowledge base documents this tap as a leads_to edge from "
+            "the current screen, check that the screen arrived and report it as "
+            "`navigation` (#491). false skips the check and its reads."
         ),
     )
     include_screen_context: bool = False

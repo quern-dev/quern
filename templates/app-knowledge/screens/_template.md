@@ -148,7 +148,11 @@ reachable_from:
     action: 'tap_element label="..." element_type="..."'
   # - deep_link: "appscheme://..."
 
-# Where this screen leads to.
+# Where this screen leads to. Checked: a tap_element matching one of these,
+# made from this screen, waits for the target screen and reports whether it
+# arrived (`navigation` on the response, #491). Write the action as the agent
+# will call it -- a label or an identifier -- and link the target's file.
+# One tap that can reach several screens gets an edge to each.
 leads_to:
   - screen: "[[screens/...]]"
     action: 'tap_element label="..." element_type="..."'

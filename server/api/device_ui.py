@@ -19,6 +19,7 @@ from server.api.device import (
     _handle_device_error,
 )
 from server.device.controller import DeviceController
+from server.knowledge import navigation
 from server.knowledge.landmarks import needs_page_urls
 from server.models import (
     ClearTextRequest,
@@ -59,6 +60,51 @@ def _with_input_warning(
         payload["warning"] = warning
     return payload
 
+
+
+async def _identify_now(
+    controller: DeviceController, udid: str, registry, *, use_cache: bool,
+) -> navigation.Identified:
+    """Read the whole screen and identify it, for the navigation check (#491).
+
+    The same read `identify_screen` makes: the full tree, at the shallow depth
+    through WDA. Raises on a failed read, which the check treats as "could not
+    tell" rather than as a miss.
+    """
+    elements, resolved = await controller.get_ui_elements(
+        udid, use_cache=use_cache,
+        snapshot_depth=controller._read_depth(udid, None),
+    )
+    page_urls = (
+        await controller.web_page_urls(resolved)
+        if needs_page_urls(registry.all_screens()) else None
+    )
+    return registry.identify_exact(elements, page_urls)
+
+
+async def _navigation_plan(
+    controller: DeviceController, udid: str, registry, body,
+) -> navigation.Plan | None:
+    """Whether this tap is a documented edge from the current screen.
+
+    Pays for a read only when some loaded edge could be this tap; with no
+    knowledge base, or none that matches, the tap is exactly as it was.
+    """
+    if registry is None or not body.verify_navigation or body.duration is not None:
+        return None
+    call = {
+        "label": body.label, "identifier": body.identifier,
+        "label_contains": body.label_contains, "label_prefix": body.label_prefix,
+        "element_type": body.element_type,
+    }
+    try:
+        if not registry.any_edge_could_match(call):
+            return None
+        before = await _identify_now(controller, udid, registry, use_cache=True)
+        return navigation.plan_for(before, registry.edges_from, call)
+    except Exception:  # noqa: BLE001 -- the check is an addition; the tap is not
+        logger.debug("navigation plan failed", exc_info=True)
+        return None
 
 
 router = APIRouter(prefix="/api/v1/device", tags=["device"])
@@ -497,6 +543,14 @@ async def tap_element(request: Request, body: TapElementRequest):
             resolved = act.udid
             if body.capture_screenshots:
                 before = await _capture_action_screenshot(controller, resolved, "tap_before")
+            # Read defensively: the check is an addition, and a caller with no
+            # app state (a direct call, as the input-advisory tests make) must
+            # tap exactly as before.
+            nav_registry = getattr(
+                getattr(getattr(request, "app", None), "state", None),
+                "landmark_registry", None,
+            )
+            nav_plan = await _navigation_plan(controller, resolved, nav_registry, body)
 
             # Guarded like scroll_to_element, and for the same reason: with
             # `scroll_to_find` on -- explicitly, or via a screen the knowledge
@@ -554,6 +608,26 @@ async def tap_element(request: Request, body: TapElementRequest):
             if result.get("status") == "obstructed":
                 act.outcome = "obstructed"
                 raise HTTPException(status_code=409, detail=result)
+
+            # Before the after-screenshot and the screen context: the check
+            # waits for the screen to arrive, so both then show where it went.
+            if (nav_plan is not None and isinstance(result, dict)
+                    and result.get("status") == "ok" and result.get("tapped")):
+                try:
+                    nav = await navigation.verify(
+                        nav_plan, result["tapped"],
+                        lambda: _identify_now(
+                            controller, resolved, nav_registry, use_cache=False),
+                    )
+                except Exception:  # noqa: BLE001 -- the tap already happened
+                    logger.debug("navigation check failed", exc_info=True)
+                    nav = None
+                if nav is not None:
+                    result["navigation"] = nav
+                    warning = navigation.warning_for(nav)
+                    if warning:
+                        act.outcome = "navigation_missed"
+                        result["warning"] = warning
 
             if body.capture_screenshots:
                 await asyncio.sleep(body.settle_delay)

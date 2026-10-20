@@ -1,0 +1,581 @@
+"""#491: tap_element checks that a documented navigation tap arrived.
+
+The check must neither cry wolf nor stay silent. Most tests here are about the
+first: every case where it cannot be sure must make no claim, and a tap no
+edge describes must cost nothing at all.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+from server.config import ServerConfig
+from server.device.controller import DeviceController
+from server.knowledge import navigation
+from server.knowledge.landmarks import LandmarkRegistry, scan_knowledge_base
+from server.knowledge.navigation import (
+    Identified,
+    Plan,
+    could_match_call,
+    link_target,
+    matches_tapped,
+    parse_action,
+    parse_leads_to,
+    plan_for,
+    verify,
+    warning_for,
+)
+from server.main import create_app
+from server.models import Landmark, NavEdge, ScreenLandmarks, UIElement
+
+# ---------------------------------------------------------------------------
+# Parsing the knowledge base
+# ---------------------------------------------------------------------------
+
+
+class TestParseAction:
+    def test_template_form(self):
+        assert parse_action('tap_element label="More" element_type="Button"') == {
+            "label": "More", "element_type": "Button",
+        }
+
+    def test_call_form(self):
+        assert parse_action('tap_element(identifier="tab_more", element_type="Button")') == {
+            "identifier": "tab_more", "element_type": "Button",
+        }
+
+    def test_single_quotes_and_mcp_prefix(self):
+        assert parse_action("mcp__quern-debug__tap_element label='Done'") == {"label": "Done"}
+
+    def test_a_label_with_spaces(self):
+        assert parse_action('tap_element label="Sign In"') == {"label": "Sign In"}
+
+    def test_non_selector_arguments_are_dropped(self):
+        assert parse_action('tap_element label="Wi-Fi" snapshot_depth=20 value="1"') == {
+            "label": "Wi-Fi",
+        }
+
+    def test_another_tool_is_not_an_edge(self):
+        assert parse_action('swipe direction="left"') is None
+        assert parse_action('open_url url="app://x"') is None
+
+    def test_prose_is_not_an_edge(self):
+        assert parse_action("tap the back button") is None
+
+    def test_a_tap_without_label_or_identifier_is_not_an_edge(self):
+        # A type alone matches every button on the screen: nothing to check.
+        assert parse_action('tap_element element_type="Button"') is None
+
+    def test_not_a_string(self):
+        assert parse_action(None) is None
+        assert parse_action({"label": "x"}) is None
+
+    def test_a_longer_tool_name_is_not_tap_element(self):
+        assert parse_action('tap_element_at x=1 y=2 label="x"') is None
+
+
+class TestLinkTarget:
+    @pytest.mark.parametrize("raw, name", [
+        ("[[screens/more]]", "more"),
+        ("[[screens/more|More]]", "more"),
+        ("screens/more.md", "more"),
+        ("more", "more"),
+        ("  [[screens/text]]  ", "text"),
+    ])
+    def test_forms(self, raw, name):
+        assert link_target(raw) == name
+
+    @pytest.mark.parametrize("raw", [None, "", "[[screens/...]]", 3])
+    def test_unusable(self, raw):
+        assert link_target(raw) is None
+
+
+class TestParseLeadsTo:
+    def test_edges_and_unusable_entries(self):
+        edges, unusable = parse_leads_to([
+            {"screen": "[[screens/more]]", "action": 'tap_element label="More"'},
+            {"screen": "[[screens/x]]", "action": "swipe left"},
+            {"screen": "", "action": 'tap_element label="X"'},
+            "not a mapping",
+            {"screen": "[[screens/y]]", "action": 'tap_element label="Y"',
+             "condition": "when signed in"},
+        ])
+        assert [(e.target, e.label, e.condition) for e in edges] == [
+            ("more", "More", None), ("y", "Y", "when signed in"),
+        ]
+        assert [u["reason"] for u in unusable] == [
+            "the action is not a tap_element call with a label or identifier",
+            "names no screen",
+            "not a mapping",
+        ]
+
+    def test_absent_is_nothing(self):
+        assert parse_leads_to(None) == ([], [])
+
+    def test_not_a_list_is_reported(self):
+        edges, unusable = parse_leads_to({"screen": "x"})
+        assert edges == [] and unusable[0]["reason"] == "leads_to is not a list"
+
+
+def _screen_file(path, name, landmarks, leads_to=""):
+    path.write_text(
+        f'---\nscreen: "{name}"\nlandmarks:\n{landmarks}\n{leads_to}---\n# {name}\n'
+    )
+
+
+class TestScan:
+    def test_links_resolve_to_screen_names(self, tmp_path):
+        screens = tmp_path / "screens"
+        screens.mkdir()
+        # The file is more.md; the screen is called "More list".
+        _screen_file(screens / "more.md", "More list",
+                     '  - { element: "Heading", label: "More" }')
+        _screen_file(
+            screens / "text.md", "Text",
+            '  - { element: "Heading", label: "Text" }',
+            'leads_to:\n'
+            '  - screen: "[[screens/more]]"\n'
+            "    action: 'tap_element label=\"More\"'\n"
+            '  - screen: "[[screens/gone]]"\n'
+            "    action: 'tap_element label=\"Gone\"'\n",
+        )
+        scan = scan_knowledge_base(tmp_path)
+        text = next(s for s in scan.screens if s.screen == "Text")
+        assert [e.target for e in text.leads_to] == ["More list"]
+        assert scan.edge_issues == [{
+            "screen": "Text", "entry": {"screen": "gone"}, "reason": "names no loaded screen",
+        }]
+
+    def test_the_load_reports_edges(self, tmp_path):
+        screens = tmp_path / "screens"
+        screens.mkdir()
+        _screen_file(screens / "a.md", "a", '  - { element: "Heading", label: "A" }',
+                     "leads_to:\n  - screen: \"[[screens/a]]\"\n    action: 'swipe'\n")
+        registry = LandmarkRegistry()
+        registry.load_from_path("app", str(tmp_path))
+        report = registry.navigation_report("app")
+        assert report["edges"] == 0
+        assert report["unusable"][0]["file"] == "screens/a.md"
+        assert "not checked" in report["note"]
+
+
+# ---------------------------------------------------------------------------
+# Matching a tap to an edge
+# ---------------------------------------------------------------------------
+
+
+def _edge(target="more", **sel) -> NavEdge:
+    return NavEdge(target=target, **sel)
+
+
+class TestCouldMatchCall:
+    def test_same_label(self):
+        assert could_match_call(_edge(label="More"), label="more")
+
+    def test_same_identifier(self):
+        assert could_match_call(_edge(identifier="tab_more"), identifier="tab_more")
+
+    def test_different_identifier(self):
+        assert not could_match_call(
+            _edge(identifier="tab_more", label="More"), identifier="tab_text", label="More")
+
+    def test_type_equivalence_across_backends(self):
+        # A tab item: RadioButton on the accessibility tree, Button through WDA.
+        assert could_match_call(
+            _edge(label="More", element_type="RadioButton"),
+            label="More", element_type="Button")
+
+    def test_an_unrelated_type(self):
+        assert not could_match_call(
+            _edge(label="More", element_type="TextField"), label="More", element_type="Switch")
+
+    def test_unrelated_label(self):
+        assert not could_match_call(_edge(label="More"), label="Settings")
+
+    def test_identifier_call_against_a_label_edge_is_not_checked(self):
+        assert not could_match_call(_edge(label="More"), identifier="tab_more")
+
+
+class TestMatchesTapped:
+    def test_exact_label(self):
+        assert matches_tapped(_edge(label="More"), {"label": "More", "type": "Button"})
+
+    def test_a_near_miss_does_not_match(self):
+        # The loose pre-check accepts this; the tapped element settles it.
+        assert could_match_call(_edge(label="More"), label_contains="More")
+        assert not matches_tapped(_edge(label="More"), {"label": "More Info", "type": "Button"})
+
+    def test_type_equivalence(self):
+        assert matches_tapped(
+            _edge(label="More", element_type="RadioButton"),
+            {"label": "More", "type": "Button"})
+
+    def test_identifier(self):
+        assert matches_tapped(
+            _edge(identifier="tab_more"),
+            {"label": "More", "type": "Button", "identifier": "tab_more"})
+        assert not matches_tapped(
+            _edge(identifier="tab_more"),
+            {"label": "More", "type": "Button", "identifier": "tab_text"})
+
+
+# ---------------------------------------------------------------------------
+# Planning and verifying
+# ---------------------------------------------------------------------------
+
+
+def _exact(screen, app="app"):
+    return Identified("exact", screen=screen, app=app)
+
+
+class TestPlanFor:
+    edges = {("app", "text"): [_edge(target="more", label="More")]}
+
+    def _edges_from(self, app, screen):
+        return self.edges.get((app, screen), [])
+
+    def test_a_documented_tap(self):
+        plan = plan_for(_exact("text"), self._edges_from, {"label": "More"})
+        assert plan is not None and [e.target for e in plan.edges] == ["more"]
+
+    @pytest.mark.parametrize("before", [
+        Identified("none"),
+        Identified("ambiguous", candidates=["text", "links"]),
+    ])
+    def test_no_claim_from_an_uncertain_start(self, before):
+        assert plan_for(before, self._edges_from, {"label": "More"}) is None
+
+    def test_an_edge_from_another_screen_is_not_used(self):
+        assert plan_for(_exact("links"), self._edges_from, {"label": "More"}) is None
+
+    def test_a_tap_that_is_not_an_edge(self):
+        assert plan_for(_exact("text"), self._edges_from, {"label": "Settings"}) is None
+
+
+class _Clock:
+    """A clock that advances only when slept on, so timeouts cost no time."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    async def sleep(self, seconds):
+        self.now += seconds
+
+
+def _reads(*results):
+    """An identify that returns each result in turn, repeating the last."""
+    seq = list(results)
+    calls = {"n": 0}
+
+    async def identify():
+        i = min(calls["n"], len(seq) - 1)
+        calls["n"] += 1
+        r = seq[i]
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    identify.calls = calls
+    return identify
+
+
+TAPPED = {"label": "More", "type": "Button"}
+
+
+async def _verify(plan, *reads, tapped=TAPPED, timeout=1.0):
+    clock = _Clock()
+    identify = _reads(*reads)
+    result = await verify(plan, tapped, identify, timeout=timeout,
+                          clock=clock, sleep=clock.sleep)
+    return result, identify.calls["n"]
+
+
+def _plan(*edges, before="text"):
+    return Plan(before=_exact(before), edges=list(edges or [_edge(label="More")]))
+
+
+class TestVerify:
+    async def test_arrived_on_the_first_read(self):
+        nav, reads = await _verify(_plan(), _exact("more"))
+        assert nav["arrived"] is True and nav["expected"] == "more"
+        assert nav["from"] == "text" and reads == 1
+        assert warning_for(nav) is None
+
+    async def test_waits_out_a_transition(self):
+        # The old screen, then neither, then the new one: a push animating.
+        nav, reads = await _verify(
+            _plan(), _exact("text"), Identified("none"), _exact("more"))
+        assert nav["arrived"] is True and reads == 3
+
+    async def test_still_on_the_starting_screen(self):
+        nav, _ = await _verify(_plan(), _exact("text"))
+        assert nav["arrived"] is False and nav["on"] == "text" and nav["stayed"] is True
+        assert "still 'text'" in warning_for(nav)
+
+    async def test_on_another_screen(self):
+        nav, _ = await _verify(_plan(), _exact("links"))
+        assert nav["arrived"] is False and nav["on"] == "links" and nav["stayed"] is False
+        assert "on 'links' instead" in warning_for(nav)
+
+    async def test_ends_unidentified_is_no_claim(self):
+        nav, _ = await _verify(_plan(), Identified("none"))
+        assert nav["arrived"] is None and nav["reason"] == "unidentified"
+        assert warning_for(nav) is None
+
+    async def test_ends_ambiguous_is_no_claim(self):
+        nav, _ = await _verify(_plan(), Identified("ambiguous", candidates=["more", "x"]))
+        assert nav["arrived"] is None and nav["reason"] == "ambiguous"
+        assert nav["candidates"] == ["more", "x"]
+
+    async def test_the_target_in_another_app_is_not_arrival(self):
+        nav, _ = await _verify(_plan(), _exact("more", app="other"))
+        assert nav["arrived"] is None
+
+    async def test_every_read_failing_is_no_claim(self):
+        nav, _ = await _verify(_plan(), OSError("gone"))
+        assert nav["arrived"] is None and nav["reason"] == "read_failed"
+
+    async def test_a_failed_read_then_arrival(self):
+        nav, _ = await _verify(_plan(), OSError("blip"), _exact("more"))
+        assert nav["arrived"] is True
+
+    async def test_a_conditional_edge_never_reports_a_miss(self):
+        plan = _plan(_edge(label="More", condition="when signed in"))
+        nav, _ = await _verify(plan, _exact("text"))
+        assert nav["arrived"] is None and nav["reason"] == "conditional"
+        assert nav["conditional"] is True and warning_for(nav) is None
+
+    async def test_a_conditional_edge_confirms_arrival(self):
+        plan = _plan(_edge(label="More", condition="when signed in"))
+        nav, _ = await _verify(plan, _exact("more"))
+        assert nav["arrived"] is True
+
+    async def test_a_firm_edge_beside_a_conditional_one_can_miss(self):
+        plan = _plan(_edge(target="more", label="More"),
+                     _edge(target="login", label="More", condition="signed out"))
+        nav, _ = await _verify(plan, _exact("text"))
+        assert nav["arrived"] is False and nav["expected"] == ["login", "more"]
+
+    async def test_either_target_is_arrival(self):
+        plan = _plan(_edge(target="more", label="More"), _edge(target="login", label="More"))
+        nav, _ = await _verify(plan, _exact("login"))
+        assert nav["arrived"] is True and nav["on"] == "login"
+
+    async def test_a_tapped_element_that_is_not_the_edges(self):
+        nav, reads = await _verify(_plan(), _exact("more"),
+                                   tapped={"label": "More Info", "type": "Button"})
+        assert nav is None and reads == 0
+
+    async def test_the_full_wait_is_paid_only_by_a_miss(self):
+        nav, _ = await _verify(_plan(), _exact("text"), timeout=1.0)
+        assert nav["waited_ms"] >= 1000
+
+
+# ---------------------------------------------------------------------------
+# Through the route
+# ---------------------------------------------------------------------------
+
+
+TEXT_TREE = [
+    UIElement(type="Heading", label="Text"),
+    UIElement(type="RadioButton", label="Text", identifier="tab_text", value="1"),
+    UIElement(type="RadioButton", label="More", identifier="tab_more", value="0"),
+]
+MORE_TREE = [
+    UIElement(type="Heading", label="More"),
+    UIElement(type="RadioButton", label="Text", identifier="tab_text", value="0"),
+    UIElement(type="RadioButton", label="More", identifier="tab_more", value="1"),
+]
+
+
+def _registry_screens(edges_from_text=True):
+    return [
+        ScreenLandmarks(
+            screen="text",
+            landmarks=[Landmark(element="Heading", label="Text")],
+            leads_to=[NavEdge(target="more", label="More", element_type="RadioButton")]
+            if edges_from_text else [],
+        ),
+        ScreenLandmarks(screen="more", landmarks=[Landmark(element="Heading", label="More")]),
+    ]
+
+
+@pytest.fixture
+def app():
+    return create_app(config=ServerConfig(api_key="k"), enable_oslog=False,
+                      enable_crash=False, enable_proxy=False)
+
+
+@pytest.fixture
+def controller(app):
+    ctrl = DeviceController()
+    ctrl._active_udid = "AAAA-1111"
+    ctrl.resolve_udid = AsyncMock(return_value="AAAA-1111")
+    ctrl.tap_element = AsyncMock(return_value={
+        "status": "ok", "tapped": {"label": "More", "type": "RadioButton",
+                                   "identifier": "tab_more", "x": 1, "y": 2},
+    })
+    ctrl.get_ui_elements = AsyncMock(return_value=(TEXT_TREE, "AAAA-1111"))
+    app.state.device_controller = ctrl
+    return ctrl
+
+
+@pytest.fixture(autouse=True)
+def fast(monkeypatch):
+    monkeypatch.setattr(navigation, "NAVIGATION_TIMEOUT", 0.3)
+    monkeypatch.setattr(navigation, "_POLL_GAP", 0.01)
+
+
+async def _tap(app, body):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/api/v1/device/ui/tap-element", json=body,
+                                 headers={"Authorization": "Bearer k"})
+    return resp.status_code, resp.json()
+
+
+class TestRoute:
+    async def test_arrived(self, app, controller):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        controller.get_ui_elements.side_effect = [
+            (TEXT_TREE, "AAAA-1111"), (MORE_TREE, "AAAA-1111"),
+        ]
+        code, body = await _tap(app, {"label": "More"})
+        assert code == 200 and body["status"] == "ok"
+        assert body["navigation"]["arrived"] is True
+        assert body["navigation"]["from"] == "text" and "warning" not in body
+        # The before read may come from the cache; the after read must not.
+        assert controller.get_ui_elements.call_args_list[0].kwargs["use_cache"] is True
+        assert controller.get_ui_elements.call_args_list[1].kwargs["use_cache"] is False
+
+    async def test_a_dropped_tap_is_reported(self, app, controller):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        code, body = await _tap(app, {"label": "More"})
+        assert code == 200 and body["status"] == "ok"
+        assert body["navigation"]["arrived"] is False
+        assert body["navigation"]["on"] == "text"
+        assert "may have dropped the tap" in body["warning"]
+
+    async def test_no_knowledge_base_costs_no_read(self, app, controller):
+        code, body = await _tap(app, {"label": "More"})
+        assert code == 200 and "navigation" not in body
+        controller.get_ui_elements.assert_not_called()
+
+    async def test_a_tap_no_edge_describes_costs_no_read(self, app, controller):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        code, body = await _tap(app, {"label": "Settings"})
+        assert "navigation" not in body
+        controller.get_ui_elements.assert_not_called()
+
+    async def test_opted_out(self, app, controller):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        code, body = await _tap(app, {"label": "More", "verify_navigation": False})
+        assert "navigation" not in body
+        controller.get_ui_elements.assert_not_called()
+
+    async def test_a_long_press_is_not_checked(self, app, controller):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        code, body = await _tap(app, {"label": "More", "duration": 1.0})
+        assert "navigation" not in body
+        controller.get_ui_elements.assert_not_called()
+
+    async def test_an_unidentified_start_makes_no_claim(self, app, controller):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        controller.get_ui_elements.return_value = ([UIElement(type="Heading", label="?")],
+                                                   "AAAA-1111")
+        code, body = await _tap(app, {"label": "More"})
+        assert "navigation" not in body
+        # One read: the start was identified, and nothing after.
+        assert controller.get_ui_elements.call_count == 1
+
+    @pytest.mark.parametrize("result, code", [
+        ({"status": "ambiguous", "matches": []}, 200),
+        ({"status": "already_set", "value": "1"}, 200),
+    ])
+    async def test_no_claim_for_a_tap_that_did_not_happen(self, app, controller, result, code):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        controller.tap_element.return_value = result
+        status, body = await _tap(app, {"label": "More"})
+        assert status == code and "navigation" not in body
+        assert controller.get_ui_elements.call_count == 1
+
+    async def test_an_obstructed_tap_makes_no_claim(self, app, controller):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        controller.tap_element.return_value = {"status": "obstructed", "reason": "covered"}
+        status, body = await _tap(app, {"label": "More"})
+        assert status == 409 and "navigation" not in body["detail"]
+        assert controller.get_ui_elements.call_count == 1
+
+    async def test_a_failed_before_read_does_not_fail_the_tap(self, app, controller):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        controller.get_ui_elements.side_effect = OSError("WDA went away")
+        code, body = await _tap(app, {"label": "More"})
+        assert code == 200 and body["status"] == "ok" and "navigation" not in body
+
+    async def test_another_screen_with_the_same_edge_name_elsewhere(self, app, controller):
+        # The edge is documented from "more" only; tapping from "text" is not checked.
+        screens = _registry_screens(edges_from_text=False)
+        screens[1].leads_to = [NavEdge(target="text", label="More")]
+        app.state.landmark_registry.load("probe", screens)
+        code, body = await _tap(app, {"label": "More"})
+        assert "navigation" not in body
+        assert controller.get_ui_elements.call_count == 1
+
+
+class TestInlineLoad:
+    async def test_leads_to_inline(self, app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post("/api/v1/landmarks/load", json={
+                "app": "probe",
+                "landmarks": {
+                    "text": {"landmarks": [{"element": "Heading", "label": "Text"}],
+                             "leads_to": [
+                                 {"screen": "[[screens/more]]",
+                                  "action": 'tap_element label="More"'},
+                                 {"screen": "nowhere", "action": 'tap_element label="X"'},
+                             ]},
+                    "more": {"landmarks": [{"element": "Heading", "label": "More"}]},
+                },
+            }, headers={"Authorization": "Bearer k"})
+        body = resp.json()
+        assert body["navigation"]["edges"] == 1
+        assert body["navigation"]["unusable"][0]["reason"] == "names no loaded screen"
+        edges = app.state.landmark_registry.edges_from("probe", "text")
+        assert [(e.target, e.label) for e in edges] == [("more", "More")]
+
+
+# ---------------------------------------------------------------------------
+# The probe apps' knowledge bases
+# ---------------------------------------------------------------------------
+
+
+class TestProbeKnowledgeBases:
+    """The fixtures the live tests load. Their landmarks are the conformance
+    contract's, kept in step here rather than by editing `probe.py`."""
+
+    @pytest.mark.parametrize("platform, path", [
+        ("ios", "tools/probe-app/knowledge"),
+        ("android", "tools/probe-app-android/knowledge"),
+    ])
+    def test_loads_whole_and_matches_the_contract(self, platform, path):
+        from pathlib import Path
+
+        from tests.conformance.probe import CONTRACTS
+
+        root = Path(__file__).resolve().parent.parent / path
+        scan = scan_knowledge_base(root)
+        assert scan.skipped == [] and scan.edge_issues == []
+        contract = CONTRACTS[platform].screens
+        for screen in scan.screens:
+            assert screen.leads_to, f"{screen.screen} documents no navigation"
+            if screen.screen in contract:
+                expected = [Landmark(**lm) for lm in contract[screen.screen]["landmarks"]]
+                assert screen.landmarks == expected, screen.screen
+        assert set(contract) <= {s.screen for s in scan.screens}

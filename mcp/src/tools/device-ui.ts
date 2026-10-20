@@ -518,6 +518,10 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         .boolean()
         .optional()
         .describe("Through WDA, a miss at snapshot_depth looks once more at the full depth -- bounded, and only after a quick shallow read -- so the depth you pass is a floor, not a ceiling (#494). Default true. Pass false for a read at exactly snapshot_depth: diagnostics, or checking that an element is NOT within a depth."),
+      verify_navigation: z
+        .boolean()
+        .optional()
+        .describe("Default true. When a loaded knowledge base documents this tap as a leads_to edge from the screen you are on, the tap waits for the screen it leads to and reports `navigation`: {expected, from, arrived, waited_ms}. arrived: false means the tap was delivered (status stays ok) but the screen did not change as documented -- `on` names where you are, and a top-level `warning` says so. Do not act as if you reached the new screen: check, and tap again if the screen is unchanged. arrived: null means it could not tell (reason says why), which is not a miss. Costs one screen read before the tap and one or more after, only for documented navigation taps. Pass false to skip it."),
       settle_delay: z
         .coerce.number()
         .min(0)
@@ -532,7 +536,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         .optional()
         .describe("Hold the touch this many seconds: a long press, for context menus, drag handles and press-and-hold controls. Omit for an ordinary tap. 1.0 clears the long-press threshold on iOS (0.5s) and Android (~0.4s)."),
     }),
-  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value, scroll_to_find, include_screen_context, capture_screenshots, settle_delay, snapshot_depth, deepen, duration, skip_stability_check }) => {
+  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value, scroll_to_find, include_screen_context, capture_screenshots, settle_delay, snapshot_depth, deepen, verify_navigation, duration, skip_stability_check }) => {
     try {
       const body: Record<string, unknown> = {};
       if (duration !== undefined) body.duration = duration;
@@ -558,6 +562,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
       if (settle_delay !== undefined) body.settle_delay = settle_delay;
       if (snapshot_depth !== undefined) body.snapshot_depth = snapshot_depth;
       if (deepen !== undefined) body.deepen = deepen;
+      if (verify_navigation !== undefined) body.verify_navigation = verify_navigation;
 
       const data = await apiRequest(
         "POST",

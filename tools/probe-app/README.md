@@ -136,3 +136,12 @@ Requires a running Quern server (`quern start`) and a booted simulator.
 - Location movement assertions (update counter + coordinate deltas)
 - Alert/sheet dismissal flows in the self-test
 - Scripted demo tour of Quern features against this app
+
+## Knowledge base
+
+`knowledge/screens/` is this app's knowledge base: a screen file per tab, with
+the conformance contract's landmarks and `leads_to` edges for the tab
+navigation. `tap_element` checks those edges, so it is the fixture for #491's
+navigation check. `tests/test_navigation_check.py` keeps the landmarks in step
+with `tests/conformance/probe.py`. Load it with
+`load_landmarks(path=<this folder>/knowledge, app="com.quern.probe")`.

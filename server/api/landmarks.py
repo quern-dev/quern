@@ -20,8 +20,10 @@ from server.knowledge.landmarks import (
     check_conventions,
     conventions_report,
     needs_page_urls,
+    resolve_targets,
     scan_knowledge_base,
 )
+from server.knowledge.navigation import parse_leads_to
 from server.models import (
     DeviceError,
     IdentifyRequest,
@@ -173,6 +175,7 @@ async def load_landmarks(request: Request, body: LoadLandmarksRequest):
             "skipped": _serialize_skipped(skipped),
             "remembered": remembered,
             "conventions": conventions_report(registry.conventions(app)),
+            "navigation": registry.navigation_report(app),
         }
 
     if body.remember:
@@ -186,6 +189,7 @@ async def load_landmarks(request: Request, body: LoadLandmarksRequest):
     if body.landmarks:
         screens: list[ScreenLandmarks] = []
         conventions: list[FileConventions] = []
+        edge_issues: list[dict] = []
         for screen_name, entry in body.landmarks.items():
             if isinstance(entry, dict):
                 # Missing is refused rather than read as []: the object form
@@ -199,30 +203,40 @@ async def load_landmarks(request: Request, body: LoadLandmarksRequest):
                 raw = entry["landmarks"]
                 raw_scrollable = entry.get("scrollable")
                 raw_declared = entry.get("landmark_conventions")
+                raw_leads_to = entry.get("leads_to")
             else:
                 raw = entry
                 raw_scrollable = None
                 raw_declared = None
+                raw_leads_to = None
             # Anything but a literal bool reads as unset, matching the file
             # parser: a typo must mean "nobody has said" rather than quietly
             # asserting one of the two answers.
             scrollable = raw_scrollable if isinstance(raw_scrollable, bool) else None
             landmarks = _inline_landmarks(screen_name, raw)
+            edges, unusable = parse_leads_to(raw_leads_to)
+            edge_issues.extend(
+                {"file": f"inline:{screen_name}", "screen": screen_name, **u}
+                for u in unusable
+            )
             screens.append(ScreenLandmarks(
                 screen=screen_name, landmarks=landmarks, scrollable=scrollable,
+                leads_to=edges,
             ))
             # No file to name, so the screen stands in for one.
             conventions.append(check_conventions(
                 f"inline:{screen_name}", screen_name, raw_declared, landmarks,
                 unloaded=None if landmarks else "no_landmarks",
             ))
-        count = registry.load(body.app, screens, conventions)
+        edge_issues.extend(resolve_targets(screens))
+        count = registry.load(body.app, screens, conventions, edge_issues)
         return {
             "loaded": body.app,
             "source": "inline",
             "screens": count,
             "skipped": [],
             "conventions": conventions_report(conventions),
+            "navigation": registry.navigation_report(body.app),
         }
 
     return {"error": "Provide either 'source' path or 'landmarks' inline data"}

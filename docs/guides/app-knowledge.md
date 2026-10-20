@@ -89,6 +89,24 @@ leads_to:
     action: 'tap_element label_prefix="Order #" element_type="button"'
 ```
 
+These edges are also checked. When `tap_element` makes a tap a `leads_to`
+edge documents, from the screen the edge is written on, it waits for the screen
+the edge leads to and reports whether it arrived (`navigation.arrived`). A tap
+an app dropped then reads as a miss with a warning, rather than as a plain `ok`
+that fails several calls later. For an edge to be checked:
+
+- its `action` is a `tap_element` call naming a `label` (or `label_contains`,
+  `label_prefix`) or an `identifier` -- the way the agent will call it, since
+  the call and the edge have to name the element the same way;
+- its `screen` links to a screen file that loads.
+
+`load_landmarks` reports the count under `navigation.edges`, and lists any entry
+that is not checked under `navigation.unusable`, with why. When one tap can
+lead to several screens -- a tab that shows whatever its stack was left on --
+list an edge to each; arriving at any of them counts. Add `condition:` to an
+edge that exists only in some states: it confirms an arrival but never reports
+a miss.
+
 #### Recording whether a screen scrolls
 
 `scrollable` is a top-level key in a screen file's YAML frontmatter, beside
