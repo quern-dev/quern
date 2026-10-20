@@ -263,16 +263,22 @@ step "What quern.dev tells an older install"
 # --------------------------------------------------------------------------
 # The menu bar's "update available" hint comes from here, not from the API, so
 # it can disagree with everything above.
+#
+# Asked on the release's own channel. A prerelease is only ever offered on
+# beta, so asking stable about one could never name it, and failed every beta
+# once the cache window below had passed.
+site_channel=stable
+[[ "$VERSION" == *-* ]] && site_channel=beta
 if [[ -z "${QUERN_RELEASES_URL:-}" ]]; then
-  answer="$(curl -fsSL "https://quern.dev/api/check-update?version=0.0.1&channel=stable" || true)"
+  answer="$(curl -fsSL "https://quern.dev/api/check-update?version=0.0.1&channel=$site_channel" || true)"
   if printf '%s' "$answer" | grep -q '"update_available": *true'; then
-    ok "quern.dev offers an update to an old install"
+    ok "quern.dev offers an update to an old install on $site_channel"
   else
-    bad "quern.dev says no update is available: ${answer:-no answer}"
+    bad "quern.dev says no update is available on $site_channel: ${answer:-no answer}"
   fi
   if printf '%s' "$answer" | grep -qF "\"latest_version\":\"$VERSION\"" \
      || printf '%s' "$answer" | grep -qF "\"latest_version\": \"$VERSION\""; then
-    ok "quern.dev names $VERSION"
+    ok "quern.dev names $VERSION on $site_channel"
   else
     # The worker caches GitHub's ref advertisement at the edge for an hour, so
     # a release verified straight after publishing is named by its
@@ -294,7 +300,7 @@ print(int((now - published).total_seconds()))' "$published_at" 2>/dev/null || tr
     if [[ -n "$age" && "$age" -lt 3600 ]]; then
       skip "quern.dev still names the previous version, $((age / 60))m after publishing — its ref cache is an hour; re-run this step after that to confirm it caught up"
     else
-      bad "quern.dev does not name $VERSION: ${answer:-no answer}"
+      bad "quern.dev does not name $VERSION on $site_channel: ${answer:-no answer}"
     fi
   fi
 else
