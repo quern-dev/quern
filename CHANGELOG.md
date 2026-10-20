@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0-beta.2] - 2026-10-19
+
 ### Added
 - **Reserve devices on a shared server (#254).** When several agents or CI jobs share one quern, an agent reserves devices and nobody else can change them. Another caller's taps, installs and other changes get **423** naming the holder, while reads (screenshots, UI tree, logs) stay open. The MCP holds a session for each agent automatically and adds `reserve_devices`, `release_devices` and `session_status`. A CI job uses `quern session run --reserve 2 -- xcodebuild test …`.
   - A reservation lasts as long as its holder's connection. A clean exit releases it at once; a dropped connection keeps it for a grace period (3 minutes by default, `sessions.grace_seconds`), so a network blip costs nothing, and a crashed agent holds its devices for no longer than that.
@@ -861,7 +863,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.25.0-beta.1...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.25.0-beta.2...main
+[0.25.0-beta.2]: https://github.com/quern-dev/quern/releases/tag/v0.25.0-beta.2
 [0.25.0-beta.1]: https://github.com/quern-dev/quern/releases/tag/v0.25.0-beta.1
 [0.24.1]: https://github.com/quern-dev/quern/releases/tag/v0.24.1
 [0.24.0]: https://github.com/quern-dev/quern/releases/tag/v0.24.0
