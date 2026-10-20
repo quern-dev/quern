@@ -94,9 +94,10 @@ async def _capture(controller, udid: str) -> tuple[bytes | None, float, str]:
     try:
         if controller._served_by_wda(udid):
             source = "wda"
-            if not controller.wda_client.has_connection(udid):
-                return None, 0.0, source
-            png = await asyncio.wait_for(controller.wda_client.screenshot(udid), left())
+            # The connection already set up, and nothing more: a capture must
+            # never enter WDA's recovery path (`capture_frame`).
+            png = await asyncio.wait_for(
+                controller.wda_client.capture_frame(udid, timeout=left()), left())
         elif controller._is_android(udid):
             png = None
             # uiautomator2's scaled JPEG is about three times as fast as adb's

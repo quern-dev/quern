@@ -129,13 +129,12 @@ class TestCapture:
         c = MagicMock()
         c.u2.frame = AsyncMock(return_value=_png())
         c.u2.is_connected.return_value = True
-        c.wda_client.has_connection.return_value = True
         c.adb.screenshot = AsyncMock(return_value=_png())
         c._served_by_wda.return_value = wda
         c._is_android.return_value = android
         c.sim_bridge = object()
         c._ui_backend.return_value = c.sim_bridge if bridge else object()
-        c.wda_client.screenshot = AsyncMock(return_value=_png())
+        c.wda_client.capture_frame = AsyncMock(return_value=_png())
         c.raw_screenshot = AsyncMock(return_value=_png())
         c.sim_bridge = MagicMock()
         c.sim_bridge.screenshot = AsyncMock(return_value=_png())
@@ -154,7 +153,7 @@ class TestCapture:
         assert frames.platform_of(used) == ("android" if source == "u2" else "ios")
 
         called = {
-            "wda": c.wda_client.screenshot, "u2": c.u2.frame,
+            "wda": c.wda_client.capture_frame, "u2": c.u2.frame,
             "sim-bridge": c.sim_bridge.screenshot, "simctl": c.raw_screenshot,
         }[source]
         called.assert_awaited_once()
@@ -175,12 +174,11 @@ class TestCapture:
         assert used == "adb"
         c.u2.frame.assert_not_awaited()
 
-    async def test_wda_does_not_connect_for_a_frame(self):
+    async def test_wda_uses_the_capture_only_path(self):
         c = self._controller(wda=True)
-        c.wda_client.has_connection.return_value = False
-        png, _, used = await frames._capture(c, "UDID")
-        assert png is None and used == "wda"
-        c.wda_client.screenshot.assert_not_awaited()
+        await frames._capture(c, "UDID")
+        c.wda_client.capture_frame.assert_awaited_once()
+        c.wda_client.screenshot.assert_not_called()
 
     @pytest.mark.parametrize("kind, attr", [
         ({"android": True}, "u2.frame"), ({"bridge": True}, "sim_bridge.screenshot"),
@@ -217,12 +215,13 @@ class TestCapture:
         assert ms < 350
 
     async def test_the_capture_is_not_decoded_at_the_tap(self, monkeypatch):
-        import server.device.settle as settle
+        from PIL import Image
 
-        def no_decode(png):
+        def no_decode(*a, **k):
             raise AssertionError("decoded at the tap")
 
-        monkeypatch.setattr(settle, "_prepare", no_decode)
+        monkeypatch.setattr(frames, "prepare", no_decode)
+        monkeypatch.setattr(Image, "open", no_decode)
         png, _, _ = await frames._capture(self._controller(wda=True), "UDID")
         assert png == _png()
 
@@ -239,13 +238,13 @@ class TestCapture:
 
     async def test_a_failed_capture_is_no_frame(self):
         c = self._controller(wda=True)
-        c.wda_client.screenshot = AsyncMock(side_effect=OSError("gone"))
+        c.wda_client.capture_frame = AsyncMock(side_effect=OSError("gone"))
         png, _, source = await frames._capture(c, "UDID")
         assert png is None and source == "wda"
 
     async def test_an_empty_capture_is_no_frame(self):
         c = self._controller(wda=True)
-        c.wda_client.screenshot = AsyncMock(return_value=b"")
+        c.wda_client.capture_frame = AsyncMock(return_value=b"")
         png, _, _ = await frames._capture(c, "UDID")
         assert png is None
 
@@ -258,7 +257,7 @@ class TestCapture:
 
         monkeypatch.setattr(frames, "CAPTURE_TIMEOUT", 0.05)
         c = self._controller(wda=True)
-        c.wda_client.screenshot = slow
+        c.wda_client.capture_frame = slow
         png, ms, _ = await frames._capture(c, "UDID")
         assert png is None and ms < 900
 
@@ -337,6 +336,30 @@ class TestRoute:
         # screen change since, that is the "after" -- no third capture.
         await _tap_then_miss(app, controller)
         assert screens["n"] == 2
+
+    async def test_a_reused_frame_from_inside_the_grace_is_not_trusted(
+        self, app, controller, screens, monkeypatch,
+    ):
+        # #510 review: the missing call's frame is taken before its lookup.
+        # If that is inside the tap's grace, the app may finish navigating
+        # during the lookup; the old frame must not stand for "after".
+        import asyncio
+
+        monkeypatch.setattr(frames, "MIN_AGE", 0.3)
+        # Before "Go", the screen; before "Next" (0.05s later, inside the
+        # grace), the same screen; at the miss, after a slow lookup, a new one.
+        screens["pngs"] = [_png(), _png(), _png(box=(0, 200, 400, 300, 255))]
+        await _post(app, "tap-element", {"label": "Go"})
+
+        async def slow_miss(*a, **k):
+            await asyncio.sleep(0.4)
+            return dict(NOT_FOUND)
+
+        await asyncio.sleep(0.05)
+        controller.tap_element.side_effect = slow_miss
+        _, body = await _post(app, "tap-element", {"label": "Next"})
+        assert "screen_unchanged_since_tap" not in body["detail"]
+        assert screens["n"] == 3   # a fresh capture at the miss
 
     async def test_a_tap_that_moves_the_stamp_still_notes(self, app, controller, screens):
         # A real tap stamps a screen change; the frame is judged from after it.
@@ -518,3 +541,59 @@ class TestU2Frame:
         with pytest.raises(DeviceError):
             await backend.frame("SERIAL")
         assert backend.is_connected("SERIAL") and not backend.is_connected("OTHER")
+
+
+class TestWdaCaptureFrame:
+    """`capture_frame`: the cached connection and one request, nothing else."""
+
+    async def test_no_connection_raises_without_connecting(self):
+        from server.device.ios.wda_client import WdaBackend
+        from server.models import DeviceError
+
+        client = WdaBackend.__new__(WdaBackend)
+        client._connections = {}
+        client._get_base_url = AsyncMock(side_effect=AssertionError("connected"))
+        with pytest.raises(DeviceError):
+            await client.capture_frame("UDID", timeout=1.0)
+
+    async def test_one_get_on_the_cached_base_url(self, monkeypatch):
+        import base64
+
+        import httpx
+
+        from server.device.ios import wda_client as mod
+
+        seen = []
+
+        def handler(request):
+            seen.append(str(request.url))
+            return httpx.Response(200, json={"value": base64.b64encode(b"png").decode()})
+
+        real = httpx.AsyncClient
+        monkeypatch.setattr(mod.httpx, "AsyncClient",
+                            lambda **k: real(transport=httpx.MockTransport(handler), **k))
+        client = mod.WdaBackend.__new__(mod.WdaBackend)
+        client._connections = {"UDID": MagicMock(base_url="http://127.0.0.1:8200")}
+        client._get_base_url = AsyncMock(side_effect=AssertionError("recovery path"))
+        assert await client.capture_frame("UDID", timeout=1.0) == b"png"
+        assert seen == ["http://127.0.0.1:8200/screenshot"]
+
+    async def test_a_failed_request_is_not_retried(self, monkeypatch):
+        import httpx
+
+        from server.device.ios import wda_client as mod
+
+        calls = {"n": 0}
+
+        def handler(request):
+            calls["n"] += 1
+            return httpx.Response(500)
+
+        real = httpx.AsyncClient
+        monkeypatch.setattr(mod.httpx, "AsyncClient",
+                            lambda **k: real(transport=httpx.MockTransport(handler), **k))
+        client = mod.WdaBackend.__new__(mod.WdaBackend)
+        client._connections = {"UDID": MagicMock(base_url="http://127.0.0.1:8200")}
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.capture_frame("UDID", timeout=1.0)
+        assert calls["n"] == 1

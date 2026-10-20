@@ -236,6 +236,7 @@ def _frame_grace(registry, tapped: dict) -> float:
 async def _note_unchanged(
     request: Request, controller, udid: str | None, payload: dict,
     after_png: bytes | None = None,
+    after_at: float | None = None,
 ) -> None:
     """On a miss: say if the screen has not changed since the last tap.
 
@@ -257,6 +258,12 @@ async def _note_unchanged(
         if stamp != tap.stamp:
             return
         ms = 0.0
+        if after_png is not None and (after_at is None or after_at - tap.at < tap.grace):
+            # The missing call's own frame predates its lookup. Taken inside
+            # the tap's grace, it can show the screen the tap was still
+            # leaving -- an app that finished navigating during the lookup
+            # moves no stamp -- so it cannot stand for "after" (#510 review).
+            after_png = None
         if after_png is None:
             # A tap that missed captured the screen before its lookup, and
             # nothing has moved it since (the stamp): that frame is the
@@ -730,6 +737,7 @@ async def tap_element(request: Request, body: TapElementRequest):
             # A long press is not a tap the next miss should be judged by.
             before_frame: tuple = (None, 0.0, "none")
             before_stamp = _last_change(controller, resolved)
+            before_at = time.monotonic()
             if (body.duration is None and body.note_unchanged
                     and _tap_frames(request) is not None):
                 try:
@@ -788,7 +796,8 @@ async def tap_element(request: Request, body: TapElementRequest):
                 # changed the screen since it was taken.
                 unmoved = _last_change(controller, resolved) == before_stamp
                 own = before_frame[0] if unmoved else None
-                await _note_unchanged(request, controller, resolved, result, after_png=own)
+                await _note_unchanged(request, controller, resolved, result,
+                                      after_png=own, after_at=before_at)
                 raise HTTPException(status_code=404, detail=result)
 
             if result.get("status") == "ambiguous":
