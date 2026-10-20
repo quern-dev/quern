@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A miss says when the tap before it probably did not register (#491).** `tap_element` reports `ok` once the backend accepts a tap, and apps -- WDA in particular -- drop taps, so a dropped tap surfaced calls later as an unrelated `not_found`.
+  - With a knowledge base loaded, a delivered tap whose element is a `leads_to` edge is remembered at no cost. A later `tap_element` miss or `wait_for_element` timeout on a screen that tap was documented to leave carries `previous_tap`: what was tapped, where it should have led, and where you still are.
+  - It is silent within the edge's grace (1s, or its `timeout:`), after any screen change through quern since the tap, and on anything short of an exact identification. Exact identifications now name their app, as `identified_app`.
+  - `verify_navigation: true` checks at the tap instead: it waits for the documented screen and reports `navigation` (`arrived`, `on`, `waited_ms`), with a warning on a miss that never says to tap again. It is opt-in, because it costs a screen read before and after the tap -- measured, 1.5-2s a tap on an iPhone 11 and on sim-bridge, while no tap was dropped in 635 navigation taps on four devices.
+  - `load_landmarks` reports the edges it checks and those it cannot (`navigation.edges`, `unusable`).
+- **A miss says when the screen has not changed since the last tap, with no knowledge base (#502).** Every `tap_element` except a long press captures a frame of the screen first, on each backend's fastest path. A later `tap_element` miss or `wait_for_element` timeout -- at least a second after the tap, with no screen change through quern in between -- on a screen that looks exactly the same carries `screen_unchanged_since_tap`, unless `previous_tap` already explains it.
+  - The comparison is near-exact, so a switch flipping or a digit changing counts as a change, and so does a spinner: an animated screen gets no note.
+  - It costs one capture per tap: measured ~60ms on Android, ~90ms on a simulator, ~200ms on an iPhone 11. `note_unchanged: false` skips it.
+- **`global_leads_to` in `app.md` for navigation from every screen (#503).** A tab bar is declared once instead of in every screen's `leads_to`, so tab taps are checked too. Its `except:` lists screens that hide the bar, and a screen's own edge for the same element wins there. A tab with a stack lists each screen it can show. `app.md` is never fatal to a load: problems in it are reported only when it mentions `global_leads_to`.
+
 ### Changed
 - **Quern needs Node 22.19 or later, not just 22 (#506).** The MCP wrapper's HTTP client, undici 8, needs 22.19. quern's floor compared only the major version, so a Node 22.0-22.18 passed `quern setup`, `quern doctor` and the menu bar's checks and then failed inside the wrapper. Every check now reads the minor version: `quern doctor` and the menu bar's "Can't Start Quern" row name a 22.12 as too old, `quern mcp-install` passes it over, and the wrapper refuses it at start with the binary to change. A version manager's `install 22` gets the newest 22.x, which meets the floor.
 
