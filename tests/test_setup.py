@@ -1459,8 +1459,12 @@ class TestTheFlagIsActuallyWired:
         monkeypatch.setattr(setup_mod.subprocess, "run",
                             lambda argv, **k: seen.update(env=k["env"])
                             or SimpleNamespace(returncode=0))
-        # A stale "1" from a caller must not survive into an ordinary run.
-        monkeypatch.setenv(setup_mod.AFTER_UPDATE_ENV, "1")
+        if after_update:
+            # Unset, so only the re-exec can have put it there.
+            monkeypatch.delenv(setup_mod.AFTER_UPDATE_ENV, raising=False)
+        else:
+            # A stale "1" from a caller must not survive into an ordinary run.
+            monkeypatch.setenv(setup_mod.AFTER_UPDATE_ENV, "1")
         monkeypatch.setattr(setup_mod, "_AFTER_UPDATE", after_update)
         setup_mod._reexec_in_venv(venv)
 
