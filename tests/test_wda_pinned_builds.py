@@ -627,6 +627,37 @@ class TestTheKeptSimulatorBuild:
         assert (sim["products"] / "Old.xctestrun").exists()
         assert not (sim["products"] / "Partial.xctestrun").exists()
 
+    async def test_a_crash_restored_build_gets_its_fingerprint_back(self, sim, state,
+                                                                     monkeypatch):
+        """Cleared before the build, the fingerprint lived only in memory: a
+        crash-restored build was never current, and rebuilt at every start
+        past the failed-version memo (#498 review)."""
+        sim["old_build"]()
+        sim["builds"](ok=False)
+        real_rename = Path.rename
+
+        def killed_before_the_restore(self, target):
+            # The kill: the build fails, and the process dies before it can
+            # put the old build back, leaving the directories as they were.
+            if self.name.endswith("-previous") and target == wda.WDA_DERIVED_SIM:
+                raise SystemExit("killed")
+            return real_rename(self, target)
+
+        monkeypatch.setattr(Path, "rename", killed_before_the_restore)
+        with pytest.raises(SystemExit):
+            await wda.build_wda_simulator()
+        monkeypatch.setattr(Path, "rename", real_rename)
+        assert "sim_build_xcode" not in state, "the crash left it cleared"
+        wda._recover_previous(wda.WDA_DERIVED_SIM, wda.WDA_DERIVED_SIM.with_name(
+            wda.WDA_DERIVED_SIM.name + "-previous"), "sim_build_phase", "sim_build_kept")
+        assert (sim["products"] / "Old.xctestrun").read_text() == "old"
+        assert state["sim_build_xcode"] == "27A1"
+        assert state["sim_build_wda_version"] == "16.15.3"
+        assert "sim_build_phase" not in state and "sim_build_kept" not in state
+        assert await wda._sim_build_is_current(state) is False, "not the pin, so"
+        state["sim_build_failed_version"] = PIN
+        assert await wda._sim_build_is_current(state) is True, "the memo works again"
+
     async def test_a_build_recorded_before_the_crash_keeps_the_new_one(self, sim, state):
         sim["old_build"]()
         derived = sim["products"].parents[1]

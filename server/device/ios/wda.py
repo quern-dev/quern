@@ -614,7 +614,8 @@ def _set_build_phase(key: str, phase: str | None) -> None:
     save_wda_state(state)
 
 
-def _recover_previous(derived: Path, previous: Path, phase_key: str) -> None:
+def _recover_previous(derived: Path, previous: Path, phase_key: str,
+                      kept_key: str | None = None) -> None:
     """A build kept as `previous` and still there means the build that kept it
     was stopped or killed before it cleaned up. Which side is good depends on
     how far it got, and the state says (review):
@@ -625,6 +626,8 @@ def _recover_previous(derived: Path, previous: Path, phase_key: str) -> None:
     - no phase: the new build finished and was recorded, and only the deletion
       of the old one was cut short. Restoring it would run the old build under
       the new one's record, so it is retired for _discard_previous to sweep.
+
+    `kept_key` names the restored build's saved fingerprint, put back with it.
     """
     state = read_wda_state()
     phase = state.get(phase_key)
@@ -634,12 +637,16 @@ def _recover_previous(derived: Path, previous: Path, phase_key: str) -> None:
                            previous)
             shutil.rmtree(derived, ignore_errors=True)
             previous.rename(derived)
+            if kept_key:
+                state.update(state.get(kept_key) or {})
         else:
             _retire(previous)
     # Cleared only once the directories are settled: a crash mid-restore must
     # find the phase still set.
-    if phase is not None:
+    if phase is not None or (kept_key and kept_key in state):
         state.pop(phase_key, None)
+        if kept_key:
+            state.pop(kept_key, None)
         save_wda_state(state)
 
 
@@ -1393,7 +1400,7 @@ async def _build_wda_simulator(force: bool) -> bool:
         return False
 
     previous = WDA_DERIVED_SIM.with_name(WDA_DERIVED_SIM.name + "-previous")
-    _recover_previous(WDA_DERIVED_SIM, previous, "sim_build_phase")
+    _recover_previous(WDA_DERIVED_SIM, previous, "sim_build_phase", "sim_build_kept")
 
     # Fetched whenever the pin moved, not only when there is no source: an
     # existing clone of another version would otherwise be built forever. A
@@ -1416,7 +1423,13 @@ async def _build_wda_simulator(force: bool) -> bool:
                                   "sim_build_wda_version") if k in state}
     moved = False
     if WDA_DERIVED_SIM.exists():
-        _set_build_phase("sim_build_phase", "building")
+        # The kept build's fingerprint is persisted with the phase: cleared
+        # below, it would otherwise live only in memory, and a crash-restored
+        # build without it is never current -- rebuilt at every start, past
+        # the failed-version memo (review).
+        state["sim_build_phase"] = "building"
+        state["sim_build_kept"] = kept
+        save_wda_state(state)
         WDA_DERIVED_SIM.rename(previous)
         moved = True
     # Cleared before anything is built, so no failure path -- a timeout
@@ -1432,6 +1445,7 @@ async def _build_wda_simulator(force: bool) -> bool:
         state = read_wda_state()
         state.update(kept)
         state.pop("sim_build_phase", None)
+        state.pop("sim_build_kept", None)
         save_wda_state(state)
         if not isinstance(exc, Exception):
             # Cancelled: the old build is back, and so is the cancel -- but not
@@ -1449,6 +1463,7 @@ async def _build_wda_simulator(force: bool) -> bool:
     state["sim_build_wda_version"] = _source_version()
     state.pop("sim_build_failed_version", None)
     state.pop("sim_build_phase", None)   # with the record, as in build_wda (review)
+    state.pop("sim_build_kept", None)
     state["sim_built_at"] = datetime.now(UTC).isoformat()
     save_wda_state(state)
     await _discard_previous(previous)   # last, as in build_wda (review)
