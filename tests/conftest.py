@@ -678,7 +678,7 @@ def _node_env_is_not_this_machine(monkeypatch, tmp_path):
 
     def all_fine(**_kw):
         return [
-            node_env.NodeSite(place, "test", node_env.OK, "/test/node", "v22.0.0")
+            node_env.NodeSite(place, "test", node_env.OK, "/test/node", "v22.20.0")
             for place in ("this command", "login shell", "non-interactive shell", "GUI apps")
         ]
 
@@ -696,12 +696,12 @@ def _node_env_is_not_this_machine(monkeypatch, tmp_path):
     monkeypatch.setattr(node_env, "_real_node_for_clients", node_env.node_for_clients,
                         raising=False)
     monkeypatch.setattr(node_env, "node_for_clients",
-                        lambda *_a, **_kw: node_env.ClientNode("/test/node", "v22.0.0",
+                        lambda *_a, **_kw: node_env.ClientNode("/test/node", "v22.20.0",
                                                                "login shell"))
     monkeypatch.setattr(node_env, "_real_check_outside_a_shell",
                         node_env.check_outside_a_shell, raising=False)
     monkeypatch.setattr(node_env, "check_outside_a_shell",
-                        lambda *_a, **_kw: (node_env.OK, "v22.0.0"))
+                        lambda *_a, **_kw: (node_env.OK, "v22.20.0"))
     monkeypatch.setattr(setup, "_real_mcp_registrations", setup.mcp_registrations,
                         raising=False)
     monkeypatch.setattr(setup, "mcp_registrations", lambda: [])

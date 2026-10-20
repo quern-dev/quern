@@ -1030,7 +1030,7 @@ def _warn_if_node_cannot_build() -> None:
     from server.config import quern_cmd
 
     print(f"Warning: {node_env.fix_for(site, [site])}")
-    print(f"  The MCP wrapper needs Node {node_env.MIN_NODE_MAJOR}+. Continuing; "
+    print(f"  The MCP wrapper needs Node {node_env.MIN_NODE_TEXT}+. Continuing; "
           f"`{quern_cmd()} doctor` shows every place a node is picked.")
 
 

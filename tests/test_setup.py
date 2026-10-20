@@ -681,7 +681,7 @@ def _sites(**status_by_place):
             "app": "the Quern app"}
     out = []
     for key, place in keys.items():
-        status, version = status_by_place.get(key, (node_env.OK, "v22.1.0"))
+        status, version = status_by_place.get(key, (node_env.OK, "v22.21.0"))
         path = None if status == node_env.MISSING else f"/x/{key}/node"
         out.append(node_env.NodeSite(place, "someone", status, path, version))
     return out
@@ -733,7 +733,7 @@ class TestCheckNode:
                                      node_env.MISSING, None, None)
         # Only GUI apps can see one, e.g. via `launchctl config user path`.
         sites[3] = node_env.NodeSite("GUI apps", "someone", node_env.OK,
-                                     "/opt/node/bin/node", "v22.1.0")
+                                     "/opt/node/bin/node", "v22.21.0")
 
         result = check_node(sites)
 
@@ -790,7 +790,7 @@ class TestCheckNode:
         sites = _sites(here=("missing", None))
         sites[1] = node_env.NodeSite(
             "login shell", "someone", node_env.OK,
-            "/Users/u/.local/state/fnm_multishells/800_1789/bin/node", "v22.1.0",
+            "/Users/u/.local/state/fnm_multishells/800_1789/bin/node", "v22.21.0",
         )
         result = check_node(sites)
 

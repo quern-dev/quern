@@ -74,21 +74,33 @@ class TestVersions:
         assert node_env.major_version(text) == major
 
     def test_the_floor_matches_the_wrapper(self):
-        """Three copies of one number; the launcher's is the one that bites."""
+        """Three copies of one version; the launcher's is the one that bites."""
+        major, minor, patch = node_env.MIN_NODE
         launcher = (ROOT / "mcp" / "src" / "launcher.cjs").read_text()
         # Tolerant of spacing: this is JS source, and reformatting it should
-        # not fail a check about the *number*.
-        assert re.search(rf"REQUIRED_MAJOR\s*=\s*{node_env.MIN_NODE_MAJOR}\b", launcher)
+        # not fail a check about the *numbers*.
+        assert re.search(
+            rf"REQUIRED\s*=\s*\[\s*{major}\s*,\s*{minor}\s*,\s*{patch}\s*\]", launcher
+        ), "launcher.cjs REQUIRED does not match node_env.MIN_NODE"
         engines = json.loads((ROOT / "mcp" / "package.json").read_text())["engines"]["node"]
-        assert re.fullmatch(rf">=\s*{node_env.MIN_NODE_MAJOR}", engines), engines
+        assert re.fullmatch(rf">=\s*{major}\.{minor}\.{patch}", engines), engines
+
+    @pytest.mark.parametrize("text, ok", [
+        ("v22.19.0", True), ("v22.22.2", True), ("v23.0.0", True), ("v24.1.0", True),
+        ("v22.18.9", False), ("v22.12.0", False), ("v22.0.0", False), ("v20.20.2", False),
+        ("v22", False), ("", None), (None, None), ("node: bad option", None),
+    ])
+    def test_the_floor_reads_the_minor(self, text, ok):
+        """22.12 is below a 22.19 floor: a major-only check called it fine (#506)."""
+        assert node_env.meets_floor(text) is ok
 
 
 class TestEachPlaceIsAskedSeparately:
     def test_every_place_is_reported(self):
         node = "/usr/bin/node"
         world = World(on_path={"/caller/bin": node, "/usr/bin": node},
-                      versions={node: "v22.1.0"},
-                      login=_line(node, "v22.1.0"), script=_line(node, "v22.1.0"))
+                      versions={node: "v22.21.0"},
+                      login=_line(node, "v22.21.0"), script=_line(node, "v22.21.0"))
         sites = world.probe()
         assert [s.place for s in sites] == [
             "this command", "login shell", "non-interactive shell",
@@ -101,7 +113,7 @@ class TestEachPlaceIsAskedSeparately:
         node made "GUI apps" green while a Dock-launched MCP client still could
         not see it, and the advice then "fixed" a row that was never broken."""
         brew = "/opt/homebrew/bin/node"
-        world = World(on_path={"/opt/homebrew/bin": brew}, versions={brew: "v22.1.0"})
+        world = World(on_path={"/opt/homebrew/bin": brew}, versions={brew: "v22.21.0"})
         sites = _by_place(world.probe())
         assert sites["GUI apps"].status == node_env.MISSING
         assert sites["the Quern app"].ok
@@ -113,7 +125,7 @@ class TestEachPlaceIsAskedSeparately:
         """`~/.local/bin` is templated with the home directory; nothing
         asserted the expansion, so it could break silently."""
         local = f"{HOME}/.local/bin/node"
-        world = World(on_path={f"{HOME}/.local/bin": local}, versions={local: "v22.1.0"})
+        world = World(on_path={f"{HOME}/.local/bin": local}, versions={local: "v22.21.0"})
         sites = _by_place(world.probe())
         assert sites["the Quern app"].ok and sites["the Quern app"].path == local
         assert sites["GUI apps"].status == node_env.MISSING
@@ -133,8 +145,8 @@ class TestEachPlaceIsAskedSeparately:
     def test_gui_apps_do_not_see_the_callers_path(self):
         """The field shape: fine in the terminal, nothing for a GUI client."""
         fnm = f"{HOME}/.local/state/fnm_multishells/1_2/bin/node"
-        world = World(on_path={"/caller/bin": fnm}, versions={fnm: "v22.1.0"},
-                      login=_line(fnm, "v22.1.0"), script=_line(fnm, "v22.1.0"))
+        world = World(on_path={"/caller/bin": fnm}, versions={fnm: "v22.21.0"},
+                      login=_line(fnm, "v22.21.0"), script=_line(fnm, "v22.21.0"))
         gui = _by_place(world.probe())["GUI apps"]
         assert gui.status == node_env.MISSING
 
@@ -171,7 +183,7 @@ class TestEachPlaceIsAskedSeparately:
 
     def test_the_version_call_is_bounded_and_cannot_be_asked_a_question(self):
         node = "/caller/bin/node"
-        world = World(on_path={"/caller/bin": node}, versions={node: "v22.1.0"})
+        world = World(on_path={"/caller/bin": node}, versions={node: "v22.21.0"})
         world.probe()
         version_calls = [kw for argv, kw in world.calls if argv[-1] == "--version"]
         assert version_calls, "no version was read"
@@ -216,8 +228,8 @@ class TestTheProbesRunTogether:
 
         node = "/opt/homebrew/bin/node"
         world = World(on_path={"/caller/bin": node, "/opt/homebrew/bin": node},
-                      versions={node: "v22.1.0"},
-                      login=_line(node, "v22.1.0"), script=_line(node, "v22.1.0"))
+                      versions={node: "v22.21.0"},
+                      login=_line(node, "v22.21.0"), script=_line(node, "v22.21.0"))
         inner = world.run
         active = {"now": 0, "most": 0}
         lock = threading.Lock()
@@ -296,8 +308,8 @@ class TestTheRealRunner:
 
 class TestShellOutput:
     def test_startup_noise_is_ignored(self):
-        node = f"{HOME}/.nvm/versions/node/v22.3.0/bin/node"
-        noisy = "Welcome!\nnvm: loaded\n" + _line(node, "v22.3.0") + "bye\n"
+        node = f"{HOME}/.nvm/versions/node/v22.23.0/bin/node"
+        noisy = "Welcome!\nnvm: loaded\n" + _line(node, "v22.23.0") + "bye\n"
         world = World(login=noisy, script=_line("", ""))
         login = _by_place(world.probe())["login shell"]
         assert login.ok and login.path == node
@@ -325,7 +337,7 @@ class TestShellOutput:
         -- which `quern update` calls after the pull."""
         def boom(argv, **kw):
             if argv[-1] == "--version":
-                return _done("v22.1.0")
+                return _done("v22.21.0")
             raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
 
         world = World(login=_line("", ""), script=_line("", ""))
@@ -462,28 +474,28 @@ class TestFixes:
 
     def test_scripts_are_pointed_at_zshenv_for_fnm(self):
         fnm = self._site("login shell", node_env.OK,
-                         f"{HOME}/.local/state/fnm_multishells/1/bin/node", "v22.0.0")
+                         f"{HOME}/.local/state/fnm_multishells/1/bin/node", "v22.20.0")
         script = self._site("non-interactive shell", node_env.MISSING)
         assert ".zshenv" in node_env.fix_for(script, [fnm, script])
 
     def test_bash_scripts_are_pointed_at_bash_env(self):
         """zsh's file would be read by nothing. Found in review."""
         fnm = self._site("login shell", node_env.OK,
-                         f"{HOME}/.local/state/fnm_multishells/1/bin/node", "v22.0.0")
+                         f"{HOME}/.local/state/fnm_multishells/1/bin/node", "v22.20.0")
         script = node_env.NodeSite("non-interactive shell", "x", node_env.MISSING, shell="bash")
         fix = node_env.fix_for(script, [fnm, script])
         assert "BASH_ENV" in fix and ".zshenv" not in fix
 
     def test_bash_mise_is_activated_for_bash(self):
         mise = self._site("login shell", node_env.OK,
-                          f"{HOME}/.local/share/mise/shims/node", "v22.0.0")
+                          f"{HOME}/.local/share/mise/shims/node", "v22.20.0")
         script = node_env.NodeSite("non-interactive shell", "x", node_env.MISSING, shell="bash")
         assert "mise activate bash --shims" in node_env.fix_for(script, [mise, script])
 
     @pytest.mark.parametrize("shell, file", [("zsh", "~/.zshrc"), ("bash", "~/.bash_profile")])
     def test_a_login_shell_missing_an_installed_node_is_told_to_load_it(self, shell, file):
         nvm = self._site("this command", node_env.OK,
-                         f"{HOME}/.nvm/versions/node/v22.0.0/bin/node", "v22.0.0")
+                         f"{HOME}/.nvm/versions/node/v22.20.0/bin/node", "v22.20.0")
         login = node_env.NodeSite("login shell", "x", node_env.MISSING, shell=shell)
         fix = node_env.fix_for(login, [nvm, login])
         assert file in fix and "nvm" in fix and "No node found" not in fix
@@ -498,8 +510,8 @@ class TestInstallers:
 
     @pytest.mark.parametrize("path, real, n_dir, manager", [
         (f"{HOME}/.local/state/fnm_multishells/1_2/bin/node",
-         f"{HOME}/.local/share/fnm/node-versions/v22.1.0/installation/bin/node", False, "fnm"),
-        (f"{HOME}/.nvm/versions/node/v22.1.0/bin/node", None, False, "nvm"),
+         f"{HOME}/.local/share/fnm/node-versions/v22.21.0/installation/bin/node", False, "fnm"),
+        (f"{HOME}/.nvm/versions/node/v22.21.0/bin/node", None, False, "nvm"),
         (f"{HOME}/.volta/bin/node", None, False, "volta"),
         (f"{HOME}/.asdf/shims/node", None, False, "asdf"),
         (f"{HOME}/.local/share/mise/shims/node", None, False, "mise"),
@@ -540,7 +552,7 @@ class TestInstallers:
         """Not whichever place happens to be listed first."""
         monkeypatch.setattr(node_env, "manager_of", lambda p, **_k: {
             "/fnm/node": "fnm", "/usr/local/bin/node": "installer"}.get(p))
-        fnm = node_env.NodeSite("this command", "x", node_env.OK, "/fnm/node", "v22.0.0")
+        fnm = node_env.NodeSite("this command", "x", node_env.OK, "/fnm/node", "v22.20.0")
         old = node_env.NodeSite("GUI apps", "x", node_env.TOO_OLD,
                                 "/usr/local/bin/node", "v18.0.0")
         fix = node_env.fix_for(old, [fnm, old])
@@ -548,7 +560,7 @@ class TestInstallers:
 
     def test_mise_scripts_are_told_about_shims(self):
         mise = node_env.NodeSite("login shell", "x", node_env.OK,
-                                 f"{HOME}/.local/share/mise/shims/node", "v22.0.0")
+                                 f"{HOME}/.local/share/mise/shims/node", "v22.20.0")
         script = node_env.NodeSite("non-interactive shell", "x", node_env.MISSING)
         assert "--shims" in node_env.fix_for(script, [mise, script])
 
@@ -558,7 +570,7 @@ class TestDoctor:
         from server import main
 
         sites = [
-            node_env.NodeSite("this command", "building", node_env.OK, "/n", "v22.0.0"),
+            node_env.NodeSite("this command", "building", node_env.OK, "/n", "v22.20.0"),
             node_env.NodeSite("GUI apps", "the menu bar", node_env.MISSING),
         ]
         monkeypatch.setattr(node_env, "probe", lambda: sites)
@@ -659,7 +671,7 @@ class TestUpdateWarnsAndContinues:
         monkeypatch.setattr(updater, "_report_tool_updates", lambda _a: True)
         monkeypatch.setattr(updater, "_refresh_update_check", lambda: None)
         monkeypatch.setattr(node_env, "here", lambda: node_env.NodeSite(
-            "this command", "building", node_env.OK, "/n", "v22.0.0"))
+            "this command", "building", node_env.OK, "/n", "v22.20.0"))
 
         updater.run_update()
         assert "Warning" not in capsys.readouterr().out
@@ -755,7 +767,7 @@ class TestTheNodeClientsAreRegisteredWith:
         assert kw["env"] == {"HOME": HOME, "PATH": ":".join(node_env.GUI_PATH)}
 
     def test_the_login_shells_node_is_preferred(self):
-        m = Machine(versions={"/caller/node": "v22.1.0", "/login/node": "v24.0.0"})
+        m = Machine(versions={"/caller/node": "v22.21.0", "/login/node": "v24.0.0"})
         chosen = m.choose([_site("this command", "/caller/node"),
                            _site("login shell", "/login/node")])
         assert (chosen.path, chosen.found_in) == ("/login/node", "login shell")
@@ -808,7 +820,7 @@ class TestCheckOutsideAShell:
         return node_env._real_check_outside_a_shell("/n/node", run=run, home=HOME)
 
     def test_the_four_answers(self):
-        assert self._check(lambda *a, **k: _done("v22.1.0\n")) == (node_env.OK, "v22.1.0")
+        assert self._check(lambda *a, **k: _done("v22.21.0\n")) == (node_env.OK, "v22.21.0")
         assert self._check(lambda *a, **k: _done("v20.20.2\n")) == (node_env.TOO_OLD, "v20.20.2")
         assert self._check(lambda *a, **k: _done("usage: sh\n", 2)) == (node_env.UNUSABLE, None)
 

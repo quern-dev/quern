@@ -2004,7 +2004,7 @@ def check_node(sites: list | None = None) -> CheckResult:
             return CheckResult(
                 name="Node.js", status=CheckStatus.WARNING,
                 message="could not be checked",
-                detail=f"{exc}\nThe MCP wrapper needs Node {node_env.MIN_NODE_MAJOR}+; "
+                detail=f"{exc}\nThe MCP wrapper needs Node {node_env.MIN_NODE_TEXT}+; "
                        f"{quern_cmd()} doctor shows each place a node is picked.",
             )
     here = sites[0]
@@ -2091,7 +2091,7 @@ def check_node(sites: list | None = None) -> CheckResult:
         name="Node.js",
         status=CheckStatus.WARNING,
         message=f"{here.version or 'installed'} here; needs attention for: {names} "
-                f"(the MCP wrapper needs Node {node_env.MIN_NODE_MAJOR}+)",
+                f"(the MCP wrapper needs Node {node_env.MIN_NODE_TEXT}+)",
         detail="\n".join(lines),
     )
 

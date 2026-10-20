@@ -328,7 +328,7 @@ def _ensure_mcp_built(quiet: bool = False) -> bool:
         print(f"Error: could not build the MCP server: {exc}")
         if not all(f.exists() for f in dist_files):
             print(
-                "  MCP tools will be unavailable until this is built. Node 22+ "
+                "  MCP tools will be unavailable until this is built. Node 22.19+ "
                 "and npm are needed, and a GUI launch may not see a node "
                 "installed by fnm or nvm — running `quern start` from a "
                 "terminal once is usually enough."
@@ -893,9 +893,9 @@ def _cmd_mcp_install() -> int:
         # the likeliest outcome is a client that cannot, so the exit says so.
         from server.config import quern_cmd
 
-        print(f"  ✗ no Node {node_env.MIN_NODE_MAJOR}+ was found that runs without your "
+        print(f"  ✗ no Node {node_env.MIN_NODE_TEXT}+ was found that runs without your "
               f"shell's setup, so clients were registered with plain `node`, which each "
-              f"resolves on its own PATH. Install Node {node_env.MIN_NODE_MAJOR}+ and run "
+              f"resolves on its own PATH. Install Node {node_env.MIN_NODE_TEXT}+ and run "
               f"this again; `{quern_cmd()} doctor` shows where each place finds node.")
         return 1
     return 0 if all_ok else 1

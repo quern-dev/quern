@@ -73,7 +73,7 @@ class TestMcpInstallPinsTheNode:
 
     def test_a_path_toml_must_escape_is_written_as_valid_toml(self, home, monkeypatch):
         odd = '/Users/some "one"/node'
-        _install(monkeypatch, "codex", chosen=node_env.ClientNode(odd, "v22.0.0", "login shell"))
+        _install(monkeypatch, "codex", chosen=node_env.ClientNode(odd, "v22.20.0", "login shell"))
         cfg = tomllib.loads((home / ".codex/config.toml").read_text())
         assert cfg["mcp_servers"]["quern"]["command"] == odd
 
@@ -88,7 +88,7 @@ class TestMcpInstallPinsTheNode:
         assert _install(monkeypatch, "claude-code", chosen=None) == 1
         written = json.loads((home / ".claude.json").read_text())["mcpServers"]["quern-debug"]
         assert written["command"] == "node"
-        assert "no Node 22+ was found" in capsys.readouterr().out
+        assert "no Node 22.19+ was found" in capsys.readouterr().out
 
     def test_a_chooser_that_raises_does_not_stop_the_registration(self, home, monkeypatch):
         def boom(*_a, **_kw):
@@ -183,7 +183,7 @@ class TestDoctorReportsTheRegistrations:
         node.write_text("")
         regs = [setup.McpRegistration("cursor", Path("/c"), str(node),
                                       launcher="/old/mcp/dist/launcher.cjs")]
-        self._report(monkeypatch, regs, {str(node): (node_env.OK, "v22.0.0")})
+        self._report(monkeypatch, regs, {str(node): (node_env.OK, "v22.20.0")})
         assert "starts Quern from /old/mcp/dist/launcher.cjs, which no longer exists" in \
             capsys.readouterr().out
 
@@ -229,7 +229,7 @@ class TestReRegisteringKeepsWhatSomeoneAdded:
     def test_a_path_outside_the_bmp_is_valid_toml(self, home, monkeypatch):
         """`json.dumps` writes an emoji as a surrogate pair, which TOML rejects."""
         odd = "/Users/someone/\U0001F600/node"
-        _install(monkeypatch, "codex", chosen=node_env.ClientNode(odd, "v22.0.0", "login shell"))
+        _install(monkeypatch, "codex", chosen=node_env.ClientNode(odd, "v22.20.0", "login shell"))
         cfg = tomllib.loads((home / ".codex/config.toml").read_text())
         assert cfg["mcp_servers"]["quern"]["command"] == odd
 
