@@ -2202,6 +2202,29 @@ class Landmark(BaseModel):
         return self
 
 
+class NavEdge(BaseModel):
+    """One `leads_to` entry: a `tap_element` call and the screen it reaches.
+
+    The selector fields are the action's own arguments, so an edge matches a
+    tap by the same rules `tap_element` finds an element by.
+    """
+
+    #: The screen this tap leads to, by name.
+    target: str
+    label: str | None = None
+    identifier: str | None = None
+    label_contains: str | None = None
+    label_prefix: str | None = None
+    element_type: str | None = None
+    #: When the edge exists only in some states. A conditional edge can
+    #: confirm an arrival, but never reports a missed one: the condition may
+    #: simply not have held.
+    condition: str | None = None
+    #: Seconds to wait for the target, for a screen that is slow to arrive (a
+    #: sign-in waiting on the network). None means the default.
+    timeout: float | None = None
+
+
 class ScreenLandmarks(BaseModel):
     """Named screen with its identifying landmarks."""
 
@@ -2225,6 +2248,11 @@ class ScreenLandmarks(BaseModel):
     #: so a wrong entry costs a slowdown rather than making an element
     #: unreachable.
     scrollable: bool | None = None
+    #: The documented navigation out of this screen: which tap leads where.
+    #: Read from `leads_to`, so `tap_element` can check that a documented tap
+    #: actually arrived (#491). Only `tap_element` actions become edges.
+    leads_to: list[NavEdge] = Field(default_factory=list)
+
 
 
 class LoadLandmarksRequest(BaseModel):
@@ -2320,6 +2348,24 @@ class TapElementRequest(BaseModel):
             "Through WDA, a miss at snapshot_depth (a floor, not a ceiling) looks once "
             "more at the full depth, bounded and only after a quick shallow read (#494). "
             "false keeps the read at exactly snapshot_depth."
+        ),
+    )
+    verify_navigation: bool = Field(
+        default=False,
+        description=(
+            "Check, at the tap, that a documented navigation arrived: when a loaded "
+            "knowledge base documents this tap as a leads_to edge from the current "
+            "screen, wait for the screen it leads to and report `navigation` (#491). "
+            "Costs a screen read before the tap and at least one after. Off by "
+            "default: without it, a documented tap that did not register is reported "
+            "for free as `previous_tap` on the next miss."
+        ),
+    )
+    navigation_timeout: float | None = Field(
+        default=None, gt=0, le=60, allow_inf_nan=False,
+        description=(
+            "Seconds the navigation check waits for the documented screen, for one "
+            "that is slow to arrive. Default: the edge's own `timeout:`, else 3."
         ),
     )
     include_screen_context: bool = False

@@ -19,8 +19,15 @@ from server.device.element_types import (
     rule_for,
     type_matches,
 )
+from server.knowledge.navigation import (
+    Identified,
+    could_match_call,
+    matches_tapped,
+    parse_leads_to,
+)
 from server.models import (
     Landmark,
+    NavEdge,
     ScreenLandmarks,
     UIElement,
     WebContentHint,
@@ -258,6 +265,8 @@ class ParseResult:
     skip: SkippedFile | None = None
     conventions: FileConventions | None = None
     """Set for every file whose frontmatter parsed, landmarks or not."""
+    edge_issues: list[dict] = field(default_factory=list)
+    """`leads_to` entries that could not become edges, with why (#491)."""
     web_content: list[WebContentHint] = field(default_factory=list)
     """Carried on both paths deliberately. The screens that most need a web
     content hint -- an OAuth view, a settings page behind
@@ -274,6 +283,8 @@ class KnowledgeBaseScan:
     skipped: list[SkippedFile] = field(default_factory=list)
     web_content: list[WebContentHint] = field(default_factory=list)
     conventions: list[FileConventions] = field(default_factory=list)
+    #: `leads_to` entries that are not checked, each with its file and why.
+    edge_issues: list[dict] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -713,12 +724,15 @@ def parse_screen_landmarks(
     raw_scrollable = data.get("scrollable")
     scrollable = raw_scrollable if isinstance(raw_scrollable, bool) else None
 
+    edges, unusable = parse_leads_to(data.get("leads_to"))
     return ParseResult(
         screen=ScreenLandmarks(
             screen=screen_name, landmarks=landmarks, scrollable=scrollable,
+            leads_to=edges,
         ),
         web_content=hints,
         conventions=conventions,
+        edge_issues=[{"file": label, "screen": screen_name, **u} for u in unusable],
     )
 
 
@@ -776,6 +790,7 @@ def scan_knowledge_base(path: Path) -> KnowledgeBaseScan:
             return KnowledgeBaseScan()
 
     scan = KnowledgeBaseScan()
+    stems: dict[str, str] = {}
     for md_file in sorted(screens_dir.glob("*.md")):
         if md_file.name.startswith("_"):
             continue
@@ -790,11 +805,52 @@ def scan_knowledge_base(path: Path) -> KnowledgeBaseScan:
                 file=result.skip.file, screen=result.skip.screen, declared=None,
                 findings=[unloaded_finding(result.skip.reason)],
             ))
+        scan.edge_issues.extend(result.edge_issues)
         if result.screen is not None:
             scan.screens.append(result.screen)
+            stems[md_file.stem] = result.screen.screen
         elif result.skip is not None:
             scan.skipped.append(result.skip)
+    scan.edge_issues.extend(resolve_targets(scan.screens, stems))
     return scan
+
+
+def resolve_targets(
+    screens: list[ScreenLandmarks], stems: dict[str, str] | None = None,
+) -> list[dict]:
+    """Point every edge at a loaded screen's name, dropping the rest.
+
+    A `leads_to` link names a file (`[[screens/more]]`), and a screen's name is
+    its `screen:` field, which can differ from the file name; `stems` maps one
+    to the other. An edge to a screen that is not loaded -- a typo, a stub, a
+    file that failed to parse -- can never be confirmed, so it is dropped and
+    reported rather than left to read as checked. Mutates `screens` in place.
+    """
+    stems = stems or {}
+    files = {name: f"screens/{stem}.md" for stem, name in stems.items()}
+    names = {screen.screen for screen in screens}
+    # A target with no landmarks loads but can never be identified, so an edge
+    # to it could never confirm an arrival: counting it as checked would be a
+    # false all-clear in the load report.
+    identifiable = {screen.screen for screen in screens if screen.landmarks}
+    issues: list[dict] = []
+    for screen in screens:
+        kept = []
+        for edge in screen.leads_to:
+            name = stems.get(edge.target, edge.target)
+            if name in identifiable:
+                kept.append(edge.model_copy(update={"target": name}))
+                continue
+            issues.append({
+                "file": files.get(screen.screen, f"inline:{screen.screen}"),
+                "screen": screen.screen,
+                "entry": {"screen": edge.target},
+                "reason": ("names a screen with no landmarks, so arrival there "
+                           "cannot be confirmed") if name in names
+                          else "names no loaded screen",
+            })
+        screen.leads_to = kept
+    return issues
 
 
 # ---------------------------------------------------------------------------
@@ -835,6 +891,8 @@ class LandmarkRegistry:
         self._sets: dict[str, list[ScreenLandmarks]] = {}
         self._web_content: dict[str, list[WebContentHint]] = {}
         self._conventions: dict[str, list[FileConventions]] = {}
+        #: `leads_to` entries each app's set could not use, with why (#491).
+        self._edge_issues: dict[str, list[dict]] = {}
         #: Where each app's set came from: a directory, or "inline".
         self._sources: dict[str, str] = {}
 
@@ -843,19 +901,116 @@ class LandmarkRegistry:
         app: str,
         screens: list[ScreenLandmarks],
         conventions: list[FileConventions] | None = None,
+        edge_issues: list[dict] | None = None,
     ) -> int:
         """Load landmarks for an app. Replaces any existing set for that app.
 
-        `conventions` is replaced along with the screens, so a reload never
-        reports a previous load's findings. Returns the number of screens
-        loaded.
+        `conventions` and `edge_issues` are replaced along with the screens, so
+        a reload never reports a previous load's findings. Returns the number
+        of screens loaded.
         """
         self._sets[app] = screens
         self._sources[app] = "inline"
         self._conventions[app] = [
             replace(entry, app=app) for entry in conventions or []
         ]
+        self._edge_issues[app] = list(edge_issues or [])
         return len(screens)
+
+    def navigation_report(self, app: str) -> dict:
+        """The `navigation` block on a load: edges checked, and those not."""
+        report: dict = {
+            "edges": sum(len(s.leads_to) for s in self._sets.get(app, [])),
+        }
+        issues = self._edge_issues.get(app, [])
+        # An edge whose `timeout:` is unusable is still checked, at the
+        # default wait: reporting it beside the dropped ones as "not checked"
+        # contradicted the edge count, and sent the author to the wrong fix.
+        dropped = [i for i in issues if not i.get("edge_kept")]
+        ignored = [
+            {k: v for k, v in i.items() if k != "edge_kept"}
+            for i in issues if i.get("edge_kept")
+        ]
+        if dropped:
+            report["unusable"] = dropped
+            report["note"] = (
+                "These leads_to entries are not checked by tap_element: only a "
+                "tap_element action with a label or identifier, leading to a "
+                "screen with landmarks, becomes an edge."
+            )
+        if ignored:
+            report["timeouts_ignored"] = ignored
+        return report
+
+    def edges_from(self, app: str, screen: str) -> list[NavEdge]:
+        """The documented edges out of one app's screen."""
+        return [
+            edge
+            for s in self._sets.get(app, []) if s.screen == screen
+            for edge in s.leads_to
+        ]
+
+    def edges_for_tapped(self, tapped: dict) -> list[tuple[str, str, NavEdge]]:
+        """Every loaded edge, from any screen, whose element is the one
+        tapped: `(app, source screen, edge)`. Pure; no device read."""
+        return [
+            (app, s.screen, edge)
+            for app, screens in self._sets.items()
+            for s in screens
+            for edge in s.leads_to
+            if matches_tapped(edge, tapped)
+        ]
+
+    def apps_with_screen(self, name: str | None) -> list[str]:
+        """The loaded apps that have a screen with this name."""
+        return [
+            app for app, screens in self._sets.items()
+            if any(s.screen == name for s in screens)
+        ]
+
+    def any_edge_could_match(self, call: dict) -> bool:
+        """Whether any loaded edge could be the tap `call` describes.
+
+        Pure, and cheap: decides whether a tap pays for identifying the screen
+        before it. False with no knowledge base or no edges.
+        """
+        return any(
+            could_match_call(edge, **call)
+            for screens in self._sets.values()
+            for s in screens
+            for edge in s.leads_to
+        )
+
+    def identify_exact(
+        self,
+        elements: list[UIElement],
+        page_urls: Sequence[Mapping[str, str | None]] | None = None,
+    ) -> Identified:
+        """Identify across every loaded app, naming the app of an exact match.
+
+        The app matters because screen names repeat across apps (`Home`,
+        `Settings`), and an edge leads to a screen in its own app. Found the
+        way `scrollable_for` finds it: the screen with that name whose
+        landmarks matched.
+        """
+        screens = self.all_screens()
+        if not screens:
+            return Identified("none")
+        result = identify_screen(elements, screens, page_urls=page_urls)
+        confidence = result.get("confidence") or "none"
+        if confidence == "ambiguous":
+            candidates = [result.get("matched"), *result.get("ambiguous_with", [])]
+            return Identified("ambiguous", candidates=[c for c in candidates if c])
+        name = result.get("matched")
+        if confidence != "exact" or name is None:
+            return Identified("none")
+        for app, app_screens in self._sets.items():
+            for s in app_screens:
+                if s.screen == name and s.landmarks and match_landmarks(
+                    elements, s.landmarks, page_urls,
+                )[0]:
+                    return Identified("exact", screen=name, app=app)
+        return Identified("none")
 
     def conventions(self, app: str | None = None) -> list[FileConventions]:
         """The conventions computed at load, for one app or all of them."""
@@ -879,7 +1034,7 @@ class LandmarkRegistry:
     ) -> tuple[int, list[SkippedFile]]:
         """Load a scan already made -- so a caller can look at it first and
         refuse it without replacing what is loaded."""
-        count = self.load(app, scan.screens, scan.conventions)
+        count = self.load(app, scan.screens, scan.conventions, scan.edge_issues)
         self._web_content[app] = scan.web_content
         self._sources[app] = path
         return count, scan.skipped
@@ -903,11 +1058,13 @@ class LandmarkRegistry:
             self._sets.clear()
             self._web_content.clear()
             self._conventions.clear()
+            self._edge_issues.clear()
             self._sources.clear()
             return "all"
         self._sets.pop(app, None)
         self._web_content.pop(app, None)
         self._conventions.pop(app, None)
+        self._edge_issues.pop(app, None)
         self._sources.pop(app, None)
         return app
 
@@ -1115,6 +1272,17 @@ class LandmarkRegistry:
             "identified_as": result.get("matched"),
             "confidence": result.get("confidence"),
         }
+        if result.get("confidence") == "exact":
+            # Which loaded app the screen belongs to: names repeat across apps
+            # (`Home`, `Settings`, the probe's iOS and Android `text`), and
+            # whatever acts on the identification -- a `previous_tap` note --
+            # must judge that app's knowledge, not a namesake's.
+            try:
+                app = self.identify_exact(elements, page_urls).app
+            except Exception:  # noqa: BLE001 -- an addition to the identification
+                app = None
+            if app is not None:
+                identified["identified_app"] = app
         if result.get("confidence") == "ambiguous":
             identified["candidates"] = [
                 result.get("matched"), *result.get("ambiguous_with", []),

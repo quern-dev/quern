@@ -103,7 +103,7 @@ For each screen, capture:
 
 1. **Identification** — Find the most unique, stable element(s) that distinguish this screen. A navigation bar title is ideal. Avoid dynamic content.
 2. **Key elements** — List interactive elements with their types and labels. Note which elements are conditional (appear only in certain states).
-3. **Navigation edges** — Where does this screen lead? What action triggers each transition? Where can you arrive from?
+3. **Navigation edges** — Where does this screen lead, and what action triggers each transition? Record those outgoing edges in this screen's `leads_to` (see [Writing navigation edges](#writing-navigation-edges)): quern checks them. Where can you arrive from? Record those incoming paths in `reachable_from`.
 4. **States** — What are the distinct states? (empty, loading, error, populated, etc.) How does the agent recognize each?
 5. **Dynamic content** — If there's a list/feed/collection: what are the items? What do they represent? What happens when you tap one?
 6. **Quirks** — Anything non-obvious. Ask the user.
@@ -126,7 +126,7 @@ A stub is a minimal screen file that records "this screen exists and I know how 
 
 **When to create a stub:**
 
-1. You're documenting Screen A and find it leads to Screen B.
+1. You're documenting Screen A and find it leads to Screen B. Add the edge to A's `leads_to` now, while you know the exact tap.
 2. Before creating a stub for Screen B, check if a file already exists for it — search every screen document by name first, then read its `landmarks:` (or, on a file written before April 2026, its `identify_by:`). Searching only for `landmarks:` misses a pre-landmarks file entirely, and the duplicate stub splits that screen's `reachable_from` edges across two documents.
 3. If no match exists, create a stub: `screens/screen-b.md` with `status: stub`, the `reachable_from` edge you just discovered, and whatever you can infer about the screen name.
 4. If a match exists (stub or documented), just add the new `reachable_from` edge to the existing file.
@@ -145,6 +145,33 @@ It's possible that the same screen gets stubbed twice from different edges befor
 4. Update any `leads_to` references in other screen docs that pointed to the deleted file.
 
 The `init_app_knowledge` tool reports stub vs. documented counts so you can gauge tour progress.
+
+### Writing Navigation Edges
+
+`leads_to` is not only a map for the next agent. `tap_element` reads it (#491). Suppose a tap documented by a `leads_to` edge leaves the agent still on the edge's source screen. Then a later `tap_element` miss, or `wait_for_element` timeout, says the tap probably did not register (`previous_tap`). With `verify_navigation: true`, the tap is checked as it is made instead. So write each edge so quern can match it:
+
+```yaml
+leads_to:
+  - screen: "[[screens/order-detail]]"
+    action: 'tap_element label_prefix="Order #" element_type="Button"'
+  - screen: "[[screens/settings]]"
+    action: 'tap_element identifier="settings_button"'
+  - screen: "[[screens/home]]"
+    action: 'tap_element label="Sign In" element_type="Button"'
+    timeout: 10          # waits on the network
+  - screen: "[[screens/paywall]]"
+    action: 'tap_element label="Export" element_type="Button"'
+    condition: "free accounts only"
+```
+
+- **The `action` is a `tap_element` call**, written the way an agent will make it, naming a `label` (or `label_contains`, `label_prefix`) or an `identifier`. Prose ("tap the gear"), other tools (`swipe`, `open_url`) and a type with nothing else are kept as documentation but not checked.
+- **Name the element the way agents call it.** An edge is matched against the element that was tapped, so any selector that picks the right element works for `previous_tap`. The check at the tap (`verify_navigation`) decides before tapping, so there the call and the edge have to share a label or an identifier.
+- **`screen` links the target's file**, `[[screens/<file name>]]`, and that file needs landmarks: an edge to a stub cannot confirm an arrival, so it is not checked until the stub is documented.
+- **One tap, several possible screens: one edge each.** A tab that shows whatever its own stack was left on leads to each screen of that stack; arriving at any of them counts.
+- **`condition:`** marks an edge that exists only in some states. It confirms an arrival but is never blamed for a missed one.
+- **`timeout:`** (seconds, up to 60) is for a screen slow to arrive -- one that waits on the network -- so a slow arrival is not taken for a dropped tap. The default is 3s for a check at the tap, and 1s before a later miss can blame it.
+
+After loading, read the `navigation` block `load_landmarks` returns: `edges` is how many edges quern checks, `unusable` lists each `leads_to` entry it does not check and why, and `timeouts_ignored` lists edges whose `timeout:` it could not read. An edge you meant to be checked that appears under `unusable` usually needs its action rewritten as a `tap_element` call, or its target documented.
 
 ### Writing Screen Documents
 

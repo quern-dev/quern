@@ -152,7 +152,7 @@ Pass include_raw=true when debugging the platform normalizer itself — e.g., to
   });
 
   server.registerTool("wait_for_element", {
-    description: `Wait for an element to satisfy a condition (server-side polling). Eliminates client-side retry loops and reduces API round-trips. Always returns with matched:true/false - timeouts are not errors. Supports conditions: exists, not_exists, visible, enabled, disabled, value_equals, value_contains. On a timeout the response carries screen_context, and with landmarks loaded that names the screen you are actually on (identified_as, confidence) -- a timeout is exactly when that is worth knowing, so you do not have to ask separately. It also carries "backend", naming which of quern's UI backends did the reads ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone or a simulator after start_driver, 'u2' on Android) -- for the same reason: an element that never appeared is the kind of odd-but-not-error result where the next question is what was driving the device.`,
+    description: `Wait for an element to satisfy a condition (server-side polling). Eliminates client-side retry loops and reduces API round-trips. Always returns with matched:true/false - timeouts are not errors. With a knowledge base loaded, a timeout on a screen your last tap_element was documented to leave carries \`previous_tap\`: that tap probably did not register. Supports conditions: exists, not_exists, visible, enabled, disabled, value_equals, value_contains. On a timeout the response carries screen_context, and with landmarks loaded that names the screen you are actually on (identified_as, confidence) -- a timeout is exactly when that is worth knowing, so you do not have to ask separately. It also carries "backend", naming which of quern's UI backends did the reads ('sim-bridge' or 'idb' on a simulator, 'wda' on a physical iPhone or a simulator after start_driver, 'u2' on Android) -- for the same reason: an element that never appeared is the kind of odd-but-not-error result where the next question is what was driving the device.`,
     inputSchema: strictParams({
       label: z
         .string()
@@ -518,6 +518,16 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         .boolean()
         .optional()
         .describe("Through WDA, a miss at snapshot_depth looks once more at the full depth -- bounded, and only after a quick shallow read -- so the depth you pass is a floor, not a ceiling (#494). Default true. Pass false for a read at exactly snapshot_depth: diagnostics, or checking that an element is NOT within a depth."),
+      verify_navigation: z
+        .boolean()
+        .optional()
+        .describe("Default false. Check at the tap that a documented navigation arrived: when a loaded knowledge base documents this tap as a leads_to edge from the screen you are on, the tap waits for the screen it leads to and reports `navigation`: {expected, from, arrived, waited_ms}. arrived: false means the tap was delivered (status stays ok) but the screen did not change as documented -- `on` names where you are, and a top-level `warning` says so; check the screen before acting, and repeat the tap only if repeating it is harmless (not for a submit, purchase or send: the screen may simply be slow). arrived: null means it could not tell (reason says why), which is not a miss. Costs a screen read before the tap and one or more after: a few hundred ms on a WDA simulator or Android, 1.5-2s on an iPhone or sim-bridge. Without it, a documented tap that did not register is reported for free as `previous_tap` on your next tap_element miss or wait_for_element timeout."),
+      navigation_timeout: z
+        .coerce.number()
+        .positive()
+        .max(60)
+        .optional()
+        .describe("Seconds the navigation check waits for the documented screen (default: the edge's own timeout: in the knowledge base, else 3). Raise it for a screen that is slow to arrive, such as one that waits on the network, so a slow arrival is not reported as a miss."),
       settle_delay: z
         .coerce.number()
         .min(0)
@@ -532,7 +542,7 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
         .optional()
         .describe("Hold the touch this many seconds: a long press, for context menus, drag handles and press-and-hold controls. Omit for an ordinary tap. 1.0 clears the long-press threshold on iOS (0.5s) and Android (~0.4s)."),
     }),
-  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value, scroll_to_find, include_screen_context, capture_screenshots, settle_delay, snapshot_depth, deepen, duration, skip_stability_check }) => {
+  }, async ({ label, label_contains, label_prefix, identifier, element_type, udid, source_timeout, value, scroll_to_find, include_screen_context, capture_screenshots, settle_delay, snapshot_depth, deepen, verify_navigation, navigation_timeout, duration, skip_stability_check }) => {
     try {
       const body: Record<string, unknown> = {};
       if (duration !== undefined) body.duration = duration;
@@ -558,6 +568,8 @@ When a sweep runs — because you passed scroll_to_find, or (on iOS) the screen 
       if (settle_delay !== undefined) body.settle_delay = settle_delay;
       if (snapshot_depth !== undefined) body.snapshot_depth = snapshot_depth;
       if (deepen !== undefined) body.deepen = deepen;
+      if (verify_navigation !== undefined) body.verify_navigation = verify_navigation;
+      if (navigation_timeout !== undefined) body.navigation_timeout = navigation_timeout;
 
       const data = await apiRequest(
         "POST",

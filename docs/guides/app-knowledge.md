@@ -89,6 +89,29 @@ leads_to:
     action: 'tap_element label_prefix="Order #" element_type="button"'
 ```
 
+These edges are also checked. When `tap_element` makes a tap a `leads_to`
+edge documents, and a later `tap_element` misses (or `wait_for_element` times
+out) on the screen the edge leaves, with nothing having changed the screen in
+between, the miss says the earlier tap probably did not register
+(`previous_tap`) -- instead of a `not_found` that seems to have nothing to do
+with it. It costs no read. With `verify_navigation: true` the tap is checked at once: it waits for
+the screen the edge leads to and reports whether it arrived
+(`navigation.arrived`). For an edge to be checked:
+
+- its `action` is a `tap_element` call naming a `label` (or `label_contains`,
+  `label_prefix`) or an `identifier` -- the way the agent will call it: the
+  check at the tap needs the call and the edge to share one;
+- its `screen` links to a screen file that loads.
+
+`load_landmarks` reports the count under `navigation.edges`, and lists any entry
+that is not checked under `navigation.unusable`, with why. When one tap can
+lead to several screens -- a tab that shows whatever its stack was left on --
+list an edge to each; arriving at any of them counts. Add `condition:` to an
+edge that exists only in some states: it confirms an arrival but never reports
+a miss. Add `timeout:` (seconds, up to 60) to an edge whose screen is slow to
+arrive -- one that waits on the network -- so a slow arrival is not reported as
+a dropped tap; the default wait is 3s.
+
 #### Recording whether a screen scrolls
 
 `scrollable` is a top-level key in a screen file's YAML frontmatter, beside

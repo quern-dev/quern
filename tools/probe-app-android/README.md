@@ -135,3 +135,12 @@ The WebView checks originally used `time.sleep(4)`, which passed on a warm
 emulator and failed on a cold one under software rendering — the DOM simply was
 not up yet, and the test reported it as missing. A fixed sleep encodes one
 machine's speed; polling states the intent.
+
+## Knowledge base
+
+`knowledge/screens/` is this app's knowledge base: a screen file per tab, with
+the conformance contract's landmarks and `leads_to` edges for the tab
+navigation. `tap_element` checks those edges, so it is the fixture for #491's
+navigation check. `tests/test_navigation_check.py` keeps the landmarks in step
+with `tests/conformance/probe.py`. Load it with
+`load_landmarks(path=<this folder>/knowledge, app="com.quern.probe")`.
