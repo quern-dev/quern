@@ -32,6 +32,21 @@ enum RecoveryTests {
             Harness.expect((setup ?? 0) < (restart ?? 0), "setup before restart")
         }
 
+        Harness.test("finishing an update tells setup so, and only then") {
+            // setup turns a Node no MCP client can start into an error for a
+            // person setting up, and keeps it a warning when finishing an
+            // update (#506). The first-run set-up is a person setting up.
+            let finish = lines(script(.finishUpdate, quern: "/q"))
+            let flag = finish.firstIndex(of: "export QUERN_SETUP_AFTER_UPDATE=1")
+            let setup = finish.firstIndex(of: "'/q' setup")
+            Harness.expect(flag != nil && setup != nil, "both lines: \(finish)")
+            Harness.expect((flag ?? Int.max) < (setup ?? 0), "flag before setup")
+            for r in [Recovery.repair, .setUp] {
+                let text = script(r, quern: "/q", releaseWrapperExists: true)
+                Harness.expect(!text.contains("QUERN_SETUP_AFTER_UPDATE"), "\(r) does not claim an update")
+            }
+        }
+
         Harness.test("every recovery leaves the window open and names the log") {
             for r in [Recovery.repair, .finishUpdate, .setUp] {
                 let text = script(r, quern: "/q")

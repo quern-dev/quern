@@ -119,6 +119,10 @@ enum Recovery: Equatable {
         case .finishUpdate:
             body.append("echo \"The update did not finish. Running setup, then restarting the server.\"")
             body.append("echo")
+            // Finishing an update, not a first setup: a Node too old for the
+            // MCP wrapper stays a warning here, as it is inside `quern
+            // update`, rather than failing the update (#214, #506).
+            body.append("export QUERN_SETUP_AFTER_UPDATE=1")
             body += Self.runQuern(quern, "setup")
             body += Self.runQuern(quern, "restart")
         case .repair:

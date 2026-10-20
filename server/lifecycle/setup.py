@@ -1982,6 +1982,67 @@ def check_mitmdump() -> CheckResult:
     )
 
 
+def _probe_node_sites() -> list | None:
+    """Every place's node, or None when the probe itself failed.
+
+    None rather than raising: `check_node` reports a failed probe as a warning,
+    and that must stay true when the probe moves out here.
+    """
+    from server.lifecycle import node_env
+
+    try:
+        return node_env.probe()
+    except Exception:  # noqa: BLE001 -- check_node reports it
+        return None
+
+
+def mcp_cannot_start(sites: list | None) -> bool:
+    """True when node was found and no place has one meeting the floor (#506).
+
+    Then no MCP client can start the wrapper, whichever place it reads -- the
+    case setup must not call complete. False when the probe failed (that is
+    "could not tell", reported as such) and when node is missing here, which
+    has its own message and is already an error.
+    """
+    from server.lifecycle import node_env
+
+    if not sites or sites[0].status == node_env.MISSING:
+        return False
+    return not any(site.status == node_env.OK for site in sites)
+
+
+def _node_severity(result: CheckResult, mcp_blocked: bool, *, after_update: bool) -> CheckResult:
+    """The Node check as setup reports it (#506).
+
+    When no place has a node the wrapper can start with, a person running setup
+    gets an error -- "complete with warnings" there is what left people with
+    MCP clients that silently would not connect. Finishing an update keeps the
+    warning: an update must not fail over the user's Node arrangement (#214).
+    Only a warning is raised: MISSING and ERROR are already errors.
+    """
+    if not mcp_blocked or after_update or result.status != CheckStatus.WARNING:
+        return result
+    return CheckResult(
+        name=result.name, status=CheckStatus.ERROR,
+        message=f"{result.message} -- the MCP server cannot start",
+        detail=result.detail,
+    )
+
+
+def _print_mcp_blocked(sites: list) -> None:
+    """The line a person must not miss: why MCP clients will not connect."""
+    from server.lifecycle import node_env
+
+    here = sites[0]
+    found = f"Node {here.version}" if here.version else "a node that does not run"
+    print(f"  \u2717 MCP will not start: {found} here, and no place has Node "
+          f"{node_env.MIN_NODE_TEXT}+.")
+    print(f"    {node_env.fix_for(here, sites)}")
+    print(f"    Then run '{quern_cmd()} setup' again. Claude and other MCP clients "
+          f"cannot use quern until then.")
+    print()
+
+
 def check_node(sites: list | None = None) -> CheckResult:
     """Check the `node` every part of the system will run, not just ours (#214).
 
@@ -2906,15 +2967,30 @@ def _print_unasked() -> None:
     print()
 
 
-def run_setup(assume_yes: bool = False) -> int:
+#: Set by whatever runs setup to finish an update -- the menu bar's "Finish
+#: Update" -- so a Node below the floor stays a warning there (#506). The
+#: updater passes `after_update=True` instead, being in-process.
+AFTER_UPDATE_ENV = "QUERN_SETUP_AFTER_UPDATE"
+
+
+def run_setup(assume_yes: bool = False, after_update: bool | None = None) -> int:
     """Run the interactive setup. Returns 0 on success, 1 on errors.
 
     `assume_yes` answers every prompt with its default, the way `apt-get -y`
     does -- except the ones marked `deliberate`, which no flag answers. See
     `_prompt_yn`.
+
+    `after_update` says setup is finishing an update rather than being run by
+    a person. It changes one thing: a Node no MCP client can start the wrapper
+    with is a warning then, and an error otherwise (#506). An update must not
+    report failure over the user's Node arrangement (#214), but a person
+    setting up should not be told "complete" when the MCP server cannot start.
+    Unset, it reads `AFTER_UPDATE_ENV`.
     """
     global _ASSUME_YES
     _ASSUME_YES = assume_yes
+    if after_update is None:
+        after_update = os.environ.get(AFTER_UPDATE_ENV, "").strip() == "1"
     # Ensure venv bin dir is on PATH so which() finds venv-installed tools
     if sys.prefix != sys.base_prefix:
         venv_bin = str(Path(sys.prefix) / "bin")
@@ -3175,7 +3251,8 @@ def run_setup(assume_yes: bool = False) -> int:
 
     report.add(check_mitmdump())
 
-    node_result = check_node()
+    node_sites = _probe_node_sites()
+    node_result = check_node(node_sites)
     # `fixable`, not just MISSING. A node that exists and is merely unreachable
     # from here is MISSING *to this process*, and installing a second one does
     # not make the first visible -- under `-y` it would silently do exactly
@@ -3186,7 +3263,8 @@ def run_setup(assume_yes: bool = False) -> int:
     if node_result.status == CheckStatus.MISSING and node_result.fixable:
         if _prompt_yn("    Node.js not found. Install via Homebrew?"):
             if _brew_install("node"):
-                node_result = check_node()  # re-check
+                node_sites = _probe_node_sites()
+                node_result = check_node(node_sites)  # re-check
             else:
                 node_result = CheckResult(
                     name="Node.js",
@@ -3194,6 +3272,12 @@ def run_setup(assume_yes: bool = False) -> int:
                     message="Homebrew install failed",
                     detail="Try manually: brew install node",
                 )
+    # Decided before the severity below: a node too old to *run* the wrapper
+    # still builds it, and an unbuilt wrapper is stale the moment Node is
+    # upgraded -- the error is about starting it, not building it.
+    node_can_build = _node_can_build(node_result)
+    mcp_blocked = mcp_cannot_start(node_sites)
+    node_result = _node_severity(node_result, mcp_blocked, after_update=after_update)
     report.add(node_result)
 
     # ── iOS support (requires Xcode CLI Tools) ──
@@ -3614,7 +3698,7 @@ def run_setup(assume_yes: bool = False) -> int:
     # Build the TypeScript MCP server so it's ready when Claude Code connects.
     # Without this, the MCP shows as broken until the first `quern start`.
 
-    if _node_can_build(node_result) and project_root:
+    if node_can_build and project_root:
         report.add(_build_mcp(project_root))
 
     # ── Tool inventory ──
@@ -3629,6 +3713,8 @@ def run_setup(assume_yes: bool = False) -> int:
     # ── Summary ──
 
     report.print_summary()
+    if mcp_blocked:
+        _print_mcp_blocked(node_sites)
 
     _print_unasked()
 

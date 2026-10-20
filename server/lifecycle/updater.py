@@ -664,7 +664,7 @@ def _rebuild_and_restart(project_root: Path) -> list[str]:
     # Run setup to check for new external dependencies
     from server.lifecycle.setup import run_setup
 
-    if run_setup() != 0:
+    if run_setup(after_update=True) != 0:
         print("Warning: setup reported errors — see above")
         failures.append("setup")
 
