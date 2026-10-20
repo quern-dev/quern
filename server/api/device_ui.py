@@ -19,6 +19,7 @@ from server.api.device import (
     _get_controller,
     _handle_device_error,
 )
+from server.device import frames
 from server.device.controller import DeviceController
 from server.knowledge import navigation
 from server.knowledge.landmarks import LandmarkRegistry, needs_page_urls
@@ -202,6 +203,51 @@ def _note_previous_tap(
         return
     if note is not None:
         payload["previous_tap"] = note
+
+
+def _tap_frames(request: Request) -> dict | None:
+    """Per-device frames of the screen before the last tap (#502)."""
+    state = getattr(getattr(request, "app", None), "state", None)
+    if state is None:
+        return None
+    store = getattr(state, "tap_frames", None)
+    if not isinstance(store, dict):
+        try:
+            store = {}
+            state.tap_frames = store
+        except Exception:  # noqa: BLE001 -- a frozen or foreign state object
+            return None
+    return store
+
+
+async def _note_unchanged(request: Request, controller, udid: str | None, payload: dict) -> None:
+    """On a miss: say if the screen has not changed since the last tap.
+
+    Second to `previous_tap`, which is the stronger claim: when that is
+    there, this says nothing and costs nothing. Otherwise one frame is taken
+    and compared with the one from before the tap. The kept frame is used up
+    by the first miss either way. Never raises.
+    """
+    try:
+        store = _tap_frames(request)
+        if store is None or not udid:
+            return
+        tap = store.pop(udid, None)
+        if tap is None or "previous_tap" in payload:
+            return
+        if time.monotonic() - tap.at > frames.TTL:
+            return
+        stamp = _last_change(controller, udid)
+        if stamp != tap.stamp:
+            return
+        after, ms, _source = await frames.capture(controller, udid)
+        note = frames.unchanged_note(tap, after, time.monotonic(), stamp=stamp)
+    except Exception:  # noqa: BLE001 -- an addition to a miss, never the miss
+        logger.debug("screen-unchanged note failed", exc_info=True)
+        return
+    if note is not None:
+        note["capture_ms"] = {"before": round(tap.capture_ms), "after": round(ms)}
+        payload["screen_unchanged_since_tap"] = note
 
 
 router = APIRouter(prefix="/api/v1/device", tags=["device"])
@@ -470,6 +516,7 @@ async def wait_for_element(request: Request, body: WaitForElementRequest):
                             "landmark_registry", None),
                     result,
                 )
+                await _note_unchanged(request, controller, resolved_udid, result)
             # A wait that matched clears nothing: it may have matched something
             # of the screen the tap should have left -- a spinner gone, a field
             # enabled -- and a tap that did arrive is never blamed on its
@@ -658,6 +705,14 @@ async def tap_element(request: Request, body: TapElementRequest):
                 "landmark_registry", None,
             )
             nav_plan = await _navigation_plan(request, controller, resolved, nav_registry, body)
+            # The screen as it was before the tap, for the next miss (#502).
+            # A long press is not a tap the next miss should be judged by.
+            before_frame: tuple = (None, 0.0, "none")
+            if body.duration is None and _tap_frames(request) is not None:
+                try:
+                    before_frame = await frames.capture(controller, resolved)
+                except Exception:  # noqa: BLE001 -- no frame is no note, never a failed tap
+                    logger.debug("frame before the tap failed", exc_info=True)
 
             # Guarded like scroll_to_element, and for the same reason: with
             # `scroll_to_find` on -- explicitly, or via a screen the knowledge
@@ -706,6 +761,7 @@ async def tap_element(request: Request, body: TapElementRequest):
             # what tells _action this was `not_found` rather than a failure.
             if result.get("status") == "not_found":
                 _note_previous_tap(request, controller, resolved, nav_registry, result)
+                await _note_unchanged(request, controller, resolved, result)
                 raise HTTPException(status_code=404, detail=result)
 
             if result.get("status") == "ambiguous":
@@ -758,6 +814,18 @@ async def tap_element(request: Request, body: TapElementRequest):
             if (body.duration is None and isinstance(result, dict)
                     and result.get("status") == "ok" and "navigation" not in result):
                 _remember_documented_tap(request, controller, resolved, nav_registry, result)
+            if (isinstance(result, dict) and result.get("status") == "ok"
+                    and isinstance(result.get("tapped"), dict)):
+                store = _tap_frames(request)
+                if store is not None:
+                    store.pop(resolved, None)
+                    frame, ms, source = before_frame
+                    if frame is not None:
+                        store[resolved] = frames.TapFrame(
+                            tapped=result["tapped"], frame=frame, at=time.monotonic(),
+                            stamp=_last_change(controller, resolved), capture_ms=ms,
+                            source=source,
+                        )
 
             if body.capture_screenshots:
                 await asyncio.sleep(body.settle_delay)
