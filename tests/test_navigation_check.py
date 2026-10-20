@@ -870,6 +870,9 @@ class TestPreviousTap:
         _, body = await self._miss(app, controller, {
             "identified_as": "text", "confidence": "exact", "identified_app": "probe"})
         assert body["detail"]["previous_tap"]["expected"] == "more"
+        controller.tap_element.return_value = {   # _miss replaced the tap result
+            "status": "ok", "tapped": {"label": "More", "type": "RadioButton",
+                                       "identifier": "tab_more", "x": 1, "y": 2}}
         await _tap(app, {"label": "More"}, opt_in=False)
         _, body = await self._miss(app, controller, {
             "identified_as": "text", "confidence": "exact", "identified_app": "other"})
