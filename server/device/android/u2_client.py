@@ -303,6 +303,10 @@ class U2Backend:
         self._devices[serial] = device
         return device
 
+    def is_connected(self, serial: str) -> bool:
+        """Whether this device already has a uiautomator2 connection."""
+        return serial in self._devices
+
     def _disconnect(self, serial: str) -> None:
         """Remove a cached connection."""
         self._devices.pop(serial, None)
@@ -310,6 +314,25 @@ class U2Backend:
     async def close(self) -> None:
         """Stop the gesture servers this backend started, and their forwards."""
         await self._touch.close_all()
+
+    async def frame(self, udid: str, scale: float = 0.25, quality: int = 50) -> bytes:
+        """A small JPEG of the screen, for comparing frames (#502).
+
+        Through uiautomator2's own server, scaled down on the device: measured
+        on an emulator at a median of 44ms, against 135ms for `adb exec-out
+        screencap -p`, which encodes and ships a full-resolution PNG. Raises
+        DeviceError on failure.
+        """
+        import base64
+
+        def _do() -> bytes:
+            device = self._connect(udid)
+            return base64.b64decode(device.jsonrpc.takeScreenshot(scale, quality))
+
+        try:
+            return await asyncio.to_thread(_do)
+        except Exception as e:
+            raise DeviceError(str(e), tool="u2") from e
 
     async def describe_all(
         self,

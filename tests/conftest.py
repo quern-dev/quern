@@ -823,3 +823,16 @@ def pinned_timezone(monkeypatch):
     # After monkeypatch has restored TZ, re-read it. The undo is the point.
     monkeypatch.undo()
     time.tzset()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_frame_capture(monkeypatch):
+    """Every tap_element through the routes captures a frame first (#502),
+    and a mocked controller would send that to a real simctl or adb. Tests
+    of the capture itself call `frames._capture` with a mocked backend."""
+    from server.device import frames
+
+    async def no_frame(controller, udid):
+        return None, 0.0, "none"
+
+    monkeypatch.setattr(frames, "capture", no_frame)

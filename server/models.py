@@ -2376,6 +2376,15 @@ class TapElementRequest(BaseModel):
             "that is slow to arrive. Default: the edge's own `timeout:`, else 3."
         ),
     )
+    note_unchanged: bool = Field(
+        default=True,
+        description=(
+            "Capture a frame of the screen before the tap, so that a later miss can "
+            "say when the screen has not changed since (`screen_unchanged_since_tap`, "
+            "#502). Costs one capture per tap: ~90ms on a simulator, ~60ms on "
+            "Android, ~200ms on an iPhone. false skips it for speed-sensitive loops."
+        ),
+    )
     include_screen_context: bool = False
     capture_screenshots: bool = False
     settle_delay: float = Field(default=1.0, ge=0, le=10)

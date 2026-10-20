@@ -1787,7 +1787,14 @@ rm -rf /data/local/tmp/tmp-ca-copy
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        try:
+            stdout, stderr = await proc.communicate()
+        except asyncio.CancelledError:
+            # A caller's timeout cancels the wait, not the process: kill it,
+            # or every abandoned capture leaves an `adb exec-out` running.
+            if proc.returncode is None:
+                proc.kill()
+            raise
         if proc.returncode != 0:
             raise DeviceError(
                 f"adb screencap failed: {stderr.decode().strip()}",

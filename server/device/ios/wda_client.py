@@ -486,6 +486,7 @@ class WdaBackend:
             "the simulator to the default backend"
         )
 
+
     async def _get_base_url(self, udid: str) -> str:
         """Get (or create) the WDA base URL for a device.
 
@@ -1256,6 +1257,30 @@ class WdaBackend:
             )
         except httpx.TimeoutException as exc:
             raise DeviceError(f"WDA screenshot timed out on {udid[:8]}", tool="wda") from exc
+        value = resp.json().get("value")
+        if not isinstance(value, str):
+            raise DeviceError(f"WDA returned no screenshot on {udid[:8]}", tool="wda")
+        return base64.b64decode(value)
+
+    async def capture_frame(self, udid: str, timeout: float) -> bytes:
+        """The screen as PNG, through the connection already set up -- and
+        nothing else (#502).
+
+        For the frame `tap_element` takes before each tap: one sessionless
+        `GET /screenshot` on the cached base URL. No `/status` check, no
+        reconnect, no retry and no driver start, which `screenshot` (through
+        `_request` and `_get_base_url`) may all do: a capture that timed out
+        mid-recovery could leave an `xcodebuild` running. Raises on anything
+        else, which the caller reads as "no frame".
+        """
+        import base64
+
+        conn = self._connections.get(udid)
+        if conn is None:
+            raise DeviceError(f"no WDA connection to {udid[:8]}", tool="wda")
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(f"{conn.base_url}/screenshot")
+        resp.raise_for_status()
         value = resp.json().get("value")
         if not isinstance(value, str):
             raise DeviceError(f"WDA returned no screenshot on {udid[:8]}", tool="wda")
