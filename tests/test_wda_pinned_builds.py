@@ -450,6 +450,18 @@ def test_a_snapshot_is_never_partial_where_recovery_looks(tmp_path, monkeypatch)
     assert sorted(p.name for p in tmp_path.iterdir()) == ["derived", "derived-previous"]
 
 
+def test_recovery_settles_the_phase(tmp_path, state):
+    """Restored, the build it describes is gone: left set, the next build's
+    finished-and-recorded case would be read as cut short (review)."""
+    derived, previous = tmp_path / "derived", tmp_path / "derived-previous"
+    (derived / "partial").mkdir(parents=True)
+    (previous / "old").mkdir(parents=True)
+    state["build_phase"] = "building"
+    wda._recover_previous(derived, previous, "build_phase")
+    assert (derived / "old").is_dir() and not previous.exists()
+    assert "build_phase" not in state
+
+
 class TestTheKeptDeviceBuild:
     async def test_a_build_interrupted_by_a_crash_is_rolled_back_not_kept(self, device, state):
         """A -previous still there means the build that made it never ended:
