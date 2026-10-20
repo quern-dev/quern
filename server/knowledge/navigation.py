@@ -453,9 +453,13 @@ def previous_tap_note(tap: DocumentedTap, screen_context: dict, now: float) -> d
     leaving = [edge for _app, screen, edge in tap.edges if screen == on]
     if not leaving:
         return None
-    targets = sorted({edge.target for edge in leaving})
-    if on in targets:
+    # Where the tap could have led from *any* screen it is documented on, not
+    # only from this one: a toggle -- "Show" from A to B, and back from B to A
+    # -- tapped on A lands on B, which "Show" also leaves. Judging B by its own
+    # edges blamed a tap that had arrived.
+    if any(edge.target == on for _app, _screen, edge in tap.edges):
         return None
+    targets = sorted({edge.target for edge in leaving})
     label = tap.tapped.get("label") or tap.tapped.get("identifier") or "the element"
     expected: str | list[str] = targets[0] if len(targets) == 1 else targets
     want = expected if isinstance(expected, str) else " or ".join(expected)

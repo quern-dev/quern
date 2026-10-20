@@ -824,6 +824,16 @@ class TestPreviousTap:
         assert "not blindly for a submit" in prev["note"]
         controller.get_ui_elements.assert_not_called()
 
+    async def test_a_toggle_that_arrived_is_not_blamed(self, app, controller):
+        # "More" leads text -> more, and the same "More" leads more -> text.
+        screens = _registry_screens()
+        screens[1].leads_to = [NavEdge(target="text", label="More", element_type="RadioButton")]
+        app.state.landmark_registry.load("probe", screens)
+        await _tap(app, {"label": "More"}, opt_in=False)   # from text, arrives on more
+        _, body = await self._miss(app, controller,
+                                   {"identified_as": "more", "confidence": "exact"})
+        assert "previous_tap" not in body["detail"]
+
     async def test_it_is_said_once(self, app, controller):
         app.state.landmark_registry.load("probe", _registry_screens())
         await _tap(app, {"label": "More"}, opt_in=False)
