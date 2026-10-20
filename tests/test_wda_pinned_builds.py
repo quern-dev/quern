@@ -687,13 +687,13 @@ class TestTheKeptSimulatorBuild:
         monkeypatch.setattr(wda, "_xcodebuild_simulator", spy)
         assert await wda.build_wda_simulator() is True
         assert seen == ["building"]
-        assert "sim_build_phase" not in state
+        assert "sim_build_phase" not in state and "sim_build_kept" not in state
 
     async def test_a_failed_build_clears_the_phase(self, sim, state):
         sim["old_build"]()
         sim["builds"](ok=False)
         assert await wda.build_wda_simulator() is False
-        assert "sim_build_phase" not in state
+        assert "sim_build_phase" not in state and "sim_build_kept" not in state
 
 
 async def test_the_simulator_start_says_an_update_failed(state, monkeypatch, tmp_path):
