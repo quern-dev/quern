@@ -2,7 +2,8 @@
 app_name: "QuernProbe"
 bundle_id: "com.quern.probe"
 
-# Every tab, from every screen (#503).
+# Every tab this knowledge base documents, from every screen (#503). The
+# Gestures tab is not in the conformance contract, so it has no screen here.
 global_leads_to:
   - screen: "[[screens/text]]"
     action: 'tap_element label="Text"'
