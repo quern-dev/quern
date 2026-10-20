@@ -1867,7 +1867,7 @@ def _report_node() -> bool:
     from server.lifecycle import node_env
 
     print()
-    print(f"Node.js (the MCP wrapper needs {node_env.MIN_NODE_MAJOR}+):")
+    print(f"Node.js (the MCP wrapper needs {node_env.MIN_NODE_TEXT}+):")
     try:
         sites = node_env.probe()
     except Exception as exc:  # noqa: BLE001 -- doctor reports, it does not crash
@@ -1957,7 +1957,7 @@ def _report_mcp_registrations() -> bool:
             print(f"  \u2717 {reg.label} — {reg.node} no longer exists")
         elif a.status == mcp_clients.TOO_OLD:
             print(f"  \u2717 {reg.label} — {reg.node} is {a.version}, below Node "
-                  f"{node_env.MIN_NODE_MAJOR}")
+                  f"{node_env.MIN_NODE_TEXT}")
         else:
             print(f"  \u2717 {reg.label} — {reg.node} did not report a Node version "
                   f"when run the way a GUI client runs it")

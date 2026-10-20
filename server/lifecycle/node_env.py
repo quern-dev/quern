@@ -39,9 +39,17 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-#: The MCP wrapper's floor. Mirrors `REQUIRED_MAJOR` in `mcp/src/launcher.cjs`
-#: and `engines` in `mcp/package.json`; a test keeps the three in step.
-MIN_NODE_MAJOR = 22
+#: The MCP wrapper's floor, as (major, minor, patch). Mirrors `REQUIRED` in
+#: `mcp/src/launcher.cjs` and `engines` in `mcp/package.json`; a test keeps the
+#: three in step. 22.19, not 22: undici 8 declares `>=22.19.0` (#506), and a
+#: floor of 22 let Node 22.0-22.18 pass every check here and then fail inside
+#: the wrapper's HTTP client.
+MIN_NODE = (22, 19, 0)
+#: The floor as people read it: "Node 22.19+".
+MIN_NODE_TEXT = f"{MIN_NODE[0]}.{MIN_NODE[1]}"
+#: The line to install from. Version managers install the newest 22.x, which
+#: meets the floor; naming a minor would pin people to it.
+MIN_NODE_MAJOR = MIN_NODE[0]
 
 #: launchd's default PATH for a user's GUI apps.
 GUI_PATH = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
@@ -141,23 +149,41 @@ def run_bounded(argv: list[str], *, env: dict[str, str] | None = None,
 
 def major_version(version: str | None) -> int | None:
     """22 from "v22.22.2"; None when there is nothing to parse."""
+    parsed = parse_version(version)
+    return parsed[0] if parsed else None
+
+
+def parse_version(version: str | None) -> tuple[int, int, int] | None:
+    """(22, 22, 2) from "v22.22.2"; None when there is nothing to parse.
+
+    A missing minor or patch reads as 0, so "v22" is (22, 0, 0) -- below a
+    22.19 floor, which is the safe direction for a version that says too little.
+    """
     if not version:
         return None
-    m = re.match(r"v?(\d+)\.", version.strip())
-    return int(m.group(1)) if m else None
+    m = re.match(r"v?(\d+)(?:\.(\d+))?(?:\.(\d+))?", version.strip())
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2) or 0), int(m.group(3) or 0)
+
+
+def meets_floor(version: str | None) -> bool | None:
+    """Whether a reported version is at or above `MIN_NODE`; None if unparseable."""
+    parsed = parse_version(version)
+    return None if parsed is None else parsed >= MIN_NODE
 
 
 def _classify(path: str | None, version: str | None) -> str:
     if not path:
         return MISSING
-    major = major_version(version)
-    if major is None:
+    ok = meets_floor(version)
+    if ok is None:
         # Found but would not report a version: a broken binary is not a
         # working one, and calling it OK is the false all-clear. Nor is it
         # "too old" -- that advice would be to upgrade something that does not
         # run at all.
         return UNUSABLE
-    return OK if major >= MIN_NODE_MAJOR else TOO_OLD
+    return OK if ok else TOO_OLD
 
 
 def _version_of(path: str, run: Runner) -> str | None:
@@ -416,7 +442,7 @@ def fix_for(site: NodeSite, sites: list[NodeSite]) -> str:
     upgrade = upgrade_command(manager)
 
     if site.status == TOO_OLD:
-        return f"Node {site.version} is below {MIN_NODE_MAJOR}. Run: {upgrade}"
+        return f"Node {site.version} is below {MIN_NODE_TEXT}. Run: {upgrade}"
     if site.status == UNUSABLE:
         return (f"{site.path} did not run or report its version, so it is "
                 f"probably broken. Reinstall it: {upgrade}")
@@ -428,7 +454,7 @@ def fix_for(site: NodeSite, sites: list[NodeSite]) -> str:
         return (f"Apps launched from the Dock get {':'.join(GUI_PATH)} and no "
                 "shell startup files, so a version manager's node is invisible "
                 "to them. Either set your MCP client's \"command\" to an absolute "
-                f"path to a Node {MIN_NODE_MAJOR}+ binary (the reliable fix), or "
+                f"path to a Node {MIN_NODE_TEXT}+ binary (the reliable fix), or "
                 "add a directory to every GUI app's PATH with "
                 "`sudo launchctl config user path ...` and log out and in.")
     if site.place == "the Quern app":
@@ -489,7 +515,7 @@ def node_for_clients(
     resolve: Callable[[str], str] = os.path.realpath,
     exists: Callable[[str], bool] = os.path.exists,
 ) -> ClientNode | None:
-    """A Node MIN_NODE_MAJOR+ binary every MCP client can run, by absolute path.
+    """A Node binary meeting `MIN_NODE` that every MCP client can run, by absolute path.
 
     Registering `"command": "node"` hands the choice to each client's own PATH,
     which for a GUI client is launchd's -- no fnm, no nvm, no Homebrew -- and
@@ -599,14 +625,14 @@ def check_outside_a_shell(path: str, *, run: Runner = run_bounded,
     except (OSError, ValueError, subprocess.SubprocessError):
         return UNUSABLE, None
     version = (result.stdout or "").strip() if result.returncode == 0 else ""
-    major = major_version(version)
-    if major is None:
+    ok = meets_floor(version)
+    if ok is None:
         return UNUSABLE, None
-    return (OK if major >= MIN_NODE_MAJOR else TOO_OLD), version
+    return (OK if ok else TOO_OLD), version
 
 
 def _runs_without_a_shell(path: str, *, run: Runner, home: str) -> str | None:
-    """The version this node reports under launchd's PATH, if MIN_NODE_MAJOR+."""
+    """The version this node reports under launchd's PATH, if it meets `MIN_NODE`."""
     try:
         result = run([path, "--version"],
                      env={"HOME": home, "PATH": os.pathsep.join(GUI_PATH)},
@@ -615,6 +641,6 @@ def _runs_without_a_shell(path: str, *, run: Runner, home: str) -> str | None:
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
     version = (result.stdout or "").strip()
-    if result.returncode != 0 or (major_version(version) or 0) < MIN_NODE_MAJOR:
+    if result.returncode != 0 or not meets_floor(version):
         return None
     return version

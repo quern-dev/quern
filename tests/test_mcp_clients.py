@@ -115,8 +115,8 @@ class TestAssess:
     @pytest.mark.parametrize("node, exists, check, status, words", [
         ("/gone/node", False, None, mcp_clients.GONE, "no longer exists"),
         ("~/.nvm/node", True, None, mcp_clients.TILDE, "do not expand"),
-        ("/old/node", True, (node_env.TOO_OLD, "v20.20.2"), mcp_clients.TOO_OLD,
-         "Node v20.20.2; Quern needs 22"),
+        ("/old/node", True, (node_env.TOO_OLD, "v22.12.0"), mcp_clients.TOO_OLD,
+         "Node v22.12.0; Quern needs 22.19 or later"),
         ("/broken/bin/node", True, (node_env.UNUSABLE, None), mcp_clients.UNUSABLE,
          "did not report a Node version"),
         (None, True, None, mcp_clients.NO_COMMAND, "has no command"),

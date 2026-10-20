@@ -664,7 +664,7 @@ def _rebuild_and_restart(project_root: Path) -> list[str]:
     # Run setup to check for new external dependencies
     from server.lifecycle.setup import run_setup
 
-    if run_setup() != 0:
+    if run_setup(after_update=True) != 0:
         print("Warning: setup reported errors — see above")
         failures.append("setup")
 
@@ -1030,7 +1030,7 @@ def _warn_if_node_cannot_build() -> None:
     from server.config import quern_cmd
 
     print(f"Warning: {node_env.fix_for(site, [site])}")
-    print(f"  The MCP wrapper needs Node {node_env.MIN_NODE_MAJOR}+. Continuing; "
+    print(f"  The MCP wrapper needs Node {node_env.MIN_NODE_TEXT}+. Continuing; "
           f"`{quern_cmd()} doctor` shows every place a node is picked.")
 
 

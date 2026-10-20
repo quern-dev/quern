@@ -7,17 +7,30 @@
 // node off PATH). The ESM entry (dist/index.js) is loaded only after
 // the version gate passes.
 
-var REQUIRED_MAJOR = 22;
-var major = parseInt(process.versions.node.split(".")[0], 10);
+// The floor as [major, minor, patch]. Mirrors MIN_NODE in
+// server/lifecycle/node_env.py and `engines` in package.json; a test keeps the
+// three in step. 22.19, not 22: undici 8 declares >=22.19.0 (#506).
+var REQUIRED = [22, 19, 0];
+var REQUIRED_TEXT = REQUIRED[0] + "." + REQUIRED[1];
+// ES5 on purpose -- this has to parse on the old node it is refusing.
+var have = process.versions.node.split(".").map(function (n) { return parseInt(n, 10); });
 
-if (isNaN(major) || major < REQUIRED_MAJOR) {
+function below(v, floor) {
+  for (var i = 0; i < floor.length; i++) {
+    var part = isNaN(v[i]) ? 0 : v[i];
+    if (part !== floor[i]) { return part < floor[i]; }
+  }
+  return false;
+}
+
+if (isNaN(have[0]) || below(have, REQUIRED)) {
   process.stderr.write(
-    "quern-debug-mcp: requires Node >= " + REQUIRED_MAJOR +
+    "quern-debug-mcp: requires Node >= " + REQUIRED_TEXT +
     ", but is running on Node " + process.versions.node + "\n" +
     "  Binary: " + process.execPath + "\n" +
     "  Fix: in your MCP client config, set 'command' to an absolute path\n" +
-    "       to a Node " + REQUIRED_MAJOR + "+ binary, e.g.\n" +
-    "       /Users/you/.nvm/versions/node/v" + REQUIRED_MAJOR + ".x.x/bin/node\n"
+    "       to a Node " + REQUIRED_TEXT + "+ binary, e.g.\n" +
+    "       /Users/you/.nvm/versions/node/v" + REQUIRED[0] + ".x.x/bin/node\n"
   );
   process.exit(1);
 }

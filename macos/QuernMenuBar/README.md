@@ -35,7 +35,7 @@ manager with a **Restart to Update** action.
   different version, so finishing the update by any route retires it.
 - **\<Client\> Can’t Start Quern…** — appears when an MCP client quern is
   registered with will not be able to start its MCP server: its registration
-  names a node that has since been removed, is older than 22 or does not run,
+  names a node that has since been removed, is older than 22.19 or does not run,
   or a Quern wrapper that is no longer there (Quern moved or was reinstalled).
   The client itself reports only `CONNECTION_CLOSED`. The dialog says which
   clients and why, and **Fix in Terminal** runs `quern mcp-install` for them,

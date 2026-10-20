@@ -681,7 +681,7 @@ def _sites(**status_by_place):
             "app": "the Quern app"}
     out = []
     for key, place in keys.items():
-        status, version = status_by_place.get(key, (node_env.OK, "v22.1.0"))
+        status, version = status_by_place.get(key, (node_env.OK, "v22.21.0"))
         path = None if status == node_env.MISSING else f"/x/{key}/node"
         out.append(node_env.NodeSite(place, "someone", status, path, version))
     return out
@@ -733,7 +733,7 @@ class TestCheckNode:
                                      node_env.MISSING, None, None)
         # Only GUI apps can see one, e.g. via `launchctl config user path`.
         sites[3] = node_env.NodeSite("GUI apps", "someone", node_env.OK,
-                                     "/opt/node/bin/node", "v22.1.0")
+                                     "/opt/node/bin/node", "v22.21.0")
 
         result = check_node(sites)
 
@@ -790,7 +790,7 @@ class TestCheckNode:
         sites = _sites(here=("missing", None))
         sites[1] = node_env.NodeSite(
             "login shell", "someone", node_env.OK,
-            "/Users/u/.local/state/fnm_multishells/800_1789/bin/node", "v22.1.0",
+            "/Users/u/.local/state/fnm_multishells/800_1789/bin/node", "v22.21.0",
         )
         result = check_node(sites)
 
@@ -1444,6 +1444,31 @@ class TestTheFlagIsActuallyWired:
         setup_mod._reexec_in_venv(venv)
 
         assert "--yes" not in seen["argv"]
+
+    @pytest.mark.parametrize("after_update", [True, False])
+    def test_finishing_an_update_survives_the_re_exec(self, monkeypatch, tmp_path, after_update):
+        """The updater passes `after_update=True` as an argument, which the
+        child does not get: without the variable it would be an ordinary run,
+        and a Node below the floor would fail the update (#506 review)."""
+        from server.lifecycle import setup as setup_mod
+
+        venv = tmp_path / ".venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "python").write_text("")
+        seen = {}
+        monkeypatch.setattr(setup_mod.subprocess, "run",
+                            lambda argv, **k: seen.update(env=k["env"])
+                            or SimpleNamespace(returncode=0))
+        if after_update:
+            # Unset, so only the re-exec can have put it there.
+            monkeypatch.delenv(setup_mod.AFTER_UPDATE_ENV, raising=False)
+        else:
+            # A stale "1" from a caller must not survive into an ordinary run.
+            monkeypatch.setenv(setup_mod.AFTER_UPDATE_ENV, "1")
+        monkeypatch.setattr(setup_mod, "_AFTER_UPDATE", after_update)
+        setup_mod._reexec_in_venv(venv)
+
+        assert (seen["env"].get(setup_mod.AFTER_UPDATE_ENV) == "1") is after_update
 
 
 class TestTheStandingCertAnswer:
@@ -3344,3 +3369,119 @@ class TestRestartKeepsThePort:
         with contextlib.suppress(SystemExit):
             main_mod.cli()
         assert seen == {"port": DEFAULT_SERVER_PORT}
+
+
+# --------------------------------------------------------------------------
+# A Node no MCP client can start the wrapper with (#506)
+# --------------------------------------------------------------------------
+
+
+def _node_sites(*statuses_versions):
+    from server.lifecycle import node_env
+
+    places = ["this terminal", "login shell", "GUI apps", "the Quern app"]
+    return [node_env.NodeSite(place, "someone", status, "/n/node" if version else None, version)
+            for place, (status, version) in zip(places, statuses_versions, strict=False)]
+
+
+class TestMcpCannotStart:
+    def test_every_place_too_old(self):
+        from server.lifecycle import node_env
+        from server.lifecycle.setup import mcp_cannot_start
+
+        old = (node_env.TOO_OLD, "v22.12.0")
+        assert mcp_cannot_start(_node_sites(old, old, old)) is True
+
+    def test_one_place_with_a_good_node_is_enough(self):
+        """A client reading that place starts it; mcp-install registers that
+        one by absolute path."""
+        from server.lifecycle import node_env
+        from server.lifecycle.setup import mcp_cannot_start
+
+        assert mcp_cannot_start(_node_sites(
+            (node_env.TOO_OLD, "v22.12.0"), (node_env.OK, "v22.21.0"))) is False
+
+    def test_missing_here_and_a_failed_probe_are_other_answers(self):
+        from server.lifecycle import node_env
+        from server.lifecycle.setup import mcp_cannot_start
+
+        assert mcp_cannot_start(_node_sites((node_env.MISSING, None))) is False
+        assert mcp_cannot_start(None) is False
+
+
+class TestNodeSeverity:
+    def _warning(self):
+        return CheckResult(name="Node.js", status=CheckStatus.WARNING, message="v22.12.0 here")
+
+    def test_a_person_running_setup_gets_an_error(self):
+        from server.lifecycle.setup import _node_severity
+
+        result = _node_severity(self._warning(), True, after_update=False)
+        assert result.status == CheckStatus.ERROR
+        assert "cannot start" in result.message
+
+    def test_an_update_keeps_the_warning(self):
+        from server.lifecycle.setup import _node_severity
+
+        assert _node_severity(self._warning(), True, after_update=True).status == CheckStatus.WARNING
+
+    def test_a_node_that_can_start_it_is_left_alone(self):
+        from server.lifecycle.setup import _node_severity
+
+        assert _node_severity(self._warning(), False, after_update=False).status == CheckStatus.WARNING
+
+
+class TestTheClosingLine:
+    def test_it_names_the_node_the_floor_and_the_fix(self, capsys, monkeypatch):
+        from server.lifecycle import node_env
+        from server.lifecycle import setup as setup_mod
+
+        old = (node_env.TOO_OLD, "v22.12.0")
+        setup_mod._print_mcp_blocked(_node_sites(old, old))
+        out = capsys.readouterr().out
+        assert "MCP will not start" in out
+        assert "Node v22.12.0 here" in out and "22.19+" in out
+        assert "setup' again" in out
+
+
+class TestAfterUpdateFromTheEnvironment:
+    """The menu bar's Finish Update runs `quern setup` in a Terminal: it says
+    so with QUERN_SETUP_AFTER_UPDATE=1, and only "1" counts."""
+
+    def _read(self, monkeypatch, value):
+        from server.lifecycle import setup as setup_mod
+
+        seen = {}
+
+        def stop(*a, **k):
+            seen["after_update"] = setup_mod_after["value"]
+            raise SystemExit(0)
+
+        setup_mod_after = {"value": None}
+        real = setup_mod._node_severity
+
+        def spy(result, blocked, *, after_update):
+            setup_mod_after["value"] = after_update
+            return real(result, blocked, after_update=after_update)
+
+        if value is None:
+            monkeypatch.delenv(setup_mod.AFTER_UPDATE_ENV, raising=False)
+        else:
+            monkeypatch.setenv(setup_mod.AFTER_UPDATE_ENV, value)
+        from server.lifecycle import node_env
+
+        _stub_the_checks_before_the_venv(monkeypatch)
+        old = (node_env.TOO_OLD, "v22.12.0")
+        monkeypatch.setattr(setup_mod, "_probe_node_sites", lambda: _node_sites(old, old))
+        monkeypatch.setattr(setup_mod, "_node_severity", spy)
+        # Stop straight after the Node check, before anything asks the machine.
+        monkeypatch.setattr(setup_mod, "_fix_developer_dir_for_setup", stop)
+        with pytest.raises(SystemExit):
+            setup_mod.run_setup()
+        return setup_mod_after["value"]
+
+    @pytest.mark.parametrize("value, expected", [
+        ("1", True), (None, False), ("", False), ("0", False), ("yes", False),
+    ])
+    def test_only_one_means_after_an_update(self, monkeypatch, value, expected):
+        assert self._read(monkeypatch, value) is expected

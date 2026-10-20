@@ -1067,7 +1067,11 @@ def rebuild(monkeypatch, tmp_path):
     monkeypatch.setattr("server.__main__._ensure_python_deps",
                         lambda **_kw: state["deps"])
     monkeypatch.setattr("server.__main__._ensure_mcp_built", lambda **_kw: state["mcp"])
-    monkeypatch.setattr("server.lifecycle.setup.run_setup", lambda: state["setup"])
+    def run_setup(**kw):
+        state["setup_kw"] = kw
+        return state["setup"]
+
+    monkeypatch.setattr("server.lifecycle.setup.run_setup", run_setup)
     monkeypatch.setattr("server.lifecycle.state.read_state",
                         lambda: {"server_port": state["port"], "proxy_port": state["proxy_port"]}
                         if state["running"] else None)
@@ -1094,6 +1098,14 @@ def rebuild(monkeypatch, tmp_path):
 
 def test_everything_working_reports_no_failures(rebuild):
     assert rebuild["_run"]() == []
+
+
+def test_the_update_runs_setup_as_finishing_an_update(rebuild):
+    """So a Node below the floor is a warning inside an update, never the
+    error a person running setup gets: an update must not fail over the
+    user's Node arrangement (#214, #506)."""
+    rebuild["_run"]()
+    assert rebuild["setup_kw"].get("after_update") is True, rebuild["setup_kw"]
 
 
 # The default server port moved from 9100 to 9110 (#446). `quern restart`

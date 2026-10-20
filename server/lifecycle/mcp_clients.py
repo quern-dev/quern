@@ -1,6 +1,6 @@
 """Whether each MCP client quern is registered with can start its wrapper (#214).
 
-`mcp-install` registers an absolute Node 22+ and the wrapper beside it, but a
+`mcp-install` registers an absolute Node 22.19+ and the wrapper beside it, but a
 registration outlives both: `nvm uninstall` or a Homebrew cleanup removes the
 node, and moving or reinstalling Quern removes the wrapper. The client then
 reports only `CONNECTION_CLOSED`, and nothing in quern's own output ever
@@ -102,7 +102,7 @@ def fix_for(reg) -> str:
                 f".mcpServers in {reg.config}, or remove that entry so the user-wide "
                 f"one applies; `{quern_cmd()} mcp-install` does not write project entries")
     return (f"`{quern_cmd()} mcp-install {reg.client}` registers an absolute Node "
-            f"{node_env.MIN_NODE_MAJOR}+")
+            f"{node_env.MIN_NODE_TEXT}+")
 
 
 def assess(registrations: list, *,
@@ -158,7 +158,7 @@ def assess(registrations: list, *,
                 out.append(Assessment(
                     reg, TOO_OLD, version, fails=True, fix=fix_for(reg),
                     reason=f"{name} runs {node}, which is Node {version}; Quern needs "
-                           f"{node_env.MIN_NODE_MAJOR} or later"))
+                           f"{node_env.MIN_NODE_TEXT} or later"))
             else:
                 out.append(Assessment(
                     reg, UNUSABLE, fails=True, fix=fix_for(reg),

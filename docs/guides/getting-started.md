@@ -136,14 +136,14 @@ If you ran the installer, the MCP server is already registered. Just open Claude
 
 If you installed manually, run `quern mcp-install` to register. It registers
 Claude Code, Claude Desktop, Cursor, OpenCode and Codex with the absolute path
-of a Node 22+ binary, and prints which one, so each client runs that node rather
+of a Node 22.19+ binary, and prints which one, so each client runs that node rather
 than whichever `node` its own PATH finds. Run it again after changing Node
 versions in a way that removes that binary; `quern doctor` lists each client's
 registration and says when that is needed.
 
 ### Other MCP Clients
 
-Point your client at an absolute Node 22+ binary running
+Point your client at an absolute Node 22.19+ binary running
 `~/.local/share/quern/mcp/dist/launcher.cjs` -- for example `command`
 `/opt/homebrew/bin/node` (or `~/.local/share/fnm/aliases/default/bin/node`,
 written out in full) with that launcher as its argument. A bare `node` is
@@ -151,9 +151,9 @@ resolved on the client's own PATH, which is the problem described below.
 
 Use `launcher.cjs` rather than `index.js`. It checks the Node version first and tells you which binary it is running under if that version is too old — worth having, because MCP clients do not always pick the node you expect.
 
-Which `node` a client gets depends on how the client was started. A client opened from the Dock doesn't read your shell's startup files, so a Node installed with fnm, nvm, mise or asdf is invisible to it even when every terminal finds it. `quern doctor` shows the `node` found in each place: this terminal, a login shell, a non-interactive shell, apps opened from the Dock, and the Quern app itself. For any place where it's missing or older than 22, it gives the fix for that place.
+Which `node` a client gets depends on how the client was started. A client opened from the Dock doesn't read your shell's startup files, so a Node installed with fnm, nvm, mise or asdf is invisible to it even when every terminal finds it. `quern doctor` shows the `node` found in each place: this terminal, a login shell, a non-interactive shell, apps opened from the Dock, and the Quern app itself. For any place where it’s missing or older than 22.19, it gives the fix for that place.
 
-For a client opened from the Dock, Homebrew does not help: launchd's PATH is `/usr/bin:/bin:/usr/sbin:/sbin`, which `/opt/homebrew/bin` is not in. Set the client's `command` to an absolute path to a Node 22+ binary, or add a directory to every GUI app's PATH with `sudo launchctl config user path …` and log back in.
+For a client opened from the Dock, Homebrew does not help: launchd's PATH is `/usr/bin:/bin:/usr/sbin:/sbin`, which `/opt/homebrew/bin` is not in. Set the client's `command` to an absolute path to a Node 22.19+ binary, or add a directory to every GUI app's PATH with `sudo launchctl config user path …` and log back in.
 
 The MCP wrapper auto-discovers the running server via `~/.quern/state.json` — no URL or API key configuration needed.
 

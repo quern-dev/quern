@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Quern needs Node 22.19 or later, not just 22 (#506).** The MCP wrapper's HTTP client, undici 8, needs 22.19. quern's floor compared only the major version, so a Node 22.0-22.18 passed `quern setup`, `quern doctor` and the menu bar's checks and then failed inside the wrapper. Every check now reads the minor version: `quern doctor` and the menu bar's "Can't Start Quern" row name a 22.12 as too old, `quern mcp-install` passes it over, and the wrapper refuses it at start with the binary to change. A version manager's `install 22` gets the newest 22.x, which meets the floor.
+
 ## [0.25.0-beta.2] - 2026-10-19
 
 ### Added

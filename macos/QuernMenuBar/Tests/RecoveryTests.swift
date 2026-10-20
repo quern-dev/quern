@@ -26,10 +26,29 @@ enum RecoveryTests {
 
         Harness.test("finishing an update runs setup, then restart") {
             let l = lines(script(.finishUpdate, quern: "/q"))
-            let setup = l.firstIndex(of: "'/q' setup")
+            // Ends with: the setup line carries QUERN_SETUP_AFTER_UPDATE (#506).
+            let setup = l.firstIndex { $0.hasSuffix("'/q' setup") }
             let restart = l.firstIndex(of: "'/q' restart")
             Harness.expect(setup != nil && restart != nil, "both commands: \(l)")
             Harness.expect((setup ?? 0) < (restart ?? 0), "setup before restart")
+        }
+
+        Harness.test("finishing an update tells setup so, and only then") {
+            // setup turns a Node no MCP client can start into an error for a
+            // person setting up, and keeps it a warning when finishing an
+            // update (#506). The first-run set-up is a person setting up.
+            let finish = lines(script(.finishUpdate, quern: "/q"))
+            Harness.expect(finish.contains("QUERN_SETUP_AFTER_UPDATE=1 '/q' setup"),
+                           "on the setup command: \(finish)")
+            // Scoped to that one command: the window ends in the user's own
+            // shell, where a `quern setup` they type is a person's (#506 review).
+            Harness.expect(!finish.contains { $0.hasPrefix("export QUERN_SETUP_AFTER_UPDATE") },
+                           "not exported to the shell the window ends in")
+            Harness.expect(finish.contains("'/q' restart"), "restart still runs")
+            for r in [Recovery.repair, .setUp] {
+                let text = script(r, quern: "/q", releaseWrapperExists: true)
+                Harness.expect(!text.contains("QUERN_SETUP_AFTER_UPDATE"), "\(r) does not claim an update")
+            }
         }
 
         Harness.test("every recovery leaves the window open and names the log") {
