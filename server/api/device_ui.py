@@ -819,10 +819,11 @@ async def tap_element(request: Request, body: TapElementRequest):
                 store = _tap_frames(request)
                 if store is not None:
                     store.pop(resolved, None)
-                    frame, ms, source = before_frame
-                    if frame is not None:
+                    png, ms, source = before_frame
+                    if png is not None:
                         store[resolved] = frames.TapFrame(
-                            tapped=result["tapped"], frame=frame, at=time.monotonic(),
+                            tapped=result["tapped"], png=png,
+                            platform=frames.platform_of(source), at=time.monotonic(),
                             stamp=_last_change(controller, resolved), capture_ms=ms,
                             source=source,
                         )

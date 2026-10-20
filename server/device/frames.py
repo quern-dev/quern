@@ -44,7 +44,11 @@ class TapFrame:
     """A delivered tap and the screen just before it."""
 
     tapped: dict
-    frame: object          # a PIL image, cropped and reduced
+    #: The capture as the backend returned it. Decoded only at a miss: the
+    #: decode and resize are most of the cost on a fast backend, and a tap
+    #: that is not followed by a miss never needs them.
+    png: bytes
+    platform: str
     at: float
     #: The device's last screen change as the tap left it (#499's stamp).
     stamp: float | None
@@ -52,15 +56,13 @@ class TapFrame:
     source: str
 
 
-async def _capture(controller, udid: str) -> tuple[object | None, float, str]:
-    """A frame of the screen, cropped and reduced, on the fastest path.
+async def _capture(controller, udid: str) -> tuple[bytes | None, float, str]:
+    """The screen as the backend returns it, on its fastest path.
 
-    Returns `(frame, milliseconds, source)`; the frame is None when the
-    capture failed or was too slow, which the caller treats as "no frame",
-    never as a changed screen.
+    Returns `(image bytes, milliseconds, source)`; the bytes are None when
+    the capture failed or was too slow, which the caller treats as "no
+    frame", never as a changed screen.
     """
-    from server.device.settle import _prepare
-
     start = time.monotonic()
     source = "none"
     try:
@@ -77,16 +79,30 @@ async def _capture(controller, udid: str) -> tuple[object | None, float, str]:
         else:
             source = "simctl"
             png = await asyncio.wait_for(controller.raw_screenshot(udid), CAPTURE_TIMEOUT)
-        image = _prepare(png)
     except Exception:  # noqa: BLE001 -- no frame is an answer, never a failure
         logger.debug("frame capture failed on %s", source, exc_info=True)
-        image = None
-    ms = (time.monotonic() - start) * 1000
+        png = None
+    if not png:
+        png = None
+    return png, (time.monotonic() - start) * 1000, source
+
+
+def platform_of(source: str) -> str:
+    """Which status bar to crop for a capture from `source`."""
+    return "android" if source == "adb" else "ios"
+
+
+def prepare(png: bytes | None, platform: str):
+    """A capture as a small grayscale image of the content, or None."""
+    from server.device.settle import _prepare
+
+    if not png:
+        return None
+    image = _prepare(png)
     if image is None:
-        return None, ms, source
-    platform = "android" if source == "adb" else "ios"
+        return None
     top = int(image.height * STATUS_BAR_FRACTION[platform])
-    return image.crop((0, top, image.width, image.height)), ms, source
+    return image.crop((0, top, image.width, image.height))
 
 
 #: The capture the routes call. A name of its own so the test suite can stand
@@ -96,21 +112,25 @@ capture = _capture
 
 
 def unchanged_note(
-    tap: TapFrame, after: object | None, now: float, *, stamp: float | None,
+    tap: TapFrame, after_png: bytes | None, now: float, *, stamp: float | None,
 ) -> dict | None:
     """`screen_unchanged_since_tap`, when the screen has not changed since
     the tap -- or None.
 
     Silent unless every one of these holds: there is a frame after; nothing
     has changed the screen through quern since the tap (`stamp`); the tap is
-    under two minutes old; and the two frames differ by less than
-    `UNCHANGED_BELOW`. A frame of a different size is a changed screen.
+    under two minutes old; both captures decode; and they differ by less than
+    `UNCHANGED_BELOW`. Frames of different sizes are a changed screen.
     """
     from server.device.settle import changed_fraction
 
-    if after is None or stamp != tap.stamp or now - tap.at > TTL:
+    if after_png is None or stamp != tap.stamp or now - tap.at > TTL:
         return None
-    change = changed_fraction(tap.frame, after)
+    before = prepare(tap.png, tap.platform)
+    after = prepare(after_png, tap.platform)
+    if before is None or after is None:
+        return None
+    change = changed_fraction(before, after)
     if change >= UNCHANGED_BELOW:
         return None
     label = tap.tapped.get("label") or tap.tapped.get("identifier") or "the element"

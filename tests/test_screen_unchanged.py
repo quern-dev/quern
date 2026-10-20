@@ -31,53 +31,52 @@ def _png(color: int = 128, size=(400, 800), box=None) -> bytes:
     return out.getvalue()
 
 
-def _frame(png: bytes):
-    from server.device.settle import _prepare
-
-    image = _prepare(png)
-    top = int(image.height * frames.STATUS_BAR_FRACTION["ios"])
-    return image.crop((0, top, image.width, image.height))
-
-
 def _tap(png=None, at=100.0, stamp=5.0):
-    return frames.TapFrame(tapped={"label": "Go", "type": "Button"},
-                           frame=_frame(png or _png()), at=at, stamp=stamp,
-                           capture_ms=80.0, source="wda")
+    return frames.TapFrame(tapped={"label": "Go", "type": "Button"}, png=png or _png(),
+                           platform="ios", at=at, stamp=stamp, capture_ms=80.0, source="wda")
 
 
 class TestUnchangedNote:
     def test_the_same_screen(self):
-        note = frames.unchanged_note(_tap(), _frame(_png()), 104.0, stamp=5.0)
+        note = frames.unchanged_note(_tap(), _png(), 104.0, stamp=5.0)
         assert note["change"] == 0.0 and note["seconds_ago"] == 4.0
         assert "'Go'" in note["note"] and "not blindly for a submit" in note["note"]
         assert note["tapped"] == {"label": "Go", "identifier": None, "type": "Button"}
 
     def test_a_changed_screen(self):
-        after = _frame(_png(box=(0, 200, 400, 300, 255)))
+        after = _png(box=(0, 200, 400, 300, 255))
         assert frames.unchanged_note(_tap(), after, 104.0, stamp=5.0) is None
 
     def test_a_small_change_below_the_threshold(self):
         # A blinking caret or a spinner: a few pixels.
-        after = _frame(_png(box=(200, 400, 4, 12, 255)))
+        after = _png(box=(200, 400, 4, 12, 255))
         assert frames.unchanged_note(_tap(), after, 104.0, stamp=5.0) is not None
 
     def test_the_status_bar_is_not_compared(self):
         # The clock ticked: a change in the top band only.
-        after = _frame(_png(box=(0, 0, 400, 40, 255)))
+        after = _png(box=(0, 0, 400, 40, 255))
         assert frames.unchanged_note(_tap(), after, 104.0, stamp=5.0) is not None
 
     def test_another_screen_change_since(self):
-        assert frames.unchanged_note(_tap(), _frame(_png()), 104.0, stamp=6.0) is None
+        assert frames.unchanged_note(_tap(), _png(), 104.0, stamp=6.0) is None
 
     def test_too_long_ago(self):
-        assert frames.unchanged_note(_tap(), _frame(_png()), 100.0 + 121, stamp=5.0) is None
-        assert frames.unchanged_note(_tap(), _frame(_png()), 100.0 + 119, stamp=5.0)
+        assert frames.unchanged_note(_tap(), _png(), 100.0 + 121, stamp=5.0) is None
+        assert frames.unchanged_note(_tap(), _png(), 100.0 + 119, stamp=5.0)
 
     def test_no_frame_after(self):
         assert frames.unchanged_note(_tap(), None, 104.0, stamp=5.0) is None
 
+    def test_an_undecodable_frame_is_no_note(self):
+        assert frames.unchanged_note(_tap(), b"junk", 104.0, stamp=5.0) is None
+        assert frames.unchanged_note(_tap(png=b"junk"), _png(), 104.0, stamp=5.0) is None
+
+    def test_android_crops_its_own_status_bar(self):
+        image = frames.prepare(_png(), "android")
+        assert image.height == 200 - int(200 * frames.STATUS_BAR_FRACTION["android"])
+
     def test_a_rotation(self):
-        after = _frame(_png(size=(800, 400)))
+        after = _png(size=(800, 400))
         assert frames.unchanged_note(_tap(), after, 104.0, stamp=5.0) is None
 
 
@@ -104,29 +103,40 @@ class TestCapture:
     ])
     async def test_each_backend_uses_its_fastest_path(self, kind, source):
         c = self._controller(**kind)
-        frame, ms, used = await frames._capture(c, "UDID")
-        assert used == source and frame is not None and ms >= 0
+        png, ms, used = await frames._capture(c, "UDID")
+        assert used == source and png == _png() and ms >= 0
+        assert frames.platform_of(used) == ("android" if source == "adb" else "ios")
         called = {
             "wda": c.wda_client.screenshot, "adb": c.raw_screenshot,
             "sim-bridge": c.sim_bridge.screenshot, "simctl": c.raw_screenshot,
         }[source]
         called.assert_awaited_once()
 
-    async def test_the_status_bar_is_cropped(self):
-        frame, _, _ = await frames._capture(self._controller(wda=True), "UDID")
-        assert frame.height == 200 - int(200 * frames.STATUS_BAR_FRACTION["ios"])
+    async def test_the_capture_is_not_decoded_at_the_tap(self, monkeypatch):
+        import server.device.settle as settle
+
+        def no_decode(png):
+            raise AssertionError("decoded at the tap")
+
+        monkeypatch.setattr(settle, "_prepare", no_decode)
+        png, _, _ = await frames._capture(self._controller(wda=True), "UDID")
+        assert png == _png()
+
+    def test_the_status_bar_is_cropped(self):
+        image = frames.prepare(_png(), "ios")
+        assert image.height == 200 - int(200 * frames.STATUS_BAR_FRACTION["ios"])
 
     async def test_a_failed_capture_is_no_frame(self):
         c = self._controller(wda=True)
         c.wda_client.screenshot = AsyncMock(side_effect=OSError("gone"))
-        frame, _, source = await frames._capture(c, "UDID")
-        assert frame is None and source == "wda"
+        png, _, source = await frames._capture(c, "UDID")
+        assert png is None and source == "wda"
 
-    async def test_an_undecodable_capture_is_no_frame(self):
+    async def test_an_empty_capture_is_no_frame(self):
         c = self._controller(wda=True)
-        c.wda_client.screenshot = AsyncMock(return_value=b"not an image")
-        frame, _, _ = await frames._capture(c, "UDID")
-        assert frame is None
+        c.wda_client.screenshot = AsyncMock(return_value=b"")
+        png, _, _ = await frames._capture(c, "UDID")
+        assert png is None
 
     async def test_a_slow_capture_is_abandoned(self, monkeypatch):
         import asyncio
@@ -138,8 +148,8 @@ class TestCapture:
         monkeypatch.setattr(frames, "CAPTURE_TIMEOUT", 0.05)
         c = self._controller(wda=True)
         c.wda_client.screenshot = slow
-        frame, ms, _ = await frames._capture(c, "UDID")
-        assert frame is None and ms < 900
+        png, ms, _ = await frames._capture(c, "UDID")
+        assert png is None and ms < 900
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +182,7 @@ def screens(monkeypatch):
     async def capture(controller, udid):
         i = min(shown["n"], len(shown["pngs"]) - 1)
         shown["n"] += 1
-        return _frame(shown["pngs"][i]), 50.0, "wda"
+        return shown["pngs"][i], 50.0, "wda"
 
     monkeypatch.setattr(frames, "capture", capture)
     return shown
