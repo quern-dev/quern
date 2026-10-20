@@ -104,6 +104,9 @@ class TestUnchangedNote:
                               at=100.0, stamp=5.0, capture_ms=1.0, source="u2", grace=0.0)
         assert frames.unchanged_note(tap, _png(box=(0, 45, 400, 8, 255)), 104.0,
                                      stamp=5.0) is None
+        # And a change inside its own band (0-40px) is not compared.
+        assert frames.unchanged_note(tap, _png(box=(0, 5, 400, 25, 255)), 104.0,
+                                     stamp=5.0) is not None
 
     def test_a_landscape_frame_is_not_cropped(self):
         image = frames.prepare(_png(size=(800, 400)), "ios")
