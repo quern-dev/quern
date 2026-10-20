@@ -67,9 +67,12 @@ async def _identify_now(
 ) -> navigation.Identified:
     """Read the whole screen and identify it, for the navigation check (#491).
 
-    The same read `identify_screen` makes: the full tree, at the shallow depth
-    through WDA. Raises on a failed read, which the check treats as "could not
-    tell" rather than as a miss.
+    The full tree, as `identify_screen` reads it -- but through WDA at the
+    shallow action depth (12), not the full 25 `identify_screen` uses: the full
+    walk of a long list took 34.5s on an iPhone 11, and this runs on every
+    documented tap. A landmark deeper than 12 therefore leaves the screen
+    unidentified here, which makes no claim rather than a wrong one. Raises on
+    a failed read, which the check treats as "could not tell".
     """
     elements, resolved = await controller.get_ui_elements(
         udid, use_cache=use_cache,
@@ -550,7 +553,10 @@ async def tap_element(request: Request, body: TapElementRequest):
                 getattr(getattr(request, "app", None), "state", None),
                 "landmark_registry", None,
             )
-            nav_plan = await _navigation_plan(controller, resolved, nav_registry, body)
+            nav_plan = await _run_until_client_leaves(
+                request, _navigation_plan(controller, resolved, nav_registry, body),
+                what="tap_element navigation check",
+            )
 
             # Guarded like scroll_to_element, and for the same reason: with
             # `scroll_to_find` on -- explicitly, or via a screen the knowledge
@@ -614,10 +620,15 @@ async def tap_element(request: Request, body: TapElementRequest):
             if (nav_plan is not None and isinstance(result, dict)
                     and result.get("status") == "ok" and result.get("tapped")):
                 try:
-                    nav = await navigation.verify(
-                        nav_plan, result["tapped"],
-                        lambda: _identify_now(
-                            controller, resolved, nav_registry, use_cache=False),
+                    nav = await _run_until_client_leaves(
+                        request,
+                        navigation.verify(
+                            nav_plan, result["tapped"],
+                            lambda: _identify_now(
+                                controller, resolved, nav_registry, use_cache=False),
+                            timeout=body.navigation_timeout,
+                        ),
+                        what="tap_element navigation check",
                     )
                 except Exception:  # noqa: BLE001 -- the tap already happened
                     logger.debug("navigation check failed", exc_info=True)

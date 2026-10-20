@@ -49,6 +49,9 @@ SELECTOR_KEYS = ("label", "identifier", "label_contains", "label_prefix", "eleme
 #: The full wait is paid only by a tap that did not navigate.
 NAVIGATION_TIMEOUT = 3.0
 
+#: The longest wait an edge or a call can ask for.
+MAX_TIMEOUT = 60.0
+
 #: A miss is claimed only from a read that *began* at least this long after
 #: the tap. A read is a snapshot of the moment it starts, and a sim-bridge read
 #: takes 1.6-3.9s (measured, mostly probing containers for the tab and
@@ -152,15 +155,49 @@ def parse_leads_to(raw: object) -> tuple[list[NavEdge], list[dict]]:
             })
             continue
         condition = entry.get("condition")
+        raw_timeout = entry.get("timeout")
+        timeout = None
+        if raw_timeout is not None:
+            if (isinstance(raw_timeout, (int, float)) and not isinstance(raw_timeout, bool)
+                    and 0 < raw_timeout <= MAX_TIMEOUT):
+                timeout = float(raw_timeout)
+            else:
+                # Reported, and the edge kept at the default wait: a typo must
+                # not silently make a slow screen read as a dropped tap.
+                unusable.append({
+                    "entry": entry,
+                    "reason": f"timeout must be a number of seconds, 0 to {MAX_TIMEOUT:g}; "
+                              f"the edge is checked with the default {NAVIGATION_TIMEOUT:g}s",
+                })
         edges.append(NavEdge(
             target=target, **selector,
             condition=str(condition) if condition not in (None, "") else None,
+            timeout=timeout,
         ))
     return edges, unusable
 
 
-def _texts(label: str | None, contains: str | None, prefix: str | None) -> list[str]:
-    return [t.lower() for t in (label, contains, prefix) if t]
+def _label_overlap(
+    call: tuple[str | None, str | None, str | None],
+    edge: tuple[str | None, str | None, str | None],
+) -> bool:
+    """Whether two label selectors -- (exact, contains, prefix) -- could pick
+    the same element. Exact against exact is equality, as `tap_element`
+    matches it: `label="OK"` can never tap the element `label="Book"` names.
+    Only a substring or prefix selector widens it."""
+    ce, cc, cp = (t.lower() if t else None for t in call)
+    ee, ec, ep = (t.lower() if t else None for t in edge)
+    if ce and ee:
+        return ce == ee
+    if ce:
+        return bool((ec and ec in ce) or (ep and ce.startswith(ep)))
+    if ee:
+        return bool((cc and cc in ee) or (cp and ee.startswith(cp)))
+    # Two widened selectors: they could overlap whenever either text holds
+    # the other. Loose by design; the tapped element is matched exactly.
+    a = [t for t in (cc, cp) if t]
+    b = [t for t in (ec, ep) if t]
+    return any(x in y or y in x for x in a for y in b)
 
 
 def could_match_call(
@@ -172,14 +209,14 @@ def could_match_call(
     label_prefix: str | None = None,
     element_type: str | None = None,
 ) -> bool:
-    """Whether a call could tap the element this edge describes. Loose.
+    """Whether a call could tap the element this edge describes.
 
     Decides only whether to pay for identifying the screen before the tap;
     the tapped element is matched exactly afterwards (`matches_tapped`). So it
     errs towards yes, but needs the call and the edge to name the element the
-    same way: the same identifier, or overlapping label text. A call by
-    identifier against an edge written by label is not checked, because
-    nothing before the tap connects the two.
+    same way: the same identifier, or label selectors that can pick the same
+    element. A call by identifier against an edge written by label is not
+    checked, because nothing before the tap connects the two.
     """
     if edge.identifier and identifier and edge.identifier != identifier:
         return False
@@ -190,9 +227,10 @@ def could_match_call(
             return False
     if edge.identifier and identifier:
         return True
-    call_texts = _texts(label, label_contains, label_prefix)
-    edge_texts = _texts(edge.label, edge.label_contains, edge.label_prefix)
-    return any(a in b or b in a for a in call_texts for b in edge_texts)
+    return _label_overlap(
+        (label, label_contains, label_prefix),
+        (edge.label, edge.label_contains, edge.label_prefix),
+    )
 
 
 def matches_tapped(edge: NavEdge, tapped: dict) -> bool:
@@ -275,7 +313,13 @@ async def verify(
     if not edges:
         return None
     if timeout is None:
-        timeout = NAVIGATION_TIMEOUT
+        # The slowest documented edge sets the wait: a screen that loads over
+        # the network is documented with its own `timeout:`.
+        timeout = max(
+            (e.timeout for e in edges if e.timeout is not None),
+            default=NAVIGATION_TIMEOUT,
+        )
+    report_timeout = timeout
     targets = sorted({e.target for e in edges})
     firm = sorted({e.target for e in edges if e.condition is None})
     expected: str | list[str] = targets[0] if len(targets) == 1 else targets
@@ -308,7 +352,9 @@ async def verify(
             if began >= MISS_MIN_AGE:
                 settled = last
         elapsed = clock() - start
-        if elapsed >= timeout and (settled is not None or elapsed >= HARD_CAP):
+        if elapsed >= timeout and (
+            settled is not None or elapsed >= max(HARD_CAP, timeout + MISS_MIN_AGE)
+        ):
             break
         await sleep(_POLL_GAP)
 
@@ -341,11 +387,17 @@ async def verify(
     report["arrived"] = False
     report["on"] = last.screen
     report["stayed"] = last.screen == plan.before.screen
+    report["timeout_s"] = report_timeout
     return report
 
 
 def warning_for(navigation: dict) -> str | None:
-    """The top-level warning for a missed navigation, or None."""
+    """The top-level warning for a missed navigation, or None.
+
+    Never "tap again". A screen that stays put while it works -- a sign-in
+    waiting on the network -- reads exactly like a dropped tap, and repeating
+    a submit or a purchase is worse than the miss this reports.
+    """
     if navigation.get("arrived") is not False:
         return None
     expected = navigation["expected"]
@@ -356,7 +408,10 @@ def warning_for(navigation: dict) -> str | None:
         where = f"it is on {navigation['on']!r} instead"
     return (
         f"The tap was delivered, but the knowledge base says it leads to {want!r} "
-        f"and {where} after {navigation['waited_ms']}ms. The app may have dropped "
-        "the tap. Do not act as if the new screen had been reached: check the "
-        "screen, and tap again if it is unchanged."
+        f"and {where} after {navigation['waited_ms']}ms. Either the app dropped "
+        "the tap, or what it started (a request, a slow screen) has not finished. "
+        "Do not act as if the new screen had been reached: check the screen first. "
+        "Repeat the tap only if repeating it is harmless -- not for a submit, a "
+        "purchase or a send. If this screen legitimately takes longer, give the "
+        "edge a `timeout:` in the knowledge base or pass navigation_timeout."
     )

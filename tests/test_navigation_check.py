@@ -115,6 +115,15 @@ class TestParseLeadsTo:
     def test_absent_is_nothing(self):
         assert parse_leads_to(None) == ([], [])
 
+    def test_an_edge_timeout(self):
+        edges, unusable = parse_leads_to([
+            {"screen": "a", "action": 'tap_element label="A"', "timeout": 8},
+            {"screen": "b", "action": 'tap_element label="B"', "timeout": "slow"},
+            {"screen": "c", "action": 'tap_element label="C"', "timeout": True},
+        ])
+        assert [e.timeout for e in edges] == [8.0, None, None]
+        assert len(unusable) == 2 and "default" in unusable[0]["reason"]
+
     def test_not_a_list_is_reported(self):
         edges, unusable = parse_leads_to({"screen": "x"})
         assert edges == [] and unusable[0]["reason"] == "leads_to is not a list"
@@ -146,7 +155,8 @@ class TestScan:
         text = next(s for s in scan.screens if s.screen == "Text")
         assert [e.target for e in text.leads_to] == ["More list"]
         assert scan.edge_issues == [{
-            "screen": "Text", "entry": {"screen": "gone"}, "reason": "names no loaded screen",
+            "file": "screens/text.md", "screen": "Text", "entry": {"screen": "gone"},
+            "reason": "names no loaded screen",
         }]
 
     def test_the_load_reports_edges(self, tmp_path):
@@ -195,6 +205,23 @@ class TestCouldMatchCall:
     def test_unrelated_label(self):
         assert not could_match_call(_edge(label="More"), label="Settings")
 
+    @pytest.mark.parametrize("call, edge", [
+        ("OK", "Book"), ("Back", "Feedback"), ("On", "Location"), ("Log", "Logs"),
+    ])
+    def test_exact_labels_must_be_equal(self, call, edge):
+        # tap_element matches labels exactly, so neither can tap the other.
+        assert not could_match_call(_edge(label=edge), label=call)
+
+    def test_a_substring_call_against_a_longer_label(self):
+        assert could_match_call(_edge(label="Order #1234"), label_contains="Order")
+        assert could_match_call(_edge(label="Order #1234"), label_prefix="order #")
+        assert not could_match_call(_edge(label="Order #1234"), label_prefix="#1234")
+
+    def test_an_exact_call_against_a_widened_edge(self):
+        assert could_match_call(_edge(label_prefix="Order #"), label="Order #77")
+        assert could_match_call(_edge(label_contains="Order"), label="My Order")
+        assert not could_match_call(_edge(label_prefix="Order #"), label="Re: Order #77")
+
     def test_identifier_call_against_a_label_edge_is_not_checked(self):
         assert not could_match_call(_edge(label="More"), identifier="tab_more")
 
@@ -212,6 +239,10 @@ class TestMatchesTapped:
         assert matches_tapped(
             _edge(label="More", element_type="RadioButton"),
             {"label": "More", "type": "Button"})
+
+    def test_an_incompatible_type_does_not_match(self):
+        assert not matches_tapped(
+            _edge(label="More", element_type="TextField"), {"label": "More", "type": "Button"})
 
     def test_identifier(self):
         assert matches_tapped(
@@ -338,8 +369,9 @@ class TestVerify:
         assert nav["arrived"] is None
 
     async def test_every_read_failing_is_no_claim(self):
-        nav, _ = await _verify(_plan(), OSError("gone"))
+        nav, reads = await _verify(_plan(), OSError("gone"))
         assert nav["arrived"] is None and nav["reason"] == "read_failed"
+        assert nav["read_failures"] == reads > 1
 
     async def test_a_failed_read_then_arrival(self):
         nav, _ = await _verify(_plan(), OSError("blip"), _exact("more"))
@@ -409,6 +441,31 @@ class TestVerify:
     async def test_the_wait_is_capped(self):
         nav, reads = await self._slow([_exact("text"), OSError("gone")], read_s=3.5)
         assert nav["waited_ms"] <= (navigation.HARD_CAP + 3.5 + 0.2) * 1000
+
+    async def test_an_edge_timeout_extends_the_wait(self):
+        clock = _Clock()
+        seen = {"n": 0}
+
+        async def identify():
+            seen["n"] += 1
+            # The next screen appears 4s in: a sign-in waiting on the network.
+            return _exact("more") if clock.now >= 4.0 else _exact("text")
+
+        plan = _plan(_edge(label="More", timeout=6.0))
+        nav = await verify(plan, TAPPED, identify, clock=clock, sleep=clock.sleep)
+        assert nav["arrived"] is True
+
+    async def test_without_one_a_slow_screen_is_a_miss_that_says_not_to_repeat(self):
+        nav, _ = await _verify(_plan(), _exact("text"), timeout=3.0)
+        assert nav["arrived"] is False and nav["timeout_s"] == 3.0
+        warning = warning_for(nav)
+        assert "tap again" not in warning
+        assert "not for a submit" in warning and "timeout:" in warning
+
+    async def test_a_call_timeout_overrides_the_edge(self):
+        nav, _ = await _verify(_plan(_edge(label="More", timeout=9.0)), _exact("text"),
+                               timeout=1.5)
+        assert nav["timeout_s"] == 1.5
 
     async def test_the_full_wait_is_paid_only_by_a_miss(self):
         nav, _ = await _verify(_plan(), _exact("text"), timeout=1.0)
@@ -498,14 +555,64 @@ class TestRoute:
         assert code == 200 and body["status"] == "ok"
         assert body["navigation"]["arrived"] is False
         assert body["navigation"]["on"] == "text"
-        assert "may have dropped the tap" in body["warning"]
+        assert "the app dropped the tap" in body["warning"]
 
     async def test_a_miss_keeps_the_device_hub_advisory(self, app, controller):
         app.state.landmark_registry.load("probe", _registry_screens())
         controller.input_warning = lambda udid: "Device Hub has this simulator's input."
         code, body = await _tap(app, {"label": "More"})
-        assert "may have dropped the tap" in body["warning"]
+        assert "the app dropped the tap" in body["warning"]
         assert "Device Hub has this simulator's input." in body["warning"]
+
+    async def test_an_unrelated_exact_label_costs_no_read(self, app, controller):
+        screens = _registry_screens()
+        screens[0].leads_to = [NavEdge(target="more", label="Book")]
+        app.state.landmark_registry.load("probe", screens)
+        await _tap(app, {"label": "OK"})
+        controller.get_ui_elements.assert_not_called()
+
+    async def test_an_incompatible_type_costs_no_read(self, app, controller):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        await _tap(app, {"label": "More", "element_type": "TextField"})
+        controller.get_ui_elements.assert_not_called()
+
+    async def test_an_exception_inside_the_check_does_not_fail_the_tap(
+        self, app, controller, monkeypatch,
+    ):
+        app.state.landmark_registry.load("probe", _registry_screens())
+
+        async def boom(*a, **k):
+            raise RuntimeError("bug in the check")
+
+        monkeypatch.setattr(navigation, "verify", boom)
+        code, body = await _tap(app, {"label": "More"})
+        assert code == 200 and body["status"] == "ok" and "navigation" not in body
+
+    async def test_ok_without_a_tapped_element_is_not_checked(self, app, controller):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        controller.tap_element.return_value = {"status": "ok"}
+        await _tap(app, {"label": "More"})
+        assert controller.get_ui_elements.call_count == 1
+
+    async def test_a_tapped_element_without_ok_is_not_checked(self, app, controller):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        controller.tap_element.return_value = {
+            "status": "already_set", "tapped": {"label": "More", "type": "RadioButton"}}
+        await _tap(app, {"label": "More"})
+        assert controller.get_ui_elements.call_count == 1
+
+    async def test_navigation_timeout_reaches_the_check(self, app, controller, monkeypatch):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        seen = {}
+        real = navigation.verify
+
+        async def spy(*a, **k):
+            seen["timeout"] = k.get("timeout")
+            return await real(*a, **k)
+
+        monkeypatch.setattr(navigation, "verify", spy)
+        await _tap(app, {"label": "More", "navigation_timeout": 0.2})
+        assert seen["timeout"] == 0.2
 
     async def test_no_knowledge_base_costs_no_read(self, app, controller):
         code, body = await _tap(app, {"label": "More"})
@@ -571,6 +678,43 @@ class TestRoute:
         code, body = await _tap(app, {"label": "More"})
         assert "navigation" not in body
         assert controller.get_ui_elements.call_count == 1
+
+
+class TestRegistry:
+    def _screen(self, name, heading, leads_to=()):
+        return ScreenLandmarks(screen=name, landmarks=[Landmark(element="Heading", label=heading)],
+                               leads_to=list(leads_to))
+
+    def test_identify_exact_names_the_app_whose_screen_matched(self):
+        registry = LandmarkRegistry()
+        registry.load("one", [self._screen("Home", "Welcome")])
+        registry.load("two", [self._screen("Home", "Dashboard")])
+        found = registry.identify_exact([UIElement(type="Heading", label="Dashboard")])
+        assert (found.confidence, found.screen, found.app) == ("exact", "Home", "two")
+
+    def test_unload_drops_edge_issues(self):
+        registry = LandmarkRegistry()
+        registry.load("a", [self._screen("x", "X")], edge_issues=[{"reason": "r"}])
+        registry.unload("a")
+        assert registry.navigation_report("a") == {"edges": 0}
+
+    def test_a_reload_replaces_edge_issues(self):
+        registry = LandmarkRegistry()
+        registry.load("a", [self._screen("x", "X")], edge_issues=[{"reason": "old"}])
+        registry.load("a", [self._screen("x", "X")], edge_issues=[{"reason": "new"}])
+        assert registry.navigation_report("a")["unusable"] == [{"reason": "new"}]
+
+    def test_an_edge_to_a_screen_with_no_landmarks_is_not_counted(self):
+        from server.knowledge.landmarks import resolve_targets
+
+        screens = [
+            ScreenLandmarks(screen="a", landmarks=[Landmark(element="Heading", label="A")],
+                            leads_to=[NavEdge(target="stub", label="Go")]),
+            ScreenLandmarks(screen="stub", landmarks=[]),
+        ]
+        issues = resolve_targets(screens)
+        assert screens[0].leads_to == []
+        assert "no landmarks" in issues[0]["reason"]
 
 
 class TestInlineLoad:

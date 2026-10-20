@@ -2220,6 +2220,9 @@ class NavEdge(BaseModel):
     #: confirm an arrival, but never reports a missed one: the condition may
     #: simply not have held.
     condition: str | None = None
+    #: Seconds to wait for the target, for a screen that is slow to arrive (a
+    #: sign-in waiting on the network). None means the default.
+    timeout: float | None = None
 
 
 class ScreenLandmarks(BaseModel):
@@ -2353,6 +2356,13 @@ class TapElementRequest(BaseModel):
             "When a loaded knowledge base documents this tap as a leads_to edge from "
             "the current screen, check that the screen arrived and report it as "
             "`navigation` (#491). false skips the check and its reads."
+        ),
+    )
+    navigation_timeout: float | None = Field(
+        default=None, gt=0, le=60, allow_inf_nan=False,
+        description=(
+            "Seconds the navigation check waits for the documented screen, for one "
+            "that is slow to arrive. Default: the edge's own `timeout:`, else 3."
         ),
     )
     include_screen_context: bool = False

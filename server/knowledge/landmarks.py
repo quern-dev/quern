@@ -822,20 +822,28 @@ def resolve_targets(
     reported rather than left to read as checked. Mutates `screens` in place.
     """
     stems = stems or {}
+    files = {name: f"screens/{stem}.md" for stem, name in stems.items()}
     names = {screen.screen for screen in screens}
+    # A target with no landmarks loads but can never be identified, so an edge
+    # to it could never confirm an arrival: counting it as checked would be a
+    # false all-clear in the load report.
+    identifiable = {screen.screen for screen in screens if screen.landmarks}
     issues: list[dict] = []
     for screen in screens:
         kept = []
         for edge in screen.leads_to:
             name = stems.get(edge.target, edge.target)
-            if name in names:
+            if name in identifiable:
                 kept.append(edge.model_copy(update={"target": name}))
-            else:
-                issues.append({
-                    "screen": screen.screen,
-                    "entry": {"screen": edge.target},
-                    "reason": "names no loaded screen",
-                })
+                continue
+            issues.append({
+                "file": files.get(screen.screen, f"inline:{screen.screen}"),
+                "screen": screen.screen,
+                "entry": {"screen": edge.target},
+                "reason": ("names a screen with no landmarks, so arrival there "
+                           "cannot be confirmed") if name in names
+                          else "names no loaded screen",
+            })
         screen.leads_to = kept
     return issues
 
