@@ -631,16 +631,19 @@ def _recover_previous(derived: Path, previous: Path, phase_key: str,
     """
     state = read_wda_state()
     phase = state.get(phase_key)
-    if previous.exists():
-        if phase == "building":
+    if phase == "building":
+        if previous.exists():
             logger.warning("A WDA build was interrupted; restoring the build before it from %s",
                            previous)
             shutil.rmtree(derived, ignore_errors=True)
             previous.rename(derived)
-            if kept_key:
-                state.update(state.get(kept_key) or {})
-        else:
-            _retire(previous)
+        # With no `previous`, `derived` is the old build too: either it was
+        # never moved, or it was already put back when the crash came -- so
+        # its fingerprint is restored either way (review).
+        if kept_key:
+            state.update(state.get(kept_key) or {})
+    elif previous.exists():
+        _retire(previous)
     # Cleared only once the directories are settled: a crash mid-restore must
     # find the phase still set.
     if phase is not None or (kept_key and kept_key in state):

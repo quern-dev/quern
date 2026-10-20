@@ -462,6 +462,20 @@ def test_recovery_settles_the_phase(tmp_path, state):
     assert "build_phase" not in state
 
 
+def test_a_build_already_put_back_gets_its_fingerprint_too(tmp_path, state):
+    """Killed after the old build was moved back but before the state was
+    saved: no `previous`, the phase still set, and the fingerprint must not be
+    dropped with it (#498 review)."""
+    derived = tmp_path / "derived-sim"
+    (derived / "old").mkdir(parents=True)
+    kept = {"sim_build_xcode": "27A1", "sim_build_wda_version": "16.15.3"}
+    state.update({"sim_build_phase": "building", "sim_build_kept": kept})
+    wda._recover_previous(derived, tmp_path / "derived-sim-previous",
+                          "sim_build_phase", "sim_build_kept")
+    assert (derived / "old").is_dir()
+    assert state == kept
+
+
 class TestTheKeptDeviceBuild:
     async def test_a_build_interrupted_by_a_crash_is_rolled_back_not_kept(self, device, state):
         """A -previous still there means the build that made it never ended:
