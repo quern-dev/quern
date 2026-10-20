@@ -103,7 +103,7 @@ For each screen, capture:
 
 1. **Identification** — Find the most unique, stable element(s) that distinguish this screen. A navigation bar title is ideal. Avoid dynamic content.
 2. **Key elements** — List interactive elements with their types and labels. Note which elements are conditional (appear only in certain states).
-3. **Navigation edges** — Where does this screen lead? What action triggers each transition? Where can you arrive from? Record each one in `leads_to` (see [Writing navigation edges](#writing-navigation-edges)): quern checks them.
+3. **Navigation edges** — Where does this screen lead, and what action triggers each transition? Record those outgoing edges in this screen's `leads_to` (see [Writing navigation edges](#writing-navigation-edges)): quern checks them. Where can you arrive from? Record those incoming paths in `reachable_from`.
 4. **States** — What are the distinct states? (empty, loading, error, populated, etc.) How does the agent recognize each?
 5. **Dynamic content** — If there's a list/feed/collection: what are the items? What do they represent? What happens when you tap one?
 6. **Quirks** — Anything non-obvious. Ask the user.
@@ -148,7 +148,7 @@ The `init_app_knowledge` tool reports stub vs. documented counts so you can gaug
 
 ### Writing Navigation Edges
 
-`leads_to` is not only a map for the next agent. `tap_element` reads it (#491): when a tap a `leads_to` edge documents leaves the agent still on the screen the edge starts from, the agent's next miss says the tap probably did not register (`previous_tap`), and with `verify_navigation: true` the tap is checked as it is made. So write each edge so quern can match it:
+`leads_to` is not only a map for the next agent. `tap_element` reads it (#491). Suppose a tap documented by a `leads_to` edge leaves the agent still on the edge's source screen. Then a later `tap_element` miss, or `wait_for_element` timeout, says the tap probably did not register (`previous_tap`). With `verify_navigation: true`, the tap is checked as it is made instead. So write each edge so quern can match it:
 
 ```yaml
 leads_to:
