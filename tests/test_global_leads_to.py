@@ -147,6 +147,15 @@ class TestApply:
         apply_global_edges(screens, globals_)
         assert len(screens[1].leads_to) == 1 and not screens[1].leads_to[0].from_global
 
+    @pytest.mark.parametrize("field", ["label_contains", "label_prefix"])
+    def test_a_different_widened_own_edge_does_not_override(self, field):
+        screens = _screens("home", "detail")
+        screens[1].leads_to = [NavEdge(target="detail", **{field: "Settings"})]
+        globals_, _ = parse_global_leads_to([
+            {"screen": "[[screens/home]]", "action": f'tap_element {field}="Home"'}])
+        apply_global_edges(screens, globals_)
+        assert any(e.from_global for e in screens[1].leads_to)
+
     def test_labels_compare_without_case(self):
         screens = _screens("home", "detail")
         screens[1].leads_to = [NavEdge(target="detail", label="HOME")]
