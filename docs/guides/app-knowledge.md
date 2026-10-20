@@ -90,10 +90,12 @@ leads_to:
 ```
 
 These edges are also checked. When `tap_element` makes a tap a `leads_to`
-edge documents, from the screen the edge is written on, it waits for the screen
-the edge leads to and reports whether it arrived (`navigation.arrived`). A tap
-an app dropped then reads as a miss with a warning, rather than as a plain `ok`
-that fails several calls later. For an edge to be checked:
+edge documents, and the agent's next tap misses on the screen the edge leaves,
+the miss says the earlier tap probably did not register (`previous_tap`) --
+instead of a `not_found` that seems to have nothing to do with it. It costs no
+read. With `verify_navigation: true` the tap is checked at once: it waits for
+the screen the edge leads to and reports whether it arrived
+(`navigation.arrived`). For an edge to be checked:
 
 - its `action` is a `tap_element` call naming a `label` (or `label_contains`,
   `label_prefix`) or an `identifier` -- the way the agent will call it, since

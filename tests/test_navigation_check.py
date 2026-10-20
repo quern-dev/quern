@@ -527,7 +527,11 @@ def fast(monkeypatch):
     monkeypatch.setattr(navigation, "_POLL_GAP", 0.01)
 
 
-async def _tap(app, body):
+async def _tap(app, body, *, opt_in=True):
+    """The per-tap check is opt-in; these route tests ask for it unless told
+    not to. TestPreviousTap covers the default."""
+    if opt_in:
+        body = {"verify_navigation": True, **body}
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.post("/api/v1/device/ui/tap-element", json=body,
@@ -784,6 +788,123 @@ class TestTimeoutReport:
         assert "unusable" not in report and "note" not in report
         assert "default" in report["timeouts_ignored"][0]["reason"]
         assert "edge_kept" not in report["timeouts_ignored"][0]
+
+
+class TestPreviousTap:
+    """The default: no read at the tap, and the next miss says whether a
+    documented tap before it seems not to have registered."""
+
+    NOT_FOUND = {
+        "status": "not_found", "detail": "No element found matching 'Toggle'",
+        "screen_context": {"identified_as": "text", "confidence": "exact"},
+    }
+
+    async def _miss(self, app, controller, screen_context=None):
+        result = dict(self.NOT_FOUND)
+        if screen_context is not None:
+            result["screen_context"] = screen_context
+        controller.tap_element.return_value = result
+        return await _tap(app, {"label": "Toggle"}, opt_in=False)
+
+    async def test_the_default_costs_no_read(self, app, controller):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        code, body = await _tap(app, {"label": "More"}, opt_in=False)
+        assert code == 200 and "navigation" not in body
+        controller.get_ui_elements.assert_not_called()
+
+    async def test_a_miss_on_the_screen_the_tap_should_have_left(self, app, controller):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        await _tap(app, {"label": "More"}, opt_in=False)
+        code, body = await self._miss(app, controller)
+        assert code == 404
+        prev = body["detail"]["previous_tap"]
+        assert prev["expected"] == "more" and prev["on"] == "text"
+        assert prev["tapped"]["label"] == "More"
+        assert "probably did not register" in prev["note"]
+        assert "not blindly for a submit" in prev["note"]
+        controller.get_ui_elements.assert_not_called()
+
+    async def test_it_is_said_once(self, app, controller):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        await _tap(app, {"label": "More"}, opt_in=False)
+        await self._miss(app, controller)
+        _, body = await self._miss(app, controller)
+        assert "previous_tap" not in body["detail"]
+
+    @pytest.mark.parametrize("context", [
+        {"identified_as": "more", "confidence": "exact"},       # it arrived
+        {"identified_as": "links", "confidence": "exact"},      # not a screen it leaves
+        {"identified_as": None, "confidence": "none"},
+        {"identified_as": "text", "confidence": "ambiguous", "candidates": ["text", "x"]},
+        {},
+    ])
+    async def test_no_note_without_an_exact_screen_it_leaves(self, app, controller, context):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        await _tap(app, {"label": "More"}, opt_in=False)
+        _, body = await self._miss(app, controller, context)
+        assert "previous_tap" not in body["detail"]
+
+    async def test_an_undocumented_tap_in_between_clears_it(self, app, controller):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        await _tap(app, {"label": "More"}, opt_in=False)
+        controller.tap_element.return_value = {
+            "status": "ok", "tapped": {"label": "Bold", "type": "Button"}}
+        await _tap(app, {"label": "Bold"}, opt_in=False)
+        _, body = await self._miss(app, controller)
+        assert "previous_tap" not in body["detail"]
+
+    async def test_a_conditional_edge_is_not_remembered(self, app, controller):
+        screens = _registry_screens()
+        screens[0].leads_to = [NavEdge(target="more", label="More", condition="signed in")]
+        app.state.landmark_registry.load("probe", screens)
+        await _tap(app, {"label": "More"}, opt_in=False)
+        _, body = await self._miss(app, controller)
+        assert "previous_tap" not in body["detail"]
+
+    async def test_too_long_ago(self, app, controller, monkeypatch):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        await _tap(app, {"label": "More"}, opt_in=False)
+        monkeypatch.setattr(navigation, "PREVIOUS_TAP_TTL", -1.0)
+        _, body = await self._miss(app, controller)
+        assert "previous_tap" not in body["detail"]
+
+    async def test_per_device(self, app, controller):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        await _tap(app, {"label": "More"}, opt_in=False)
+        controller.resolve_udid.return_value = "BBBB-2222"
+        _, body = await self._miss(app, controller)
+        assert "previous_tap" not in body["detail"]
+
+    async def test_a_long_press_is_not_remembered(self, app, controller):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        await _tap(app, {"label": "More", "duration": 1.0}, opt_in=False)
+        _, body = await self._miss(app, controller)
+        assert "previous_tap" not in body["detail"]
+
+    async def _wait(self, app, controller, matched):
+        controller.wait_for_element = AsyncMock(return_value=(
+            {"matched": matched, "screen_context": self.NOT_FOUND["screen_context"]},
+            "AAAA-1111"))
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post("/api/v1/device/ui/wait-for-element",
+                                     json={"identifier": "toggle", "condition": "exists",
+                                           "timeout": 1},
+                                     headers={"Authorization": "Bearer k"})
+        return resp.json()
+
+    async def test_a_wait_that_times_out_carries_it(self, app, controller):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        await _tap(app, {"label": "More"}, opt_in=False)
+        body = await self._wait(app, controller, matched=False)
+        assert body["previous_tap"]["expected"] == "more"
+
+    async def test_a_wait_that_succeeds_clears_it(self, app, controller):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        await _tap(app, {"label": "More"}, opt_in=False)
+        await self._wait(app, controller, matched=True)
+        _, body = await self._miss(app, controller)
+        assert "previous_tap" not in body["detail"]
 
 
 class TestInlineLoad:

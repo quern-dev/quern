@@ -19,7 +19,12 @@ from server.device.element_types import (
     rule_for,
     type_matches,
 )
-from server.knowledge.navigation import Identified, could_match_call, parse_leads_to
+from server.knowledge.navigation import (
+    Identified,
+    could_match_call,
+    matches_tapped,
+    parse_leads_to,
+)
 from server.models import (
     Landmark,
     NavEdge,
@@ -943,6 +948,17 @@ class LandmarkRegistry:
             edge
             for s in self._sets.get(app, []) if s.screen == screen
             for edge in s.leads_to
+        ]
+
+    def edges_for_tapped(self, tapped: dict) -> list[tuple[str, str, NavEdge]]:
+        """Every loaded edge, from any screen, whose element is the one
+        tapped: `(app, source screen, edge)`. Pure; no device read."""
+        return [
+            (app, s.screen, edge)
+            for app, screens in self._sets.items()
+            for s in screens
+            for edge in s.leads_to
+            if matches_tapped(edge, tapped)
         ]
 
     def any_edge_could_match(self, call: dict) -> bool:

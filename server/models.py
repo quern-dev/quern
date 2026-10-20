@@ -2351,11 +2351,14 @@ class TapElementRequest(BaseModel):
         ),
     )
     verify_navigation: bool = Field(
-        default=True,
+        default=False,
         description=(
-            "When a loaded knowledge base documents this tap as a leads_to edge from "
-            "the current screen, check that the screen arrived and report it as "
-            "`navigation` (#491). false skips the check and its reads."
+            "Check, at the tap, that a documented navigation arrived: when a loaded "
+            "knowledge base documents this tap as a leads_to edge from the current "
+            "screen, wait for the screen it leads to and report `navigation` (#491). "
+            "Costs a screen read before the tap and at least one after. Off by "
+            "default: without it, a documented tap that did not register is reported "
+            "for free as `previous_tap` on the next miss."
         ),
     )
     navigation_timeout: float | None = Field(

@@ -417,3 +417,57 @@ def warning_for(navigation: dict) -> str | None:
         "purchase or a send. If this screen legitimately takes longer, give the "
         "edge a `timeout:` in the knowledge base or pass navigation_timeout."
     )
+
+
+#: How long a documented tap is remembered for the next miss to be read
+#: against. Long enough for an agent to take its next action; short enough
+#: that a tap from minutes ago is not blamed for a miss now.
+PREVIOUS_TAP_TTL = 120.0
+
+
+@dataclass
+class DocumentedTap:
+    """A delivered tap the knowledge base documents as navigation, kept so
+    that the next miss on the device can say whether it explains it."""
+
+    tapped: dict
+    #: `(app, source screen, edge)` for every unconditional edge it matches.
+    edges: list[tuple[str, str, NavEdge]]
+    at: float
+
+
+def previous_tap_note(tap: DocumentedTap, screen_context: dict, now: float) -> dict | None:
+    """Why a miss may have happened: the tap before it did not navigate.
+
+    Read off the identification the miss already made, so it costs nothing.
+    Only when that identification is exact, the screen is one the tap is
+    documented to *leave*, and it is not one the tap leads *to*. Anything
+    else -- an unidentified screen, a screen the tap does not start from, a
+    tap too long ago -- says nothing.
+    """
+    if now - tap.at > PREVIOUS_TAP_TTL:
+        return None
+    if (screen_context or {}).get("confidence") != "exact":
+        return None
+    on = screen_context.get("identified_as")
+    leaving = [edge for _app, screen, edge in tap.edges if screen == on]
+    if not leaving:
+        return None
+    targets = sorted({edge.target for edge in leaving})
+    if on in targets:
+        return None
+    label = tap.tapped.get("label") or tap.tapped.get("identifier") or "the element"
+    expected: str | list[str] = targets[0] if len(targets) == 1 else targets
+    want = expected if isinstance(expected, str) else " or ".join(expected)
+    return {
+        "tapped": {k: tap.tapped.get(k) for k in ("label", "identifier", "type")},
+        "expected": expected,
+        "on": on,
+        "seconds_ago": round(now - tap.at, 1),
+        "note": (
+            f"The previous tap on {label!r} is documented to lead from {on!r} to "
+            f"{want!r}, and the screen is still {on!r}: that tap probably did not "
+            "register, which would explain this miss. Check the screen before "
+            "repeating it -- not blindly for a submit, a purchase or a send."
+        ),
+    }

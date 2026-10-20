@@ -148,11 +148,11 @@ reachable_from:
     action: 'tap_element label="..." element_type="..."'
   # - deep_link: "appscheme://..."
 
-# Where this screen leads to. Checked: a tap_element matching one of these,
-# made from this screen, waits for the target screen and reports whether it
-# arrived (`navigation` on the response, #491). Write the action as the agent
-# will call it -- a label or an identifier -- and link the target's file.
-# One tap that can reach several screens gets an edge to each.
+# Where this screen leads to. Checked (#491): a tap_element matching one of
+# these that leaves the agent still on this screen is named on its next miss
+# (`previous_tap`), and with verify_navigation it is checked at the tap. Write
+# the action as the agent will call it -- a label or an identifier -- and link
+# the target's file. One tap that can reach several screens gets an edge to each.
 leads_to:
   - screen: "[[screens/...]]"
     action: 'tap_element label="..." element_type="..."'

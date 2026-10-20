@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from collections.abc import Coroutine
 from typing import Any, TypeVar
 
@@ -120,6 +121,57 @@ async def _navigation_plan(
     except Exception:  # noqa: BLE001 -- the check is an addition; the tap is not
         logger.debug("navigation plan failed", exc_info=True)
         return None
+
+
+def _documented_taps(request: Request) -> dict | None:
+    """Per-device documented taps awaiting the next miss, on the app state."""
+    state = getattr(getattr(request, "app", None), "state", None)
+    if state is None:
+        return None
+    store = getattr(state, "documented_taps", None)
+    if not isinstance(store, dict):
+        try:
+            store = {}
+            state.documented_taps = store
+        except Exception:  # noqa: BLE001 -- a frozen or foreign state object
+            return None
+    return store
+
+
+def _remember_documented_tap(request: Request, udid: str, registry, result: dict) -> None:
+    """After a delivered tap: keep it if the knowledge base documents it as
+    navigation, and forget whatever was kept before. Costs no device read."""
+    store = _documented_taps(request)
+    if store is None:
+        return
+    store.pop(udid, None)
+    tapped = result.get("tapped")
+    if not isinstance(registry, LandmarkRegistry) or not isinstance(tapped, dict):
+        return
+    try:
+        edges = [e for e in registry.edges_for_tapped(tapped) if e[2].condition is None]
+    except Exception:  # noqa: BLE001 -- the knowledge base is an addition
+        logger.debug("documented-tap lookup failed", exc_info=True)
+        return
+    if edges:
+        store[udid] = navigation.DocumentedTap(tapped=tapped, edges=edges, at=time.monotonic())
+
+
+def _note_previous_tap(request: Request, udid: str | None, payload: dict) -> None:
+    """On a miss: say if the documented tap before it seems not to have
+    registered. Reads the identification the miss already made. A kept tap
+    is consumed by the first miss, whether or not it explains it."""
+    store = _documented_taps(request)
+    if store is None or not udid:
+        return
+    tap = store.pop(udid, None)
+    if tap is None:
+        return
+    note = navigation.previous_tap_note(
+        tap, payload.get("screen_context") or {}, time.monotonic(),
+    )
+    if note is not None:
+        payload["previous_tap"] = note
 
 
 router = APIRouter(prefix="/api/v1/device", tags=["device"])
@@ -382,6 +434,13 @@ async def wait_for_element(request: Request, body: WaitForElementRequest):
             # answer. But it is the answer worth finding in a trace.
             if not result.get("matched"):
                 act.outcome = "not_found"
+                _note_previous_tap(request, resolved_udid, result)
+            else:
+                # The agent found what it waited for: whatever it tapped
+                # before landed well enough.
+                store = _documented_taps(request)
+                if store is not None:
+                    store.pop(resolved_udid, None)
             return result
         except DeviceError as e:
             raise _handle_device_error(e)
@@ -613,6 +672,7 @@ async def tap_element(request: Request, body: TapElementRequest):
             # Element not found — return 404 with screen context. The 404 is
             # what tells _action this was `not_found` rather than a failure.
             if result.get("status") == "not_found":
+                _note_previous_tap(request, resolved, result)
                 raise HTTPException(status_code=404, detail=result)
 
             if result.get("status") == "ambiguous":
@@ -623,6 +683,10 @@ async def tap_element(request: Request, body: TapElementRequest):
             if result.get("status") == "obstructed":
                 act.outcome = "obstructed"
                 raise HTTPException(status_code=409, detail=result)
+
+            if (body.duration is None and isinstance(result, dict)
+                    and result.get("status") == "ok"):
+                _remember_documented_tap(request, resolved, nav_registry, result)
 
             # Before the after-screenshot and the screen context: the check
             # waits for the screen to arrive, so both then show where it went.
