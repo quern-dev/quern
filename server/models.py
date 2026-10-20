@@ -2381,7 +2381,7 @@ class TapElementRequest(BaseModel):
         description=(
             "Capture a frame of the screen before the tap, so that a later miss can "
             "say when the screen has not changed since (`screen_unchanged_since_tap`, "
-            "#502). Costs one capture per tap: ~100ms on a simulator, ~45ms on "
+            "#502). Costs one capture per tap: ~90ms on a simulator, ~60ms on "
             "Android, ~200ms on an iPhone. false skips it for speed-sensitive loops."
         ),
     )

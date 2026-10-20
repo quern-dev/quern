@@ -31,9 +31,10 @@ def _png(color: int = 128, size=(400, 800), box=None) -> bytes:
     return out.getvalue()
 
 
-def _tap(png=None, at=100.0, stamp=5.0):
+def _tap(png=None, at=100.0, stamp=5.0, grace=0.0):
     return frames.TapFrame(tapped={"label": "Go", "type": "Button"}, png=png or _png(),
-                           platform="ios", at=at, stamp=stamp, capture_ms=80.0, source="wda")
+                           platform="ios", at=at, stamp=stamp, capture_ms=80.0, source="wda",
+                           grace=grace)
 
 
 class TestUnchangedNote:
@@ -41,16 +42,36 @@ class TestUnchangedNote:
         note = frames.unchanged_note(_tap(), _png(), 104.0, stamp=5.0)
         assert note["change"] == 0.0 and note["seconds_ago"] == 4.0
         assert "'Go'" in note["note"] and "not blindly for a submit" in note["note"]
+        assert "4.0s ago" in note["note"] and "looks exactly as it did" in note["note"]
         assert note["tapped"] == {"label": "Go", "identifier": None, "type": "Button"}
 
     def test_a_changed_screen(self):
         after = _png(box=(0, 200, 400, 300, 255))
         assert frames.unchanged_note(_tap(), after, 104.0, stamp=5.0) is None
 
-    def test_a_small_change_below_the_threshold(self):
-        # A blinking caret or a spinner: a few pixels.
-        after = _png(box=(200, 400, 4, 12, 255))
-        assert frames.unchanged_note(_tap(), after, 104.0, stamp=5.0) is not None
+    @pytest.mark.parametrize("box, what", [
+        ((330, 300, 50, 30, 255), "a switch flipping"),
+        ((40, 500, 320, 16, 255), "a line of text replaced"),
+        ((360, 600, 12, 12, 255), "a checkmark appearing"),
+        ((200, 400, 8, 12, 255), "one digit changing"),
+    ])
+    def test_what_a_tap_that_does_not_navigate_changes_is_a_change(self, box, what):
+        # #502 review: at 0.008 every one of these read as "changed nothing".
+        after = _png(box=box)
+        assert frames.unchanged_note(_tap(), after, 104.0, stamp=5.0) is None, what
+
+    def test_a_spinner_or_caret_reads_as_changed(self):
+        # No note on an animated screen: a missed hint, never a false one.
+        after = _png(box=(200, 400, 6, 6, 255))
+        assert frames.unchanged_note(_tap(), after, 104.0, stamp=5.0) is None
+
+    def test_the_threshold_is_near_exact(self):
+        assert frames.UNCHANGED_BELOW <= 0.0003
+
+    def test_within_the_grace_says_nothing(self):
+        tap = _tap(grace=1.0)
+        assert frames.unchanged_note(tap, _png(), 100.5, stamp=5.0) is None
+        assert frames.unchanged_note(tap, _png(), 101.5, stamp=5.0) is not None
 
     def test_the_status_bar_is_not_compared(self):
         # The clock ticked: a change in the top band only.
@@ -71,6 +92,23 @@ class TestUnchangedNote:
         assert frames.unchanged_note(_tap(), b"junk", 104.0, stamp=5.0) is None
         assert frames.unchanged_note(_tap(png=b"junk"), _png(), 104.0, stamp=5.0) is None
 
+    def test_a_change_inside_the_status_bar_is_not_compared(self):
+        # 7% of 800 = 56px: a change within it is ignored, one just below it is not.
+        assert frames.unchanged_note(_tap(), _png(box=(0, 10, 400, 40, 255)), 104.0, stamp=5.0)
+        assert frames.unchanged_note(
+            _tap(), _png(box=(0, 70, 400, 40, 255)), 104.0, stamp=5.0) is None
+
+    def test_android_crops_less(self):
+        # 5% of 800 = 40px: a change at 45-60px is compared on Android, not on iOS.
+        tap = frames.TapFrame(tapped={"label": "Go"}, png=_png(), platform="android",
+                              at=100.0, stamp=5.0, capture_ms=1.0, source="u2", grace=0.0)
+        assert frames.unchanged_note(tap, _png(box=(0, 45, 400, 8, 255)), 104.0,
+                                     stamp=5.0) is None
+
+    def test_a_landscape_frame_is_not_cropped(self):
+        image = frames.prepare(_png(size=(800, 400)), "ios")
+        assert image.size == (frames.FRAME_WIDTH, 50)
+
     def test_android_crops_its_own_status_bar(self):
         image = frames.prepare(_png(), "android")
         assert image.width == frames.FRAME_WIDTH
@@ -87,6 +125,9 @@ class TestCapture:
     def _controller(self, *, wda=False, android=False, bridge=False):
         c = MagicMock()
         c.u2.frame = AsyncMock(return_value=_png())
+        c.u2.is_connected.return_value = True
+        c.wda_client.has_connection.return_value = True
+        c.adb.screenshot = AsyncMock(return_value=_png())
         c._served_by_wda.return_value = wda
         c._is_android.return_value = android
         c.sim_bridge = object()
@@ -120,7 +161,57 @@ class TestCapture:
         c.u2.frame = AsyncMock(side_effect=OSError("u2 server down"))
         png, _, used = await frames._capture(c, "SERIAL")
         assert used == "adb" and png == _png() and frames.platform_of(used) == "android"
-        c.raw_screenshot.assert_awaited_once()
+        c.adb.screenshot.assert_awaited_once()
+        # Not raw_screenshot: on a phone that wakes the screen.
+        c.raw_screenshot.assert_not_awaited()
+
+    async def test_android_does_not_connect_u2_for_a_frame(self):
+        c = self._controller(android=True)
+        c.u2.is_connected.return_value = False
+        _, _, used = await frames._capture(c, "SERIAL")
+        assert used == "adb"
+        c.u2.frame.assert_not_awaited()
+
+    async def test_wda_does_not_connect_for_a_frame(self):
+        c = self._controller(wda=True)
+        c.wda_client.has_connection.return_value = False
+        png, _, used = await frames._capture(c, "UDID")
+        assert png is None and used == "wda"
+        c.wda_client.screenshot.assert_not_awaited()
+
+    @pytest.mark.parametrize("kind, attr", [
+        ({"android": True}, "u2.frame"), ({"bridge": True}, "sim_bridge.screenshot"),
+        ({}, "raw_screenshot"),
+    ])
+    async def test_every_path_is_bounded(self, kind, attr, monkeypatch):
+        import asyncio
+
+        async def slow(*a, **k):
+            await asyncio.sleep(1.0)
+            return _png()
+
+        monkeypatch.setattr(frames, "CAPTURE_TIMEOUT", 0.05)
+        c = self._controller(**kind)
+        obj, name = attr.rsplit(".", 1) if "." in attr else ("", attr)
+        setattr(getattr(c, obj) if obj else c, name, slow)
+        if kind.get("android"):
+            c.adb.screenshot = slow
+        png, ms, _ = await frames._capture(c, "UDID")
+        assert png is None and ms < 900
+
+    async def test_the_fallback_shares_one_deadline(self, monkeypatch):
+        import asyncio
+
+        async def slow(*a, **k):
+            await asyncio.sleep(1.0)
+            return _png()
+
+        monkeypatch.setattr(frames, "CAPTURE_TIMEOUT", 0.2)
+        c = self._controller(android=True)
+        c.u2.frame = slow
+        c.adb.screenshot = slow
+        _, ms, _ = await frames._capture(c, "UDID")
+        assert ms < 350
 
     async def test_the_capture_is_not_decoded_at_the_tap(self, monkeypatch):
         import server.device.settle as settle
@@ -136,11 +227,12 @@ class TestCapture:
         image = frames.prepare(_png(), "ios")
         assert image.height == 200 - int(200 * frames.STATUS_BAR_FRACTION["ios"])
 
-    def test_frames_from_different_sources_compare(self):
-        # A scaled JPEG-sized capture against a full-size one of the same screen.
-        small = frames.prepare(_png(size=(100, 200)), "android")
-        full = frames.prepare(_png(size=(1080, 2160)), "android")
-        assert small.size == full.size
+    @pytest.mark.parametrize("full", [(1080, 2400), (1080, 2340), (1080, 1920), (1440, 3120)])
+    def test_frames_from_different_sources_compare(self, full):
+        # u2's quarter-scale JPEG against adb's full PNG of the same screen.
+        small = frames.prepare(_png(size=(full[0] // 4, full[1] // 4)), "android")
+        big = frames.prepare(_png(size=full), "android")
+        assert small.size == big.size
 
     async def test_a_failed_capture_is_no_frame(self):
         c = self._controller(wda=True)
@@ -190,6 +282,12 @@ def controller(app):
     return ctrl
 
 
+@pytest.fixture(autouse=True)
+def no_grace(monkeypatch):
+    """These misses come straight after the tap; the grace is tested above."""
+    monkeypatch.setattr(frames, "MIN_AGE", 0.0)
+
+
 @pytest.fixture
 def screens(monkeypatch):
     """Frames the capture returns, in order, repeating the last."""
@@ -231,11 +329,65 @@ async def _tap_then_miss(app, controller):
 
 
 class TestRoute:
+    async def test_a_miss_reuses_its_own_frame(self, app, controller, screens):
+        # The missing call captured the screen before its lookup; with no
+        # screen change since, that is the "after" -- no third capture.
+        await _tap_then_miss(app, controller)
+        assert screens["n"] == 2
+
+    async def test_a_tap_that_moves_the_stamp_still_notes(self, app, controller, screens):
+        # A real tap stamps a screen change; the frame is judged from after it.
+        async def tapping(*a, **k):
+            controller._last_ui_change["AAAA-1111"] = 42.0
+            return {"status": "ok", "tapped": {"label": "Go", "type": "Button"}}
+
+        controller.tap_element.side_effect = tapping
+        await _post(app, "tap-element", {"label": "Go"})
+        _misses(controller)
+        _, body = await _post(app, "tap-element", {"label": "Next"})
+        assert body["detail"]["screen_unchanged_since_tap"]["tapped"]["label"] == "Go"
+
+    async def test_a_capture_failing_at_the_miss_only(self, app, controller, monkeypatch):
+        calls = {"n": 0}
+
+        async def capture(c, udid):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _png(), 10.0, "wda"
+            raise RuntimeError("bug at the miss")
+
+        monkeypatch.setattr(frames, "capture", capture)
+        await _post(app, "tap-element", {"label": "Go"})
+        controller.wait_for_element = AsyncMock(return_value=(
+            {"matched": False, "screen_context": {}}, "AAAA-1111"))
+        code, body = await _post(app, "wait-for-element",
+                                 {"identifier": "x", "condition": "exists", "timeout": 1})
+        assert code == 200 and "screen_unchanged_since_tap" not in body
+
+    async def test_a_documented_edges_timeout_extends_the_grace(
+        self, app, controller, screens, monkeypatch,
+    ):
+        monkeypatch.setattr(frames, "MIN_AGE", 0.0)
+        app.state.landmark_registry.load("probe", [
+            ScreenLandmarks(screen="a", landmarks=[Landmark(element="Heading", label="A")],
+                            leads_to=[NavEdge(target="b", label="Go", timeout=30.0)]),
+            ScreenLandmarks(screen="b", landmarks=[Landmark(element="Heading", label="B")]),
+        ])
+        code, body = await _tap_then_miss(app, controller)
+        assert "screen_unchanged_since_tap" not in body["detail"]
+
+    async def test_a_verified_arrival_keeps_no_frame(self, app, controller, screens):
+        controller.tap_element.return_value = {
+            "status": "ok", "tapped": {"label": "Go", "type": "Button"},
+            "navigation": {"arrived": True}}
+        await _post(app, "tap-element", {"label": "Go"})
+        assert app.state.tap_frames.get("AAAA-1111") is None
+
     async def test_a_miss_on_an_unchanged_screen_says_so(self, app, controller, screens):
         code, body = await _tap_then_miss(app, controller)
         note = body["detail"]["screen_unchanged_since_tap"]
         assert code == 404 and note["change"] == 0.0 and note["tapped"]["label"] == "Go"
-        assert note["capture_ms"] == {"before": 50, "after": 50}
+        assert note["capture_ms"] == {"before": 50, "after": 0}
 
     async def test_a_changed_screen_says_nothing(self, app, controller, screens):
         screens["pngs"] = [_png(), _png(box=(0, 200, 400, 300, 255))]
@@ -337,3 +489,29 @@ class TestRoute:
         _misses(controller)
         _, body = await _post(app, "tap-element", {"label": "Next"})
         assert "screen_unchanged_since_tap" not in body["detail"]
+
+
+class TestU2Frame:
+    async def test_asks_for_a_scaled_jpeg_and_decodes_it(self):
+        import base64
+
+        from server.device.android.u2_client import U2Backend
+
+        backend = U2Backend()
+        device = MagicMock()
+        device.jsonrpc.takeScreenshot.return_value = base64.b64encode(b"jpeg").decode()
+        backend._devices["SERIAL"] = device
+        assert await backend.frame("SERIAL") == b"jpeg"
+        device.jsonrpc.takeScreenshot.assert_called_once_with(0.25, 50)
+
+    async def test_a_failure_is_a_device_error(self):
+        from server.device.android.u2_client import U2Backend
+        from server.models import DeviceError
+
+        backend = U2Backend()
+        device = MagicMock()
+        device.jsonrpc.takeScreenshot.side_effect = RuntimeError("server gone")
+        backend._devices["SERIAL"] = device
+        with pytest.raises(DeviceError):
+            await backend.frame("SERIAL")
+        assert backend.is_connected("SERIAL") and not backend.is_connected("OTHER")

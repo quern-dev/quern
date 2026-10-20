@@ -1,4 +1,4 @@
-"""Did the screen change since the last tap? (#502)
+"""Has the screen changed since the last tap? (#502)
 
 After a miss, the question an agent asks is "did my last tap do anything?".
 #499 answers it from a knowledge base (`previous_tap`); this answers it
@@ -9,37 +9,53 @@ It is said on the miss, never on the tap: "nothing changed" is often meant --
 a label tapped, a switch already set -- and only once something has failed is
 it the useful fact. The frame before the tap is the per-tap cost, so each
 backend uses its fastest capture.
+
+**It must never claim "unchanged" over a real change.** So the comparison is
+near-exact: identical screens measured 0.0 on every backend, while what a tap
+that does not navigate actually changes is small -- a switch flipping is
+~0.5% of the frame, a checkmark appearing ~0.05%, one digit ~0.045% (#502
+review). A spinner or a blinking caret therefore reads as *changed*, and an
+animated screen gets no note: a missed hint, never a false one.
 """
 
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import time
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-#: Below this fraction of changed pixels the screen counts as unchanged. The
-#: frames are the content area at a quarter of the resolution, grayscale,
-#: compared per pixel with settle's threshold -- the comparison #475's sweep
-#: trusts to tell a list that moved from one that did not (0.008 there).
-UNCHANGED_BELOW = 0.008
+#: At or above this fraction of changed pixels the screen has changed. About
+#: four pixels of a 100-pixel-wide frame: identical screens compare at 0.0 on
+#: every backend (WDA, sim-bridge, uiautomator2, adb), and the smallest real
+#: effect measured -- a digit changing -- is ~0.00045.
+UNCHANGED_BELOW = 0.0002
 
-#: The top of the screen left out of the comparison: the status bar, whose
-#: clock and indicators change on their own. A fraction of the frame's height,
-#: so it holds at any scale; a little generous, since cutting a sliver of
-#: content costs nothing and leaving the clock in costs the whole signal.
-STATUS_BAR_FRACTION = {"ios": 0.07, "android": 0.05}
-
-#: Every frame is compared at this width, whatever captured it.
+#: Every frame is decoded straight to this width, whatever captured it, so a
+#: frame from one path compares with a frame from another.
 FRAME_WIDTH = 100
 
-#: A capture slower than this is abandoned: the tap must not wait on it.
+#: The top of a portrait screen left out of the comparison: the status bar,
+#: whose clock and indicators change on their own. A fraction of the height,
+#: so it holds at any scale. A landscape iPhone has no status bar, so a
+#: landscape frame is not cropped. A change confined to this band is missed:
+#: the safe direction.
+STATUS_BAR_FRACTION = {"ios": 0.07, "android": 0.05}
+
+#: The whole capture, fallback included, is abandoned past this: the tap must
+#: not wait on it.
 CAPTURE_TIMEOUT = 3.0
 
 #: How long a tap's frame is kept for the next miss, as `previous_tap` is.
 TTL = 120.0
+
+#: A miss sooner than this after the tap says nothing: the screen may still be
+#: arriving. The same grace #499 gives `previous_tap` (`MISS_MIN_AGE`); a
+#: documented edge's `timeout:` extends it.
+MIN_AGE = 1.0
 
 
 @dataclass
@@ -47,9 +63,8 @@ class TapFrame:
     """A delivered tap and the screen just before it."""
 
     tapped: dict
-    #: The capture as the backend returned it. Decoded only at a miss: the
-    #: decode and resize are most of the cost on a fast backend, and a tap
-    #: that is not followed by a miss never needs them.
+    #: The capture as the backend returned it. Decoded only at a miss: a tap
+    #: that is not followed by one never needs it.
     png: bytes
     platform: str
     at: float
@@ -57,38 +72,54 @@ class TapFrame:
     stamp: float | None
     capture_ms: float
     source: str
+    #: How long after the tap a miss must wait before this can be said.
+    grace: float = MIN_AGE
 
 
 async def _capture(controller, udid: str) -> tuple[bytes | None, float, str]:
     """The screen as the backend returns it, on its fastest path.
 
     Returns `(image bytes, milliseconds, source)`; the bytes are None when
-    the capture failed or was too slow, which the caller treats as "no
-    frame", never as a changed screen.
+    the capture failed, was too slow, or would have had to start something
+    -- a WDA connection, a uiautomator2 server -- that a tap must not start
+    as a side effect. None is "no frame", never a changed screen.
     """
     start = time.monotonic()
+    deadline = start + CAPTURE_TIMEOUT
     source = "none"
+
+    def left() -> float:
+        return max(0.01, deadline - time.monotonic())
+
     try:
         if controller._served_by_wda(udid):
             source = "wda"
-            png = await asyncio.wait_for(controller.wda_client.screenshot(udid), CAPTURE_TIMEOUT)
+            if not controller.wda_client.has_connection(udid):
+                return None, 0.0, source
+            png = await asyncio.wait_for(controller.wda_client.screenshot(udid), left())
         elif controller._is_android(udid):
+            png = None
             # uiautomator2's scaled JPEG is about three times as fast as adb's
-            # full PNG; adb stays the fallback when the u2 server cannot answer.
-            try:
-                source = "u2"
-                png = await asyncio.wait_for(controller.u2.frame(udid), CAPTURE_TIMEOUT)
-            except Exception:  # noqa: BLE001
-                logger.debug("u2 frame failed; falling back to adb", exc_info=True)
+            # full PNG -- but only on a device already connected: connecting,
+            # or a failed call, can restart the u2 server in the background,
+            # racing the tap's own u2 call (#502 review).
+            if controller.u2.is_connected(udid):
+                try:
+                    source = "u2"
+                    png = await asyncio.wait_for(controller.u2.frame(udid), left())
+                except Exception:  # noqa: BLE001
+                    logger.debug("u2 frame failed; falling back to adb", exc_info=True)
+                    png = None
+            if png is None:
                 source = "adb"
-                png = await asyncio.wait_for(controller.raw_screenshot(udid), CAPTURE_TIMEOUT)
+                png = await asyncio.wait_for(controller.adb.screenshot(udid), left())
         elif controller._ui_backend(udid) is getattr(controller, "sim_bridge", None):
             source = "sim-bridge"
             png = await asyncio.wait_for(
-                controller.sim_bridge.screenshot(udid, quality=0.5), CAPTURE_TIMEOUT)
+                controller.sim_bridge.screenshot(udid, quality=0.5), left())
         else:
             source = "simctl"
-            png = await asyncio.wait_for(controller.raw_screenshot(udid), CAPTURE_TIMEOUT)
+            png = await asyncio.wait_for(controller.raw_screenshot(udid), left())
     except Exception:  # noqa: BLE001 -- no frame is an answer, never a failure
         logger.debug("frame capture failed on %s", source, exc_info=True)
         png = None
@@ -103,21 +134,25 @@ def platform_of(source: str) -> str:
 
 
 def prepare(png: bytes | None, platform: str):
-    """A capture as a small grayscale image of the content, or None."""
-    from server.device.settle import _prepare
+    """A capture as a small grayscale image of the content, or None.
 
+    Decoded straight to `FRAME_WIDTH`: resizing in two steps rounded a scaled
+    JPEG and a full PNG of one screen to different heights, so they never
+    compared (#502 review).
+    """
     if not png:
         return None
-    image = _prepare(png)
-    if image is None:
+    try:
+        from PIL import Image
+
+        image = Image.open(io.BytesIO(png)).convert("L")
+    except Exception:  # noqa: BLE001 -- an undecodable capture is no frame
+        logger.debug("frame could not be decoded", exc_info=True)
         return None
-    # One width for every source, so frames from different capture paths
-    # compare -- u2's scaled JPEG and adb's full PNG, when one falls back to
-    # the other between the tap and the miss. A rotation still reads as
-    # changed: its height differs.
+    portrait = image.height >= image.width
     height = max(1, round(image.height * FRAME_WIDTH / image.width))
     image = image.resize((FRAME_WIDTH, height))
-    top = int(image.height * STATUS_BAR_FRACTION[platform])
+    top = int(image.height * STATUS_BAR_FRACTION[platform]) if portrait else 0
     return image.crop((0, top, image.width, image.height))
 
 
@@ -135,12 +170,15 @@ def unchanged_note(
 
     Silent unless every one of these holds: there is a frame after; nothing
     has changed the screen through quern since the tap (`stamp`); the tap is
-    under two minutes old; both captures decode; and they differ by less than
-    `UNCHANGED_BELOW`. Frames of different sizes are a changed screen.
+    older than its grace and younger than two minutes; both captures decode
+    to the same size; and they differ by less than `UNCHANGED_BELOW`.
     """
     from server.device.settle import changed_fraction
 
-    if after_png is None or stamp != tap.stamp or now - tap.at > TTL:
+    if after_png is None or stamp != tap.stamp:
+        return None
+    age = now - tap.at
+    if age < tap.grace or age > TTL:
         return None
     before = prepare(tap.png, tap.platform)
     after = prepare(after_png, tap.platform)
@@ -152,13 +190,14 @@ def unchanged_note(
     label = tap.tapped.get("label") or tap.tapped.get("identifier") or "the element"
     return {
         "tapped": {k: tap.tapped.get(k) for k in ("label", "identifier", "type")},
-        "seconds_ago": round(now - tap.at, 1),
-        "change": round(change, 4),
+        "seconds_ago": round(age, 1),
+        "change": round(change, 5),
         "note": (
-            f"The screen looks the same as just before the previous tap on {label!r}: "
-            "that tap changed nothing visible. If it was meant to navigate or open "
-            "something, it probably did not register, which would explain this miss. "
-            "Check the screen before repeating it -- not blindly for a submit, a "
-            "purchase or a send."
+            f"The screen looks exactly as it did just before the previous tap on "
+            f"{label!r}, {round(age, 1)}s ago, and nothing quern did has changed it "
+            "since. If that tap was meant to navigate, open or toggle something, it "
+            "probably did not register, which would explain this miss. Check the "
+            "screen before repeating it -- not blindly for a submit, a purchase or a "
+            "send."
         ),
     }

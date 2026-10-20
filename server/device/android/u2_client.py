@@ -303,6 +303,10 @@ class U2Backend:
         self._devices[serial] = device
         return device
 
+    def is_connected(self, serial: str) -> bool:
+        """Whether this device already has a uiautomator2 connection."""
+        return serial in self._devices
+
     def _disconnect(self, serial: str) -> None:
         """Remove a cached connection."""
         self._devices.pop(serial, None)

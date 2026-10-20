@@ -486,6 +486,11 @@ class WdaBackend:
             "the simulator to the default backend"
         )
 
+    def has_connection(self, udid: str) -> bool:
+        """Whether a WDA connection to this device is already set up, so a
+        call needs no tunnel check, forward or driver start first (#502)."""
+        return udid in self._simulator_ports or udid in self._connections
+
     async def _get_base_url(self, udid: str) -> str:
         """Get (or create) the WDA base URL for a device.
 
