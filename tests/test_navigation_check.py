@@ -500,6 +500,13 @@ class TestRoute:
         assert body["navigation"]["on"] == "text"
         assert "may have dropped the tap" in body["warning"]
 
+    async def test_a_miss_keeps_the_device_hub_advisory(self, app, controller):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        controller.input_warning = lambda udid: "Device Hub has this simulator's input."
+        code, body = await _tap(app, {"label": "More"})
+        assert "may have dropped the tap" in body["warning"]
+        assert "Device Hub has this simulator's input." in body["warning"]
+
     async def test_no_knowledge_base_costs_no_read(self, app, controller):
         code, body = await _tap(app, {"label": "More"})
         assert code == 200 and "navigation" not in body

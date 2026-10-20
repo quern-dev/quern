@@ -627,7 +627,14 @@ async def tap_element(request: Request, body: TapElementRequest):
                     warning = navigation.warning_for(nav)
                     if warning:
                         act.outcome = "navigation_missed"
-                        result["warning"] = warning
+                        # The Device Hub advisory too, when there is one: it is
+                        # the likeliest cause of the miss, and
+                        # `_with_input_warning` adds nothing once a warning is
+                        # set.
+                        advisory = controller.input_warning(resolved)
+                        result["warning"] = (
+                            f"{warning} {advisory}" if advisory else warning
+                        )
 
             if body.capture_screenshots:
                 await asyncio.sleep(body.settle_delay)
