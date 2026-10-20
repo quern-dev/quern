@@ -105,7 +105,9 @@ that is not checked under `navigation.unusable`, with why. When one tap can
 lead to several screens -- a tab that shows whatever its stack was left on --
 list an edge to each; arriving at any of them counts. Add `condition:` to an
 edge that exists only in some states: it confirms an arrival but never reports
-a miss.
+a miss. Add `timeout:` (seconds, up to 60) to an edge whose screen is slow to
+arrive -- one that waits on the network -- so a slow arrival is not reported as
+a dropped tap; the default wait is 3s.
 
 #### Recording whether a screen scrolls
 

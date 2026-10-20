@@ -157,6 +157,7 @@ leads_to:
   - screen: "[[screens/...]]"
     action: 'tap_element label="..." element_type="..."'
     # condition: "optional — when this edge only exists in certain states"
+    # timeout: 10  # optional — seconds to wait for a screen that loads slowly (default 3)
 
 # What must be true before the agent can reach this screen.
 preconditions: []
