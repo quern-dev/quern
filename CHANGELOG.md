@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0-beta.3] - 2026-10-20
+
 ### Added
 - **A miss says when the tap before it probably did not register (#491).** `tap_element` reports `ok` once the backend accepts a tap, and apps -- WDA in particular -- drop taps, so a dropped tap surfaced calls later as an unrelated `not_found`.
   - With a knowledge base loaded, a delivered tap whose element is a `leads_to` edge is remembered at no cost. A later `tap_element` miss or `wait_for_element` timeout on a screen that tap was documented to leave carries `previous_tap`: what was tapped, where it should have led, and where you still are.
@@ -877,7 +879,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.25.0-beta.2...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.25.0-beta.3...main
+[0.25.0-beta.3]: https://github.com/quern-dev/quern/releases/tag/v0.25.0-beta.3
 [0.25.0-beta.2]: https://github.com/quern-dev/quern/releases/tag/v0.25.0-beta.2
 [0.25.0-beta.1]: https://github.com/quern-dev/quern/releases/tag/v0.25.0-beta.1
 [0.24.1]: https://github.com/quern-dev/quern/releases/tag/v0.24.1
