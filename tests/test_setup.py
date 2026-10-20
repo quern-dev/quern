@@ -3485,3 +3485,47 @@ class TestAfterUpdateFromTheEnvironment:
     ])
     def test_only_one_means_after_an_update(self, monkeypatch, value, expected):
         assert self._read(monkeypatch, value) is expected
+
+
+class TestCouldNotTellIsNotBlocked:
+    """#506's error needs evidence: a place that could not tell may hold the
+    node a client will use, so setup must not say none does (beta.3 cut)."""
+
+    def test_an_unknown_place_is_not_evidence_of_no_node(self):
+        from server.lifecycle import node_env
+        from server.lifecycle.setup import mcp_cannot_start
+
+        assert mcp_cannot_start(_node_sites(
+            (node_env.UNKNOWN, None), (node_env.UNKNOWN, None), (node_env.MISSING, None),
+        )) is False
+
+    def test_a_too_old_node_with_nothing_unknown_is_still_blocked(self):
+        from server.lifecycle import node_env
+        from server.lifecycle.setup import mcp_cannot_start
+
+        old = (node_env.TOO_OLD, "v22.12.0")
+        assert mcp_cannot_start(_node_sites(old, old, (node_env.MISSING, None))) is True
+
+
+class TestTheNewNodeRunsOnceBeforeTheProbe:
+    def test_it_runs_unhurried(self, monkeypatch):
+        from server.lifecycle import setup as setup_mod
+
+        seen = []
+        monkeypatch.setattr(setup_mod.shutil, "which", lambda name: "/opt/homebrew/bin/node")
+        setup_mod._first_run_of_new_node(run=lambda argv, **kw: seen.append((argv, kw)))
+        (argv, kw), = seen
+        assert argv == ["/opt/homebrew/bin/node", "--version"]
+        assert kw["timeout"] >= 60, "no longer than the probe's own timeout is no help"
+
+    def test_a_slow_or_failing_first_run_does_not_raise(self, monkeypatch):
+        import subprocess
+
+        from server.lifecycle import setup as setup_mod
+
+        monkeypatch.setattr(setup_mod.shutil, "which", lambda name: "/opt/homebrew/bin/node")
+
+        def slow(argv, **kw):
+            raise subprocess.TimeoutExpired(argv, kw["timeout"])
+
+        setup_mod._first_run_of_new_node(run=slow)   # no exception

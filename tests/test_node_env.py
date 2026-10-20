@@ -28,9 +28,10 @@ class World:
     """A machine: which node each PATH finds, and what each shell prints."""
 
     def __init__(self, *, on_path=None, versions=None, login="", script="",
-                 raise_for=None):
+                 raise_for=None, slow=()):
         self.on_path = on_path or {}       # dir -> node path
         self.versions = versions or {}     # node path -> "vNN..."
+        self.slow = set(slow)              # node paths whose --version times out
         self.shell_out = {"-lic": login, "-c": script}
         self.raise_for = raise_for or {}   # "-lic" -> exception
         self.calls: list[tuple[list[str], dict]] = []
@@ -45,6 +46,8 @@ class World:
     def run(self, argv, **kw):
         self.calls.append((argv, kw))
         if argv[-1] == "--version":
+            if argv[0] in self.slow:
+                raise subprocess.TimeoutExpired(argv, kw.get("timeout", 10))
             v = self.versions.get(argv[0])
             return _done(v + "\n") if v else _done("", 1)
         flag = argv[1]
@@ -831,3 +834,25 @@ class TestCheckOutsideAShell:
         def timeout(*a, **k):
             raise subprocess.TimeoutExpired("node", 10)
         assert self._check(timeout) == (node_env.UNKNOWN, None)
+
+
+class TestAFirstRunThatTimesOut:
+    """A node Homebrew has just installed can take longer than the probe's
+    timeout on its first run while macOS checks the new binary -- measured on
+    a fresh VM for the beta.3 cut: every place timed out, then the same run's
+    tool inventory read v26.12.0. A timeout is "could not tell", never
+    "broken": reporting it as broken told a first install to reinstall a
+    working node and, with #506, failed setup over it."""
+
+    def test_a_timed_out_version_is_unknown_not_unusable(self):
+        node = "/opt/homebrew/bin/node"
+        world = World(on_path={"/caller/bin": node}, versions={node: "v26.12.0"}, slow={node})
+        here = world.probe()[0]
+        assert here.status == node_env.UNKNOWN, here
+        assert "did not answer" in here.detail, here.detail
+
+    def test_a_node_that_fails_fast_is_still_unusable(self):
+        """The other half: a binary that exits non-zero has answered."""
+        node = "/opt/homebrew/bin/node"
+        world = World(on_path={"/caller/bin": node}, versions={})
+        assert world.probe()[0].status == node_env.UNUSABLE

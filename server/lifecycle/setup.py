@@ -1999,19 +1999,45 @@ def _probe_node_sites() -> list | None:
         return None
 
 
+#: How long a node just installed may take to answer its first `--version`.
+#: The probe allows 10s; macOS checking a new binary on a fresh machine took
+#: longer than that (beta.3 cut), and this run is the one to absorb it.
+FIRST_RUN_TIMEOUT = 120
+
+
+def _first_run_of_new_node(run: Callable[..., object] = subprocess.run) -> None:
+    """Run the node Homebrew just installed once, unhurried, before probing it.
+
+    So the re-probe sees the node as it will be from now on, not its first
+    launch: on a fresh machine that launch outlasted the probe's timeout, and
+    the report then said the new node did not run. Best effort -- whatever
+    happens here, the probe that follows is what reports.
+    """
+    node = shutil.which("node")
+    if not node:
+        return
+    with contextlib.suppress(OSError, ValueError, subprocess.SubprocessError):
+        run([node, "--version"], capture_output=True, text=True,
+            timeout=FIRST_RUN_TIMEOUT, stdin=subprocess.DEVNULL)
+
+
 def mcp_cannot_start(sites: list | None) -> bool:
     """True when node was found and no place has one meeting the floor (#506).
 
     Then no MCP client can start the wrapper, whichever place it reads -- the
-    case setup must not call complete. False when the probe failed (that is
-    "could not tell", reported as such) and when node is missing here, which
-    has its own message and is already an error.
+    case setup must not call complete. False when the probe failed or any
+    place could not tell (that is "could not tell", reported as such), and
+    when node is missing here, which has its own message and is already an
+    error.
     """
     from server.lifecycle import node_env
 
     if not sites or sites[0].status == node_env.MISSING:
         return False
-    return not any(site.status == node_env.OK for site in sites)
+    # Evidence, not absence of it: a place that could not tell (a timeout, a
+    # shell that would not start) may hold the very node a client will run,
+    # so "no place has one" is not something setup can say then (beta.3 cut).
+    return not any(site.status in (node_env.OK, node_env.UNKNOWN) for site in sites)
 
 
 def _node_severity(result: CheckResult, mcp_blocked: bool, *, after_update: bool) -> CheckResult:
@@ -3273,6 +3299,7 @@ def run_setup(assume_yes: bool = False, after_update: bool | None = None) -> int
     if node_result.status == CheckStatus.MISSING and node_result.fixable:
         if _prompt_yn("    Node.js not found. Install via Homebrew?"):
             if _brew_install("node"):
+                _first_run_of_new_node()
                 node_sites = _probe_node_sites()
                 node_result = check_node(node_sites)  # re-check
             else:
