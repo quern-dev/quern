@@ -372,6 +372,44 @@ class TestVerify:
                                    tapped={"label": "More Info", "type": "Button"})
         assert nav is None and reads == 0
 
+    async def _slow(self, reads, read_s, timeout=3.0):
+        """Reads that each take `read_s` -- a sim-bridge read is 1.6-3.9s."""
+        clock = _Clock()
+        seq = list(reads)
+        calls = {"n": 0}
+
+        async def identify():
+            i = min(calls["n"], len(seq) - 1)
+            calls["n"] += 1
+            clock.now += read_s
+            r = seq[i]
+            if isinstance(r, Exception):
+                raise r
+            return r
+
+        nav = await verify(_plan(), TAPPED, identify, timeout=timeout,
+                           clock=clock, sleep=clock.sleep)
+        return nav, calls["n"]
+
+    async def test_a_slow_read_begun_with_the_tap_cannot_claim_a_miss(self):
+        # The first read begins as the tap lands and runs past the deadline,
+        # showing the old screen; the app had navigated meanwhile.
+        nav, reads = await self._slow([_exact("text"), _exact("more")], read_s=3.5)
+        assert nav["arrived"] is True and reads == 2
+
+    async def test_a_slow_backend_still_reports_a_real_miss(self):
+        nav, reads = await self._slow([_exact("text")], read_s=3.5)
+        assert nav["arrived"] is False and reads == 2
+
+    async def test_late_reads_failing_is_no_claim(self):
+        nav, _ = await self._slow([_exact("text"), OSError("gone")], read_s=3.5)
+        assert nav["arrived"] is None and nav["reason"] == "no_settled_read"
+        assert warning_for(nav) is None
+
+    async def test_the_wait_is_capped(self):
+        nav, reads = await self._slow([_exact("text"), OSError("gone")], read_s=3.5)
+        assert nav["waited_ms"] <= (navigation.HARD_CAP + 3.5 + 0.2) * 1000
+
     async def test_the_full_wait_is_paid_only_by_a_miss(self):
         nav, _ = await _verify(_plan(), _exact("text"), timeout=1.0)
         assert nav["waited_ms"] >= 1000

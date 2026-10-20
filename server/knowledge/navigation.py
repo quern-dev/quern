@@ -49,8 +49,19 @@ SELECTOR_KEYS = ("label", "identifier", "label_contains", "label_prefix", "eleme
 #: The full wait is paid only by a tap that did not navigate.
 NAVIGATION_TIMEOUT = 3.0
 
-#: Between reads while waiting. Reads themselves take 0.1-0.5s, so this only
-#: stops a fast backend from spinning.
+#: A miss is claimed only from a read that *began* at least this long after
+#: the tap. A read is a snapshot of the moment it starts, and a sim-bridge read
+#: takes 1.6-3.9s (measured, mostly probing containers for the tab and
+#: navigation bars the landmarks name): one begun as the tap landed can return
+#: the old screen after the new one has arrived. A push animates for ~0.35s.
+MISS_MIN_AGE = 1.0
+
+#: However slow the reads, the wait ends here. Past it with no read late
+#: enough to claim a miss, the answer is "could not tell".
+HARD_CAP = 10.0
+
+#: Between reads while waiting. Reads themselves take 0.1-0.5s through WDA, so
+#: this only stops a fast backend from spinning.
 _POLL_GAP = 0.15
 
 _ACTION_RE = re.compile(r"^\s*(?:mcp__[\w-]+__)?tap_element\b(?P<args>.*)$", re.S)
@@ -274,8 +285,11 @@ async def verify(
 
     start = clock()
     last: Identified | None = None
+    #: The latest identification from a read begun late enough to claim a miss.
+    settled: Identified | None = None
     failures = 0
     while True:
+        began = clock() - start
         try:
             last = await identify()
         except Exception:  # noqa: BLE001 -- a failed read is "could not tell", never a miss
@@ -291,7 +305,10 @@ async def verify(
                     report["on"] = last.screen
                 report["waited_ms"] = round((clock() - start) * 1000)
                 return report
-        if clock() - start >= timeout:
+            if began >= MISS_MIN_AGE:
+                settled = last
+        elapsed = clock() - start
+        if elapsed >= timeout and (settled is not None or elapsed >= HARD_CAP):
             break
         await sleep(_POLL_GAP)
 
@@ -301,6 +318,13 @@ async def verify(
         report["reason"] = "read_failed"
         report["read_failures"] = failures
         return report
+    if settled is None:
+        # Every read that answered began too soon after the tap to show
+        # where it went -- a slow backend, or the late reads failing.
+        report["arrived"] = None
+        report["reason"] = "no_settled_read"
+        return report
+    last = settled
     if last.confidence != "exact" or last.app != plan.before.app:
         # The target half-drawn, or a screen the knowledge base does not know.
         report["arrived"] = None
