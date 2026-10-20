@@ -14,7 +14,7 @@ enum McpClientsTests {
         client: "Claude Desktop",
         reason: "Claude Desktop is set to run /Users/u/.nvm/versions/node/v22.1.0/bin/node, "
             + "which no longer exists",
-        fix: "`quern mcp-install claude-desktop` registers an absolute Node 22+")
+        fix: "`quern mcp-install claude-desktop` registers an absolute Node 22.19+")
     static let project = McpClientProblem(
         client: "Claude Code (/src/app)",
         reason: "Claude Code (/src/app) is set to run /gone/node, which no longer exists",

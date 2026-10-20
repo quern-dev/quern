@@ -388,6 +388,9 @@ def _can_prompt() -> bool:
 #: which is how one gets missed and a single prompt goes on blocking an
 #: unattended run.
 _ASSUME_YES = False
+#: Whether this run finishes an update (#506), so the venv re-exec can say so
+#: too: the child reads `AFTER_UPDATE_ENV`, and an argument does not cross it.
+_AFTER_UPDATE = False
 
 
 def _prompt_yn(question: str, default: bool = True, *, deliberate: bool = False) -> bool:
@@ -2912,6 +2915,12 @@ def _reexec_in_venv(venv_path: Path) -> int:
     venv_bin = str(venv_path / "bin")
     env["PATH"] = venv_bin + ":" + env.get("PATH", "")
     env["VIRTUAL_ENV"] = str(venv_path)
+    # Into the child only, not this process's environment: set here, it would
+    # outlive this run and reach whatever the updater starts next.
+    if _AFTER_UPDATE:
+        env[AFTER_UPDATE_ENV] = "1"
+    else:
+        env.pop(AFTER_UPDATE_ENV, None)
     # When running under `curl | bash`, stdin is the pipe — pass /dev/tty
     # so the re-exec'd process can prompt interactively.
     stdin_arg: int | None = None
@@ -2987,10 +2996,11 @@ def run_setup(assume_yes: bool = False, after_update: bool | None = None) -> int
     setting up should not be told "complete" when the MCP server cannot start.
     Unset, it reads `AFTER_UPDATE_ENV`.
     """
-    global _ASSUME_YES
+    global _ASSUME_YES, _AFTER_UPDATE
     _ASSUME_YES = assume_yes
     if after_update is None:
         after_update = os.environ.get(AFTER_UPDATE_ENV, "").strip() == "1"
+    _AFTER_UPDATE = after_update
     # Ensure venv bin dir is on PATH so which() finds venv-installed tools
     if sys.prefix != sys.base_prefix:
         venv_bin = str(Path(sys.prefix) / "bin")

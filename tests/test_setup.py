@@ -1445,6 +1445,27 @@ class TestTheFlagIsActuallyWired:
 
         assert "--yes" not in seen["argv"]
 
+    @pytest.mark.parametrize("after_update", [True, False])
+    def test_finishing_an_update_survives_the_re_exec(self, monkeypatch, tmp_path, after_update):
+        """The updater passes `after_update=True` as an argument, which the
+        child does not get: without the variable it would be an ordinary run,
+        and a Node below the floor would fail the update (#506 review)."""
+        from server.lifecycle import setup as setup_mod
+
+        venv = tmp_path / ".venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "python").write_text("")
+        seen = {}
+        monkeypatch.setattr(setup_mod.subprocess, "run",
+                            lambda argv, **k: seen.update(env=k["env"])
+                            or SimpleNamespace(returncode=0))
+        # A stale "1" from a caller must not survive into an ordinary run.
+        monkeypatch.setenv(setup_mod.AFTER_UPDATE_ENV, "1")
+        monkeypatch.setattr(setup_mod, "_AFTER_UPDATE", after_update)
+        setup_mod._reexec_in_venv(venv)
+
+        assert (seen["env"].get(setup_mod.AFTER_UPDATE_ENV) == "1") is after_update
+
 
 class TestTheStandingCertAnswer:
     """`auto_install_cert` answers the CA question once. Setup's own prompt

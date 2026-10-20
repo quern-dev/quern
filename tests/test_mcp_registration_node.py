@@ -169,8 +169,10 @@ class TestDoctorReportsTheRegistrations:
         node = tmp_path / "node"
         node.write_text("")
         regs = [setup.McpRegistration("claude-code", Path("/c"), str(node))]
-        self._report(monkeypatch, regs, {str(node): (node_env.TOO_OLD, "v20.20.2")})
-        assert "is v20.20.2, below Node 22" in capsys.readouterr().out
+        # A 22 below the floor, and the floor's minor in the words: v20 and
+        # "below Node 22" passed against a major-only floor (#506 review).
+        self._report(monkeypatch, regs, {str(node): (node_env.TOO_OLD, "v22.12.0")})
+        assert "is v22.12.0, below Node 22.19" in capsys.readouterr().out
 
     def test_plain_node_is_flagged_as_left_to_each_client(self, monkeypatch, capsys):
         regs = [setup.McpRegistration("claude-desktop", Path("/c"), "node")]
