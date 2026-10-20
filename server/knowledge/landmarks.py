@@ -961,6 +961,13 @@ class LandmarkRegistry:
             if matches_tapped(edge, tapped)
         ]
 
+    def apps_with_screen(self, name: str | None) -> list[str]:
+        """The loaded apps that have a screen with this name."""
+        return [
+            app for app, screens in self._sets.items()
+            if any(s.screen == name for s in screens)
+        ]
+
     def any_edge_could_match(self, call: dict) -> bool:
         """Whether any loaded edge could be the tap `call` describes.
 
@@ -1265,6 +1272,17 @@ class LandmarkRegistry:
             "identified_as": result.get("matched"),
             "confidence": result.get("confidence"),
         }
+        if result.get("confidence") == "exact":
+            # Which loaded app the screen belongs to: names repeat across apps
+            # (`Home`, `Settings`, the probe's iOS and Android `text`), and
+            # whatever acts on the identification -- a `previous_tap` note --
+            # must judge that app's knowledge, not a namesake's.
+            try:
+                app = self.identify_exact(elements, page_urls).app
+            except Exception:  # noqa: BLE001 -- an addition to the identification
+                app = None
+            if app is not None:
+                identified["identified_app"] = app
         if result.get("confidence") == "ambiguous":
             identified["candidates"] = [
                 result.get("matched"), *result.get("ambiguous_with", []),

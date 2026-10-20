@@ -25,6 +25,7 @@ from server.knowledge.navigation import (
     parse_action,
     parse_leads_to,
     plan_for,
+    previous_tap_note,
     verify,
     warning_for,
 )
@@ -734,6 +735,23 @@ class TestRoute:
         assert controller.get_ui_elements.call_count == 1
 
 
+class TestIdentifiedApp:
+    async def test_identify_for_context_names_the_app(self):
+        registry = LandmarkRegistry()
+        registry.load("one", [ScreenLandmarks(
+            screen="Home", landmarks=[Landmark(element="Heading", label="Welcome")])])
+        registry.load("two", [ScreenLandmarks(
+            screen="Home", landmarks=[Landmark(element="Heading", label="Dashboard")])])
+
+        async def no_urls():
+            return None
+
+        found = await registry.identify_for_context(
+            [UIElement(type="Heading", label="Dashboard")], no_urls)
+        assert found == {"identified_as": "Home", "confidence": "exact",
+                         "identified_app": "two"}
+
+
 class TestRegistry:
     def _screen(self, name, heading, leads_to=()):
         return ScreenLandmarks(screen=name, landmarks=[Landmark(element="Heading", label=heading)],
@@ -799,6 +817,12 @@ class TestPreviousTap:
         "screen_context": {"identified_as": "text", "confidence": "exact"},
     }
 
+    @pytest.fixture(autouse=True)
+    def no_grace(self, monkeypatch):
+        """These misses come straight after the tap; the grace before a tap
+        can be blamed is tested on its own below."""
+        monkeypatch.setattr(navigation, "MISS_MIN_AGE", 0.0)
+
     async def _miss(self, app, controller, screen_context=None):
         result = dict(self.NOT_FOUND)
         if screen_context is not None:
@@ -834,6 +858,23 @@ class TestPreviousTap:
                                    {"identified_as": "more", "confidence": "exact"})
         assert "previous_tap" not in body["detail"]
 
+    async def test_the_identified_app_decides_whose_edges_count(self, app, controller):
+        # Both apps have a "text"; the miss identified probe's.
+        app.state.landmark_registry.load("probe", _registry_screens())
+        app.state.landmark_registry.load("other", [
+            ScreenLandmarks(screen="hub", landmarks=[Landmark(element="Heading", label="Hub")],
+                            leads_to=[NavEdge(target="text", label="More")]),
+            ScreenLandmarks(screen="text", landmarks=[Landmark(element="Heading", label="T2")]),
+        ])
+        await _tap(app, {"label": "More"}, opt_in=False)
+        _, body = await self._miss(app, controller, {
+            "identified_as": "text", "confidence": "exact", "identified_app": "probe"})
+        assert body["detail"]["previous_tap"]["expected"] == "more"
+        await _tap(app, {"label": "More"}, opt_in=False)
+        _, body = await self._miss(app, controller, {
+            "identified_as": "text", "confidence": "exact", "identified_app": "other"})
+        assert "previous_tap" not in body["detail"]
+
     async def test_another_apps_edges_do_not_silence_it(self, app, controller):
         # A second app whose own "More" leads to its own screen named "text".
         app.state.landmark_registry.load("probe", _registry_screens())
@@ -843,7 +884,8 @@ class TestPreviousTap:
             ScreenLandmarks(screen="text", landmarks=[Landmark(element="Heading", label="T2")]),
         ])
         await _tap(app, {"label": "More"}, opt_in=False)
-        _, body = await self._miss(app, controller)
+        _, body = await self._miss(app, controller, {
+            "identified_as": "text", "confidence": "exact", "identified_app": "probe"})
         assert body["detail"]["previous_tap"]["expected"] == "more"
 
     async def test_it_is_said_once(self, app, controller):
@@ -921,12 +963,134 @@ class TestPreviousTap:
         body = await self._wait(app, controller, matched=False)
         assert body["previous_tap"]["expected"] == "more"
 
-    async def test_a_wait_that_succeeds_clears_it(self, app, controller):
+    async def test_a_wait_that_matched_does_not_clear_it(self, app, controller):
+        # It may have matched something of the screen the tap should have
+        # left: a spinner gone, a field enabled.
         app.state.landmark_registry.load("probe", _registry_screens())
         await _tap(app, {"label": "More"}, opt_in=False)
         await self._wait(app, controller, matched=True)
         _, body = await self._miss(app, controller)
+        assert body["detail"]["previous_tap"]["expected"] == "more"
+
+    async def test_any_screen_change_since_silences_it(self, app, controller):
+        # A back tap by coordinates, a swipe, a button: they all stamp it.
+        app.state.landmark_registry.load("probe", _registry_screens())
+        await _tap(app, {"label": "More"}, opt_in=False)
+        controller._last_ui_change["AAAA-1111"] = 12345.0
+        _, body = await self._miss(app, controller)
         assert "previous_tap" not in body["detail"]
+
+    async def test_a_verified_tap_is_not_remembered(self, app, controller):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        controller.get_ui_elements.side_effect = [
+            (TEXT_TREE, "AAAA-1111"), (MORE_TREE, "AAAA-1111")]
+        _, body = await _tap(app, {"label": "More"})   # verify_navigation: true
+        assert body["navigation"]["arrived"] is True
+        _, body = await self._miss(app, controller)
+        assert "previous_tap" not in body["detail"]
+
+    async def test_a_name_shared_with_another_app_says_nothing(self, app, controller):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        app.state.landmark_registry.load("other", [
+            ScreenLandmarks(screen="text", landmarks=[Landmark(element="Heading", label="T2")])])
+        await _tap(app, {"label": "More"}, opt_in=False)
+        _, body = await self._miss(app, controller)
+        assert "previous_tap" not in body["detail"]
+
+    async def test_an_arrival_through_a_conditional_edge_is_not_blamed(self, app, controller):
+        screens = _registry_screens()
+        screens.append(ScreenLandmarks(
+            screen="hub", landmarks=[Landmark(element="Heading", label="Hub")],
+            leads_to=[NavEdge(target="text", label="More", condition="signed in")]))
+        app.state.landmark_registry.load("probe", screens)
+        await _tap(app, {"label": "More"}, opt_in=False)   # from hub, lands on text
+        _, body = await self._miss(app, controller)
+        assert "previous_tap" not in body["detail"]
+
+    async def test_a_miss_with_no_identification_leaves_it(self, app, controller):
+        # A stale web element: not_found with no screen context.
+        app.state.landmark_registry.load("probe", _registry_screens())
+        await _tap(app, {"label": "More"}, opt_in=False)
+        controller.tap_element.return_value = {
+            "status": "not_found", "reason": "stale_web_content", "message": "gone"}
+        code, body = await _tap(app, {"label": "Toggle"}, opt_in=False)
+        assert code == 404 and "previous_tap" not in body["detail"]
+        _, body = await self._miss(app, controller)
+        assert body["detail"]["previous_tap"]["expected"] == "more"
+
+    async def test_a_result_that_tapped_nothing_keeps_it(self, app, controller):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        await _tap(app, {"label": "More"}, opt_in=False)
+        controller.tap_element.return_value = {"status": "ambiguous", "matches": []}
+        await _tap(app, {"label": "Row"}, opt_in=False)
+        _, body = await self._miss(app, controller)
+        assert body["detail"]["previous_tap"]["expected"] == "more"
+
+    async def test_a_failing_lookup_does_not_fail_the_tap(self, app, controller, monkeypatch):
+        app.state.landmark_registry.load("probe", _registry_screens())
+
+        def boom(tapped):
+            raise RuntimeError("bad knowledge base")
+
+        monkeypatch.setattr(app.state.landmark_registry, "edges_for_tapped", boom)
+        code, body = await _tap(app, {"label": "More"}, opt_in=False)
+        assert code == 200 and body["status"] == "ok"
+        _, body = await self._miss(app, controller)
+        assert "previous_tap" not in body["detail"]
+
+    async def test_a_failing_note_does_not_fail_the_miss(self, app, controller, monkeypatch):
+        app.state.landmark_registry.load("probe", _registry_screens())
+        await _tap(app, {"label": "More"}, opt_in=False)
+
+        def boom(*a, **k):
+            raise RuntimeError("bug")
+
+        monkeypatch.setattr(navigation, "previous_tap_note", boom)
+        code, body = await self._miss(app, controller)
+        assert code == 404 and body["detail"]["status"] == "not_found"
+
+
+class TestPreviousTapNote:
+    """`previous_tap_note` itself, with the clock in hand."""
+
+    def _tap(self, *edges, at=100.0, stamp=7.0):
+        return navigation.DocumentedTap(
+            tapped={"label": "Next", "type": "Button"},
+            edges=list(edges), at=at, stamp=stamp)
+
+    CTX = {"identified_as": "a", "confidence": "exact"}
+
+    def test_the_real_ttl(self):
+        tap = self._tap(("app", "a", _edge(target="b", label="Next")))
+        assert previous_tap_note(tap, self.CTX, 100.0 + 119, stamp=7.0) is not None
+        assert previous_tap_note(tap, self.CTX, 100.0 + 121, stamp=7.0) is None
+
+    def test_the_grace_before_blame(self):
+        tap = self._tap(("app", "a", _edge(target="b", label="Next")))
+        assert previous_tap_note(tap, self.CTX, 100.5, stamp=7.0) is None
+        assert previous_tap_note(tap, self.CTX, 101.5, stamp=7.0) is not None
+
+    def test_an_edge_timeout_extends_the_grace(self):
+        tap = self._tap(("app", "a", _edge(target="b", label="Next", timeout=30.0)))
+        assert previous_tap_note(tap, self.CTX, 110.0, stamp=7.0) is None
+        assert previous_tap_note(tap, self.CTX, 131.0, stamp=7.0) is not None
+
+    def test_a_changed_screen(self):
+        tap = self._tap(("app", "a", _edge(target="b", label="Next")))
+        assert previous_tap_note(tap, self.CTX, 105.0, stamp=8.0) is None
+
+    def test_expected_is_only_where_it_leads_from_here(self):
+        # "Next" leads a -> b and b -> c; the miss is on a.
+        tap = self._tap(("app", "a", _edge(target="b", label="Next")),
+                        ("app", "b", _edge(target="c", label="Next")))
+        note = previous_tap_note(tap, self.CTX, 105.0, stamp=7.0)
+        assert note["expected"] == "b"
+
+    def test_the_note_names_the_tap_and_its_age(self):
+        tap = self._tap(("app", "a", _edge(target="b", label="Next")))
+        note = previous_tap_note(tap, self.CTX, 104.26, stamp=7.0)
+        assert "'Next'" in note["note"] and note["seconds_ago"] == 4.3
+        assert note["tapped"] == {"label": "Next", "identifier": None, "type": "Button"}
 
 
 class TestInlineLoad:

@@ -431,41 +431,79 @@ class DocumentedTap:
     that the next miss on the device can say whether it explains it."""
 
     tapped: dict
-    #: `(app, source screen, edge)` for every unconditional edge it matches.
+    #: `(app, source screen, edge)` for every edge the tapped element matches,
+    #: conditional ones included: they cannot be blamed, but an arrival
+    #: through one must still read as an arrival.
     edges: list[tuple[str, str, NavEdge]]
     at: float
+    #: The device's last screen change as the tap left it. Any later action
+    #: that moves the screen -- a back tap by coordinates, a swipe, a button,
+    #: a launch -- changes it, and then this tap explains nothing.
+    stamp: float | None = None
 
 
-def previous_tap_note(tap: DocumentedTap, screen_context: dict, now: float) -> dict | None:
+def previous_tap_note(
+    tap: DocumentedTap,
+    screen_context: dict,
+    now: float,
+    *,
+    stamp: float | None = None,
+    shared_name: bool = False,
+) -> dict | None:
     """Why a miss may have happened: the tap before it did not navigate.
 
     Read off the identification the miss already made, so it costs nothing.
-    Only when that identification is exact, the screen is one the tap is
-    documented to *leave*, and it is not one the tap leads *to*. Anything
-    else -- an unidentified screen, a screen the tap does not start from, a
-    tap too long ago -- says nothing.
+    Says something only when all of these hold, and nothing otherwise:
+
+    * the screen has not changed since the tap, by any action (`stamp`);
+    * the tap is under two minutes old, and older than the time its edges
+      allow the target to arrive (an edge's `timeout:`, else `MISS_MIN_AGE`);
+    * the identification is exact, and names the app (`identified_app`), or
+      the screen name belongs to only one loaded app (`shared_name` false);
+    * the screen is one the tap is documented to leave, unconditionally, and
+      not one any of its edges -- conditional ones too -- leads to.
+
+    What it cannot know is where the tap was made: the default path reads
+    nothing before the tap. A common label documented as A -> B and also on
+    an undocumented screen that returns to A reads as a tap that did not
+    leave A. Hence "probably".
     """
+    if stamp != tap.stamp:
+        return None
     if now - tap.at > PREVIOUS_TAP_TTL:
         return None
     if (screen_context or {}).get("confidence") != "exact":
         return None
+    # A name two loaded apps share, with no app named: cannot tell whose.
+    if shared_name and not screen_context.get("identified_app"):
+        return None
     on = screen_context.get("identified_as")
+    # Only the identified app's edges, when the identification names it.
+    edges_here = [
+        (app, screen, edge) for app, screen, edge in tap.edges
+        if screen_context.get("identified_app") in (None, app)
+    ]
+    firm = [(app, screen, edge) for app, screen, edge in edges_here if edge.condition is None]
     # Judged within the apps whose screen `on` the tap is documented to leave.
     # Another loaded app's edges are about another app: the probe's Android
     # set has "Text" edges leading to its own `text`, and counting them as
     # "the tap may have arrived" silenced the iOS miss they had nothing to do
     # with (found live, with both sets loaded).
-    apps = {app for app, screen, _edge in tap.edges if screen == on}
+    apps = {app for app, screen, _edge in firm if screen == on}
     if not apps:
         return None
-    mine = [(screen, edge) for app, screen, edge in tap.edges if app in apps]
     # Where the tap could have led from *any* of those apps' screens, not only
-    # from this one: a toggle -- "Show" from A to B, and back from B to A --
-    # tapped on A lands on B, which "Show" also leaves. Judging B by its own
-    # edges blamed a tap that had arrived.
-    if any(edge.target == on for _screen, edge in mine):
+    # from this one, and through a conditional edge too: a toggle -- "Show"
+    # from A to B, and back from B to A -- tapped on A lands on B, which "Show"
+    # also leaves. Judging B by its own edges blamed a tap that had arrived.
+    if any(edge.target == on for app, _screen, edge in edges_here if app in apps):
         return None
-    targets = sorted({edge.target for screen, edge in mine if screen == on})
+    leaving = [edge for app, screen, edge in firm if app in apps and screen == on]
+    # A screen slow to arrive is not a dropped tap until its edge says so.
+    grace = max((e.timeout or MISS_MIN_AGE for e in leaving), default=MISS_MIN_AGE)
+    if now - tap.at < grace:
+        return None
+    targets = sorted({edge.target for edge in leaving})
     label = tap.tapped.get("label") or tap.tapped.get("identifier") or "the element"
     expected: str | list[str] = targets[0] if len(targets) == 1 else targets
     want = expected if isinstance(expected, str) else " or ".join(expected)

@@ -138,7 +138,15 @@ def _documented_taps(request: Request) -> dict | None:
     return store
 
 
-def _remember_documented_tap(request: Request, udid: str, registry, result: dict) -> None:
+def _last_change(controller, udid: str) -> float | None:
+    """When the device's screen last changed through quern, if known."""
+    changes = getattr(controller, "_last_ui_change", None)
+    return changes.get(udid) if isinstance(changes, dict) else None
+
+
+def _remember_documented_tap(
+    request: Request, controller, udid: str, registry, result: dict,
+) -> None:
     """After a delivered tap: keep it if the knowledge base documents it as
     navigation, and forget whatever was kept before. Costs no device read."""
     store = _documented_taps(request)
@@ -149,27 +157,49 @@ def _remember_documented_tap(request: Request, udid: str, registry, result: dict
     if not isinstance(registry, LandmarkRegistry) or not isinstance(tapped, dict):
         return
     try:
-        edges = [e for e in registry.edges_for_tapped(tapped) if e[2].condition is None]
+        edges = registry.edges_for_tapped(tapped)
     except Exception:  # noqa: BLE001 -- the knowledge base is an addition
         logger.debug("documented-tap lookup failed", exc_info=True)
         return
-    if edges:
-        store[udid] = navigation.DocumentedTap(tapped=tapped, edges=edges, at=time.monotonic())
+    if any(edge.condition is None for _app, _screen, edge in edges):
+        store[udid] = navigation.DocumentedTap(
+            tapped=tapped, edges=edges, at=time.monotonic(),
+            stamp=_last_change(controller, udid),
+        )
 
 
-def _note_previous_tap(request: Request, udid: str | None, payload: dict) -> None:
+def _note_previous_tap(
+    request: Request, controller, udid: str | None, registry, payload: dict,
+) -> None:
     """On a miss: say if the documented tap before it seems not to have
-    registered. Reads the identification the miss already made. A kept tap
-    is consumed by the first miss, whether or not it explains it."""
-    store = _documented_taps(request)
-    if store is None or not udid:
+    registered. Reads the identification the miss already made.
+
+    A kept tap is consumed by the first miss that identified a screen,
+    whether or not it explains it. A miss with no identification (a stale web
+    element) leaves it for the next one. Never raises: a miss is reported as
+    a miss whatever this does.
+    """
+    try:
+        store = _documented_taps(request)
+        if store is None or not udid:
+            return
+        context = payload.get("screen_context") or {}
+        if not isinstance(context, dict) or "confidence" not in context:
+            return
+        tap = store.pop(udid, None)
+        if tap is None:
+            return
+        shared = (
+            isinstance(registry, LandmarkRegistry)
+            and len(registry.apps_with_screen(context.get("identified_as"))) > 1
+        )
+        note = navigation.previous_tap_note(
+            tap, context, time.monotonic(),
+            stamp=_last_change(controller, udid), shared_name=shared,
+        )
+    except Exception:  # noqa: BLE001 -- an addition to a miss, never the miss
+        logger.debug("previous-tap note failed", exc_info=True)
         return
-    tap = store.pop(udid, None)
-    if tap is None:
-        return
-    note = navigation.previous_tap_note(
-        tap, payload.get("screen_context") or {}, time.monotonic(),
-    )
     if note is not None:
         payload["previous_tap"] = note
 
@@ -434,13 +464,16 @@ async def wait_for_element(request: Request, body: WaitForElementRequest):
             # answer. But it is the answer worth finding in a trace.
             if not result.get("matched"):
                 act.outcome = "not_found"
-                _note_previous_tap(request, resolved_udid, result)
-            else:
-                # The agent found what it waited for: whatever it tapped
-                # before landed well enough.
-                store = _documented_taps(request)
-                if store is not None:
-                    store.pop(resolved_udid, None)
+                _note_previous_tap(
+                    request, controller, resolved_udid,
+                    getattr(getattr(getattr(request, "app", None), "state", None),
+                            "landmark_registry", None),
+                    result,
+                )
+            # A wait that matched clears nothing: it may have matched something
+            # of the screen the tap should have left -- a spinner gone, a field
+            # enabled -- and a tap that did arrive is never blamed on its
+            # target anyway.
             return result
         except DeviceError as e:
             raise _handle_device_error(e)
@@ -672,7 +705,7 @@ async def tap_element(request: Request, body: TapElementRequest):
             # Element not found — return 404 with screen context. The 404 is
             # what tells _action this was `not_found` rather than a failure.
             if result.get("status") == "not_found":
-                _note_previous_tap(request, resolved, result)
+                _note_previous_tap(request, controller, resolved, nav_registry, result)
                 raise HTTPException(status_code=404, detail=result)
 
             if result.get("status") == "ambiguous":
@@ -684,9 +717,6 @@ async def tap_element(request: Request, body: TapElementRequest):
                 act.outcome = "obstructed"
                 raise HTTPException(status_code=409, detail=result)
 
-            if (body.duration is None and isinstance(result, dict)
-                    and result.get("status") == "ok"):
-                _remember_documented_tap(request, resolved, nav_registry, result)
 
             # Before the after-screenshot and the screen context: the check
             # waits for the screen to arrive, so both then show where it went.
@@ -721,6 +751,13 @@ async def tap_element(request: Request, body: TapElementRequest):
                         result["warning"] = (
                             f"{warning} {advisory}" if advisory else warning
                         )
+
+            # Remembered for the next miss only when the tap was not already
+            # checked: a verified arrival must not be blamed later, and a
+            # verified miss has been reported.
+            if (body.duration is None and isinstance(result, dict)
+                    and result.get("status") == "ok" and "navigation" not in result):
+                _remember_documented_tap(request, controller, resolved, nav_registry, result)
 
             if body.capture_screenshots:
                 await asyncio.sleep(body.settle_delay)

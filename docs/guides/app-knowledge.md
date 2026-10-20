@@ -90,10 +90,11 @@ leads_to:
 ```
 
 These edges are also checked. When `tap_element` makes a tap a `leads_to`
-edge documents, and the agent's next tap misses on the screen the edge leaves,
-the miss says the earlier tap probably did not register (`previous_tap`) --
-instead of a `not_found` that seems to have nothing to do with it. It costs no
-read. With `verify_navigation: true` the tap is checked at once: it waits for
+edge documents, and a later `tap_element` misses (or `wait_for_element` times
+out) on the screen the edge leaves, with nothing having changed the screen in
+between, the miss says the earlier tap probably did not register
+(`previous_tap`) -- instead of a `not_found` that seems to have nothing to do
+with it. It costs no read. With `verify_navigation: true` the tap is checked at once: it waits for
 the screen the edge leads to and reports whether it arrived
 (`navigation.arrived`). For an edge to be checked:
 
