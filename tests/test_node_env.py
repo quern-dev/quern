@@ -822,6 +822,10 @@ class TestCheckOutsideAShell:
     def test_the_four_answers(self):
         assert self._check(lambda *a, **k: _done("v22.21.0\n")) == (node_env.OK, "v22.21.0")
         assert self._check(lambda *a, **k: _done("v20.20.2\n")) == (node_env.TOO_OLD, "v20.20.2")
+        # The menu bar's "Can't Start Quern" row comes from this answer: a 22
+        # below the floor must be too old, not OK by its major (#506).
+        assert self._check(lambda *a, **k: _done("v22.12.0\n")) == (node_env.TOO_OLD, "v22.12.0")
+        assert self._check(lambda *a, **k: _done("v22.19.0\n")) == (node_env.OK, "v22.19.0")
         assert self._check(lambda *a, **k: _done("usage: sh\n", 2)) == (node_env.UNUSABLE, None)
 
         def timeout(*a, **k):
