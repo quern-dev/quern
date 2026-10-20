@@ -450,16 +450,22 @@ def previous_tap_note(tap: DocumentedTap, screen_context: dict, now: float) -> d
     if (screen_context or {}).get("confidence") != "exact":
         return None
     on = screen_context.get("identified_as")
-    leaving = [edge for _app, screen, edge in tap.edges if screen == on]
-    if not leaving:
+    # Judged within the apps whose screen `on` the tap is documented to leave.
+    # Another loaded app's edges are about another app: the probe's Android
+    # set has "Text" edges leading to its own `text`, and counting them as
+    # "the tap may have arrived" silenced the iOS miss they had nothing to do
+    # with (found live, with both sets loaded).
+    apps = {app for app, screen, _edge in tap.edges if screen == on}
+    if not apps:
         return None
-    # Where the tap could have led from *any* screen it is documented on, not
-    # only from this one: a toggle -- "Show" from A to B, and back from B to A
-    # -- tapped on A lands on B, which "Show" also leaves. Judging B by its own
+    mine = [(screen, edge) for app, screen, edge in tap.edges if app in apps]
+    # Where the tap could have led from *any* of those apps' screens, not only
+    # from this one: a toggle -- "Show" from A to B, and back from B to A --
+    # tapped on A lands on B, which "Show" also leaves. Judging B by its own
     # edges blamed a tap that had arrived.
-    if any(edge.target == on for _app, _screen, edge in tap.edges):
+    if any(edge.target == on for _screen, edge in mine):
         return None
-    targets = sorted({edge.target for edge in leaving})
+    targets = sorted({edge.target for screen, edge in mine if screen == on})
     label = tap.tapped.get("label") or tap.tapped.get("identifier") or "the element"
     expected: str | list[str] = targets[0] if len(targets) == 1 else targets
     want = expected if isinstance(expected, str) else " or ".join(expected)

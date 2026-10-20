@@ -834,6 +834,18 @@ class TestPreviousTap:
                                    {"identified_as": "more", "confidence": "exact"})
         assert "previous_tap" not in body["detail"]
 
+    async def test_another_apps_edges_do_not_silence_it(self, app, controller):
+        # A second app whose own "More" leads to its own screen named "text".
+        app.state.landmark_registry.load("probe", _registry_screens())
+        app.state.landmark_registry.load("other", [
+            ScreenLandmarks(screen="hub", landmarks=[Landmark(element="Heading", label="Hub")],
+                            leads_to=[NavEdge(target="text", label="More")]),
+            ScreenLandmarks(screen="text", landmarks=[Landmark(element="Heading", label="T2")]),
+        ])
+        await _tap(app, {"label": "More"}, opt_in=False)
+        _, body = await self._miss(app, controller)
+        assert body["detail"]["previous_tap"]["expected"] == "more"
+
     async def test_it_is_said_once(self, app, controller):
         app.state.landmark_registry.load("probe", _registry_screens())
         await _tap(app, {"label": "More"}, opt_in=False)
