@@ -52,20 +52,18 @@ def _top(probe) -> None:
     probe.scroll_to(identifier=_row(0), max_swipes=40)
 
 
-#: The depth rows are read at. Through WDA, a list behind More has its rows
-#: from depth 14 (measured on an iOS 26.5 simulator; none at 12, the depth
-#: `ProbeDriver.element` reads at), so reading at the driver's depth makes
-#: every row look absent -- and would pass the laziness check below for the
-#: wrong reason. A lazy list holds ~15 rows, so 25 costs little. Ignored off WDA.
-ROW_DEPTH = 25
-
-
 def _read(probe, quern: QuernClient, index: int) -> tuple[int, dict | None]:
-    """(status, element) for one row, read at `ROW_DEPTH`."""
+    """(status, element) for one row, read at the driver's own depth.
+
+    Through WDA a list behind More has its rows from depth 14 and none at the
+    driver's 12, so this relies on #494: an explicit depth is a floor, and a
+    miss looks once more at 25. That makes these tests a check of the floor
+    too -- without it, row 0 reads as absent and the laziness test fails on
+    its first assertion rather than passing for the wrong reason.
+    """
     resp = quern.get(
         "/api/v1/device/ui/element",
-        params={"udid": probe.udid, "identifier": _row(index),
-                "source_timeout": 30, "snapshot_depth": ROW_DEPTH},
+        params={"udid": probe.udid, "identifier": _row(index), **probe.READ},
         timeout=90.0,
     )
     if resp.status_code not in (200, 404):
