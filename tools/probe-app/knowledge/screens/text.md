@@ -7,12 +7,6 @@ landmarks:
   - { element: "Heading", label: "Text" }
   - { element: "RadioButton", identifier: "tab_text", selected: true }
 leads_to:
-  - screen: "[[screens/controls]]"
-    action: 'tap_element identifier="tab_controls"'
-  - screen: "[[screens/scroll]]"
-    action: 'tap_element identifier="tab_scroll"'
-  - screen: "[[screens/links]]"
-    action: 'tap_element identifier="tab_links"'
   - screen: "[[screens/more]]"
     action: 'tap_element label="More" element_type="RadioButton"'
   - screen: "[[screens/logs]]"

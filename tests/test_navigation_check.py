@@ -1147,3 +1147,5 @@ class TestProbeKnowledgeBases:
                 expected = [Landmark(**lm) for lm in contract[screen.screen]["landmarks"]]
                 assert screen.landmarks == expected, screen.screen
         assert set(contract) <= {s.screen for s in scan.screens}
+        # The tabs are declared once, in app.md (#503), not on every screen.
+        assert any(e.from_global for s in scan.screens for e in s.leads_to)

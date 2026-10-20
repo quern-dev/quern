@@ -179,6 +179,103 @@ def parse_leads_to(raw: object) -> tuple[list[NavEdge], list[dict]]:
     return edges, unusable
 
 
+def parse_global_leads_to(
+    raw: object,
+) -> tuple[list[tuple[NavEdge, list[str]]], list[dict]]:
+    """Edges from `app.md`'s `global_leads_to`, each with its `except:` list.
+
+    The same entry format as a screen's `leads_to`, plus `except:` -- links
+    to the screens the edge does not apply from (a sheet, a login screen, any
+    screen that hides the bar). Unusable entries are reported as `leads_to`'s
+    are; an `except:` that is not a list of links is reported and the edge
+    kept, applying everywhere.
+    """
+    out: list[tuple[NavEdge, list[str]]] = []
+    if raw is None:
+        return out, []
+    edges, unusable = parse_leads_to(raw)
+    if not isinstance(raw, list):
+        return out, unusable
+    # parse_leads_to keeps usable entries in order; walk the same entries to
+    # pair each edge with its own `except:`.
+    usable = [e for e in raw if isinstance(e, dict) and link_target(e.get("screen"))
+              and parse_action(e.get("action"))]
+    for edge, entry in zip(edges, usable, strict=True):
+        raw_except = entry.get("except")
+        names: list[str] = []
+        if raw_except is not None:
+            items = raw_except if isinstance(raw_except, list) else None
+            parsed = [link_target(i) for i in items] if items is not None else None
+            if parsed is None or any(n is None for n in parsed):
+                unusable.append({
+                    "entry": entry,
+                    "reason": "except must be a list of screen links; the edge applies "
+                              "from every screen",
+                    "edge_kept": True,
+                })
+            else:
+                names = [n for n in parsed if n]
+        out.append((edge.model_copy(update={"from_global": True}), names))
+    return out, unusable
+
+
+def _selector_key(edge: NavEdge) -> tuple:
+    """What an edge taps, for telling a screen's own edge from a global one."""
+    def low(v: str | None) -> str | None:
+        return v.lower() if v else None
+    return (low(edge.label), edge.identifier, low(edge.label_contains), low(edge.label_prefix))
+
+
+def apply_global_edges(
+    screens: Sequence,
+    globals_: list[tuple[NavEdge, list[str]]],
+    stems: dict[str, str] | None = None,
+    file: str = "app.md",
+) -> list[dict]:
+    """Add each global edge to every screen it applies from (#503).
+
+    Not to a screen in its `except:`, not to its own target (tapping Home on
+    Home is not navigation), and not to a screen whose own `leads_to`
+    documents the same element: there the screen's own edge wins -- a tab
+    that pops to its root on one screen, say. Targets and `except:` names
+    resolve from file names to screen names as `leads_to` links do; a target
+    that is not a screen with landmarks drops the edge, reported once rather
+    than once per screen. Mutates `screens`.
+    """
+    stems = stems or {}
+    names = {s.screen for s in screens}
+    identifiable = {s.screen for s in screens if s.landmarks}
+    issues: list[dict] = []
+    for edge, excepted in globals_:
+        target = stems.get(edge.target, edge.target)
+        if target not in identifiable:
+            issues.append({
+                "file": file, "entry": {"screen": edge.target},
+                "reason": ("names a screen with no landmarks, so arrival there cannot "
+                           "be confirmed") if target in names else "names no loaded screen",
+            })
+            continue
+        skip = set()
+        for name in excepted:
+            resolved = stems.get(name, name)
+            if resolved in names:
+                skip.add(resolved)
+            else:
+                issues.append({
+                    "file": file, "entry": {"except": name},
+                    "reason": "except names no loaded screen",
+                    "edge_kept": True,
+                })
+        key = _selector_key(edge)
+        for screen in screens:
+            if screen.screen in skip or screen.screen == target:
+                continue
+            if any(_selector_key(own) == key for own in screen.leads_to):
+                continue
+            screen.leads_to.append(edge.model_copy(update={"target": target}))
+    return issues
+
+
 def _label_overlap(
     call: tuple[str | None, str | None, str | None],
     edge: tuple[str | None, str | None, str | None],

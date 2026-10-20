@@ -7,12 +7,6 @@ landmarks:
   - { element: "RadioButton", identifier: "tab_scroll", selected: true }
   - { element: "Group", identifier: "scroll_table" }
 leads_to:
-  - screen: "[[screens/text]]"
-    action: 'tap_element identifier="tab_text"'
-  - screen: "[[screens/controls]]"
-    action: 'tap_element identifier="tab_controls"'
-  - screen: "[[screens/links]]"
-    action: 'tap_element identifier="tab_links"'
   - screen: "[[screens/more]]"
     action: 'tap_element label="More" element_type="RadioButton"'
   - screen: "[[screens/logs]]"

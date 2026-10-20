@@ -23,7 +23,11 @@ from server.knowledge.landmarks import (
     resolve_targets,
     scan_knowledge_base,
 )
-from server.knowledge.navigation import parse_leads_to
+from server.knowledge.navigation import (
+    apply_global_edges,
+    parse_global_leads_to,
+    parse_leads_to,
+)
 from server.models import (
     DeviceError,
     IdentifyRequest,
@@ -229,6 +233,11 @@ async def load_landmarks(request: Request, body: LoadLandmarksRequest):
                 unloaded=None if landmarks else "no_landmarks",
             ))
         edge_issues.extend(resolve_targets(screens))
+        if body.global_leads_to is not None:
+            globals_, unusable = parse_global_leads_to(body.global_leads_to)
+            edge_issues.extend({"file": "inline:global_leads_to", **u} for u in unusable)
+            edge_issues.extend(
+                apply_global_edges(screens, globals_, file="inline:global_leads_to"))
         count = registry.load(body.app, screens, conventions, edge_issues)
         return {
             "loaded": body.app,

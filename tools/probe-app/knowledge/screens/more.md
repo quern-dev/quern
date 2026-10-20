@@ -22,14 +22,6 @@ leads_to:
     action: 'tap_element label="Lists"'
   - screen: "[[screens/lazy]]"
     action: 'tap_element label="Lazy"'
-  - screen: "[[screens/text]]"
-    action: 'tap_element identifier="tab_text"'
-  - screen: "[[screens/controls]]"
-    action: 'tap_element identifier="tab_controls"'
-  - screen: "[[screens/scroll]]"
-    action: 'tap_element identifier="tab_scroll"'
-  - screen: "[[screens/links]]"
-    action: 'tap_element identifier="tab_links"'
 ---
 
 # More

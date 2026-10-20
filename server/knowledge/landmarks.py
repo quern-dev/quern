@@ -21,8 +21,10 @@ from server.device.element_types import (
 )
 from server.knowledge.navigation import (
     Identified,
+    apply_global_edges,
     could_match_call,
     matches_tapped,
+    parse_global_leads_to,
     parse_leads_to,
 )
 from server.models import (
@@ -812,7 +814,41 @@ def scan_knowledge_base(path: Path) -> KnowledgeBaseScan:
         elif result.skip is not None:
             scan.skipped.append(result.skip)
     scan.edge_issues.extend(resolve_targets(scan.screens, stems))
+    # app.md sits at the knowledge base's root, beside screens/. When the path
+    # given *is* the screens directory there is no root to look in.
+    if screens_dir == path / "screens":
+        scan.edge_issues.extend(_apply_app_md(path / "app.md", scan.screens, stems))
     return scan
+
+
+def _apply_app_md(
+    app_md: Path, screens: list[ScreenLandmarks], stems: dict[str, str],
+) -> list[dict]:
+    """Apply `app.md`'s `global_leads_to` to the screens (#503).
+
+    A missing file, or one without the key, adds nothing. One that cannot be
+    read or parsed is reported, since its global edges then silently do not
+    exist -- the same false all-clear a dropped `leads_to` entry would be.
+    """
+    try:
+        text = app_md.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        return [{"file": "app.md", "reason": f"could not be read: {e}"}]
+    match = _FRONTMATTER_RE.match(text)
+    if not match:
+        return []
+    try:
+        data = yaml.safe_load(match.group(1))
+    except yaml.YAMLError as e:
+        return [{"file": "app.md", "reason": f"frontmatter is not valid YAML: {e}"}]
+    if not isinstance(data, dict) or data.get("global_leads_to") is None:
+        return []
+    globals_, unusable = parse_global_leads_to(data["global_leads_to"])
+    issues = [{"file": "app.md", **u} for u in unusable]
+    issues.extend(apply_global_edges(screens, globals_, stems))
+    return issues
 
 
 def resolve_targets(
@@ -919,9 +955,17 @@ class LandmarkRegistry:
 
     def navigation_report(self, app: str) -> dict:
         """The `navigation` block on a load: edges checked, and those not."""
-        report: dict = {
-            "edges": sum(len(s.leads_to) for s in self._sets.get(app, [])),
+        screens = self._sets.get(app, [])
+        report: dict = {"edges": sum(len(s.leads_to) for s in screens)}
+        # Global edges count once each here, however many screens they apply
+        # from; `edges` counts every screen's copy.
+        declared = {
+            (e.target, *e.model_dump(include={"label", "identifier", "label_contains",
+                                              "label_prefix"}).values())
+            for s in screens for e in s.leads_to if e.from_global
         }
+        if declared:
+            report["global"] = len(declared)
         issues = self._edge_issues.get(app, [])
         # An edge whose `timeout:` is unusable is still checked, at the
         # default wait: reporting it beside the dropped ones as "not checked"

@@ -2223,6 +2223,9 @@ class NavEdge(BaseModel):
     #: Seconds to wait for the target, for a screen that is slow to arrive (a
     #: sign-in waiting on the network). None means the default.
     timeout: float | None = None
+    #: Declared once in `app.md`'s `global_leads_to` and applied to this
+    #: screen, rather than written in its own `leads_to` (#503).
+    from_global: bool = False
 
 
 class ScreenLandmarks(BaseModel):
@@ -2279,6 +2282,9 @@ class LoadLandmarksRequest(BaseModel):
     #: sends, and a knowledge base that could express scrollability in a file
     #: but not inline would be an asymmetry found later and by surprise.
     landmarks: dict[str, list[dict] | dict] | None = None
+    #: Inline only: edges that apply from every screen, as `app.md`'s
+    #: `global_leads_to` does for a knowledge base on disk (#503).
+    global_leads_to: list[dict] | None = None
 
 
 class IdentifyRequest(BaseModel):
