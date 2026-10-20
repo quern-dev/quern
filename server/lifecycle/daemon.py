@@ -222,6 +222,13 @@ def _print_status(state: dict) -> None:
             print(f"{prefix}{line}")
 
     try:
+        line = wda_status_line()
+        if line:
+            print(line)
+    except Exception:
+        pass  # never let an opportunistic check block the banner
+
+    try:
         from server.device.ios.tunneld import PLIST_PATH, installed_plist_drift
         # The third copy of this. Two others said "old user-home log path"
         # whichever condition had drifted; this one is printed in the start
@@ -232,6 +239,33 @@ def _print_status(state: dict) -> None:
             print(f"              Run: {quern_cmd()} tunneld install")
     except Exception:
         pass  # never let an opportunistic check block the banner
+
+
+def wda_status_line() -> str | None:
+    """`quern status`'s WebDriverAgent line: what the device and simulator
+    builds are, against the version quern pins (#479) -- or None when WDA has
+    never been built here. Nothing reported which version ran, and two
+    installs could behave differently with nothing to say why."""
+    from server.device.ios.wda import pinned_wda_version, read_wda_state
+
+    state = read_wda_state()
+    pinned = pinned_wda_version()
+    parts = []
+    behind = False
+    for label, built_key, marker in (("device", "build_wda_version", "build_team_id"),
+                                     ("simulator", "sim_build_wda_version", "sim_built_at")):
+        if marker not in state and built_key not in state:
+            continue
+        version = state.get(built_key) or "unpinned"
+        behind = behind or version != pinned
+        parts.append(f"{label} {version}")
+    if not parts:
+        return None
+    line = f"  WebDriverAgent: {', '.join(parts)} (quern pins {pinned})"
+    if behind:
+        line += ("\n              behind the pin: setup_wda rebuilds it "
+                 "(a simulator, at its next start)")
+    return line
 
 
 def install_signal_handlers(cleanup_fn) -> None:

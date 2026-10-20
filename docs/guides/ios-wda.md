@@ -16,11 +16,11 @@ WebDriverAgent (WDA) is how Quern controls physical iOS devices — tapping butt
 
 Tell your agent you want to work with a physical device, and it will call `setup_wda`. This:
 
-1. Discovers your signing identities from Xcode
-2. Clones the WDA repo
+1. Discovers your signing team: from Xcode's account list, or, when that is empty (as on Xcode 27), from your installed iOS development provisioning profiles
+2. Fetches the WebDriverAgent version quern pins (`server/device/ios/wda-pin.json`) from npm's `appium-webdriveragent`, checked against its sha512
 3. Builds and installs it on the device as "QuernDriver"
 
-The build is cached — subsequent sessions skip it unless something changes.
+The build is cached; later sessions skip it unless something changes. When quern moves to a new WebDriverAgent version, the next `setup_wda` rebuilds it, and a simulator rebuilds at its next start. If that build fails, or the download does, the build already there keeps working and the answer says so (`wda_update_failed`). `setup_wda`, `start_driver` and `quern status` report the running version against the pinned one.
 
 ### Signing Identity Selection
 

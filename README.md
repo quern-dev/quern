@@ -417,7 +417,7 @@ Manage iOS simulators and physical devices, and interact with running apps.
 
 **Simulator UI automation** uses a native Swift helper, `sim-bridge`, that talks to `CoreSimulator` / `SimulatorKit` / `AccessibilityPlatformTranslation` directly — no daemon, no subprocess per call. It's built automatically on first use and requires Xcode 26+ on Apple Silicon. On Intel Macs or older Xcode, Quern falls back to [idb](https://fbidb.io/) (`brew install idb-companion` + `pip install fb-idb`); `quern setup` handles the install in that case. Device management and screenshots use `xcrun simctl` (always available with Xcode).
 
-**Physical device UI automation** uses [WebDriverAgent](https://github.com/appium/WebDriverAgent) (WDA), which Quern builds and deploys automatically via `setup_wda`. WDA requires a valid Apple Developer signing identity. Once set up, the WDA driver auto-starts on first interaction and idles out after 15 minutes of inactivity. The app appears on the device as **Quern Driver**.
+**Physical device UI automation** uses [WebDriverAgent](https://github.com/appium/appium-ios/tree/main/packages/webdriveragent) (WDA), which Quern builds and deploys automatically via `setup_wda`, at the version it pins. WDA requires a valid Apple Developer signing identity. Once set up, the WDA driver auto-starts on first interaction and idles out after 15 minutes of inactivity. The app appears on the device as **Quern Driver**.
 
 ### Process Lifecycle
 

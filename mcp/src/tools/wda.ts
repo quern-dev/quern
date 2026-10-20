@@ -7,7 +7,7 @@ export function registerWdaTools(server: McpServer): void {
   server.registerTool("setup_wda", {
     description: `Set up WebDriverAgent on a physical iOS device or a simulator.
 
-On a physical device: discovers signing identities, clones the WDA repo, builds, and installs. If multiple signing identities exist and no team_id is provided, returns the list for you to choose from — call again with the chosen team_id.
+On a physical device: discovers signing identities, fetches the WebDriverAgent version quern pins (from npm, checksum-checked), builds, and installs. A build of another version is rebuilt; if that fails, the build already there (same team) is kept and installed, and wda_update_failed says why. A failed force_rebuild returns the error instead: the old build is still on disk, but is not reinstalled. The answer carries wda_version and wda_pinned. If multiple signing identities exist and no team_id is provided, returns the list for you to choose from — call again with the chosen team_id.
 
 On a simulator: builds WDA for the iOS Simulator — no signing team, no provisioning, nothing to install. Optional: start_driver builds it on first use anyway. team_id is ignored.`,
     inputSchema: strictParams({
@@ -22,7 +22,7 @@ On a simulator: builds WDA for the iOS Simulator — no signing team, no provisi
         .coerce.boolean()
         .optional()
         .describe(
-          "Force a fresh WDA build even if one already exists for this team."
+          "Force a fresh WDA build even if one already exists for this team. If it fails, the error is returned; the old build stays on disk but is not reinstalled."
         ),
     }),
   }, async ({ udid, team_id, force_rebuild }) => {

@@ -25,6 +25,7 @@ from server.device.ios.wda import (
     customize_wda,
     discover_signing_identities,
     install_wda,
+    pinned_wda_version,
     read_wda_state,
     save_wda_state,
     setup_wda,
@@ -155,78 +156,47 @@ class TestDiscoverSigningIdentities:
 
         assert ids == []
 
-    def test_empty_prefs(self):
+    def test_empty_prefs(self, tmp_path):
         with (
             patch("builtins.open", create=True),
             patch("server.device.ios.wda.Path.exists", return_value=True),
             patch("server.device.ios.wda.plistlib.load", return_value={}),
         ):
-            ids = discover_signing_identities()
+            # No profiles either -- and never this machine's own (#480).
+            ids = discover_signing_identities(profile_dirs=(tmp_path / "none",))
 
         assert ids == []
 
 
 # ---------------------------------------------------------------------------
-# Unit tests: clone_wda
+# Unit tests: clone_wda -- the pinned source (#479); see tests/test_wda_source.py
 # ---------------------------------------------------------------------------
 
 
 class TestCloneWda:
-    async def test_skips_if_already_cloned(self, tmp_path):
-        repo = tmp_path / "WebDriverAgent"
-        repo.mkdir()
-        (repo / ".git").mkdir()
+    async def test_it_fetches_the_pinned_source_into_the_repo(self, tmp_path, monkeypatch):
+        from server.device.ios import wda_source
 
-        with patch("server.device.ios.wda.WDA_REPO", repo):
-            result = await clone_wda()
+        seen = {}
 
-        assert result is False
+        async def fake_fetch(dest, pin=None, **kw):
+            seen["dest"] = dest
+            return True
 
-    async def test_clones_fresh(self, tmp_path):
-        repo = tmp_path / "WebDriverAgent"
-        proc = _mock_process()
-        with (
-            patch("server.device.ios.wda.WDA_REPO", repo),
-            patch("server.device.ios.wda.WDA_DIR", tmp_path),
-            patch(
-                "server.device.ios.wda.asyncio.create_subprocess_exec", return_value=proc
-            ) as mock_exec,
-        ):
-            result = await clone_wda()
+        monkeypatch.setattr(wda_source, "fetch", fake_fetch)
+        with patch("server.device.ios.wda.WDA_REPO", tmp_path / "WebDriverAgent"):
+            assert await clone_wda() is True
+        assert seen["dest"] == tmp_path / "WebDriverAgent"
 
-        assert result is True
-        mock_exec.assert_called_once()
+    async def test_a_source_that_cannot_be_had_is_a_runtime_error(self, monkeypatch):
+        from server.device.ios import wda_source
 
-    async def test_clone_failure(self, tmp_path):
-        repo = tmp_path / "WebDriverAgent"
-        proc = _mock_process(returncode=128, stderr=b"fatal: could not connect")
-        with (
-            patch("server.device.ios.wda.WDA_REPO", repo),
-            patch("server.device.ios.wda.WDA_DIR", tmp_path),
-            patch("server.device.ios.wda.asyncio.create_subprocess_exec", return_value=proc),
-        ):
-            with pytest.raises(RuntimeError, match="git clone failed"):
-                await clone_wda()
+        async def failing(dest, pin=None, **kw):
+            raise wda_source.SourceError("could not download WebDriverAgent 1.0 from npm")
 
-    async def test_clone_timeout(self, tmp_path):
-        import asyncio
-
-        repo = tmp_path / "WebDriverAgent"
-
-        async def _hang_forever():
-            await asyncio.sleep(999)
-            return (b"", b"")
-
-        proc = MagicMock()
-        proc.communicate = _hang_forever
-        with (
-            patch("server.device.ios.wda.WDA_REPO", repo),
-            patch("server.device.ios.wda.WDA_DIR", tmp_path),
-            patch("server.device.ios.wda.asyncio.create_subprocess_exec", return_value=proc),
-            patch("server.device.ios.wda.CLONE_TIMEOUT", 0.001),
-        ):
-            with pytest.raises(RuntimeError, match="git clone timed out"):
-                await clone_wda()
+        monkeypatch.setattr(wda_source, "fetch", failing)
+        with pytest.raises(RuntimeError, match="could not download"):
+            await clone_wda()
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +316,25 @@ class TestCustomizeWda:
         content = (repo / "WebDriverAgent.xcodeproj" / "project.pbxproj").read_text()
         assert content.count("PRODUCT_NAME = QuernDriver") == 2
 
+    def test_the_runners_own_icon_is_replaced_by_querns(self, tmp_path):
+        """WebDriverAgent 16 ships the runner an AppIcon of its own, Appium's
+        logo, and a simulator showed it instead of quern's (#479)."""
+        repo = _setup_wda_repo(tmp_path)
+        upstream = repo / "WebDriverAgentRunner" / "Assets.xcassets" / "AppIcon.appiconset"
+        upstream.mkdir(parents=True)
+        (upstream / "icon-1024.png").write_bytes(b"appium logo")
+        (upstream / "Contents.json").write_text(
+            '{"images": [{"filename": "icon-1024.png", "idiom": "universal"}]}')
+        customize_wda(repo)
+        assert not (upstream / "icon-1024.png").exists()
+        assert (upstream / "AppIcon-1024.png").read_bytes() == ICON_PATH.read_bytes()
+        assert json.loads((upstream / "Contents.json").read_text())["images"][0]["filename"] \
+            == "AppIcon-1024.png"
+        # And on a source customised before this, whose project is already patched.
+        (upstream / "AppIcon-1024.png").write_bytes(b"appium logo")
+        assert customize_wda(repo) is False
+        assert (upstream / "AppIcon-1024.png").read_bytes() == ICON_PATH.read_bytes()
+
     def test_icon_file_exists_in_resources(self):
         """The wda-icon.png must be checked into the repo."""
         assert ICON_PATH.exists(), f"Icon not found at {ICON_PATH}"
@@ -384,6 +373,7 @@ class TestBuildWda:
             "cloned": True,
             "build_team_id": "TEAM123",
             "built_at": "2026-01-01T00:00:00+00:00",
+            "build_wda_version": pinned_wda_version(),
         }
         app = tmp_path / "Runner.app"
         app.mkdir()
@@ -444,6 +434,7 @@ class TestBuildWda:
             "cloned": True,
             "build_team_id": "TEAM123",
             "built_at": "2026-01-01T00:00:00+00:00",
+            "build_wda_version": pinned_wda_version(),
         }
         repo = tmp_path / "WebDriverAgent"
         repo.mkdir()
@@ -628,7 +619,8 @@ class TestSetupWda:
             result = await setup_wda("DEV1", "iOS 17.4")
 
         assert result["status"] == "error"
-        assert "No provisioning teams" in result["error"]
+        assert "No signing team found" in result["error"]
+        assert "provisioning profile" in result["error"], "both places read are named"
 
     async def test_multiple_identities_no_team_id(self):
         identities = [
