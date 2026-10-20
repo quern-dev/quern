@@ -287,6 +287,8 @@ class KnowledgeBaseScan:
     conventions: list[FileConventions] = field(default_factory=list)
     #: `leads_to` entries that are not checked, each with its file and why.
     edge_issues: list[dict] = field(default_factory=list)
+    #: How many edges `app.md`'s `global_leads_to` declares (#503).
+    global_declared: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -817,38 +819,50 @@ def scan_knowledge_base(path: Path) -> KnowledgeBaseScan:
     # app.md sits at the knowledge base's root, beside screens/. When the path
     # given *is* the screens directory there is no root to look in.
     if screens_dir == path / "screens":
-        scan.edge_issues.extend(_apply_app_md(path / "app.md", scan.screens, stems))
+        issues, scan.global_declared = _apply_app_md(path / "app.md", scan.screens, stems)
+        scan.edge_issues.extend(issues)
     return scan
 
 
 def _apply_app_md(
     app_md: Path, screens: list[ScreenLandmarks], stems: dict[str, str],
-) -> list[dict]:
+) -> tuple[list[dict], int]:
     """Apply `app.md`'s `global_leads_to` to the screens (#503).
 
-    A missing file, or one without the key, adds nothing. One that cannot be
-    read or parsed is reported, since its global edges then silently do not
-    exist -- the same false all-clear a dropped `leads_to` entry would be.
+    Returns the issues and the number of global edges declared.
+
+    `app.md` was never read before #503, and existing knowledge bases hold
+    all sorts in it, so a problem with the file itself is reported only when
+    it mentions `global_leads_to` -- otherwise its prose is none of the
+    loader's business. Never raises: a load must not fail over `app.md`.
     """
+    def problem(reason: str) -> tuple[list[dict], int]:
+        return [{"file": "app.md", "reason": reason, "category": "app_md"}], 0
+
     try:
         text = app_md.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return []
-    except OSError as e:
-        return [{"file": "app.md", "reason": f"could not be read: {e}"}]
+        return [], 0
+    except (OSError, ValueError) as e:   # ValueError: not UTF-8
+        return problem(f"could not be read: {e}")
+    text = text.lstrip("\ufeff")
+    declares = "global_leads_to" in text
     match = _FRONTMATTER_RE.match(text)
     if not match:
-        return []
+        return problem("global_leads_to is not in a '---' frontmatter block, so it "
+                       "was not read") if declares else ([], 0)
+    if "global_leads_to" not in match.group(1):
+        return [], 0
     try:
         data = yaml.safe_load(match.group(1))
     except yaml.YAMLError as e:
-        return [{"file": "app.md", "reason": f"frontmatter is not valid YAML: {e}"}]
-    if not isinstance(data, dict) or data.get("global_leads_to") is None:
-        return []
-    globals_, unusable = parse_global_leads_to(data["global_leads_to"])
+        return problem(f"frontmatter is not valid YAML, so global_leads_to was not read: {e}")
+    if not isinstance(data, dict):
+        return problem("frontmatter is not a mapping, so global_leads_to was not read")
+    globals_, unusable = parse_global_leads_to(data.get("global_leads_to"))
     issues = [{"file": "app.md", **u} for u in unusable]
     issues.extend(apply_global_edges(screens, globals_, stems))
-    return issues
+    return issues, len(globals_)
 
 
 def resolve_targets(
@@ -929,6 +943,8 @@ class LandmarkRegistry:
         self._conventions: dict[str, list[FileConventions]] = {}
         #: `leads_to` entries each app's set could not use, with why (#491).
         self._edge_issues: dict[str, list[dict]] = {}
+        #: How many global edges each app's `app.md` declares (#503).
+        self._global_declared: dict[str, int] = {}
         #: Where each app's set came from: a directory, or "inline".
         self._sources: dict[str, str] = {}
 
@@ -938,6 +954,7 @@ class LandmarkRegistry:
         screens: list[ScreenLandmarks],
         conventions: list[FileConventions] | None = None,
         edge_issues: list[dict] | None = None,
+        global_declared: int = 0,
     ) -> int:
         """Load landmarks for an app. Replaces any existing set for that app.
 
@@ -951,30 +968,28 @@ class LandmarkRegistry:
             replace(entry, app=app) for entry in conventions or []
         ]
         self._edge_issues[app] = list(edge_issues or [])
+        self._global_declared[app] = global_declared
         return len(screens)
 
     def navigation_report(self, app: str) -> dict:
-        """The `navigation` block on a load: edges checked, and those not."""
+        """The `navigation` block on a load: edges checked, and those not.
+
+        `edges` counts every screen's edges, a global edge once per screen it
+        applies from; `global` is the number `app.md` declares. Issues are
+        split by what happened: `unusable` entries are not checked at all;
+        `timeouts_ignored` and `except_ignored` are edges still checked with
+        one field ignored; `app_md` is a problem with `app.md` itself.
+        """
         screens = self._sets.get(app, [])
         report: dict = {"edges": sum(len(s.leads_to) for s in screens)}
-        # Global edges count once each here, however many screens they apply
-        # from; `edges` counts every screen's copy.
-        declared = {
-            (e.target, *e.model_dump(include={"label", "identifier", "label_contains",
-                                              "label_prefix"}).values())
-            for s in screens for e in s.leads_to if e.from_global
-        }
-        if declared:
-            report["global"] = len(declared)
+        if self._global_declared.get(app):
+            report["global"] = self._global_declared[app]
         issues = self._edge_issues.get(app, [])
-        # An edge whose `timeout:` is unusable is still checked, at the
-        # default wait: reporting it beside the dropped ones as "not checked"
-        # contradicted the edge count, and sent the author to the wrong fix.
-        dropped = [i for i in issues if not i.get("edge_kept")]
-        ignored = [
-            {k: v for k, v in i.items() if k != "edge_kept"}
-            for i in issues if i.get("edge_kept")
-        ]
+
+        def strip(issue: dict) -> dict:
+            return {k: v for k, v in issue.items() if k != "category"}
+
+        dropped = [strip(i) for i in issues if not i.get("category")]
         if dropped:
             report["unusable"] = dropped
             report["note"] = (
@@ -982,8 +997,11 @@ class LandmarkRegistry:
                 "tap_element action with a label or identifier, leading to a "
                 "screen with landmarks, becomes an edge."
             )
-        if ignored:
-            report["timeouts_ignored"] = ignored
+        for category, key in (("timeout", "timeouts_ignored"), ("except", "except_ignored"),
+                              ("app_md", "app_md")):
+            found = [strip(i) for i in issues if i.get("category") == category]
+            if found:
+                report[key] = found
         return report
 
     def edges_from(self, app: str, screen: str) -> list[NavEdge]:
@@ -1078,7 +1096,8 @@ class LandmarkRegistry:
     ) -> tuple[int, list[SkippedFile]]:
         """Load a scan already made -- so a caller can look at it first and
         refuse it without replacing what is loaded."""
-        count = self.load(app, scan.screens, scan.conventions, scan.edge_issues)
+        count = self.load(app, scan.screens, scan.conventions, scan.edge_issues,
+                          scan.global_declared)
         self._web_content[app] = scan.web_content
         self._sources[app] = path
         return count, scan.skipped
@@ -1103,12 +1122,14 @@ class LandmarkRegistry:
             self._web_content.clear()
             self._conventions.clear()
             self._edge_issues.clear()
+            self._global_declared.clear()
             self._sources.clear()
             return "all"
         self._sets.pop(app, None)
         self._web_content.pop(app, None)
         self._conventions.pop(app, None)
         self._edge_issues.pop(app, None)
+        self._global_declared.pop(app, None)
         self._sources.pop(app, None)
         return app
 

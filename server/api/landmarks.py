@@ -233,12 +233,14 @@ async def load_landmarks(request: Request, body: LoadLandmarksRequest):
                 unloaded=None if landmarks else "no_landmarks",
             ))
         edge_issues.extend(resolve_targets(screens))
+        declared = 0
         if body.global_leads_to is not None:
             globals_, unusable = parse_global_leads_to(body.global_leads_to)
+            declared = len(globals_)
             edge_issues.extend({"file": "inline:global_leads_to", **u} for u in unusable)
             edge_issues.extend(
                 apply_global_edges(screens, globals_, file="inline:global_leads_to"))
-        count = registry.load(body.app, screens, conventions, edge_issues)
+        count = registry.load(body.app, screens, conventions, edge_issues, declared)
         return {
             "loaded": body.app,
             "source": "inline",

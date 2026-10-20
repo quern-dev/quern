@@ -153,6 +153,8 @@ reachable_from:
 # (`previous_tap`), and with verify_navigation it is checked at the tap. Write
 # the action as the agent will call it -- a label or an identifier -- and link
 # the target's file. One tap that can reach several screens gets an edge to each.
+# Navigation available from every screen (a tab bar) goes once in app.md's
+# global_leads_to instead of here.
 leads_to:
   - screen: "[[screens/...]]"
     action: 'tap_element label="..." element_type="..."'

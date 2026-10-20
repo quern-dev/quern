@@ -2284,7 +2284,9 @@ class LoadLandmarksRequest(BaseModel):
     landmarks: dict[str, list[dict] | dict] | None = None
     #: Inline only: edges that apply from every screen, as `app.md`'s
     #: `global_leads_to` does for a knowledge base on disk (#503).
-    global_leads_to: list[dict] | None = None
+    #: Any items, not only mappings: one malformed entry is reported, as it is
+    #: in a file, rather than refusing the whole load with a 422.
+    global_leads_to: list[Any] | None = None
 
 
 class IdentifyRequest(BaseModel):

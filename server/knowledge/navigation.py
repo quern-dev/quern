@@ -169,7 +169,7 @@ def parse_leads_to(raw: object) -> tuple[list[NavEdge], list[dict]]:
                     "reason": f"timeout must be a number of seconds, 0 to {MAX_TIMEOUT:g}; "
                               f"the edge is checked with the default {NAVIGATION_TIMEOUT:g}s",
                     # The edge itself is kept: only its timeout is ignored.
-                    "edge_kept": True,
+                    "category": "timeout",
                 })
         edges.append(NavEdge(
             target=target, **selector,
@@ -186,41 +186,48 @@ def parse_global_leads_to(
 
     The same entry format as a screen's `leads_to`, plus `except:` -- links
     to the screens the edge does not apply from (a sheet, a login screen, any
-    screen that hides the bar). Unusable entries are reported as `leads_to`'s
-    are; an `except:` that is not a list of links is reported and the edge
-    kept, applying everywhere.
+    screen that hides the bar). Each entry is parsed on its own, so an edge
+    is always paired with its own `except:`. Unusable entries are reported as
+    `leads_to`'s are; an `except:` that is not a list of links is reported
+    (category `except`) and the edge kept, applying everywhere.
     """
     out: list[tuple[NavEdge, list[str]]] = []
     if raw is None:
         return out, []
-    edges, unusable = parse_leads_to(raw)
     if not isinstance(raw, list):
-        return out, unusable
-    # parse_leads_to keeps usable entries in order; walk the same entries to
-    # pair each edge with its own `except:`.
-    usable = [e for e in raw if isinstance(e, dict) and link_target(e.get("screen"))
-              and parse_action(e.get("action"))]
-    for edge, entry in zip(edges, usable, strict=True):
-        raw_except = entry.get("except")
+        return out, [{"entry": raw, "reason": "global_leads_to is not a list"}]
+    unusable: list[dict] = []
+    for entry in raw:
+        edges, problems = parse_leads_to([entry])
+        unusable.extend(problems)
+        if not edges:
+            continue
         names: list[str] = []
+        raw_except = entry.get("except")
         if raw_except is not None:
-            items = raw_except if isinstance(raw_except, list) else None
-            parsed = [link_target(i) for i in items] if items is not None else None
+            parsed = (
+                [link_target(i) for i in raw_except] if isinstance(raw_except, list) else None
+            )
             if parsed is None or any(n is None for n in parsed):
                 unusable.append({
                     "entry": entry,
                     "reason": "except must be a list of screen links; the edge applies "
                               "from every screen",
-                    "edge_kept": True,
+                    "category": "except",
                 })
             else:
-                names = [n for n in parsed if n]
-        out.append((edge.model_copy(update={"from_global": True}), names))
+                names = parsed
+        out.append((edges[0].model_copy(update={"from_global": True}), names))
     return out, unusable
 
 
 def _selector_key(edge: NavEdge) -> tuple:
-    """What an edge taps, for telling a screen's own edge from a global one."""
+    """What an edge taps, for telling a screen's own edge from a global one.
+
+    The label selectors and the identifier, labels without case -- as
+    `tap_element` compares them. Not `element_type`: a screen's own "Home"
+    button documents a "Home" tap there, whatever the global edge's type.
+    """
     def low(v: str | None) -> str | None:
         return v.lower() if v else None
     return (low(edge.label), edge.identifier, low(edge.label_contains), low(edge.label_prefix))
@@ -234,18 +241,27 @@ def apply_global_edges(
 ) -> list[dict]:
     """Add each global edge to every screen it applies from (#503).
 
-    Not to a screen in its `except:`, not to its own target (tapping Home on
-    Home is not navigation), and not to a screen whose own `leads_to`
-    documents the same element: there the screen's own edge wins -- a tab
-    that pops to its root on one screen, say. Targets and `except:` names
-    resolve from file names to screen names as `leads_to` links do; a target
-    that is not a screen with landmarks drops the edge, reported once rather
-    than once per screen. Mutates `screens`.
+    Global edges are grouped by the element they tap. A group is not applied
+    to any screen that is one of its targets -- a tab's own screen, and the
+    screens of its stack ("one tap, several possible screens: one edge
+    each"), since re-tapping a tab there is not a navigation the group
+    describes. Nor to a screen whose own `leads_to` documents the same
+    element: there the screen's own edges win, conditional or not. Nor to a
+    screen in an edge's `except:`.
+
+    Targets and `except:` names resolve from file names to screen names as
+    `leads_to` links do; a target that is not a screen with landmarks drops
+    the edge, reported once rather than once per screen. Mutates `screens`.
     """
     stems = stems or {}
     names = {s.screen for s in screens}
     identifiable = {s.screen for s in screens if s.landmarks}
+    # Each screen's own selectors, taken before any global copy is added: a
+    # copy appended for one global edge is not the screen's own, and reading
+    # it as one dropped the next global edge for the same element.
+    own = {id(s): {_selector_key(e) for e in s.leads_to} for s in screens}
     issues: list[dict] = []
+    resolved: list[tuple[NavEdge, set[str]]] = []
     for edge, excepted in globals_:
         target = stems.get(edge.target, edge.target)
         if target not in identifiable:
@@ -257,22 +273,26 @@ def apply_global_edges(
             continue
         skip = set()
         for name in excepted:
-            resolved = stems.get(name, name)
-            if resolved in names:
-                skip.add(resolved)
+            name_resolved = stems.get(name, name)
+            if name_resolved in names:
+                skip.add(name_resolved)
             else:
                 issues.append({
                     "file": file, "entry": {"except": name},
                     "reason": "except names no loaded screen",
-                    "edge_kept": True,
+                    "category": "except",
                 })
+        resolved.append((edge.model_copy(update={"target": target}), skip))
+    group_targets: dict[tuple, set[str]] = {}
+    for edge, _skip in resolved:
+        group_targets.setdefault(_selector_key(edge), set()).add(edge.target)
+    for edge, skip in resolved:
         key = _selector_key(edge)
         for screen in screens:
-            if screen.screen in skip or screen.screen == target:
+            if (screen.screen in skip or screen.screen in group_targets[key]
+                    or key in own[id(screen)]):
                 continue
-            if any(_selector_key(own) == key for own in screen.leads_to):
-                continue
-            screen.leads_to.append(edge.model_copy(update={"target": target}))
+            screen.leads_to.append(edge)
     return issues
 
 

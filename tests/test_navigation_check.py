@@ -805,7 +805,7 @@ class TestTimeoutReport:
         assert report["edges"] == 1
         assert "unusable" not in report and "note" not in report
         assert "default" in report["timeouts_ignored"][0]["reason"]
-        assert "edge_kept" not in report["timeouts_ignored"][0]
+        assert "category" not in report["timeouts_ignored"][0]
 
 
 class TestPreviousTap:
