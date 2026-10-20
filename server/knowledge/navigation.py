@@ -168,6 +168,8 @@ def parse_leads_to(raw: object) -> tuple[list[NavEdge], list[dict]]:
                     "entry": entry,
                     "reason": f"timeout must be a number of seconds, 0 to {MAX_TIMEOUT:g}; "
                               f"the edge is checked with the default {NAVIGATION_TIMEOUT:g}s",
+                    # The edge itself is kept: only its timeout is ignored.
+                    "edge_kept": True,
                 })
         edges.append(NavEdge(
             target=target, **selector,

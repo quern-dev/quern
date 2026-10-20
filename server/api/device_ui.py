@@ -113,6 +113,10 @@ async def _navigation_plan(
             what="tap_element navigation check",
         )
         return navigation.plan_for(before, registry.edges_from, call)
+    except HTTPException:
+        # The disconnect guard's 499: the caller has gone, and the tap must
+        # not go ahead for nobody.
+        raise
     except Exception:  # noqa: BLE001 -- the check is an addition; the tap is not
         logger.debug("navigation plan failed", exc_info=True)
         return None
@@ -635,6 +639,8 @@ async def tap_element(request: Request, body: TapElementRequest):
                         ),
                         what="tap_element navigation check",
                     )
+                except HTTPException:
+                    raise  # the caller left: no more reads on its behalf
                 except Exception:  # noqa: BLE001 -- the tap already happened
                     logger.debug("navigation check failed", exc_info=True)
                     nav = None

@@ -918,13 +918,23 @@ class LandmarkRegistry:
             "edges": sum(len(s.leads_to) for s in self._sets.get(app, [])),
         }
         issues = self._edge_issues.get(app, [])
-        if issues:
-            report["unusable"] = issues
+        # An edge whose `timeout:` is unusable is still checked, at the
+        # default wait: reporting it beside the dropped ones as "not checked"
+        # contradicted the edge count, and sent the author to the wrong fix.
+        dropped = [i for i in issues if not i.get("edge_kept")]
+        ignored = [
+            {k: v for k, v in i.items() if k != "edge_kept"}
+            for i in issues if i.get("edge_kept")
+        ]
+        if dropped:
+            report["unusable"] = dropped
             report["note"] = (
                 "These leads_to entries are not checked by tap_element: only a "
                 "tap_element action with a label or identifier, leading to a "
-                "loaded screen, becomes an edge."
+                "screen with landmarks, becomes an edge."
             )
+        if ignored:
+            report["timeouts_ignored"] = ignored
         return report
 
     def edges_from(self, app: str, screen: str) -> list[NavEdge]:

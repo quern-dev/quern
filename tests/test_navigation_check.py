@@ -576,6 +576,41 @@ class TestRoute:
         await _tap(app, {"label": "More", "element_type": "TextField"})
         controller.get_ui_elements.assert_not_called()
 
+    async def test_a_disconnect_during_the_read_before_stops_the_tap(
+        self, app, controller, monkeypatch,
+    ):
+        from fastapi import HTTPException
+
+        from server.api import device_ui
+
+        app.state.landmark_registry.load("probe", _registry_screens())
+        real = device_ui._run_until_client_leaves
+
+        async def gone(request, coro, *, what, poll_s=2.0):
+            if what == "tap_element navigation check":
+                coro.close()
+                raise HTTPException(status_code=499, detail="client disconnected")
+            return await real(request, coro, what=what, poll_s=poll_s)
+
+        monkeypatch.setattr(device_ui, "_run_until_client_leaves", gone)
+        code, _ = await _tap(app, {"label": "More"})
+        assert code == 499
+        controller.tap_element.assert_not_called()
+
+    async def test_a_disconnect_during_the_check_stops_its_reads(
+        self, app, controller, monkeypatch,
+    ):
+        from fastapi import HTTPException
+
+        app.state.landmark_registry.load("probe", _registry_screens())
+
+        async def gone(*a, **k):
+            raise HTTPException(status_code=499, detail="client disconnected")
+
+        monkeypatch.setattr(navigation, "verify", gone)
+        code, _ = await _tap(app, {"label": "More"})
+        assert code == 499
+
     async def test_an_exception_inside_the_check_does_not_fail_the_tap(
         self, app, controller, monkeypatch,
     ):
@@ -715,6 +750,25 @@ class TestRegistry:
         issues = resolve_targets(screens)
         assert screens[0].leads_to == []
         assert "no landmarks" in issues[0]["reason"]
+
+
+class TestTimeoutReport:
+    def test_a_bad_timeout_is_not_reported_as_unchecked(self, tmp_path):
+        screens = tmp_path / "screens"
+        screens.mkdir()
+        _screen_file(screens / "b.md", "b", '  - { element: "Heading", label: "B" }')
+        _screen_file(
+            screens / "a.md", "a", '  - { element: "Heading", label: "A" }',
+            'leads_to:\n  - screen: "[[screens/b]]"\n'
+            "    action: 'tap_element label=\"Go\"'\n    timeout: slow\n",
+        )
+        registry = LandmarkRegistry()
+        registry.load_from_path("app", str(tmp_path))
+        report = registry.navigation_report("app")
+        assert report["edges"] == 1
+        assert "unusable" not in report and "note" not in report
+        assert "default" in report["timeouts_ignored"][0]["reason"]
+        assert "edge_kept" not in report["timeouts_ignored"][0]
 
 
 class TestInlineLoad:
