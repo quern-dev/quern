@@ -407,12 +407,6 @@ CONTRACTS = {"ios": IOS, "android": ANDROID}
 IOS_BAR_TABS = ("text", "controls", "scroll", "links")
 IOS_MORE_TABS = ("logs", "location", "web", "diag", "state", "widgets", "lists", "lazy")
 
-#: The depth `goto` reads the More list at, through WDA, to find a tab's row.
-#: 13 finds the first seven (measured on an iPhone 11: absent at 12, 1.2s at
-#: 13). The Lazy row is found only at 25 -- measured on an iOS 26.5
-#: simulator -- so it is asked for there and nowhere else (#375).
-IOS_MORE_ROW_DEPTH = {"lazy": 25}
-
 
 class ProbeUnavailable(RuntimeError):
     """The fixture app could not be built or installed, with the reason."""
@@ -842,12 +836,12 @@ class ProbeDriver:
             # "More" is that screen's back button. Pop to the list.
             self._tap_center(mores[0])
             time.sleep(1.0)
-        # The system More list's rows sit one level below quern's default WDA
-        # depth (12): measured on an iPhone 11, they appear at 13 (1.2s), while
-        # 13 on the 200-row Scroll table costs 26s -- so the depth is asked for
-        # here, where it is known to be needed, not raised for every read.
-        # Ignored off WDA. See #375.
-        self.tap_label(tab.capitalize(), snapshot_depth=IOS_MORE_ROW_DEPTH.get(name, 13))
+        # Through WDA the More list's rows sit below the driver's depth of 12
+        # (they appear at 13; the Lazy row only at 25). No depth is asked for
+        # here: since #494 an explicit 12 is a floor, and a miss looks once
+        # more at 25 -- quick on a list this short. This used to name 13, and
+        # 25 for Lazy (#375, closed as superseded).
+        self.tap_label(tab.capitalize())
         time.sleep(1.2)
 
     def _goto_android(self, label: str) -> None:
