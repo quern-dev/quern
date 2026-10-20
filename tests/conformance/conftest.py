@@ -192,6 +192,74 @@ def authenticated(health: client_mod.HealthReport) -> None:
         pytest.skip("; ".join(health.notes) or "no working API key")
 
 
+# -- reservations ------------------------------------------------------------
+
+
+class _Unreserved:
+    """Stand-in when the server has no sessions (before #468): the run goes on
+    without reservations, and says so once rather than failing."""
+
+    def __init__(self, why: str) -> None:
+        self.why = why
+        self.held: list[str] = []
+        self.lost = False
+
+    def reserve(self, udid: str) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.fixture(scope="session")
+def reservation(request: pytest.FixtureRequest, quern: client_mod.QuernClient,
+                authenticated: None):
+    """This run's held session; each device fixture reserves what it picks.
+
+    So another agent on the same server cannot drive a device mid-run: its
+    writes get 423 naming this run (#468). The run's own requests carry the
+    same `X-Quern-Session`, so it is never refused by its own reservation.
+    """
+    reporter = request.config.pluginmanager.get_plugin("terminalreporter")
+
+    def say(line: str) -> None:
+        if reporter is not None:
+            reporter.write_line(line)
+        else:
+            print(line)
+
+    probe = quern.get("/api/v1/sessions")
+    if probe.status_code == 404:
+        held = _Unreserved("this server has no sessions (before #468)")
+    else:
+        try:
+            held = client_mod.HeldSession(quern).open()
+        except ImportError:
+            held = _Unreserved("the `websockets` package is not installed")
+    if isinstance(held, _Unreserved):
+        say(f"[conformance] devices are NOT reserved: {held.why}; another agent on "
+            "this server could drive them mid-run.")
+    try:
+        yield held
+    finally:
+        if held.lost:
+            say(f"[conformance] WARNING: session {quern.session} lost its hold during "
+                "the run; results after that point were not protected from other agents.")
+        held.close()
+
+
+def _reserve(reservation, device: Device) -> Device:
+    try:
+        reservation.reserve(device.udid)
+    except client_mod.ReservationRefused as exc:
+        # A failure, not a skip: the device exists and is in use by someone
+        # else, and a run on it would measure their actions as well as ours.
+        pytest.fail(f"{device.udid} is reserved by another session, so this run cannot "
+                    f"vouch for it -- pin a free device with QUERN_CONFORMANCE_DEVICES "
+                    f"or wait for that session to release it: {exc}")
+    return device
+
+
 # -- role fixtures -----------------------------------------------------------
 
 
@@ -209,23 +277,23 @@ def _device_for(env: Environment, role: Role) -> Device:
 
 
 @pytest.fixture(scope="session")
-def ios_simulator(environment: Environment, authenticated: None) -> Device:
-    return _device_for(environment, Role.IOS_SIMULATOR)
+def ios_simulator(environment: Environment, authenticated: None, reservation) -> Device:
+    return _reserve(reservation, _device_for(environment, Role.IOS_SIMULATOR))
 
 
 @pytest.fixture(scope="session")
-def ios_device(environment: Environment, authenticated: None) -> Device:
-    return _device_for(environment, Role.IOS_DEVICE)
+def ios_device(environment: Environment, authenticated: None, reservation) -> Device:
+    return _reserve(reservation, _device_for(environment, Role.IOS_DEVICE))
 
 
 @pytest.fixture(scope="session")
-def android_emulator(environment: Environment, authenticated: None) -> Device:
-    return _device_for(environment, Role.ANDROID_EMULATOR)
+def android_emulator(environment: Environment, authenticated: None, reservation) -> Device:
+    return _reserve(reservation, _device_for(environment, Role.ANDROID_EMULATOR))
 
 
 @pytest.fixture(scope="session")
-def android_device(environment: Environment, authenticated: None) -> Device:
-    return _device_for(environment, Role.ANDROID_DEVICE)
+def android_device(environment: Environment, authenticated: None, reservation) -> Device:
+    return _reserve(reservation, _device_for(environment, Role.ANDROID_DEVICE))
 
 
 def _any_of(env: Environment, roles: tuple[Role, ...], platform: str) -> Device:
@@ -256,20 +324,21 @@ def _any_of(env: Environment, roles: tuple[Role, ...], platform: str) -> Device:
 
 
 @pytest.fixture(scope="session")
-def any_ios(environment: Environment, authenticated: None) -> Device:
+def any_ios(environment: Environment, authenticated: None, reservation) -> Device:
     """A simulator if there is one, else a physical iPhone.
 
     For the many endpoints that do not care which, and should be exercised on
     whatever the machine has rather than skipped for want of a simulator.
     """
-    return _any_of(environment, (Role.IOS_SIMULATOR, Role.IOS_DEVICE), "iOS")
+    return _reserve(reservation,
+                    _any_of(environment, (Role.IOS_SIMULATOR, Role.IOS_DEVICE), "iOS"))
 
 
 @pytest.fixture(scope="session")
-def any_android(environment: Environment, authenticated: None) -> Device:
-    return _any_of(
+def any_android(environment: Environment, authenticated: None, reservation) -> Device:
+    return _reserve(reservation, _any_of(
         environment, (Role.ANDROID_EMULATOR, Role.ANDROID_DEVICE), "Android"
-    )
+    ))
 
 
 # -- host tooling ------------------------------------------------------------

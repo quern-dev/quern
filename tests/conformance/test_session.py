@@ -122,3 +122,44 @@ def test_a_public_path_carries_no_warning(quern: QuernClient) -> None:
     resp = quern.get("/health", authenticated=False, tagged=False)
     assert resp.status_code == 200, f"{resp.status_code}: {resp.text[:300]}"
     assert WARNING not in resp.headers, resp.headers.get(WARNING)
+
+
+def test_another_session_cannot_drive_a_device_this_run_holds(
+    quern: QuernClient, any_ios, reservation,
+) -> None:
+    """The reservation is what keeps this run's measurements its own (#468).
+
+    A write from a different session is refused with 423 naming the holder,
+    before it reaches the device. The write is a tap in the status-bar corner,
+    so if the guard ever fails, what it does is harmless.
+    """
+    import pytest
+
+    if hasattr(reservation, "why"):
+        pytest.skip(f"this run is not reserving: {reservation.why}")
+    # A real session that did not end up holding the device is a failure, not
+    # a skip: that is the reservation silently not happening.
+    assert any_ios.udid in reservation.held, (any_ios.udid, reservation.held)
+    resp = quern.post(
+        "/api/v1/device/ui/tap",
+        json={"udid": any_ios.udid, "x": 1, "y": 1},
+        headers={"X-Quern-Session": f"conformance-intruder-{uuid.uuid4().hex[:8]}"},
+        timeout=60.0,
+    )
+    assert resp.status_code == 423, f"{resp.status_code}: {resp.text[:300]}"
+    assert reservation.name in resp.text, resp.text[:300]
+
+
+def test_this_runs_own_writes_pass_its_reservation(
+    quern: QuernClient, any_ios, reservation,
+) -> None:
+    """The other half: a run refused by its own reservation would fail every
+    device test, and read as the devices being broken."""
+    import pytest
+
+    if hasattr(reservation, "why"):
+        pytest.skip(f"this run is not reserving: {reservation.why}")
+    resp = quern.post(
+        "/api/v1/device/ui/tap", json={"udid": any_ios.udid, "x": 1, "y": 1}, timeout=60.0,
+    )
+    assert resp.status_code != 423, resp.text[:300]
