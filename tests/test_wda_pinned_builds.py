@@ -418,16 +418,36 @@ class TestDiscardingTheKeptBuild:
         await wda._discard_previous(previous)
         assert not previous.exists()
 
-    async def test_a_deletion_cut_short_is_not_restored_by_the_next_build(self, tmp_path):
+    async def test_a_deletion_cut_short_is_not_restored_by_the_next_build(self, tmp_path,
+                                                                           state):
         derived = tmp_path / "derived"
         (derived / "good").mkdir(parents=True)
         previous = tmp_path / "derived-previous"
         retired = tmp_path / "derived-previous-retired-deadbeef"
         (retired / "half").mkdir(parents=True)
-        wda._recover_previous(derived, previous)
+        wda._recover_previous(derived, previous, "build_phase")
         assert (derived / "good").exists(), "a retired leftover is not a kept build"
         await wda._discard_previous(previous)
         assert not retired.exists(), "and the next discard sweeps it"
+
+
+def test_a_snapshot_is_never_partial_where_recovery_looks(tmp_path, monkeypatch):
+    """A copy cut short by a crash at `-previous` would be restored over the
+    intact build (#498 review): it is copied beside it and renamed in."""
+    src = tmp_path / "derived"
+    (src / "Build").mkdir(parents=True)
+    dst = tmp_path / "derived-previous"
+    import subprocess
+
+    def cp(cmd, **kw):
+        assert not dst.exists(), "nothing at -previous while copying"
+        assert cmd[-1] != str(dst)
+        raise subprocess.CalledProcessError(1, cmd)   # and the fallback copy runs
+
+    monkeypatch.setattr(subprocess, "run", cp)
+    wda._snapshot(src, dst)
+    assert (dst / "Build").is_dir()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["derived", "derived-previous"]
 
 
 class TestTheKeptDeviceBuild:
@@ -440,11 +460,54 @@ class TestTheKeptDeviceBuild:
         import shutil
 
         shutil.copytree(derived, previous)
+        state["build_phase"] = "building"
         (device["app"] / "partial").write_text("half-written")
         device["builds"](ok=False)
         with pytest.raises(RuntimeError):
             await wda.build_wda("TEAM")
         assert (device["app"] / "old").exists() and not (device["app"] / "partial").exists()
+        assert "build_phase" not in state
+
+    async def test_a_build_recorded_before_the_crash_keeps_the_new_one(self, device, state):
+        """Stopped after the new build was recorded but before the old one was
+        deleted: restoring it would run the old build under the new record
+        (#498 review)."""
+        device["old_build"]()
+        derived = device["app"].parents[3]
+        previous = derived.with_name(derived.name + "-previous")
+        import shutil
+
+        shutil.copytree(derived, previous)
+        (device["app"] / "old").write_text("the new build, recorded")
+        state["build_wda_version"] = PIN          # recorded; no phase left
+        wda._recover_previous(derived, previous, "build_phase")
+        assert (device["app"] / "old").read_text() == "the new build, recorded"
+        assert not previous.exists()
+        await wda._discard_previous(previous)
+        assert not list(derived.parent.glob("*-previous*"))
+
+    async def test_the_phase_is_building_while_it_builds_and_gone_after(self, device, state,
+                                                                       monkeypatch):
+        device["old_build"]()
+        device["builds"](ok=True)
+        seen = []
+        real = wda._snapshot
+
+        def spy(src, dst):
+            seen.append(state.get("build_phase"))
+            real(src, dst)
+
+        monkeypatch.setattr(wda, "_snapshot", spy)
+        assert await wda.build_wda("TEAM") is True
+        assert seen == ["building"], "set before the snapshot"
+        assert "build_phase" not in state
+
+    async def test_a_failed_build_clears_the_phase(self, device, state):
+        device["old_build"]()
+        device["builds"](ok=False)
+        with pytest.raises(RuntimeError):
+            await wda.build_wda("TEAM")
+        assert "build_phase" not in state
 
     async def test_a_failed_build_s_partial_output_is_cleared_before_the_restore(
             self, device, state, monkeypatch):
@@ -545,11 +608,49 @@ class TestTheKeptSimulatorBuild:
         import shutil
 
         shutil.copytree(derived, previous)
+        state["sim_build_phase"] = "building"
         (sim["products"] / "Partial.xctestrun").write_text("x")
         sim["builds"](ok=False)
         assert await wda.build_wda_simulator() is False
         assert (sim["products"] / "Old.xctestrun").exists()
         assert not (sim["products"] / "Partial.xctestrun").exists()
+
+    async def test_a_build_recorded_before_the_crash_keeps_the_new_one(self, sim, state):
+        sim["old_build"]()
+        derived = sim["products"].parents[1]
+        previous = derived.with_name(derived.name + "-previous")
+        import shutil
+
+        shutil.copytree(derived, previous)
+        (sim["products"] / "Old.xctestrun").unlink()
+        (sim["products"] / "New.xctestrun").write_text("new")
+        state["sim_build_wda_version"] = PIN          # recorded; no phase left
+        wda._recover_previous(derived, previous, "sim_build_phase")
+        assert (sim["products"] / "New.xctestrun").exists()
+        assert not (sim["products"] / "Old.xctestrun").exists()
+        assert not previous.exists()
+
+    async def test_the_phase_is_building_while_it_builds_and_gone_after(self, sim, state,
+                                                                       monkeypatch):
+        sim["old_build"]()
+        sim["builds"](ok=True)
+        seen = []
+        real = wda._xcodebuild_simulator
+
+        async def spy():
+            seen.append(state.get("sim_build_phase"))
+            await real()
+
+        monkeypatch.setattr(wda, "_xcodebuild_simulator", spy)
+        assert await wda.build_wda_simulator() is True
+        assert seen == ["building"]
+        assert "sim_build_phase" not in state
+
+    async def test_a_failed_build_clears_the_phase(self, sim, state):
+        sim["old_build"]()
+        sim["builds"](ok=False)
+        assert await wda.build_wda_simulator() is False
+        assert "sim_build_phase" not in state
 
 
 async def test_the_simulator_start_says_an_update_failed(state, monkeypatch, tmp_path):

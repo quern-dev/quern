@@ -535,9 +535,10 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
     # another phone's driver start looks for it, and an ordinary rebuild stays
     # incremental. `force` still builds from clean (#188), after the snapshot.
     previous = WDA_DERIVED.with_name(WDA_DERIVED.name + "-previous")
-    _recover_previous(WDA_DERIVED, previous)
+    _recover_previous(WDA_DERIVED, previous, "build_phase")
     kept = False
     if WDA_DERIVED.exists():
+        _set_build_phase("build_phase", "building")
         await asyncio.to_thread(_snapshot, WDA_DERIVED, previous)
         kept = True
     try:
@@ -548,6 +549,7 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
         shutil.rmtree(WDA_DERIVED, ignore_errors=True)
         if kept:
             previous.rename(WDA_DERIVED)
+            _set_build_phase("build_phase", None)
             logger.warning("WDA build failed; the previous build is kept")
         raise
 
@@ -558,6 +560,9 @@ async def build_wda(team_id: str, force: bool = False) -> bool:
     state["build_team_id"] = team_id
     state["built_at"] = now
     state["build_wda_version"] = _source_version()
+    # In the same write as the new build's record: from here a kept build is
+    # the one this replaced, not one to restore (review).
+    state.pop("build_phase", None)
     # What this artifact was built *with*, so the next run can tell whether it
     # still matches. Written only here, after a build that returned zero.
     state["build_deployment_target"] = WDA_MIN_DEPLOYMENT_TARGET
@@ -585,27 +590,61 @@ def _snapshot(src: Path, dst: Path) -> None:
     instant, and no space until either side changes -- else a plain copy."""
     import subprocess
 
+    # Copied beside it and renamed into place: a copy cut short by a crash
+    # must never sit at `dst`, where recovery would put it back over the
+    # intact build (review).
+    partial = dst.with_name(dst.name + ".partial")
     shutil.rmtree(dst, ignore_errors=True)
+    shutil.rmtree(partial, ignore_errors=True)
     try:
-        subprocess.run(["cp", "-cR", str(src), str(dst)], check=True,
+        subprocess.run(["cp", "-cR", str(src), str(partial)], check=True,
                        capture_output=True, timeout=600)
     except (OSError, subprocess.SubprocessError):
-        shutil.rmtree(dst, ignore_errors=True)
-        shutil.copytree(src, dst, symlinks=True)
+        shutil.rmtree(partial, ignore_errors=True)
+        shutil.copytree(src, partial, symlinks=True)
+    partial.rename(dst)
 
 
-def _recover_previous(derived: Path, previous: Path) -> None:
+def _set_build_phase(key: str, phase: str | None) -> None:
+    state = read_wda_state()
+    if phase is None:
+        state.pop(key, None)
+    else:
+        state[key] = phase
+    save_wda_state(state)
+
+
+def _recover_previous(derived: Path, previous: Path, phase_key: str) -> None:
     """A build kept as `previous` and still there means the build that kept it
-    never finished -- the server was stopped or killed mid-build -- so
-    `derived` is whatever that build left: the kept one goes back. Deleting it
-    instead (the first version did) threw away the good build and kept the
-    partial one (review)."""
-    if not previous.exists():
-        return
-    logger.warning("A WDA build was interrupted; restoring the build before it from %s",
-                   previous)
-    shutil.rmtree(derived, ignore_errors=True)
-    previous.rename(derived)
+    was stopped or killed before it cleaned up. Which side is good depends on
+    how far it got, and the state says (review):
+
+    - still "building": `derived` is whatever that build left, so the kept one
+      goes back. Deleting it instead (the first version did) threw away the
+      good build and kept the partial one (review).
+    - no phase: the new build finished and was recorded, and only the deletion
+      of the old one was cut short. Restoring it would run the old build under
+      the new one's record, so it is retired for _discard_previous to sweep.
+    """
+    state = read_wda_state()
+    phase = state.get(phase_key)
+    if previous.exists():
+        if phase == "building":
+            logger.warning("A WDA build was interrupted; restoring the build before it from %s",
+                           previous)
+            shutil.rmtree(derived, ignore_errors=True)
+            previous.rename(derived)
+        else:
+            _retire(previous)
+    # Cleared only once the directories are settled: a crash mid-restore must
+    # find the phase still set.
+    if phase is not None:
+        state.pop(phase_key, None)
+        save_wda_state(state)
+
+
+def _retire(previous: Path) -> None:
+    previous.rename(previous.with_name(f"{previous.name}-retired-{uuid.uuid4().hex[:8]}"))
 
 
 async def _discard_previous(previous: Path) -> None:
@@ -618,7 +657,7 @@ async def _discard_previous(previous: Path) -> None:
     stuck = False
     if previous.exists():
         try:
-            previous.rename(previous.with_name(f"{previous.name}-retired-{uuid.uuid4().hex[:8]}"))
+            _retire(previous)
         except OSError as e:
             # The build succeeded and is recorded, so this must not fail it;
             # left in place, the next build would restore the old one over it.
@@ -1354,7 +1393,7 @@ async def _build_wda_simulator(force: bool) -> bool:
         return False
 
     previous = WDA_DERIVED_SIM.with_name(WDA_DERIVED_SIM.name + "-previous")
-    _recover_previous(WDA_DERIVED_SIM, previous)
+    _recover_previous(WDA_DERIVED_SIM, previous, "sim_build_phase")
 
     # Fetched whenever the pin moved, not only when there is no source: an
     # existing clone of another version would otherwise be built forever. A
@@ -1377,6 +1416,7 @@ async def _build_wda_simulator(force: bool) -> bool:
                                   "sim_build_wda_version") if k in state}
     moved = False
     if WDA_DERIVED_SIM.exists():
+        _set_build_phase("sim_build_phase", "building")
         WDA_DERIVED_SIM.rename(previous)
         moved = True
     # Cleared before anything is built, so no failure path -- a timeout
@@ -1391,6 +1431,7 @@ async def _build_wda_simulator(force: bool) -> bool:
         previous.rename(WDA_DERIVED_SIM)
         state = read_wda_state()
         state.update(kept)
+        state.pop("sim_build_phase", None)
         save_wda_state(state)
         if not isinstance(exc, Exception):
             # Cancelled: the old build is back, and so is the cancel -- but not
@@ -1407,6 +1448,7 @@ async def _build_wda_simulator(force: bool) -> bool:
     state["sim_build_deployment_target"] = WDA_MIN_DEPLOYMENT_TARGET
     state["sim_build_wda_version"] = _source_version()
     state.pop("sim_build_failed_version", None)
+    state.pop("sim_build_phase", None)   # with the record, as in build_wda (review)
     state["sim_built_at"] = datetime.now(UTC).isoformat()
     save_wda_state(state)
     await _discard_previous(previous)   # last, as in build_wda (review)
