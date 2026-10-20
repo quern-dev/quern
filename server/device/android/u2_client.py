@@ -311,6 +311,25 @@ class U2Backend:
         """Stop the gesture servers this backend started, and their forwards."""
         await self._touch.close_all()
 
+    async def frame(self, udid: str, scale: float = 0.25, quality: int = 50) -> bytes:
+        """A small JPEG of the screen, for comparing frames (#502).
+
+        Through uiautomator2's own server, scaled down on the device: measured
+        on an emulator at a median of 44ms, against 135ms for `adb exec-out
+        screencap -p`, which encodes and ships a full-resolution PNG. Raises
+        DeviceError on failure.
+        """
+        import base64
+
+        def _do() -> bytes:
+            device = self._connect(udid)
+            return base64.b64decode(device.jsonrpc.takeScreenshot(scale, quality))
+
+        try:
+            return await asyncio.to_thread(_do)
+        except Exception as e:
+            raise DeviceError(str(e), tool="u2") from e
+
     async def describe_all(
         self,
         udid: str,

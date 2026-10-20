@@ -73,6 +73,7 @@ class TestUnchangedNote:
 
     def test_android_crops_its_own_status_bar(self):
         image = frames.prepare(_png(), "android")
+        assert image.width == frames.FRAME_WIDTH
         assert image.height == 200 - int(200 * frames.STATUS_BAR_FRACTION["android"])
 
     def test_a_rotation(self):
@@ -85,6 +86,7 @@ class TestCapture:
 
     def _controller(self, *, wda=False, android=False, bridge=False):
         c = MagicMock()
+        c.u2.frame = AsyncMock(return_value=_png())
         c._served_by_wda.return_value = wda
         c._is_android.return_value = android
         c.sim_bridge = object()
@@ -98,19 +100,27 @@ class TestCapture:
         return c
 
     @pytest.mark.parametrize("kind, source", [
-        ({"wda": True}, "wda"), ({"android": True}, "adb"),
+        ({"wda": True}, "wda"), ({"android": True}, "u2"),
         ({"bridge": True}, "sim-bridge"), ({}, "simctl"),
     ])
     async def test_each_backend_uses_its_fastest_path(self, kind, source):
         c = self._controller(**kind)
         png, ms, used = await frames._capture(c, "UDID")
         assert used == source and png == _png() and ms >= 0
-        assert frames.platform_of(used) == ("android" if source == "adb" else "ios")
+        assert frames.platform_of(used) == ("android" if source == "u2" else "ios")
+
         called = {
-            "wda": c.wda_client.screenshot, "adb": c.raw_screenshot,
+            "wda": c.wda_client.screenshot, "u2": c.u2.frame,
             "sim-bridge": c.sim_bridge.screenshot, "simctl": c.raw_screenshot,
         }[source]
         called.assert_awaited_once()
+
+    async def test_android_falls_back_to_adb(self):
+        c = self._controller(android=True)
+        c.u2.frame = AsyncMock(side_effect=OSError("u2 server down"))
+        png, _, used = await frames._capture(c, "SERIAL")
+        assert used == "adb" and png == _png() and frames.platform_of(used) == "android"
+        c.raw_screenshot.assert_awaited_once()
 
     async def test_the_capture_is_not_decoded_at_the_tap(self, monkeypatch):
         import server.device.settle as settle
@@ -125,6 +135,12 @@ class TestCapture:
     def test_the_status_bar_is_cropped(self):
         image = frames.prepare(_png(), "ios")
         assert image.height == 200 - int(200 * frames.STATUS_BAR_FRACTION["ios"])
+
+    def test_frames_from_different_sources_compare(self):
+        # A scaled JPEG-sized capture against a full-size one of the same screen.
+        small = frames.prepare(_png(size=(100, 200)), "android")
+        full = frames.prepare(_png(size=(1080, 2160)), "android")
+        assert small.size == full.size
 
     async def test_a_failed_capture_is_no_frame(self):
         c = self._controller(wda=True)
@@ -255,6 +271,22 @@ class TestRoute:
         assert "screen_unchanged_since_tap" not in body["detail"]
         # And it cost no frame at the miss: one before the tap only.
         assert screens["n"] == 2   # before "Go", before "Next"
+
+    async def test_opting_out_takes_no_frame(self, app, controller, screens):
+        await _post(app, "tap-element", {"label": "Go", "note_unchanged": False})
+        assert screens["n"] == 0
+        _misses(controller)
+        _, body = await _post(app, "tap-element", {"label": "Next", "note_unchanged": False})
+        assert "screen_unchanged_since_tap" not in body["detail"] and screens["n"] == 0
+
+    async def test_opting_out_drops_an_earlier_frame(self, app, controller, screens):
+        # The opted-out tap moved the screen as far as anyone knows: an
+        # earlier frame must not be compared across it.
+        await _post(app, "tap-element", {"label": "Go"})
+        await _post(app, "tap-element", {"label": "Fast", "note_unchanged": False})
+        _misses(controller)
+        _, body = await _post(app, "tap-element", {"label": "Next"})
+        assert "screen_unchanged_since_tap" not in body["detail"]
 
     async def test_a_long_press_takes_no_frame(self, app, controller, screens):
         await _post(app, "tap-element", {"label": "Go", "duration": 1.0})

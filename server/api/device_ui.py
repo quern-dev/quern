@@ -708,7 +708,8 @@ async def tap_element(request: Request, body: TapElementRequest):
             # The screen as it was before the tap, for the next miss (#502).
             # A long press is not a tap the next miss should be judged by.
             before_frame: tuple = (None, 0.0, "none")
-            if body.duration is None and _tap_frames(request) is not None:
+            if (body.duration is None and body.note_unchanged
+                    and _tap_frames(request) is not None):
                 try:
                     before_frame = await frames.capture(controller, resolved)
                 except Exception:  # noqa: BLE001 -- no frame is no note, never a failed tap

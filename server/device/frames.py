@@ -32,6 +32,9 @@ UNCHANGED_BELOW = 0.008
 #: content costs nothing and leaving the clock in costs the whole signal.
 STATUS_BAR_FRACTION = {"ios": 0.07, "android": 0.05}
 
+#: Every frame is compared at this width, whatever captured it.
+FRAME_WIDTH = 100
+
 #: A capture slower than this is abandoned: the tap must not wait on it.
 CAPTURE_TIMEOUT = 3.0
 
@@ -70,8 +73,15 @@ async def _capture(controller, udid: str) -> tuple[bytes | None, float, str]:
             source = "wda"
             png = await asyncio.wait_for(controller.wda_client.screenshot(udid), CAPTURE_TIMEOUT)
         elif controller._is_android(udid):
-            source = "adb"
-            png = await asyncio.wait_for(controller.raw_screenshot(udid), CAPTURE_TIMEOUT)
+            # uiautomator2's scaled JPEG is about three times as fast as adb's
+            # full PNG; adb stays the fallback when the u2 server cannot answer.
+            try:
+                source = "u2"
+                png = await asyncio.wait_for(controller.u2.frame(udid), CAPTURE_TIMEOUT)
+            except Exception:  # noqa: BLE001
+                logger.debug("u2 frame failed; falling back to adb", exc_info=True)
+                source = "adb"
+                png = await asyncio.wait_for(controller.raw_screenshot(udid), CAPTURE_TIMEOUT)
         elif controller._ui_backend(udid) is getattr(controller, "sim_bridge", None):
             source = "sim-bridge"
             png = await asyncio.wait_for(
@@ -89,7 +99,7 @@ async def _capture(controller, udid: str) -> tuple[bytes | None, float, str]:
 
 def platform_of(source: str) -> str:
     """Which status bar to crop for a capture from `source`."""
-    return "android" if source == "adb" else "ios"
+    return "android" if source in ("u2", "adb") else "ios"
 
 
 def prepare(png: bytes | None, platform: str):
@@ -101,6 +111,12 @@ def prepare(png: bytes | None, platform: str):
     image = _prepare(png)
     if image is None:
         return None
+    # One width for every source, so frames from different capture paths
+    # compare -- u2's scaled JPEG and adb's full PNG, when one falls back to
+    # the other between the tap and the miss. A rotation still reads as
+    # changed: its height differs.
+    height = max(1, round(image.height * FRAME_WIDTH / image.width))
+    image = image.resize((FRAME_WIDTH, height))
     top = int(image.height * STATUS_BAR_FRACTION[platform])
     return image.crop((0, top, image.width, image.height))
 
