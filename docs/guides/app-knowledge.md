@@ -106,7 +106,9 @@ the screen the edge leads to and reports whether it arrived
 `load_landmarks` reports the count under `navigation.edges`, and lists any entry
 that is not checked under `navigation.unusable`, with why. When one tap can
 lead to several screens -- a tab that shows whatever its stack was left on --
-list an edge to each; arriving at any of them counts. Add `condition:` to an
+list an edge to each; arriving at any of them counts. Navigation available
+from every screen -- a tab bar -- goes in `app.md`'s frontmatter once, as
+`global_leads_to`, with `except:` for the screens that hide it. Add `condition:` to an
 edge that exists only in some states: it confirms an arrival but never reports
 a miss. Add `timeout:` (seconds, up to 60) to an edge whose screen is slow to
 arrive -- one that waits on the network -- so a slow arrival is not reported as

@@ -805,7 +805,7 @@ class TestTimeoutReport:
         assert report["edges"] == 1
         assert "unusable" not in report and "note" not in report
         assert "default" in report["timeouts_ignored"][0]["reason"]
-        assert "edge_kept" not in report["timeouts_ignored"][0]
+        assert "category" not in report["timeouts_ignored"][0]
 
 
 class TestPreviousTap:
@@ -1147,3 +1147,5 @@ class TestProbeKnowledgeBases:
                 expected = [Landmark(**lm) for lm in contract[screen.screen]["landmarks"]]
                 assert screen.landmarks == expected, screen.screen
         assert set(contract) <= {s.screen for s in scan.screens}
+        # The tabs are declared once, in app.md (#503), not on every screen.
+        assert any(e.from_global for s in scan.screens for e in s.leads_to)

@@ -11,7 +11,7 @@ The app knowledge base is a set of markdown files that capture everything you ne
 If `.quern/knowledge/` was just initialized from templates, start with:
 
 1. **Fill in `.quern/config.json`** — This is the machine-readable project config. Set `bundle_id` and `app_name` first (use `list_apps` on a device where the app is installed if unknown). If you can find the Xcode project/workspace in the directory, set `workspace` and discover available schemes. Set `url_scheme` and `universal_link_domains` if the user provides them.
-2. **Fill in `app.md`** — Entry points, global navigation, and test accounts. The bundle ID and URL scheme should match what you put in config.json.
+2. **Fill in `app.md`** — Entry points, global navigation (as `global_leads_to`, so tab taps are checked), and test accounts. The bundle ID and URL scheme should match what you put in config.json.
 3. **Launch the app** and begin the guided tour (see below).
 
 If `.quern/knowledge/` already has content, read the existing files and `.quern/config.json` before making changes. Your job is to extend and correct, not overwrite.
@@ -167,11 +167,15 @@ leads_to:
 - **The `action` is a `tap_element` call**, written the way an agent will make it, naming a `label` (or `label_contains`, `label_prefix`) or an `identifier`. Prose ("tap the gear"), other tools (`swipe`, `open_url`) and a type with nothing else are kept as documentation but not checked.
 - **Name the element the way agents call it.** An edge is matched against the element that was tapped, so any selector that picks the right element works for `previous_tap`. The check at the tap (`verify_navigation`) decides before tapping, so there the call and the edge have to share a label or an identifier.
 - **`screen` links the target's file**, `[[screens/<file name>]]`, and that file needs landmarks: an edge to a stub cannot confirm an arrival, so it is not checked until the stub is documented.
+- **Navigation from every screen goes in `app.md`.** A tab bar or a persistent menu is reachable from almost everywhere, so declare it once in `app.md`'s frontmatter as `global_leads_to` -- the same entry format, plus `except:` for the screens it does not apply from (a login screen, a full-screen sheet). quern copies it onto every other screen. Three rules decide where:
+  - **A tab with a stack:** a tab that shows whatever its stack was left on gets one global edge per stack screen, all naming the same element. The group is not applied on any of those screens, so re-tapping the tab there -- which pops to its root -- is not checked against the stack.
+  - **A screen's own edge wins:** a screen whose own `leads_to` names the same element (the same label or identifier, whatever the `element_type`, conditional or not) keeps its own edges and gets no global copy.
+  - **List every screen a global edge can reach.** A tab whose stack screens are not listed will be checked as if it always lands on its root, and an arrival on a pushed screen can then be taken for a dropped tap.
 - **One tap, several possible screens: one edge each.** A tab that shows whatever its own stack was left on leads to each screen of that stack; arriving at any of them counts.
 - **`condition:`** marks an edge that exists only in some states. It confirms an arrival but is never blamed for a missed one.
 - **`timeout:`** (seconds, up to 60) is for a screen slow to arrive -- one that waits on the network -- so a slow arrival is not taken for a dropped tap. The default is 3s for a check at the tap, and 1s before a later miss can blame it.
 
-After loading, read the `navigation` block `load_landmarks` returns: `edges` is how many edges quern checks, `unusable` lists each `leads_to` entry it does not check and why, and `timeouts_ignored` lists edges whose `timeout:` it could not read. An edge you meant to be checked that appears under `unusable` usually needs its action rewritten as a `tap_element` call, or its target documented.
+After loading, read the `navigation` block `load_landmarks` returns: `edges` is how many edges quern checks (a global edge counted once per screen it applies from, and `global` the number declared in `app.md`), `unusable` lists each `leads_to` entry it does not check and why, `timeouts_ignored` and `except_ignored` list edges still checked with a `timeout:` or `except:` it could not read, and `app_md` reports a problem with `app.md` itself (unreadable, or `global_leads_to` outside valid frontmatter). An edge you meant to be checked that appears under `unusable` usually needs its action rewritten as a `tap_element` call, or its target documented.
 
 ### Writing Screen Documents
 

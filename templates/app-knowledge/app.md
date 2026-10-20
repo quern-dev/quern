@@ -4,6 +4,19 @@ app_name: ""
 bundle_id: ""
 url_scheme: ""
 universal_link_domain: ""
+
+# Navigation available from every screen -- a tab bar, a persistent menu --
+# declared once instead of in every screen's leads_to (#503). Same format as
+# leads_to; `except` lists the screens it does not apply from (a login screen,
+# a full-screen sheet: anything that hides the bar). A screen's own leads_to
+# entry for the same element wins on that screen. Checked by tap_element like
+# any edge: see "Writing Navigation Edges" in the knowledge-base guide.
+# To use it, replace the [] with entries like the example below.
+global_leads_to: []
+#global_leads_to:
+#  - screen: "[[screens/home]]"
+#    action: 'tap_element label="Home" element_type="Button"'
+#    except: ["[[screens/login]]"]
 ---
 
 # App Name
@@ -28,7 +41,8 @@ universal_link_domain: ""
 | 2 | Search | [[screens/search]] |
 | 3 | Profile | [[screens/profile]] |
 
-To switch tabs: `tap_element label="{Tab Label}" element_type="tabBarButton"`
+To switch tabs: `tap_element label="{Tab Label}"`. Declare the tabs in
+`global_leads_to` above so quern can check tab taps.
 -->
 
 ## Global Elements
