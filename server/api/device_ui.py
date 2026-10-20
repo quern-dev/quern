@@ -20,7 +20,7 @@ from server.api.device import (
 )
 from server.device.controller import DeviceController
 from server.knowledge import navigation
-from server.knowledge.landmarks import needs_page_urls
+from server.knowledge.landmarks import LandmarkRegistry, needs_page_urls
 from server.models import (
     ClearTextRequest,
     DeviceError,
@@ -86,14 +86,17 @@ async def _identify_now(
 
 
 async def _navigation_plan(
-    controller: DeviceController, udid: str, registry, body,
+    request: Request, controller: DeviceController, udid: str, registry, body,
 ) -> navigation.Plan | None:
     """Whether this tap is a documented edge from the current screen.
 
     Pays for a read only when some loaded edge could be this tap; with no
     knowledge base, or none that matches, the tap is exactly as it was.
     """
-    if registry is None or not body.verify_navigation or body.duration is not None:
+    # A real registry only: anything else -- None, or a stand-in -- has no
+    # edges to check, and treating it as one costs a read for nothing.
+    if (not isinstance(registry, LandmarkRegistry) or not body.verify_navigation
+            or body.duration is not None):
         return None
     call = {
         "label": body.label, "identifier": body.identifier,
@@ -103,7 +106,12 @@ async def _navigation_plan(
     try:
         if not registry.any_edge_could_match(call):
             return None
-        before = await _identify_now(controller, udid, registry, use_cache=True)
+        # Under the disconnect guard, as the tap is: only a tap that pays for
+        # this read gets there.
+        before = await _run_until_client_leaves(
+            request, _identify_now(controller, udid, registry, use_cache=True),
+            what="tap_element navigation check",
+        )
         return navigation.plan_for(before, registry.edges_from, call)
     except Exception:  # noqa: BLE001 -- the check is an addition; the tap is not
         logger.debug("navigation plan failed", exc_info=True)
@@ -553,10 +561,7 @@ async def tap_element(request: Request, body: TapElementRequest):
                 getattr(getattr(request, "app", None), "state", None),
                 "landmark_registry", None,
             )
-            nav_plan = await _run_until_client_leaves(
-                request, _navigation_plan(controller, resolved, nav_registry, body),
-                what="tap_element navigation check",
-            )
+            nav_plan = await _navigation_plan(request, controller, resolved, nav_registry, body)
 
             # Guarded like scroll_to_element, and for the same reason: with
             # `scroll_to_find` on -- explicitly, or via a screen the knowledge
