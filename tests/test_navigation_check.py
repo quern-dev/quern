@@ -600,16 +600,31 @@ class TestRoute:
     async def test_a_disconnect_during_the_check_stops_its_reads(
         self, app, controller, monkeypatch,
     ):
+        """Through the real guard: the read before the tap goes ahead, the
+        caller leaves, and no read is made after the tap. A route that called
+        the check without the guard would read on for the whole wait."""
         from fastapi import HTTPException
 
+        from server.api import device_ui
+
         app.state.landmark_registry.load("probe", _registry_screens())
+        real = device_ui._run_until_client_leaves
+        guarded = {"n": 0}
 
-        async def gone(*a, **k):
-            raise HTTPException(status_code=499, detail="client disconnected")
+        async def leaves_after_the_tap(request, coro, *, what, poll_s=2.0):
+            if what == "tap_element navigation check":
+                guarded["n"] += 1
+                if guarded["n"] > 1:   # the check after the tap
+                    coro.close()
+                    raise HTTPException(status_code=499, detail="client disconnected")
+            return await real(request, coro, what=what, poll_s=poll_s)
 
-        monkeypatch.setattr(navigation, "verify", gone)
-        code, _ = await _tap(app, {"label": "More"})
+        monkeypatch.setattr(device_ui, "_run_until_client_leaves", leaves_after_the_tap)
+        code, _ = await _tap(app, {"label": "More", "navigation_timeout": 0.5})
         assert code == 499
+        controller.tap_element.assert_awaited_once()
+        # The read before the tap, and none after it.
+        assert controller.get_ui_elements.call_count == 1
 
     async def test_an_exception_inside_the_check_does_not_fail_the_tap(
         self, app, controller, monkeypatch,
