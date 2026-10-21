@@ -50,9 +50,10 @@ def _hold(duration: float | None) -> dict:
     return {"hold": float(duration)}
 
 
-def _selector_ambiguous(tapped: dict | None) -> bool:
-    """`tap_by_selector` matched several elements and pressed none (#512)."""
-    return isinstance(tapped, dict) and "ambiguous" in tapped
+def _selector_deferred(tapped: dict | None) -> bool:
+    """`tap_by_selector` pressed nothing and left the call to the dump path:
+    the name matched several elements, or could not be counted (#512)."""
+    return isinstance(tapped, dict) and "defer" in tapped
 
 
 def _scroll_report(sweep: dict, requested: bool | None) -> dict:
@@ -3081,12 +3082,12 @@ class DeviceControllerUI:
             tapped = await backend.tap_by_selector(
                 resolved_fast, identifier=identifier, label=label, **hold,
             )
-            # More than one match, and nothing pressed (#512). The dump path
-            # below decides: it folds a control's own parts into the control,
-            # and answers `ambiguous` with the candidates otherwise -- the same
-            # answer a call with `element_type` gets. Not a miss, so no scroll.
-            ambiguous = _selector_ambiguous(tapped)
-            if ambiguous:
+            # More than one match, or matches it could not count, and nothing
+            # pressed (#512). The dump path below decides, and answers
+            # `ambiguous` with the candidates -- the same answer a call with
+            # `element_type` gets. Not a miss, so no scroll.
+            deferred = _selector_deferred(tapped)
+            if deferred:
                 tapped = None
             # Not in the current view — auto-scroll to it and retry. Uses the
             # selector-based swipe loop (no dump_hierarchy), so it inherits the
@@ -3100,7 +3101,7 @@ class DeviceControllerUI:
             # The iOS sweep is the one that prompted #274. Android's
             # `scroll_into_view` swipes for real too and deserves the same
             # treatment; it needs a cheaper way to identify the screen first.
-            if tapped is None and not ambiguous and scroll_to_find is not False:
+            if tapped is None and not deferred and scroll_to_find is not False:
                 # Recorded even though the knowledge base is not consulted on
                 # this path: the swipe is just as real, and a response saying
                 # `attempted: False` after the device was swiped is the exact
@@ -3123,7 +3124,7 @@ class DeviceControllerUI:
                     tapped = await backend.tap_by_selector(
                         resolved_fast, identifier=identifier, label=label, **hold,
                     )
-                    if _selector_ambiguous(tapped):
+                    if _selector_deferred(tapped):
                         tapped = None
             if tapped is not None:
                 self._invalidate_ui_cache(resolved_fast)
@@ -3641,7 +3642,7 @@ class DeviceControllerUI:
                 entry["center_y"] = cy
             match_list.append(entry)
 
-        return {
+        result = {
             "status": "ambiguous",
             "matches": match_list,
             "message": (
@@ -3649,6 +3650,11 @@ class DeviceControllerUI:
                 "specify element_type or identifier to narrow"
             ),
         }
+        # Android's sweep can find a name below the fold and only then learn
+        # it is ambiguous (#512): the swipe happened, so say so (review).
+        if sweep.get("attempted"):
+            result["scroll"] = _scroll_report(sweep, scroll_to_find)
+        return result
 
     async def _connected_web_inspector(self):
         """The shared Web Inspector connection, opening one if needed."""

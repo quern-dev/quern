@@ -181,6 +181,7 @@ class TestEachBackendsLongPress:
         obj = MagicMock()
         obj.count = 1  # the fast path counts before it presses (#512)
         obj.info = {"bounds": {"left": 0, "right": 100, "top": 0, "bottom": 50}}
+        obj.info_list.return_value = [obj.info]  # the fast path counts before it presses (#512)
         device = MagicMock(return_value=obj)
         backend = self._u2(device)
         await backend.tap_by_selector("dev", identifier="map", hold=1.0)
@@ -434,6 +435,7 @@ class TestU2NeverPressesTwice:
         obj = MagicMock(**obj_kwargs)
         obj.count = 1
         obj.info = {"bounds": {"left": 0, "right": 100, "top": 0, "bottom": 50}}
+        obj.info_list.return_value = [obj.info]  # the fast path counts before it presses (#512)
         return TestEachBackendsLongPress._u2(MagicMock(return_value=obj)), obj
 
     async def test_a_press_that_failed_after_it_was_sent_is_not_retried(self):

@@ -242,6 +242,23 @@ def _focused_text_and_hint(device: Any) -> tuple[str | None, str | None]:
             return (node.get("text", ""), node.get("hint", ""))
     return (None, None)
 
+def _nested(frames: list[dict]) -> bool:
+    """Whether every frame lies inside the largest: one element and its parts.
+
+    A frame without its four edges is not evidence of nesting.
+    """
+    try:
+        boxes = [(float(f["left"]), float(f["top"]), float(f["right"]), float(f["bottom"]))
+                 for f in frames]
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not boxes:
+        return False
+    outer = max(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
+    return all(outer[0] <= b[0] and outer[1] <= b[1] and b[2] <= outer[2] and b[3] <= outer[3]
+               for b in boxes)
+
+
 class _PressMayHaveLanded(Exception):
     """A selector's click or long click failed after it was sent (#251)."""
 
@@ -493,13 +510,21 @@ class U2Backend:
         element, or None if no match was found (caller should fall back to the
         dump-based path).
 
-        Or `{"ambiguous": n}`, tapping nothing, when the selector matches more
-        than one element (#512). Picking one is the dump path's job: it folds a
-        control's own nested parts into the control and answers `ambiguous`
-        for the rest, and this one press cannot tell those apart. A label
-        counts its text and content-desc matches together, since either is the
-        label; an element carrying both counts twice, which costs it the
-        slower path and nothing else.
+        Or `{"defer": reason}`, pressing nothing, when this path cannot tell
+        the press is not a guess (#512): `"ambiguous"` when the name matches
+        more than one element, `"uncounted"` when the matches could not be
+        counted. The caller hands those to the dump path, which answers
+        `ambiguous` with the candidates. A label counts its text and
+        content-desc matches together, since either is the label.
+
+        Matches that nest -- every one inside the largest -- are one element
+        and its own parts, and are pressed as before. That is the stock
+        Material bottom-nav item and tab: the item's content-desc copies its
+        title, and the TextView inside it shows the same text. Without the
+        fold every such tab counted 2, and the dump path could not fold it
+        either, since the item reads as a Group rather than a control (review).
+        An element whose text and content-desc are both the label nests in
+        itself.
         """
 
         def _do():
@@ -516,16 +541,25 @@ class U2Backend:
                 groups.append([{"text": label}, {"description": label}])
 
             for group in groups:
-                # `count`, not `exists`: one RPC either way, and it says
-                # whether the press would be a guess.
-                counts = [(obj, obj.count) for obj in (device(**sel) for sel in group)]
-                total = sum(n for _, n in counts)
+                # `info_list`, not `exists`: one RPC per selector either way,
+                # and it says how many matched and where, so whether the press
+                # would be a guess costs nothing extra. Its first entry is the
+                # element `click` presses, so no separate `info` read either.
+                try:
+                    found = [(obj, list(obj.info_list() or []))
+                             for obj in (device(**sel) for sel in group)]
+                except Exception:  # noqa: BLE001 -- a failed count is not a miss
+                    # Read as None, this would sweep the screen for an element
+                    # that may be in plain view.
+                    return {"defer": "uncounted"}
+                total = sum(len(infos) for _, infos in found)
                 if total == 0:
                     continue
-                if total > 1:
-                    return {"ambiguous": total}
-                obj = next(o for o, n in counts if n)
-                info = obj.info or {}
+                if total > 1 and not _nested(
+                        [i.get("bounds") or {} for _, infos in found for i in infos]):
+                    return {"defer": "ambiguous", "matches": total}
+                obj, infos = next((o, infos) for o, infos in found if infos)
+                info = infos[0] or {}
                 try:
                     if hold is None:
                         obj.click()
