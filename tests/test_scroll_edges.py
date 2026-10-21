@@ -25,6 +25,9 @@ class Frame:
         self.name = name
         self.size = (100, 200)
 
+    def getextrema(self):
+        return (0, 0) if self.name == "black" else (0, 255)
+
 
 @pytest.fixture(autouse=True)
 def frames_by_name(monkeypatch):
@@ -75,8 +78,8 @@ class TestScrollIntoView:
         device = _device(["a"] * 100)
         found, report = await _sweep(device)
         assert found is None
-        assert report == {"swipes": 2, "moved": False, "ends": ["bottom", "top"],
-                          "no_progress": True}
+        assert report == {"swipes": 3, "moved": False, "ends": ["bottom", "top"],
+                          "no_progress": True}, "a third swipe confirms it"
 
     async def test_a_list_turns_round_at_its_bottom_and_stops_at_its_top(self):
         # down: b, c, then c again (bottom); up: b, a, then a again (top)
@@ -86,6 +89,45 @@ class TestScrollIntoView:
         assert report["ends"] == ["bottom", "top"]
         assert report["swipes"] == 6 and report["moved"] is True
         assert "no_progress" not in report
+
+    async def test_a_false_still_read_at_the_top_is_caught_by_the_third_swipe(self):
+        """Down reads still (a false read), up is truly at the top; the extra
+        swipe down moves, so this is a list, not a still screen (review)."""
+        device = _device(["a", "a", "a", "b", "b"])
+        found, report = await _sweep(device, max_swipes=1)
+        assert "no_progress" not in report
+        assert report["ends"] == ["top"] and report["moved"] is True
+
+    async def test_a_secure_window_never_reads_as_not_scrolling(self):
+        """FLAG_SECURE captures black: blank frames are no frames, and the
+        sweep runs as it used to (review)."""
+        device = _device(["black"] * 200)
+        found, report = await _sweep(device, max_swipes=3)
+        assert "no_progress" not in report and "ends" not in report
+        assert report["swipes"] == 9
+
+    async def test_a_slow_capture_turns_frames_off(self, monkeypatch):
+        import time as _time
+
+        from server.device.android import u2_client
+
+        monkeypatch.setattr(u2_client, "FRAME_SLOW_S", 0.0)
+        device = _device(["a"] * 200)
+        real = device.jsonrpc.takeScreenshot.side_effect
+
+        def slow(*a):
+            _time.sleep(0.001)
+            return real(*a)
+        device.jsonrpc.takeScreenshot.side_effect = slow
+        found, report = await _sweep(device, max_swipes=3)
+        assert device.jsonrpc.takeScreenshot.call_count == 1, "only the first"
+        assert report["swipes"] == 9 and "no_progress" not in report
+
+    async def test_a_target_that_appears_does_not_claim_movement(self):
+        """Found after a swipe whose frame was never compared: not measured."""
+        device = _device(["a"], found_after=1)
+        found, report = await _sweep(device)
+        assert found is not None and report["moved"] is False
 
     async def test_one_unchanged_direction_is_not_no_progress(self):
         """At the bottom already: the first swipe down changes nothing, the
@@ -153,3 +195,42 @@ class TestTheAnswerSaysWhy:
         assert result["status"] == "not_found"
         assert "does not scroll" in result["detail"]
         assert result["scroll"]["swipes"] == 2
+
+
+class TestRealFrames:
+    """The capture path end to end -- the real `prepare` and
+    `changed_fraction`, on JPEGs like the ones u2 sends -- since every other
+    test here stands both in."""
+
+    @pytest.fixture(autouse=True)
+    def frames_by_name(self):
+        yield                                   # the real ones, not the fakes
+
+    @staticmethod
+    def _jpeg(offset: int) -> bytes:
+        import io
+
+        from PIL import Image, ImageDraw
+
+        image = Image.new("RGB", (270, 600), "white")
+        draw = ImageDraw.Draw(image)
+        for row in range(-2, 20):
+            y = row * 40 + offset
+            draw.rectangle((10, y + 5, 200, y + 30), fill="black")
+        out = io.BytesIO()
+        image.save(out, "JPEG", quality=50)
+        return out.getvalue()
+
+    async def test_a_list_moved_by_a_swipe_reads_as_moved_and_a_still_one_as_still(self):
+        shots = [self._jpeg(0), self._jpeg(0), self._jpeg(0), self._jpeg(13),
+                 self._jpeg(13), self._jpeg(13)]
+        device = MagicMock()
+        device.window_size.return_value = (1080, 2400)
+        it = iter(shots)
+        device.jsonrpc.takeScreenshot.side_effect = (
+            lambda scale, quality: base64.b64encode(next(it)).decode())
+        device.side_effect = lambda **sel: MagicMock(exists=False)
+        found, report = await _sweep(device, max_swipes=2)
+        # down: unchanged (bottom); up: unchanged (top); third: moved
+        assert device.jsonrpc.takeScreenshot.call_args.args == (0.25, 50)
+        assert report["moved"] is True and "no_progress" not in report

@@ -72,12 +72,13 @@ def _scroll_report(sweep: dict, requested: bool | None) -> dict:
     reason `scrollable` is tri-state rather than a boolean.
     """
     if sweep.get("attempted"):
-        # `swipes` and `moved` only when something measured them. Android's
-        # `scroll_into_view` reports whether the target appeared and nothing
-        # else, so defaulting these to 0 and False stated two facts it never
-        # established -- and "swiped 0 times, nothing moved" alongside
-        # `attempted: true` is a contradiction the reader has to resolve.
-        # Absent means unmeasured; present means measured.
+        # `swipes`, `moved`, `ends` and `no_progress` only when something
+        # measured them: Android's `scroll_into_view` compares a frame after
+        # each swipe (#515), and an iOS sweep counts its swipes. Defaulting
+        # them would state facts nobody established -- "swiped 0 times,
+        # nothing moved" alongside `attempted: true` is a contradiction the
+        # reader has to resolve. Absent means unmeasured; present means
+        # measured.
         measured = {
             k: sweep[k] for k in ("swipes", "moved", "ends", "no_progress") if k in sweep
         }
@@ -4230,10 +4231,16 @@ class DeviceControllerUI:
             )
             self._invalidate_ui_cache(resolved)  # scrolling changes the viewport
             if found is None:
-                why = ("the screen did not move when swiped either way: it does not "
-                       "scroll here" if report.get("no_progress") else
-                       f"the list reached its {' and '.join(report['ends'])} without it"
-                       if report.get("ends") else "")
+                ends = report.get("ends") or []
+                if report.get("no_progress"):
+                    why = "the screen did not move when swiped either way: it does not scroll here"
+                elif ends:
+                    why = f"the list reached its {' and '.join(ends)} without it"
+                    if "bottom" not in ends:
+                        why += (f", but not its bottom within {max_swipes} swipes down -- "
+                                "it may be further down")
+                else:
+                    why = ""
                 return {
                     "udid": resolved,
                     "backend": self.backend_that_served(resolved),

@@ -366,6 +366,13 @@ def _nested(frames: list[dict]) -> bool:
                for b in boxes)
 
 
+#: A scroll-sweep frame taking longer than this turns frames off for the
+#: sweep (#515); a frame whose brightest and darkest pixels are closer than
+#: BLANK_RANGE is blank -- a FLAG_SECURE window captures black.
+FRAME_SLOW_S = 1.0
+BLANK_RANGE = 8
+
+
 class _PressMayHaveLanded(Exception):
     """A selector's click or long click failed after it was sent (#251)."""
 
@@ -794,7 +801,9 @@ class U2Backend:
         never the sweep, and a frame that could not be taken or compared reads
         as moved, so the worst case is the old blind sweep. `report`, when
         given, gains `swipes`, `moved`, `ends` (the directions found at their
-        end) and `no_progress`.
+        end) and `no_progress` -- which takes a third unchanged swipe, since it
+        says the screen does not scroll. A blank frame (FLAG_SECURE captures
+        black) and a capture slower than FRAME_SLOW_S read as no frame.
 
         A bounded, metered swipe loop that re-checks the target by selector
         (``obj.exists`` — not ``dump_hierarchy``, so no dump-induced scroll, see
@@ -870,13 +879,31 @@ class U2Backend:
             out = report if report is not None else {}
             out.update(swipes=0, moved=False)
 
+            slow = []
+
             def _frame():
+                # A capture that took over FRAME_SLOW_S turns frames off for
+                # the rest of the sweep: every swipe would pay it (review).
+                if slow:
+                    return None
+                started = time.monotonic()
                 try:
                     png = base64.b64decode(device.jsonrpc.takeScreenshot(0.25, 50))
-                    return frames.prepare(png, "android")
+                    frame = frames.prepare(png, "android")
                 except Exception:  # noqa: BLE001 -- no frame reads as moved
                     logger.debug("scroll_into_view: no frame", exc_info=True)
-                    return None
+                    frame = None
+                if time.monotonic() - started > FRAME_SLOW_S:
+                    slow.append(True)
+                # A blank frame is no frame. A FLAG_SECURE window (banking,
+                # password screens) captures black, which never changes, so a
+                # list there read as not scrolling and the sweep stopped
+                # (review).
+                if frame is not None:
+                    low, high = frame.getextrema()
+                    if high - low < BLANK_RANGE:
+                        return None
+                return frame
 
             def _unchanged(before, after) -> bool:
                 if before is None or after is None or before.size != after.size:
@@ -894,7 +921,9 @@ class U2Backend:
                     out["swipes"] += 1
                     info = _match()
                     if info is not None:
-                        out["moved"] = True
+                        # `moved` stays what was measured: a target that
+                        # appeared because the screen finished loading did
+                        # not prove anything moved (review).
                         return _result(info)
                     current = _frame()
                     still = _unchanged(previous, current)
@@ -906,7 +935,20 @@ class U2Backend:
                         break
                     out["moved"] = True
             if first_swipe_moved == [False, False]:
-                out["no_progress"] = True
+                # Two unchanged frames, but the first may have been a false
+                # read at the top of a list, and the answer is "this does not
+                # scroll". One more swipe down settles it (review).
+                _scroll(y_hi, y_lo)
+                out["swipes"] += 1
+                info = _match()
+                if info is not None:
+                    return _result(info)
+                current = _frame()
+                if _unchanged(previous, current):
+                    out["no_progress"] = True
+                else:
+                    out["moved"] = True
+                    out["ends"].remove("bottom")
             return None
 
         try:
