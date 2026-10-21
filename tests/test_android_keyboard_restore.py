@@ -506,6 +506,21 @@ class TestIdleRestore:
         assert device.current == U2 and _file(state_dir) == {SERIAL: GBOARD}
         assert backend._last_typed[SERIAL] == later
 
+    async def test_a_type_during_the_adb_check_cancels_the_restore(self, state_dir,
+                                                                   monkeypatch):
+        """Judged idle, then typed on while `adb devices` ran: the stamp the
+        lock checks is the one judged by, so the restore stands down."""
+        backend, device = self._typed(state_dir, monkeypatch)
+        await backend.type_text(SERIAL, "hi")
+        later = time.monotonic() + backend.IDLE_RESTORE_S
+
+        async def online_while_typing():
+            backend._last_typed[SERIAL] = later       # a type lands now
+            return {SERIAL}
+        monkeypatch.setattr(backend, "_online_serials", online_while_typing)
+        assert await backend.restore_idle_keyboards(now=later) == []
+        assert device.current == U2 and backend._last_typed[SERIAL] == later
+
     async def test_a_busy_device_backs_off_too(self, state_dir, monkeypatch):
         """Not only the restore's own failure: a device whose lock stayed
         held was retried every sweep (CodeRabbit)."""

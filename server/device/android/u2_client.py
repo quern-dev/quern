@@ -901,15 +901,20 @@ class U2Backend:
         if not pending:
             return []
         now = time.monotonic() if now is None else now
+        # Each stamp read once, when the device is judged idle: re-read after
+        # the `adb devices` await below, a type landing during it became the
+        # stamp the locked check compared against, and passed (CodeRabbit).
+        seen = {u: self._last_typed.get(u) for u in pending}
         idle = [u for u in pending
-                if now - self._last_typed.get(u, float("-inf")) >= self.IDLE_RESTORE_S]
+                if now - (seen[u] if seen[u] is not None else float("-inf"))
+                >= self.IDLE_RESTORE_S]
         if not idle:
             return []
         online = await self._online_serials()
         if online is not None:
             idle = [u for u in idle if u in online]
         return [a for a in await asyncio.gather(*(
-                    self.restore_keyboard(u, idle=(self._last_typed.get(u), now))
+                    self.restore_keyboard(u, idle=(seen[u], now))
                     for u in idle)) if a is not None]
 
     async def _online_serials(self) -> set[str] | None:
