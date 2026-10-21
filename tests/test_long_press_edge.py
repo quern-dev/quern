@@ -179,7 +179,7 @@ class TestEachBackendsLongPress:
 
     async def test_u2_selector_long_clicks(self):
         obj = MagicMock()
-        obj.exists = True
+        obj.count = 1  # the fast path counts before it presses (#512)
         obj.info = {"bounds": {"left": 0, "right": 100, "top": 0, "bottom": 50}}
         device = MagicMock(return_value=obj)
         backend = self._u2(device)
@@ -432,7 +432,7 @@ class TestU2NeverPressesTwice:
     @staticmethod
     def _selector(**obj_kwargs):
         obj = MagicMock(**obj_kwargs)
-        obj.exists = True
+        obj.count = 1
         obj.info = {"bounds": {"left": 0, "right": 100, "top": 0, "bottom": 50}}
         return TestEachBackendsLongPress._u2(MagicMock(return_value=obj)), obj
 

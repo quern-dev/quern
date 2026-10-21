@@ -492,24 +492,39 @@ class U2Backend:
         Returns a normalized {label, identifier, type, x, y} dict for the tapped
         element, or None if no match was found (caller should fall back to the
         dump-based path).
+
+        Or `{"ambiguous": n}`, tapping nothing, when the selector matches more
+        than one element (#512). Picking one is the dump path's job: it folds a
+        control's own nested parts into the control and answers `ambiguous`
+        for the rest, and this one press cannot tell those apart. A label
+        counts its text and content-desc matches together, since either is the
+        label; an element carrying both counts twice, which costs it the
+        slower path and nothing else.
         """
 
         def _do():
             device = self._connect(udid)
-            selectors: list[dict] = []
+            # Each group is one way of naming the element, tried in order; the
+            # selectors within a group are counted together.
+            groups: list[list[dict]] = []
             if identifier:
                 # quern identifiers are resource-ids with the package stripped
                 # ("button_log"); match the suffix of the full resource-id.
-                selectors.append({"resourceIdMatches": rf".*/{re.escape(identifier)}$"})
+                groups.append([{"resourceIdMatches": rf".*/{re.escape(identifier)}$"}])
             if label:
                 # A label may be visible text OR content-desc — try both.
-                selectors.append({"text": label})
-                selectors.append({"description": label})
+                groups.append([{"text": label}, {"description": label}])
 
-            for sel in selectors:
-                obj = device(**sel)
-                if not obj.exists:
+            for group in groups:
+                # `count`, not `exists`: one RPC either way, and it says
+                # whether the press would be a guess.
+                counts = [(obj, obj.count) for obj in (device(**sel) for sel in group)]
+                total = sum(n for _, n in counts)
+                if total == 0:
                     continue
+                if total > 1:
+                    return {"ambiguous": total}
+                obj = next(o for o, n in counts if n)
                 info = obj.info or {}
                 try:
                     if hold is None:

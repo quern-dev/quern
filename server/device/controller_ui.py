@@ -49,6 +49,12 @@ def _hold(duration: float | None) -> dict:
             f"{MAX_HOLD_SECONDS:g}, not {duration!r}", tool="quern")
     return {"hold": float(duration)}
 
+
+def _selector_ambiguous(tapped: dict | None) -> bool:
+    """`tap_by_selector` matched several elements and pressed none (#512)."""
+    return isinstance(tapped, dict) and "ambiguous" in tapped
+
+
 def _scroll_report(sweep: dict, requested: bool | None) -> dict:
     """What happened about scrolling, said positively either way.
 
@@ -3075,6 +3081,13 @@ class DeviceControllerUI:
             tapped = await backend.tap_by_selector(
                 resolved_fast, identifier=identifier, label=label, **hold,
             )
+            # More than one match, and nothing pressed (#512). The dump path
+            # below decides: it folds a control's own parts into the control,
+            # and answers `ambiguous` with the candidates otherwise -- the same
+            # answer a call with `element_type` gets. Not a miss, so no scroll.
+            ambiguous = _selector_ambiguous(tapped)
+            if ambiguous:
+                tapped = None
             # Not in the current view — auto-scroll to it and retry. Uses the
             # selector-based swipe loop (no dump_hierarchy), so it inherits the
             # no-dump-induced-scroll property of the fast path.
@@ -3087,7 +3100,7 @@ class DeviceControllerUI:
             # The iOS sweep is the one that prompted #274. Android's
             # `scroll_into_view` swipes for real too and deserves the same
             # treatment; it needs a cheaper way to identify the screen first.
-            if tapped is None and scroll_to_find is not False:
+            if tapped is None and not ambiguous and scroll_to_find is not False:
                 # Recorded even though the knowledge base is not consulted on
                 # this path: the swipe is just as real, and a response saying
                 # `attempted: False` after the device was swiped is the exact
@@ -3110,6 +3123,8 @@ class DeviceControllerUI:
                     tapped = await backend.tap_by_selector(
                         resolved_fast, identifier=identifier, label=label, **hold,
                     )
+                    if _selector_ambiguous(tapped):
+                        tapped = None
             if tapped is not None:
                 self._invalidate_ui_cache(resolved_fast)
                 result = {"status": "ok", "tapped": tapped}
