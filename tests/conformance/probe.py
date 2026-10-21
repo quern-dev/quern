@@ -157,8 +157,10 @@ class ProbeContract:
     screens: dict[str, dict] = field(default_factory=dict)
     #: Screen name -> an identifier only that screen's content carries, which
     #: `goto` waits for. Not the landmarks: a bar tab's landmark identifier is
-    #: its tab item, on screen from every tab. Empty where the wait is not
-    #: needed (Android, whose pages are all in the tree at once anyway).
+    #: its tab item, on screen from every tab. Both platforms need it: Android
+    #: was once thought to hold every page in the tree at once, and so had no
+    #: entries, but only the current page is there -- its `goto` tapped a tab,
+    #: slept a second, and never confirmed the page had arrived.
     screen_ready: dict[str, str] = field(default_factory=dict)
 
     def id_for(self, logical: str) -> str | None:
@@ -361,6 +363,15 @@ ANDROID = ProbeContract(
     row_identifier_template=None,
     row_label_template="Row {index}",
     ready_identifier="probe_tabs",
+    # The same content identifiers iOS waits for, where Android has them --
+    # only the selected page is in the tree, so its content appearing is the
+    # page having arrived.
+    screen_ready={
+        "text": "field_default", "controls": "control_switch",
+        "scroll": "scroll_to_top", "links": "link_count", "logs": "log_start",
+        "location": "location_auth", "web": "web_heading_native",
+        "diag": "diag_crash_uncaught", "taps": "taps_heading",
+    },
     screens={
         # Each fragment's own heading, plus the selected tab. The tab strip is
         # StaticText labels whose `selected` state quern normalises to "1".
