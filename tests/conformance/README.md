@@ -162,6 +162,7 @@ parametrisation; probe-driven tests run once per platform present.
 | 20 | Android-specific backends | `test_android.py` | todo |
 | 21 | Session attribution (`X-Quern-Session`, #254) | `test_session.py` | **done** — 7 tests; the client sends `conformance-<run id>` on every request, the tests read it back from `/trace`, and check `X-Quern-Session-Warning` (`missing`, `malformed`, none when tagged or public) |
 | 22 | Lazy lists through WDA (#475) | `test_lazy_list.py` | **done** — 4 tests, each on the default backend and through WDA, on the iOS probe's Lazy tab; fail through WDA against the server before #478 |
+| 23 | Which element a tap reached (#511) | `test_taps.py` | **done** — 6 tests on each probe's Taps tab, reading per-button counters: by label and by identifier, two buttons sharing a label, a tap after and during a remount, and a button partly covered by an overlay. On Android the shared label fails until #512 and the covered button until #521; the moving target is a fixture only, until #514 |
 
 ### The fixture apps already exist
 

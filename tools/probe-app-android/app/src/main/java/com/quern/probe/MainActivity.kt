@@ -62,6 +62,9 @@ class MainActivity : AppCompatActivity() {
         "Location" to ::LocationFragment,
         // Pinch, rotate, two-finger pan and multi-tap, each reported (#252).
         "Gestures" to ::GesturesFragment,
+        // Which element a tap reached: target/decoy counters and moving
+        // cells (#511). Last, so it moved no existing tab.
+        "Taps" to ::TapsFragment,
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {

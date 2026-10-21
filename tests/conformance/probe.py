@@ -241,7 +241,7 @@ IOS = ProbeContract(
         "location": "location_auth", "web": "web_heading_native",
         "diag": "diag_crash_uncaught", "state": "state_counter",
         "widgets": "widget_nav_done", "lists": "lists_table",
-        "lazy": "lazy_list",
+        "lazy": "lazy_list", "taps": "taps_heading",
     },
     row_identifier_template="row_{index}",
     row_label_template="Row {index}",
@@ -301,6 +301,12 @@ IOS = ProbeContract(
         "lazy": {"scrollable": True, "landmarks": [
             {"element": "Heading", "label": "Lazy"},
             {"element": "Group", "identifier": "lazy_list"},
+        ]},
+        # Every button counts its own taps (#511). The heading is a label of
+        # its own, beside the navigation title, so both platforms share it.
+        "taps": {"landmarks": [
+            {"element": "Heading", "label": "Taps"},
+            {"element": "StaticText", "identifier": "taps_heading"},
         ]},
     },
 )
@@ -390,6 +396,10 @@ ANDROID = ProbeContract(
             {"element": "StaticText", "identifier": "location_heading"},
             {"element": "StaticText", "label": "Location", "selected": True},
         ]},
+        "taps": {"landmarks": [
+            {"element": "StaticText", "identifier": "taps_heading"},
+            {"element": "StaticText", "label": "Taps", "selected": True},
+        ]},
     },
 )
 
@@ -405,7 +415,7 @@ CONTRACTS = {"ios": IOS, "android": ANDROID}
 #: tabs. Measured against the live screen, which reports exactly
 #: `Text, Controls, Scroll, Links, More`.
 IOS_BAR_TABS = ("text", "controls", "scroll", "links")
-IOS_MORE_TABS = ("logs", "location", "web", "diag", "state", "widgets", "lists", "lazy")
+IOS_MORE_TABS = ("logs", "location", "web", "diag", "state", "widgets", "lists", "lazy", "taps")
 
 
 class ProbeUnavailable(RuntimeError):
@@ -866,8 +876,8 @@ class ProbeDriver:
             if resp.is_success:
                 status = (resp.json() or {}).get("status")
                 if status == "ambiguous":
-                    # Ambiguous is a 200 and taps nothing. The Controls and
-                    # Logs fragments' headings repeat their tab's label, so it
+                    # Ambiguous is a 200 and taps nothing. The Controls, Logs
+                    # and Taps fragments' headings repeat their tab's label, so it
                     # happens when already on that tab -- which is fine only
                     # if that tab really is the selected one.
                     if self._tab_selected(label):

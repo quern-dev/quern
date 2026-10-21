@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Taps tab's ids (#511): declared, so uiautomator reports them. -->
+<resources>
+    <item name="taps_heading" type="id" />
+    <item name="tap_target" type="id" />
+    <item name="tap_decoy" type="id" />
+    <item name="tap_twin_a" type="id" />
+    <item name="tap_twin_b" type="id" />
+    <item name="tap_slide_behind" type="id" />
+    <item name="tap_slider" type="id" />
+    <item name="tap_slide_arm" type="id" />
+    <item name="tap_remount" type="id" />
+    <item name="tap_remount_arm" type="id" />
+    <item name="tap_overlay_target" type="id" />
+    <item name="tap_overlay_arm" type="id" />
+    <item name="tap_overlay_clear" type="id" />
+    <item name="tap_overlay" type="id" />
+    <item name="tap_reset" type="id" />
+    <item name="tap_target_count" type="id" />
+    <item name="tap_decoy_count" type="id" />
+    <item name="tap_twin_a_count" type="id" />
+    <item name="tap_twin_b_count" type="id" />
+    <item name="tap_slide_behind_count" type="id" />
+    <item name="tap_slider_count" type="id" />
+    <item name="tap_remount_count" type="id" />
+    <item name="tap_overlay_target_count" type="id" />
+    <item name="tap_overlay_count" type="id" />
+</resources>
