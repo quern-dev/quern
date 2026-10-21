@@ -43,6 +43,9 @@ enum ProbeTabs {
             (GesturesViewController(), "Gestures", "hand.draw"),
             // A long list that is lazy and deep, as iOS 26 draws one (#475).
             (LazyListViewController(), "Lazy", "square.stack"),
+            // Every button counts its own taps, so a test reads which one a
+            // tap reached (#511).
+            (TapsViewController(), "Taps", "hand.tap"),
         ]
 
         let tabBarController = UITabBarController()

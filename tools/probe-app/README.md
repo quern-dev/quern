@@ -74,13 +74,14 @@ does, and the mismatch surfaces at install as a signature error.
 | Gestures | *(in More)* | What a pinch, rotation, two-finger pan, scroll, double tap, two-finger tap and long press actually did, as the app's recognisers saw it: `gesture_pinch` (`pinch 5.00 ended`), `gesture_rotate` (degrees), `gesture_pan` and `gesture_scroll` (translation), and counters `gesture_tap`, `gesture_double_tap`, `gesture_two_finger_tap`, `gesture_long_press`, all on `gesture_pad`; `gesture_reset` clears them. A single tap waits for the double tap and the long press to fail, and a two-finger tap for the moving gestures, so each label means one thing (#252) |
 | Lists | *(in More)* | A table with a section header, footer and three accessory types (`lists_row_0`…`2`), and a collection view (`lists_tile_0`…`5`), for the same comparison |
 | Lazy | *(in More)* | A long list the way iOS 26 draws one: a `UICollectionView` list (`lazy_list`) of 200 rows (`lazy_row_0` … `lazy_row_199`) that is **lazy** — only the rows on screen are in the tree, where the Scroll tab's table reports all 200 — and **deep**: through WDA the rows appear from depth 14 here (18 on the tab bar). `get_ui_tree` reads at 25 by default and sees every row on screen; an action reads at 12 first and, on a miss, looks again at 25 -- `tap_element`, `get_element` and `wait_for_element` since #470, the scroll sweep since #475 -- so a row here costs a second query, not a failure. Settings, a SwiftUI `List` and any `UICollectionView` list measured the same way; the Scroll tab's rows are all present at 12 and cannot show it. Even the More list's own "Lazy" row is found only on the second look |
+| Taps | *(in More)* | Every button counts its own taps into a label beneath it, `<id>_count` (`target 1`), so a test reads which element a tap reached rather than inferring it (#511): `tap_target` beside `tap_decoy`; twins `tap_twin_a` and `tap_twin_b`, both labelled "Twin"; `tap_slider` over `tap_slide_behind`, which after `tap_slide_arm` jumps between two spots every 120 ms until reset, so a tap aimed at a stale position counts on the behind button or reaches nothing; `tap_remount`, which `tap_remount_arm` removes and adds back 1.5 s later, lower down; and `tap_overlay`, which covers `tap_overlay_target` 500 ms after `tap_overlay_arm` until `tap_overlay_clear`. `tap_reset` clears every counter and puts every cell back. Same identifiers, labels and layout on both probes, so `tests/conformance/test_taps.py` reads both |
 
 The tab bar itself doubles as a fixture for hidden tab-bar-children probing.
 
 **Tab order is load bearing.** An iPhone tab bar shows five items and moves the
 rest into a More list, which keeps its own navigation stack and is markedly
 harder to drive. The five the self-test exercises on every run are on the bar;
-Location, Web, Diag, State, Widgets, Lists, Gestures and Lazy are reached through More by
+Location, Web, Diag, State, Widgets, Lists, Gestures, Lazy and Taps are reached through More by
 `goto()`, which handles the list, the nav stack, and the fact that "More" names
 two different elements — the tab (a `RadioButton`) and the back button (a
 `Button`).
