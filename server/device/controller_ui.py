@@ -79,7 +79,7 @@ def _scroll_report(sweep: dict, requested: bool | None) -> dict:
         # `attempted: true` is a contradiction the reader has to resolve.
         # Absent means unmeasured; present means measured.
         measured = {
-            k: sweep[k] for k in ("swipes", "moved") if k in sweep
+            k: sweep[k] for k in ("swipes", "moved", "ends", "no_progress") if k in sweep
         }
         return {
             "attempted": True,
@@ -3136,7 +3136,7 @@ class DeviceControllerUI:
                 # other platform.
                 sweep["attempted"] = True
                 found = await backend.scroll_into_view(
-                    resolved_fast, identifier=identifier, label=label,
+                    resolved_fast, identifier=identifier, label=label, report=sweep,
                 )
                 if found is not None:
                     # Let the scroll settle before clicking — a tap landing
@@ -4223,16 +4223,25 @@ class DeviceControllerUI:
         target = f"identifier='{identifier}'" if identifier else f"label='{label}'"
 
         if self._is_android(resolved):
+            report: dict = {}
             found = await self._ui_backend(resolved).scroll_into_view(
                 resolved, identifier=identifier, label=label, max_swipes=max_swipes,
+                report=report,
             )
             self._invalidate_ui_cache(resolved)  # scrolling changes the viewport
             if found is None:
+                why = ("the screen did not move when swiped either way: it does not "
+                       "scroll here" if report.get("no_progress") else
+                       f"the list reached its {' and '.join(report['ends'])} without it"
+                       if report.get("ends") else "")
                 return {
                     "udid": resolved,
                     "backend": self.backend_that_served(resolved),
                     "status": "not_found",
-                    "detail": f"Element not found after scrolling ({target})",
+                    "detail": (f"Element not found after scrolling ({target})"
+                               + (f"; {why}" if why else "")),
+                    "scroll": {k: report[k] for k in
+                               ("swipes", "moved", "ends", "no_progress") if k in report},
                 }
             return {
                 "udid": resolved,

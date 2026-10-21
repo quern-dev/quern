@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import re
 import threading
@@ -779,9 +780,21 @@ class U2Backend:
         identifier: str | None = None,
         label: str | None = None,
         max_swipes: int = 10,
+        report: dict | None = None,
     ) -> dict | None:
         """Scroll a scrollable container until the target element is on-screen —
         WITHOUT dumping the full hierarchy.
+
+        Each swipe is followed by a small frame of the screen (#515), compared
+        with the one before it as #502's frames are. A swipe that changed
+        nothing means that direction is at its end, so the sweep turns round;
+        when the first swipe each way changed nothing, the screen does not
+        scroll and the sweep stops. Before this it swiped blind, 10 down and 20
+        up, whatever happened. An unchanged frame ends one direction only,
+        never the sweep, and a frame that could not be taken or compared reads
+        as moved, so the worst case is the old blind sweep. `report`, when
+        given, gains `swipes`, `moved`, `ends` (the directions found at their
+        end) and `no_progress`.
 
         A bounded, metered swipe loop that re-checks the target by selector
         (``obj.exists`` — not ``dump_hierarchy``, so no dump-induced scroll, see
@@ -851,14 +864,49 @@ class U2Backend:
                 # a drag highlights rows.
                 device.swipe(cx, y1, cx, y2, steps=25)
 
+            from server.device import frames
+            from server.device.settle import changed_fraction
+
+            out = report if report is not None else {}
+            out.update(swipes=0, moved=False)
+
+            def _frame():
+                try:
+                    png = base64.b64decode(device.jsonrpc.takeScreenshot(0.25, 50))
+                    return frames.prepare(png, "android")
+                except Exception:  # noqa: BLE001 -- no frame reads as moved
+                    logger.debug("scroll_into_view: no frame", exc_info=True)
+                    return None
+
+            def _unchanged(before, after) -> bool:
+                if before is None or after is None or before.size != after.size:
+                    return False
+                return changed_fraction(before, after) < frames.UNCHANGED_BELOW
+
             # Sweep down (reveal rows below) then up (rows above / top-anchored
             # controls), re-checking after each swipe.
-            sweeps = [(y_hi, y_lo)] * max_swipes + [(y_lo, y_hi)] * (max_swipes * 2)
-            for y1, y2 in sweeps:
-                _scroll(y1, y2)
-                info = _match()
-                if info is not None:
-                    return _result(info)
+            previous = _frame()
+            first_swipe_moved = []
+            for direction, (y1, y2), budget in (("bottom", (y_hi, y_lo), max_swipes),
+                                                ("top", (y_lo, y_hi), max_swipes * 2)):
+                for n in range(budget):
+                    _scroll(y1, y2)
+                    out["swipes"] += 1
+                    info = _match()
+                    if info is not None:
+                        out["moved"] = True
+                        return _result(info)
+                    current = _frame()
+                    still = _unchanged(previous, current)
+                    previous = current if current is not None else previous
+                    if n == 0:
+                        first_swipe_moved.append(not still)
+                    if still:
+                        out.setdefault("ends", []).append(direction)
+                        break
+                    out["moved"] = True
+            if first_swipe_moved == [False, False]:
+                out["no_progress"] = True
             return None
 
         try:
