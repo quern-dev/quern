@@ -332,6 +332,99 @@ class QuernClient:
         self._client.close()
 
 
+class ReservationRefused(RuntimeError):
+    """Another session holds a device this run needs (#468)."""
+
+
+class HeldSession:
+    """The run's own session, held for its whole length, reserving each device
+    the fixtures pick (#468, #254).
+
+    Without it, another agent sharing the server can drive a device mid-run --
+    measured: a session typed into Spotlight on the simulator this suite had
+    QuernProbe up on, and every iOS test after that failed as "no 'More' tab
+    on screen". Reserved, that session's writes get 423 naming this one, and
+    this run is what it measures.
+
+    Black-box like the rest of the suite: plain HTTP and the session's live
+    WebSocket, which is what keeps it held -- a session with no socket is not
+    live, and a dropped one expires after the server's grace period. Closed
+    cleanly at the end (code 1000), which the server releases at once.
+    """
+
+    def __init__(self, client: QuernClient) -> None:
+        import threading
+
+        self.client = client
+        self.name = client.session
+        self.held: list[str] = []
+        self.lost = False
+        self._ws = None
+        self._closing = False
+        self._threading = threading
+
+    def open(self) -> HeldSession:
+        resp = self.client.post("/api/v1/sessions", json={"name": self.name})
+        if resp.status_code != 200:
+            raise RuntimeError(f"could not open session {self.name}: "
+                               f"{resp.status_code} {_body_text(resp, 300)}")
+        opened = resp.json()
+        self.name, token = opened["id"], opened["resume_token"]
+        from websockets.sync.client import connect
+
+        url = "ws" + self.client.target.url[len("http"):] + f"/api/v1/sessions/{self.name}/live"
+        headers = {"X-Quern-Session": self.name, "X-Quern-Resume-Token": token}
+        if self.client.target.api_key:
+            headers["Authorization"] = f"Bearer {self.client.target.api_key}"
+        # Entered as a context manager by hand: websockets 17.1 deprecates a
+        # bare connect(), and its `legacy=True` way out does not exist before
+        # 17.1. `close()` below ends it either way.
+        self._ws = connect(url, additional_headers=headers, open_timeout=10).__enter__()
+        first = json.loads(self._ws.recv(timeout=10))
+        if first.get("event") != "attached":
+            self._ws.close()
+            raise RuntimeError(f"session socket said {first!r}, not attached")
+        self._thread = self._threading.Thread(target=self._hold, daemon=True)
+        self._thread.start()
+        return self
+
+    def _hold(self) -> None:
+        """Read until closed: reading answers the server's pings."""
+        try:
+            for _ in self._ws:
+                pass
+        except Exception:  # noqa: BLE001 -- any end is the same answer
+            pass
+        if not self._closing:
+            # No reconnect: a run that lost its hold mid-way has measured
+            # something it cannot vouch for, and should say so, not resume.
+            self.lost = True
+
+    def reserve(self, udid: str) -> None:
+        """Hold `udid` for this run. Raises ReservationRefused when another
+        session has it; any other refusal is an error to report as itself."""
+        if udid in self.held:
+            return
+        resp = self.client.post(
+            f"/api/v1/sessions/{self.name}/reservations",
+            json={"udids": [udid], "auto_boot": False},
+            headers={"X-Quern-Session": self.name},
+        )
+        if resp.status_code == 409:
+            raise ReservationRefused(_body_text(resp, 400))
+        if resp.status_code != 200:
+            raise RuntimeError(f"reserving {udid}: {resp.status_code} {_body_text(resp, 300)}")
+        self.held = list(resp.json().get("holding", [*self.held, udid]))
+
+    def close(self) -> None:
+        self._closing = True
+        if self._ws is not None:
+            try:
+                self._ws.close(code=1000, reason="conformance run finished")
+            except Exception:  # noqa: BLE001 -- gone already: the grace period applies
+                pass
+
+
 def _body_text(resp: httpx.Response, limit: int = 2000) -> str:
     try:
         text = resp.text

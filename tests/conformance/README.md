@@ -123,6 +123,15 @@ suite that skips everything has not passed; it has not run.
   before any handler runs, and the handful of endpoints that take no body and do
   something irreversible are listed in `UNSAFE_TO_PROBE` and covered
   schema-side instead.
+- The run reserves every device it uses (#468). It opens a session named for
+  its own `X-Quern-Session`, holds that session's live socket for the whole
+  run, and each device fixture reserves the device it picks. Another agent on
+  the same server then gets **423** naming the run if it tries to drive one,
+  and cannot change what the run is measuring. A device some other session
+  already holds fails setup with what to do, rather than being shared. Against
+  a server without sessions, the run says it is unreserved and carries on. The
+  socket closes cleanly at the end, which releases everything at once; a run
+  that is killed releases after the server's grace period (3 minutes by default).
 
 ## Categories
 
