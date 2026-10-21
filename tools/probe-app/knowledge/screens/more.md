@@ -22,6 +22,8 @@ leads_to:
     action: 'tap_element label="Lists"'
   - screen: "[[screens/lazy]]"
     action: 'tap_element label="Lazy"'
+  - screen: "[[screens/taps]]"
+    action: 'tap_element label="Taps"'
 ---
 
 # More
