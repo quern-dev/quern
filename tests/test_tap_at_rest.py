@@ -272,6 +272,19 @@ class TestTapElement:
         result = await ctrl.tap_element(label="Slider")
         assert "fast_path" not in result
 
+    async def test_skip_stability_check_covers_the_tap_after_a_sweep_too(self):
+        """It only covered the first call (CodeRabbit)."""
+        from unittest.mock import patch
+
+        ctrl, backend = self._ctrl(None)
+        ctrl._last_ui_change[UDID] = time.monotonic()
+        backend.tap_by_selector = AsyncMock(side_effect=[None, self._tapped()])
+        backend.scroll_into_view = AsyncMock(return_value={"label": "Slider"})
+        with patch("server.device.controller_ui.asyncio.sleep", AsyncMock()):
+            await ctrl.tap_element(label="Slider", skip_stability_check=True)
+        assert [c.kwargs["confirm_rest"] for c in backend.tap_by_selector.await_args_list] \
+            == [False, False]
+
     async def test_the_tap_after_a_sweep_is_checked(self):
         from unittest.mock import patch
 

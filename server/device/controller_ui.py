@@ -3149,7 +3149,9 @@ class DeviceControllerUI:
                     await asyncio.sleep(0.4)
                     tapped = await backend.tap_by_selector(
                         resolved_fast, identifier=identifier, label=label, **hold,
-                        confirm_rest=True,  # the sweep just moved the screen
+                        # The sweep just moved the screen -- unless the caller
+                        # opted out, as for the first call (CodeRabbit).
+                        confirm_rest=not skip_stability_check,
                     )
                     if _selector_deferred(tapped):
                         if tapped.get("defer") == "vanished":
