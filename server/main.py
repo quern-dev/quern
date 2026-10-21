@@ -221,6 +221,17 @@ async def _stop_all(sources: Iterable[_Stoppable]) -> None:
                          getattr(source, "adapter_id", type(source).__name__), result)
 
 
+def _log_keyboards(actions: list[dict], when: str) -> None:
+    for a in actions:
+        if a.get("action") == "keyboard_left":
+            logger.info("Left %s's keyboard as it is %s: %s", a["udid"], when, a.get("detail"))
+        elif a.get("ok"):
+            logger.info("Put back %s's keyboard (%s) %s", a["udid"], a["ime"], when)
+        else:
+            logger.warning("Could not put back %s's keyboard (%s) %s: %s; will try "
+                           "again", a["udid"], a.get("ime"), when, a.get("error"))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage server startup and shutdown."""
@@ -529,6 +540,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "show a UDID instead of a name", exc_info=True,
             )
 
+        # An Android keyboard an earlier process replaced and never put back,
+        # because it crashed or was killed (#513). Last: it waits on devices.
+        _log_keyboards(await device_controller.u2.restore_keyboards(), "at startup")
+
     app.state._warmup_task = asyncio.create_task(_warmup_devices())
 
     # Re-probe the simulator UI backend periodically. Selection used to be
@@ -633,6 +648,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.uploads.reset()
     uploads_task = asyncio.create_task(_sweep_uploads(app), name="upload-sweep")
 
+    # An Android keyboard typing replaced goes back after IDLE_RESTORE_S with
+    # no typing on that device (#513). Without it, a device nobody reserved
+    # kept u2's keyboard, which shows no keys, until the server stopped.
+    async def _restore_idle_keyboards():
+        while True:
+            await asyncio.sleep(30)
+            try:
+                _log_keyboards(await device_controller.u2.restore_idle_keyboards(),
+                               "after it sat idle")
+            except Exception:  # noqa: BLE001 -- the next pass tries again
+                logger.warning("Could not put back idle Android keyboards", exc_info=True)
+
+    keyboards_task = asyncio.create_task(_restore_idle_keyboards(), name="keyboard-sweep")
+
     # The LAN viewer (#449), opt-in. Started after the recordings it serves.
     from server.config import viewer_settings as _viewer_settings
     from server.viewer.listener import start_viewer
@@ -653,6 +682,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.remote = None
 
     yield
+
+    # Put back the Android keyboards typing replaced (#513). First, and within
+    # 4s: `quern stop` kills the server 5s after asking it to stop. One cut
+    # short keeps its records for the next start.
+    keyboards_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await keyboards_task
+    controller_at_exit = getattr(app.state, "device_controller", None)
+    if controller_at_exit is not None:
+        try:
+            _log_keyboards(await asyncio.wait_for(
+                controller_at_exit.u2.restore_keyboards(), 4.0), "at shutdown")
+        except Exception:  # noqa: BLE001 -- shutdown must carry on regardless
+            logger.warning("Could not put back the Android keyboards", exc_info=True)
 
     # Sessions end with the server; a reconnect will be told so (4404).
     from server import device_access as _device_access

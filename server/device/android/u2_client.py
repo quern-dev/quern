@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import threading
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -327,8 +328,26 @@ class U2Backend:
     #: A swipe from the screen edge is the system's under gesture navigation.
     edge_swipes = True
 
+    #: Seconds a keyboard restore may wait on the device (#513).
+    RESTORE_TIMEOUT_S = 15.0
+
+    #: Seconds without typing on a device before its keyboard is put back
+    #: (#513). A device used without a reservation -- the single-user case --
+    #: otherwise kept u2's keyboard until the server stopped, which can be
+    #: days. Typing again switches back, at ~300ms.
+    IDLE_RESTORE_S = 180.0
+
     def __init__(self) -> None:
         self._devices: dict[str, object] = {}  # serial → u2.Device
+        from server.device.android.ime import ImeKeeper
+
+        #: The keyboard each device had before typing replaced it (#513).
+        self.ime = ImeKeeper()
+        #: When quern last typed or cleared on each device (monotonic).
+        self._last_typed: dict[str, float] = {}
+        #: Guards `_last_typed`: typing stamps it and the idle sweep clears
+        #: or backs it off, and neither may overwrite the other's newer value.
+        self._typed_lock = threading.Lock()
         from server.device.android.adb import _find_sdk_tool
 
         self._touch = ScrcpyInput(_find_sdk_tool("adb"))
@@ -770,12 +789,153 @@ class U2Backend:
 
         def _do():
             device = self._connect(udid)
-            device.send_keys(text)
+            # Held through send_keys, which selects u2's keyboard: a restore
+            # landing between the two would lose the record (#513).
+            with self.ime.lock_for(udid):
+                self.ime.remember(udid, device)
+                try:
+                    device.send_keys(text)
+                finally:
+                    with self._typed_lock:
+                        self._last_typed[udid] = time.monotonic()
 
         try:
             await asyncio.to_thread(_do)
         except Exception as e:
             raise DeviceError(f"Type text failed: {e}", tool="u2") from e
+
+    async def restore_keyboard(
+        self, udid: str, *, idle: tuple[float | None, float] | None = None,
+    ) -> dict | None:
+        """Put back the keyboard typing replaced on this device (#513).
+
+        None when nothing was replaced. Never raises; a failure is the
+        returned action's `ok: False`, and the record is kept to try again.
+        """
+        if udid not in await asyncio.to_thread(self.ime.pending):
+            return None
+
+        def _do():
+            lock = self.ime.lock_for(udid)
+            # Typing in progress finishes first; a device whose lock is held
+            # past half the bound is reported, not waited on -- and the
+            # thread ends, rather than outliving the await blocked for ever.
+            if not lock.acquire(timeout=self.RESTORE_TIMEOUT_S / 2):
+                return {"udid": udid, "action": "keyboard_restored", "ok": False,
+                        "error": "the device stayed busy"}
+            try:
+                if idle is not None:
+                    seen, now = idle
+                    # Typed on since the sweep judged it idle: not idle any
+                    # more (CodeRabbit). Checked, and the stamp updated, under
+                    # the lock typing takes.
+                    if self._last_typed.get(udid) != seen:
+                        return None
+                return self.ime.restore(udid, self._connect(udid))
+            finally:
+                lock.release()
+
+        try:
+            # Bounded: an unplugged phone can hold a u2 connect for a long
+            # time, and this runs while a release or a shutdown waits on it.
+            # The worker thread can outlive the bound, but it holds nothing the
+            # event loop waits on (#513 review).
+            result = await asyncio.wait_for(asyncio.to_thread(_do), self.RESTORE_TIMEOUT_S)
+        except Exception as e:  # noqa: BLE001 -- the connection itself failed
+            result = {"udid": udid, "action": "keyboard_restored", "ok": False,
+                      "error": str(e) or type(e).__name__}
+        self._settle_idle(udid, idle, result)
+        return result
+
+    def _settle_idle(self, udid: str, idle: tuple[float | None, float] | None,
+                     result: dict | None) -> None:
+        """After an idle restore, whatever its outcome: a success clears the
+        device's stamp, and any failure -- the restore's own, a busy device, a
+        timeout, a failed connect -- backs it off for another IDLE_RESTORE_S,
+        since some failures repeat every time and a retry every sweep was ~120
+        warnings an hour. Only if the stamp is still the one the sweep judged
+        by: a type in between wrote a newer one, which stands (CodeRabbit)."""
+        if idle is None or result is None:
+            return
+        seen, now = idle
+        with self._typed_lock:
+            if self._last_typed.get(udid) != seen:
+                return
+            if result.get("ok"):
+                self._last_typed.pop(udid, None)
+            else:
+                self._last_typed[udid] = now
+
+    async def restore_keyboards(self) -> list[dict]:
+        """Every keyboard still recorded, put back: at shutdown, and at startup
+        for a record an earlier process left. Never raises.
+
+        Devices adb does not list as connected are skipped, their records kept
+        for the next start: waiting on an unplugged phone used the shutdown's
+        budget before a connected one was reached. The rest run at once, for
+        the same reason.
+        """
+        pending = list(await asyncio.to_thread(self.ime.pending))
+        if not pending:
+            return []
+        online = await self._online_serials()
+        actions: list[dict] = []
+        reachable = []
+        for udid in pending:
+            if online is not None and udid not in online:
+                actions.append({"udid": udid, "action": "keyboard_restored", "ok": False,
+                                "error": "not connected; kept for the next start"})
+            else:
+                reachable.append(udid)
+        for action in await asyncio.gather(*(self.restore_keyboard(u) for u in reachable)):
+            if action is not None:
+                actions.append(action)
+        return actions
+
+    async def restore_idle_keyboards(self, now: float | None = None) -> list[dict]:
+        """Put back the keyboard on every device quern has not typed on for
+        `IDLE_RESTORE_S` (#513). A record with no typing in this process --
+        a startup repair that could not reach the device -- counts as idle.
+        Devices adb does not list are left for a later pass. Never raises."""
+        pending = list(await asyncio.to_thread(self.ime.pending))
+        if not pending:
+            return []
+        now = time.monotonic() if now is None else now
+        # Each stamp read once, when the device is judged idle: re-read after
+        # the `adb devices` await below, a type landing during it became the
+        # stamp the locked check compared against, and passed (CodeRabbit).
+        seen = {u: self._last_typed.get(u) for u in pending}
+        idle = [u for u in pending
+                if now - (seen[u] if seen[u] is not None else float("-inf"))
+                >= self.IDLE_RESTORE_S]
+        if not idle:
+            return []
+        online = await self._online_serials()
+        if online is not None:
+            idle = [u for u in idle if u in online]
+        return [a for a in await asyncio.gather(*(
+                    self.restore_keyboard(u, idle=(seen[u], now))
+                    for u in idle)) if a is not None]
+
+    async def _online_serials(self) -> set[str] | None:
+        """Serials `adb devices` lists as `device`, or None if it could not say
+        -- in which case every record is tried."""
+        from server.device.android.adb import _find_sdk_tool
+
+        adb = _find_sdk_tool("adb")
+        if not adb:
+            return None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                adb, "devices",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+            out, _ = await asyncio.wait_for(proc.communicate(), 5.0)
+        except (TimeoutError, OSError):
+            return None
+        if proc.returncode != 0:
+            return None
+        return {line.split("\t")[0] for line in out.decode(errors="replace").splitlines()[1:]
+                if line.endswith("\tdevice")}
 
     async def press_button(self, udid: str, button: str) -> None:
         """Press a hardware button."""
@@ -836,7 +996,13 @@ class U2Backend:
             device = self._connect(udid)
             device.click(int(x), int(y))  # focus the field the caller named
 
-            device.clear_text()
+            with self.ime.lock_for(udid):  # clear_text selects u2's keyboard
+                self.ime.remember(udid, device)
+                try:
+                    device.clear_text()
+                finally:
+                    with self._typed_lock:
+                        self._last_typed[udid] = time.monotonic()
 
             # An empty EditText reports its *hint* in `text`, so a cleared field
             # does not read empty -- `field_default` reads 'default'. The hint
