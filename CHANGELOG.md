@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **On Android, a `tap_element` label or identifier that matches more than one element answers `ambiguous` instead of tapping the first (#512).** The selector fast path, taken whenever a call has no `element_type`, `value` or substring filter, pressed whichever match uiautomator returned first and said `ok`, while the same call with `element_type` answered `ambiguous`. It now counts the matches -- a label's text and content-desc together -- and hands more than one to the tree path, which folds a control's own parts into it and otherwise answers `ambiguous` with the candidates. A duplicated label that happened to tap the right element now asks you to choose: narrow it with `identifier` or `element_type`, as the response says. Measured on an emulator, a unique match costs the same as before (~390ms a tap).
+
 ## [0.25.0-beta.3] - 2026-10-20
 
 ### Added
