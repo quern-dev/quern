@@ -186,10 +186,25 @@ def _classify(path: str | None, version: str | None) -> str:
     return OK if ok else TOO_OLD
 
 
+class _TimedOut(Exception):
+    """`node --version` did not answer within the probe's timeout."""
+
+
 def _version_of(path: str, run: Runner) -> str | None:
+    """The version `path` reports, or None when it ran and gave none.
+
+    Raises `_TimedOut` rather than returning None for a node that did not
+    answer in time: that is "could not tell", and folding it into None read it
+    as a broken binary. A node Homebrew has just installed can be that slow on
+    its first run while macOS checks it -- measured on a fresh VM, where every
+    place timed out and the same run's inventory then read v26.12.0 -- and
+    "probably broken, reinstall it" was the advice, with setup failing over it.
+    """
     try:
         result = run([path, "--version"], capture_output=True, text=True,
                      timeout=PROBE_TIMEOUT, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired as exc:
+        raise _TimedOut from exc
     except (OSError, ValueError, subprocess.SubprocessError):
         # ValueError covers UnicodeDecodeError from a node shim that writes
         # something undecodable; a broken shim is not a reason to raise.
@@ -202,7 +217,12 @@ def _version_of(path: str, run: Runner) -> str | None:
 def _on_path(place: str, used_by: str, path_dirs: list[str], run: Runner,
              which: Callable[..., str | None]) -> NodeSite:
     found = which("node", path=os.pathsep.join(path_dirs))
-    version = _version_of(found, run) if found else None
+    try:
+        version = _version_of(found, run) if found else None
+    except _TimedOut:
+        return NodeSite(place, used_by, UNKNOWN, found,
+                        detail=f"{found} did not answer within {PROBE_TIMEOUT:.0f}s -- "
+                               "a node just installed can be that slow on its first run")
     return NodeSite(place, used_by, _classify(found, version), found, version)
 
 

@@ -3485,3 +3485,63 @@ class TestAfterUpdateFromTheEnvironment:
     ])
     def test_only_one_means_after_an_update(self, monkeypatch, value, expected):
         assert self._read(monkeypatch, value) is expected
+
+
+class TestCouldNotTellIsNotBlocked:
+    """#506's error needs evidence: a place that could not tell may hold the
+    node a client will use, so setup must not say none does (beta.3 cut)."""
+
+    def test_an_unknown_place_is_not_evidence_of_no_node(self):
+        from server.lifecycle import node_env
+        from server.lifecycle.setup import mcp_cannot_start
+
+        assert mcp_cannot_start(_node_sites(
+            (node_env.UNKNOWN, None), (node_env.UNKNOWN, None), (node_env.MISSING, None),
+        )) is False
+
+    def test_a_too_old_node_with_nothing_unknown_is_still_blocked(self):
+        from server.lifecycle import node_env
+        from server.lifecycle.setup import mcp_cannot_start
+
+        old = (node_env.TOO_OLD, "v22.12.0")
+        assert mcp_cannot_start(_node_sites(old, old, (node_env.MISSING, None))) is True
+
+
+class TestTheNewNodeRunsOnceBeforeTheProbe:
+    BREW = "/opt/homebrew/bin/node"
+
+    def _warm(self, *, which, exists, run=None):
+        from server.lifecycle import setup as setup_mod
+
+        seen = []
+        setup_mod._first_run_of_new_node(
+            run=run or (lambda argv, **kw: seen.append((argv, kw))),
+            which=lambda name: which, exists=lambda p: p in exists,
+        )
+        return seen
+
+    def test_it_runs_unhurried(self):
+        (argv, kw), = self._warm(which=self.BREW, exists={self.BREW})
+        assert argv == [self.BREW, "--version"]
+        assert kw["timeout"] >= 60, "no longer than the probe's own timeout is no help"
+
+    def test_homebrews_node_is_warmed_when_this_path_does_not_have_it(self):
+        """Setup launched from an app has no Homebrew on PATH, but the probe
+        still reads Homebrew's node through the Quern app's directories: that
+        is the binary whose first run must happen here (#518 review)."""
+        seen = self._warm(which=None, exists={self.BREW})
+        assert [argv[0] for argv, _ in seen] == [self.BREW]
+
+    def test_a_different_node_on_path_does_not_stand_in_for_homebrews(self):
+        seen = self._warm(which="/Users/u/.nvm/versions/node/v22.22.0/bin/node",
+                          exists={self.BREW})
+        assert {argv[0] for argv, _ in seen} == {
+            "/Users/u/.nvm/versions/node/v22.22.0/bin/node", self.BREW}
+
+    def test_a_slow_or_failing_first_run_does_not_raise(self):
+        import subprocess
+
+        def slow(argv, **kw):
+            raise subprocess.TimeoutExpired(argv, kw["timeout"])
+
+        self._warm(which=self.BREW, exists={self.BREW}, run=slow)   # no exception

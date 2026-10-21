@@ -1999,19 +1999,64 @@ def _probe_node_sites() -> list | None:
         return None
 
 
+#: How long a node just installed may take to answer its first `--version`.
+#: The probe allows 10s; macOS checking a new binary on a fresh machine took
+#: longer than that (beta.3 cut), and this run is the one to absorb it.
+FIRST_RUN_TIMEOUT = 120
+
+
+#: Where Homebrew puts node, on Apple silicon and on Intel. Named rather than
+#: found on PATH: setup can run without Homebrew on its PATH -- launched from
+#: an app -- while the probe still reaches these through the Quern app's own
+#: directories, so the binary it reads must be the one warmed (#518 review).
+_HOMEBREW_NODES = ("/opt/homebrew/bin/node", "/usr/local/bin/node")
+
+
+def _first_run_of_new_node(
+    run: Callable[..., object] = subprocess.run,
+    which: Callable[[str], str | None] = shutil.which,
+    exists: Callable[[str], bool] = os.path.exists,
+) -> None:
+    """Run the node Homebrew just installed once, unhurried, before probing it.
+
+    So the re-probe sees the node as it will be from now on, not its first
+    launch: on a fresh machine that launch outlasted the probe's timeout, and
+    the report then said the new node did not run. Every node the probe might
+    read is run -- the one on this PATH and Homebrew's own -- each once, by
+    real path. Best effort -- whatever happens here, the probe that follows is
+    what reports.
+    """
+    candidates = [which("node"), *(p for p in _HOMEBREW_NODES if exists(p))]
+    seen: set[str] = set()
+    for node in candidates:
+        if not node:
+            continue
+        real = os.path.realpath(node)
+        if real in seen:
+            continue
+        seen.add(real)
+        with contextlib.suppress(OSError, ValueError, subprocess.SubprocessError):
+            run([node, "--version"], capture_output=True, text=True,
+                timeout=FIRST_RUN_TIMEOUT, stdin=subprocess.DEVNULL)
+
+
 def mcp_cannot_start(sites: list | None) -> bool:
     """True when node was found and no place has one meeting the floor (#506).
 
     Then no MCP client can start the wrapper, whichever place it reads -- the
-    case setup must not call complete. False when the probe failed (that is
-    "could not tell", reported as such) and when node is missing here, which
-    has its own message and is already an error.
+    case setup must not call complete. False when the probe failed or any
+    place could not tell (that is "could not tell", reported as such), and
+    when node is missing here, which has its own message and is already an
+    error.
     """
     from server.lifecycle import node_env
 
     if not sites or sites[0].status == node_env.MISSING:
         return False
-    return not any(site.status == node_env.OK for site in sites)
+    # Evidence, not absence of it: a place that could not tell (a timeout, a
+    # shell that would not start) may hold the very node a client will run,
+    # so "no place has one" is not something setup can say then (beta.3 cut).
+    return not any(site.status in (node_env.OK, node_env.UNKNOWN) for site in sites)
 
 
 def _node_severity(result: CheckResult, mcp_blocked: bool, *, after_update: bool) -> CheckResult:
@@ -3273,6 +3318,7 @@ def run_setup(assume_yes: bool = False, after_update: bool | None = None) -> int
     if node_result.status == CheckStatus.MISSING and node_result.fixable:
         if _prompt_yn("    Node.js not found. Install via Homebrew?"):
             if _brew_install("node"):
+                _first_run_of_new_node()
                 node_sites = _probe_node_sites()
                 node_result = check_node(node_sites)  # re-check
             else:
