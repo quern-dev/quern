@@ -242,6 +242,47 @@ def _focused_text_and_hint(device: Any) -> tuple[str | None, str | None]:
             return (node.get("text", ""), node.get("hint", ""))
     return (None, None)
 
+def _as_the_tree_labels(found: list, label: str) -> list:
+    """The label matches the dump path would also call `label`.
+
+    The tree labels a node by its text, and by its content-desc only when it
+    has none, so a node reading "Other" with the content-desc "Twin" is not a
+    "Twin" there. Counted here, it made the fast path defer to a tree that
+    found one "Twin" and tapped it, `ok`, past the ambiguity this path had
+    just seen (CodeRabbit). Content-desc matches on nodes with other text are
+    kept only when nothing else matches, so a lone one is still pressed, as
+    before.
+    """
+    def labelled(entry) -> bool:
+        sel, _, info = entry
+        return "description" not in sel or (info or {}).get("text") in (None, "", label)
+
+    def node(entry) -> tuple:
+        info = entry[2] or {}
+        return (repr(info.get("bounds")), info.get("className"))
+
+    # One node whose text and content-desc are both the label is found by both
+    # selectors; it is one match, not two.
+    texts = {node(e) for e in found if "description" not in e[0]}
+    found = [e for e in found if "description" not in e[0] or node(e) not in texts]
+    primary = [e for e in found if labelled(e)]
+    return primary or found
+
+
+def _one_control(found: list) -> bool:
+    """Whether several matches are one control and its own parts.
+
+    Every frame nests inside the largest, and at most one of them takes a tap
+    by itself: a Material tab or bottom-nav item, clickable, around its title,
+    which is not. A clickable control inside a clickable container -- a Switch
+    in its row -- stays two, as on the dump path (#490; CodeRabbit).
+    """
+    infos = [info or {} for _, _, info in found]
+    if sum(1 for i in infos if i.get("clickable")) > 1:
+        return False
+    return _nested([i.get("bounds") or {} for i in infos])
+
+
 def _nested(frames: list[dict]) -> bool:
     """Whether every frame lies inside the largest: one element and its parts.
 
@@ -543,23 +584,24 @@ class U2Backend:
             for group in groups:
                 # `info_list`, not `exists`: one RPC per selector either way,
                 # and it says how many matched and where, so whether the press
-                # would be a guess costs nothing extra. Its first entry is the
-                # element `click` presses, so no separate `info` read either.
+                # would be a guess costs nothing extra -- and gives the frame
+                # the answer reports, so no separate `info` read either.
                 try:
-                    found = [(obj, list(obj.info_list() or []))
-                             for obj in (device(**sel) for sel in group)]
+                    found = [(sel, i, info) for sel in group
+                             for i, info in enumerate(device(**sel).info_list() or [])]
                 except Exception:  # noqa: BLE001 -- a failed count is not a miss
                     # Read as None, this would sweep the screen for an element
                     # that may be in plain view.
                     return {"defer": "uncounted"}
-                total = sum(len(infos) for _, infos in found)
-                if total == 0:
+                if label is not None and "description" in group[-1]:
+                    found = _as_the_tree_labels(found, label)
+                if not found:
                     continue
-                if total > 1 and not _nested(
-                        [i.get("bounds") or {} for _, infos in found for i in infos]):
-                    return {"defer": "ambiguous", "matches": total}
-                obj, infos = next((o, infos) for o, infos in found if infos)
-                info = infos[0] or {}
+                if len(found) > 1 and not _one_control(found):
+                    return {"defer": "ambiguous", "matches": len(found)}
+                sel, index, info = found[0]
+                obj = device(**sel, instance=index) if index else device(**sel)
+                info = info or {}
                 try:
                     if hold is None:
                         obj.click()

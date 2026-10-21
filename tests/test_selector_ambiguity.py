@@ -22,22 +22,28 @@ def _box(left, top, right, bottom):
     return {"left": left, "top": top, "right": right, "bottom": bottom}
 
 
-def _obj(count: int, *frames) -> MagicMock:
-    """`count` matches; side by side unless `frames` says where each is."""
+def _obj(count: int, *frames, clickable=False, text="Twin",
+         cls="android.widget.Button") -> MagicMock:
+    """`count` matches; side by side unless `frames` says where each is.
+
+    `obj.at[i]` is what a press of instance i reached; instance 0 is `obj`.
+    """
     obj = MagicMock()
-    obj.count = count
     frames = frames or tuple(_box(200 * i, 0, 200 * i + 100, 50) for i in range(count))
-    obj.info = {"bounds": frames[0] if frames else _box(0, 0, 100, 50),
-                "className": "android.widget.Button", "text": "Twin"}
-    obj.info_list.return_value = [{"bounds": f} for f in frames]
+    obj.info_list.return_value = [
+        {"bounds": f, "className": cls, "text": text, "clickable": clickable}
+        for f in frames]
+    obj.at = {0: obj}
     return obj
 
 
 def _backend(by_selector: dict[str, MagicMock]) -> U2Backend:
     """A U2Backend whose device answers each selector key with its own object."""
     def device(**sel):
+        instance = sel.pop("instance", 0)
         (key,) = sel
-        return by_selector.get(key) or _obj(0)
+        obj = by_selector.get(key) or _obj(0)
+        return obj.at.setdefault(instance, MagicMock())
 
     backend = U2Backend()
     backend._connect = lambda serial: device
@@ -70,8 +76,9 @@ class TestTapBySelectorCounts:
     async def test_a_bottom_nav_item_and_its_own_title_are_one(self):
         """Stock Material: the item's content-desc copies its title, and the
         TextView inside it shows it. Pressed, as before -- not ambiguous."""
-        text = _obj(1, _box(20, 1800, 120, 1840))         # the title
-        desc = _obj(1, _box(0, 1760, 270, 1900))          # the item around it
+        text = _obj(1, _box(20, 1800, 120, 1840), cls="android.widget.TextView")  # the title
+        desc = _obj(1, _box(0, 1760, 270, 1900), clickable=True, text="",
+                    cls="android.widget.FrameLayout")      # the item around it
         result = await _backend({"text": text, "description": desc}).tap_by_selector(
             UDID, label="Home")
         assert "defer" not in result, result
@@ -80,7 +87,9 @@ class TestTapBySelectorCounts:
 
     async def test_one_element_whose_text_and_description_are_the_label(self):
         same = _box(0, 0, 100, 50)
-        text, desc = _obj(1, same), _obj(1, same)
+        # A clickable button found by both selectors: one node, so one
+        # clickable -- counted twice, it read as two tap targets.
+        text, desc = _obj(1, same, clickable=True), _obj(1, same, clickable=True)
         result = await _backend({"text": text, "description": desc}).tap_by_selector(
             UDID, label="Twin")
         assert "defer" not in result
@@ -89,7 +98,7 @@ class TestTapBySelectorCounts:
     async def test_two_bottom_nav_items_with_one_title_are_still_two(self):
         """Nesting is every match inside the largest, not any pair."""
         text = _obj(2, _box(20, 1800, 120, 1840), _box(290, 1800, 390, 1840))
-        desc = _obj(1, _box(0, 1760, 270, 1900))
+        desc = _obj(1, _box(0, 1760, 270, 1900), text="")
         result = await _backend({"text": text, "description": desc}).tap_by_selector(
             UDID, label="Home")
         assert result == {"defer": "ambiguous", "matches": 3}
@@ -109,6 +118,49 @@ class TestTapBySelectorCounts:
         obj.info = {"bounds": _box(999, 999, 1000, 1000)}   # would be wrong
         result = await _backend({"text": obj}).tap_by_selector(UDID, label="Twin")
         assert (result["x"], result["y"]) == (60, 45)
+
+    async def test_a_clickable_control_in_a_clickable_row_is_two(self):
+        """A Switch in its row: the row's centre is not the switch (CodeRabbit;
+        the dump path keeps these ambiguous too, #490)."""
+        switch = _obj(1, _box(900, 400, 1000, 460), clickable=True,
+                      cls="android.widget.Switch")
+        row = _obj(1, _box(0, 380, 1080, 480), clickable=True, text="",
+                   cls="android.widget.LinearLayout")
+        result = await _backend({"text": switch, "description": row}).tap_by_selector(
+            UDID, label="Twin")
+        assert result == {"defer": "ambiguous", "matches": 2}
+        switch.click.assert_not_called()
+
+    async def test_a_description_on_a_node_with_other_text_is_not_that_label(self):
+        """The tree labels that node by its text, so deferring to it tapped
+        the other one and said ok (CodeRabbit). Count as it does."""
+        text = _obj(1, _box(0, 0, 100, 50))
+        other = _obj(1, _box(300, 0, 400, 50), text="Other")
+        result = await _backend({"text": text, "description": other}).tap_by_selector(
+            UDID, label="Twin")
+        assert "defer" not in result, result
+        text.click.assert_called_once_with()
+        other.click.assert_not_called()
+
+    async def test_a_lone_description_match_is_still_pressed(self):
+        """As on main: nothing else carries the label, so it is the one."""
+        other = _obj(1, _box(300, 0, 400, 50), text="Other")
+        result = await _backend({"description": other}).tap_by_selector(UDID, label="Twin")
+        assert "defer" not in result
+        other.click.assert_called_once_with()
+
+    async def test_the_press_reaches_the_counted_instance(self):
+        """Description matches on nodes with other text are set aside, so the
+        one counted can be the second instance; `click` on the selector alone
+        would press the first."""
+        desc = _obj(2, _box(0, 0, 100, 50), _box(300, 0, 400, 50))
+        desc.info_list.return_value[0]["text"] = "Other"
+        desc.info_list.return_value[1]["text"] = ""
+        result = await _backend({"description": desc}).tap_by_selector(UDID, label="Twin")
+        assert "defer" not in result
+        desc.at[1].click.assert_called_once_with()
+        desc.click.assert_not_called()
+        assert result["x"] == 350
 
     async def test_a_unique_label_match_is_pressed(self):
         desc = _obj(1)
