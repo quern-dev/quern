@@ -119,8 +119,10 @@ def _device(frames, counts=None):
     count_it = iter(counts if counts is not None else [[A], [A]])
 
     def info_list():
-        return [{"bounds": f, "className": "android.widget.Button", "text": "Slider"}
-                for f in next(count_it)]
+        # visibleBounds as well, as every real entry carries it: without it a
+        # press that ignored the rest wait's frame passed every test (review).
+        return [{"bounds": f, "visibleBounds": f, "className": "android.widget.Button",
+                 "text": "Slider"} for f in next(count_it)]
     obj.info_list.side_effect = info_list
     type(obj).info = property(lambda self: {"bounds": next(frame_it)})
 

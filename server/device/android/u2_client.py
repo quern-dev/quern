@@ -654,7 +654,7 @@ class U2Backend:
         that scrolls CoordinatorLayout/RecyclerView content out of view on some
         screens (e.g. cache-detail's header actions), so resolving an identifier
         via the tree can scroll the target away before the tap lands. A targeted
-        selector click (UiObject.click) finds and taps just the one element with
+        selector read finds just the one element, and a press at its centre taps it, with
         no such side effect — and it's faster (~0.3s vs ~1.2s).
 
         Returns a normalized {label, identifier, type, x, y} dict for the tapped
@@ -759,7 +759,9 @@ class U2Backend:
                 # where it shows.
                 bounds = _press_bounds(info)
                 if not bounds:
-                    return {"defer": "uncounted"}
+                    # Counted, then gone by its own read: uiautomator leaves no
+                    # frame for an instance that left between the two (review).
+                    return {"defer": "vanished"}
                 px = (bounds["left"] + bounds["right"]) / 2
                 py = (bounds["top"] + bounds["bottom"]) / 2
                 try:

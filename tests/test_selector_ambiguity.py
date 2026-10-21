@@ -293,10 +293,11 @@ class TestOneRoundTripPerPress:
         obj = _obj(1, _box(0, 0, 100, 50))
         backend = _backend({"text": obj})
         await backend.tap_by_selector(UDID, label="Twin")
-        # Routed to obj.click() by the fake, from device.click -- never called
-        # on the selector object directly, so no wait and no second read.
         assert backend._connect(UDID).click.call_count == 1
-        obj.info.__getitem__.assert_not_called()
+        # No waitForExists and no second read: the round trips #516 removes.
+        for name in ("must_wait", "wait", "exists", "center", "bounds"):
+            getattr(obj, name).assert_not_called()
+        assert "info" not in [c[0] for c in obj.mock_calls], obj.mock_calls
 
     async def test_a_match_with_no_frame_is_not_pressed(self):
         obj = _obj(1)
@@ -304,5 +305,5 @@ class TestOneRoundTripPerPress:
                                        "text": "Twin"}]
         backend = _backend({"text": obj})
         result = await backend.tap_by_selector(UDID, label="Twin")
-        assert result == {"defer": "uncounted"}
+        assert result == {"defer": "vanished"}
         backend._connect(UDID).click.assert_not_called()

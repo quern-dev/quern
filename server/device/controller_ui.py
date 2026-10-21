@@ -3066,7 +3066,7 @@ class DeviceControllerUI:
         # dump. dump_hierarchy() scrolls CoordinatorLayout/RecyclerView content
         # out of view on some screens (e.g. cache-detail), so resolving an
         # identifier via the tree can scroll the target away before the tap. A
-        # native selector click (UiObject.click) finds+taps the one element with
+        # native selector read finds the one element and a press at its centre taps it, with
         # no such side effect, and is faster. Restricted to unambiguous cases
         # (exact identifier/label, no type/value/substring filters); anything
         # else falls through to the dump-based path below.
