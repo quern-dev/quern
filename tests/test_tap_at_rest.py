@@ -73,16 +73,21 @@ class TestWaitForRest:
         assert rest["gone"] is True and rest["settled"] is False
 
     def test_an_empty_read_is_gone_too(self):
-        assert _wait_for_rest(_reads(None), A)["gone"] is True
+        """Followed by reads that would settle, so only the empty-read check
+        can make this gone -- not the fake running out (review)."""
+        assert _wait_for_rest(_reads(None, A, A, A, A), A)["gone"] is True
 
 
-def _device(frames, *, count=1):
-    """A device whose one match reads `frames` in turn through `.info`."""
+def _device(reads):
+    """A device whose "Slider" selector answers `info_list` with each entry of
+    `reads` in turn: a list of frames, one per match. The first is the count."""
     obj = MagicMock()
-    obj.info_list.return_value = [{"bounds": A, "className": "android.widget.Button",
-                                   "text": "Slider"}] * count
-    it = iter(frames)
-    type(obj).info = property(lambda self: {"bounds": next(it)})
+    it = iter(reads)
+
+    def info_list():
+        return [{"bounds": f, "className": "android.widget.Button", "text": "Slider"}
+                for f in next(it)]
+    obj.info_list.side_effect = info_list
 
     def device(**sel):
         return obj if "text" in sel else MagicMock(**{"info_list.return_value": []})
@@ -97,13 +102,13 @@ def _backend(device) -> U2Backend:
 
 class TestTapBySelector:
     async def test_without_confirm_rest_nothing_is_read_again(self):
-        device, obj = _device([])             # any .info read would raise
+        device, obj = _device([[A]])          # a second read would raise
         result = await _backend(device).tap_by_selector(UDID, label="Slider")
         obj.click.assert_called_once_with()
         assert "rest" not in result
 
     async def test_a_settled_target_is_pressed_and_reported_where_it_rests(self):
-        device, obj = _device([B, B, B])
+        device, obj = _device([[A], [B], [B], [B]])
         result = await _backend(device).tap_by_selector(
             UDID, label="Slider", confirm_rest=True)
         obj.click.assert_called_once_with()
@@ -111,14 +116,30 @@ class TestTapBySelector:
         assert (result["x"], result["y"]) == (234, 73)
 
     async def test_a_moving_target_is_pressed_anyway_and_says_so(self):
-        device, obj = _device([B, A] * 1000)
+        device, obj = _device([[A]] + [[B], [A]] * 1000)
         result = await _backend(device).tap_by_selector(
             UDID, label="Slider", confirm_rest=True)
         obj.click.assert_called_once_with()
         assert result["rest"]["settled"] is False
 
     async def test_a_target_that_vanished_defers_without_pressing(self):
-        device, obj = _device([None])
+        device, obj = _device([[A], []])
+        result = await _backend(device).tap_by_selector(
+            UDID, label="Slider", confirm_rest=True)
+        assert result == {"defer": "vanished", "matches": 0}
+        obj.click.assert_not_called()
+
+    async def test_a_second_match_arriving_during_the_wait_is_ambiguous(self):
+        """The incoming page of a transition has its own "Next": counted once,
+        the press would go to whichever uiautomator found first (review)."""
+        device, obj = _device([[A], [A, B]])
+        result = await _backend(device).tap_by_selector(
+            UDID, label="Slider", confirm_rest=True)
+        assert result == {"defer": "ambiguous", "matches": 2}
+        obj.click.assert_not_called()
+
+    async def test_a_read_that_fails_defers_without_pressing(self):
+        device, obj = _device([[A]])          # the second read raises
         result = await _backend(device).tap_by_selector(
             UDID, label="Slider", confirm_rest=True)
         assert result == {"defer": "vanished"}
@@ -165,4 +186,53 @@ class TestTapElement:
         result = await ctrl.tap_element(label="Slider")
         assert result["status"] == "ok"
         assert result["target_moving"] is True
-        assert "still moving" in result["warnings"][0]
+        assert "still moving" in result["warning"], "singular, as every other"
+        assert "warnings" not in result
+
+    async def test_skip_stability_check_skips_it(self):
+        """As it skips the iOS settle: a target that never stops moving would
+        otherwise cost a second on every tap (review)."""
+        ctrl, backend = self._ctrl(self._tapped())
+        ctrl._last_ui_change[UDID] = time.monotonic()
+        await ctrl.tap_element(label="Slider", skip_stability_check=True)
+        assert backend.tap_by_selector.await_args.kwargs["confirm_rest"] is False
+
+    async def test_a_vanished_target_says_the_full_tree_was_read(self):
+        from unittest.mock import patch
+
+        from server.models import UIElement
+
+        ctrl, backend = self._ctrl({"defer": "vanished"})
+        ctrl._last_ui_change[UDID] = time.monotonic()
+        backend.tap = AsyncMock()
+        ctrl.get_ui_elements = AsyncMock(return_value=([UIElement(
+            type="Button", label="Slider",
+            frame={"x": 0, "y": 0, "width": 100, "height": 50})], UDID))
+        with patch("server.device.controller_ui._capture_screenshot",
+                   AsyncMock(return_value=None)):
+            result = await ctrl.tap_element(label="Slider", skip_stability_check=False)
+        assert "vanished" in result.get("fast_path", ""), result
+        backend.scroll_into_view.assert_not_called()
+
+    async def test_the_note_does_not_outlive_its_call(self):
+        ctrl, backend = self._ctrl({"defer": "vanished"})
+        from server.device.controller_ui import _FAST_PATH_NOTE
+
+        _FAST_PATH_NOTE.set("left over")
+        backend.tap_by_selector = AsyncMock(return_value=self._tapped())
+        result = await ctrl.tap_element(label="Slider")
+        assert "fast_path" not in result
+
+    async def test_the_tap_after_a_sweep_is_checked(self):
+        from unittest.mock import patch
+
+        ctrl, backend = self._ctrl(None)
+        ctrl._last_ui_change[UDID] = time.monotonic() - 60
+        backend.tap_by_selector = AsyncMock(side_effect=[None, self._tapped(
+            waited_ms=220, settled=True)])
+        backend.scroll_into_view = AsyncMock(return_value={"label": "Slider"})
+        with patch("server.device.controller_ui.asyncio.sleep", AsyncMock()):
+            result = await ctrl.tap_element(label="Slider")
+        assert [c.kwargs["confirm_rest"] for c in backend.tap_by_selector.await_args_list] \
+            == [False, True]
+        assert result["waited_for_rest_ms"] == 220

@@ -249,28 +249,41 @@ REST_BUDGET_S = 1.0
 REST_AGREE = 3
 
 
+class _MatchesChanged(Exception):
+    """The selector matched a different number of elements than was counted."""
+
+    def __init__(self, count: int) -> None:
+        super().__init__(count)
+        self.count = count
+
+
 def _wait_for_rest(read, first) -> dict:
     """Read a frame until REST_AGREE reads in a row agree, or REST_BUDGET_S
-    passes. Returns {waited_ms, settled, bounds, gone}: `bounds` the last read,
-    `gone` when a read failed -- the element left, or the read did, and either
-    way the selector's answer is no longer the one counted."""
+    passes. Returns {waited_ms, settled, bounds, gone, changed}: `bounds` the
+    last read; `gone` when a read failed or found no frame -- the element
+    left, or the read did, and either way the selector's answer is no longer
+    the one counted; `changed`, the new count, when the match count moved."""
     started = time.monotonic()
     seen = [first]
+
+    def done(settled, bounds, gone=False, changed=None):
+        return {"waited_ms": round((time.monotonic() - started) * 1000),
+                "settled": settled, "bounds": bounds, "gone": gone, "changed": changed}
+
     while True:
         tail = seen[-REST_AGREE:]
         settled = len(tail) == REST_AGREE and all(b == tail[0] for b in tail)
         if settled or time.monotonic() - started >= REST_BUDGET_S:
-            return {"waited_ms": round((time.monotonic() - started) * 1000),
-                    "settled": settled, "bounds": seen[-1], "gone": False}
+            return done(settled, seen[-1])
         time.sleep(REST_INTERVAL_S)
         try:
             bounds = read()
+        except _MatchesChanged as e:
+            return done(False, None, changed=e.count)
         except Exception:  # noqa: BLE001 -- see the docstring
-            return {"waited_ms": round((time.monotonic() - started) * 1000),
-                    "settled": False, "bounds": None, "gone": True}
+            return done(False, None, gone=True)
         if not bounds:
-            return {"waited_ms": round((time.monotonic() - started) * 1000),
-                    "settled": False, "bounds": None, "gone": True}
+            return done(False, None, gone=True)
         seen.append(bounds)
 
 
@@ -667,8 +680,27 @@ class U2Backend:
                 info = info or {}
                 rest = None
                 if confirm_rest:
-                    rest = _wait_for_rest(lambda: (obj.info or {}).get("bounds"),
-                                          info.get("bounds"))
+                    counted = len(found)
+
+                    def read():
+                        # The selector's whole match list, not `obj.info`: the
+                        # count was taken once, and in a transition a second
+                        # match can arrive or an earlier one leave, shifting
+                        # what one instance names (review). Same one RPC.
+                        now = [e for s_ in group for e in
+                               ((s_, i, inf) for i, inf in
+                                enumerate(device(**s_).info_list() or []))]
+                        if label is not None and "description" in group[-1]:
+                            now = _as_the_tree_labels(now, label)
+                        if len(now) != counted:
+                            raise _MatchesChanged(len(now))
+                        return (now[0][2] or {}).get("bounds")
+
+                    rest = _wait_for_rest(read, info.get("bounds"))
+                    changed = rest.pop("changed")
+                    if changed is not None:
+                        return {"defer": "ambiguous" if changed > 1 else "vanished",
+                                "matches": changed}
                     if rest.pop("gone"):
                         return {"defer": "vanished"}
                     if rest["bounds"]:
