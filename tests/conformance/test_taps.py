@@ -125,6 +125,9 @@ def test_a_tap_during_a_remount_is_honest_about_it(taps) -> None:
     fine, and `ok` with nothing tapped is not."""
     taps.tap("tap_remount_arm")
     body = _tap(taps, label="Remount")
+    # Measured: Android's selector click waits for the new view (ok), and
+    # iOS reads the screen once (not_found). Anything else is a wrong answer.
+    assert body.get("status") in {"ok", "not_found"}, body
     _reached(taps, "tap_remount" if body.get("status") == "ok" else None)
 
 
