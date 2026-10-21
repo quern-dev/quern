@@ -3140,15 +3140,15 @@ class DeviceControllerUI:
                     resolved_fast, identifier=identifier, label=label, report=sweep,
                 )
                 if found is not None:
-                    # Let the scroll settle before clicking — a tap landing
+                    # Let the scroll settle before clicking -- a tap landing
                     # while the list is still coming to rest gets absorbed as a
                     # scroll-stop instead of a click (observed intermittently).
-                    #
-                    # Still a sleep, unlike the iOS paths above: wait_for_settle
-                    # costs three captures, and adb's capture time has not been
-                    # measured here, so swapping this blind could make the
-                    # Android path slower rather than more reliable. See #100.
-                    await asyncio.sleep(0.4)
+                    # The at-rest check below (#514) does that, reading the
+                    # target until it stops, so the fixed 0.4s sleep that stood
+                    # here goes (#515). It stays for a caller who turned the
+                    # check off: a list coming to rest still swallows a tap.
+                    if skip_stability_check:
+                        await asyncio.sleep(0.4)
                     tapped = await backend.tap_by_selector(
                         resolved_fast, identifier=identifier, label=label, **hold,
                         # The sweep just moved the screen -- unless the caller

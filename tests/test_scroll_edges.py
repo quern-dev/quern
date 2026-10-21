@@ -234,3 +234,38 @@ class TestRealFrames:
         # down: unchanged (bottom); up: unchanged (top); third: moved
         assert device.jsonrpc.takeScreenshot.call_args.args == (0.25, 50)
         assert report["moved"] is True and "no_progress" not in report
+
+
+
+class TestTheFixedSleepIsGone:
+    """#515: the tap after a sweep waited a fixed 0.4s; the at-rest check
+    (#514) now waits for the list to stop instead. The sleep stays only for
+    a caller who turned that check off."""
+
+    def _ctrl(self):
+        from server.device.controller import DeviceController
+        from server.models import DeviceType
+
+        ctrl = DeviceController()
+        ctrl._device_type_cache[UDID] = DeviceType.ANDROID_EMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value=UDID)
+        ctrl._invalidate_ui_cache = MagicMock()
+        backend = MagicMock()
+        backend.tap_by_selector = AsyncMock(side_effect=[None, {
+            "label": "Row 150", "identifier": None, "type": "StaticText", "x": 1, "y": 2}])
+        backend.scroll_into_view = AsyncMock(return_value={"label": "Row 150"})
+        ctrl._ui_backend = MagicMock(return_value=backend)
+        return ctrl, backend
+
+    @pytest.mark.parametrize("skip, slept", [(False, []), (True, [0.4])])
+    async def test_the_sleep_only_without_the_rest_check(self, skip, slept):
+        ctrl, backend = self._ctrl()
+        sleeps = []
+
+        async def sleep(t):
+            sleeps.append(t)
+        with patch("server.device.controller_ui.asyncio.sleep", sleep):
+            result = await ctrl.tap_element(label="Row 150", skip_stability_check=skip)
+        assert result["status"] == "ok"
+        assert sleeps == slept
+        assert backend.tap_by_selector.await_args_list[1].kwargs["confirm_rest"] is not skip
