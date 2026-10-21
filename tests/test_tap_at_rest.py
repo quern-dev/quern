@@ -285,6 +285,48 @@ class TestTapElement:
         assert "vanished" in result.get("fast_path", "")
         ctrl._invalidate_ui_cache.assert_any_call(UDID)
 
+    async def test_a_vanished_target_gone_on_the_final_recheck_is_not_pressed(self):
+        """Moved on the first re-check, gone on the final one after the settle
+        wait: the same refusal (CodeRabbit)."""
+        from unittest.mock import patch
+
+        from server.models import UIElement
+
+        ctrl, backend = self._ctrl({"defer": "vanished"})
+        backend.tap = AsyncMock()
+        at = lambda y: UIElement(type="Button", label="Slider",  # noqa: E731
+                                 frame={"x": 0, "y": y, "width": 100, "height": 50})
+        ctrl.get_ui_elements = AsyncMock(side_effect=[([at(0)], UDID), ([at(40)], UDID),
+                                                      ([], UDID)])
+        ctrl.wait_for_settle = AsyncMock(return_value={"settled": True})
+        with patch("server.device.controller_ui._capture_screenshot",
+                   AsyncMock(return_value=None)), \
+                patch("server.device.controller_ui.asyncio.sleep", AsyncMock()):
+            result = await ctrl.tap_element(label="Slider")
+        assert result["status"] == "not_found", result
+        backend.tap.assert_not_called()
+
+    async def test_a_vanish_after_a_sweep_says_the_screen_was_swiped(self):
+        from unittest.mock import patch
+
+        from server.models import UIElement
+
+        ctrl, backend = self._ctrl(None)
+        ctrl._last_ui_change[UDID] = time.monotonic() - 60
+        backend.tap_by_selector = AsyncMock(side_effect=[None, {"defer": "vanished"}])
+        backend.scroll_into_view = AsyncMock(return_value={"label": "Slider"})
+        backend.tap = AsyncMock()
+        el = UIElement(type="Button", label="Slider",
+                       frame={"x": 0, "y": 0, "width": 100, "height": 50})
+        ctrl.get_ui_elements = AsyncMock(side_effect=[([el], UDID), ([], UDID)])
+        with patch("server.device.controller_ui._capture_screenshot",
+                   AsyncMock(return_value=None)), \
+                patch("server.device.controller_ui.asyncio.sleep", AsyncMock()):
+            result = await ctrl.tap_element(label="Slider")
+        assert result["status"] == "not_found"
+        assert result["scroll"]["attempted"] is True
+        backend.tap.assert_not_called()
+
     async def test_the_note_does_not_outlive_its_call(self):
         ctrl, backend = self._ctrl({"defer": "vanished"})
         from server.device.controller_ui import _FAST_PATH_NOTE

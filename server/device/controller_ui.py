@@ -3567,16 +3567,23 @@ class DeviceControllerUI:
                 # Folded as the first read was, or a part listed before its
                 # control is taken for the target (#490 review, CodeRabbit).
                 matches_check, _ = _fold_nested_matches(matches_check)
-                if not matches_check and _FAST_PATH_NOTE.get() == _VANISHED_NOTE:
-                    # The fast path saw it vanish, and the re-check finds it
-                    # gone too: pressing where the first read put it would tap
-                    # whatever is there now, and answer ok (CodeRabbit).
-                    return {
+                def gone_again() -> dict:
+                    """The fast path saw the target vanish, and a re-check finds
+                    it gone too: pressing where an earlier read put it would
+                    tap whatever is there now, and answer ok (CodeRabbit)."""
+                    result = {
                         "status": "not_found",
                         "detail": (f"'{el.label or el.identifier or el.type}' moved or "
                                    "vanished while quern looked for it, and is not on "
                                    "screen now -- read the screen and try again"),
                     }
+                    if sweep.get("attempted"):
+                        result["scroll"] = _scroll_report(sweep, scroll_to_find)
+                    return result
+
+                vanished = _FAST_PATH_NOTE.get() == _VANISHED_NOTE
+                if not matches_check and vanished:
+                    return gone_again()
                 if matches_check:
                     # Check if position changed (element is animating)
                     current_frame = matches_check[0].frame
@@ -3610,6 +3617,8 @@ class DeviceControllerUI:
                             element_type=element_type,
                         )
                         matches_final, _ = _fold_nested_matches(matches_final)
+                        if not matches_final and vanished:
+                            return gone_again()
                         if matches_final:
                             el = matches_final[0]
                             cx, cy = get_tap_point(el)
