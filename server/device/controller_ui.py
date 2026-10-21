@@ -285,6 +285,15 @@ _PENDING_RESTORE: contextvars.ContextVar[tuple[str, int] | None] = contextvars.C
     "_pending_restore", default=None,
 )
 
+#: Said on the answer when Android's fast path saw its target vanish while
+#: confirming it was at rest, and handed the call to the full-tree read (#514).
+#: That read matches labels case-insensitively and can scroll some layouts,
+#: so the caller is told it was taken (review).
+_FAST_PATH_NOTE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_FAST_PATH_NOTE", default=None)
+_VANISHED_NOTE = ("the element moved or vanished while quern checked it was at rest, "
+                  "so it was looked for again by reading the whole screen")
+
 #: Look deeper only when the shallow look was this quick. A slow shallow query
 #: means a dense screen, where a deep walk is slower still: the 200-row table
 #: that took 34.5s at full depth (F35) is exactly the screen to leave alone.
@@ -2997,8 +3006,13 @@ class DeviceControllerUI:
         depth if a deep hit held it at the full depth through the tap's own
         lookups -- on every exit, including one that raises (#470)."""
         _PENDING_RESTORE.set(None)
+        _FAST_PATH_NOTE.set(None)
         try:
-            return await self._tap_element(*args, **kwargs)
+            result = await self._tap_element(*args, **kwargs)
+            note = _FAST_PATH_NOTE.get()
+            if note and isinstance(result, dict):
+                result.setdefault("fast_path", note)
+            return result
         finally:
             pending = _PENDING_RESTORE.get()
             if pending is not None:
@@ -3079,8 +3093,18 @@ class DeviceControllerUI:
             and (identifier or label)
         ):
             backend = self._ui_backend(resolved_fast)
+            # Moments after a change, confirm the target is at rest first
+            # (#514): the dump path re-reads its position and the iOS path
+            # settles, and this path had neither. Free otherwise.
+            # A successful tap is itself a change, so a second tap within
+            # 1.5s pays it too -- as on iOS. `skip_stability_check` skips it,
+            # as it skips the iOS settle (review).
+            since_change = time.monotonic() - self._last_ui_change.get(
+                resolved_fast, float("-inf"))
+            just_changed = not skip_stability_check and since_change < self._RECENT_CHANGE_S
             tapped = await backend.tap_by_selector(
                 resolved_fast, identifier=identifier, label=label, **hold,
+                confirm_rest=just_changed,
             )
             # More than one match, or matches it could not count, and nothing
             # pressed (#512). The dump path below decides, and answers
@@ -3088,6 +3112,9 @@ class DeviceControllerUI:
             # `element_type` gets. Not a miss, so no scroll.
             deferred = _selector_deferred(tapped)
             if deferred:
+                if tapped.get("defer") == "vanished":
+                    _FAST_PATH_NOTE.set(_VANISHED_NOTE)
+                    self._invalidate_ui_cache(resolved_fast)  # read the tree afresh
                 tapped = None
             # Not in the current view — auto-scroll to it and retry. Uses the
             # selector-based swipe loop (no dump_hierarchy), so it inherits the
@@ -3123,12 +3150,33 @@ class DeviceControllerUI:
                     await asyncio.sleep(0.4)
                     tapped = await backend.tap_by_selector(
                         resolved_fast, identifier=identifier, label=label, **hold,
+                        # The sweep just moved the screen -- unless the caller
+                        # opted out, as for the first call (CodeRabbit).
+                        confirm_rest=not skip_stability_check,
                     )
                     if _selector_deferred(tapped):
+                        if tapped.get("defer") == "vanished":
+                            _FAST_PATH_NOTE.set(_VANISHED_NOTE)
+                            self._invalidate_ui_cache(resolved_fast)  # read the tree afresh
                         tapped = None
             if tapped is not None:
                 self._invalidate_ui_cache(resolved_fast)
+                rest = tapped.pop("rest", None)
                 result = {"status": "ok", "tapped": tapped}
+                if rest is not None:
+                    result["waited_for_rest_ms"] = rest["waited_ms"]
+                    if not rest["settled"]:
+                        # Pressed anyway, as the iOS settle does; the caller is
+                        # told, since the tap may have reached what moved in.
+                        # `warning`, singular, as every other tap_element
+                        # warning is (review).
+                        result["target_moving"] = True
+                        result["warning"] = (
+                            f"the target was still moving after "
+                            f"{rest['waited_ms']}ms; it was tapped where "
+                            f"uiautomator last found it, which may not be where "
+                            f"it is now -- check the screen before relying on "
+                            f"this tap")
             # A tap that succeeded only *because* the screen scrolled has
             # moved the screen, and the caller cannot see that from
             # `status: ok` alone. Same defect as the Android branch reporting
@@ -3519,6 +3567,23 @@ class DeviceControllerUI:
                 # Folded as the first read was, or a part listed before its
                 # control is taken for the target (#490 review, CodeRabbit).
                 matches_check, _ = _fold_nested_matches(matches_check)
+                def gone_again() -> dict:
+                    """The fast path saw the target vanish, and a re-check finds
+                    it gone too: pressing where an earlier read put it would
+                    tap whatever is there now, and answer ok (CodeRabbit)."""
+                    result = {
+                        "status": "not_found",
+                        "detail": (f"'{el.label or el.identifier or el.type}' moved or "
+                                   "vanished while quern looked for it, and is not on "
+                                   "screen now -- read the screen and try again"),
+                    }
+                    if sweep.get("attempted"):
+                        result["scroll"] = _scroll_report(sweep, scroll_to_find)
+                    return result
+
+                vanished = _FAST_PATH_NOTE.get() == _VANISHED_NOTE
+                if not matches_check and vanished:
+                    return gone_again()
                 if matches_check:
                     # Check if position changed (element is animating)
                     current_frame = matches_check[0].frame
@@ -3552,6 +3617,8 @@ class DeviceControllerUI:
                             element_type=element_type,
                         )
                         matches_final, _ = _fold_nested_matches(matches_final)
+                        if not matches_final and vanished:
+                            return gone_again()
                         if matches_final:
                             el = matches_final[0]
                             cx, cy = get_tap_point(el)

@@ -243,6 +243,70 @@ def _focused_text_and_hint(device: Any) -> tuple[str | None, str | None]:
             return (node.get("text", ""), node.get("hint", ""))
     return (None, None)
 
+#: The at-rest check before a fast-path tap right after a change (#514): the
+#: target is at rest once every read across REST_SPAN_S agrees, with at least
+#: REST_AGREE reads, read nearly back to back. Spacing matters more than
+#: count: with ~100ms sleeps plus a two-selector read, reads fell ~240ms apart
+#: -- one whole period of the Taps fixture's slider, which jumps every 120ms --
+#: and three reads saw it in one place and called it still, 6 times in 10.
+#: Back to back, reads come one round trip apart (~60ms measured), well inside
+#: the half period, so a target cannot jump between two reads unseen.
+REST_GAP_S = 0.02
+REST_SPAN_S = 0.2
+#: A read that comes back this long after the previous one starts the
+#: agreement over: a target can jump and jump back inside a slow read, and a
+#: read measured at 300ms let three agreeing reads miss two jumps.
+REST_MAX_GAP_S = 0.15
+REST_AGREE = 3
+REST_BUDGET_S = 1.0
+
+
+class _MatchesChanged(Exception):
+    """The selector matched a different number of elements than was counted."""
+
+    def __init__(self, count: int) -> None:
+        super().__init__(count)
+        self.count = count
+
+
+def _wait_for_rest(read, first) -> dict:
+    """Read a frame until every read across REST_SPAN_S agrees (at least
+    REST_AGREE reads), or REST_BUDGET_S passes. Returns {waited_ms, settled,
+    bounds, gone, changed}: `bounds` the last read; `gone` when a read failed
+    or found no frame -- the element left, or the read did, and either way the
+    selector's answer is no longer the one counted; `changed`, the new count,
+    when the match count moved."""
+    started = time.monotonic()
+    current, since, run = first, started, 1
+    last = started
+
+    def done(settled, bounds, gone=False, changed=None):
+        return {"waited_ms": round((time.monotonic() - started) * 1000),
+                "settled": settled, "bounds": bounds, "gone": gone, "changed": changed}
+
+    while True:
+        now = time.monotonic()
+        if run >= REST_AGREE and now - since >= REST_SPAN_S:
+            return done(True, current)
+        if now - started >= REST_BUDGET_S:
+            return done(False, current)
+        time.sleep(REST_GAP_S)
+        try:
+            bounds = read()
+        except _MatchesChanged as e:
+            return done(False, None, changed=e.count)
+        except Exception:  # noqa: BLE001 -- see the docstring
+            return done(False, None, gone=True)
+        if not bounds:
+            return done(False, None, gone=True)
+        now = time.monotonic()
+        if bounds == current and now - last <= REST_MAX_GAP_S:
+            run += 1
+        else:
+            current, since, run = bounds, now, 1
+        last = now
+
+
 def _as_the_tree_labels(found: list, label: str) -> list:
     """The label matches the dump path would also call `label`.
 
@@ -555,9 +619,18 @@ class U2Backend:
         identifier: str | None = None,
         label: str | None = None,
         hold: float | None = None,
+        confirm_rest: bool = False,
     ) -> dict | None:
         """Tap an element by native uiautomator2 selector — WITHOUT dumping the
         full hierarchy.
+
+        `confirm_rest` (#514), for a tap moments after the screen changed:
+        before pressing, read the target's frame back to back until every
+        read across `REST_SPAN_S` agrees, for up to `REST_BUDGET_S` -- see
+        REST_GAP_S for why spacing, not count, decides it. One that never settles is
+        pressed anyway, as the iOS settle does, and `rest.settled` says so;
+        one that vanishes while being read defers to the dump path. The
+        answer gains `rest: {waited_ms, settled}`.
 
         describe_all()/dump_hierarchy() performs a full accessibility traversal
         that scrolls CoordinatorLayout/RecyclerView content out of view on some
@@ -624,6 +697,43 @@ class U2Backend:
                 sel, index, info = found[0]
                 obj = device(**sel, instance=index) if index else device(**sel)
                 info = info or {}
+                rest = None
+                if confirm_rest:
+                    counted = len(found)
+
+                    def recount():
+                        now = [e for s_ in group for e in
+                               ((s_, i, inf) for i, inf in
+                                enumerate(device(**s_).info_list() or []))]
+                        if label is not None and "description" in group[-1]:
+                            now = _as_the_tree_labels(now, label)
+                        return len(now)
+
+                    # The frame through one `info` per read (~50ms): with a
+                    # two-selector recount on every read, reads fell ~120ms
+                    # apart -- the fixture slider's half period -- and saw it
+                    # still, 3 times in 10. The count is taken again once, at
+                    # the end, before the press: a transition can attach a
+                    # second match, or detach the first, while this waits
+                    # (review).
+                    rest = _wait_for_rest(lambda: (obj.info or {}).get("bounds"),
+                                          info.get("bounds"))
+                    changed = rest.pop("changed")
+                    if changed is None and not rest["gone"]:
+                        try:
+                            n = recount()
+                        except Exception:  # noqa: BLE001 -- could not tell
+                            return {"defer": "uncounted"}
+                        if n != counted:
+                            changed = n
+                    if changed is not None:
+                        return {"defer": "ambiguous" if changed > 1 else "vanished",
+                                "matches": changed}
+                    if rest.pop("gone"):
+                        return {"defer": "vanished"}
+                    if rest["bounds"]:
+                        info = {**info, "bounds": rest["bounds"]}
+                    del rest["bounds"]
                 try:
                     if hold is None:
                         obj.click()
@@ -647,6 +757,7 @@ class U2Backend:
                     "type": _map_class(cls) if cls else None,
                     "x": cx,
                     "y": cy,
+                    **({"rest": rest} if rest is not None else {}),
                 }
             return None
 
