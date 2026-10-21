@@ -378,6 +378,82 @@ class TestU2Backend:
         assert await U2Backend()._online_serials() is None
 
 
+class TestIdleRestore:
+    """A device nobody reserved kept u2's keyboard until the server stopped;
+    it now goes back after IDLE_RESTORE_S without typing."""
+
+    def _typed(self, state_dir, monkeypatch, online=(SERIAL,)):
+        device = FakeDevice(GBOARD)
+        device.send_keys = lambda text: setattr(device, "current", U2)
+        backend = _backend(device)
+
+        async def serials():
+            return set(online)
+        monkeypatch.setattr(backend, "_online_serials", serials)
+        return backend, device
+
+    async def test_a_device_typed_on_recently_keeps_u2s_keyboard(self, state_dir,
+                                                                monkeypatch):
+        backend, device = self._typed(state_dir, monkeypatch)
+        await backend.type_text(SERIAL, "hi")
+        assert await backend.restore_idle_keyboards() == []
+        assert device.current == U2
+
+    async def test_after_the_idle_time_it_is_put_back(self, state_dir, monkeypatch):
+        backend, device = self._typed(state_dir, monkeypatch)
+        await backend.type_text(SERIAL, "hi")
+        later = time.monotonic() + backend.IDLE_RESTORE_S
+        actions = await backend.restore_idle_keyboards(now=later)
+        assert [a["ok"] for a in actions] == [True]
+        assert device.current == GBOARD and _file(state_dir) == {}
+
+    async def test_just_short_of_the_idle_time_it_is_not(self, state_dir, monkeypatch):
+        backend, device = self._typed(state_dir, monkeypatch)
+        await backend.type_text(SERIAL, "hi")
+        soon = time.monotonic() + backend.IDLE_RESTORE_S - 5
+        assert await backend.restore_idle_keyboards(now=soon) == []
+
+    async def test_the_idle_time_is_three_minutes(self):
+        from server.device.android.u2_client import U2Backend
+
+        assert U2Backend.IDLE_RESTORE_S == 180.0
+
+    async def test_typing_that_failed_still_counts_as_typing(self, state_dir, monkeypatch):
+        """u2 may have switched before it failed."""
+        backend, device = self._typed(state_dir, monkeypatch)
+
+        def fail(text):
+            device.current = U2
+            raise RuntimeError("broadcast failed")
+        device.send_keys = fail
+        with pytest.raises(Exception):
+            await backend.type_text(SERIAL, "hi")
+        assert await backend.restore_idle_keyboards() == []
+
+    async def test_a_record_from_an_earlier_process_counts_as_idle(self, state_dir,
+                                                                  monkeypatch):
+        """A startup repair that could not reach the device: the sweep retries."""
+        backend, device = self._typed(state_dir, monkeypatch)
+        ImeKeeper().remember(SERIAL, FakeDevice(GBOARD))
+        device.current = U2
+        actions = await backend.restore_idle_keyboards()
+        assert [a["ok"] for a in actions] == [True]
+
+    async def test_a_device_adb_cannot_see_is_left_for_later(self, state_dir, monkeypatch):
+        backend, device = self._typed(state_dir, monkeypatch, online=())
+        await backend.type_text(SERIAL, "hi")
+        later = time.monotonic() + backend.IDLE_RESTORE_S
+        assert await backend.restore_idle_keyboards(now=later) == []
+        assert _file(state_dir) == {SERIAL: GBOARD}
+
+    async def test_typing_after_a_restore_records_again(self, state_dir, monkeypatch):
+        backend, device = self._typed(state_dir, monkeypatch)
+        await backend.type_text(SERIAL, "hi")
+        await backend.restore_idle_keyboards(now=time.monotonic() + backend.IDLE_RESTORE_S)
+        await backend.type_text(SERIAL, "again")
+        assert _file(state_dir) == {SERIAL: GBOARD} and device.current == U2
+
+
 class TestSessionRelease:
     def _app(self, u2):
         from server.session_registry import SessionRegistry
@@ -466,6 +542,8 @@ async def test_the_server_puts_keyboards_back_at_startup_and_at_shutdown(monkeyp
     async with lifespan(app):
         await asyncio.wait_for(app.state._warmup_task, 60)
         assert calls == ["restore"], "at startup"
+        names = {t.get_name() for t in asyncio.all_tasks()}
+        assert "keyboard-sweep" in names, "the idle sweep runs"
     assert calls == ["restore", "restore"], "and at shutdown"
 
 

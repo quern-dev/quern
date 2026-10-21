@@ -330,12 +330,20 @@ class U2Backend:
     #: Seconds a keyboard restore may wait on the device (#513).
     RESTORE_TIMEOUT_S = 15.0
 
+    #: Seconds without typing on a device before its keyboard is put back
+    #: (#513). A device used without a reservation -- the single-user case --
+    #: otherwise kept u2's keyboard until the server stopped, which can be
+    #: days. Typing again switches back, at ~300ms.
+    IDLE_RESTORE_S = 180.0
+
     def __init__(self) -> None:
         self._devices: dict[str, object] = {}  # serial → u2.Device
         from server.device.android.ime import ImeKeeper
 
         #: The keyboard each device had before typing replaced it (#513).
         self.ime = ImeKeeper()
+        #: When quern last typed or cleared on each device (monotonic).
+        self._last_typed: dict[str, float] = {}
         from server.device.android.adb import _find_sdk_tool
 
         self._touch = ScrcpyInput(_find_sdk_tool("adb"))
@@ -781,7 +789,10 @@ class U2Backend:
             # landing between the two would lose the record (#513).
             with self.ime.lock_for(udid):
                 self.ime.remember(udid, device)
-                device.send_keys(text)
+                try:
+                    device.send_keys(text)
+                finally:
+                    self._last_typed[udid] = time.monotonic()
 
         try:
             await asyncio.to_thread(_do)
@@ -844,6 +855,29 @@ class U2Backend:
         for action in await asyncio.gather(*(self.restore_keyboard(u) for u in reachable)):
             if action is not None:
                 actions.append(action)
+        return actions
+
+    async def restore_idle_keyboards(self, now: float | None = None) -> list[dict]:
+        """Put back the keyboard on every device quern has not typed on for
+        `IDLE_RESTORE_S` (#513). A record with no typing in this process --
+        a startup repair that could not reach the device -- counts as idle.
+        Devices adb does not list are left for a later pass. Never raises."""
+        pending = list(await asyncio.to_thread(self.ime.pending))
+        if not pending:
+            return []
+        now = time.monotonic() if now is None else now
+        idle = [u for u in pending
+                if now - self._last_typed.get(u, float("-inf")) >= self.IDLE_RESTORE_S]
+        if not idle:
+            return []
+        online = await self._online_serials()
+        if online is not None:
+            idle = [u for u in idle if u in online]
+        actions = [a for a in await asyncio.gather(*(self.restore_keyboard(u) for u in idle))
+                   if a is not None]
+        for a in actions:
+            if a.get("ok"):
+                self._last_typed.pop(a["udid"], None)
         return actions
 
     async def _online_serials(self) -> set[str] | None:
@@ -927,7 +961,10 @@ class U2Backend:
 
             with self.ime.lock_for(udid):  # clear_text selects u2's keyboard
                 self.ime.remember(udid, device)
-                device.clear_text()
+                try:
+                    device.clear_text()
+                finally:
+                    self._last_typed[udid] = time.monotonic()
 
             # An empty EditText reports its *hint* in `text`, so a cleared field
             # does not read empty -- `field_default` reads 'default'. The hint
