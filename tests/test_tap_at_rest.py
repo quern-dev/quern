@@ -263,6 +263,28 @@ class TestTapElement:
         assert "vanished" in result.get("fast_path", ""), result
         backend.scroll_into_view.assert_not_called()
 
+    async def test_a_vanished_target_gone_on_the_recheck_is_not_pressed(self):
+        """The tree's first read still showed it (a cached read, or it was
+        leaving); the uncached re-check does not. Pressing the first read's
+        point would tap whatever is there now (CodeRabbit)."""
+        from unittest.mock import patch
+
+        from server.models import UIElement
+
+        ctrl, backend = self._ctrl({"defer": "vanished"})
+        backend.tap = AsyncMock()
+        el = UIElement(type="Button", label="Slider",
+                       frame={"x": 0, "y": 0, "width": 100, "height": 50})
+        ctrl.get_ui_elements = AsyncMock(side_effect=[([el], UDID), ([], UDID)])
+        with patch("server.device.controller_ui._capture_screenshot",
+                   AsyncMock(return_value=None)), \
+                patch("server.device.controller_ui.asyncio.sleep", AsyncMock()):
+            result = await ctrl.tap_element(label="Slider")
+        assert result["status"] == "not_found", result
+        backend.tap.assert_not_called()
+        assert "vanished" in result.get("fast_path", "")
+        ctrl._invalidate_ui_cache.assert_any_call(UDID)
+
     async def test_the_note_does_not_outlive_its_call(self):
         ctrl, backend = self._ctrl({"defer": "vanished"})
         from server.device.controller_ui import _FAST_PATH_NOTE

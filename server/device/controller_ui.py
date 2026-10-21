@@ -3114,6 +3114,7 @@ class DeviceControllerUI:
             if deferred:
                 if tapped.get("defer") == "vanished":
                     _FAST_PATH_NOTE.set(_VANISHED_NOTE)
+                    self._invalidate_ui_cache(resolved_fast)  # read the tree afresh
                 tapped = None
             # Not in the current view — auto-scroll to it and retry. Uses the
             # selector-based swipe loop (no dump_hierarchy), so it inherits the
@@ -3156,6 +3157,7 @@ class DeviceControllerUI:
                     if _selector_deferred(tapped):
                         if tapped.get("defer") == "vanished":
                             _FAST_PATH_NOTE.set(_VANISHED_NOTE)
+                            self._invalidate_ui_cache(resolved_fast)  # read the tree afresh
                         tapped = None
             if tapped is not None:
                 self._invalidate_ui_cache(resolved_fast)
@@ -3565,6 +3567,16 @@ class DeviceControllerUI:
                 # Folded as the first read was, or a part listed before its
                 # control is taken for the target (#490 review, CodeRabbit).
                 matches_check, _ = _fold_nested_matches(matches_check)
+                if not matches_check and _FAST_PATH_NOTE.get() == _VANISHED_NOTE:
+                    # The fast path saw it vanish, and the re-check finds it
+                    # gone too: pressing where the first read put it would tap
+                    # whatever is there now, and answer ok (CodeRabbit).
+                    return {
+                        "status": "not_found",
+                        "detail": (f"'{el.label or el.identifier or el.type}' moved or "
+                                   "vanished while quern looked for it, and is not on "
+                                   "screen now -- read the screen and try again"),
+                    }
                 if matches_check:
                     # Check if position changed (element is animating)
                     current_frame = matches_check[0].frame
