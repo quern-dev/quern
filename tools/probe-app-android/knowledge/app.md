@@ -21,6 +21,8 @@ global_leads_to:
     action: 'tap_element label="Diag"'
   - screen: "[[screens/location]]"
     action: 'tap_element label="Location"'
+  - screen: "[[screens/taps]]"
+    action: 'tap_element label="Taps"'
 ---
 
 # QuernProbe (Android)
