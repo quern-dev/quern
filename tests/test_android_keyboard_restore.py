@@ -506,6 +506,54 @@ class TestIdleRestore:
         assert device.current == U2 and _file(state_dir) == {SERIAL: GBOARD}
         assert backend._last_typed[SERIAL] == later
 
+    async def test_a_busy_device_backs_off_too(self, state_dir, monkeypatch):
+        """Not only the restore's own failure: a device whose lock stayed
+        held was retried every sweep (CodeRabbit)."""
+        backend, device = self._typed(state_dir, monkeypatch)
+        await backend.type_text(SERIAL, "hi")
+        backend.RESTORE_TIMEOUT_S = 0.2
+        later = time.monotonic() + backend.IDLE_RESTORE_S
+        lock = backend.ime.lock_for(SERIAL)
+        lock.acquire()
+        try:
+            first = await backend.restore_idle_keyboards(now=later)
+        finally:
+            lock.release()
+        assert [a.get("error") for a in first] == ["the device stayed busy"]
+        assert await backend.restore_idle_keyboards(now=later + 30) == [], "no retry yet"
+
+    async def test_a_restore_that_times_out_backs_off_too(self, state_dir, monkeypatch):
+        backend, device = self._typed(state_dir, monkeypatch)
+        await backend.type_text(SERIAL, "hi")
+        backend.RESTORE_TIMEOUT_S = 0.05
+        done = _finished(backend)
+        connect = backend._connect
+        backend._connect = lambda serial: time.sleep(0.3) or connect(serial)
+        later = time.monotonic() + backend.IDLE_RESTORE_S
+        first = await backend.restore_idle_keyboards(now=later)
+        assert [a["error"] for a in first] == ["TimeoutError"]
+        assert done.wait(10)
+        assert backend._last_typed[SERIAL] == later, "backed off"
+
+    async def test_a_type_during_a_failing_restore_keeps_its_stamp(self, state_dir,
+                                                                 monkeypatch):
+        """The back-off writes only over the stamp the sweep judged by."""
+        backend, device = self._typed(state_dir, monkeypatch)
+        await backend.type_text(SERIAL, "hi")
+        device.installed = {U2}                       # the restore will fail
+        later = time.monotonic() + backend.IDLE_RESTORE_S
+        real = backend.ime.restore
+
+        def restore_while_typing(serial, dev):
+            result = real(serial, dev)
+            with backend._typed_lock:                 # a type lands meanwhile
+                backend._last_typed[serial] = later + 5
+            return result
+        backend.ime.restore = restore_while_typing
+        first = await backend.restore_idle_keyboards(now=later)
+        assert [a["ok"] for a in first] == [False]
+        assert backend._last_typed[SERIAL] == later + 5
+
     async def test_typing_after_a_restore_records_again(self, state_dir, monkeypatch):
         backend, device = self._typed(state_dir, monkeypatch)
         await backend.type_text(SERIAL, "hi")

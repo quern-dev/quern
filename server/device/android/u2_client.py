@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import threading
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -344,6 +345,9 @@ class U2Backend:
         self.ime = ImeKeeper()
         #: When quern last typed or cleared on each device (monotonic).
         self._last_typed: dict[str, float] = {}
+        #: Guards `_last_typed`: typing stamps it and the idle sweep clears
+        #: or backs it off, and neither may overwrite the other's newer value.
+        self._typed_lock = threading.Lock()
         from server.device.android.adb import _find_sdk_tool
 
         self._touch = ScrcpyInput(_find_sdk_tool("adb"))
@@ -792,7 +796,8 @@ class U2Backend:
                 try:
                     device.send_keys(text)
                 finally:
-                    self._last_typed[udid] = time.monotonic()
+                    with self._typed_lock:
+                        self._last_typed[udid] = time.monotonic()
 
         try:
             await asyncio.to_thread(_do)
@@ -826,17 +831,7 @@ class U2Backend:
                     # the lock typing takes.
                     if self._last_typed.get(udid) != seen:
                         return None
-                result = self.ime.restore(udid, self._connect(udid))
-                if idle is not None and result is not None:
-                    if result.get("ok"):
-                        self._last_typed.pop(udid, None)
-                    else:
-                        # Wait out another idle period before trying again:
-                        # some failures repeat every time (an uninstalled
-                        # keyboard), and a retry every sweep was ~120 warnings
-                        # an hour (CodeRabbit).
-                        self._last_typed[udid] = now
-                return result
+                return self.ime.restore(udid, self._connect(udid))
             finally:
                 lock.release()
 
@@ -845,10 +840,31 @@ class U2Backend:
             # time, and this runs while a release or a shutdown waits on it.
             # The worker thread can outlive the bound, but it holds nothing the
             # event loop waits on (#513 review).
-            return await asyncio.wait_for(asyncio.to_thread(_do), self.RESTORE_TIMEOUT_S)
+            result = await asyncio.wait_for(asyncio.to_thread(_do), self.RESTORE_TIMEOUT_S)
         except Exception as e:  # noqa: BLE001 -- the connection itself failed
-            return {"udid": udid, "action": "keyboard_restored", "ok": False,
-                    "error": str(e) or type(e).__name__}
+            result = {"udid": udid, "action": "keyboard_restored", "ok": False,
+                      "error": str(e) or type(e).__name__}
+        self._settle_idle(udid, idle, result)
+        return result
+
+    def _settle_idle(self, udid: str, idle: tuple[float | None, float] | None,
+                     result: dict | None) -> None:
+        """After an idle restore, whatever its outcome: a success clears the
+        device's stamp, and any failure -- the restore's own, a busy device, a
+        timeout, a failed connect -- backs it off for another IDLE_RESTORE_S,
+        since some failures repeat every time and a retry every sweep was ~120
+        warnings an hour. Only if the stamp is still the one the sweep judged
+        by: a type in between wrote a newer one, which stands (CodeRabbit)."""
+        if idle is None or result is None:
+            return
+        seen, now = idle
+        with self._typed_lock:
+            if self._last_typed.get(udid) != seen:
+                return
+            if result.get("ok"):
+                self._last_typed.pop(udid, None)
+            else:
+                self._last_typed[udid] = now
 
     async def restore_keyboards(self) -> list[dict]:
         """Every keyboard still recorded, put back: at shutdown, and at startup
@@ -980,7 +996,8 @@ class U2Backend:
                 try:
                     device.clear_text()
                 finally:
-                    self._last_typed[udid] = time.monotonic()
+                    with self._typed_lock:
+                        self._last_typed[udid] = time.monotonic()
 
             # An empty EditText reports its *hint* in `text`, so a cleared field
             # does not read empty -- `field_default` reads 'default'. The hint
