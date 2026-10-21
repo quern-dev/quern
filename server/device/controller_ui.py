@@ -3079,8 +3079,14 @@ class DeviceControllerUI:
             and (identifier or label)
         ):
             backend = self._ui_backend(resolved_fast)
+            # Moments after a change, confirm the target is at rest first
+            # (#514): the dump path re-reads its position and the iOS path
+            # settles, and this path had neither. Free otherwise.
+            just_changed = (time.monotonic() - self._last_ui_change.get(
+                resolved_fast, float("-inf"))) < self._RECENT_CHANGE_S
             tapped = await backend.tap_by_selector(
                 resolved_fast, identifier=identifier, label=label, **hold,
+                confirm_rest=just_changed,
             )
             # More than one match, or matches it could not count, and nothing
             # pressed (#512). The dump path below decides, and answers
@@ -3123,12 +3129,25 @@ class DeviceControllerUI:
                     await asyncio.sleep(0.4)
                     tapped = await backend.tap_by_selector(
                         resolved_fast, identifier=identifier, label=label, **hold,
+                        confirm_rest=True,  # the sweep just moved the screen
                     )
                     if _selector_deferred(tapped):
                         tapped = None
             if tapped is not None:
                 self._invalidate_ui_cache(resolved_fast)
+                rest = tapped.pop("rest", None)
                 result = {"status": "ok", "tapped": tapped}
+                if rest is not None:
+                    result["waited_for_rest_ms"] = rest["waited_ms"]
+                    if not rest["settled"]:
+                        # Pressed anyway, as the iOS settle does; the caller is
+                        # told, since the tap may have reached what moved in.
+                        result["target_moving"] = True
+                        result["warnings"] = [
+                            f"the target was still moving after "
+                            f"{rest['waited_ms']}ms; it was tapped where it last "
+                            f"was, which may not be where it is now -- check "
+                            f"the screen before relying on this tap"]
             # A tap that succeeded only *because* the screen scrolled has
             # moved the screen, and the caller cannot see that from
             # `status: ok` alone. Same defect as the Android branch reporting

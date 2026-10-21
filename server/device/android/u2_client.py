@@ -243,6 +243,37 @@ def _focused_text_and_hint(device: Any) -> tuple[str | None, str | None]:
             return (node.get("text", ""), node.get("hint", ""))
     return (None, None)
 
+#: The at-rest check before a fast-path tap right after a change (#514).
+REST_INTERVAL_S = 0.1
+REST_BUDGET_S = 1.0
+REST_AGREE = 3
+
+
+def _wait_for_rest(read, first) -> dict:
+    """Read a frame until REST_AGREE reads in a row agree, or REST_BUDGET_S
+    passes. Returns {waited_ms, settled, bounds, gone}: `bounds` the last read,
+    `gone` when a read failed -- the element left, or the read did, and either
+    way the selector's answer is no longer the one counted."""
+    started = time.monotonic()
+    seen = [first]
+    while True:
+        tail = seen[-REST_AGREE:]
+        settled = len(tail) == REST_AGREE and all(b == tail[0] for b in tail)
+        if settled or time.monotonic() - started >= REST_BUDGET_S:
+            return {"waited_ms": round((time.monotonic() - started) * 1000),
+                    "settled": settled, "bounds": seen[-1], "gone": False}
+        time.sleep(REST_INTERVAL_S)
+        try:
+            bounds = read()
+        except Exception:  # noqa: BLE001 -- see the docstring
+            return {"waited_ms": round((time.monotonic() - started) * 1000),
+                    "settled": False, "bounds": None, "gone": True}
+        if not bounds:
+            return {"waited_ms": round((time.monotonic() - started) * 1000),
+                    "settled": False, "bounds": None, "gone": True}
+        seen.append(bounds)
+
+
 def _as_the_tree_labels(found: list, label: str) -> list:
     """The label matches the dump path would also call `label`.
 
@@ -555,9 +586,19 @@ class U2Backend:
         identifier: str | None = None,
         label: str | None = None,
         hold: float | None = None,
+        confirm_rest: bool = False,
     ) -> dict | None:
         """Tap an element by native uiautomator2 selector — WITHOUT dumping the
         full hierarchy.
+
+        `confirm_rest` (#514), for a tap moments after the screen changed:
+        before pressing, read the target's frame until three reads
+        `REST_INTERVAL_S` apart agree, for up to `REST_BUDGET_S`. Three, not
+        two: two reads 100ms apart both fall between the jumps of a target
+        that moves every 120ms and read as still. One that never settles is
+        pressed anyway, as the iOS settle does, and `rest.settled` says so;
+        one that vanishes while being read defers to the dump path. The
+        answer gains `rest: {waited_ms, settled}`.
 
         describe_all()/dump_hierarchy() performs a full accessibility traversal
         that scrolls CoordinatorLayout/RecyclerView content out of view on some
@@ -624,6 +665,15 @@ class U2Backend:
                 sel, index, info = found[0]
                 obj = device(**sel, instance=index) if index else device(**sel)
                 info = info or {}
+                rest = None
+                if confirm_rest:
+                    rest = _wait_for_rest(lambda: (obj.info or {}).get("bounds"),
+                                          info.get("bounds"))
+                    if rest.pop("gone"):
+                        return {"defer": "vanished"}
+                    if rest["bounds"]:
+                        info = {**info, "bounds": rest["bounds"]}
+                    del rest["bounds"]
                 try:
                     if hold is None:
                         obj.click()
@@ -647,6 +697,7 @@ class U2Backend:
                     "type": _map_class(cls) if cls else None,
                     "x": cx,
                     "y": cy,
+                    **({"rest": rest} if rest is not None else {}),
                 }
             return None
 
