@@ -197,6 +197,16 @@ class TestRestore:
         assert not any(c[:2] == ["ime", "set"] for c in device.calls)
         assert _file(state_dir) == {}
 
+    def test_a_keyboard_the_device_cannot_name_keeps_the_record(self, state_dir):
+        """Just after a boot the input-method service is not up: no answer is
+        not a hand change, and dropping the record lost the keyboard for good."""
+        keeper = _recorded()
+        device = FakeDevice(U2)
+        device.current = "null"
+        action = keeper.restore(SERIAL, device)
+        assert action["ok"] is False and "did not say" in action["error"]
+        assert _file(state_dir) == {SERIAL: GBOARD}
+
     def test_an_offline_device_keeps_the_record(self, state_dir):
         keeper = _recorded()
         action = keeper.restore(SERIAL, FakeDevice(broken=True))
@@ -216,6 +226,20 @@ def _backend(device):
     backend = U2Backend()
     backend._connect = lambda serial: device
     return backend
+
+
+def _finished(backend) -> threading.Event:
+    """Set when the backend's restore worker returns, however it returns."""
+    done = threading.Event()
+    real = backend.ime.restore
+
+    def restore(*a, **k):
+        try:
+            return real(*a, **k)
+        finally:
+            done.set()
+    backend.ime.restore = restore
+    return done
 
 
 class TestU2Backend:
@@ -302,9 +326,13 @@ class TestU2Backend:
         backend.ime.remember(SERIAL, device)
         backend.RESTORE_TIMEOUT_S = 0.05
         backend._connect = lambda serial: time.sleep(0.5) or device
+        done = _finished(backend)
         action = await backend.restore_keyboard(SERIAL)
         assert action["ok"] is False and action["error"] == "TimeoutError"
         assert _file(state_dir) == {SERIAL: GBOARD}
+        # The worker outlives the await; let it end inside this test, or its
+        # late write lands in another test's state dir (CodeRabbit).
+        assert done.wait(10), "the worker never finished"
 
     async def test_a_hung_shell_never_blocks_the_event_loop(self, state_dir):
         """The first version took its lock on the loop while a worker held it
@@ -314,7 +342,8 @@ class TestU2Backend:
         backend.ime.remember(SERIAL, device)
         device.current = U2
         backend.RESTORE_TIMEOUT_S = 0.2
-        device.hang = 1.0                 # every shell call now hangs
+        device.hang = 0.3                 # every shell call now hangs past the bound
+        done = _finished(backend)
         gaps, last = [], time.monotonic()
 
         async def ticker():
@@ -329,6 +358,7 @@ class TestU2Backend:
         await tick
         assert first["ok"] is False and second["ok"] is False
         assert max(gaps) < 0.15, f"the loop stalled for {max(gaps):.2f}s"
+        assert done.wait(10), "the worker never finished"
 
     async def test_a_restore_waits_for_typing_in_progress(self, state_dir):
         device = FakeDevice(GBOARD)
@@ -445,6 +475,17 @@ class TestIdleRestore:
         later = time.monotonic() + backend.IDLE_RESTORE_S
         assert await backend.restore_idle_keyboards(now=later) == []
         assert _file(state_dir) == {SERIAL: GBOARD}
+
+    async def test_a_failed_restore_waits_another_idle_period(self, state_dir, monkeypatch):
+        """An uninstalled keyboard fails every time; retrying every sweep was
+        ~120 warnings an hour (CodeRabbit)."""
+        backend, device = self._typed(state_dir, monkeypatch)
+        await backend.type_text(SERIAL, "hi")
+        device.installed = {U2}                   # the recorded keyboard is gone
+        later = time.monotonic() + backend.IDLE_RESTORE_S
+        first = await backend.restore_idle_keyboards(now=later)
+        assert [a["ok"] for a in first] == [False]
+        assert await backend.restore_idle_keyboards(now=later + 30) == [], "no retry yet"
 
     async def test_typing_after_a_restore_records_again(self, state_dir, monkeypatch):
         backend, device = self._typed(state_dir, monkeypatch)

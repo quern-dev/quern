@@ -36,7 +36,9 @@ import os
 import re
 import tempfile
 import threading
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -68,11 +70,11 @@ class _Unreadable(Exception):
     """The record file exists and cannot be read: not the same as empty."""
 
 
-def _shell(device, cmd: list[str]):
+def _shell(device: Any, cmd: list[str]) -> Any:
     return device.shell(cmd, timeout=SHELL_TIMEOUT_S)
 
 
-def current_ime(device) -> str | None:
+def current_ime(device: Any) -> str | None:
     """The input method the device is actually using, from the input-method
     service -- not the setting, which a `settings put` makes say anything."""
     out = _shell(device, ["dumpsys", "input_method"]).output
@@ -124,7 +126,7 @@ class ImeKeeper:
             Path(tmp).unlink(missing_ok=True)
             raise
 
-    def _update(self, change) -> None:
+    def _update(self, change: Callable[[dict[str, str]], object]) -> None:
         """Read, change, write, under the file lock. Raises _Unreadable rather
         than overwrite a file it could not read -- other devices' records are
         in it."""
@@ -146,7 +148,7 @@ class ImeKeeper:
 
     # -- the device ----------------------------------------------------------
 
-    def remember(self, serial: str, device) -> None:
+    def remember(self, serial: str, device: Any) -> None:
         """Record the device's keyboard, unless one is recorded already.
 
         Call with `lock_for(serial)` held, from the worker thread about to
@@ -170,7 +172,7 @@ class ImeKeeper:
             logger.warning("Could not record %s's keyboard; quern will not be able to "
                            "put it back after typing", serial, exc_info=True)
 
-    def restore(self, serial: str, device) -> dict | None:
+    def restore(self, serial: str, device: Any) -> dict | None:
         """Select the recorded keyboard again, and forget it once that held.
 
         Call with `lock_for(serial)` held. None when there is nothing recorded.
@@ -185,10 +187,17 @@ class ImeKeeper:
         action = {"udid": serial, "action": "keyboard_restored", "ime": ime}
         try:
             now = current_ime(device)
+            if now is None:
+                # Not "changed by hand": the input-method service had no answer
+                # -- just after a boot it is not registered yet, and a dumpsys
+                # format this does not parse reads the same. `remember` treats
+                # this as unknown; so does this, keeping the record (CodeRabbit).
+                return {**action, "ok": False,
+                        "error": "the device did not say which keyboard it is using"}
             if not is_u2_ime(now):
                 self._update(lambda records: records.pop(serial, None))
                 return {**action, "action": "keyboard_left", "ok": True,
-                        "detail": f"the device is on {now or 'no keyboard'}, not quern's; "
+                        "detail": f"the device is on {now}, not quern's; "
                                   "left as it is"}
             _shell(device, ["ime", "enable", ime])
             chosen = _shell(device, ["ime", "set", ime])

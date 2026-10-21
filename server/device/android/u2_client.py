@@ -878,6 +878,11 @@ class U2Backend:
         for a in actions:
             if a.get("ok"):
                 self._last_typed.pop(a["udid"], None)
+            else:
+                # Wait out another idle period before trying again: some
+                # failures repeat every time (an uninstalled keyboard), and a
+                # retry every sweep was ~120 warnings an hour (CodeRabbit).
+                self._last_typed[a["udid"]] = now
         return actions
 
     async def _online_serials(self) -> set[str] | None:
