@@ -68,6 +68,16 @@ def _reached(probe, expected: str | None) -> None:
     assert hit == want, f"expected {want or 'no button'} to count a tap; counters read {hit}"
 
 
+def _remount_elements(probe) -> list[dict]:
+    return [e for e in probe.ui_tree().get("elements") or []
+            if e.get("identifier") == "tap_remount"]
+
+
+def _at(element: dict) -> tuple:
+    frame = element.get("frame") or {}
+    return (frame.get("x"), frame.get("y"))
+
+
 def _tap(probe, **locator) -> dict:
     """The tap's answer, whatever its HTTP status: a 404 `not_found` or a
     refusal is an answer these tests read, not an error."""
@@ -112,9 +122,15 @@ def test_a_tap_after_a_remount_reaches_the_new_view(taps) -> None:
     The screen is read first, so a tap from anything remembered about the old
     button aims at an empty spot and moves no counter.
     """
-    taps.ui_tree()
+    # Read first, and check the button really moved: if arming did nothing,
+    # a tap on the old view would pass this test too (CodeRabbit).
+    before = _remount_elements(taps)
+    assert len(before) == 1, before
     taps.tap("tap_remount_arm")
     time.sleep(2.0)
+    after = _remount_elements(taps)
+    assert len(after) == 1, after
+    assert _at(after[0]) != _at(before[0]), (before, after)
     body = _tap(taps, label="Remount")
     assert body.get("status") == "ok", body
     _reached(taps, "tap_remount")
@@ -124,6 +140,7 @@ def test_a_tap_during_a_remount_is_honest_about_it(taps) -> None:
     """Sent while the button is gone: waiting for it and missing are both
     fine, and `ok` with nothing tapped is not."""
     taps.tap("tap_remount_arm")
+    assert not _remount_elements(taps), "the button is still there: arming did nothing"
     body = _tap(taps, label="Remount")
     # Measured: Android's selector click waits for the new view (ok), and
     # iOS reads the screen once (not_found). Anything else is a wrong answer.
