@@ -799,7 +799,9 @@ class U2Backend:
         except Exception as e:
             raise DeviceError(f"Type text failed: {e}", tool="u2") from e
 
-    async def restore_keyboard(self, udid: str) -> dict | None:
+    async def restore_keyboard(
+        self, udid: str, *, idle: tuple[float | None, float] | None = None,
+    ) -> dict | None:
         """Put back the keyboard typing replaced on this device (#513).
 
         None when nothing was replaced. Never raises; a failure is the
@@ -817,7 +819,24 @@ class U2Backend:
                 return {"udid": udid, "action": "keyboard_restored", "ok": False,
                         "error": "the device stayed busy"}
             try:
-                return self.ime.restore(udid, self._connect(udid))
+                if idle is not None:
+                    seen, now = idle
+                    # Typed on since the sweep judged it idle: not idle any
+                    # more (CodeRabbit). Checked, and the stamp updated, under
+                    # the lock typing takes.
+                    if self._last_typed.get(udid) != seen:
+                        return None
+                result = self.ime.restore(udid, self._connect(udid))
+                if idle is not None and result is not None:
+                    if result.get("ok"):
+                        self._last_typed.pop(udid, None)
+                    else:
+                        # Wait out another idle period before trying again:
+                        # some failures repeat every time (an uninstalled
+                        # keyboard), and a retry every sweep was ~120 warnings
+                        # an hour (CodeRabbit).
+                        self._last_typed[udid] = now
+                return result
             finally:
                 lock.release()
 
@@ -873,17 +892,9 @@ class U2Backend:
         online = await self._online_serials()
         if online is not None:
             idle = [u for u in idle if u in online]
-        actions = [a for a in await asyncio.gather(*(self.restore_keyboard(u) for u in idle))
-                   if a is not None]
-        for a in actions:
-            if a.get("ok"):
-                self._last_typed.pop(a["udid"], None)
-            else:
-                # Wait out another idle period before trying again: some
-                # failures repeat every time (an uninstalled keyboard), and a
-                # retry every sweep was ~120 warnings an hour (CodeRabbit).
-                self._last_typed[a["udid"]] = now
-        return actions
+        return [a for a in await asyncio.gather(*(
+                    self.restore_keyboard(u, idle=(self._last_typed.get(u), now))
+                    for u in idle)) if a is not None]
 
     async def _online_serials(self) -> set[str] | None:
         """Serials `adb devices` lists as `device`, or None if it could not say

@@ -487,6 +487,25 @@ class TestIdleRestore:
         assert [a["ok"] for a in first] == [False]
         assert await backend.restore_idle_keyboards(now=later + 30) == [], "no retry yet"
 
+    async def test_typing_while_the_restore_waits_for_the_lock_cancels_it(
+            self, state_dir, monkeypatch):
+        """Judged idle, then typed on before the restore got the device: it
+        is not idle any more, and the new stamp survives (CodeRabbit)."""
+        backend, device = self._typed(state_dir, monkeypatch)
+        await backend.type_text(SERIAL, "hi")
+        later = time.monotonic() + backend.IDLE_RESTORE_S
+        lock = backend.ime.lock_for(SERIAL)
+        lock.acquire()                              # typing in progress...
+
+        def finish_typing():
+            backend._last_typed[SERIAL] = later     # ...stamps as it ends
+            lock.release()
+        threading.Timer(0.1, finish_typing).start()
+        actions = await backend.restore_idle_keyboards(now=later)
+        assert actions == []
+        assert device.current == U2 and _file(state_dir) == {SERIAL: GBOARD}
+        assert backend._last_typed[SERIAL] == later
+
     async def test_typing_after_a_restore_records_again(self, state_dir, monkeypatch):
         backend, device = self._typed(state_dir, monkeypatch)
         await backend.type_text(SERIAL, "hi")
@@ -528,6 +547,33 @@ class TestSessionRelease:
         actions = self._release(app)
         assert u2.restored == [SERIAL]
         assert any(a["action"] == "keyboard_restored" for a in actions)
+
+    def test_the_device_stays_unavailable_until_its_keyboard_is_back(self):
+        """Freed first, a new session could reserve it and have its keyboard
+        switched under it (CodeRabbit)."""
+        from server.session_registry import SessionConflict
+
+        u2 = MagicMock()
+        app, registry = self._app(u2)
+        seen = []
+
+        async def restore(udid):
+            registry.open("claude-b", principal="key:other")   # not the owner,
+            try:                                               # who may always
+                registry.reserve("claude-b", [udid])
+                seen.append("reserved during the restore")
+            except SessionConflict:
+                seen.append("refused")
+            return {"udid": udid, "action": "keyboard_restored", "ime": GBOARD, "ok": True}
+        u2.restore_keyboard = restore
+        # A client key's release: the registry holds a device back from other
+        # keys only while a client key's clean-up runs (the owner's frees it).
+        registry.open("claude-a", principal="key:a")
+        registry.reserve("claude-a", [SERIAL])
+        registry.release("claude-a")
+        self._release(app)
+        assert seen == ["refused"]
+        registry.reserve("claude-b", [SERIAL])      # free once it is done
 
     def test_a_device_reserved_again_meanwhile_keeps_u2s_keyboard(self):
         u2 = self._u2()

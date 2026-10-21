@@ -427,8 +427,26 @@ async def run_release_policies(app) -> list[dict]:
     for session in registry.take_released():
         start = len(actions)
         ended: list[dict] = []
+        keyboards: list[dict] = []
         try:
             ended = await _end_client_work(app, registry, session)
+            # The keyboard typing replaced on each Android device it held
+            # (#513), put back before the device is freed below: freed first,
+            # a new session could reserve it and have its keyboard switched
+            # under it (CodeRabbit). A failure here does not keep the device
+            # unavailable -- the record is kept, and the idle sweep and the
+            # next start try again. None when nothing was replaced.
+            u2 = getattr(controller, "u2", None)
+            for udid in session.reservations if u2 is not None else ():
+                if registry.holder_of(udid) is not None:
+                    continue
+                try:
+                    restored = await u2.restore_keyboard(udid)
+                except Exception as e:  # noqa: BLE001 -- reported, never raised
+                    restored = {"udid": udid, "action": "keyboard_restored", "ok": False,
+                                "error": str(e)}
+                if restored is not None:
+                    keyboards.append(restored)
         finally:
             failed = {a["udid"] for a in ended if not a.get("ok")}
             # A device whose clean-up failed stays unavailable, and is tried
@@ -452,19 +470,7 @@ async def run_release_policies(app) -> list[dict]:
                 logger.warning("Could not shut down %s on release: %s", r.udid, e)
                 actions.append({"udid": r.udid, "action": "shutdown", "ok": False,
                                 "error": str(e)})
-        # The keyboard typing replaced on each Android device it held, unless
-        # someone holds the device again (#513). None when nothing was replaced.
-        u2 = getattr(controller, "u2", None)
-        for udid in session.reservations if u2 is not None else ():
-            if registry.holder_of(udid) is not None:
-                continue
-            try:
-                restored = await u2.restore_keyboard(udid)
-            except Exception as e:  # noqa: BLE001 -- reported, never raised
-                restored = {"udid": udid, "action": "keyboard_restored", "ok": False,
-                            "error": str(e)}
-            if restored is not None:
-                actions.append(restored)
+        actions.extend(keyboards)
         for a in actions[start:]:
             a["_session"] = session.id         # whose release it was; stripped before answering
     return actions
