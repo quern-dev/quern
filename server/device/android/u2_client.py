@@ -243,10 +243,22 @@ def _focused_text_and_hint(device: Any) -> tuple[str | None, str | None]:
             return (node.get("text", ""), node.get("hint", ""))
     return (None, None)
 
-#: The at-rest check before a fast-path tap right after a change (#514).
-REST_INTERVAL_S = 0.1
-REST_BUDGET_S = 1.0
+#: The at-rest check before a fast-path tap right after a change (#514): the
+#: target is at rest once every read across REST_SPAN_S agrees, with at least
+#: REST_AGREE reads, read nearly back to back. Spacing matters more than
+#: count: with ~100ms sleeps plus a two-selector read, reads fell ~240ms apart
+#: -- one whole period of the Taps fixture's slider, which jumps every 120ms --
+#: and three reads saw it in one place and called it still, 6 times in 10.
+#: Back to back, reads come one round trip apart (~60ms measured), well inside
+#: the half period, so a target cannot jump between two reads unseen.
+REST_GAP_S = 0.02
+REST_SPAN_S = 0.2
+#: A read that comes back this long after the previous one starts the
+#: agreement over: a target can jump and jump back inside a slow read, and a
+#: read measured at 300ms let three agreeing reads miss two jumps.
+REST_MAX_GAP_S = 0.15
 REST_AGREE = 3
+REST_BUDGET_S = 1.0
 
 
 class _MatchesChanged(Exception):
@@ -258,24 +270,27 @@ class _MatchesChanged(Exception):
 
 
 def _wait_for_rest(read, first) -> dict:
-    """Read a frame until REST_AGREE reads in a row agree, or REST_BUDGET_S
-    passes. Returns {waited_ms, settled, bounds, gone, changed}: `bounds` the
-    last read; `gone` when a read failed or found no frame -- the element
-    left, or the read did, and either way the selector's answer is no longer
-    the one counted; `changed`, the new count, when the match count moved."""
+    """Read a frame until every read across REST_SPAN_S agrees (at least
+    REST_AGREE reads), or REST_BUDGET_S passes. Returns {waited_ms, settled,
+    bounds, gone, changed}: `bounds` the last read; `gone` when a read failed
+    or found no frame -- the element left, or the read did, and either way the
+    selector's answer is no longer the one counted; `changed`, the new count,
+    when the match count moved."""
     started = time.monotonic()
-    seen = [first]
+    current, since, run = first, started, 1
+    last = started
 
     def done(settled, bounds, gone=False, changed=None):
         return {"waited_ms": round((time.monotonic() - started) * 1000),
                 "settled": settled, "bounds": bounds, "gone": gone, "changed": changed}
 
     while True:
-        tail = seen[-REST_AGREE:]
-        settled = len(tail) == REST_AGREE and all(b == tail[0] for b in tail)
-        if settled or time.monotonic() - started >= REST_BUDGET_S:
-            return done(settled, seen[-1])
-        time.sleep(REST_INTERVAL_S)
+        now = time.monotonic()
+        if run >= REST_AGREE and now - since >= REST_SPAN_S:
+            return done(True, current)
+        if now - started >= REST_BUDGET_S:
+            return done(False, current)
+        time.sleep(REST_GAP_S)
         try:
             bounds = read()
         except _MatchesChanged as e:
@@ -284,7 +299,12 @@ def _wait_for_rest(read, first) -> dict:
             return done(False, None, gone=True)
         if not bounds:
             return done(False, None, gone=True)
-        seen.append(bounds)
+        now = time.monotonic()
+        if bounds == current and now - last <= REST_MAX_GAP_S:
+            run += 1
+        else:
+            current, since, run = bounds, now, 1
+        last = now
 
 
 def _as_the_tree_labels(found: list, label: str) -> list:
@@ -605,10 +625,9 @@ class U2Backend:
         full hierarchy.
 
         `confirm_rest` (#514), for a tap moments after the screen changed:
-        before pressing, read the target's frame until three reads
-        `REST_INTERVAL_S` apart agree, for up to `REST_BUDGET_S`. Three, not
-        two: two reads 100ms apart both fall between the jumps of a target
-        that moves every 120ms and read as still. One that never settles is
+        before pressing, read the target's frame back to back until every
+        read across `REST_SPAN_S` agrees, for up to `REST_BUDGET_S` -- see
+        REST_GAP_S for why spacing, not count, decides it. One that never settles is
         pressed anyway, as the iOS settle does, and `rest.settled` says so;
         one that vanishes while being read defers to the dump path. The
         answer gains `rest: {waited_ms, settled}`.
@@ -682,22 +701,31 @@ class U2Backend:
                 if confirm_rest:
                     counted = len(found)
 
-                    def read():
-                        # The selector's whole match list, not `obj.info`: the
-                        # count was taken once, and in a transition a second
-                        # match can arrive or an earlier one leave, shifting
-                        # what one instance names (review). Same one RPC.
+                    def recount():
                         now = [e for s_ in group for e in
                                ((s_, i, inf) for i, inf in
                                 enumerate(device(**s_).info_list() or []))]
                         if label is not None and "description" in group[-1]:
                             now = _as_the_tree_labels(now, label)
-                        if len(now) != counted:
-                            raise _MatchesChanged(len(now))
-                        return (now[0][2] or {}).get("bounds")
+                        return len(now)
 
-                    rest = _wait_for_rest(read, info.get("bounds"))
+                    # The frame through one `info` per read (~50ms): with a
+                    # two-selector recount on every read, reads fell ~120ms
+                    # apart -- the fixture slider's half period -- and saw it
+                    # still, 3 times in 10. The count is taken again once, at
+                    # the end, before the press: a transition can attach a
+                    # second match, or detach the first, while this waits
+                    # (review).
+                    rest = _wait_for_rest(lambda: (obj.info or {}).get("bounds"),
+                                          info.get("bounds"))
                     changed = rest.pop("changed")
+                    if changed is None and not rest["gone"]:
+                        try:
+                            n = recount()
+                        except Exception:  # noqa: BLE001 -- could not tell
+                            return {"defer": "uncounted"}
+                        if n != counted:
+                            changed = n
                     if changed is not None:
                         return {"defer": "ambiguous" if changed > 1 else "vanished",
                                 "matches": changed}

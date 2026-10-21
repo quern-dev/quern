@@ -27,7 +27,8 @@ B = {"left": 184, "top": 48, "right": 284, "bottom": 98}
 
 @pytest.fixture(autouse=True)
 def fast(monkeypatch):
-    monkeypatch.setattr(u2_client, "REST_INTERVAL_S", 0.001)
+    monkeypatch.setattr(u2_client, "REST_GAP_S", 0.001)
+    monkeypatch.setattr(u2_client, "REST_SPAN_S", 0.01)
     monkeypatch.setattr(u2_client, "REST_BUDGET_S", 0.2)
 
 
@@ -43,14 +44,44 @@ def _reads(*frames):
 
 
 class TestWaitForRest:
+    def test_agreement_must_span_the_whole_window(self, monkeypatch):
+        """Three agreeing reads taken faster than REST_SPAN_S are not enough:
+        a target jumping every 120ms reads the same three times in 60ms."""
+        monkeypatch.setattr(u2_client, "REST_SPAN_S", 0.05)
+        reads = _reads(*([A] * 3 + [B] * 3) * 400)
+        rest = _wait_for_rest(reads, A)
+        assert rest["settled"] is False
+
+    def test_a_target_still_across_the_window_settles(self, monkeypatch):
+        monkeypatch.setattr(u2_client, "REST_SPAN_S", 0.02)
+        rest = _wait_for_rest(_reads(*[A] * 5000), A)
+        assert rest["settled"] is True
+
+    def test_a_slow_read_starts_the_agreement_over(self, monkeypatch):
+        """A target can jump and jump back inside a slow read."""
+        monkeypatch.setattr(u2_client, "REST_SPAN_S", 0.02)
+        monkeypatch.setattr(u2_client, "REST_MAX_GAP_S", 0.005)
+        monkeypatch.setattr(u2_client, "REST_GAP_S", 0.01)   # every read is "slow"
+        rest = _wait_for_rest(_reads(*[A] * 5000), A)
+        assert rest["settled"] is False
+
+    def test_reads_are_back_to_back(self, monkeypatch):
+        """Spacing decides it: reads one round trip apart, not 100ms plus."""
+        slept = []
+        monkeypatch.setattr(u2_client.time, "sleep", slept.append)
+        monkeypatch.setattr(u2_client, "REST_GAP_S", 0.02)
+        monkeypatch.setattr(u2_client, "REST_BUDGET_S", 0.01)
+        _wait_for_rest(_reads(*[A] * 5000), A)
+        assert slept and all(t <= 0.03 for t in slept), slept
+
     def test_three_agreeing_reads_are_at_rest(self):
-        read = _reads(A, A, A, A)
+        read = _reads(*[A] * 5000)
         rest = _wait_for_rest(read, A)
         assert rest["settled"] is True and rest["bounds"] == A
-        assert len(read.calls) == 2           # the first frame, then two more
+        assert len(read.calls) >= 2           # the first frame, then two more
 
     def test_a_target_that_moved_and_stopped_is_reported_where_it_stopped(self):
-        rest = _wait_for_rest(_reads(B, B, B, B), A)
+        rest = _wait_for_rest(_reads(*[B] * 5000), A)
         assert rest["settled"] is True and rest["bounds"] == B
 
     def test_two_agreeing_reads_are_not_enough(self):
@@ -78,16 +109,20 @@ class TestWaitForRest:
         assert _wait_for_rest(_reads(None, A, A, A, A), A)["gone"] is True
 
 
-def _device(reads):
-    """A device whose "Slider" selector answers `info_list` with each entry of
-    `reads` in turn: a list of frames, one per match. The first is the count."""
+def _device(frames, counts=None):
+    """A "Slider" selector: `info` answers each of `frames` in turn (the rest
+    reads), and `info_list` each of `counts` -- frame lists, one frame per
+    match: the count before, then the recount before the press. Running out of
+    either raises, which no test may rely on by accident."""
     obj = MagicMock()
-    it = iter(reads)
+    frame_it = iter(frames)
+    count_it = iter(counts if counts is not None else [[A], [A]])
 
     def info_list():
         return [{"bounds": f, "className": "android.widget.Button", "text": "Slider"}
-                for f in next(it)]
+                for f in next(count_it)]
     obj.info_list.side_effect = info_list
+    type(obj).info = property(lambda self: {"bounds": next(frame_it)})
 
     def device(**sel):
         return obj if "text" in sel else MagicMock(**{"info_list.return_value": []})
@@ -102,13 +137,13 @@ def _backend(device) -> U2Backend:
 
 class TestTapBySelector:
     async def test_without_confirm_rest_nothing_is_read_again(self):
-        device, obj = _device([[A]])          # a second read would raise
+        device, obj = _device([], counts=[[A]])   # any further read would raise
         result = await _backend(device).tap_by_selector(UDID, label="Slider")
         obj.click.assert_called_once_with()
         assert "rest" not in result
 
     async def test_a_settled_target_is_pressed_and_reported_where_it_rests(self):
-        device, obj = _device([[A], [B], [B], [B]])
+        device, obj = _device([B] * 5000)
         result = await _backend(device).tap_by_selector(
             UDID, label="Slider", confirm_rest=True)
         obj.click.assert_called_once_with()
@@ -116,30 +151,44 @@ class TestTapBySelector:
         assert (result["x"], result["y"]) == (234, 73)
 
     async def test_a_moving_target_is_pressed_anyway_and_says_so(self):
-        device, obj = _device([[A]] + [[B], [A]] * 1000)
+        device, obj = _device([B, A] * 5000)
         result = await _backend(device).tap_by_selector(
             UDID, label="Slider", confirm_rest=True)
         obj.click.assert_called_once_with()
         assert result["rest"]["settled"] is False
 
     async def test_a_target_that_vanished_defers_without_pressing(self):
-        device, obj = _device([[A], []])
+        device, obj = _device([B] * 5000, counts=[[A], []])
         result = await _backend(device).tap_by_selector(
             UDID, label="Slider", confirm_rest=True)
         assert result == {"defer": "vanished", "matches": 0}
         obj.click.assert_not_called()
 
+    async def test_rest_reads_are_one_rpc_each(self):
+        """A two-selector recount on every read spaced reads ~120ms apart, the
+        fixture slider's half period, and it read as still 3 times in 10."""
+        device, obj = _device([B] * 5000)
+        await _backend(device).tap_by_selector(UDID, label="Slider", confirm_rest=True)
+        assert obj.info_list.call_count == 2, "the count, and the recount before the press"
+
+    async def test_a_recount_that_fails_defers_without_pressing(self):
+        device, obj = _device([A] * 5000, counts=[[A]])     # the recount raises
+        result = await _backend(device).tap_by_selector(
+            UDID, label="Slider", confirm_rest=True)
+        assert result == {"defer": "uncounted"}
+        obj.click.assert_not_called()
+
     async def test_a_second_match_arriving_during_the_wait_is_ambiguous(self):
         """The incoming page of a transition has its own "Next": counted once,
         the press would go to whichever uiautomator found first (review)."""
-        device, obj = _device([[A], [A, B]])
+        device, obj = _device([A] * 5000, counts=[[A], [A, B]])
         result = await _backend(device).tap_by_selector(
             UDID, label="Slider", confirm_rest=True)
         assert result == {"defer": "ambiguous", "matches": 2}
         obj.click.assert_not_called()
 
     async def test_a_read_that_fails_defers_without_pressing(self):
-        device, obj = _device([[A]])          # the second read raises
+        device, obj = _device([])            # the first rest read raises
         result = await _backend(device).tap_by_selector(
             UDID, label="Slider", confirm_rest=True)
         assert result == {"defer": "vanished"}
