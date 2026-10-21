@@ -912,10 +912,15 @@ class U2Backend:
 
             # Sweep down (reveal rows below) then up (rows above / top-anchored
             # controls), re-checking after each swipe.
-            previous = _frame()
-            first_swipe_moved = []
-            for direction, (y1, y2), budget in (("bottom", (y_hi, y_lo), max_swipes),
-                                                ("top", (y_lo, y_hi), max_swipes * 2)):
+            state = {"previous": _frame()}
+            DOWN, UP = ("bottom", (y_hi, y_lo)), ("top", (y_lo, y_hi))
+
+            def sweep(direction, budget):
+                """Swipe one way until the target shows, the frame stops
+                changing (that direction's end), or the budget is spent.
+                Returns (info, first swipe moved?)."""
+                name, (y1, y2) = direction
+                first_moved = None
                 for n in range(budget):
                     _scroll(y1, y2)
                     out["swipes"] += 1
@@ -924,17 +929,26 @@ class U2Backend:
                         # `moved` stays what was measured: a target that
                         # appeared because the screen finished loading did
                         # not prove anything moved (review).
-                        return _result(info)
+                        return info, first_moved
                     current = _frame()
-                    still = _unchanged(previous, current)
-                    previous = current if current is not None else previous
+                    still = _unchanged(state["previous"], current)
+                    if current is not None:
+                        state["previous"] = current
                     if n == 0:
-                        first_swipe_moved.append(not still)
+                        first_moved = not still
                     if still:
-                        out.setdefault("ends", []).append(direction)
+                        out.setdefault("ends", []).append(name)
                         break
                     out["moved"] = True
-            if first_swipe_moved == [False, False]:
+                return None, first_moved
+
+            info, down_moved = sweep(DOWN, max_swipes)
+            if info is not None:
+                return _result(info)
+            info, up_moved = sweep(UP, max_swipes * 2)
+            if info is not None:
+                return _result(info)
+            if down_moved is False and up_moved is False:
                 # Two unchanged frames, but the first may have been a false
                 # read at the top of a list, and the answer is "this does not
                 # scroll". One more swipe down settles it (review).
@@ -944,11 +958,23 @@ class U2Backend:
                 if info is not None:
                     return _result(info)
                 current = _frame()
-                if _unchanged(previous, current):
+                if _unchanged(state["previous"], current):
                     out["no_progress"] = True
-                else:
-                    out["moved"] = True
-                    out["ends"].remove("bottom")
+                    return None
+                # It moved: the bottom "end" was a false read. Carry on the
+                # search -- down with what is left of that budget, then back
+                # up -- rather than stopping short of rows further down
+                # (CodeRabbit).
+                if current is not None:
+                    state["previous"] = current
+                out["moved"] = True
+                out["ends"] = [e for e in out.get("ends", []) if e != "bottom"]
+                for direction, budget in ((DOWN, max(0, max_swipes - 2)),
+                                          (UP, max_swipes * 2)):
+                    out["ends"] = [e for e in out["ends"] if e != direction[0]]
+                    info, _ = sweep(direction, budget)
+                    if info is not None:
+                        return _result(info)
             return None
 
         try:

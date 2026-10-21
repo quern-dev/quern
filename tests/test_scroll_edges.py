@@ -38,9 +38,11 @@ def frames_by_name(monkeypatch):
                         lambda a, b: 0.0 if a.name == b.name else 0.5)
 
 
-def _device(screens, *, found_after: int | None = None):
+def _device(screens, *, found_after: int | None = None, found_below: int | None = None):
     """`screens` names the screen before the first swipe, then after each one.
-    The target appears after `found_after` swipes, if given."""
+    The target appears after `found_after` swipes, if given -- or, with
+    `found_below`, once the list is that many swipes down from where it
+    started (a swipe up brings it back one)."""
     device = MagicMock()
     device.window_size.return_value = (1080, 2400)
     shots = iter(screens)
@@ -55,9 +57,14 @@ def _device(screens, *, found_after: int | None = None):
     device.swipe.side_effect = lambda *a, **k: swipes.append(a)
     device.swipes = swipes
 
+    def below():
+        # A swipe from low to high on screen (y1 > y2) scrolls the list down.
+        return sum(1 if a[1] > a[3] else -1 for a in swipes)
+
     def select(**sel):
         obj = MagicMock()
-        obj.exists = found_after is not None and len(swipes) >= found_after
+        obj.exists = ((found_after is not None and len(swipes) >= found_after)
+                      or (found_below is not None and below() >= found_below))
         obj.info = {"bounds": {"left": 0, "top": 0, "right": 100, "bottom": 50},
                     "text": "Row 150", "className": "android.widget.TextView"}
         return obj
@@ -97,6 +104,17 @@ class TestScrollIntoView:
         found, report = await _sweep(device, max_swipes=1)
         assert "no_progress" not in report
         assert report["ends"] == ["top"] and report["moved"] is True
+
+    async def test_after_a_false_end_the_search_carries_on_down(self):
+        """Down reads still (false), up is at the top, the third swipe moves:
+        the row further down is still found, not given up on (CodeRabbit)."""
+        # down 1 (false still), up 1 (top), verify down 1 (moved): net 1 down.
+        # The row is 3 down, so two more swipes down reach it.
+        device = _device(["a", "a", "a", "b", "c", "d", "e"], found_below=3)
+        found, report = await _sweep(device, max_swipes=5)
+        assert found is not None and found["label"] == "Row 150"
+        assert report["swipes"] == 5
+        assert "no_progress" not in report and "bottom" not in report.get("ends", [])
 
     async def test_a_secure_window_never_reads_as_not_scrolling(self):
         """FLAG_SECURE captures black: blank frames are no frames, and the
