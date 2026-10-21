@@ -777,8 +777,11 @@ class U2Backend:
 
         def _do():
             device = self._connect(udid)
-            self.ime.remember(udid, device)  # send_keys selects u2's keyboard
-            device.send_keys(text)
+            # Held through send_keys, which selects u2's keyboard: a restore
+            # landing between the two would lose the record (#513).
+            with self.ime.lock_for(udid):
+                self.ime.remember(udid, device)
+                device.send_keys(text)
 
         try:
             await asyncio.to_thread(_do)
@@ -791,15 +794,27 @@ class U2Backend:
         None when nothing was replaced. Never raises; a failure is the
         returned action's `ok: False`, and the record is kept to try again.
         """
-        if udid not in self.ime.pending():
+        if udid not in await asyncio.to_thread(self.ime.pending):
             return None
 
         def _do():
-            return self.ime.restore(udid, self._connect(udid))
+            lock = self.ime.lock_for(udid)
+            # Typing in progress finishes first; a device whose lock is held
+            # past half the bound is reported, not waited on -- and the
+            # thread ends, rather than outliving the await blocked for ever.
+            if not lock.acquire(timeout=self.RESTORE_TIMEOUT_S / 2):
+                return {"udid": udid, "action": "keyboard_restored", "ok": False,
+                        "error": "the device stayed busy"}
+            try:
+                return self.ime.restore(udid, self._connect(udid))
+            finally:
+                lock.release()
 
         try:
             # Bounded: an unplugged phone can hold a u2 connect for a long
             # time, and this runs while a release or a shutdown waits on it.
+            # The worker thread can outlive the bound, but it holds nothing the
+            # event loop waits on (#513 review).
             return await asyncio.wait_for(asyncio.to_thread(_do), self.RESTORE_TIMEOUT_S)
         except Exception as e:  # noqa: BLE001 -- the connection itself failed
             return {"udid": udid, "action": "keyboard_restored", "ok": False,
@@ -807,13 +822,49 @@ class U2Backend:
 
     async def restore_keyboards(self) -> list[dict]:
         """Every keyboard still recorded, put back: at shutdown, and at startup
-        for a record an earlier process left. Never raises."""
-        actions = []
-        for udid in self.ime.pending():
-            action = await self.restore_keyboard(udid)
+        for a record an earlier process left. Never raises.
+
+        Devices adb does not list as connected are skipped, their records kept
+        for the next start: waiting on an unplugged phone used the shutdown's
+        budget before a connected one was reached. The rest run at once, for
+        the same reason.
+        """
+        pending = list(await asyncio.to_thread(self.ime.pending))
+        if not pending:
+            return []
+        online = await self._online_serials()
+        actions: list[dict] = []
+        reachable = []
+        for udid in pending:
+            if online is not None and udid not in online:
+                actions.append({"udid": udid, "action": "keyboard_restored", "ok": False,
+                                "error": "not connected; kept for the next start"})
+            else:
+                reachable.append(udid)
+        for action in await asyncio.gather(*(self.restore_keyboard(u) for u in reachable)):
             if action is not None:
                 actions.append(action)
         return actions
+
+    async def _online_serials(self) -> set[str] | None:
+        """Serials `adb devices` lists as `device`, or None if it could not say
+        -- in which case every record is tried."""
+        from server.device.android.adb import _find_sdk_tool
+
+        adb = _find_sdk_tool("adb")
+        if not adb:
+            return None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                adb, "devices",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+            out, _ = await asyncio.wait_for(proc.communicate(), 5.0)
+        except (TimeoutError, OSError):
+            return None
+        if proc.returncode != 0:
+            return None
+        return {line.split("\t")[0] for line in out.decode(errors="replace").splitlines()[1:]
+                if line.endswith("\tdevice")}
 
     async def press_button(self, udid: str, button: str) -> None:
         """Press a hardware button."""
@@ -874,8 +925,9 @@ class U2Backend:
             device = self._connect(udid)
             device.click(int(x), int(y))  # focus the field the caller named
 
-            self.ime.remember(udid, device)  # clear_text selects u2's keyboard
-            device.clear_text()
+            with self.ime.lock_for(udid):  # clear_text selects u2's keyboard
+                self.ime.remember(udid, device)
+                device.clear_text()
 
             # An empty EditText reports its *hint* in `text`, so a cleared field
             # does not read empty -- `field_default` reads 'default'. The hint

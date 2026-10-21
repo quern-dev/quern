@@ -223,7 +223,9 @@ async def _stop_all(sources: Iterable[_Stoppable]) -> None:
 
 def _log_keyboards(actions: list[dict], when: str) -> None:
     for a in actions:
-        if a.get("ok"):
+        if a.get("action") == "keyboard_left":
+            logger.info("Left %s's keyboard as it is %s: %s", a["udid"], when, a.get("detail"))
+        elif a.get("ok"):
             logger.info("Put back %s's keyboard (%s) %s", a["udid"], a["ime"], when)
         else:
             logger.warning("Could not put back %s's keyboard (%s) %s: %s; will try "
@@ -667,6 +669,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     yield
 
+    # Put back the Android keyboards typing replaced (#513). First, and within
+    # 4s: `quern stop` kills the server 5s after asking it to stop. One cut
+    # short keeps its records for the next start.
+    controller_at_exit = getattr(app.state, "device_controller", None)
+    if controller_at_exit is not None:
+        try:
+            _log_keyboards(await asyncio.wait_for(
+                controller_at_exit.u2.restore_keyboards(), 4.0), "at shutdown")
+        except Exception:  # noqa: BLE001 -- shutdown must carry on regardless
+            logger.warning("Could not put back the Android keyboards", exc_info=True)
+
     # Sessions end with the server; a reconnect will be told so (4404).
     from server import device_access as _device_access
     _device_access.install(None)
@@ -723,13 +736,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     if device_controller:
         await device_controller.wda_client.close()
-        # Put back the keyboards typing replaced (#513). Bounded: a shutdown
-        # must finish; one cut short keeps its records for the next start.
-        try:
-            _log_keyboards(await asyncio.wait_for(
-                device_controller.u2.restore_keyboards(), 30.0), "at shutdown")
-        except Exception:  # noqa: BLE001 -- shutdown must carry on regardless
-            logger.warning("Could not put back the Android keyboards", exc_info=True)
         # The gesture servers' adb forwards outlive this process otherwise:
         # adb keeps them until it restarts, one per run (#252).
         try:
