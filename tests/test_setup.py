@@ -3508,24 +3508,40 @@ class TestCouldNotTellIsNotBlocked:
 
 
 class TestTheNewNodeRunsOnceBeforeTheProbe:
-    def test_it_runs_unhurried(self, monkeypatch):
+    BREW = "/opt/homebrew/bin/node"
+
+    def _warm(self, *, which, exists, run=None):
         from server.lifecycle import setup as setup_mod
 
         seen = []
-        monkeypatch.setattr(setup_mod.shutil, "which", lambda name: "/opt/homebrew/bin/node")
-        setup_mod._first_run_of_new_node(run=lambda argv, **kw: seen.append((argv, kw)))
-        (argv, kw), = seen
-        assert argv == ["/opt/homebrew/bin/node", "--version"]
+        setup_mod._first_run_of_new_node(
+            run=run or (lambda argv, **kw: seen.append((argv, kw))),
+            which=lambda name: which, exists=lambda p: p in exists,
+        )
+        return seen
+
+    def test_it_runs_unhurried(self):
+        (argv, kw), = self._warm(which=self.BREW, exists={self.BREW})
+        assert argv == [self.BREW, "--version"]
         assert kw["timeout"] >= 60, "no longer than the probe's own timeout is no help"
 
-    def test_a_slow_or_failing_first_run_does_not_raise(self, monkeypatch):
+    def test_homebrews_node_is_warmed_when_this_path_does_not_have_it(self):
+        """Setup launched from an app has no Homebrew on PATH, but the probe
+        still reads Homebrew's node through the Quern app's directories: that
+        is the binary whose first run must happen here (#518 review)."""
+        seen = self._warm(which=None, exists={self.BREW})
+        assert [argv[0] for argv, _ in seen] == [self.BREW]
+
+    def test_a_different_node_on_path_does_not_stand_in_for_homebrews(self):
+        seen = self._warm(which="/Users/u/.nvm/versions/node/v22.22.0/bin/node",
+                          exists={self.BREW})
+        assert {argv[0] for argv, _ in seen} == {
+            "/Users/u/.nvm/versions/node/v22.22.0/bin/node", self.BREW}
+
+    def test_a_slow_or_failing_first_run_does_not_raise(self):
         import subprocess
-
-        from server.lifecycle import setup as setup_mod
-
-        monkeypatch.setattr(setup_mod.shutil, "which", lambda name: "/opt/homebrew/bin/node")
 
         def slow(argv, **kw):
             raise subprocess.TimeoutExpired(argv, kw["timeout"])
 
-        setup_mod._first_run_of_new_node(run=slow)   # no exception
+        self._warm(which=self.BREW, exists={self.BREW}, run=slow)   # no exception

@@ -2005,20 +2005,39 @@ def _probe_node_sites() -> list | None:
 FIRST_RUN_TIMEOUT = 120
 
 
-def _first_run_of_new_node(run: Callable[..., object] = subprocess.run) -> None:
+#: Where Homebrew puts node, on Apple silicon and on Intel. Named rather than
+#: found on PATH: setup can run without Homebrew on its PATH -- launched from
+#: an app -- while the probe still reaches these through the Quern app's own
+#: directories, so the binary it reads must be the one warmed (#518 review).
+_HOMEBREW_NODES = ("/opt/homebrew/bin/node", "/usr/local/bin/node")
+
+
+def _first_run_of_new_node(
+    run: Callable[..., object] = subprocess.run,
+    which: Callable[[str], str | None] = shutil.which,
+    exists: Callable[[str], bool] = os.path.exists,
+) -> None:
     """Run the node Homebrew just installed once, unhurried, before probing it.
 
     So the re-probe sees the node as it will be from now on, not its first
     launch: on a fresh machine that launch outlasted the probe's timeout, and
-    the report then said the new node did not run. Best effort -- whatever
-    happens here, the probe that follows is what reports.
+    the report then said the new node did not run. Every node the probe might
+    read is run -- the one on this PATH and Homebrew's own -- each once, by
+    real path. Best effort -- whatever happens here, the probe that follows is
+    what reports.
     """
-    node = shutil.which("node")
-    if not node:
-        return
-    with contextlib.suppress(OSError, ValueError, subprocess.SubprocessError):
-        run([node, "--version"], capture_output=True, text=True,
-            timeout=FIRST_RUN_TIMEOUT, stdin=subprocess.DEVNULL)
+    candidates = [which("node"), *(p for p in _HOMEBREW_NODES if exists(p))]
+    seen: set[str] = set()
+    for node in candidates:
+        if not node:
+            continue
+        real = os.path.realpath(node)
+        if real in seen:
+            continue
+        seen.add(real)
+        with contextlib.suppress(OSError, ValueError, subprocess.SubprocessError):
+            run([node, "--version"], capture_output=True, text=True,
+                timeout=FIRST_RUN_TIMEOUT, stdin=subprocess.DEVNULL)
 
 
 def mcp_cannot_start(sites: list | None) -> bool:
