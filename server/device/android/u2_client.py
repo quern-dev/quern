@@ -591,7 +591,10 @@ class U2Backend:
                              for i, info in enumerate(device(**sel).info_list() or [])]
                 except Exception:  # noqa: BLE001 -- a failed count is not a miss
                     # Read as None, this would sweep the screen for an element
-                    # that may be in plain view.
+                    # that may be in plain view. Logged with its cause, so a
+                    # u2 too old for info_list (before 3.5.2) reads differently
+                    # from a dropped RPC (CodeRabbit).
+                    logger.debug("tap_by_selector could not count matches", exc_info=True)
                     return {"defer": "uncounted"}
                 if label is not None and "description" in group[-1]:
                     found = _as_the_tree_labels(found, label)
