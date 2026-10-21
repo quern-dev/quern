@@ -876,8 +876,8 @@ class ProbeDriver:
             if resp.is_success:
                 status = (resp.json() or {}).get("status")
                 if status == "ambiguous":
-                    # Ambiguous is a 200 and taps nothing. The Controls and
-                    # Logs fragments' headings repeat their tab's label, so it
+                    # Ambiguous is a 200 and taps nothing. The Controls, Logs
+                    # and Taps fragments' headings repeat their tab's label, so it
                     # happens when already on that tab -- which is fine only
                     # if that tab really is the selected one.
                     if self._tab_selected(label):

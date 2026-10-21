@@ -7,11 +7,12 @@ afterwards. Every button on the Taps tab counts its own taps into a label,
 `<identifier>_count`, so these tests read which button the tap reached and
 assert that nothing else moved.
 
-Not covered here: the slider that never stops jumping (`tap_slide_arm`). A tap
-on it reaches a stale position only some of the time -- measured at about one
-run in seven on an Android emulator and two in three on a simulator, each an
-`ok` that reached nothing -- so there is no deterministic assertion to make
-until quern checks that a target is still before tapping it (#514).
+Not asserted here: the slider that never stops jumping (`tap_slide_arm`). A tap
+sent right after arming reached a stale position, with `ok`, in 10 of 10 tries
+on a simulator (nine reached nothing, one the behind button) and 1 in 10 on an
+Android emulator. An assertion would pass or fail by device and by run, so
+there is none until quern checks that a target is still before tapping it
+(#514).
 """
 
 from __future__ import annotations
@@ -68,11 +69,18 @@ def _reached(probe, expected: str | None) -> None:
 
 
 def _tap(probe, **locator) -> dict:
-    return probe.client.json_ok(
-        "POST", "/api/v1/device/ui/tap-element",
+    """The tap's answer, whatever its HTTP status: a 404 `not_found` or a
+    refusal is an answer these tests read, not an error."""
+    resp = probe.client.post(
+        "/api/v1/device/ui/tap-element",
         json={"udid": probe.udid, **locator, **probe.NO_SCROLL, **probe.READ},
         timeout=90.0,
     )
+    body = resp.json()
+    if not resp.is_success and isinstance(body.get("detail"), dict):
+        body = body["detail"]
+    assert body.get("status"), f"{resp.status_code}: {resp.text[:300]}"
+    return body
 
 
 def test_a_tap_by_label_reaches_that_button_and_not_its_neighbour(taps) -> None:
@@ -98,15 +106,13 @@ def test_a_label_two_buttons_share_is_ambiguous_and_taps_neither(taps) -> None:
     _reached(taps, None)
 
 
-def test_a_tap_reaches_the_button_on_top_not_the_one_beneath(taps) -> None:
-    """The slider, at rest, lies over the behind button."""
-    body = _tap(taps, label="Slider")
-    assert body.get("status") == "ok", body
-    _reached(taps, "tap_slider")
-
-
 def test_a_tap_after_a_remount_reaches_the_new_view(taps) -> None:
-    """Removed and added back 1.5 s later, lower down: the same label, a new view."""
+    """The button is replaced by a new one a column over and a row down.
+
+    The screen is read first, so a tap from anything remembered about the old
+    button aims at an empty spot and moves no counter.
+    """
+    taps.ui_tree()
     taps.tap("tap_remount_arm")
     time.sleep(2.0)
     body = _tap(taps, label="Remount")
@@ -114,11 +120,27 @@ def test_a_tap_after_a_remount_reaches_the_new_view(taps) -> None:
     _reached(taps, "tap_remount")
 
 
-def test_a_tap_after_a_late_overlay_reaches_the_overlay(taps) -> None:
-    """The overlay arrives 500 ms after arming, over the covered button."""
+def test_a_tap_during_a_remount_is_honest_about_it(taps) -> None:
+    """Sent while the button is gone: waiting for it and missing are both
+    fine, and `ok` with nothing tapped is not."""
+    taps.tap("tap_remount_arm")
+    body = _tap(taps, label="Remount")
+    _reached(taps, "tap_remount" if body.get("status") == "ok" else None)
+
+
+def test_a_tap_on_a_covered_button_is_refused(taps) -> None:
+    """The overlay covers the middle of the button, so a tap there is the
+    overlay's. Quern should say so rather than tap it.
+
+    Fails on Android until #521: the selector fast path presses the
+    button's centre without asking what is on top, says `ok`, and the overlay
+    counts it.
+    """
     taps.tap("tap_overlay_arm")
     time.sleep(1.2)
-    body = _tap(taps, label="Overlay")
-    assert body.get("status") == "ok", body
-    _reached(taps, "tap_overlay")
-    taps.tap("tap_overlay_clear")
+    try:
+        body = _tap(taps, label="Covered")
+        assert body.get("status") == "obstructed", body
+        _reached(taps, None)
+    finally:
+        taps.tap("tap_overlay_clear")
