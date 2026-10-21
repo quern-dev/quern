@@ -124,8 +124,18 @@ def _device(frames, counts=None):
     obj.info_list.side_effect = info_list
     type(obj).info = property(lambda self: {"bounds": next(frame_it)})
 
-    def device(**sel):
+    def select(**sel):
         return obj if "text" in sel else MagicMock(**{"info_list.return_value": []})
+
+    # The fast path presses by coordinates (#516): the one element here takes
+    # the press, and `obj.pressed_at` says where it landed.
+    device = MagicMock(side_effect=select)
+
+    def press(x, y, *hold):
+        obj.pressed_at = (x, y)
+        return obj.long_click(*hold) if hold else obj.click()
+    device.click.side_effect = press
+    device.long_click.side_effect = press
     return device, obj
 
 
@@ -149,6 +159,7 @@ class TestTapBySelector:
         obj.click.assert_called_once_with()
         assert result["rest"]["settled"] is True
         assert (result["x"], result["y"]) == (234, 73)
+        assert obj.pressed_at == (234, 73), "pressed where it came to rest"
 
     async def test_a_moving_target_is_pressed_anyway_and_says_so(self):
         device, obj = _device([B, A] * 5000)

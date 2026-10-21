@@ -270,6 +270,16 @@ class _MatchesChanged(Exception):
         self.count = count
 
 
+def _press_bounds(info: dict) -> dict | None:
+    """The frame a press aims at: the visible part, as u2's own `click()`
+    takes it, else the whole -- or None when neither has its four edges."""
+    for key in ("visibleBounds", "bounds"):
+        b = info.get(key)
+        if isinstance(b, dict) and all(k in b for k in ("left", "top", "right", "bottom")):
+            return b
+    return None
+
+
 def _wait_for_rest(read, first) -> dict:
     """Read a frame until every read across REST_SPAN_S agrees (at least
     REST_AGREE reads), or REST_BUDGET_S passes. Returns {waited_ms, settled,
@@ -724,8 +734,8 @@ class U2Backend:
                     # the end, before the press: a transition can attach a
                     # second match, or detach the first, while this waits
                     # (review).
-                    rest = _wait_for_rest(lambda: (obj.info or {}).get("bounds"),
-                                          info.get("bounds"))
+                    rest = _wait_for_rest(lambda: _press_bounds(obj.info or {}),
+                                          _press_bounds(info))
                     changed = rest.pop("changed")
                     if changed is None and not rest["gone"]:
                         try:
@@ -740,21 +750,29 @@ class U2Backend:
                     if rest.pop("gone"):
                         return {"defer": "vanished"}
                     if rest["bounds"]:
-                        info = {**info, "bounds": rest["bounds"]}
+                        info = {**info, "visibleBounds": rest["bounds"]}
                     del rest["bounds"]
+                # One round trip (#516): press the centre of the frame already
+                # read, rather than `obj.click()`, which waits for the element,
+                # reads its frame again and then presses -- three. The visible
+                # part, as `click()` used, so a row half under a bar is pressed
+                # where it shows.
+                bounds = _press_bounds(info)
+                if not bounds:
+                    return {"defer": "uncounted"}
+                px = (bounds["left"] + bounds["right"]) / 2
+                py = (bounds["top"] + bounds["bottom"]) / 2
                 try:
                     if hold is None:
-                        obj.click()
+                        device.click(px, py)
                     else:
-                        obj.long_click(float(hold))
+                        device.long_click(px, py, float(hold))
                 except Exception as e:
                     # Past this point the press may have reached the device: a
                     # read timeout after it landed looks the same as one before.
                     # Falling back to the tree path would press again (#407).
                     raise _PressMayHaveLanded(e) from e
-                bounds = info.get("bounds") or {}
-                cx = (bounds.get("left", 0) + bounds.get("right", 0)) / 2
-                cy = (bounds.get("top", 0) + bounds.get("bottom", 0)) / 2
+                cx, cy = px, py
                 cls = info.get("className", "")
                 return {
                     "label": info.get("text")

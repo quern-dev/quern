@@ -185,8 +185,9 @@ class TestEachBackendsLongPress:
         device = MagicMock(return_value=obj)
         backend = self._u2(device)
         await backend.tap_by_selector("dev", identifier="map", hold=1.0)
-        obj.long_click.assert_called_once_with(1.0)
-        obj.click.assert_not_called()
+        # At the element's centre, in one call (#516).
+        device.long_click.assert_called_once_with(50.0, 25.0, 1.0)
+        device.click.assert_not_called()
 
 
 class TestEdgeStart:
@@ -436,7 +437,11 @@ class TestU2NeverPressesTwice:
         obj.count = 1
         obj.info = {"bounds": {"left": 0, "right": 100, "top": 0, "bottom": 50}}
         obj.info_list.return_value = [obj.info]  # the fast path counts before it presses (#512)
-        return TestEachBackendsLongPress._u2(MagicMock(return_value=obj)), obj
+        device = MagicMock(return_value=obj)
+        # The fast path presses by coordinates (#516); the element takes it.
+        device.click.side_effect = lambda x, y: obj.click()
+        device.long_click.side_effect = lambda x, y, d: obj.long_click(d)
+        return TestEachBackendsLongPress._u2(device), obj
 
     async def test_a_press_that_failed_after_it_was_sent_is_not_retried(self):
         """tap_element would fall through to the tree path and press again:
