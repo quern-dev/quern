@@ -242,6 +242,64 @@ def _focused_text_and_hint(device: Any) -> tuple[str | None, str | None]:
             return (node.get("text", ""), node.get("hint", ""))
     return (None, None)
 
+def _as_the_tree_labels(found: list, label: str) -> list:
+    """The label matches the dump path would also call `label`.
+
+    The tree labels a node by its text, and by its content-desc only when it
+    has none, so a node reading "Other" with the content-desc "Twin" is not a
+    "Twin" there. Counted here, it made the fast path defer to a tree that
+    found one "Twin" and tapped it, `ok`, past the ambiguity this path had
+    just seen (CodeRabbit). Content-desc matches on nodes with other text are
+    kept only when nothing else matches, so a lone one is still pressed, as
+    before.
+    """
+    def labelled(entry) -> bool:
+        sel, _, info = entry
+        return "description" not in sel or (info or {}).get("text") in (None, "", label)
+
+    def node(entry) -> tuple:
+        info = entry[2] or {}
+        return (repr(info.get("bounds")), info.get("className"))
+
+    # One node whose text and content-desc are both the label is found by both
+    # selectors; it is one match, not two.
+    texts = {node(e) for e in found if "description" not in e[0]}
+    found = [e for e in found if "description" not in e[0] or node(e) not in texts]
+    primary = [e for e in found if labelled(e)]
+    return primary or found
+
+
+def _one_control(found: list) -> bool:
+    """Whether several matches are one control and its own parts.
+
+    Every frame nests inside the largest, and at most one of them takes a tap
+    by itself: a Material tab or bottom-nav item, clickable, around its title,
+    which is not. A clickable control inside a clickable container -- a Switch
+    in its row -- stays two, as on the dump path (#490; CodeRabbit).
+    """
+    infos = [info or {} for _, _, info in found]
+    if sum(1 for i in infos if i.get("clickable")) > 1:
+        return False
+    return _nested([i.get("bounds") or {} for i in infos])
+
+
+def _nested(frames: list[dict]) -> bool:
+    """Whether every frame lies inside the largest: one element and its parts.
+
+    A frame without its four edges is not evidence of nesting.
+    """
+    try:
+        boxes = [(float(f["left"]), float(f["top"]), float(f["right"]), float(f["bottom"]))
+                 for f in frames]
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not boxes:
+        return False
+    outer = max(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
+    return all(outer[0] <= b[0] and outer[1] <= b[1] and b[2] <= outer[2] and b[3] <= outer[3]
+               for b in boxes)
+
+
 class _PressMayHaveLanded(Exception):
     """A selector's click or long click failed after it was sent (#251)."""
 
@@ -492,25 +550,61 @@ class U2Backend:
         Returns a normalized {label, identifier, type, x, y} dict for the tapped
         element, or None if no match was found (caller should fall back to the
         dump-based path).
+
+        Or `{"defer": reason}`, pressing nothing, when this path cannot tell
+        the press is not a guess (#512): `"ambiguous"` when the name matches
+        more than one element, `"uncounted"` when the matches could not be
+        counted. The caller hands those to the dump path, which answers
+        `ambiguous` with the candidates. A label counts its text and
+        content-desc matches together, since either is the label.
+
+        Matches that nest -- every one inside the largest -- are one element
+        and its own parts, and are pressed as before. That is the stock
+        Material bottom-nav item and tab: the item's content-desc copies its
+        title, and the TextView inside it shows the same text. Without the
+        fold every such tab counted 2, and the dump path could not fold it
+        either, since the item reads as a Group rather than a control (review).
+        An element whose text and content-desc are both the label nests in
+        itself.
         """
 
         def _do():
             device = self._connect(udid)
-            selectors: list[dict] = []
+            # Each group is one way of naming the element, tried in order; the
+            # selectors within a group are counted together.
+            groups: list[list[dict]] = []
             if identifier:
                 # quern identifiers are resource-ids with the package stripped
                 # ("button_log"); match the suffix of the full resource-id.
-                selectors.append({"resourceIdMatches": rf".*/{re.escape(identifier)}$"})
+                groups.append([{"resourceIdMatches": rf".*/{re.escape(identifier)}$"}])
             if label:
                 # A label may be visible text OR content-desc — try both.
-                selectors.append({"text": label})
-                selectors.append({"description": label})
+                groups.append([{"text": label}, {"description": label}])
 
-            for sel in selectors:
-                obj = device(**sel)
-                if not obj.exists:
+            for group in groups:
+                # `info_list`, not `exists`: one RPC per selector either way,
+                # and it says how many matched and where, so whether the press
+                # would be a guess costs nothing extra -- and gives the frame
+                # the answer reports, so no separate `info` read either.
+                try:
+                    found = [(sel, i, info) for sel in group
+                             for i, info in enumerate(device(**sel).info_list() or [])]
+                except Exception:  # noqa: BLE001 -- a failed count is not a miss
+                    # Read as None, this would sweep the screen for an element
+                    # that may be in plain view. Logged with its cause, so a
+                    # u2 too old for info_list (before 3.5.2) reads differently
+                    # from a dropped RPC (CodeRabbit).
+                    logger.debug("tap_by_selector could not count matches", exc_info=True)
+                    return {"defer": "uncounted"}
+                if label is not None and "description" in group[-1]:
+                    found = _as_the_tree_labels(found, label)
+                if not found:
                     continue
-                info = obj.info or {}
+                if len(found) > 1 and not _one_control(found):
+                    return {"defer": "ambiguous", "matches": len(found)}
+                sel, index, info = found[0]
+                obj = device(**sel, instance=index) if index else device(**sel)
+                info = info or {}
                 try:
                     if hold is None:
                         obj.click()

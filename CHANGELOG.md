@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **On Android, a `tap_element` label or identifier shown by more than one element answers `ambiguous` instead of tapping the first (#512).** The selector fast path, taken whenever a call has no `element_type`, `value` or substring filter, pressed whichever match uiautomator returned first and said `ok`. Measured on the emulator's Clock app: from the Timer tab, "Timer" is both the toolbar title and the tab, and the call now answers `ambiguous` with the candidates rather than pressing whichever came first. A label counts its text and content-desc matches together. Matches that nest -- a stock Material tab or bottom-nav item, whose content-desc copies the title it contains -- are one element and are pressed as before, as is an element whose text and content-desc are both the label. A duplicated label that happened to tap the right element now asks you to narrow it with `identifier` or `element_type`, as the response says. Unchanged: the fast path still matches case-sensitively, where the tree path does not. It reads each match with the same number of round trips as before: measured on an emulator, ~390ms a tap for a unique match and for a Clock-app tab, as on main.
+
 ## [0.25.0-beta.3] - 2026-10-20
 
 ### Added

@@ -60,7 +60,10 @@ dependencies = [
     # inherited. CLI only -- `idb` is imported in zero Python files; server/device
     # shells out to the binary. The floor constrains the console script, not an API.
     "fb-idb>=1.1.0",
-    "uiautomator2>=3.2",                # inherited
+    # 3.5.2 is the first with UiObject.info_list, which the Android selector
+    # fast path counts its matches with (#512). On an older one every count
+    # failed and every tap fell back to the slower tree read.
+    "uiautomator2>=3.5.2",
     "pyyaml>=6.0",                      # inherited
     # Direct, though it arrives transitively via pymobiledevice3 anyway. The
     # updater compares release versions with it, and a comparison that silently
