@@ -221,6 +221,15 @@ async def _stop_all(sources: Iterable[_Stoppable]) -> None:
                          getattr(source, "adapter_id", type(source).__name__), result)
 
 
+def _log_keyboards(actions: list[dict], when: str) -> None:
+    for a in actions:
+        if a.get("ok"):
+            logger.info("Put back %s's keyboard (%s) %s", a["udid"], a["ime"], when)
+        else:
+            logger.warning("Could not put back %s's keyboard (%s) %s: %s; will try "
+                           "again", a["udid"], a.get("ime"), when, a.get("error"))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage server startup and shutdown."""
@@ -529,6 +538,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "show a UDID instead of a name", exc_info=True,
             )
 
+        # An Android keyboard an earlier process replaced and never put back,
+        # because it crashed or was killed (#513). Last: it waits on devices.
+        _log_keyboards(await device_controller.u2.restore_keyboards(), "at startup")
+
     app.state._warmup_task = asyncio.create_task(_warmup_devices())
 
     # Re-probe the simulator UI backend periodically. Selection used to be
@@ -710,6 +723,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     if device_controller:
         await device_controller.wda_client.close()
+        # Put back the keyboards typing replaced (#513). Bounded: a shutdown
+        # must finish; one cut short keeps its records for the next start.
+        try:
+            _log_keyboards(await asyncio.wait_for(
+                device_controller.u2.restore_keyboards(), 30.0), "at shutdown")
+        except Exception:  # noqa: BLE001 -- shutdown must carry on regardless
+            logger.warning("Could not put back the Android keyboards", exc_info=True)
         # The gesture servers' adb forwards outlive this process otherwise:
         # adb keeps them until it restarts, one per run (#252).
         try:

@@ -327,8 +327,15 @@ class U2Backend:
     #: A swipe from the screen edge is the system's under gesture navigation.
     edge_swipes = True
 
+    #: Seconds a keyboard restore may wait on the device (#513).
+    RESTORE_TIMEOUT_S = 15.0
+
     def __init__(self) -> None:
         self._devices: dict[str, object] = {}  # serial → u2.Device
+        from server.device.android.ime import ImeKeeper
+
+        #: The keyboard each device had before typing replaced it (#513).
+        self.ime = ImeKeeper()
         from server.device.android.adb import _find_sdk_tool
 
         self._touch = ScrcpyInput(_find_sdk_tool("adb"))
@@ -770,12 +777,43 @@ class U2Backend:
 
         def _do():
             device = self._connect(udid)
+            self.ime.remember(udid, device)  # send_keys selects u2's keyboard
             device.send_keys(text)
 
         try:
             await asyncio.to_thread(_do)
         except Exception as e:
             raise DeviceError(f"Type text failed: {e}", tool="u2") from e
+
+    async def restore_keyboard(self, udid: str) -> dict | None:
+        """Put back the keyboard typing replaced on this device (#513).
+
+        None when nothing was replaced. Never raises; a failure is the
+        returned action's `ok: False`, and the record is kept to try again.
+        """
+        if udid not in self.ime.pending():
+            return None
+
+        def _do():
+            return self.ime.restore(udid, self._connect(udid))
+
+        try:
+            # Bounded: an unplugged phone can hold a u2 connect for a long
+            # time, and this runs while a release or a shutdown waits on it.
+            return await asyncio.wait_for(asyncio.to_thread(_do), self.RESTORE_TIMEOUT_S)
+        except Exception as e:  # noqa: BLE001 -- the connection itself failed
+            return {"udid": udid, "action": "keyboard_restored", "ok": False,
+                    "error": str(e) or type(e).__name__}
+
+    async def restore_keyboards(self) -> list[dict]:
+        """Every keyboard still recorded, put back: at shutdown, and at startup
+        for a record an earlier process left. Never raises."""
+        actions = []
+        for udid in self.ime.pending():
+            action = await self.restore_keyboard(udid)
+            if action is not None:
+                actions.append(action)
+        return actions
 
     async def press_button(self, udid: str, button: str) -> None:
         """Press a hardware button."""
@@ -836,6 +874,7 @@ class U2Backend:
             device = self._connect(udid)
             device.click(int(x), int(y))  # focus the field the caller named
 
+            self.ime.remember(udid, device)  # clear_text selects u2's keyboard
             device.clear_text()
 
             # An empty EditText reports its *hint* in `text`, so a cleared field

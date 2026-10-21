@@ -452,6 +452,19 @@ async def run_release_policies(app) -> list[dict]:
                 logger.warning("Could not shut down %s on release: %s", r.udid, e)
                 actions.append({"udid": r.udid, "action": "shutdown", "ok": False,
                                 "error": str(e)})
+        # The keyboard typing replaced on each Android device it held, unless
+        # someone holds the device again (#513). None when nothing was replaced.
+        u2 = getattr(controller, "u2", None)
+        for udid in session.reservations if u2 is not None else ():
+            if registry.holder_of(udid) is not None:
+                continue
+            try:
+                restored = await u2.restore_keyboard(udid)
+            except Exception as e:  # noqa: BLE001 -- reported, never raised
+                restored = {"udid": udid, "action": "keyboard_restored", "ok": False,
+                            "error": str(e)}
+            if restored is not None:
+                actions.append(restored)
         for a in actions[start:]:
             a["_session"] = session.id         # whose release it was; stripped before answering
     return actions
