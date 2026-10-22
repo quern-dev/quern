@@ -1175,8 +1175,9 @@ class TestScrollToElement:
             )
         assert resp.status_code == 200
         assert resp.json()["status"] == "ok"
+        # Unset, not 10: each platform has its own default (#232).
         mock_controller.scroll_to_element.assert_called_once_with(
-            label=None, identifier="button_log", udid=None, max_swipes=10,
+            label=None, identifier="button_log", udid=None, max_swipes=None,
             snapshot_depth=None, deepen=True,
         )
 

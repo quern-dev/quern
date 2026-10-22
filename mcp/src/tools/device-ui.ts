@@ -811,8 +811,10 @@ Returns where the fingers went. An app's recogniser reports a little less than w
       max_swipes: z
         .coerce.number()
         .int()
-        .default(10)
-        .describe("Max scroll attempts before giving up (default 10). On Android a direction can end sooner, at the list's end, and the whole search stops sooner on a screen that does not scroll; the response's `scroll` says which."),
+        .min(1)
+        .max(50)
+        .optional()
+        .describe("Max scroll attempts before giving up. Default 10 on iOS and 30 on Android, whose swipes cover fewer rows (#232). On Android a direction can end sooner, at the list's end, and the whole search stops sooner on a screen that does not scroll; the response's `scroll` says which."),
       snapshot_depth: z
         .coerce.number()
         .int()
@@ -831,7 +833,8 @@ Returns where the fingers went. An app's recogniser reports a little less than w
     }),
   }, async ({ label, identifier, max_swipes, udid, snapshot_depth, deepen }) => {
     try {
-      const body: Record<string, unknown> = { max_swipes };
+      const body: Record<string, unknown> = {};
+      if (max_swipes !== undefined) body.max_swipes = max_swipes;
       if (label) body.label = label;
       if (identifier) body.identifier = identifier;
       if (udid) body.udid = udid;

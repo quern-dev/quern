@@ -395,6 +395,14 @@ def _nested(frames: list[dict]) -> bool:
 FRAME_SLOW_S = 1.0
 BLANK_RANGE = 8
 
+#: The sweep's default budget of swipes down (up gets twice it). A swipe moves
+#: about 7.5 rows of a typical list (measured on the probe's 200-row list), so
+#: the old default of 10 reached about row 75 and a deeper row read as absent
+#: (#232). The end detection from #515 stops a direction at its end, so a
+#: generous default costs nothing on a short list -- only a long one, where
+#: the time is the point.
+DEFAULT_MAX_SWIPES = 30
+
 
 class _PressMayHaveLanded(Exception):
     """A selector's click or long click failed after it was sent (#251)."""
@@ -819,7 +827,7 @@ class U2Backend:
         udid: str,
         identifier: str | None = None,
         label: str | None = None,
-        max_swipes: int = 10,
+        max_swipes: int = DEFAULT_MAX_SWIPES,
         report: dict | None = None,
     ) -> dict | None:
         """Scroll a scrollable container until the target element is on-screen —

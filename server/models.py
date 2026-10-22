@@ -2477,7 +2477,10 @@ class ScrollToElementRequest(BaseModel):
     label: str | None = None
     identifier: str | None = None
     udid: str | None = None
-    max_swipes: int = Field(default=10, ge=1, le=50)
+    max_swipes: int | None = Field(default=None, ge=1, le=50, description=(
+        "Swipe budget. Default 10 on iOS, whose swipes cover about 17 rows, and "
+        "30 on Android, whose cover about 7.5 (#232); an Android direction also "
+        "stops at the list's end."))
     snapshot_depth: int | None = Field(
         default=None, ge=1, le=50,
         description=(
