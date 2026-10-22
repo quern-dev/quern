@@ -248,6 +248,9 @@ struct Panel {
     /// Points, laid out as the framebuffer is (portrait for both Duo panels).
     let nativeSize: CGSize
     let lit: Bool
+    /// The device's other built-in panels' native sizes: what SpringBoard's
+    /// stale root reports while this one is lit (see `AXFrameTransform`).
+    var otherNativeSizes: [CGSize] = []
 
     var target: UInt32 { 0x4000_0000 | screenID }
     var landscape: Bool { orientation == 3 || orientation == 4 }
@@ -294,23 +297,48 @@ struct Panel {
 /// typed IMPs: the descriptor and its properties are XPC proxies that claim
 /// every selector, so `value(forKey:)` on a wrong guess raises rather than
 /// returning nil. `screenType` 0 is a built-in panel.
+///
+/// Neither `responds(to:)` nor `class_getMethodImplementation` can say
+/// whether a proxy has a method -- the first answers yes to everything, the
+/// second returns the forwarding IMP -- and an unrecognised selector raises
+/// an exception Swift cannot catch, which would end the bridge on every tap.
+/// So what is called is checked against the interfaces CoreSimulator declares
+/// (review): an Xcode whose `SimScreen` / `SimScreenProperties` lack any of
+/// these has no panels as far as this file is concerned, and every caller
+/// stays on the single-screen path. The return types are the declared ones
+/// (`I` for screenID and uiOrientation, `Q` for screenType).
+let screenPropertiesAvailable: Bool = {
+    guard let screen = objc_getProtocol("SimScreen"),
+          let props = objc_getProtocol("SimScreenProperties") else { return false }
+    func declares(_ proto: Protocol, _ name: String, _ type: String) -> Bool {
+        let d = protocol_getMethodDescription(proto, NSSelectorFromString(name), true, true)
+        guard d.name != nil, let types = d.types else { return false }
+        return String(cString: types).hasPrefix(type)
+    }
+    return declares(screen, "screenProperties", "@")
+        && declares(props, "screenID", "I") && declares(props, "uiOrientation", "I")
+        && declares(props, "screenType", "Q") && declares(props, "deviceName", "@")
+}()
+
 func screenProperties(of descriptor: NSObject)
     -> (screenID: UInt32, deviceName: String, screenType: UInt64, orientation: UInt32)? {
+    guard screenPropertiesAvailable,
+          let screen = objc_getProtocol("SimScreen"), descriptor.conforms(to: screen) else { return nil }
     let propsSel = NSSelectorFromString("screenProperties")
     guard let props = descriptor.perform(propsSel)?.takeUnretainedValue() as? NSObject,
           let cls = object_getClass(props) else { return nil }
     typealias U32Fn = @convention(c) (AnyObject, Selector) -> UInt32
     typealias U64Fn = @convention(c) (AnyObject, Selector) -> UInt64
     typealias ObjFn = @convention(c) (AnyObject, Selector) -> AnyObject?
-    func u32(_ name: String) -> UInt32? {
+    func imp(_ name: String) -> (IMP, Selector)? {
         let sel = NSSelectorFromString(name)
-        guard let imp = class_getMethodImplementation(cls, sel) else { return nil }
-        return unsafeBitCast(imp, to: U32Fn.self)(props, sel)
+        return class_getMethodImplementation(cls, sel).map { ($0, sel) }
     }
-    let typeSel = NSSelectorFromString("screenType"), nameSel = NSSelectorFromString("deviceName")
-    guard let id = u32("screenID"), let orientation = u32("uiOrientation"),
-          let typeImp = class_getMethodImplementation(cls, typeSel),
-          let nameImp = class_getMethodImplementation(cls, nameSel) else { return nil }
+    guard let (idImp, idSel) = imp("screenID"), let (oImp, oSel) = imp("uiOrientation"),
+          let (typeImp, typeSel) = imp("screenType"),
+          let (nameImp, nameSel) = imp("deviceName") else { return nil }
+    let id = unsafeBitCast(idImp, to: U32Fn.self)(props, idSel)
+    let orientation = unsafeBitCast(oImp, to: U32Fn.self)(props, oSel)
     let type = unsafeBitCast(typeImp, to: U64Fn.self)(props, typeSel)
     let name = unsafeBitCast(nameImp, to: ObjFn.self)(props, nameSel) as? String ?? ""
     return (id, name, type, orientation)
@@ -337,7 +365,8 @@ func surfaceIsLit(_ surface: IOSurface) -> Bool {
 
 /// Every built-in panel's display descriptor, with what it says about itself.
 func integratedPanels(device: NSObject) -> [(Panel, NSObject)] {
-    guard let io = device.perform(NSSelectorFromString("io"))?.takeUnretainedValue() as? NSObject
+    guard screenPropertiesAvailable,
+          let io = device.perform(NSSelectorFromString("io"))?.takeUnretainedValue() as? NSObject
     else { return [] }
     io.perform(NSSelectorFromString("updateIOPorts"))
     guard let ports = io.value(forKey: "deviceIOPorts") as? [NSObject] else { return [] }
@@ -373,26 +402,41 @@ nonisolated(unsafe) var lastLitPanel: [String: UInt32] = [:]
 /// definite one: a device still booting reports none, and is asked again.
 nonisolated(unsafe) var singlePanelDevices: Set<String> = []
 
-/// The lit panel of a device with more than one built-in panel; nil for every
-/// other device, which keeps the single-screen path exactly as it was.
-func litPanelAndDescriptor(udid: String, device: NSObject) -> (Panel, NSObject)? {
-    if singlePanelDevices.contains(udid) { return nil }
-    let panels = integratedPanels(device: device)
-    if panels.count == 1 { singlePanelDevices.insert(udid) }
+/// Which panel is lit, from what each says about itself -- pure, so the
+/// self-test drives it. Nil for fewer than two panels: a phone, and the one
+/// case this must never get wrong, since every caller then keeps the
+/// single-screen path. Neither or both lit (mid-fold, or a lit panel showing
+/// a black screen): the one lit last, else the cover, which a Duo boots on.
+func choosePanel(_ panels: [Panel], last: UInt32?) -> Panel? {
     guard panels.count > 1 else { return nil }
-    let lit = panels.filter { $0.0.lit }
-    let chosen: (Panel, NSObject)
+    let lit = panels.filter { $0.lit }
+    var chosen: Panel
     if lit.count == 1 {
         chosen = lit[0]
-    } else if let last = lastLitPanel[udid], let p = panels.first(where: { $0.0.screenID == last }) {
+    } else if let last, let p = panels.first(where: { $0.screenID == last }) {
         chosen = p
     } else {
-        // Neither or both, never seen before: the cover, which is what a Duo
-        // boots on.
-        chosen = panels.first(where: { $0.0.deviceName == "primary" }) ?? panels[0]
+        chosen = panels.first(where: { $0.deviceName == "primary" }) ?? panels[0]
     }
-    lastLitPanel[udid] = chosen.0.screenID
+    chosen.otherNativeSizes = panels.filter { $0.screenID != chosen.screenID }.map { $0.nativeSize }
     return chosen
+}
+
+/// The lit panel of a device with more than one built-in panel, its
+/// descriptor, and every built-in panel; nil lit for every other device.
+func readPanels(udid: String, device: NSObject) -> (lit: (Panel, NSObject)?, all: [Panel]) {
+    if singlePanelDevices.contains(udid) { return (nil, []) }
+    let found = integratedPanels(device: device)
+    if found.count == 1 { singlePanelDevices.insert(udid) }
+    let all = found.map { $0.0 }
+    guard let chosen = choosePanel(all, last: lastLitPanel[udid]),
+          let desc = found.first(where: { $0.0.screenID == chosen.screenID })?.1 else { return (nil, all) }
+    lastLitPanel[udid] = chosen.screenID
+    return ((chosen, desc), all)
+}
+
+func litPanelAndDescriptor(udid: String, device: NSObject) -> (Panel, NSObject)? {
+    readPanels(udid: udid, device: device).lit
 }
 
 func litPanel(udid: String, device: NSObject) -> Panel? {
@@ -449,7 +493,166 @@ func panelSelfTest() -> [String] {
         failures.append("single panel: \(mid) target \(flat.target)")
     }
     if panel(3).target != 0x4000_0003 { failures.append("target \(panel(3).target)") }
+
+    // Frames with a size: a SpringBoard icon, panel -> screen -> panel, and
+    // its width and height swap in landscape (review: only zero-size rects
+    // were checked, so min/max and swap errors survived).
+    let icon = CGRect(x: 257.3, y: 800.0, width: 64, height: 90)
+    for o: UInt32 in 1...4 {
+        let p = panel(o)
+        let onScreen = p.toScreen(icon)
+        let swapped = p.landscape
+        if !near(onScreen.width, swapped ? 90 : 64, 0.01) || !near(onScreen.height, swapped ? 64 : 90, 0.01) {
+            failures.append("orientation \(o): size \(onScreen.size)")
+        }
+        if onScreen.minX < 0 || onScreen.minY < 0 || onScreen.maxX > p.screenSize.width + 0.01
+            || onScreen.maxY > p.screenSize.height + 0.01 {
+            failures.append("orientation \(o): \(onScreen) leaves the \(p.screenSize) screen")
+        }
+        // Each corner of the screen rect, taken back, is a corner of the icon.
+        let corners = [CGPoint(x: onScreen.minX, y: onScreen.minY), CGPoint(x: onScreen.maxX, y: onScreen.maxY)]
+            .map { p.toPanel($0) }
+        let back = CGRect(x: min(corners[0].x, corners[1].x), y: min(corners[0].y, corners[1].y),
+                          width: abs(corners[0].x - corners[1].x), height: abs(corners[0].y - corners[1].y))
+        if !near(back.minX, icon.minX, 0.01) || !near(back.minY, icon.minY, 0.01)
+            || !near(back.width, icon.width, 0.01) || !near(back.height, icon.height, 0.01) {
+            failures.append("orientation \(o): \(icon) -> \(onScreen) -> \(back)")
+        }
+    }
+
+    // Screenshot rotation: a marker pixel at the framebuffer's top-left lands
+    // where `toScreen` puts that corner, every orientation.
+    for o: UInt32 in 1...4 {
+        let small = Panel(screenID: 3, deviceName: "primary-1", orientation: o,
+                          nativeSize: CGSize(width: 4, height: 2), lit: true)
+        guard let marked = markerImage(width: 4, height: 2),
+              let turned = rotated(marked, orientation: o),
+              let at = markerPosition(turned) else {
+            failures.append("orientation \(o): screenshot rotation could not run"); continue
+        }
+        let expected = small.toScreen(CGRect(x: 0, y: 0, width: 1, height: 1)).origin
+        if Int(expected.x) != at.x || Int(expected.y) != at.y || turned.width != Int(small.screenSize.width) {
+            failures.append("orientation \(o): marker at \(at) in \(turned.width)x\(turned.height), expected \(expected)")
+        }
+    }
+
+    // The AX rule: rotate only a root the size of another panel (SpringBoard).
+    var inner = panel(3)
+    inner.otherNativeSizes = [CGSize(width: 466, height: 678)]
+    let springboard = AXFrameTransform(rootFrame: CGRect(x: 0, y: 0, width: 466, height: 678),
+                                       pointSize: .zero, panel: inner,
+                                       panelSpace: AXFrameTransform.panelSpace(
+                                           root: CGRect(x: 0, y: 0, width: 466, height: 678), panel: inner))
+    let app = AXFrameTransform(rootFrame: CGRect(x: 0, y: 0, width: 669, height: 951),
+                               pointSize: .zero, panel: inner,
+                               panelSpace: AXFrameTransform.panelSpace(
+                                   root: CGRect(x: 0, y: 0, width: 669, height: 951), panel: inner))
+    let odd = AXFrameTransform.panelSpace(root: CGRect(x: 0, y: 0, width: 402, height: 874), panel: inner)
+    if !springboard.panelSpace || app.panelSpace || odd {
+        failures.append("panelSpace: springboard \(springboard.panelSpace) app \(app.panelSpace) other \(odd)")
+    }
+    let r = CGRect(x: 10, y: 20, width: 30, height: 40)
+    if app.map(r) != r { failures.append("an app's frames were turned: \(app.map(r))") }
+    if springboard.map(r) != inner.toScreen(r) { failures.append("SpringBoard's frames were not turned") }
+    // Hit-tests take panel points whichever the tree's space (measured).
+    let hit = CGPoint(x: 691, y: 374)
+    if app.unmap(hit) != inner.toPanel(hit) || springboard.unmap(hit) != inner.toPanel(hit) {
+        failures.append("unmap is not toPanel: \(app.unmap(hit)), \(springboard.unmap(hit))")
+    }
+
+    // Choosing the lit panel.
+    func p(_ id: UInt32, _ name: String, _ lit: Bool) -> Panel {
+        Panel(screenID: id, deviceName: name, orientation: 1,
+              nativeSize: CGSize(width: id == 1 ? 466 : 669, height: id == 1 ? 678 : 951), lit: lit)
+    }
+    if choosePanel([p(1, "PurpleMain", true)], last: nil) != nil {
+        failures.append("a one-panel device chose a panel")
+    }
+    if choosePanel([], last: 3) != nil { failures.append("no panels chose one") }
+    if choosePanel([p(1, "primary", false), p(3, "primary-1", true)], last: 1)?.screenID != 3 {
+        failures.append("the lit panel was not chosen")
+    }
+    if choosePanel([p(1, "primary", false), p(3, "primary-1", false)], last: 3)?.screenID != 3 {
+        failures.append("neither lit: the last lit was not kept")
+    }
+    if choosePanel([p(1, "primary", true), p(3, "primary-1", true)], last: nil)?.screenID != 1 {
+        failures.append("both lit, nothing known: not the cover")
+    }
+    if choosePanel([p(3, "primary-1", false), p(1, "primary", false)], last: nil)?.screenID != 1 {
+        failures.append("neither lit, nothing known: not the cover")
+    }
+    if let chosen = choosePanel([p(1, "primary", false), p(3, "primary-1", true)], last: nil),
+       chosen.otherNativeSizes != [CGSize(width: 466, height: 678)] {
+        failures.append("other sizes: \(chosen.otherNativeSizes)")
+    }
+
+    // Lit or black, on a synthetic framebuffer.
+    for (value, expected) in [(0, false), (6, false), (20, true), (255, true)] {
+        guard let surface = filledSurface(width: 64, height: 64, value: UInt8(value)) else {
+            failures.append("could not make a test surface"); break
+        }
+        if surfaceIsLit(surface) != expected { failures.append("surface of \(value) read lit=\(!expected)") }
+    }
+
+    // The target is what reaches the message: 0x6c and 0x10c (review: a
+    // wrapAndPatch writing 0x32 regardless survived).
+    if resolveHIDSymbols(),
+       let event = makeDigitizerEvent(point: CGPoint(x: 0.5, y: 0.5), identifier: 1, isDown: true) {
+        for t: UInt32 in [touchDigitizer, 0x4000_0003] {
+            guard let msg = withExtendedLifetime(event, { wrapAndPatch(event: event, target: t) }) else {
+                failures.append("no message for target \(t)"); continue
+            }
+            let a = msg.load(fromByteOffset: 0x6c, as: UInt32.self)
+            let b = malloc_size(msg) >= 0x110 ? msg.load(fromByteOffset: 0x10c, as: UInt32.self) : t
+            free(msg)
+            if a != t || b != t { failures.append("target \(t) wrote \(a), \(b)") }
+        }
+    } else {
+        failures.append("SimulatorKit's digitizer builders did not load")
+    }
     return failures
+}
+
+/// A width x height image, black but for one white pixel at the top-left.
+func markerImage(width: Int, height: Int) -> CGImage? {
+    guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+          let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+                              bytesPerRow: width * 4, space: space,
+                              bitmapInfo: CGBitmapInfo.byteOrder32Little.rawValue
+                                  | CGImageAlphaInfo.premultipliedFirst.rawValue),
+          let data = ctx.data else { return nil }
+    memset(data, 0, width * height * 4)
+    let px = data.assumingMemoryBound(to: UInt8.self)   // row 0 is the top
+    px[0] = 255; px[1] = 255; px[2] = 255; px[3] = 255
+    return ctx.makeImage()
+}
+
+/// Where an image's white pixel is, top-left origin.
+func markerPosition(_ image: CGImage) -> (x: Int, y: Int)? {
+    let w = image.width, h = image.height
+    guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+          let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                              space: space, bitmapInfo: CGBitmapInfo.byteOrder32Little.rawValue
+                                  | CGImageAlphaInfo.premultipliedFirst.rawValue) else { return nil }
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+    guard let data = ctx.data else { return nil }
+    let px = data.assumingMemoryBound(to: UInt8.self)
+    for y in 0..<h { for x in 0..<w where px[(y * w + x) * 4 + 1] > 128 { return (x, y) } }
+    return nil
+}
+
+/// An IOSurface of BGRA pixels all set to `value` (alpha opaque).
+func filledSurface(width: Int, height: Int, value: UInt8) -> IOSurface? {
+    let props: [IOSurfacePropertyKey: Any] = [
+        .width: width, .height: height, .bytesPerElement: 4,
+        .pixelFormat: 0x4247_5241,  // 'BGRA'
+    ]
+    guard let surface = IOSurface(properties: props) else { return nil }
+    surface.lock(options: [], seed: nil)
+    let base = surface.baseAddress.assumingMemoryBound(to: UInt8.self)
+    for i in 0..<(surface.bytesPerRow * height) { base[i] = (i % 4 == 3) ? 255 : value }
+    surface.unlock(options: [], seed: nil)
+    return surface
 }
 
 /// Where a touch goes and how a point gets there: the size callers' points
@@ -652,20 +855,22 @@ struct AXFrameTransform {
     /// - an app (Settings, Safari) reports its root at the panel's native
     ///   portrait size and every element in the interface's own points --
     ///   already the space callers work in;
-    /// - SpringBoard's home screen reports a stale root, the cover's size, and
-    ///   its elements in the panel's native portrait points, which have to be
-    ///   turned to the interface's orientation.
+    /// - SpringBoard's home screen reports a stale root, the *other* panel's
+    ///   size (the cover's, unfolded), and its elements in the lit panel's
+    ///   native portrait points, which have to be turned.
     ///
-    /// So `panelSpace` is decided per read from the root (`forRoot`), and the
-    /// root's own frame is never used for scale.
+    /// So `panelSpace` is decided per read from the root, keyed on that
+    /// positive signal: a root the size of another panel. Anything else --
+    /// an app, or a case never measured (a letterboxed or portrait-locked
+    /// app) -- is left as an app is (review). The root's frame is never used
+    /// for scale.
     var panel: Panel? = nil
     var panelSpace: Bool = false
 
-    /// Whether a lit panel's tree is in its native points: true unless the
-    /// root reports the panel's native size, as an app's does.
     static func panelSpace(root: CGRect, panel: Panel) -> Bool {
-        !(abs(root.width - panel.nativeSize.width) <= 1
-          && abs(root.height - panel.nativeSize.height) <= 1)
+        panel.otherNativeSizes.contains {
+            abs(root.width - $0.width) <= 1 && abs(root.height - $0.height) <= 1
+        }
     }
 
     func map(_ macFrame: CGRect) -> CGRect {
@@ -713,8 +918,10 @@ func walkElement(
     let role = axString(element, "accessibilityRole") ?? "AXUnknown"
     let macFrame = axFrame(of: element)
     // The application is the interface's bounds on a lit panel: its own frame
-    // is the cover's whatever is lit, and quern keeps the screen's size from it.
-    // Not "depth 0": a hit-test walks from the element it hit.
+    // is the panel's native portrait size for an app and the other panel's
+    // for SpringBoard -- never the turned screen -- and quern keeps the
+    // screen's size from it. Not "depth 0": a hit-test walks from the element
+    // it hit.
     let projected = (role == "AXApplication" && transform.panel != nil)
         ? CGRect(origin: .zero, size: transform.panel!.screenSize)
         : transform.map(macFrame)
@@ -2016,7 +2223,17 @@ func handleCommand(_ dict: [String: Any]) {
                 return
             }
             do {
-                let size = touchSpace(udid: udid, device: device).size
+                let space = touchSpace(udid: udid, device: device)
+                // Refused, not sent: no edge gesture reached an iPhone Duo in
+                // any state, folded or not, by the old path or this one
+                // (#536). Answering ok for a gesture that never happens is
+                // the failure this bridge keeps being fixed for.
+                if space.panel != nil {
+                    respond(failure("edge swipes do not reach a device with several panels (iPhone Duo): none did, folded or unfolded. Navigate with taps, or press home",
+                                    badRequest: true))
+                    return
+                }
+                let size = space.size
                 let w = Double(size.width), h = Double(size.height), m = 0.03
                 let atEdge: Bool
                 switch name {
@@ -2116,10 +2333,12 @@ func handleCommand(_ dict: [String: Any]) {
             respond(["ok": false, "error": "missing 'udid' or device not found"])
             return
         }
-        let all = integratedPanels(device: device).map { $0.0 }
-        let lit = litPanel(udid: udid, device: device)
-        respond(["ok": true, "panels": all.map { $0.json() },
-                 "lit": lit.map { $0.json(includeLit: false) } as Any])
+        // One enumeration: `panels` is asked before every screenshot of a
+        // device not yet known to have one panel (review).
+        let read = readPanels(udid: udid, device: device)
+        let count = singlePanelDevices.contains(udid) ? 1 : read.all.count
+        respond(["ok": true, "count": count, "panels": read.all.map { $0.json() },
+                 "lit": read.lit.map { $0.0.json(includeLit: false) } as Any])
 
     case "screenshot":
         guard let udid = dict["udid"] as? String else {
@@ -2165,5 +2384,7 @@ while let line = readLine() {
         respond(["ok": false, "error": "invalid JSON"])
         continue
     }
-    handleCommand(dict)
+    // Drained per command: each now reads CoreSimulator's port and screen
+    // proxies, which nothing else would release over a long session (review).
+    autoreleasepool { handleCommand(dict) }
 }

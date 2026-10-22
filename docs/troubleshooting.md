@@ -88,8 +88,9 @@ Xcode 27.1's **iPhone Duo** has two screens: a cover, lit when folded (the
 boot state), and a larger inner panel, lit when unfolded and turned to
 landscape. Quern follows whichever is lit (#536). Taps, accessibility reads,
 hit-tests and screenshots are all of that panel, in its points as the screen
-is turned, so element frames and tap coordinates mean what you see. Nothing
-changes for a phone with one screen.
+is turned, so element frames and tap coordinates mean what you see. Typing
+and the Home button work folded and unfolded. A phone with one screen behaves
+as before.
 
 What to know:
 
@@ -100,8 +101,11 @@ What to know:
   over about a second. An action sent in that window can land on the screen
   that was there before, and quern's settle wait does not cover a fold made
   outside quern.
-- **Edge swipes do not work on the Duo**, folded or not. That was true before
-  this support existed too.
+- **Edge swipes are refused on the Duo.** No edge gesture reached it in any
+  state, folded or not, before this support existed or since, so quern says
+  so rather than answering `ok`. Navigate with taps, or press Home.
+- **Video recording and the preview window still show the cover (#538)**,
+  which is black while the Duo is unfolded.
 - **Which panel is lit is read from the screen, not the hinge.** The panel
   SpringBoard lights depends on how the hinge got where it is, not only its
   angle: measured, stepping it closed kept the inner panel lit down to 20°,

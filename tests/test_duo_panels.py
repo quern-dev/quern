@@ -76,30 +76,41 @@ class _Admit:
 
 
 async def test_the_lit_panel_is_read_from_the_bridge():
-    bridge = _bridge({"ok": True, "panels": [], "lit": INNER})
-    assert await bridge.lit_panel(DUO) == INNER
+    bridge = _bridge({"ok": True, "count": 2, "panels": [], "lit": INNER})
+    assert await bridge.panels(DUO) == (INNER, 2)
     bridge._mgr.send.assert_awaited_once_with({"cmd": "panels", "udid": DUO})
 
 
 async def test_a_single_panel_device_has_no_lit_panel():
     """Null from the bridge is every ordinary simulator: the old path."""
-    assert await _bridge({"ok": True, "panels": [], "lit": None}).lit_panel(DUO) is None
+    bridge = _bridge({"ok": True, "count": 1, "panels": [], "lit": None})
+    assert await bridge.panels(DUO) == (None, 1)
+
+
+async def test_a_lit_panel_of_the_wrong_shape_is_none():
+    assert await _bridge({"ok": True, "count": 2, "lit": ["3"]}).panels(DUO) == (None, 2)
+
+
+async def test_a_missing_count_is_none_found():
+    """Not one: only a definite answer may mark a device single-panel."""
+    assert await _bridge({"ok": True, "lit": None}).panels(DUO) == (None, 0)
 
 
 async def test_a_bridge_that_cannot_read_the_panels_says_so():
     """Not None: "no panel" and "could not ask" must not look alike."""
     with pytest.raises(DeviceError, match="could not read the panels"):
-        await _bridge({"ok": False, "error": "device not found"}).lit_panel(DUO)
+        await _bridge({"ok": False, "error": "device not found"}).panels(DUO)
 
 
 # -- the controller ----------------------------------------------------------
 
 
-def _controller(*, bridge_ok=True, lit=None, raises=None) -> DeviceController:
+def _controller(*, bridge_ok=True, lit=None, count=None, raises=None) -> DeviceController:
     ctrl = DeviceController()
     ctrl._sim_bridge_ok = bridge_ok
     ctrl.sim_bridge = MagicMock()
-    ctrl.sim_bridge.lit_panel = AsyncMock(return_value=lit, side_effect=raises)
+    count = count if count is not None else (2 if lit else 1)
+    ctrl.sim_bridge.panels = AsyncMock(return_value=(lit, count), side_effect=raises)
     ctrl.simctl = MagicMock()
     ctrl.simctl.screenshot = AsyncMock(return_value=b"png")
     ctrl.resolve_udid = AsyncMock(return_value=DUO)
@@ -128,10 +139,53 @@ async def test_a_failed_panel_read_still_captures():
     ctrl.simctl.screenshot.assert_awaited_once_with(DUO, display=None)
 
 
+async def test_a_failure_of_any_kind_still_captures():
+    """Not only DeviceError: a bridge timing out or gone raises others."""
+    for exc in (TimeoutError(), OSError("broken pipe"), RuntimeError("bad answer")):
+        ctrl = _controller(raises=exc)
+        assert await ctrl.raw_screenshot(DUO) == b"png"
+        ctrl.simctl.screenshot.assert_awaited_once_with(DUO, display=None)
+
+
+async def test_a_one_panel_device_is_not_asked_again():
+    """Every screenshot went through sim-bridge's lock to ask (review); a
+    device type never gains a panel, so one answer is enough."""
+    ctrl = _controller(lit=None, count=1)
+    await ctrl.raw_screenshot(DUO)
+    await ctrl.raw_screenshot(DUO)
+    ctrl.sim_bridge.panels.assert_awaited_once()
+    assert ctrl.simctl.screenshot.await_count == 2
+
+
+async def test_a_device_with_no_screens_yet_is_asked_again():
+    """Booting, it reports none: that is not "one panel"."""
+    ctrl = _controller(lit=None, count=0)
+    await ctrl.raw_screenshot(DUO)
+    await ctrl.raw_screenshot(DUO)
+    assert ctrl.sim_bridge.panels.await_count == 2
+
+
+async def test_a_duo_is_asked_every_time():
+    """Its lit panel changes with the fold."""
+    ctrl = _controller(lit=INNER)
+    await ctrl.raw_screenshot(DUO)
+    await ctrl.raw_screenshot(DUO)
+    assert ctrl.sim_bridge.panels.await_count == 2
+
+
+async def test_the_annotated_screenshot_is_of_the_lit_panel_too():
+    ctrl = _controller(lit=INNER)
+    ctrl.get_ui_elements = AsyncMock(return_value=([], DUO))
+    from unittest.mock import patch
+    with patch("server.device.controller_ui.annotate_screenshot", return_value=(b"x", "image/png")):
+        await ctrl.screenshot_annotated(udid=DUO)
+    ctrl.simctl.screenshot.assert_awaited_once_with(DUO, display=3)
+
+
 async def test_without_sim_bridge_the_bridge_is_not_asked():
     ctrl = _controller(bridge_ok=False, lit=INNER)
     await ctrl.raw_screenshot(DUO)
-    ctrl.sim_bridge.lit_panel.assert_not_called()
+    ctrl.sim_bridge.panels.assert_not_called()
     ctrl.simctl.screenshot.assert_awaited_once_with(DUO, display=None)
 
 

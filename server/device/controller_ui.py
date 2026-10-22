@@ -584,6 +584,7 @@ class DeviceControllerUI:
     - self._input_probe_cooldown: dict[str, float]
     - self._last_ui_change: dict[str, float]
     - self._screen_bounds: dict[str, tuple[float, float, float, float]]
+    - self._single_panel: set[str]
     - self.resolve_udid(udid) -> str
     - self._invalidate_ui_cache(udid) -> None
     - self._is_physical(udid) -> bool
