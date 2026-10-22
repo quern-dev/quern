@@ -1172,6 +1172,13 @@ func probePoint(udid: String, x: Double, y: Double, nested: Bool) -> Any? {
         logErr("[ax] no mac platform element for frontmost translation")
         return nil
     }
+    // Stamped before its frame is read, as describeUI does: unstamped, the
+    // root answered (0,0,0,0) on any probe after the first in a process, and
+    // the lit-panel rule that keys on the root's size misread SpringBoard as
+    // an app -- the hit-test then saw every home-screen icon elsewhere and
+    // refused the tap as covered (#536). A single-panel transform skips a
+    // zero root, which is why this went unnoticed.
+    stampElementTranslation(token: token, on: frontmostRoot)
     let pointSize = devicePointSize(for: device)
     let rootFrame = axFrame(of: frontmostRoot)
     let panel = litPanel(udid: udid, device: device)
