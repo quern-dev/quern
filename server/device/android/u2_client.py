@@ -1075,12 +1075,14 @@ class U2Backend:
         stop = threading.Event()
         try:
             return await asyncio.to_thread(_do)
-        except asyncio.CancelledError:
-            stop.set()
-            raise
         except Exception as e:
             logger.debug("scroll_into_view failed (%s)", e)
             return None
+        finally:
+            # Every way out, not only cancellation: whatever ended the await,
+            # the worker must not go on swiping. After a normal return it has
+            # already finished, so this changes nothing there.
+            stop.set()
 
     async def swipe(
         self,
