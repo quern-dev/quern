@@ -3643,6 +3643,10 @@ class DeviceControllerUI:
                             # Not found again: tap where it was last seen, the
                             # re-check -- not the first read, which the
                             # re-check already showed was out of date (review).
+                            # One with no frame has no point to tap: say it
+                            # moved or left, not an error (CodeRabbit).
+                            if not matches_check[0].frame:
+                                return gone_again()
                             el = matches_check[0]
                         cx, cy = get_tap_point(el)
 
@@ -3665,13 +3669,16 @@ class DeviceControllerUI:
                     if settled_ms is not None:
                         result["waited_for_settle_ms"] = settled_ms
                     if unsettled_ms is not None:
+                        result["target_moving"] = True
+                        result["waited_for_rest_ms"] = unsettled_ms
+                    if unsettled_ms is not None and result.get("reason") == "covered":
                         # Not covered: the target never held still, so its last
                         # frame no longer has it under the point (#529). Said
                         # as that, or the detail sends the caller to scroll or
-                        # dismiss something that is not there (review).
+                        # dismiss something that is not there (review). An
+                        # off-screen refusal keeps its own reason and remedy
+                        # -- nothing covers it (CodeRabbit).
                         result["reason"] = "moving"
-                        result["target_moving"] = True
-                        result["waited_for_rest_ms"] = unsettled_ms
                         result["detail"] = (
                             f"'{el.label or el.identifier or el.type}' was still moving "
                             f"after {unsettled_ms}ms, and where it was last read "

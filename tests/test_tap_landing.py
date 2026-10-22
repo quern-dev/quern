@@ -561,3 +561,32 @@ def test_the_device_hub_advisory_joins_a_moving_warning():
                                   "Device Hub has this simulator's input.")
     again = _with_input_warning(controller, SIM, dict(payload))
     assert again["warning"] == payload["warning"], "not added twice"
+
+
+async def test_a_frameless_recheck_with_nothing_after_is_not_found():
+    """Found on the re-check without a frame, then not at all: there is no
+    point to tap, and that is an answer, not an error (CodeRabbit)."""
+    ctrl, backend = _moving(settled=False)
+    frameless = FIELD.model_copy(update={"frame": None})
+    ctrl.get_ui_elements = AsyncMock(side_effect=[([FIELD], SIM), ([frameless], SIM), ([], SIM)])
+    with patch("server.device.controller_ui.asyncio.sleep", AsyncMock()):
+        result = await _tap(ctrl, identifier="field_secure", skip=False)
+    assert result["status"] == "not_found", result
+    backend.tap.assert_not_called()
+
+
+async def test_a_moving_target_gone_off_screen_keeps_its_off_screen_reason():
+    """Nothing covers it, so it is not 'moving under an element': the
+    off-screen reason and remedy stand, with target_moving added (CodeRabbit)."""
+    ctrl, backend = _moving(settled=False)
+    off = FIELD.model_copy(update={"frame": {**FIELD.frame, "y": 2000}})
+    ctrl.get_ui_elements = AsyncMock(side_effect=[
+        ([FIELD], SIM), ([FIELD.model_copy(update={"frame": {**FIELD.frame, "y": 380}})], SIM),
+        ([off], SIM)])
+    ctrl._screen_bounds[SIM] = (0.0, 0.0, 402.0, 874.0)
+    with patch("server.device.controller_ui.asyncio.sleep", AsyncMock()):
+        result = await _tap(ctrl, identifier="field_secure", skip=False)
+    assert result["status"] == "obstructed"
+    assert result["reason"] == "off_screen" and result["target_moving"] is True
+    assert "off screen" in result["detail"]
+    backend.tap.assert_not_called()
