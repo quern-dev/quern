@@ -910,7 +910,29 @@ class ProbeDriver:
             for e in self.ui_tree().get("elements") or []
         )
 
+    #: Enough swipes to cross any strip this probe will have; the loop stops
+    #: as soon as one moves nothing, which is the edge.
+    _MAX_STRIP_SWIPES = 5
+
+    def _tab_strip_positions(self, frame: dict) -> tuple:
+        """Each tab label in the strip with its x: what a swipe moves."""
+        top, bottom = frame["y"], frame["y"] + frame["height"]
+        return tuple(sorted(
+            (e.get("label"), round(e["frame"]["x"]))
+            for e in self.ui_tree().get("elements") or []
+            if e.get("type") == "StaticText" and e.get("label") and e.get("frame")
+            and top <= e["frame"]["y"] < bottom
+        ))
+
     def _swipe_tab_strip(self, toward: str) -> None:
+        """Swipe the strip until it stops moving: to its start or its end.
+
+        One fling was assumed to cross it, and with ten tabs it does not
+        always: measured from the strip's end, one swipe toward the start left
+        Text off screen in 1 try of 5, so `goto("text")` failed about 1 run in
+        10 after a test that ended on Taps. Repeating until a swipe moves
+        nothing makes it right for any number of tabs.
+        """
         import time
 
         strip = self.element("probe_tabs")
@@ -921,13 +943,19 @@ class ProbeDriver:
         left = frame["x"] + frame["width"] * 0.15
         right = frame["x"] + frame["width"] * 0.85
         start_x, end_x = (left, right) if toward == "start" else (right, left)
-        self.client.json_ok(
-            "POST", "/api/v1/device/ui/swipe",
-            json={"udid": self.udid, "start_x": start_x, "start_y": y,
-                  "end_x": end_x, "end_y": y, "duration": 0.3},
-            timeout=90.0,
-        )
-        time.sleep(0.8)
+        before = self._tab_strip_positions(frame)
+        for _ in range(self._MAX_STRIP_SWIPES):
+            self.client.json_ok(
+                "POST", "/api/v1/device/ui/swipe",
+                json={"udid": self.udid, "start_x": start_x, "start_y": y,
+                      "end_x": end_x, "end_y": y, "duration": 0.3},
+                timeout=90.0,
+            )
+            time.sleep(0.8)
+            after = self._tab_strip_positions(frame)
+            if after == before:
+                return
+            before = after
 
     def _more_elements(self) -> list[dict]:
         """Every element labelled "More", top of the screen first."""
