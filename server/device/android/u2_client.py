@@ -270,6 +270,29 @@ class _MatchesChanged(Exception):
         self.count = count
 
 
+def _press_bounds(info: dict) -> dict | None:
+    """The frame a press aims at: the visible part, as u2's own `click()`
+    takes it, else the whole -- or None when there is nothing to press.
+
+    A frame with no area is nothing to press: it would aim at its corner,
+    (0, 0) for an all-zero one (CodeRabbit). And a visible part with no area
+    means none of the element is on screen, so the whole frame is not tried
+    either -- pressing its centre would tap whatever covers it."""
+    def edges(b: object) -> dict | None:
+        if isinstance(b, dict) and all(k in b for k in ("left", "top", "right", "bottom")):
+            return b
+        return None
+
+    def area(b: dict) -> bool:
+        return b["right"] > b["left"] and b["bottom"] > b["top"]
+
+    visible = edges(info.get("visibleBounds"))
+    if visible is not None:
+        return visible if area(visible) else None
+    whole = edges(info.get("bounds"))
+    return whole if whole is not None and area(whole) else None
+
+
 def _wait_for_rest(read, first) -> dict:
     """Read a frame until every read across REST_SPAN_S agrees (at least
     REST_AGREE reads), or REST_BUDGET_S passes. Returns {waited_ms, settled,
@@ -644,7 +667,7 @@ class U2Backend:
         that scrolls CoordinatorLayout/RecyclerView content out of view on some
         screens (e.g. cache-detail's header actions), so resolving an identifier
         via the tree can scroll the target away before the tap lands. A targeted
-        selector click (UiObject.click) finds and taps just the one element with
+        selector read finds just the one element, and a press at its centre taps it, with
         no such side effect — and it's faster (~0.3s vs ~1.2s).
 
         Returns a normalized {label, identifier, type, x, y} dict for the tapped
@@ -724,8 +747,8 @@ class U2Backend:
                     # the end, before the press: a transition can attach a
                     # second match, or detach the first, while this waits
                     # (review).
-                    rest = _wait_for_rest(lambda: (obj.info or {}).get("bounds"),
-                                          info.get("bounds"))
+                    rest = _wait_for_rest(lambda: _press_bounds(obj.info or {}),
+                                          _press_bounds(info))
                     changed = rest.pop("changed")
                     if changed is None and not rest["gone"]:
                         try:
@@ -740,21 +763,31 @@ class U2Backend:
                     if rest.pop("gone"):
                         return {"defer": "vanished"}
                     if rest["bounds"]:
-                        info = {**info, "bounds": rest["bounds"]}
+                        info = {**info, "visibleBounds": rest["bounds"]}
                     del rest["bounds"]
+                # One round trip (#516): press the centre of the frame already
+                # read, rather than `obj.click()`, which waits for the element,
+                # reads its frame again and then presses -- three. The visible
+                # part, as `click()` used, so a row half under a bar is pressed
+                # where it shows.
+                bounds = _press_bounds(info)
+                if not bounds:
+                    # Counted, then gone by its own read: uiautomator leaves no
+                    # frame for an instance that left between the two (review).
+                    return {"defer": "vanished"}
+                px = (bounds["left"] + bounds["right"]) / 2
+                py = (bounds["top"] + bounds["bottom"]) / 2
                 try:
                     if hold is None:
-                        obj.click()
+                        device.click(px, py)
                     else:
-                        obj.long_click(float(hold))
+                        device.long_click(px, py, float(hold))
                 except Exception as e:
                     # Past this point the press may have reached the device: a
                     # read timeout after it landed looks the same as one before.
                     # Falling back to the tree path would press again (#407).
                     raise _PressMayHaveLanded(e) from e
-                bounds = info.get("bounds") or {}
-                cx = (bounds.get("left", 0) + bounds.get("right", 0)) / 2
-                cy = (bounds.get("top", 0) + bounds.get("bottom", 0)) / 2
+                cx, cy = px, py
                 cls = info.get("className", "")
                 return {
                     "label": info.get("text")
@@ -915,7 +948,8 @@ class U2Backend:
             state = {"previous": _frame()}
             DOWN, UP = ("bottom", (y_hi, y_lo)), ("top", (y_lo, y_hi))
 
-            def sweep(direction, budget):
+            def sweep(direction: tuple[str, tuple[int, int]],
+                      budget: int) -> tuple[dict | None, bool | None]:
                 """Swipe one way until the target shows, the frame stops
                 changing (that direction's end), or the budget is spent.
                 Returns (info, first swipe moved?)."""

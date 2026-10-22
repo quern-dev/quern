@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from server.device.android.u2_client import U2Backend
 from server.device.controller import DeviceController
 from server.models import DeviceType, UIElement
@@ -38,13 +40,29 @@ def _obj(count: int, *frames, clickable=False, text="Twin",
 
 
 def _backend(by_selector: dict[str, MagicMock]) -> U2Backend:
-    """A U2Backend whose device answers each selector key with its own object."""
-    def device(**sel):
+    """A U2Backend whose device answers each selector key with its own object.
+
+    The fast path presses by coordinates (#516), so the device routes a
+    `click(x, y)` to the element whose frame is centred there, as that
+    instance's own `click()` -- the assertions below keep saying which element
+    was pressed. A press that lands on no element raises."""
+    def select(**sel):
         instance = sel.pop("instance", 0)
         (key,) = sel
         obj = by_selector.get(key) or _obj(0)
         return obj.at.setdefault(instance, MagicMock())
 
+    def target(x, y):
+        for obj in by_selector.values():
+            for i, info in enumerate(obj.info_list.return_value or []):
+                b = info.get("visibleBounds") or info["bounds"]
+                if ((b["left"] + b["right"]) / 2, (b["top"] + b["bottom"]) / 2) == (x, y):
+                    return obj.at.setdefault(i, MagicMock())
+        raise AssertionError(f"a press at ({x}, {y}) reached no element")
+
+    device = MagicMock(side_effect=select)
+    device.click.side_effect = lambda x, y: target(x, y).click()
+    device.long_click.side_effect = lambda x, y, d: target(x, y).long_click(d)
     backend = U2Backend()
     backend._connect = lambda serial: device
     return backend
@@ -254,3 +272,58 @@ class TestTapElementHandsAmbiguityToTheDumpPath:
         backend.tap.assert_not_called()
         # The device was swiped, and the answer says so.
         assert result["scroll"]["attempted"] is True, result
+
+
+class TestOneRoundTripPerPress:
+    """#516: the fast path presses the centre of the frame it already read,
+    with one `device.click`, instead of `UiObject.click()` -- which waited for
+    the element, read its frame again and then pressed. Measured ~115ms a tap
+    saved on an emulator."""
+
+    async def test_the_visible_part_is_pressed(self):
+        """As `UiObject.click()` aimed: a row half under a bar is pressed where
+        it shows."""
+        obj = _obj(1, _box(0, 0, 100, 200))
+        obj.info_list.return_value[0]["visibleBounds"] = _box(0, 100, 100, 200)
+        backend = _backend({"text": obj})
+        device = backend._connect(UDID)
+        result = await backend.tap_by_selector(UDID, label="Twin")
+        device.click.assert_called_once_with(50.0, 150.0)
+        assert (result["x"], result["y"]) == (50.0, 150.0)
+
+    async def test_no_element_method_is_used_to_press(self):
+        obj = _obj(1, _box(0, 0, 100, 50))
+        backend = _backend({"text": obj})
+        await backend.tap_by_selector(UDID, label="Twin")
+        assert backend._connect(UDID).click.call_count == 1
+        # No waitForExists and no second read: the round trips #516 removes.
+        for name in ("must_wait", "wait", "exists", "center", "bounds"):
+            getattr(obj, name).assert_not_called()
+        assert "info" not in [c[0] for c in obj.mock_calls], obj.mock_calls
+
+    async def test_a_match_with_no_frame_is_not_pressed(self):
+        obj = _obj(1)
+        obj.info_list.return_value = [{"className": "android.widget.Button",
+                                       "text": "Twin"}]
+        backend = _backend({"text": obj})
+        result = await backend.tap_by_selector(UDID, label="Twin")
+        assert result == {"defer": "vanished"}
+        backend._connect(UDID).click.assert_not_called()
+
+
+class TestNothingToPress:
+    """A frame with no area is nothing to press (CodeRabbit)."""
+
+    @pytest.mark.parametrize("info", [
+        {"visibleBounds": _box(0, 0, 0, 0), "bounds": _box(0, 0, 100, 50)},
+        {"visibleBounds": _box(40, 80, 40, 120)},
+        {"bounds": _box(10, 10, 10, 10)},
+    ], ids=["visible-part-empty", "visible-zero-width", "whole-zero-area"])
+    async def test_a_match_with_an_empty_frame_is_not_pressed(self, info):
+        obj = _obj(1)
+        obj.info_list.return_value = [{"className": "android.widget.Button",
+                                       "text": "Twin", **info}]
+        backend = _backend({"text": obj})
+        result = await backend.tap_by_selector(UDID, label="Twin")
+        assert result == {"defer": "vanished"}
+        backend._connect(UDID).click.assert_not_called()
