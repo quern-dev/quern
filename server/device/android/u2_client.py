@@ -940,6 +940,11 @@ class U2Backend:
             deadline = time.monotonic() + limit
 
             def _out_of_time() -> bool:
+                """Whether to stop before the next swipe: the caller has gone,
+                or the deadline has passed. Checked before every swipe."""
+                if stop.is_set():
+                    out["cancelled"] = True
+                    return True
                 if time.monotonic() < deadline:
                     return False
                 out.update(timed_out=True, deadline_s=limit)
@@ -947,7 +952,7 @@ class U2Backend:
 
             slow = []
 
-            def _capture():
+            def _capture() -> Any | None:
                 # A capture that took over FRAME_SLOW_S turns frames off for
                 # the rest of the sweep: every swipe would pay it (review).
                 if slow:
@@ -976,7 +981,7 @@ class U2Backend:
                     return False
                 return changed_fraction(before, after) < frames.UNCHANGED_BELOW
 
-            def _frame():
+            def _frame() -> Any | None:
                 """The screen once it has stopped changing, up to
                 SETTLE_LIMIT_S: two captures in a row alike. Unsettled, the
                 last capture is returned, which reads as moved -- the old
@@ -1035,7 +1040,7 @@ class U2Backend:
             info, up_moved = sweep(UP, max_swipes * 2)
             if info is not None:
                 return _result(info)
-            if down_moved is False and up_moved is False:
+            if down_moved is False and up_moved is False and not _out_of_time():
                 # Two unchanged frames, but the first may have been a false
                 # read at the top of a list, and the answer is "this does not
                 # scroll". One more swipe down settles it (review).
@@ -1064,8 +1069,15 @@ class U2Backend:
                         return _result(info)
             return None
 
+        # Cancelling the await does not stop the thread: a caller that hung
+        # up left the sweep swiping the device until its deadline (#535
+        # review). The worker checks this before every swipe instead.
+        stop = threading.Event()
         try:
             return await asyncio.to_thread(_do)
+        except asyncio.CancelledError:
+            stop.set()
+            raise
         except Exception as e:
             logger.debug("scroll_into_view failed (%s)", e)
             return None

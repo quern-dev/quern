@@ -372,3 +372,45 @@ class TestTheSweepHasADeadline:
         assert found is None
         assert report["swipes"] == 9, "3 down and 6 up, no end either way"
         assert "timed_out" not in report
+
+
+class TestTheSweepStopsWhenItsCallerDoes:
+    async def test_a_cancelled_sweep_stops_swiping(self):
+        """Cancelling the await does not stop the worker thread; before #535's
+        review a caller that hung up left it swiping until its deadline."""
+        import asyncio
+        import time as real_time
+
+        device = TestTheSweepHasADeadline()._endless()
+
+        def slow_swipe(*a, **k):
+            device.swipes.append(a)
+            real_time.sleep(0.02)
+
+        device.swipe.side_effect = slow_swipe
+        task = asyncio.ensure_future(_sweep(device, max_swipes=30))
+        await asyncio.sleep(0.15)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.2)          # let the worker reach its next check
+        settled = len(device.swipes)
+        await asyncio.sleep(0.3)
+        assert len(device.swipes) == settled, "the sweep went on swiping after it was cancelled"
+        assert settled < 90, "it ran to the end of its budget"
+
+
+class TestTheConfirmingSwipeRespectsTheDeadline:
+    async def test_no_third_swipe_after_the_deadline(self, monkeypatch):
+        """A screen that does not scroll gets a third, confirming swipe; past
+        the deadline it must not be sent (#535 review)."""
+        clock = {"t": 0.0}
+        monkeypatch.setattr("server.device.android.u2_client.time.monotonic",
+                            lambda: clock["t"])
+        device = _device(["a"] * 10)
+        device.swipe.side_effect = (
+            lambda *a, **k: (device.swipes.append(a), clock.update(t=clock["t"] + 10.0)))
+        found, report = await _sweep(device, deadline_s=15.0)
+        assert found is None
+        assert report["swipes"] == 2, report
+        assert report["timed_out"] is True
