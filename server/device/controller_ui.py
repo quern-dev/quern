@@ -3647,6 +3647,11 @@ class DeviceControllerUI:
                     _note_collapsed(result, folded)
                     if settled_ms is not None:
                         result["waited_for_settle_ms"] = settled_ms
+                    if unsettled_ms is not None:
+                        # Why it is in the way: the target never held still, so
+                        # its last frame no longer has it under the point (#529).
+                        result["target_moving"] = True
+                        result["waited_for_rest_ms"] = unsettled_ms
                     if sweep.get("attempted"):
                         result["scroll"] = _scroll_report(sweep, scroll_to_find)
                     return result

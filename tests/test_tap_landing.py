@@ -508,3 +508,16 @@ async def test_a_target_that_settled_says_nothing():
         result = await _tap(ctrl, identifier="field_secure", skip=False)
     assert result["status"] == "ok"
     assert "target_moving" not in result and "warning" not in result
+
+
+async def test_a_refusal_after_the_target_never_settled_says_why():
+    """The last frame no longer has the target under it, so the hit-test finds
+    something else: refused, and the answer says the target was moving."""
+    ctrl, backend = _moving(settled=False)
+    ctrl._ui_backend.return_value.describe_point = AsyncMock(
+        return_value=hit("Behind", 0, 360, 120, 120, "Button"))   # over the point, not the field
+    with patch("server.device.controller_ui.asyncio.sleep", AsyncMock()):
+        result = await _tap(ctrl, identifier="field_secure", skip=False)
+    assert result["status"] == "obstructed"
+    backend.tap.assert_not_called()
+    assert result["target_moving"] is True and result["waited_for_rest_ms"] == 3000
