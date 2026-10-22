@@ -352,6 +352,32 @@ class TestSettledFrames:
         assert "no_progress" not in report
         assert report["swipes"] == 9, "the whole budget, as an unknown screen gets"
 
+    async def test_a_screen_that_never_settles_stops_at_the_deadline_and_says_so(
+        self, monkeypatch,
+    ):
+        """A looping animation or a video row never settles, so every swipe
+        reads as moved and no end is found. At the default budget each swipe
+        also spends the whole settle limit, so the deadline is what stops it --
+        and the report must say that, not claim an edge (#535 review)."""
+        clock = {"t": 0.0, "n": 0}
+        monkeypatch.setattr("server.device.android.u2_client.time.monotonic",
+                            lambda: clock["t"])
+        device = _device(["unused"])
+
+        def never_alike(scale, quality):
+            clock["t"] += 0.3
+            clock["n"] += 1
+            return base64.b64encode(f"frame-{clock['n']}".encode()).decode()
+
+        device.jsonrpc.takeScreenshot.side_effect = never_alike
+        device.swipe.side_effect = (
+            lambda *a, **k: (device.swipes.append(a), clock.update(t=clock["t"] + 0.6)))
+        found, report = await _sweep(device)          # the default budget, 30
+        assert found is None
+        assert report["timed_out"] is True, report
+        assert not report.get("ends") and "no_progress" not in report, report
+        assert report["swipes"] < 90, "it ran out of budget before the deadline"
+
     async def test_a_screen_that_never_settles_reads_as_moved(self, monkeypatch):
         """Unsettled is the old behaviour -- moved -- never a false end."""
         monkeypatch.setattr("server.device.android.u2_client.SETTLE_LIMIT_S", 0.0)
