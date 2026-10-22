@@ -569,6 +569,17 @@ class TestRoute:
         assert "the app dropped the tap" in body["warning"]
         assert "Device Hub has this simulator's input." in body["warning"]
 
+    async def test_a_miss_keeps_the_taps_own_warning(self, app, controller):
+        """A tap that already warns -- its target was still moving (#529) --
+        keeps that warning when the navigation check adds its own."""
+        app.state.landmark_registry.load("probe", _registry_screens())
+        tapped = dict(controller.tap_element.return_value)
+        tapped["warning"] = "the target was still moving after 3000ms"
+        controller.tap_element.return_value = tapped
+        code, body = await _tap(app, {"label": "More"})
+        assert "the target was still moving" in body["warning"]
+        assert "the app dropped the tap" in body["warning"]
+
     async def test_an_unrelated_exact_label_costs_no_read(self, app, controller):
         screens = _registry_screens()
         screens[0].leads_to = [NavEdge(target="more", label="Book")]

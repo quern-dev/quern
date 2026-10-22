@@ -162,7 +162,7 @@ parametrisation; probe-driven tests run once per platform present.
 | 20 | Android-specific backends | `test_android.py` | todo |
 | 21 | Session attribution (`X-Quern-Session`, #254) | `test_session.py` | **done** — 7 tests; the client sends `conformance-<run id>` on every request, the tests read it back from `/trace`, and check `X-Quern-Session-Warning` (`missing`, `malformed`, none when tagged or public) |
 | 22 | Lazy lists through WDA (#475) | `test_lazy_list.py` | **done** — 4 tests, each on the default backend and through WDA, on the iOS probe's Lazy tab; fail through WDA against the server before #478 |
-| 23 | Which element a tap reached (#511) | `test_taps.py` | **done** — 7 tests on each probe's Taps tab, reading per-button counters: by label and by identifier, two buttons sharing a label, a tap after and during a remount, a button partly covered by an overlay, and a moving target, which must be reached or reported as `target_moving` (#514). The covered button fails on Android until #521, and the moving target on iOS until #529 |
+| 23 | Which element a tap reached (#511) | `test_taps.py` | **done** — 7 tests on each probe's Taps tab, reading per-button counters: by label and by identifier, two buttons sharing a label, a tap after and during a remount, a button partly covered by an overlay, and a moving target, which must be reached or reported as `target_moving` (#514). The covered button fails on Android until #521 (deferred, P3); the moving target, which slides continuously, passes on both: Android flags it, an iOS simulator refuses it as moving (#529) |
 
 ### The fixture apps already exist
 

@@ -7,10 +7,10 @@ afterwards. Every button on the Taps tab counts its own taps into a label,
 `<identifier>_count`, so these tests read which button the tap reached and
 assert that nothing else moved.
 
-The slider that never stops jumping (`tap_slide_arm`) cannot be asserted
-reached: a tap sent right after arming reached a stale position, with `ok`,
-in 10 of 10 tries on a simulator and 1 in 10 on an Android emulator before
-#514. What is asserted is that such a tap says so (`target_moving`).
+The slider that never stops moving (`tap_slide_arm`) cannot be asserted
+reached: a tap sent right after arming can land where it just was. What is
+asserted is that such a tap says so (`target_moving`, #514 and #529), or is
+refused without pressing anything.
 """
 
 from __future__ import annotations
@@ -115,22 +115,31 @@ def test_a_label_two_buttons_share_is_ambiguous_and_taps_neither(taps) -> None:
 
 
 def test_a_tap_on_a_moving_target_is_right_or_says_it_was_moving(taps) -> None:
-    """The slider jumps between two places every 120ms once armed. A tap on
-    it cannot be guaranteed to reach it -- the press can land where it just
-    was -- so the assertion is about honesty: an `ok` either reached the
-    slider or carries `target_moving` (#514). An `ok` that reached the
-    button behind, or nothing, and said nothing is the failure this suite
-    exists for. Fails on iOS until #529: the stale tap answers a bare `ok`.
+    """The slider slides back and forth once armed. A tap on it cannot be
+    guaranteed to reach it -- the press can land where it just was -- so the
+    assertion is about honesty: an `ok` either reached the slider or carries
+    `target_moving` (#514, #529), and a refusal (`obstructed`, when the point
+    no longer has the target under it) pressed nothing. An `ok` that reached
+    the button behind, or nothing, and said nothing is the failure this suite
+    exists for.
     """
     taps.tap("tap_slide_arm")
     try:
         body = _tap(taps, label="Slider")
-        assert body.get("status") == "ok", body
+        assert body.get("status") in ("ok", "obstructed"), body
         time.sleep(0.6)
         counts = _counts(taps)
-        if counts["tap_slider"] != 1:
+        reached = [k for k, v in counts.items() if v]
+        if body["status"] == "obstructed":
+            assert not reached, f"refused, yet {reached} counted a tap: {body}"
+            # Refused because it moved, and saying so: without this the
+            # branch could not fail -- a refusal presses nothing by
+            # construction, and the older cover check produces it (review).
             assert body.get("target_moving") is True, (
-                f"the tap reached {[k for k, v in counts.items() if v] or 'nothing'} "
+                f"refused without saying the target was moving: {body}")
+        elif counts["tap_slider"] != 1:
+            assert body.get("target_moving") is True, (
+                f"the tap reached {reached or 'nothing'} "
                 f"and said nothing about the target moving: {body}")
     finally:
         taps.tap("tap_reset")

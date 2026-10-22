@@ -13,9 +13,10 @@
 //
 //  - Target / decoy: side by side, each counted.
 //  - Twins: two buttons with the same label, for the ambiguity case.
-//  - Slide: after `tap_slide_arm`, `tap_slider` jumps between its start and
-//    the spot below `tap_slide_arm` every 120 ms, until reset or the tab is
-//    left. `tap_slide_behind` sits where it started, so a tap aimed at a stale
+//  - Slide: after `tap_slide_arm`, `tap_slider` slides back and forth between
+//    its start and the spot below `tap_slide_arm`, one round trip every 1.2 s,
+//    until reset or the tab is left -- its frame changes every display frame.
+//    `tap_slide_behind` sits where it started, so a tap aimed at a stale
 //    position counts there or reaches nothing.
 //  - Remount: `tap_remount_arm` removes `tap_remount`, and 1.5 s later a new
 //    button with the same identifier and label appears a column over and a
@@ -34,10 +35,13 @@
 import UIKit
 
 final class TapsViewController: UIViewController {
-    // About a tap's round trip through quern, so a read and the tap that
-    // follows it can straddle a jump; a one-off slide had always finished
-    // before quern read the tree.
-    static let slidePeriod: TimeInterval = 0.12
+    // One round trip of the slide: long enough that a read and the tap after
+    // it race the motion, as a one-off slide never did. Continuous, not a
+    // toggle between two places: a toggle on a fixed beat let screenshots
+    // taken on a fixed interval catch it in one place every time and call it
+    // settled (#529), which no real animation does.
+    static let slideCycle: TimeInterval = 1.2
+    static let slideFrame: TimeInterval = 1.0 / 60
     static let remountGap: TimeInterval = 1.5
     static let overlayDelay: TimeInterval = 0.5
 
@@ -175,11 +179,17 @@ final class TapsViewController: UIViewController {
 
     private func armSlide() {
         slideTimer?.invalidate()
-        slideTimer = Timer.scheduledTimer(withTimeInterval: Self.slidePeriod, repeats: true) {
+        let started = CACurrentMediaTime()
+        // Set frame by frame, not with a UIView animation: an animation moves
+        // only the presentation layer, and the accessibility frame quern reads
+        // reports where the view ends up, not where it is.
+        slideTimer = Timer.scheduledTimer(withTimeInterval: Self.slideFrame, repeats: true) {
             [weak self] _ in
             guard let slider = self?.slider else { return }
-            slider.transform = slider.transform.isIdentity
-                ? CGAffineTransform(translationX: 184, y: 48) : .identity
+            let phase = (CACurrentMediaTime() - started)
+                .truncatingRemainder(dividingBy: Self.slideCycle) / Self.slideCycle
+            let t = CGFloat(phase < 0.5 ? phase * 2 : (1 - phase) * 2)   // 0 -> 1 -> 0
+            slider.transform = CGAffineTransform(translationX: 184 * t, y: 48 * t)
         }
     }
 

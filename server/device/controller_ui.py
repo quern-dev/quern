@@ -50,6 +50,13 @@ def _hold(duration: float | None) -> dict:
     return {"hold": float(duration)}
 
 
+def covering_name(result: dict) -> str:
+    """What an obstructed result says is in the way, for a sentence."""
+    covering = result.get("covered_by") or {}
+    what = f"{covering.get('type') or 'an element'} '{covering.get('label') or ''}'"
+    return what.replace(" ''", "")
+
+
 def _selector_deferred(tapped: dict | None) -> bool:
     """`tap_by_selector` pressed nothing and left the call to the dump path:
     the name matched several elements, or could not be counted (#512)."""
@@ -3177,7 +3184,7 @@ class DeviceControllerUI:
                             f"{rest['waited_ms']}ms; it was tapped where "
                             f"uiautomator last found it, which may not be where "
                             f"it is now -- check the screen before relying on "
-                            f"this tap")
+                            f"this tap.")
             # A tap that succeeded only *because* the screen scrolled has
             # moved the screen, and the caller cannot see that from
             # `status: ok` alone. Same defect as the Android branch reporting
@@ -3527,6 +3534,7 @@ class DeviceControllerUI:
 
             # Stability check: ensure element has stopped moving/animating
             # Skip for static elements (tab bars, nav bars) to avoid expensive tree fetches
+            unsettled_ms: int | None = None
             if not skip_stability_check:
                 # Get initial position
                 initial_frame = el.frame
@@ -3621,8 +3629,26 @@ class DeviceControllerUI:
                         if not matches_final and vanished:
                             return gone_again()
                         if matches_final:
+                            # Still moving if the target itself moved between
+                            # the read before the wait and the one after -- a
+                            # check on the target, not the whole screen, so a
+                            # spinner elsewhere or a capture that failed does
+                            # not count, and a whole-screen settle that was
+                            # fooled still does (#529, review). Said on the
+                            # answer, not only the log: a bare ok hid it.
+                            if matches_final[0].frame != current_frame:
+                                unsettled_ms = round(stability.get("elapsed_ms") or 0)
                             el = matches_final[0]
-                            cx, cy = get_tap_point(el)
+                        else:
+                            # Not found again: tap where it was last seen, the
+                            # re-check -- not the first read, which the
+                            # re-check already showed was out of date (review).
+                            # One with no frame has no point to tap: say it
+                            # moved or left, not an error (CodeRabbit).
+                            if not matches_check[0].frame:
+                                return gone_again()
+                            el = matches_check[0]
+                        cx, cy = get_tap_point(el)
 
             settled_ms = None
             if self._checks_landing(resolved):
@@ -3642,6 +3668,22 @@ class DeviceControllerUI:
                     _note_collapsed(result, folded)
                     if settled_ms is not None:
                         result["waited_for_settle_ms"] = settled_ms
+                    if unsettled_ms is not None:
+                        result["target_moving"] = True
+                        result["waited_for_rest_ms"] = unsettled_ms
+                    if unsettled_ms is not None and result.get("reason") == "covered":
+                        # Not covered: the target never held still, so its last
+                        # frame no longer has it under the point (#529). Said
+                        # as that, or the detail sends the caller to scroll or
+                        # dismiss something that is not there (review). An
+                        # off-screen refusal keeps its own reason and remedy
+                        # -- nothing covers it (CodeRabbit).
+                        result["reason"] = "moving"
+                        result["detail"] = (
+                            f"'{el.label or el.identifier or el.type}' was still moving "
+                            f"after {unsettled_ms}ms, and where it was last read "
+                            f"{covering_name(result)} is now: not tapped. Wait for it to "
+                            f"stop, then read the screen and tap again.")
                     if sweep.get("attempted"):
                         result["scroll"] = _scroll_report(sweep, scroll_to_find)
                     return result
@@ -3676,6 +3718,14 @@ class DeviceControllerUI:
                 result["requested_value"] = value
             if settled_ms is not None:
                 result["waited_for_settle_ms"] = settled_ms
+            if unsettled_ms is not None:
+                # The same fields Android's fast path answers with (#514).
+                result["target_moving"] = True
+                result["waited_for_rest_ms"] = unsettled_ms
+                result["warning"] = (
+                    f"The target was still moving after {unsettled_ms}ms; it was "
+                    f"tapped where it was last read, which may not be where it is "
+                    f"now -- check the screen before relying on this tap.")
             _note_collapsed(result, folded)
             _note_equivalence(result, element_type, el)
             _note_deepened(result, deepened, shallow_depth)

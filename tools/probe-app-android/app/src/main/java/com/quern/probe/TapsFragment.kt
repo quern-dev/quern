@@ -25,9 +25,10 @@ import androidx.fragment.app.Fragment
  *
  * - **Target / decoy:** side by side, each counted.
  * - **Twins:** two buttons with the same label, for the ambiguity case.
- * - **Slide:** after `tap_slide_arm`, `tap_slider` jumps between its start and
- *   the spot below `tap_slide_arm` every 120 ms, until reset or the tab is
- *   left. `tap_slide_behind` sits where it started, so a tap aimed at a stale
+ * - **Slide:** after `tap_slide_arm`, `tap_slider` slides back and forth
+ *   between its start and the spot below `tap_slide_arm`, one round trip every
+ *   1.2 s, until reset or the tab is left -- its frame changes every display
+ *   frame. `tap_slide_behind` sits where it started, so a tap aimed at a stale
  *   position counts there or reaches nothing.
  * - **Remount:** `tap_remount_arm` removes `tap_remount`, and 1.5 s later a new
  *   button with the same id and label appears a column over and a row down.
@@ -44,10 +45,13 @@ import androidx.fragment.app.Fragment
 class TapsFragment : Fragment() {
 
     companion object {
-        // About a tap's round trip through quern on an emulator, so a read and
-        // the tap that follows it can straddle a jump; a one-off slide had
-        // always finished before quern read the tree, so it never raced.
-        const val SLIDE_PERIOD_MS = 120L
+        // One round trip of the slide: long enough that a read and the tap
+        // after it race the motion, as a one-off slide never did. Continuous,
+        // not a toggle between two places: a toggle on a fixed beat let
+        // screenshots taken on a fixed interval catch it in one place every
+        // time and call it settled (#529), which no real animation does.
+        const val SLIDE_CYCLE_MS = 1200L
+        const val SLIDE_FRAME_MS = 16L
         const val REMOUNT_GAP_MS = 1500L
         const val OVERLAY_DELAY_MS = 500L
 
@@ -112,7 +116,7 @@ class TapsFragment : Fragment() {
 
     override fun onPause() {
         super.onPause()
-        // The pager keeps every page alive; a slide left running would jump
+        // The pager keeps every page alive; a slide left running would move
         // forever behind the other tabs.
         stopSlide()
     }
@@ -181,17 +185,24 @@ class TapsFragment : Fragment() {
         labels[id]?.text = "${id.removePrefix("tap_")} ${counts[id] ?: 0}"
     }
 
+    private var slideStarted = 0L
+
+    // Set frame by frame, not with a property animation: the position each
+    // frame is the one uiautomator reads, as on iOS.
     private val slide = object : Runnable {
         override fun run() {
-            val away = slider.translationX == 0f
-            slider.translationX = if (away) dp(184).toFloat() else 0f
-            slider.translationY = if (away) dp(48).toFloat() else 0f
-            handler.postDelayed(this, SLIDE_PERIOD_MS)
+            val phase = ((android.os.SystemClock.uptimeMillis() - slideStarted) %
+                SLIDE_CYCLE_MS).toFloat() / SLIDE_CYCLE_MS
+            val t = if (phase < 0.5f) phase * 2 else (1 - phase) * 2   // 0 -> 1 -> 0
+            slider.translationX = dp(184) * t
+            slider.translationY = dp(48) * t
+            handler.postDelayed(this, SLIDE_FRAME_MS)
         }
     }
 
     private fun armSlide() {
         handler.removeCallbacks(slide)
+        slideStarted = android.os.SystemClock.uptimeMillis()
         handler.post(slide)
     }
 
