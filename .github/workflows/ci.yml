@@ -216,6 +216,14 @@ jobs:
             macos/QuernMedia/Sources/QuernMedia/Sinks/StreamRefusal.swift \
             -framework AVFoundation -framework CoreMediaIO -framework AppKit
 
+      - name: Compile and self-test sim-bridge
+        working-directory: .
+        # sim-bridge is compiled only at runtime, on first use, and the suite
+        # never runs swiftc -- so before this nothing built it in CI at all.
+        # The self-test checks the iPhone Duo panel rotations against what was
+        # measured on the device (#536); it needs no simulator.
+        run: scripts/sim-bridge-selftest.sh
+
   mcp-build:
     runs-on: ubuntu-latest
 

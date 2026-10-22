@@ -695,6 +695,24 @@ class SimBridgeBackend:
                 udid, snapshot_depth=snapshot_depth, source_timeout=source_timeout
             )
 
+    async def lit_panel(self, udid: str) -> dict | None:
+        """The lit panel of a device with several built-in panels (#536).
+
+        iPhone Duo has a cover and an inner panel, and only one is lit; taps,
+        reads and screenshots have to follow it. None for a device with one
+        panel -- every other simulator -- which keeps every caller on its
+        single-screen path. A dict with ``screen_id``, ``orientation``
+        (UIDeviceOrientation), ``size`` (points as the interface is turned)
+        and ``native_size``.
+        """
+        async with self._mgr.admit():
+            result = await self._mgr.send({"cmd": "panels", "udid": udid})
+        if not result.get("ok"):
+            raise DeviceError(f"sim-bridge could not read the panels: {result.get('error')}",
+                              tool=_TOOL)
+        lit = result.get("lit")
+        return lit if isinstance(lit, dict) else None
+
     async def describe_point(
         self,
         udid: str,

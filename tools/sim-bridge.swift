@@ -215,6 +215,260 @@ func devicePointSize(for device: NSObject) -> CGSize {
     return CGSize(width: pixelSize.width / scale, height: pixelSize.height / scale)
 }
 
+// MARK: - Panels (#536)
+//
+// iPhone Duo (Xcode 27.1) is one device with two built-in panels: a cover
+// (screen 1, `primary`, lit folded) and an inner panel (screen 3,
+// `primary-1`, lit unfolded, landscape). Everything above assumed one screen
+// -- `devicePointSize` is the device type's *main* screen, touches went to
+// `0x32` -- so once the Duo unfolded every tap was accepted and landed
+// nowhere, screenshots were of the dark cover, and accessibility frames were
+// squeezed into the cover's size. Measured on Xcode 27.1 / iOS 27.1:
+//
+// - Each built-in panel takes touch on its own digitizer, `0x40000000 |
+//   screenID`; `0x32` is a slot the last-created panel owns, and reached
+//   neither panel when unfolded. (tddworks/baguette found the registration
+//   and documented it in docs/features/iphone-duo/design.md.)
+// - Nothing on the host says which panel is lit: both report powered and
+//   connected, and their backlight state never changes with the fold. The
+//   framebuffer does -- the unlit panel is black -- so that is the test.
+// - The digitizer and accessibility both work in the panel's own portrait
+//   points; `uiOrientation` (UIDeviceOrientation: 1 portrait, 2 upside down,
+//   3 landscape left, 4 landscape right) says how the interface is turned on
+//   it. Callers work in the interface's points, so both are rotated here.
+//
+// A device with one built-in panel never reaches any of this: `litPanel`
+// answers nil and every caller keeps the single-screen path unchanged.
+
+struct Panel {
+    let screenID: UInt32
+    let deviceName: String
+    /// UIDeviceOrientation of the interface on this panel.
+    let orientation: UInt32
+    /// Points, laid out as the framebuffer is (portrait for both Duo panels).
+    let nativeSize: CGSize
+    let lit: Bool
+
+    var target: UInt32 { 0x4000_0000 | screenID }
+    var landscape: Bool { orientation == 3 || orientation == 4 }
+    /// Points as the interface is turned: what callers tap and read in.
+    var screenSize: CGSize {
+        landscape ? CGSize(width: nativeSize.height, height: nativeSize.width) : nativeSize
+    }
+
+    /// Interface point -> panel point.
+    func toPanel(_ p: CGPoint) -> CGPoint {
+        let w = nativeSize.width, h = nativeSize.height
+        switch orientation {
+        case 2: return CGPoint(x: w - p.x, y: h - p.y)
+        case 3: return CGPoint(x: p.y, y: h - p.x)
+        case 4: return CGPoint(x: w - p.y, y: p.x)
+        default: return p
+        }
+    }
+
+    /// Panel rect -> interface rect: the inverse of `toPanel`, for frames.
+    func toScreen(_ r: CGRect) -> CGRect {
+        let w = nativeSize.width, h = nativeSize.height
+        switch orientation {
+        case 2: return CGRect(x: w - r.maxX, y: h - r.maxY, width: r.width, height: r.height)
+        case 3: return CGRect(x: h - r.maxY, y: r.minX, width: r.height, height: r.width)
+        case 4: return CGRect(x: r.minY, y: w - r.maxX, width: r.height, height: r.width)
+        default: return r
+        }
+    }
+
+    func json(includeLit: Bool = true) -> [String: Any] {
+        var d: [String: Any] = [
+            "screen_id": Int(screenID), "device_name": deviceName,
+            "orientation": Int(orientation),
+            "native_size": [Double(nativeSize.width), Double(nativeSize.height)],
+            "size": [Double(screenSize.width), Double(screenSize.height)],
+        ]
+        if includeLit { d["lit"] = lit }
+        return d
+    }
+}
+
+/// The screen properties a display port's descriptor carries, read through
+/// typed IMPs: the descriptor and its properties are XPC proxies that claim
+/// every selector, so `value(forKey:)` on a wrong guess raises rather than
+/// returning nil. `screenType` 0 is a built-in panel.
+func screenProperties(of descriptor: NSObject)
+    -> (screenID: UInt32, deviceName: String, screenType: UInt64, orientation: UInt32)? {
+    let propsSel = NSSelectorFromString("screenProperties")
+    guard let props = descriptor.perform(propsSel)?.takeUnretainedValue() as? NSObject,
+          let cls = object_getClass(props) else { return nil }
+    typealias U32Fn = @convention(c) (AnyObject, Selector) -> UInt32
+    typealias U64Fn = @convention(c) (AnyObject, Selector) -> UInt64
+    typealias ObjFn = @convention(c) (AnyObject, Selector) -> AnyObject?
+    func u32(_ name: String) -> UInt32? {
+        let sel = NSSelectorFromString(name)
+        guard let imp = class_getMethodImplementation(cls, sel) else { return nil }
+        return unsafeBitCast(imp, to: U32Fn.self)(props, sel)
+    }
+    let typeSel = NSSelectorFromString("screenType"), nameSel = NSSelectorFromString("deviceName")
+    guard let id = u32("screenID"), let orientation = u32("uiOrientation"),
+          let typeImp = class_getMethodImplementation(cls, typeSel),
+          let nameImp = class_getMethodImplementation(cls, nameSel) else { return nil }
+    let type = unsafeBitCast(typeImp, to: U64Fn.self)(props, typeSel)
+    let name = unsafeBitCast(nameImp, to: ObjFn.self)(props, nameSel) as? String ?? ""
+    return (id, name, type, orientation)
+}
+
+/// Whether a framebuffer shows anything: 256 samples on a grid, any channel
+/// above 8. An unlit panel is exactly black; a lit one showing a dark
+/// interface still has a status bar.
+func surfaceIsLit(_ surface: IOSurface) -> Bool {
+    IOSurfaceLock(surface, .readOnly, nil)
+    defer { IOSurfaceUnlock(surface, .readOnly, nil) }
+    let w = IOSurfaceGetWidth(surface), h = IOSurfaceGetHeight(surface)
+    let bpr = IOSurfaceGetBytesPerRow(surface)
+    guard w > 0, h > 0 else { return false }
+    let base = IOSurfaceGetBaseAddress(surface).assumingMemoryBound(to: UInt8.self)
+    for gy in 0..<16 {
+        for gx in 0..<16 {
+            let px = base + ((gy * 2 + 1) * h / 32) * bpr + ((gx * 2 + 1) * w / 32) * 4
+            if px[0] > 8 || px[1] > 8 || px[2] > 8 { return true }
+        }
+    }
+    return false
+}
+
+/// Every built-in panel's display descriptor, with what it says about itself.
+func integratedPanels(device: NSObject) -> [(Panel, NSObject)] {
+    guard let io = device.perform(NSSelectorFromString("io"))?.takeUnretainedValue() as? NSObject
+    else { return [] }
+    io.perform(NSSelectorFromString("updateIOPorts"))
+    guard let ports = io.value(forKey: "deviceIOPorts") as? [NSObject] else { return [] }
+    let scale = (device.value(forKey: "deviceType") as? NSObject)
+        .flatMap { ($0.value(forKey: "mainScreenScale") as? NSNumber)?.doubleValue } ?? 3.0
+    let pidSel = NSSelectorFromString("portIdentifier"), descSel = NSSelectorFromString("descriptor")
+    let surfSel = NSSelectorFromString("framebufferSurface")
+    var found: [(Panel, NSObject)] = []
+    for port in ports where port.responds(to: pidSel) {
+        guard let pid = port.perform(pidSel)?.takeUnretainedValue(),
+              "\(pid)" == "com.apple.framebuffer.display",
+              let desc = port.perform(descSel)?.takeUnretainedValue() as? NSObject,
+              let props = screenProperties(of: desc), props.screenType == 0,
+              let surfObj = desc.perform(surfSel)?.takeUnretainedValue() else { continue }
+        let surface = unsafeBitCast(surfObj, to: IOSurface.self)
+        let native = CGSize(width: Double(IOSurfaceGetWidth(surface)) / scale,
+                            height: Double(IOSurfaceGetHeight(surface)) / scale)
+        found.append((Panel(screenID: props.screenID, deviceName: props.deviceName,
+                            orientation: props.orientation, nativeSize: native,
+                            lit: surfaceIsLit(surface)), desc))
+    }
+    return found.sorted { $0.0.screenID < $1.0.screenID }
+}
+
+/// The last panel each device was found lit on, for the moment neither or
+/// both read lit -- mid-fold, or a panel showing a black screen.
+nonisolated(unsafe) var lastLitPanel: [String: UInt32] = [:]
+
+/// The lit panel of a device with more than one built-in panel; nil for every
+/// other device, which keeps the single-screen path exactly as it was.
+func litPanelAndDescriptor(udid: String, device: NSObject) -> (Panel, NSObject)? {
+    let panels = integratedPanels(device: device)
+    guard panels.count > 1 else { return nil }
+    let lit = panels.filter { $0.0.lit }
+    let chosen: (Panel, NSObject)
+    if lit.count == 1 {
+        chosen = lit[0]
+    } else if let last = lastLitPanel[udid], let p = panels.first(where: { $0.0.screenID == last }) {
+        chosen = p
+    } else {
+        // Neither or both, never seen before: the cover, which is what a Duo
+        // boots on.
+        chosen = panels.first(where: { $0.0.deviceName == "primary" }) ?? panels[0]
+    }
+    lastLitPanel[udid] = chosen.0.screenID
+    return chosen
+}
+
+func litPanel(udid: String, device: NSObject) -> Panel? {
+    litPanelAndDescriptor(udid: udid, device: device)?.0
+}
+
+/// The rotations checked against measurements on the Duo's inner panel
+/// (669x951 native points; Xcode 27.1, iOS 27.1). Each case is a tap that
+/// opened the app it aimed at, or a frame read against the screenshot.
+func panelSelfTest() -> [String] {
+    var failures: [String] = []
+    func panel(_ o: UInt32) -> Panel {
+        Panel(screenID: 3, deviceName: "primary-1", orientation: o,
+              nativeSize: CGSize(width: 669, height: 951), lit: true)
+    }
+    func near(_ a: CGFloat, _ b: CGFloat, _ tol: CGFloat = 0.002) -> Bool { abs(a - b) <= tol }
+    // A screen fraction -> the digitizer fraction that landed on it.
+    let taps: [(UInt32, CGPoint, CGPoint)] = [
+        (3, CGPoint(x: 0.570, y: 0.123), CGPoint(x: 0.123, y: 0.430)),   // Settings icon
+        (4, CGPoint(x: 0.570, y: 0.123), CGPoint(x: 0.877, y: 0.570)),   // Settings icon
+        (4, CGPoint(x: 0.947, y: 0.569), CGPoint(x: 0.431, y: 0.947)),   // Safari icon
+        (2, CGPoint(x: 0.261, y: 0.120), CGPoint(x: 0.739, y: 0.880)),   // Settings icon
+        (1, CGPoint(x: 0.261, y: 0.120), CGPoint(x: 0.261, y: 0.120)),
+    ]
+    for (o, screen, expected) in taps {
+        let p = panel(o)
+        let space = TouchSpace(size: p.screenSize, target: p.target, panel: p)
+        let got = space.normalize(CGPoint(x: screen.x * p.screenSize.width,
+                                          y: screen.y * p.screenSize.height))
+        if !near(got.x, expected.x) || !near(got.y, expected.y) {
+            failures.append("orientation \(o): screen \(screen) -> \(got), measured \(expected)")
+        }
+    }
+    // The home screen's Safari frame, native points -> where it is on screen
+    // in landscape right: (871, 348) 64x64, read against the screenshot.
+    let safari = panel(4).toScreen(CGRect(x: 257.3, y: 871.2, width: 64, height: 64))
+    if !near(safari.minX, 871.2, 1) || !near(safari.minY, 347.7, 1) {
+        failures.append("orientation 4: Safari frame -> \(safari), measured (871, 348)")
+    }
+    // toScreen undoes toPanel, every orientation.
+    for o: UInt32 in 1...4 {
+        let p = panel(o)
+        let point = CGPoint(x: 123, y: 45)
+        let there = p.toPanel(point)
+        let back = p.toScreen(CGRect(origin: there, size: .zero)).origin
+        if !near(back.x, point.x, 0.01) || !near(back.y, point.y, 0.01) {
+            failures.append("orientation \(o): toScreen(toPanel(\(point))) = \(back)")
+        }
+    }
+    // A single-panel device keeps the old space: its own size, 0x32, no turn.
+    let flat = TouchSpace(size: CGSize(width: 393, height: 852), target: touchDigitizer, panel: nil)
+    let mid = flat.normalize(CGPoint(x: 196.5, y: 426))
+    if !near(mid.x, 0.5) || !near(mid.y, 0.5) || flat.target != 0x32 {
+        failures.append("single panel: \(mid) target \(flat.target)")
+    }
+    if panel(3).target != 0x4000_0003 { failures.append("target \(panel(3).target)") }
+    return failures
+}
+
+/// Where a touch goes and how a point gets there: the size callers' points
+/// are in, the digitizer, and the rotation into the panel's own coordinates.
+struct TouchSpace {
+    let size: CGSize
+    let target: UInt32
+    let panel: Panel?
+
+    /// Interface point -> the 0...1 digitizer coordinate, clamped.
+    func normalize(_ p: CGPoint) -> CGPoint {
+        guard let panel else {
+            return CGPoint(x: CGFloat(clamp01(Double(p.x / size.width))),
+                           y: CGFloat(clamp01(Double(p.y / size.height))))
+        }
+        let q = panel.toPanel(p)
+        return CGPoint(x: CGFloat(clamp01(Double(q.x / panel.nativeSize.width))),
+                       y: CGFloat(clamp01(Double(q.y / panel.nativeSize.height))))
+    }
+}
+
+func touchSpace(udid: String, device: NSObject) -> TouchSpace {
+    if let panel = litPanel(udid: udid, device: device) {
+        return TouchSpace(size: panel.screenSize, target: panel.target, panel: panel)
+    }
+    return TouchSpace(size: devicePointSize(for: device), target: touchDigitizer, panel: nil)
+}
+
 // MARK: - Accessibility Bridge
 
 /// TokenDispatcher — bridge-token delegate for AXPTranslator.
@@ -382,8 +636,31 @@ func axChildren(of element: NSObject) -> [NSObject] {
 struct AXFrameTransform {
     let rootFrame: CGRect
     let pointSize: CGSize
+    /// A multi-panel device's lit panel (#536). Its accessibility frames are
+    /// in points, so they are never scaled; but which way they are turned
+    /// depends on the app, measured on the unfolded Duo:
+    ///
+    /// - an app (Settings, Safari) reports its root at the panel's native
+    ///   portrait size and every element in the interface's own points --
+    ///   already the space callers work in;
+    /// - SpringBoard's home screen reports a stale root, the cover's size, and
+    ///   its elements in the panel's native portrait points, which have to be
+    ///   turned to the interface's orientation.
+    ///
+    /// So `panelSpace` is decided per read from the root (`forRoot`), and the
+    /// root's own frame is never used for scale.
+    var panel: Panel? = nil
+    var panelSpace: Bool = false
+
+    /// Whether a lit panel's tree is in its native points: true unless the
+    /// root reports the panel's native size, as an app's does.
+    static func panelSpace(root: CGRect, panel: Panel) -> Bool {
+        !(abs(root.width - panel.nativeSize.width) <= 1
+          && abs(root.height - panel.nativeSize.height) <= 1)
+    }
 
     func map(_ macFrame: CGRect) -> CGRect {
+        if let panel { return panelSpace ? panel.toScreen(macFrame) : macFrame }
         guard rootFrame.width > 0, rootFrame.height > 0,
               pointSize.width > 0, pointSize.height > 0 else { return macFrame }
         let scale = pointSize.width / rootFrame.width
@@ -399,6 +676,7 @@ struct AXFrameTransform {
     /// Invert: device point -> Mac AX point. AXPTranslator's
     /// objectAtPoint expects Mac coordinates, not device points.
     func unmap(_ devicePoint: CGPoint) -> CGPoint {
+        if let panel { return panel.toPanel(devicePoint) }
         guard rootFrame.width > 0, rootFrame.height > 0,
               pointSize.width > 0, pointSize.height > 0 else { return devicePoint }
         let scale = pointSize.width / rootFrame.width
@@ -425,7 +703,12 @@ func walkElement(
 ) -> [String: Any] {
     let role = axString(element, "accessibilityRole") ?? "AXUnknown"
     let macFrame = axFrame(of: element)
-    let projected = transform.map(macFrame)
+    // The application is the interface's bounds on a lit panel: its own frame
+    // is the cover's whatever is lit, and quern keeps the screen's size from it.
+    // Not "depth 0": a hit-test walks from the element it hit.
+    let projected = (role == "AXApplication" && transform.panel != nil)
+        ? CGRect(origin: .zero, size: transform.panel!.screenSize)
+        : transform.map(macFrame)
 
     // Strip "AX" prefix for the "type" field (idb convention)
     let type: String
@@ -598,7 +881,10 @@ func describeUI(udid: String, nested: Bool, hitX: Double? = nil, hitY: Double? =
 
     let pointSize = devicePointSize(for: device)
     let rootFrame = axFrame(of: rootElement)
-    let transform = AXFrameTransform(rootFrame: rootFrame, pointSize: pointSize)
+    let panel = litPanel(udid: udid, device: device)
+    let transform = AXFrameTransform(
+        rootFrame: rootFrame, pointSize: pointSize, panel: panel,
+        panelSpace: panel.map { AXFrameTransform.panelSpace(root: rootFrame, panel: $0) } ?? false)
 
     let tree = walkElement(rootElement, transform: transform, depth: 0,
                           deadline: deadline, nested: true)
@@ -653,12 +939,17 @@ func probePoint(udid: String, x: Double, y: Double, nested: Bool) -> Any? {
     }
     let pointSize = devicePointSize(for: device)
     let rootFrame = axFrame(of: frontmostRoot)
-    let transform = AXFrameTransform(rootFrame: rootFrame, pointSize: pointSize)
+    let panel = litPanel(udid: udid, device: device)
+    let transform = AXFrameTransform(
+        rootFrame: rootFrame, pointSize: pointSize, panel: panel,
+        panelSpace: panel.map { AXFrameTransform.panelSpace(root: rootFrame, panel: $0) } ?? false)
 
     let macPoint = transform.unmap(CGPoint(x: x, y: y))
 
     guard let hitTranslation = objectAtPointOnTranslator(
-        translator: translator, point: macPoint, displayId: 0, token: token
+        // The lit panel's own display: asked on display 0, the hit-test on
+        // an unfolded Duo found nothing anywhere (#536).
+        translator: translator, point: macPoint, displayId: transform.panel?.screenID ?? 0, token: token
     ) else {
         logErr("[ax] objectAtPoint returned nil for device=(\(x),\(y)) mac=(\(macPoint.x),\(macPoint.y))")
         return nil
@@ -901,11 +1192,11 @@ func makeDigitizerEvent(point: CGPoint, identifier: UInt32, isDown: Bool) -> CFT
     return parent
 }
 
-func wrapAndPatch(event: CFTypeRef, edgeBit: UInt8 = 0) -> UnsafeMutableRawPointer? {
+func wrapAndPatch(event: CFTypeRef, edgeBit: UInt8 = 0,
+                  target: UInt32 = touchDigitizer) -> UnsafeMutableRawPointer? {
     guard let wrapFn = trackpadWrapFn else { return nil }
     let raw = Unmanaged.passUnretained(event as AnyObject).toOpaque()
     guard let msg = wrapFn(raw) else { return nil }
-    let target: UInt32 = 0x32
     msg.storeBytes(of: target, toByteOffset: 0x6c, as: UInt32.self)
     let size = malloc_size(msg)
     if size >= 0x110 {
@@ -922,12 +1213,13 @@ func wrapAndPatch(event: CFTypeRef, edgeBit: UInt8 = 0) -> UnsafeMutableRawPoint
 }
 
 func sendDigitizerEvent(point: CGPoint, identifier: UInt32, isDown: Bool,
-                        edgeBit: UInt8 = 0, client: AnyObject) -> Bool {
+                        edgeBit: UInt8 = 0, target: UInt32 = touchDigitizer,
+                        client: AnyObject) -> Bool {
     guard let event = makeDigitizerEvent(point: point, identifier: identifier, isDown: isDown) else {
         return false
     }
     let msg: UnsafeMutableRawPointer? = withExtendedLifetime(event) {
-        wrapAndPatch(event: event, edgeBit: edgeBit)
+        wrapAndPatch(event: event, edgeBit: edgeBit, target: target)
     }
     guard let msg else { return false }
     sendHIDMessage(msg, to: client)
@@ -937,16 +1229,16 @@ func sendDigitizerEvent(point: CGPoint, identifier: UInt32, isDown: Bool,
 func clamp01(_ v: Double) -> Double { v < 0 ? 0 : (v > 1 ? 1 : v) }
 
 func doTap(udid: String, x: Double, y: Double, hold: Double = 0.05) -> Bool {
-    guard let client = ensureHIDClient(udid: udid) else { return false }
-    let size = devicePointSize(for: resolveDevice(udid: udid)!)
-    let nx = CGFloat(clamp01(x / Double(size.width)))
-    let ny = CGFloat(clamp01(y / Double(size.height)))
-    let point = CGPoint(x: nx, y: ny)
+    guard let client = ensureHIDClient(udid: udid), let device = resolveDevice(udid: udid) else { return false }
+    let space = touchSpace(udid: udid, device: device)
+    let point = space.normalize(CGPoint(x: x, y: y))
     let id = nextTouchId()
-    guard sendDigitizerEvent(point: point, identifier: id, isDown: true, client: client) else { return false }
+    guard sendDigitizerEvent(point: point, identifier: id, isDown: true, target: space.target,
+                             client: client) else { return false }
     let holdUs = UInt32(max(0.02, hold) * 1_000_000)
     usleep(holdUs)
-    return sendDigitizerEvent(point: point, identifier: id, isDown: false, client: client)
+    return sendDigitizerEvent(point: point, identifier: id, isDown: false, target: space.target,
+                              client: client)
 }
 
 /// Indigo's screen-edge bits, as the guest reads them at 0x3b/0xdb (#251).
@@ -973,17 +1265,17 @@ let edgeBits: [String: UInt8] = ["left": 0x02, "right": 0x04, "top": 0x08, "bott
 /// ordinary drag from its second sample on.
 func doSwipe(udid: String, x1: Double, y1: Double, x2: Double, y2: Double, duration: Double = 0.3,
              hold: Double = 0, edge: UInt8 = 0) -> Bool {
-    guard let client = ensureHIDClient(udid: udid) else { return false }
-    let size = devicePointSize(for: resolveDevice(udid: udid)!)
-    let start = CGPoint(x: CGFloat(clamp01(x1 / Double(size.width))),
-                        y: CGFloat(clamp01(y1 / Double(size.height))))
-    let end = CGPoint(x: CGFloat(clamp01(x2 / Double(size.width))),
-                      y: CGFloat(clamp01(y2 / Double(size.height))))
+    guard let client = ensureHIDClient(udid: udid), let device = resolveDevice(udid: udid) else { return false }
+    let space = touchSpace(udid: udid, device: device)
+    let target = space.target
+    let start = space.normalize(CGPoint(x: x1, y: y1))
+    let end = space.normalize(CGPoint(x: x2, y: y2))
     let steps = 10
     let stepMs = UInt32(max(8, (duration * 1000) / Double(steps + 2)))
     let id = nextTouchId()
 
-    guard sendDigitizerEvent(point: start, identifier: id, isDown: true, edgeBit: edge, client: client) else { return false }
+    guard sendDigitizerEvent(point: start, identifier: id, isDown: true, edgeBit: edge, target: target,
+                             client: client) else { return false }
     var ok = 0
     for i in 1...steps {
         usleep(stepMs * 1000)
@@ -991,18 +1283,21 @@ func doSwipe(udid: String, x1: Double, y1: Double, x2: Double, y2: Double, durat
         let p = CGPoint(x: start.x + (end.x - start.x) * CGFloat(t),
                         y: start.y + (end.y - start.y) * CGFloat(t))
         // Move events: use isDown=true for sustained touch (mask 0x07)
-        if sendDigitizerEvent(point: p, identifier: id, isDown: true, edgeBit: edge, client: client) { ok += 1 }
+        if sendDigitizerEvent(point: p, identifier: id, isDown: true, edgeBit: edge, target: target,
+                              client: client) { ok += 1 }
     }
     usleep(stepMs * 1000)
     if hold > 0 {
         let holdSteps = max(1, Int(hold * 1000 / 16))
         for k in 0..<holdSteps {
             let p = CGPoint(x: end.x, y: end.y + CGFloat(k % 2) * 0.0005)
-            _ = sendDigitizerEvent(point: p, identifier: id, isDown: true, edgeBit: edge, client: client)
+            _ = sendDigitizerEvent(point: p, identifier: id, isDown: true, edgeBit: edge, target: target,
+                                   client: client)
             usleep(16_000)
         }
     }
-    return sendDigitizerEvent(point: end, identifier: id, isDown: false, edgeBit: edge, client: client) && ok >= steps / 2
+    return sendDigitizerEvent(point: end, identifier: id, isDown: false, edgeBit: edge, target: target,
+                              client: client) && ok >= steps / 2
 }
 
 func doButton(udid: String, name: String) -> Bool {
@@ -1317,6 +1612,14 @@ func doScreenshot(udid: String, quality: Double = 0.8, scale: Int = 1) -> (Data,
         break
     }
 
+    // A multi-panel device's lit panel, not whichever display came first:
+    // unfolded, the first was the Duo's dark cover (#536).
+    var panel: Panel? = nil
+    if let (lit, litDesc) = litPanelAndDescriptor(udid: udid, device: device) {
+        descriptor = litDesc
+        panel = lit
+    }
+
     guard let desc = descriptor else {
         logErr("[screenshot] no framebuffer descriptor")
         return nil
@@ -1349,7 +1652,11 @@ func doScreenshot(udid: String, quality: Double = 0.8, scale: Int = 1) -> (Data,
         bitmapInfo: CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
     ) else { return nil }
 
-    guard let cgImage = ctx.makeImage() else { return nil }
+    guard let framebufferImage = ctx.makeImage() else { return nil }
+    // Upright, as the interface is turned: the framebuffer is the panel's own
+    // portrait layout, and `simctl io screenshot` rotates the same way.
+    guard let cgImage = panel.map({ rotated(framebufferImage, orientation: $0.orientation) })
+            ?? framebufferImage else { return nil }
 
     // Encode JPEG
     let data = NSMutableData()
@@ -1358,7 +1665,37 @@ func doScreenshot(udid: String, quality: Double = 0.8, scale: Int = 1) -> (Data,
     CGImageDestinationAddImage(dest, cgImage, options as CFDictionary)
     guard CGImageDestinationFinalize(dest) else { return nil }
 
-    return (data as Data, width, height)
+    return (data as Data, cgImage.width, cgImage.height)
+}
+
+/// A framebuffer image turned to the interface's orientation (UIDeviceOrientation).
+/// The same rotation `Panel.toScreen` applies to frames, so a frame read from
+/// the tree lands on the matching pixels of this image.
+func rotated(_ image: CGImage, orientation: UInt32) -> CGImage? {
+    guard orientation != 1, orientation >= 2, orientation <= 4 else { return image }
+    let w = image.width, h = image.height
+    let landscape = orientation != 2
+    let outW = landscape ? h : w, outH = landscape ? w : h
+    guard let space = image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB),
+          let ctx = CGContext(data: nil, width: outW, height: outH, bitsPerComponent: 8,
+                              bytesPerRow: 0, space: space,
+                              bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                  | CGBitmapInfo.byteOrder32Little.rawValue) else { return nil }
+    // CoreGraphics' origin is bottom-left; these are the panel-to-screen
+    // rotations of `Panel.toScreen` expressed in it.
+    switch orientation {
+    case 2:
+        ctx.translateBy(x: CGFloat(outW), y: CGFloat(outH))
+        ctx.rotate(by: .pi)
+    case 3:
+        ctx.translateBy(x: 0, y: CGFloat(outH))
+        ctx.rotate(by: -.pi / 2)
+    default: // 4
+        ctx.translateBy(x: CGFloat(outW), y: 0)
+        ctx.rotate(by: .pi / 2)
+    }
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+    return ctx.makeImage()
 }
 
 
@@ -1409,10 +1746,12 @@ func makeMultiFingerEvent(points: [CGPoint], identifiers: [UInt32], isDown: Bool
 }
 
 func sendMultiFingerEvent(points: [CGPoint], identifiers: [UInt32], isDown: Bool,
-                          client: AnyObject) -> Bool {
+                          target: UInt32 = touchDigitizer, client: AnyObject) -> Bool {
     guard let event = makeMultiFingerEvent(points: points, identifiers: identifiers, isDown: isDown)
     else { return false }
-    let msg: UnsafeMutableRawPointer? = withExtendedLifetime(event) { wrapAndPatch(event: event) }
+    let msg: UnsafeMutableRawPointer? = withExtendedLifetime(event) {
+        wrapAndPatch(event: event, target: target)
+    }
     guard let msg else { return false }
     sendHIDMessage(msg, to: client)
     return true
@@ -1428,11 +1767,11 @@ func sendMultiFingerEvent(points: [CGPoint], identifiers: [UInt32], isDown: Bool
 /// unchecked send dispatches with no completion, and reporting a recovery on
 /// that would claim more than was known (review).
 func releaseContacts(points: [CGPoint], identifiers: [UInt32], udid: String,
-                     client: AnyObject) -> Bool {
+                     target: UInt32 = touchDigitizer, client: AnyObject) -> Bool {
     var delivered = true
     for (point, id) in zip(points, identifiers) {
         guard let event = makeDigitizerEvent(point: point, identifier: id, isDown: false),
-              let msg = withExtendedLifetime(event, { wrapAndPatch(event: event) }),
+              let msg = withExtendedLifetime(event, { wrapAndPatch(event: event, target: target) }),
               sendHIDMessageChecked(msg, to: client) else {
             delivered = false
             continue
@@ -1456,7 +1795,8 @@ func doTouchPaths(udid: String, paths: [[CGPoint]], duration: Double) -> (Bool, 
     guard let client = ensureHIDClient(udid: udid), let device = resolveDevice(udid: udid) else {
         return (false, "no HID client for \(udid)", false)
     }
-    let size = devicePointSize(for: device)
+    let space = touchSpace(udid: udid, device: device)
+    let size = space.size, target = space.target
     // Refused, not clamped: a finger pinned to the edge turns the scale or
     // angle that was asked for into a different one, and says nothing.
     for path in paths {
@@ -1464,21 +1804,20 @@ func doTouchPaths(udid: String, paths: [[CGPoint]], duration: Double) -> (Bool, 
             return (false, "point (\(Int(p.x)), \(Int(p.y))) is off the \(Int(size.width))x\(Int(size.height)) screen", true)
         }
     }
-    let normalised = paths.map { path in
-        path.map { CGPoint(x: CGFloat(clamp01(Double($0.x) / Double(size.width))),
-                           y: CGFloat(clamp01(Double($0.y) / Double(size.height)))) }
-    }
+    let normalised = paths.map { path in path.map { space.normalize($0) } }
     let ids = paths.map { _ in nextTouchId() }
     let stepUs = UInt32(max(0.008, duration / Double(steps - 1)) * 1_000_000)
     func frame(_ i: Int) -> [CGPoint] { normalised.map { $0[i] } }
 
-    guard sendMultiFingerEvent(points: frame(0), identifiers: ids, isDown: true, client: client) else {
+    guard sendMultiFingerEvent(points: frame(0), identifiers: ids, isDown: true, target: target,
+                               client: client) else {
         return (false, "could not build the touch-down event", false)
     }
     var failed = 0
     for i in 1..<steps {
         usleep(stepUs)
-        if !sendMultiFingerEvent(points: frame(i), identifiers: ids, isDown: true, client: client) {
+        if !sendMultiFingerEvent(points: frame(i), identifiers: ids, isDown: true, target: target,
+                                 client: client) {
             failed += 1
         }
     }
@@ -1486,17 +1825,17 @@ func doTouchPaths(udid: String, paths: [[CGPoint]], duration: Double) -> (Bool, 
     // Lifted even after a failed move: fingers left down would hold every
     // later touch on this simulator hostage.
     var lifted = sendMultiFingerEvent(points: frame(steps - 1), identifiers: ids, isDown: false,
-                                      client: client)
+                                      target: target, client: client)
     if !lifted {
         // Once more: the same builders just made every other event, and a
         // contact left down holds the simulator's touch state hostage.
         usleep(16_000)
         lifted = sendMultiFingerEvent(points: frame(steps - 1), identifiers: ids, isDown: false,
-                                      client: client)
+                                      target: target, client: client)
     }
     if !lifted {
         let released = releaseContacts(points: frame(steps - 1), identifiers: ids, udid: udid,
-                                       client: client)
+                                       target: target, client: client)
         return (false, "could not build the touch-up event; " + (released
             ? "a separate lift for each finger was delivered instead"
             : "contacts may still be down until the simulator is next touched"), false)
@@ -1519,35 +1858,37 @@ func doMultiTap(udid: String, points: [CGPoint], count: Int, interval: Double,
     guard let client = ensureHIDClient(udid: udid), let device = resolveDevice(udid: udid) else {
         return (false, "no HID client for \(udid)", false)
     }
-    let size = devicePointSize(for: device)
+    let space = touchSpace(udid: udid, device: device)
+    let size = space.size, target = space.target
     for p in points where p.x < 0 || p.y < 0 || p.x > size.width || p.y > size.height {
         return (false, "point (\(Int(p.x)), \(Int(p.y))) is off the \(Int(size.width))x\(Int(size.height)) screen", true)
     }
-    let normalised = points.map {
-        CGPoint(x: CGFloat(clamp01(Double($0.x) / Double(size.width))),
-                y: CGFloat(clamp01(Double($0.y) / Double(size.height))))
-    }
+    let normalised = points.map { space.normalize($0) }
     for n in 0..<count {
         let ids = points.map { _ in nextTouchId() }
         let down: Bool
         if normalised.count == 1 {
-            down = sendDigitizerEvent(point: normalised[0], identifier: ids[0], isDown: true, client: client)
+            down = sendDigitizerEvent(point: normalised[0], identifier: ids[0], isDown: true,
+                                      target: target, client: client)
         } else {
-            down = sendMultiFingerEvent(points: normalised, identifiers: ids, isDown: true, client: client)
+            down = sendMultiFingerEvent(points: normalised, identifiers: ids, isDown: true,
+                                        target: target, client: client)
         }
         guard down else { return (false, "could not build tap \(n + 1)", false) }
         usleep(UInt32(max(0.02, hold) * 1_000_000))
         func lift() -> Bool {
             normalised.count == 1
-                ? sendDigitizerEvent(point: normalised[0], identifier: ids[0], isDown: false, client: client)
-                : sendMultiFingerEvent(points: normalised, identifiers: ids, isDown: false, client: client)
+                ? sendDigitizerEvent(point: normalised[0], identifier: ids[0], isDown: false,
+                                     target: target, client: client)
+                : sendMultiFingerEvent(points: normalised, identifiers: ids, isDown: false,
+                                       target: target, client: client)
         }
         // Retried once, as in doTouchPaths: a finger left down is worse than a
         // late one.
         let up = lift() || { usleep(16_000); return lift() }()
         guard up else {
             let released = releaseContacts(points: normalised, identifiers: ids, udid: udid,
-                                           client: client)
+                                           target: target, client: client)
             return (false, "could not lift tap \(n + 1); " + (released
                 ? "a separate lift for each finger was delivered instead"
                 : "contacts may still be down until the simulator is next touched"), false)
@@ -1666,7 +2007,7 @@ func handleCommand(_ dict: [String: Any]) {
                 return
             }
             do {
-                let size = devicePointSize(for: device)
+                let size = touchSpace(udid: udid, device: device).size
                 let w = Double(size.width), h = Double(size.height), m = 0.03
                 let atEdge: Bool
                 switch name {
@@ -1751,6 +2092,25 @@ func handleCommand(_ dict: [String: Any]) {
         } else {
             respond(["ok": false, "error": "set-hardware-keyboard failed"])
         }
+
+    case "selftest-panels":
+        // The panel rotations against what was measured on an iPhone Duo
+        // (#536), runnable without a simulator: scripts/sim-bridge-selftest.sh,
+        // which CI runs. Each failure is named; none means ok.
+        let failures = panelSelfTest()
+        respond(["ok": failures.isEmpty, "failures": failures])
+
+    case "panels":
+        // The built-in panels and which one is lit (#536). `lit` is null on a
+        // device with one panel, which every caller treats as "the screen".
+        guard let udid = dict["udid"] as? String, let device = resolveDevice(udid: udid) else {
+            respond(["ok": false, "error": "missing 'udid' or device not found"])
+            return
+        }
+        let all = integratedPanels(device: device).map { $0.0 }
+        let lit = litPanel(udid: udid, device: device)
+        respond(["ok": true, "panels": all.map { $0.json() },
+                 "lit": lit.map { $0.json(includeLit: false) } as Any])
 
     case "screenshot":
         guard let udid = dict["udid"] as? String else {

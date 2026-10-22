@@ -1743,7 +1743,25 @@ class DeviceController(DeviceControllerUI):
             return await self.adb.screenshot(resolved)
         if self._is_physical(resolved):
             return await self.pmd3.screenshot(resolved)
-        return await self.simctl.screenshot(resolved)
+        return await self.simctl.screenshot(resolved, display=await self._lit_display(resolved))
+
+    async def _lit_display(self, udid: str) -> int | None:
+        """The screen to capture on a simulator with several built-in panels:
+        the lit one (#536). None -- simctl's default screen -- for every other
+        device, and whenever the answer cannot be had: a screenshot of the
+        default screen is what was taken before this existed, and failing the
+        capture over it would be worse."""
+        if not self._sim_bridge_ok:
+            return None
+        try:
+            lit = await self.sim_bridge.lit_panel(udid)
+        except Exception:  # noqa: BLE001 -- a capture must not fail over which screen
+            logger.debug("Could not read the lit panel of %s", udid[:8], exc_info=True)
+            return None
+        if not lit:
+            return None
+        screen_id = lit.get("screen_id")
+        return screen_id if isinstance(screen_id, int) else None
 
     async def set_location(
         self, latitude: float, longitude: float, udid: str | None = None,

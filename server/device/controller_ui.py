@@ -4751,6 +4751,7 @@ class DeviceControllerUI:
         elif self._is_physical(resolved):
             raw_png = await self.pmd3.screenshot(resolved)
         else:
-            raw_png = await self.simctl.screenshot(resolved)
+            display = await self._lit_display(resolved)
+            raw_png = await self.simctl.screenshot(resolved, display=display)
         elements, _ = await self.get_ui_elements(resolved)
         return annotate_screenshot(raw_png, elements, scale=scale, quality=quality, grid=grid)
