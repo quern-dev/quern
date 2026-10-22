@@ -272,12 +272,25 @@ class _MatchesChanged(Exception):
 
 def _press_bounds(info: dict) -> dict | None:
     """The frame a press aims at: the visible part, as u2's own `click()`
-    takes it, else the whole -- or None when neither has its four edges."""
-    for key in ("visibleBounds", "bounds"):
-        b = info.get(key)
+    takes it, else the whole -- or None when there is nothing to press.
+
+    A frame with no area is nothing to press: it would aim at its corner,
+    (0, 0) for an all-zero one (CodeRabbit). And a visible part with no area
+    means none of the element is on screen, so the whole frame is not tried
+    either -- pressing its centre would tap whatever covers it."""
+    def edges(b) -> dict | None:
         if isinstance(b, dict) and all(k in b for k in ("left", "top", "right", "bottom")):
             return b
-    return None
+        return None
+
+    def area(b: dict) -> bool:
+        return b["right"] > b["left"] and b["bottom"] > b["top"]
+
+    visible = edges(info.get("visibleBounds"))
+    if visible is not None:
+        return visible if area(visible) else None
+    whole = edges(info.get("bounds"))
+    return whole if whole is not None and area(whole) else None
 
 
 def _wait_for_rest(read, first) -> dict:

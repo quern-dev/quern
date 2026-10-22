@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from server.device.android.u2_client import U2Backend
 from server.device.controller import DeviceController
 from server.models import DeviceType, UIElement
@@ -303,6 +305,24 @@ class TestOneRoundTripPerPress:
         obj = _obj(1)
         obj.info_list.return_value = [{"className": "android.widget.Button",
                                        "text": "Twin"}]
+        backend = _backend({"text": obj})
+        result = await backend.tap_by_selector(UDID, label="Twin")
+        assert result == {"defer": "vanished"}
+        backend._connect(UDID).click.assert_not_called()
+
+
+class TestNothingToPress:
+    """A frame with no area is nothing to press (CodeRabbit)."""
+
+    @pytest.mark.parametrize("info", [
+        {"visibleBounds": _box(0, 0, 0, 0), "bounds": _box(0, 0, 100, 50)},
+        {"visibleBounds": _box(40, 80, 40, 120)},
+        {"bounds": _box(10, 10, 10, 10)},
+    ], ids=["visible-part-empty", "visible-zero-width", "whole-zero-area"])
+    async def test_a_match_with_an_empty_frame_is_not_pressed(self, info):
+        obj = _obj(1)
+        obj.info_list.return_value = [{"className": "android.widget.Button",
+                                       "text": "Twin", **info}]
         backend = _backend({"text": obj})
         result = await backend.tap_by_selector(UDID, label="Twin")
         assert result == {"defer": "vanished"}
