@@ -395,6 +395,14 @@ def _nested(frames: list[dict]) -> bool:
 FRAME_SLOW_S = 1.0
 BLANK_RANGE = 8
 
+#: How long a sweep frame may take to stop changing after a swipe. Android 12+
+#: stretches a list dragged past its end and springs it back, so a capture
+#: taken straight after a swipe at the bottom catches the spring and differs
+#: from the last -- measured 0.1-2% changed on every swipe, where 0.02% is
+#: "unchanged" -- and the bottom was never found (#232). Settled, the bottom
+#: reads 0.000 and a real scroll ~4.8%. Measured settling in 90-380 ms.
+SETTLE_LIMIT_S = 1.0
+
 #: The sweep's default budget of swipes down (up gets twice it). A swipe moves
 #: about 7.5 rows of a typical list (measured on the probe's 200-row list), so
 #: the old default of 10 reached about row 75 and a deeper row read as absent
@@ -922,7 +930,7 @@ class U2Backend:
 
             slow = []
 
-            def _frame():
+            def _capture():
                 # A capture that took over FRAME_SLOW_S turns frames off for
                 # the rest of the sweep: every swipe would pay it (review).
                 if slow:
@@ -950,6 +958,22 @@ class U2Backend:
                 if before is None or after is None or before.size != after.size:
                     return False
                 return changed_fraction(before, after) < frames.UNCHANGED_BELOW
+
+            def _frame():
+                """The screen once it has stopped changing, up to
+                SETTLE_LIMIT_S: two captures in a row alike. Unsettled, the
+                last capture is returned, which reads as moved -- the old
+                behaviour, never a false end."""
+                started = time.monotonic()
+                frame = _capture()
+                while frame is not None and time.monotonic() - started < SETTLE_LIMIT_S:
+                    nxt = _capture()
+                    if nxt is None:
+                        return None
+                    if _unchanged(frame, nxt):
+                        return nxt
+                    frame = nxt
+                return frame
 
             # Sweep down (reveal rows below) then up (rows above / top-anchored
             # controls), re-checking after each swipe.

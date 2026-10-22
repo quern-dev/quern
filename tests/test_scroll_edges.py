@@ -45,15 +45,16 @@ def _device(screens, *, found_after: int | None = None, found_below: int | None 
     started (a swipe up brings it back one)."""
     device = MagicMock()
     device.window_size.return_value = (1080, 2400)
-    shots = iter(screens)
+    swipes = []
 
     def shot(scale, quality):
-        name = next(shots)
+        # The screen as it is after the latest swipe: a frame settles at once,
+        # as a list that is not springing back does (#232).
+        name = screens[min(len(swipes), len(screens) - 1)]
         if name is None:
             raise RuntimeError("screenshot failed")
         return base64.b64encode(name.encode()).decode()
     device.jsonrpc.takeScreenshot.side_effect = shot
-    swipes = []
     device.swipe.side_effect = lambda *a, **k: swipes.append(a)
     device.swipes = swipes
 
@@ -287,3 +288,51 @@ class TestTheFixedSleepIsGone:
         assert result["status"] == "ok"
         assert sleeps == slept
         assert backend.tap_by_selector.await_args_list[1].kwargs["confirm_rest"] is not skip
+
+
+class TestSettledFrames:
+    """Android 12+ springs a list dragged past its end back into place, so a
+    capture straight after a swipe at the bottom differs from the last one and
+    the bottom was never found (#232). Frames are compared once settled."""
+
+    def _springing(self, bottom_after: int, captures_to_settle: int = 2):
+        """A list that reaches its bottom after `bottom_after` swipes down and,
+        at the bottom, shows a different spring frame for the first
+        `captures_to_settle` captures after each swipe."""
+        device = _device(["unused"])
+        swipes = device.swipes
+        seen = {"swipe": -1, "n": 0}
+
+        def shot(scale, quality):
+            if len(swipes) != seen["swipe"]:
+                seen.update(swipe=len(swipes), n=0)
+            seen["n"] += 1
+            down = sum(1 if a[1] > a[3] else -1 for a in swipes)
+            if down >= bottom_after:
+                if seen["n"] <= captures_to_settle:
+                    name = f"spring-{len(swipes)}-{seen['n']}"
+                else:
+                    name = "bottom"
+            else:
+                name = f"row-{max(down, 0)}"
+            return base64.b64encode(name.encode()).decode()
+
+        device.jsonrpc.takeScreenshot.side_effect = shot
+        return device
+
+    async def test_the_bottom_is_found_although_the_list_springs_back(self):
+        device = self._springing(bottom_after=4)
+        found, report = await _sweep(device, max_swipes=30)
+        assert found is None
+        assert "bottom" in report["ends"], report
+        # Down to the bottom and one more to see it still -- not all 30.
+        down = sum(1 for a in device.swipes if a[1] > a[3])
+        assert down <= 6, f"{down} swipes down for a list 4 swipes long"
+
+    async def test_a_screen_that_never_settles_reads_as_moved(self, monkeypatch):
+        """Unsettled is the old behaviour -- moved -- never a false end."""
+        monkeypatch.setattr("server.device.android.u2_client.SETTLE_LIMIT_S", 0.0)
+        device = self._springing(bottom_after=0, captures_to_settle=10_000)
+        found, report = await _sweep(device, max_swipes=3)
+        assert found is None
+        assert "bottom" not in (report.get("ends") or []), report
