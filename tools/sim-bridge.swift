@@ -307,7 +307,15 @@ struct Panel {
 /// these has no panels as far as this file is concerned, and every caller
 /// stays on the single-screen path. The return types are the declared ones
 /// (`I` for screenID and uiOrientation, `Q` for screenType).
-let screenPropertiesAvailable: Bool = {
+///
+/// Asked on first use, not as a global initialiser: this file is top-level
+/// code, so a `let` here runs at launch, before CoreSimulator is loaded, and
+/// answered false for the life of the bridge -- every Duo read as one screen.
+/// Only a yes is kept; a no is cheap to ask again.
+nonisolated(unsafe) var screenPropertiesConfirmed = false
+
+func screenPropertiesAvailable() -> Bool {
+    if screenPropertiesConfirmed { return true }
     guard let screen = objc_getProtocol("SimScreen"),
           let props = objc_getProtocol("SimScreenProperties") else { return false }
     func declares(_ proto: Protocol, _ name: String, _ type: String) -> Bool {
@@ -315,14 +323,15 @@ let screenPropertiesAvailable: Bool = {
         guard d.name != nil, let types = d.types else { return false }
         return String(cString: types).hasPrefix(type)
     }
-    return declares(screen, "screenProperties", "@")
+    screenPropertiesConfirmed = declares(screen, "screenProperties", "@")
         && declares(props, "screenID", "I") && declares(props, "uiOrientation", "I")
         && declares(props, "screenType", "Q") && declares(props, "deviceName", "@")
-}()
+    return screenPropertiesConfirmed
+}
 
 func screenProperties(of descriptor: NSObject)
     -> (screenID: UInt32, deviceName: String, screenType: UInt64, orientation: UInt32)? {
-    guard screenPropertiesAvailable,
+    guard screenPropertiesAvailable(),
           let screen = objc_getProtocol("SimScreen"), descriptor.conforms(to: screen) else { return nil }
     let propsSel = NSSelectorFromString("screenProperties")
     guard let props = descriptor.perform(propsSel)?.takeUnretainedValue() as? NSObject,
@@ -365,7 +374,7 @@ func surfaceIsLit(_ surface: IOSurface) -> Bool {
 
 /// Every built-in panel's display descriptor, with what it says about itself.
 func integratedPanels(device: NSObject) -> [(Panel, NSObject)] {
-    guard screenPropertiesAvailable,
+    guard screenPropertiesAvailable(),
           let io = device.perform(NSSelectorFromString("io"))?.takeUnretainedValue() as? NSObject
     else { return [] }
     io.perform(NSSelectorFromString("updateIOPorts"))
@@ -592,6 +601,16 @@ func panelSelfTest() -> [String] {
             failures.append("could not make a test surface"); break
         }
         if surfaceIsLit(surface) != expected { failures.append("surface of \(value) read lit=\(!expected)") }
+    }
+
+    // The interface check answers from what is loaded now: as a global
+    // initialiser it ran before CoreSimulator was, said no for good, and
+    // every Duo read as one screen -- found live, after every other check here
+    // passed. An Xcode without the interfaces is not tested by this.
+    if let props = objc_getProtocol("SimScreenProperties"),
+       protocol_getMethodDescription(props, NSSelectorFromString("uiOrientation"), true, true).name != nil,
+       !screenPropertiesAvailable() {
+        failures.append("CoreSimulator declares the screen interfaces, but the check says it does not")
     }
 
     // The target is what reaches the message: 0x6c and 0x10c (review: a
