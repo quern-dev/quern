@@ -983,9 +983,12 @@ class U2Backend:
 
             def _frame() -> Any | None:
                 """The screen once it has stopped changing, up to
-                SETTLE_LIMIT_S: two captures in a row alike. Unsettled, the
-                last capture is returned, which reads as moved -- the old
-                behaviour, never a false end."""
+                SETTLE_LIMIT_S: two captures in a row alike. A screen that
+                did not settle is no frame, which reads as moved and leaves
+                the last settled frame as the one to compare with. Returning
+                its last capture could declare a false end: a screen
+                alternating between two images can show the same one either
+                side of a swipe (#535 review)."""
                 started = time.monotonic()
                 frame = _capture()
                 while frame is not None and time.monotonic() - started < SETTLE_LIMIT_S:
@@ -995,7 +998,7 @@ class U2Backend:
                     if _unchanged(frame, nxt):
                         return nxt
                     frame = nxt
-                return frame
+                return None
 
             # Sweep down (reveal rows below) then up (rows above / top-anchored
             # controls), re-checking after each swipe.

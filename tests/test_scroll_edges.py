@@ -329,6 +329,29 @@ class TestSettledFrames:
         down = sum(1 for a in device.swipes if a[1] > a[3])
         assert down <= 6, f"{down} swipes down for a list 4 swipes long"
 
+    async def test_a_screen_alternating_between_two_images_is_no_end(self, monkeypatch):
+        """Returning an unsettled frame's last capture could declare a false
+        end: a screen alternating A, B, A, B shows the same image either side
+        of every swipe if the same number of captures fits each time (#535
+        review). Unsettled is no frame, so it reads as moved."""
+        clock = {"t": 0.0, "n": 0}
+        monkeypatch.setattr("server.device.android.u2_client.time.monotonic",
+                            lambda: clock["t"])
+        device = _device(["unused"])
+
+        def alternating(scale, quality):
+            # 0.6 s a capture against the 1 s limit: two captures, never alike.
+            clock["t"] += 0.6
+            clock["n"] += 1
+            return base64.b64encode(("A" if clock["n"] % 2 else "B").encode()).decode()
+
+        device.jsonrpc.takeScreenshot.side_effect = alternating
+        found, report = await _sweep(device, max_swipes=3, deadline_s=1e9)
+        assert found is None
+        assert not report.get("ends"), f"a false end: {report}"
+        assert "no_progress" not in report
+        assert report["swipes"] == 9, "the whole budget, as an unknown screen gets"
+
     async def test_a_screen_that_never_settles_reads_as_moved(self, monkeypatch):
         """Unsettled is the old behaviour -- moved -- never a false end."""
         monkeypatch.setattr("server.device.android.u2_client.SETTLE_LIMIT_S", 0.0)
