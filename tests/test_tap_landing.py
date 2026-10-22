@@ -476,13 +476,16 @@ async def test_a_filtered_read_still_records_the_screen_size():
 # -- a target that never settles (#529) -------------------------------------------
 
 
-def _moving(settled: bool, elapsed_ms: float = 3000.0):
+def _moving(settled: bool, elapsed_ms: float = 3000.0, *, still_moving: bool = True):
     """The tree path's re-check finds the target moved, so it waits for the
-    screen; `settled` is how that wait ends."""
-    moved = FIELD.model_copy(update={"frame": {**FIELD.frame, "y": FIELD.frame["y"] + 80}})
-    # The hit-test finds the field where it moved to, so nothing covers it.
-    ctrl, backend = _controller(describe=lambda *a: hit("", 20, 380, 353, 40, "TextField"))
-    ctrl.get_ui_elements = AsyncMock(side_effect=[([FIELD], SIM), ([moved], SIM), ([moved], SIM)])
+    screen; `settled` is how that wait ends, and `still_moving` whether the
+    target's frame changed again across the wait -- the check that flags it."""
+    at = lambda dy: FIELD.model_copy(update={"frame": {**FIELD.frame, "y": FIELD.frame["y"] + dy}})  # noqa: E731
+    final = at(160) if still_moving else at(80)
+    # The hit-test finds the field where it ended up, so nothing covers it.
+    ctrl, backend = _controller(
+        describe=lambda *a: hit("", 20, final.frame["y"], 353, 40, "TextField"))
+    ctrl.get_ui_elements = AsyncMock(side_effect=[([FIELD], SIM), ([at(80)], SIM), ([final], SIM)])
     ctrl.wait_for_settle = AsyncMock(return_value={
         "settled": settled, "elapsed_ms": elapsed_ms, "reason": "timeout"})
     ctrl._last_ui_change.pop(SIM, None)     # no recent-change settle; only this wait
@@ -502,8 +505,27 @@ async def test_a_target_that_never_settled_says_so():
     assert "still moving" in result["warning"]
 
 
+async def test_a_target_that_stopped_says_nothing():
+    """Moved once, then held still across the wait: not moving, even when the
+    whole-screen wait timed out on a spinner elsewhere (review)."""
+    ctrl, backend = _moving(settled=False, still_moving=False)
+    with patch("server.device.controller_ui.asyncio.sleep", AsyncMock()):
+        result = await _tap(ctrl, identifier="field_secure", skip=False)
+    assert result["status"] == "ok"
+    assert "target_moving" not in result and "warning" not in result
+
+
+async def test_a_target_still_moving_is_flagged_even_if_the_screen_read_settled():
+    """The whole-screen check can be fooled (a fixed-beat toggle aliasing its
+    captures); the target's own frames are the evidence (#529)."""
+    ctrl, backend = _moving(settled=True, elapsed_ms=900.0)
+    with patch("server.device.controller_ui.asyncio.sleep", AsyncMock()):
+        result = await _tap(ctrl, identifier="field_secure", skip=False)
+    assert result["status"] == "ok" and result["target_moving"] is True
+
+
 async def test_a_target_that_settled_says_nothing():
-    ctrl, backend = _moving(settled=True, elapsed_ms=400.0)
+    ctrl, backend = _moving(settled=True, elapsed_ms=400.0, still_moving=False)
     with patch("server.device.controller_ui.asyncio.sleep", AsyncMock()):
         result = await _tap(ctrl, identifier="field_secure", skip=False)
     assert result["status"] == "ok"
@@ -521,3 +543,21 @@ async def test_a_refusal_after_the_target_never_settled_says_why():
     assert result["status"] == "obstructed"
     backend.tap.assert_not_called()
     assert result["target_moving"] is True and result["waited_for_rest_ms"] == 3000
+    # Said as moving, not as covered: "scroll it into view or dismiss what is
+    # on top" sent the caller after something that was not there (review).
+    assert result["reason"] == "moving"
+    assert "still moving" in result["detail"] and "scroll" not in result["detail"]
+
+
+def test_the_device_hub_advisory_joins_a_moving_warning():
+    """It used to step aside for any existing warning; a tap that also says
+    its target was moving went nowhere first if the input was taken (review)."""
+    from server.api.device_ui import _with_input_warning
+
+    controller = MagicMock()
+    controller.input_warning = lambda udid: "Device Hub has this simulator's input."
+    payload = _with_input_warning(controller, SIM, {"warning": "The target was still moving."})
+    assert payload["warning"] == ("The target was still moving. "
+                                  "Device Hub has this simulator's input.")
+    again = _with_input_warning(controller, SIM, dict(payload))
+    assert again["warning"] == payload["warning"], "not added twice"

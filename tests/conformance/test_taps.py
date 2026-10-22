@@ -132,12 +132,18 @@ def test_a_tap_on_a_moving_target_is_right_or_says_it_was_moving(taps) -> None:
         reached = [k for k, v in counts.items() if v]
         if body["status"] == "obstructed":
             assert not reached, f"refused, yet {reached} counted a tap: {body}"
+            # Refused because it moved, and saying so: without this the
+            # branch could not fail -- a refusal presses nothing by
+            # construction, and the older cover check produces it (review).
+            assert body.get("target_moving") is True, (
+                f"refused without saying the target was moving: {body}")
         elif counts["tap_slider"] != 1:
             assert body.get("target_moving") is True, (
                 f"the tap reached {reached or 'nothing'} "
                 f"and said nothing about the target moving: {body}")
     finally:
         taps.tap("tap_reset")
+
 
 def test_a_tap_after_a_remount_reaches_the_new_view(taps) -> None:
     """The button is replaced by a new one a column over and a row down.

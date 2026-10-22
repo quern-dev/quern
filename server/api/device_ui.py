@@ -52,14 +52,18 @@ def _with_input_warning(
     looking. Carrying it on the response puts the explanation on the call that
     is failing.
 
-    Never overwrites an existing `warning`: a handler that already has
-    something to say about this call is more specific than this is.
+    Never overwrites an existing `warning`, and adds to it rather than
+    stepping aside: a tap that also warns its target was moving (#529) went
+    nowhere first because the input services were taken, so the advisory is
+    the likelier explanation and must still be read. Not added twice.
     """
     if not udid:
         return payload
     warning = controller.input_warning(udid)
-    if warning and "warning" not in payload:
-        payload["warning"] = warning
+    if isinstance(warning, str) and warning and warning not in (payload.get("warning") or ""):
+        # Added to a warning already there -- a target still moving (#529) --
+        # not skipped for it: the advisory is the likelier cause (review).
+        payload["warning"] = " ".join(w for w in (payload.get("warning"), warning) if w)
     return payload
 
 
