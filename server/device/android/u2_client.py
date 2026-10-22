@@ -935,7 +935,8 @@ class U2Backend:
             state = {"previous": _frame()}
             DOWN, UP = ("bottom", (y_hi, y_lo)), ("top", (y_lo, y_hi))
 
-            def sweep(direction, budget):
+            def sweep(direction: tuple[str, tuple[int, int]],
+                      budget: int) -> tuple[dict | None, bool | None]:
                 """Swipe one way until the target shows, the frame stops
                 changing (that direction's end), or the budget is spent.
                 Returns (info, first swipe moved?)."""
