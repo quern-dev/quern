@@ -366,10 +366,19 @@ func integratedPanels(device: NSObject) -> [(Panel, NSObject)] {
 /// both read lit -- mid-fold, or a panel showing a black screen.
 nonisolated(unsafe) var lastLitPanel: [String: UInt32] = [:]
 
+/// Devices found to have exactly one built-in panel. How many panels a
+/// device has is its device type's, so it never changes for a UDID; and
+/// finding out costs ~15ms of XPC and framebuffer reads, which a phone would
+/// otherwise pay on every tap and every read for nothing. Recorded only on a
+/// definite one: a device still booting reports none, and is asked again.
+nonisolated(unsafe) var singlePanelDevices: Set<String> = []
+
 /// The lit panel of a device with more than one built-in panel; nil for every
 /// other device, which keeps the single-screen path exactly as it was.
 func litPanelAndDescriptor(udid: String, device: NSObject) -> (Panel, NSObject)? {
+    if singlePanelDevices.contains(udid) { return nil }
     let panels = integratedPanels(device: device)
+    if panels.count == 1 { singlePanelDevices.insert(udid) }
     guard panels.count > 1 else { return nil }
     let lit = panels.filter { $0.0.lit }
     let chosen: (Panel, NSObject)
