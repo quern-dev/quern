@@ -87,7 +87,8 @@ def _scroll_report(sweep: dict, requested: bool | None) -> dict:
         # reader has to resolve. Absent means unmeasured; present means
         # measured.
         measured = {
-            k: sweep[k] for k in ("swipes", "moved", "ends", "no_progress") if k in sweep
+            k: sweep[k] for k in ("swipes", "moved", "ends", "no_progress", "timed_out",
+                                  "deadline_s") if k in sweep
         }
         return {
             "attempted": True,
@@ -4235,11 +4236,15 @@ class DeviceControllerUI:
         label: str | None = None,
         identifier: str | None = None,
         udid: str | None = None,
-        max_swipes: int = 10,
+        max_swipes: int | None = None,
         snapshot_depth: int | None = None,
         deepen: bool = True,
     ) -> dict:
         """Scroll until an element is in view, without interacting with it.
+
+        `max_swipes` unset is each platform's own default: 10 on iOS, and
+        Android's `DEFAULT_MAX_SWIPES` (30), since an Android swipe covers
+        fewer rows (#232).
 
         A bounded, coordinate swipe loop that re-checks the target by selector
         after each swipe (no full-tree dump-induced scroll — see #49). Works
@@ -4274,6 +4279,10 @@ class DeviceControllerUI:
         target = f"identifier='{identifier}'" if identifier else f"label='{label}'"
 
         if self._is_android(resolved):
+            from server.device.android.u2_client import DEFAULT_MAX_SWIPES
+
+            if max_swipes is None:
+                max_swipes = DEFAULT_MAX_SWIPES
             report: dict = {}
             found = await self._ui_backend(resolved).scroll_into_view(
                 resolved, identifier=identifier, label=label, max_swipes=max_swipes,
@@ -4284,6 +4293,10 @@ class DeviceControllerUI:
                 ends = report.get("ends") or []
                 if report.get("no_progress"):
                     why = "the screen did not move when swiped either way: it does not scroll here"
+                elif report.get("timed_out"):
+                    why = (f"the sweep stopped at its {report.get('deadline_s', 0):.0f}s deadline "
+                           f"after {report.get('swipes', 0)} swipes, before it had looked "
+                           "everywhere -- it may be there")
                 elif ends:
                     why = f"the list reached its {' and '.join(ends)} without it"
                     if "bottom" not in ends:
@@ -4298,7 +4311,8 @@ class DeviceControllerUI:
                     "detail": (f"Element not found after scrolling ({target})"
                                + (f"; {why}" if why else "")),
                     "scroll": {k: report[k] for k in
-                               ("swipes", "moved", "ends", "no_progress") if k in report},
+                               ("swipes", "moved", "ends", "no_progress", "timed_out",
+                                "deadline_s") if k in report},
                 }
             return {
                 "udid": resolved,
@@ -4319,7 +4333,8 @@ class DeviceControllerUI:
         read_depth = self._read_depth(resolved, snapshot_depth)
         _begin_lookup()  # the not-found below reports on this sweep's looks only
         el = await self._ios_scroll_to_element(
-            resolved, label=label, identifier=identifier, max_swipes=max_swipes,
+            resolved, label=label, identifier=identifier,
+            max_swipes=10 if max_swipes is None else max_swipes,
             snapshot_depth=read_depth,
             deepen=_deepen_allowed(snapshot_depth, deepen),
         )

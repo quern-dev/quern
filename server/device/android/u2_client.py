@@ -395,6 +395,30 @@ def _nested(frames: list[dict]) -> bool:
 FRAME_SLOW_S = 1.0
 BLANK_RANGE = 8
 
+#: How long a sweep frame may take to stop changing after a swipe. Android 12+
+#: stretches a list dragged past its end and springs it back, so a capture
+#: taken straight after a swipe at the bottom catches the spring and differs
+#: from the last -- measured 0.1-2% changed on every swipe, where 0.02% is
+#: "unchanged" -- and the bottom was never found (#232). Settled, the bottom
+#: reads 0.000 and a real scroll ~4.8%. Measured settling in 90-380 ms, and
+#: never under two captures (~95 ms) a swipe, which is the price of it.
+SETTLE_LIMIT_S = 1.0
+
+#: A wall-clock bound on one sweep, as iOS's `_SCROLL_DEADLINE_S` (120 s). A
+#: swipe count is not a time bound: a list that never ends -- an endless feed
+#: -- costs the whole budget down and twice it up, about 90 swipes or 110 s at
+#: the emulator's ~1.2 s a step, and longer on a slow phone. Past a couple of
+#: minutes the answer is worthless and the device is held for nothing.
+SWEEP_DEADLINE_S = 120.0
+
+#: The sweep's default budget of swipes down (up gets twice it). A swipe moves
+#: about 7.5 rows of a typical list (measured on the probe's 200-row list), so
+#: the old default of 10 reached about row 75 and a deeper row read as absent
+#: (#232). The end detection from #515 stops a direction at its end, so a
+#: generous default costs nothing on a short list -- only a long one, where
+#: the time is the point.
+DEFAULT_MAX_SWIPES = 30
+
 
 class _PressMayHaveLanded(Exception):
     """A selector's click or long click failed after it was sent (#251)."""
@@ -819,8 +843,9 @@ class U2Backend:
         udid: str,
         identifier: str | None = None,
         label: str | None = None,
-        max_swipes: int = 10,
+        max_swipes: int = DEFAULT_MAX_SWIPES,
         report: dict | None = None,
+        deadline_s: float | None = None,
     ) -> dict | None:
         """Scroll a scrollable container until the target element is on-screen —
         WITHOUT dumping the full hierarchy.
@@ -911,10 +936,23 @@ class U2Backend:
 
             out = report if report is not None else {}
             out.update(swipes=0, moved=False)
+            limit = SWEEP_DEADLINE_S if deadline_s is None else deadline_s
+            deadline = time.monotonic() + limit
+
+            def _out_of_time() -> bool:
+                """Whether to stop before the next swipe: the caller has gone,
+                or the deadline has passed. Checked before every swipe."""
+                if stop.is_set():
+                    out["cancelled"] = True
+                    return True
+                if time.monotonic() < deadline:
+                    return False
+                out.update(timed_out=True, deadline_s=limit)
+                return True
 
             slow = []
 
-            def _frame():
+            def _capture() -> Any | None:
                 # A capture that took over FRAME_SLOW_S turns frames off for
                 # the rest of the sweep: every swipe would pay it (review).
                 if slow:
@@ -943,6 +981,25 @@ class U2Backend:
                     return False
                 return changed_fraction(before, after) < frames.UNCHANGED_BELOW
 
+            def _frame() -> Any | None:
+                """The screen once it has stopped changing, up to
+                SETTLE_LIMIT_S: two captures in a row alike. A screen that
+                did not settle is no frame, which reads as moved and leaves
+                the last settled frame as the one to compare with. Returning
+                its last capture could declare a false end: a screen
+                alternating between two images can show the same one either
+                side of a swipe (#535 review)."""
+                started = time.monotonic()
+                frame = _capture()
+                while frame is not None and time.monotonic() - started < SETTLE_LIMIT_S:
+                    nxt = _capture()
+                    if nxt is None:
+                        return None
+                    if _unchanged(frame, nxt):
+                        return nxt
+                    frame = nxt
+                return None
+
             # Sweep down (reveal rows below) then up (rows above / top-anchored
             # controls), re-checking after each swipe.
             state = {"previous": _frame()}
@@ -956,6 +1013,8 @@ class U2Backend:
                 name, (y1, y2) = direction
                 first_moved = None
                 for n in range(budget):
+                    if _out_of_time():
+                        break
                     _scroll(y1, y2)
                     out["swipes"] += 1
                     info = _match()
@@ -976,13 +1035,15 @@ class U2Backend:
                     out["moved"] = True
                 return None, first_moved
 
+            # Out of time, each sweep below stops before its first swipe:
+            # `_out_of_time` is checked before every one.
             info, down_moved = sweep(DOWN, max_swipes)
             if info is not None:
                 return _result(info)
             info, up_moved = sweep(UP, max_swipes * 2)
             if info is not None:
                 return _result(info)
-            if down_moved is False and up_moved is False:
+            if down_moved is False and up_moved is False and not _out_of_time():
                 # Two unchanged frames, but the first may have been a false
                 # read at the top of a list, and the answer is "this does not
                 # scroll". One more swipe down settles it (review).
@@ -1011,11 +1072,20 @@ class U2Backend:
                         return _result(info)
             return None
 
+        # Cancelling the await does not stop the thread: a caller that hung
+        # up left the sweep swiping the device until its deadline (#535
+        # review). The worker checks this before every swipe instead.
+        stop = threading.Event()
         try:
             return await asyncio.to_thread(_do)
         except Exception as e:
             logger.debug("scroll_into_view failed (%s)", e)
             return None
+        finally:
+            # Every way out, not only cancellation: whatever ended the await,
+            # the worker must not go on swiping. After a normal return it has
+            # already finished, so this changes nothing there.
+            stop.set()
 
     async def swipe(
         self,

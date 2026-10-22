@@ -398,19 +398,16 @@ def test_a_row_far_down_the_list_is_reached(probe) -> None:
     """The reach of one sweep, which is a different question from #84's.
 
     The tests above use rows 20 and 60, both within any plausible budget, so
-    they pass on a sweep that cannot go further. Row 150 of 200 is past what
-    Android's *default* budget covers: ~11 rows a swipe against `max_swipes`
-    of 10.
+    they pass on a sweep that cannot go further. Row 150 of 200 was past what
+    Android's default budget covered: about 7.5 rows a swipe (measured; the
+    ~11 once written here was wrong) against `max_swipes` of 10, so about row
+    75. #232 made Android's default 30, which the end detection from #515
+    keeps cheap on a short list.
 
-    Deliberately not raising `max_swipes`. Asking for 25 makes this pass on
-    both platforms today, which is worth knowing -- the sweep works, the reach
-    is the budget -- and makes the test prove nothing about what a caller who
-    did not think to ask for more will get. The default is the contract.
-
-    Expected to fail on Android until #232: the caller cannot tell "not on
-    this screen" from "further than the default budget", because both answer
-    404. Left failing rather than skipped, for the reason F9 is: a known bug
-    that reports as a pass is worse than no test.
+    Deliberately not passing `max_swipes`: the server's default is the
+    contract, and asking for more makes the test prove nothing about what a
+    caller who did not think to ask will get. The driver used to send 15,
+    which is why this test never measured the default it named.
     """
     probe.goto("scroll")
     probe.scroll_reset(to="top")

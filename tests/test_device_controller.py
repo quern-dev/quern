@@ -1899,6 +1899,69 @@ class TestScrollToElement:
             "emulator-5554", identifier="button_log", label=None, max_swipes=5, report=ANY,
         )
 
+    async def test_android_default_budget_reaches_a_long_list(self):
+        """Unset is Android's own default, 30 -- not iOS's 10. A swipe moves
+        about 7.5 rows, so 10 reached about row 75 and a deeper row read as
+        absent (#232)."""
+        from server.device.android.u2_client import DEFAULT_MAX_SWIPES
+
+        ctrl = DeviceController()
+        ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value="emulator-5554")
+        ctrl._invalidate_ui_cache = MagicMock()
+        ctrl.u2.scroll_into_view = AsyncMock(return_value={"label": "Row 150"})
+
+        await ctrl.scroll_to_element(label="Row 150")
+        assert DEFAULT_MAX_SWIPES == 30
+        assert ctrl.u2.scroll_into_view.call_args.kwargs["max_swipes"] == 30
+
+    async def test_android_not_found_names_the_budget_it_used(self):
+        """The miss says how far down it looked: the default it actually
+        used, not an unset value."""
+        ctrl = DeviceController()
+        ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value="emulator-5554")
+        ctrl._invalidate_ui_cache = MagicMock()
+
+        async def miss(*a, report=None, **k):
+            report.update(swipes=90, moved=True, ends=["top"])
+            return None
+
+        ctrl.u2.scroll_into_view = miss
+        result = await ctrl.scroll_to_element(label="Row 999")
+        assert result["status"] == "not_found"
+        assert "within 30 swipes down" in result["detail"], result["detail"]
+
+    async def test_android_miss_at_the_deadline_says_it_may_be_there(self):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value="emulator-5554")
+        ctrl._invalidate_ui_cache = MagicMock()
+
+        async def out_of_time(*a, report=None, **k):
+            report.update(swipes=97, moved=True, timed_out=True, deadline_s=120.0)
+            return None
+
+        ctrl.u2.scroll_into_view = out_of_time
+        result = await ctrl.scroll_to_element(label="Row 999")
+        assert result["status"] == "not_found"
+        assert "120s deadline after 97 swipes" in result["detail"], result["detail"]
+        assert "may be there" in result["detail"]
+        assert result["scroll"]["timed_out"] is True
+
+    async def test_ios_default_budget_is_unchanged(self):
+        """iOS swipes cover about 17 rows, so it keeps 10 (#232 is Android's)."""
+        ctrl = DeviceController()
+        ctrl._device_type_cache["AAAA-1111"] = DeviceType.SIMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value="AAAA-1111")
+        ctrl._invalidate_ui_cache = MagicMock()
+        ctrl._warn_if_input_is_suppressed = AsyncMock()
+        ctrl._ios_scroll_to_element = AsyncMock(return_value=None)
+        ctrl._done_with_deep_element = AsyncMock()
+
+        await ctrl.scroll_to_element(label="Row 150")
+        assert ctrl._ios_scroll_to_element.call_args.kwargs["max_swipes"] == 10
+
     async def test_android_not_found(self):
         ctrl = DeviceController()
         ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR

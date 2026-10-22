@@ -715,16 +715,20 @@ class ProbeDriver:
         return self.scroll_to(**self.contract.row_locator(index), **kw)
 
     def scroll_to(self, *, identifier: str | None = None, label: str | None = None,
-                  max_swipes: int = 15):
+                  max_swipes: int | None = None):
+        """`max_swipes` unset is the server's own default, which is what a
+        caller who did not think to ask gets -- the thing these tests are
+        about. This sent 15, so the far-row test never measured the default
+        it was written to check (#232)."""
         return self.client.json_ok(
             "POST", "/api/v1/device/ui/scroll-to-element",
             json={
                 "udid": self.udid,
                 **({"identifier": identifier} if identifier else {}),
                 **({"label": label} if label else {}),
-                "max_swipes": max_swipes,
+                **({"max_swipes": max_swipes} if max_swipes is not None else {}),
             },
-            timeout=180.0,
+            timeout=240.0,
         )
 
     def wait_for(self, *, identifier: str | None = None, label: str | None = None,
