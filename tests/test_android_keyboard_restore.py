@@ -375,7 +375,9 @@ class TestU2Backend:
         device = FakeDevice(GBOARD)
         backend = _backend(device)
         backend.ime.remember(SERIAL, device)
-        backend.RESTORE_TIMEOUT_S = 0.2
+        # Room to spare: the lock wait is half the bound and must end well
+        # inside it, on a slow CI runner too (flaked there at 0.2s).
+        backend.RESTORE_TIMEOUT_S = 2.0
         lock = backend.ime.lock_for(SERIAL)
         lock.acquire()                    # typing that never finishes
         try:
@@ -526,7 +528,9 @@ class TestIdleRestore:
         held was retried every sweep (CodeRabbit)."""
         backend, device = self._typed(state_dir, monkeypatch)
         await backend.type_text(SERIAL, "hi")
-        backend.RESTORE_TIMEOUT_S = 0.2
+        # Room to spare: the lock wait is half the bound and must end well
+        # inside it, on a slow CI runner too (flaked there at 0.2s).
+        backend.RESTORE_TIMEOUT_S = 2.0
         later = time.monotonic() + backend.IDLE_RESTORE_S
         lock = backend.ime.lock_for(SERIAL)
         lock.acquire()

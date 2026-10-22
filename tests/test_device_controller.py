@@ -1896,7 +1896,7 @@ class TestScrollToElement:
         # wrongly selecting sim-bridge.
         assert result["backend"] == "u2"
         ctrl.u2.scroll_into_view.assert_called_once_with(
-            "emulator-5554", identifier="button_log", label=None, max_swipes=5,
+            "emulator-5554", identifier="button_log", label=None, max_swipes=5, report=ANY,
         )
 
     async def test_android_not_found(self):
@@ -2023,7 +2023,7 @@ class TestTapElementAutoScroll:
         result = await ctrl.tap_element(identifier="button_log")
         assert result["status"] == "ok"
         backend.scroll_into_view.assert_called_once_with(
-            "emulator-5554", identifier="button_log", label=None,
+            "emulator-5554", identifier="button_log", label=None, report=ANY,
         )
         assert backend.tap_by_selector.call_count == 2
 

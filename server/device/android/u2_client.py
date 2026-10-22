@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import re
 import threading
@@ -363,6 +364,13 @@ def _nested(frames: list[dict]) -> bool:
     outer = max(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
     return all(outer[0] <= b[0] and outer[1] <= b[1] and b[2] <= outer[2] and b[3] <= outer[3]
                for b in boxes)
+
+
+#: A scroll-sweep frame taking longer than this turns frames off for the
+#: sweep (#515); a frame whose brightest and darkest pixels are closer than
+#: BLANK_RANGE is blank -- a FLAG_SECURE window captures black.
+FRAME_SLOW_S = 1.0
+BLANK_RANGE = 8
 
 
 class _PressMayHaveLanded(Exception):
@@ -779,9 +787,23 @@ class U2Backend:
         identifier: str | None = None,
         label: str | None = None,
         max_swipes: int = 10,
+        report: dict | None = None,
     ) -> dict | None:
         """Scroll a scrollable container until the target element is on-screen —
         WITHOUT dumping the full hierarchy.
+
+        Each swipe is followed by a small frame of the screen (#515), compared
+        with the one before it as #502's frames are. A swipe that changed
+        nothing means that direction is at its end, so the sweep turns round;
+        when the first swipe each way changed nothing, the screen does not
+        scroll and the sweep stops. Before this it swiped blind, 10 down and 20
+        up, whatever happened. An unchanged frame ends one direction only,
+        never the sweep, and a frame that could not be taken or compared reads
+        as moved, so the worst case is the old blind sweep. `report`, when
+        given, gains `swipes`, `moved`, `ends` (the directions found at their
+        end) and `no_progress` -- which takes a third unchanged swipe, since it
+        says the screen does not scroll. A blank frame (FLAG_SECURE captures
+        black) and a capture slower than FRAME_SLOW_S read as no frame.
 
         A bounded, metered swipe loop that re-checks the target by selector
         (``obj.exists`` — not ``dump_hierarchy``, so no dump-induced scroll, see
@@ -851,14 +873,108 @@ class U2Backend:
                 # a drag highlights rows.
                 device.swipe(cx, y1, cx, y2, steps=25)
 
+            from server.device import frames
+            from server.device.settle import changed_fraction
+
+            out = report if report is not None else {}
+            out.update(swipes=0, moved=False)
+
+            slow = []
+
+            def _frame():
+                # A capture that took over FRAME_SLOW_S turns frames off for
+                # the rest of the sweep: every swipe would pay it (review).
+                if slow:
+                    return None
+                started = time.monotonic()
+                try:
+                    png = base64.b64decode(device.jsonrpc.takeScreenshot(0.25, 50))
+                    frame = frames.prepare(png, "android")
+                except Exception:  # noqa: BLE001 -- no frame reads as moved
+                    logger.debug("scroll_into_view: no frame", exc_info=True)
+                    frame = None
+                if time.monotonic() - started > FRAME_SLOW_S:
+                    slow.append(True)
+                # A blank frame is no frame. A FLAG_SECURE window (banking,
+                # password screens) captures black, which never changes, so a
+                # list there read as not scrolling and the sweep stopped
+                # (review).
+                if frame is not None:
+                    low, high = frame.getextrema()
+                    if high - low < BLANK_RANGE:
+                        return None
+                return frame
+
+            def _unchanged(before, after) -> bool:
+                if before is None or after is None or before.size != after.size:
+                    return False
+                return changed_fraction(before, after) < frames.UNCHANGED_BELOW
+
             # Sweep down (reveal rows below) then up (rows above / top-anchored
             # controls), re-checking after each swipe.
-            sweeps = [(y_hi, y_lo)] * max_swipes + [(y_lo, y_hi)] * (max_swipes * 2)
-            for y1, y2 in sweeps:
-                _scroll(y1, y2)
+            state = {"previous": _frame()}
+            DOWN, UP = ("bottom", (y_hi, y_lo)), ("top", (y_lo, y_hi))
+
+            def sweep(direction, budget):
+                """Swipe one way until the target shows, the frame stops
+                changing (that direction's end), or the budget is spent.
+                Returns (info, first swipe moved?)."""
+                name, (y1, y2) = direction
+                first_moved = None
+                for n in range(budget):
+                    _scroll(y1, y2)
+                    out["swipes"] += 1
+                    info = _match()
+                    if info is not None:
+                        # `moved` stays what was measured: a target that
+                        # appeared because the screen finished loading did
+                        # not prove anything moved (review).
+                        return info, first_moved
+                    current = _frame()
+                    still = _unchanged(state["previous"], current)
+                    if current is not None:
+                        state["previous"] = current
+                    if n == 0:
+                        first_moved = not still
+                    if still:
+                        out.setdefault("ends", []).append(name)
+                        break
+                    out["moved"] = True
+                return None, first_moved
+
+            info, down_moved = sweep(DOWN, max_swipes)
+            if info is not None:
+                return _result(info)
+            info, up_moved = sweep(UP, max_swipes * 2)
+            if info is not None:
+                return _result(info)
+            if down_moved is False and up_moved is False:
+                # Two unchanged frames, but the first may have been a false
+                # read at the top of a list, and the answer is "this does not
+                # scroll". One more swipe down settles it (review).
+                _scroll(y_hi, y_lo)
+                out["swipes"] += 1
                 info = _match()
                 if info is not None:
                     return _result(info)
+                current = _frame()
+                if _unchanged(state["previous"], current):
+                    out["no_progress"] = True
+                    return None
+                # It moved: the bottom "end" was a false read. Carry on the
+                # search -- down with what is left of that budget, then back
+                # up -- rather than stopping short of rows further down
+                # (CodeRabbit).
+                if current is not None:
+                    state["previous"] = current
+                out["moved"] = True
+                out["ends"] = [e for e in out.get("ends", []) if e != "bottom"]
+                for direction, budget in ((DOWN, max(0, max_swipes - 2)),
+                                          (UP, max_swipes * 2)):
+                    out["ends"] = [e for e in out["ends"] if e != direction[0]]
+                    info, _ = sweep(direction, budget)
+                    if info is not None:
+                        return _result(info)
             return None
 
         try:

@@ -72,14 +72,15 @@ def _scroll_report(sweep: dict, requested: bool | None) -> dict:
     reason `scrollable` is tri-state rather than a boolean.
     """
     if sweep.get("attempted"):
-        # `swipes` and `moved` only when something measured them. Android's
-        # `scroll_into_view` reports whether the target appeared and nothing
-        # else, so defaulting these to 0 and False stated two facts it never
-        # established -- and "swiped 0 times, nothing moved" alongside
-        # `attempted: true` is a contradiction the reader has to resolve.
-        # Absent means unmeasured; present means measured.
+        # `swipes`, `moved`, `ends` and `no_progress` only when something
+        # measured them: Android's `scroll_into_view` compares a frame after
+        # each swipe (#515), and an iOS sweep counts its swipes. Defaulting
+        # them would state facts nobody established -- "swiped 0 times,
+        # nothing moved" alongside `attempted: true` is a contradiction the
+        # reader has to resolve. Absent means unmeasured; present means
+        # measured.
         measured = {
-            k: sweep[k] for k in ("swipes", "moved") if k in sweep
+            k: sweep[k] for k in ("swipes", "moved", "ends", "no_progress") if k in sweep
         }
         return {
             "attempted": True,
@@ -3136,18 +3137,18 @@ class DeviceControllerUI:
                 # other platform.
                 sweep["attempted"] = True
                 found = await backend.scroll_into_view(
-                    resolved_fast, identifier=identifier, label=label,
+                    resolved_fast, identifier=identifier, label=label, report=sweep,
                 )
                 if found is not None:
-                    # Let the scroll settle before clicking — a tap landing
+                    # Let the scroll settle before clicking -- a tap landing
                     # while the list is still coming to rest gets absorbed as a
                     # scroll-stop instead of a click (observed intermittently).
-                    #
-                    # Still a sleep, unlike the iOS paths above: wait_for_settle
-                    # costs three captures, and adb's capture time has not been
-                    # measured here, so swapping this blind could make the
-                    # Android path slower rather than more reliable. See #100.
-                    await asyncio.sleep(0.4)
+                    # The at-rest check below (#514) does that, reading the
+                    # target until it stops, so the fixed 0.4s sleep that stood
+                    # here goes (#515). It stays for a caller who turned the
+                    # check off: a list coming to rest still swallows a tap.
+                    if skip_stability_check:
+                        await asyncio.sleep(0.4)
                     tapped = await backend.tap_by_selector(
                         resolved_fast, identifier=identifier, label=label, **hold,
                         # The sweep just moved the screen -- unless the caller
@@ -4223,16 +4224,31 @@ class DeviceControllerUI:
         target = f"identifier='{identifier}'" if identifier else f"label='{label}'"
 
         if self._is_android(resolved):
+            report: dict = {}
             found = await self._ui_backend(resolved).scroll_into_view(
                 resolved, identifier=identifier, label=label, max_swipes=max_swipes,
+                report=report,
             )
             self._invalidate_ui_cache(resolved)  # scrolling changes the viewport
             if found is None:
+                ends = report.get("ends") or []
+                if report.get("no_progress"):
+                    why = "the screen did not move when swiped either way: it does not scroll here"
+                elif ends:
+                    why = f"the list reached its {' and '.join(ends)} without it"
+                    if "bottom" not in ends:
+                        why += (f", but not its bottom within {max_swipes} swipes down -- "
+                                "it may be further down")
+                else:
+                    why = ""
                 return {
                     "udid": resolved,
                     "backend": self.backend_that_served(resolved),
                     "status": "not_found",
-                    "detail": f"Element not found after scrolling ({target})",
+                    "detail": (f"Element not found after scrolling ({target})"
+                               + (f"; {why}" if why else "")),
+                    "scroll": {k: report[k] for k in
+                               ("swipes", "moved", "ends", "no_progress") if k in report},
                 }
             return {
                 "udid": resolved,
