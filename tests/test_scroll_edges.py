@@ -336,3 +336,39 @@ class TestSettledFrames:
         found, report = await _sweep(device, max_swipes=3)
         assert found is None
         assert "bottom" not in (report.get("ends") or []), report
+
+
+class TestTheSweepHasADeadline:
+    """A swipe count is not a time bound: a list that never ends costs the
+    whole budget down and twice it up (#535 review). The sweep stops at a
+    wall-clock deadline, as iOS's does, and says so."""
+
+    def _endless(self):
+        """Every swipe shows a new screen: no end in either direction."""
+        device = _device(["unused"])
+        device.jsonrpc.takeScreenshot.side_effect = (
+            lambda scale, quality: base64.b64encode(
+                f"screen-{len(device.swipes)}".encode()).decode())
+        return device
+
+    async def test_out_of_time_stops_and_says_so(self, monkeypatch):
+        clock = {"t": 0.0}
+        monkeypatch.setattr("server.device.android.u2_client.time.monotonic",
+                            lambda: clock["t"])
+
+        device = self._endless()
+        device.swipe.side_effect = (
+            lambda *a, **k: (device.swipes.append(a), clock.update(t=clock["t"] + 10.0)))
+        found, report = await _sweep(device, max_swipes=30, deadline_s=35.0)
+        assert found is None
+        assert report["timed_out"] is True and report["deadline_s"] == 35.0
+        # 10 s a swipe against 35 s: four swipes, then out of time -- and no
+        # sweep up after a down sweep that ran out of time.
+        assert report["swipes"] == 4, report
+        assert all(a[1] > a[3] for a in device.swipes), "it swept up after the deadline"
+
+    async def test_an_endless_list_within_the_deadline_spends_its_budget(self):
+        found, report = await _sweep(self._endless(), max_swipes=3)
+        assert found is None
+        assert report["swipes"] == 9, "3 down and 6 up, no end either way"
+        assert "timed_out" not in report

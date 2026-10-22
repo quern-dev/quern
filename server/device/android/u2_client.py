@@ -400,8 +400,16 @@ BLANK_RANGE = 8
 #: taken straight after a swipe at the bottom catches the spring and differs
 #: from the last -- measured 0.1-2% changed on every swipe, where 0.02% is
 #: "unchanged" -- and the bottom was never found (#232). Settled, the bottom
-#: reads 0.000 and a real scroll ~4.8%. Measured settling in 90-380 ms.
+#: reads 0.000 and a real scroll ~4.8%. Measured settling in 90-380 ms, and
+#: never under two captures (~95 ms) a swipe, which is the price of it.
 SETTLE_LIMIT_S = 1.0
+
+#: A wall-clock bound on one sweep, as iOS's `_SCROLL_DEADLINE_S` (120 s). A
+#: swipe count is not a time bound: a list that never ends -- an endless feed
+#: -- costs the whole budget down and twice it up, about 90 swipes or 110 s at
+#: the emulator's ~1.2 s a step, and longer on a slow phone. Past a couple of
+#: minutes the answer is worthless and the device is held for nothing.
+SWEEP_DEADLINE_S = 120.0
 
 #: The sweep's default budget of swipes down (up gets twice it). A swipe moves
 #: about 7.5 rows of a typical list (measured on the probe's 200-row list), so
@@ -837,6 +845,7 @@ class U2Backend:
         label: str | None = None,
         max_swipes: int = DEFAULT_MAX_SWIPES,
         report: dict | None = None,
+        deadline_s: float | None = None,
     ) -> dict | None:
         """Scroll a scrollable container until the target element is on-screen —
         WITHOUT dumping the full hierarchy.
@@ -927,6 +936,14 @@ class U2Backend:
 
             out = report if report is not None else {}
             out.update(swipes=0, moved=False)
+            limit = SWEEP_DEADLINE_S if deadline_s is None else deadline_s
+            deadline = time.monotonic() + limit
+
+            def _out_of_time() -> bool:
+                if time.monotonic() < deadline:
+                    return False
+                out.update(timed_out=True, deadline_s=limit)
+                return True
 
             slow = []
 
@@ -988,6 +1005,8 @@ class U2Backend:
                 name, (y1, y2) = direction
                 first_moved = None
                 for n in range(budget):
+                    if _out_of_time():
+                        break
                     _scroll(y1, y2)
                     out["swipes"] += 1
                     info = _match()
@@ -1008,6 +1027,8 @@ class U2Backend:
                     out["moved"] = True
                 return None, first_moved
 
+            # Out of time, each sweep below stops before its first swipe:
+            # `_out_of_time` is checked before every one.
             info, down_moved = sweep(DOWN, max_swipes)
             if info is not None:
                 return _result(info)

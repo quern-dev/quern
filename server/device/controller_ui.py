@@ -87,7 +87,8 @@ def _scroll_report(sweep: dict, requested: bool | None) -> dict:
         # reader has to resolve. Absent means unmeasured; present means
         # measured.
         measured = {
-            k: sweep[k] for k in ("swipes", "moved", "ends", "no_progress") if k in sweep
+            k: sweep[k] for k in ("swipes", "moved", "ends", "no_progress", "timed_out",
+                                  "deadline_s") if k in sweep
         }
         return {
             "attempted": True,
@@ -4292,6 +4293,10 @@ class DeviceControllerUI:
                 ends = report.get("ends") or []
                 if report.get("no_progress"):
                     why = "the screen did not move when swiped either way: it does not scroll here"
+                elif report.get("timed_out"):
+                    why = (f"the sweep stopped at its {report.get('deadline_s', 0):.0f}s deadline "
+                           f"after {report.get('swipes', 0)} swipes, before it had looked "
+                           "everywhere -- it may be there")
                 elif ends:
                     why = f"the list reached its {' and '.join(ends)} without it"
                     if "bottom" not in ends:
@@ -4306,7 +4311,8 @@ class DeviceControllerUI:
                     "detail": (f"Element not found after scrolling ({target})"
                                + (f"; {why}" if why else "")),
                     "scroll": {k: report[k] for k in
-                               ("swipes", "moved", "ends", "no_progress") if k in report},
+                               ("swipes", "moved", "ends", "no_progress", "timed_out",
+                                "deadline_s") if k in report},
                 }
             return {
                 "udid": resolved,

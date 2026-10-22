@@ -1932,6 +1932,23 @@ class TestScrollToElement:
         assert result["status"] == "not_found"
         assert "within 30 swipes down" in result["detail"], result["detail"]
 
+    async def test_android_miss_at_the_deadline_says_it_may_be_there(self):
+        ctrl = DeviceController()
+        ctrl._device_type_cache["emulator-5554"] = DeviceType.ANDROID_EMULATOR
+        ctrl.resolve_udid = AsyncMock(return_value="emulator-5554")
+        ctrl._invalidate_ui_cache = MagicMock()
+
+        async def out_of_time(*a, report=None, **k):
+            report.update(swipes=97, moved=True, timed_out=True, deadline_s=120.0)
+            return None
+
+        ctrl.u2.scroll_into_view = out_of_time
+        result = await ctrl.scroll_to_element(label="Row 999")
+        assert result["status"] == "not_found"
+        assert "120s deadline after 97 swipes" in result["detail"], result["detail"]
+        assert "may be there" in result["detail"]
+        assert result["scroll"]["timed_out"] is True
+
     async def test_ios_default_budget_is_unchanged(self):
         """iOS swipes cover about 17 rows, so it keeps 10 (#232 is Android's)."""
         ctrl = DeviceController()
