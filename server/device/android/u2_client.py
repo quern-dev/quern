@@ -278,7 +278,7 @@ def _press_bounds(info: dict) -> dict | None:
     (0, 0) for an all-zero one (CodeRabbit). And a visible part with no area
     means none of the element is on screen, so the whole frame is not tried
     either -- pressing its centre would tap whatever covers it."""
-    def edges(b) -> dict | None:
+    def edges(b: object) -> dict | None:
         if isinstance(b, dict) and all(k in b for k in ("left", "top", "right", "bottom")):
             return b
         return None
