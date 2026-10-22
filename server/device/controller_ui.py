@@ -3527,6 +3527,7 @@ class DeviceControllerUI:
 
             # Stability check: ensure element has stopped moving/animating
             # Skip for static elements (tab bars, nav bars) to avoid expensive tree fetches
+            unsettled_ms: int | None = None
             if not skip_stability_check:
                 # Get initial position
                 initial_frame = el.frame
@@ -3606,6 +3607,10 @@ class DeviceControllerUI:
                                 "the last known position",
                                 stability.get("reason"),
                             )
+                            # And on the answer, not only the log: the tap went
+                            # where the target last was, which may not be where
+                            # it is now, and a bare ok hid that (#529).
+                            unsettled_ms = round(stability.get("elapsed_ms") or 0)
 
                         # Re-fetch one more time to get final position (bypass cache again)
                         elements_final = await recheck()
@@ -3676,6 +3681,14 @@ class DeviceControllerUI:
                 result["requested_value"] = value
             if settled_ms is not None:
                 result["waited_for_settle_ms"] = settled_ms
+            if unsettled_ms is not None:
+                # The same fields Android's fast path answers with (#514).
+                result["target_moving"] = True
+                result["waited_for_rest_ms"] = unsettled_ms
+                result["warning"] = (
+                    f"the target was still moving after {unsettled_ms}ms; it was "
+                    f"tapped where it was last read, which may not be where it is "
+                    f"now -- check the screen before relying on this tap")
             _note_collapsed(result, folded)
             _note_equivalence(result, element_type, el)
             _note_deepened(result, deepened, shallow_depth)

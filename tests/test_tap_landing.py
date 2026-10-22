@@ -471,3 +471,40 @@ async def test_a_filtered_read_still_records_the_screen_size():
 
     assert [e.label for e in elements] == ["General"], "the read was not filtered"
     assert ctrl._screen_bounds[SIM] == (0.0, 0.0, 393.0, 852.0)
+
+
+# -- a target that never settles (#529) -------------------------------------------
+
+
+def _moving(settled: bool, elapsed_ms: float = 3000.0):
+    """The tree path's re-check finds the target moved, so it waits for the
+    screen; `settled` is how that wait ends."""
+    moved = FIELD.model_copy(update={"frame": {**FIELD.frame, "y": FIELD.frame["y"] + 80}})
+    # The hit-test finds the field where it moved to, so nothing covers it.
+    ctrl, backend = _controller(describe=lambda *a: hit("", 20, 380, 353, 40, "TextField"))
+    ctrl.get_ui_elements = AsyncMock(side_effect=[([FIELD], SIM), ([moved], SIM), ([moved], SIM)])
+    ctrl.wait_for_settle = AsyncMock(return_value={
+        "settled": settled, "elapsed_ms": elapsed_ms, "reason": "timeout"})
+    ctrl._last_ui_change.pop(SIM, None)     # no recent-change settle; only this wait
+    return ctrl, backend
+
+
+async def test_a_target_that_never_settled_says_so():
+    """It was tapped where it was last read, and the answer was a bare ok:
+    the give-up reached only the server log (#529)."""
+    ctrl, backend = _moving(settled=False)
+    with patch("server.device.controller_ui.asyncio.sleep", AsyncMock()):
+        result = await _tap(ctrl, identifier="field_secure", skip=False)
+    assert result["status"] == "ok"
+    backend.tap.assert_awaited_once()
+    assert result["target_moving"] is True
+    assert result["waited_for_rest_ms"] == 3000
+    assert "still moving" in result["warning"]
+
+
+async def test_a_target_that_settled_says_nothing():
+    ctrl, backend = _moving(settled=True, elapsed_ms=400.0)
+    with patch("server.device.controller_ui.asyncio.sleep", AsyncMock()):
+        result = await _tap(ctrl, identifier="field_secure", skip=False)
+    assert result["status"] == "ok"
+    assert "target_moving" not in result and "warning" not in result

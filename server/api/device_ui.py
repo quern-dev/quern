@@ -840,9 +840,10 @@ async def tap_element(request: Request, body: TapElementRequest):
                         # `_with_input_warning` adds nothing once a warning is
                         # set.
                         advisory = controller.input_warning(resolved)
-                        result["warning"] = (
-                            f"{warning} {advisory}" if advisory else warning
-                        )
+                        # Added to, not over, a warning the tap already
+                        # carries -- a target still moving (#529).
+                        result["warning"] = " ".join(
+                            w for w in (result.get("warning"), warning, advisory) if w)
 
             # Remembered for the next miss only when the tap was not already
             # checked: a verified arrival must not be blamed later, and a
