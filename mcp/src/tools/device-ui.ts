@@ -386,6 +386,84 @@ Not needed for a simulator quern booted itself — that path restores the servic
     }
   });
 
+  server.registerTool("set_hinge", {
+    description: `Fold, unfold or turn a foldable simulator (iPhone Duo, Xcode 27.1+), as Device Hub does.
+
+Poses: closed (0 degrees; the cover is lit), open (130; the inner panel is lit, in landscape) and flat (180). Or give any angle from 0 to 180. Either is swept over duration seconds (0.8 by default; 0 sets it at once) from the angle the hinge reads now. orientation is the physical orientation as Device Hub's picker names it (portrait, pud, landscape-left, landscape-right), applied after any move; unfolded, portrait gives the inner panel's landscape interface.
+
+The response reports lit_panel, the panel that actually lit, with its screen_id, orientation and size in points, plus angle as read back. Which panel SpringBoard lights depends on how the hinge moved, not only where it stopped, so a pose whose panel did not light carries a warning. Afterwards tap_element, get_ui_tree and take_screenshot all follow the lit panel.
+
+A 400 on any other device. After a fold, quern waits for the screen to settle before the next tap, as it does after any action.`,
+    inputSchema: strictParams({
+      pose: z
+        .enum(["closed", "open", "flat"])
+        .optional()
+        .describe("closed (0), open (130) or flat (180) degrees. Give this or angle."),
+      angle: z.coerce
+        .number()
+        .min(0)
+        .max(180)
+        .optional()
+        .describe("A hinge angle in degrees, instead of a pose."),
+      duration: z.coerce
+        .number()
+        .min(0)
+        .max(5)
+        .optional()
+        .describe("Seconds to sweep over (default 0.8; 0 sets it at once)."),
+      orientation: z
+        .enum(["portrait", "pud", "landscape-left", "landscape-right"])
+        .optional()
+        .describe("Physical orientation, applied after any move."),
+      udid: z
+        .string()
+        .optional()
+        .describe("Target device UDID (defaults to active device)"),
+    }),
+  }, async ({ pose, angle, duration, orientation, udid }) => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (udid) body.udid = udid;
+      if (pose !== undefined) body.pose = pose;
+      if (angle !== undefined) body.angle = angle;
+      if (duration !== undefined) body.duration = duration;
+      if (orientation !== undefined) body.orientation = orientation;
+      const data = await apiRequest("POST", "/api/v1/device/hinge", undefined, body);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+      };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: errorText(e) }],
+        isError: true,
+      };
+    }
+  });
+
+  server.registerTool("get_hinge", {
+    description: `Read a foldable simulator's hinge angle and which panel is lit (iPhone Duo, Xcode 27.1+). lit_panel gives the screen_id, orientation and size in points of the panel taps and reads go to. angle is null when the guest gives no reading, which happens after SpringBoard restarts until the hinge next moves. A 400 on any other device.`,
+    inputSchema: strictParams({
+      udid: z
+        .string()
+        .optional()
+        .describe("Target device UDID (defaults to active device)"),
+    }),
+  }, async ({ udid }) => {
+    try {
+      const params: Record<string, string> = {};
+      if (udid) params.udid = udid;
+      const data = await apiRequest("GET", "/api/v1/device/hinge", params);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+      };
+    } catch (e) {
+      return {
+        content: [{ type: "text" as const, text: errorText(e) }],
+        isError: true,
+      };
+    }
+  });
+
   server.registerTool("tap", {
     description: `Tap at specific screen coordinates on the simulator.
 

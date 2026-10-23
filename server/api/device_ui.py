@@ -27,6 +27,7 @@ from server.models import (
     ClearTextRequest,
     DeviceError,
     GestureRequest,
+    HingeRequest,
     PressButtonRequest,
     RestoreInputRequest,
     ScrollToElementRequest,
@@ -638,6 +639,35 @@ async def get_screen_summary(
                 summary["identify_hint"] = result.get("hint")
 
         return summary
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+@router.get("/hinge")
+@logged_action("get_hinge", category="device.read")
+async def get_hinge(request: Request, udid: str | None = Query(default=None)):
+    """A foldable simulator's hinge angle and lit panel (#537)."""
+    controller = _get_controller(request)
+    try:
+        return await controller.get_hinge(udid=udid)
+    except DeviceError as e:
+        raise _handle_device_error(e)
+
+
+@router.post("/hinge")
+@logged_action("set_hinge", category="device.action")
+async def set_hinge(request: Request, body: HingeRequest):
+    """Fold, unfold or turn a foldable simulator -- iPhone Duo (#537).
+
+    Moves the hinge from inside the simulator, as Device Hub does, then
+    reports the panel that lit: SpringBoard decides that from how the hinge
+    moved, not only where it ended, so it is read back rather than assumed.
+    """
+    controller = _get_controller(request)
+    try:
+        return await controller.set_hinge(
+            udid=body.udid, pose=body.pose, angle=body.angle, duration=body.duration,
+            orientation=body.orientation)
     except DeviceError as e:
         raise _handle_device_error(e)
 

@@ -2314,6 +2314,25 @@ class TapRequest(BaseModel):
         "ago (iOS simulators). For a screen that never stops moving."))
 
 
+class HingeRequest(BaseModel):
+    """Request body for POST /device/hinge: fold or turn a foldable simulator (#537)."""
+
+    udid: str | None = None
+    pose: Literal["closed", "open", "flat"] | None = Field(default=None, description=(
+        "Device Hub's poses: closed (0 degrees, the cover lit), open (130, the inner "
+        "panel lit, landscape), flat (180)."))
+    angle: float | None = Field(default=None, ge=0, le=180, description=(
+        "Any hinge angle in degrees, instead of a pose. Which panel lights depends on "
+        "how the hinge got there, so the response says which did."))
+    duration: float | None = Field(default=None, ge=0, le=5, description=(
+        "Seconds to sweep over, from the angle the hinge reads now; Device Hub's 0.8 "
+        "by default, 0 to set it at once."))
+    orientation: Literal["portrait", "pud", "landscape-left", "landscape-right"] | None = Field(
+        default=None, description=(
+            "The physical orientation, as Device Hub's picker names it, applied after any "
+            "move. Unfolded, `portrait` is the inner panel's landscape interface."))
+
+
 class RestoreInputRequest(BaseModel):
     """Request body for POST /device/ui/restore-input."""
 

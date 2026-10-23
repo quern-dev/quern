@@ -94,13 +94,15 @@ as before.
 
 What to know:
 
-- **Quern cannot fold it yet (#537).** Fold and unfold it in Device Hub, which
-  replaces Simulator.app on Xcode 27. Quern follows the change on its next
-  action.
-- **Just after a fold, wait a moment.** SpringBoard swaps panels and rotates
-  over about a second. An action sent in that window can land on the screen
-  that was there before, and quern's settle wait does not cover a fold made
-  outside quern.
+- **Fold it with `set_hinge` (#537)**: `pose` `closed`, `open` or `flat`, or
+  any `angle`, plus an optional `orientation`. It moves the hinge from inside
+  the simulator, as Device Hub does, and answers with the panel that lit;
+  `get_hinge` reads the angle. Device Hub, which replaces Simulator.app on
+  Xcode 27, still works too.
+- **A fold is a screen change.** SpringBoard swaps panels and rotates over
+  about a second, so the next tap waits for the screen to settle -- after a
+  fold through quern, and after one in Device Hub, which quern notices from
+  the lit panel changing.
 - **Edge swipes are refused on the Duo.** No edge gesture reached it in any
   state, folded or not, before this support existed or since, so quern says
   so rather than answering `ok`. Navigate with taps, or press Home.

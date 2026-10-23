@@ -13,6 +13,7 @@ from server.device.android.u2_client import U2Backend
 from server.device.controller_ui import DeviceControllerUI
 from server.device.ios import sim_settings
 from server.device.ios.devicectl import DevicectlBackend, canonical_device_id, spellings_of
+from server.device.ios.hinge import HingeControl
 from server.device.ios.idb import IdbBackend
 from server.device.ios.pmd3 import Pmd3Backend
 from server.device.ios.sim_bridge import SimBridgeBackend, SimBridgeManager
@@ -188,6 +189,11 @@ class DeviceController(DeviceControllerUI):
         #: never gains a panel, so once a booted device answers with one, its
         #: screenshots go straight to simctl and never queue on sim-bridge.
         self._single_panel: set[str] = set()
+        #: The lit panel and its orientation each multi-panel simulator was
+        #: last seen with: a change is a fold, from quern or Device Hub (#537).
+        self._lit_seen: dict[str, tuple[int, int]] = {}
+        #: The in-simulator helper that folds an iPhone Duo (#537).
+        self.hinge = HingeControl()
         # One long-lived Web Inspector connection. Reconnecting per request cost
         # ~3.4s of handshake, and webinspectord did not re-report its connected
         # applications to a connection opened immediately after the previous one
