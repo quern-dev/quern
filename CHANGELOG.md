@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0-beta.4] - 2026-10-23
+
 ### Added
 - **Fold and unfold an iPhone Duo from quern (#537).** `set_hinge` (`POST /api/v1/device/hinge`) takes Device Hub's poses (`closed`, `open`, `flat`) or any `angle`, swept over `duration` (0.8s by default) from where the hinge is, and an optional `orientation`. It answers with `lit_panel`, the panel that actually lit: SpringBoard decides that from how the hinge moved, not only where it stopped, so a pose whose panel did not light says so. `get_hinge` reads the angle and the lit panel. It is done by a small helper that runs inside the simulator, adapted from tddworks/baguette's (Apache-2.0; `tools/hinge-control`), compiled on first use. A fold, through quern or in Device Hub, now counts as a screen change, so the next tap waits for the panel swap and rotation instead of landing on the screen that was there before. `scripts/hinge-selftest.sh`, run in CI, checks the helper's event bytes against those that moved a Duo. The upstream commit the copy was last reviewed against is pinned in `tools/hinge-control/hinge-pin.json`; `scripts/hinge-pin.py --check` lists upstream changes since, and a weekly workflow keeps a "Hinge helper is behind baguette" issue open while there are any.
 
@@ -896,7 +898,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.25.0-beta.3...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.25.0-beta.4...main
+[0.25.0-beta.4]: https://github.com/quern-dev/quern/releases/tag/v0.25.0-beta.4
 [0.25.0-beta.3]: https://github.com/quern-dev/quern/releases/tag/v0.25.0-beta.3
 [0.25.0-beta.2]: https://github.com/quern-dev/quern/releases/tag/v0.25.0-beta.2
 [0.25.0-beta.1]: https://github.com/quern-dev/quern/releases/tag/v0.25.0-beta.1
