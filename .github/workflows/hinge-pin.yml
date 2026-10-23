@@ -1,0 +1,81 @@
+# Has baguette's hinge helper moved since quern's copy was reviewed? (#537)
+#
+# tools/hinge-control is adapted from tddworks/baguette's Injected/HingeControl,
+# and the knowledge in it -- Apple's private pose events -- is still being
+# learned upstream. The commit it was last reviewed against is pinned in
+# tools/hinge-control/hinge-pin.json. This keeps a single tracking issue open
+# while upstream has commits touching the helper that nobody has looked at, and
+# comments on it as more arrive. Close it by reviewing and running
+# `scripts/hinge-pin.py --bump`, which also records "reviewed, nothing to take".
+name: hinge-pin
+
+on:
+  schedule:
+    - cron: "41 15 * * 1"        # Mondays
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compare the pin with baguette
+        id: pin
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          python3 scripts/hinge-pin.py --check --json > pin.json
+          code=$?
+          set -e
+          cat pin.json
+          # 0 current, 1 behind; anything else -- GitHub unreachable, the pin
+          # not found upstream, a crash -- is a failure, not a verdict, and must
+          # not read as "up to date".
+          if [ "$code" -ne 0 ] && [ "$code" -ne 1 ]; then exit 1; fi
+          jq -e 'has("behind") and has("pinned") and has("head") and has("commits") and has("compare")' pin.json > /dev/null
+          echo "behind=$(jq -r .behind pin.json)" >> "$GITHUB_OUTPUT"
+          echo "pinned=$(jq -r .pinned pin.json)" >> "$GITHUB_OUTPUT"
+          echo "head=$(jq -r .head pin.json)" >> "$GITHUB_OUTPUT"
+          echo "compare=$(jq -r .compare pin.json)" >> "$GITHUB_OUTPUT"
+          {
+            echo "commits<<EOF_COMMITS"
+            jq -r '.commits[] | "- [`\(.sha[0:10])`](https://github.com/tddworks/baguette/commit/\(.sha)) \(.date[0:10]) \(.message)"' pin.json
+            echo "EOF_COMMITS"
+          } >> "$GITHUB_OUTPUT"
+      - name: Open, update or close the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEHIND: ${{ steps.pin.outputs.behind }}
+          PINNED: ${{ steps.pin.outputs.pinned }}
+          HEAD_SHA: ${{ steps.pin.outputs.head }}
+          COMPARE: ${{ steps.pin.outputs.compare }}
+          COMMITS: ${{ steps.pin.outputs.commits }}
+        run: |
+          title="Hinge helper is behind baguette"
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -1)
+          if [ "$BEHIND" != "true" ]; then
+            # Caught up: the issue has nothing left to track.
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" --repo "$GITHUB_REPOSITORY" --comment "Reviewed against \`${PINNED:0:10}\`; nothing upstream since."
+            fi
+            exit 0
+          fi
+          body="tools/hinge-control was last reviewed against tddworks/baguette **\`${PINNED:0:10}\`**. Upstream commits touching \`Injected/HingeControl\` since, up to **\`${HEAD_SHA:0:10}\`**:
+
+          ${COMMITS}
+
+          Diff: ${COMPARE}
+
+          To review: read the diff, take what applies to the copy (the key service and frontmost query are deliberately left out), run \`scripts/hinge-selftest.sh\`, and live-test on an iPhone Duo if anything was taken. Then \`scripts/hinge-pin.py --bump ${HEAD_SHA:0:10}\` -- also when there was nothing to take. See #537."
+          if [ -z "$existing" ]; then
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          # Body and comments both: the week after it is opened the head is in
+          # the body only.
+          elif ! gh issue view "$existing" --repo "$GITHUB_REPOSITORY" --json body,comments --jq '.body, .comments[].body' | grep -qF "**\`${HEAD_SHA:0:10}\`**"; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          fi

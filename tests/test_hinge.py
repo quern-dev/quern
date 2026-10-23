@@ -18,7 +18,12 @@ import pytest
 from server.device.controller import DeviceController
 from server.device.ios import hinge as hinge_mod
 from server.device.ios.hinge import HingeControl
-from server.models import DeviceError, DeviceType, InvalidDeviceRequestError
+from server.models import (
+    DeviceError,
+    DeviceOperationUnsupportedError,
+    DeviceType,
+    InvalidDeviceRequestError,
+)
 
 DUO = "0AA1FC84-86D2-4488-98F6-5CE07DD27A6B"
 COVER = {"screen_id": 1, "device_name": "primary", "orientation": 1,
@@ -31,21 +36,39 @@ INNER = {"screen_id": 3, "device_name": "primary-1", "orientation": 3,
 
 
 class FakeProc:
+    """A subprocess with real pipes: what was written is readable until the
+    process is killed, and a hung one keeps its pipes open -- so, as with
+    asyncio's own, nothing written survives a cancelled `communicate()`."""
+
     def __init__(self, code=0, out=b"", err=b"", hang=False):
         self.returncode = code
-        self._out, self._err, self._hang = out, err, hang
+        self._hang = hang
         self.killed = False
-        self.stdout = None
+        self._done = asyncio.Event()
+        self.stdout, self.stderr = asyncio.StreamReader(), asyncio.StreamReader()
+        self.stdout.feed_data(out)
+        self.stderr.feed_data(err)
+        if not hang:
+            self._finish()
+
+    def _finish(self):
+        for s in (self.stdout, self.stderr):
+            if not s.at_eof():
+                s.feed_eof()
+        self._done.set()
 
     async def communicate(self):
-        if self._hang:
-            await asyncio.sleep(60)
-        return self._out, self._err
+        out, err = await asyncio.gather(self.stdout.read(), self.stderr.read())
+        await self.wait()
+        return out, err
 
     def kill(self):
         self.killed = True
+        self.returncode = -9
+        self._finish()
 
     async def wait(self):
+        await self._done.wait()
         return self.returncode
 
 
@@ -58,6 +81,21 @@ def _spawning(monkeypatch, *procs):
     async def exec_(*argv, **_kw):
         calls.append(argv)
         return queue.pop(0) if queue else FakeProc()
+
+    monkeypatch.setattr(hinge_mod.asyncio, "create_subprocess_exec", exec_)
+    return calls
+
+
+def _building(monkeypatch):
+    """Fake a build: the SDK lookup answers, and clang writes its `-o`."""
+    calls = []
+
+    async def exec_(*argv, **_kw):
+        calls.append(argv)
+        if "clang" in argv:
+            Path(argv[argv.index("-o") + 1]).write_bytes(b"new")
+            return FakeProc()
+        return FakeProc(out=b"/SDK\n")
 
     monkeypatch.setattr(hinge_mod.asyncio, "create_subprocess_exec", exec_)
     return calls
@@ -81,7 +119,7 @@ async def test_a_current_build_is_not_rebuilt(helper, monkeypatch):
 
 async def test_a_changed_source_rebuilds_signed_at_link_time(helper, monkeypatch, tmp_path):
     (tmp_path / "hinge-control.sha256").write_text("stale")
-    calls = _spawning(monkeypatch, FakeProc(out=b"/SDK\n"), FakeProc())
+    calls = _building(monkeypatch)
     await helper.ensure_binary()
     clang = calls[1]
     assert "-Wl,-adhoc_codesign" in clang
@@ -139,17 +177,127 @@ async def test_a_failed_move_says_why(helper, monkeypatch, code, match):
         await helper.move(DUO, 0, 130, 800)
 
 
-async def test_a_move_that_times_out_is_killed_in_the_guest_too(helper, monkeypatch):
+@pytest.fixture
+def killed(monkeypatch):
+    """os.kill, recorded rather than sent."""
+    sent = []
+    monkeypatch.setattr(hinge_mod.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    return sent
+
+
+async def test_a_move_that_times_out_is_killed_in_the_guest_too(helper, monkeypatch, killed):
     """The host's simctl spawn does not own the guest process, which would go
-    on and move the hinge after quern gave up."""
+    on and move the hinge after quern gave up. A simulator's processes are the
+    Mac's, so it is killed from here, by the pid the helper printed first."""
     monkeypatch.setattr(hinge_mod, "_SLACK_S", 0.05)
-    hung = FakeProc(hang=True)
-    hung.stdout = MagicMock(read=AsyncMock(return_value=b"pid 4242\n"))
-    calls = _spawning(monkeypatch, hung, FakeProc())
-    with pytest.raises(DeviceError, match="did not finish"):
+    hung = FakeProc(out=b"pid 4242\n", hang=True)
+    calls = _spawning(monkeypatch, hung, FakeProc(out=b"/sim/data/hinge-control\n"))
+    with pytest.raises(DeviceError, match="did not finish within .* and was stopped"):
         await helper.move(DUO, 0, 130, 0)
     assert hung.killed
-    assert list(calls[1])[-3:] == ["kill", "-9", "4242"]
+    assert list(calls[1]) == ["ps", "-p", "4242", "-o", "comm="]
+    assert killed == [(4242, hinge_mod.signal.SIGKILL)]
+
+
+async def test_a_cancelled_move_is_killed_in_the_guest_too(helper, monkeypatch, killed):
+    """A client that disconnects cancels the call: the helper must not go on."""
+    hung = FakeProc(out=b"pid 77\n", hang=True)
+    _spawning(monkeypatch, hung, FakeProc(out=b"hinge-control\n"))
+    task = asyncio.create_task(helper.move(DUO, 0, 130, 800))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert killed == [(77, hinge_mod.signal.SIGKILL)]
+
+
+async def test_a_reused_pid_is_not_killed(helper, monkeypatch, killed):
+    """By the time of the kill the helper may have gone and its pid been reused."""
+    monkeypatch.setattr(hinge_mod, "_SLACK_S", 0.05)
+    _spawning(monkeypatch, FakeProc(out=b"pid 4242\n", hang=True),
+              FakeProc(out=b"/Applications/Mail.app/Contents/MacOS/Mail\n"))
+    with pytest.raises(DeviceError, match="was stopped"):
+        await helper.move(DUO, 0, 130, 0)
+    assert killed == []
+
+
+async def test_a_kill_that_fails_says_so(helper, monkeypatch):
+    """Report the outcome, not the request: "stopped" only when it was."""
+    monkeypatch.setattr(hinge_mod, "_SLACK_S", 0.05)
+
+    def refuse(_pid, _sig):
+        raise PermissionError("not permitted")
+
+    monkeypatch.setattr(hinge_mod.os, "kill", refuse)
+    _spawning(monkeypatch, FakeProc(out=b"pid 4242\n", hang=True),
+              FakeProc(out=b"hinge-control\n"))
+    with pytest.raises(DeviceError, match="could not be stopped in the simulator"):
+        await helper.move(DUO, 0, 130, 0)
+
+
+async def test_the_deadline_is_in_the_near_future(helper, monkeypatch):
+    """A deadline already past makes every command a no-op that exits 3."""
+    calls = _spawning(monkeypatch, FakeProc())
+    now = time.time()
+    await helper.move(DUO, 0, 130, 0)
+    argv = list(calls[0])
+    deadline = int(argv[argv.index("--deadline") + 1])
+    assert now < deadline + 1 <= now + hinge_mod._SLACK_S + 2
+
+
+async def test_a_sweep_has_its_own_playing_time_on_top_of_the_slack(helper, monkeypatch):
+    seen = []
+
+    async def spawn(_udid, _argv, timeout):
+        seen.append(timeout)
+        return 0, "", ""
+
+    monkeypatch.setattr(helper, "_spawn", spawn)
+    await helper.move(DUO, 0, 130, 4000)
+    assert seen == [4.0 + hinge_mod._SLACK_S]
+
+
+async def test_an_orientation_is_sent_with_a_deadline(helper, monkeypatch):
+    calls = _spawning(monkeypatch, FakeProc())
+    await helper.orient(DUO, "landscape-left")
+    argv = list(calls[0])
+    assert "--deadline" in argv and argv[-2:] == ["orientation", "landscape-left"]
+
+
+async def test_an_unreadable_angle_raises(helper, monkeypatch):
+    _spawning(monkeypatch, FakeProc(out=b"something else\n"))
+    with pytest.raises(DeviceError, match="could not read the hinge"):
+        await helper.read_angle(DUO)
+
+
+async def test_exit_1_is_no_reading_only_when_the_helper_says_so(helper, monkeypatch):
+    """simctl spawn and dyld exit 1 too; those are failures, not a quiet guest."""
+    _spawning(monkeypatch, FakeProc(code=1, err=b"dyld: Library not loaded"))
+    with pytest.raises(DeviceError, match="could not read the hinge"):
+        await helper.read_angle(DUO)
+
+
+async def test_a_build_is_renamed_into_place(helper, monkeypatch, tmp_path):
+    """Never written in place: another server may be spawning the old one."""
+    (tmp_path / "hinge-control.sha256").write_text("stale")
+    calls = _building(monkeypatch)
+    await helper.ensure_binary()
+    out = calls[1][calls[1].index("-o") + 1]
+    assert out != str(helper.binary_path)
+    assert helper.binary_path.read_bytes() == b"new"
+    assert not Path(out).exists()
+
+
+async def test_a_build_that_times_out_is_killed(helper, monkeypatch, tmp_path):
+    """Left running, it would go on writing a binary the next build writes too."""
+    (tmp_path / "hinge-control.sha256").write_text("stale")
+    monkeypatch.setattr(hinge_mod, "_COMPILE_TIMEOUT_S", 0.05)
+    clang = FakeProc(hang=True)
+    _spawning(monkeypatch, FakeProc(out=b"/SDK\n"), clang)
+    with pytest.raises(DeviceError, match="did not finish"):
+        await helper.ensure_binary()
+    assert clang.killed
+    assert not (tmp_path / "hinge-control.sha256").exists()
 
 
 # -- the controller ------------------------------------------------------------
@@ -209,14 +357,88 @@ async def test_no_reading_sets_the_angle_at_once():
     ctrl.hinge.move.assert_awaited_once_with(DUO, 130.0, 130.0, 0)
 
 
-async def test_an_angle_has_no_expected_panel_and_never_waits(monkeypatch):
-    ctrl = _controller(panels=[(COVER, 2)])
-    monkeypatch.setattr(ctrl, "_HINGE_SETTLE_S", 30)
-    started = time.monotonic()
+async def test_flat_expects_the_inner_panel():
+    ctrl = _controller(angles=(0.0, 180.0))
+    result = await ctrl.set_hinge(DUO, pose="flat")
+    ctrl.hinge.move.assert_awaited_once_with(DUO, 0.0, 180.0, 800)
+    assert result["lit_panel"]["device_name"] == "primary-1" and "warning" not in result
+
+
+async def test_an_angle_waits_for_the_panel_to_change_and_hold():
+    """The first read after the helper exits is usually the panel from before:
+    SpringBoard swaps and rotates about a second later."""
+    ctrl = _controller(panels=[(COVER, 2), (COVER, 2), (COVER, 2), (INNER, 2), (INNER, 2)],
+                       angles=(0.0, 100.0))
     result = await ctrl.set_hinge(DUO, angle=100, duration=0.3)
-    assert time.monotonic() - started < 5
     ctrl.hinge.move.assert_awaited_once_with(DUO, 0.0, 100, 300)
-    assert result["requested_angle"] == 100 and "warning" not in result
+    assert result["lit_panel"]["device_name"] == "primary-1"
+    assert result["requested_angle"] == 100 and "warning" not in result and "note" not in result
+
+
+async def test_an_angle_that_swaps_nothing_says_the_panel_is_unchanged(monkeypatch):
+    ctrl = _controller(panels=[(COVER, 2)], angles=(0.0, 10.0))
+    monkeypatch.setattr(ctrl, "_HINGE_SETTLE_S", 0.1)
+    result = await ctrl.set_hinge(DUO, angle=10)
+    assert result["lit_panel"]["device_name"] == "primary"
+    assert "Neither the lit panel nor its orientation changed" in result["note"]
+
+
+async def test_the_angle_is_read_back_not_assumed():
+    ctrl = _controller(angles=(0.0, 127.5))
+    result = await ctrl.set_hinge(DUO, pose="open")
+    assert result["angle"] == 127.5
+
+
+async def test_a_failed_read_back_does_not_undo_a_move(monkeypatch):
+    """The hinge moved: an error now would have the caller fold it again."""
+    ctrl = _controller()
+    monkeypatch.setattr(ctrl, "_HINGE_SETTLE_S", 0.05)
+    reads = [0.0]
+
+    async def read(_u):
+        if reads:
+            return reads.pop()
+        raise DeviceError("simctl went away")
+
+    ctrl.hinge.read_angle = AsyncMock(side_effect=read)
+    ctrl.sim_bridge.panels = AsyncMock(side_effect=[(COVER, 2), RuntimeError("bridge"),
+                                                    RuntimeError("bridge"), RuntimeError("b")]
+                                       + [RuntimeError("bridge")] * 50)
+    result = await ctrl.set_hinge(DUO, pose="open")
+    assert result["status"] == "ok" and result["angle"] is None
+    assert "Could not read the lit panel" in result["note"]
+    assert "Could not read the angle back" in result["note"]
+    assert result["lit_panel"] == COVER
+
+
+async def test_a_missing_panel_mid_wait_keeps_the_last_one(monkeypatch):
+    ctrl = _controller(panels=[(COVER, 2), (None, 2), (INNER, 2)])
+    result = await ctrl.set_hinge(DUO, pose="open")
+    assert result["lit_panel"]["device_name"] == "primary-1"
+
+
+async def test_the_change_is_marked_when_the_call_returns(monkeypatch):
+    """Not only before the wait: an immediate tap must still find it recent."""
+    ctrl = _controller(panels=[(COVER, 2)])
+    monkeypatch.setattr(ctrl, "_HINGE_SETTLE_S", 0.3)
+    started = time.monotonic()
+    await ctrl.set_hinge(DUO, pose="open")
+    assert ctrl._last_ui_change[DUO] >= started + 0.3
+
+
+async def test_a_sweep_with_no_reading_says_it_was_set_at_once():
+    ctrl = _controller(angles=(None, 130.0))
+    result = await ctrl.set_hinge(DUO, pose="open", duration=2)
+    ctrl.hinge.move.assert_awaited_once_with(DUO, 130.0, 130.0, 0)
+    assert "set at once" in result["note"]
+
+
+async def test_a_pose_and_an_orientation_both_happen():
+    ctrl = _controller()
+    result = await ctrl.set_hinge(DUO, pose="open", orientation="landscape-left")
+    ctrl.hinge.move.assert_awaited_once()
+    ctrl.hinge.orient.assert_awaited_once_with(DUO, "landscape-left")
+    assert result["orientation"] == "landscape-left"
 
 
 async def test_orientation_alone_turns_without_moving_the_hinge():
@@ -262,6 +484,30 @@ async def test_android_is_refused():
     ctrl._device_type_cache[DUO] = DeviceType.ANDROID_EMULATOR
     with pytest.raises(InvalidDeviceRequestError, match="foldable simulator"):
         await ctrl.get_hinge(DUO)
+
+
+async def test_a_physical_iphone_is_refused():
+    ctrl = _controller()
+    ctrl._device_type_cache[DUO] = DeviceType.DEVICE
+    with pytest.raises(InvalidDeviceRequestError, match="foldable simulator"):
+        await ctrl.set_hinge(DUO, pose="open")
+    ctrl.sim_bridge.panels.assert_not_called()
+
+
+async def test_no_sim_bridge_is_unsupported_not_a_bad_request():
+    ctrl = _controller()
+    ctrl._sim_bridge_ok = False
+    with pytest.raises(DeviceOperationUnsupportedError, match="sim-bridge"):
+        await ctrl.set_hinge(DUO, pose="open")
+    ctrl.hinge.move.assert_not_called()
+
+
+async def test_a_duo_showing_no_screens_is_not_called_unfoldable():
+    """A Duo still booting reports no screens: that is not "has one screen"."""
+    ctrl = _controller(panels=[(None, 0)])
+    with pytest.raises(InvalidDeviceRequestError, match="Is it booted"):
+        await ctrl.set_hinge(DUO, pose="open")
+    assert DUO not in ctrl._single_panel
 
 
 async def test_get_hinge_reports_angle_and_panel():

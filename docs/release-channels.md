@@ -166,6 +166,15 @@ For each item, ask "did this release change what this file asserts?" — not
       having run, the server restarted on the new version, and
       `~/.quern/last-update.json` reading `updated`. Switch back to stable
       afterwards.
+- [ ] **Check the hinge helper.** `tools/hinge-control` is a reviewed copy of
+      baguette's, and drives private pose events that Xcode can change under
+      it. Look at the "Hinge helper is behind baguette" issue, opened weekly
+      by `.github/workflows/hinge-pin.yml` while upstream has unreviewed
+      commits, and either review them (`scripts/hinge-pin.py --check` lists
+      them; `--bump` records the review, also when there is nothing to take)
+      or say in the release why not. Then run `scripts/hinge-selftest.sh` on
+      the newest Xcode installed, which CI may not have yet: it checks the pose
+      record byte for byte and builds the helper for the simulator.
 - [ ] **Pick the version deliberately.** New commands, new config fields, or a
       call that now refuses where it used to succeed are a minor bump, not a
       patch — regardless of how the work was framed while doing it.

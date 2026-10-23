@@ -10,7 +10,10 @@ doesn't either, and Device Hub's window is opaque to accessibility.
 Adapted from [tddworks/baguette](https://github.com/tddworks/baguette)'s
 `Injected/HingeControl`, under its Apache-2.0 license (`LICENSE.baguette`). The
 upstream commit this copy was last reviewed against is in `hinge-pin.json`.
-`scripts/hinge-pin.py --check` lists upstream changes since then.
+`scripts/hinge-pin.py --check` lists upstream changes since then, and
+`.github/workflows/hinge-pin.yml` keeps a "Hinge helper is behind baguette"
+issue open each week while there are any. `scripts/hinge-pin.py --bump` records
+a review, including one that found nothing to take.
 
 baguette worked out the mechanism; its `docs/features/hinge/design.md` is the
 reference. Device Hub dispatches each pose as a vendor-defined `IOHIDEvent`

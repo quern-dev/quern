@@ -818,11 +818,15 @@ class DeviceControllerUI:
         lit, count = await self.sim_bridge.panels(udid)
         if count == 1:
             self._single_panel.add(udid)
-        if count < 2 or not lit:
             raise InvalidDeviceRequestError(
-                f"{udid[:8]} has {'one screen' if count == 1 else 'no screens reported'}: only "
-                "a foldable simulator (iPhone Duo, Xcode 27.1+) has a hinge to move.",
-                tool="hinge-control")
+                f"{udid[:8]} has one screen: only a foldable simulator (iPhone Duo, "
+                "Xcode 27.1+) has a hinge to move.", tool="hinge-control")
+        if count < 2 or not lit:
+            # Not "not foldable": a Duo still booting reports no screens too.
+            raise InvalidDeviceRequestError(
+                f"{udid[:8]} reports {count} screen(s) and none lit, so whether it folds cannot "
+                "be told. Is it booted, with its screen on? Only a foldable simulator (iPhone "
+                "Duo, Xcode 27.1+) has a hinge to move.", tool="hinge-control")
         return lit
 
     async def get_hinge(self, udid: str | None = None) -> dict:
@@ -873,32 +877,39 @@ class DeviceControllerUI:
         resolved = await self.resolve_udid(udid)
         before = await self._foldable(resolved)
         target = POSES[pose] if pose is not None else angle
-        moved_from = None
+        notes: list[str] = []
         if target is not None:
             # From where it is: a sweep from anywhere else would jump there
             # first. No reading (a guest quiet since SpringBoard restarted)
             # sets it at once instead.
             moved_from = await self.hinge.read_angle(resolved)
             ms = DEFAULT_SWEEP_MS if duration is None else int(duration * 1000)
+            if moved_from is None and ms > 0:
+                notes.append("The hinge gave no reading to sweep from, so it was set at once.")
             await self.hinge.move(resolved, moved_from if moved_from is not None else target,
                                   target, ms if moved_from is not None else 0)
         if orientation is not None:
             await self.hinge.orient(resolved, orientation)
         self._invalidate_ui_cache(resolved)  # a fold is a screen change
 
-        # A pose has a panel it should light; wait for it.
+        # The hinge has moved: nothing below may turn that into an error, or a
+        # caller retries and folds again. A read that fails is reported.
         expect = {"closed": "primary"}.get(pose or "", "primary-1" if pose else None)
-        lit = before
-        deadline = time.monotonic() + self._HINGE_SETTLE_S
-        while True:
-            lit, _ = await self.sim_bridge.panels(resolved)
-            lit = lit or before
-            if expect is None or lit.get("device_name") == expect or time.monotonic() >= deadline:
-                break
-            await asyncio.sleep(0.25)
-        self._lit_seen[resolved] = (lit["screen_id"], int(lit.get("orientation") or 0))
-        result = {"udid": resolved, "status": "ok",
-                  "angle": await self.hinge.read_angle(resolved), "lit_panel": lit,
+        lit, settled = await self._await_panel(resolved, before, expect)
+        if lit is None:
+            notes.append("Could not read the lit panel after the move.")
+            lit = before
+        else:
+            self._lit_seen[resolved] = (lit["screen_id"], int(lit.get("orientation") or 0))
+        try:
+            read_back = await self.hinge.read_angle(resolved)
+        except DeviceError as e:
+            read_back = None
+            notes.append(f"Could not read the angle back: {e}")
+        # Marked again on the way out, not only before the wait: an immediate
+        # tap must still find the swap and rotation recent enough to settle.
+        self._invalidate_ui_cache(resolved)
+        result = {"udid": resolved, "status": "ok", "angle": read_back, "lit_panel": lit,
                   "lit_panel_before": before}
         if pose is not None:
             result["pose"] = pose
@@ -912,7 +923,50 @@ class DeviceControllerUI:
                 f"did not light within {self._HINGE_SETTLE_S:.0f}s: SpringBoard decides which "
                 "panel to light from how the hinge moved, not only where it is. Read the panel "
                 "again, or move the hinge through a pose.")
+        elif expect is None and not settled:
+            notes.append(
+                f"Neither the lit panel nor its orientation changed within "
+                f"{self._HINGE_SETTLE_S:.0f}s, so lit_panel is the panel from before; that is "
+                "the answer if this move does not swap panels.")
+        if notes:
+            result["note"] = " ".join(notes)
         return result
+
+    async def _await_panel(self, udid: str, before: dict,
+                           expect: str | None) -> tuple[dict | None, bool]:
+        """The lit panel once a move has played out, and whether it settled.
+
+        With a panel to expect, until that one lights. Without -- an angle, or
+        only an orientation -- until the panel or its orientation differs from
+        `before` and reads the same twice running: SpringBoard's swap and
+        rotation take about a second after the helper exits, so the first read
+        is usually the panel from before. Gives up after _HINGE_SETTLE_S with
+        what it last read; (None, False) when no read worked.
+        """
+        def key(p: dict) -> tuple:
+            return (p.get("screen_id"), int(p.get("orientation") or 0))
+
+        lit: dict | None = None
+        previous: dict | None = None
+        deadline = time.monotonic() + self._HINGE_SETTLE_S
+        while True:
+            try:
+                read, _ = await self.sim_bridge.panels(udid)
+            except Exception:  # noqa: BLE001 -- reported by the caller as no reading
+                logger.debug("Could not read the panels of %s", udid[:8], exc_info=True)
+                read = None
+            if read:
+                lit = read
+                if expect is not None:
+                    if read.get("device_name") == expect:
+                        return lit, True
+                elif (key(read) != key(before) and previous is not None
+                        and key(previous) == key(read)):
+                    return lit, True
+                previous = read
+            if time.monotonic() >= deadline:
+                return lit, False
+            await asyncio.sleep(0.25)
 
     async def _obstruction(self, udid: str, target: UIElement,
                            x: float, y: float) -> dict | None:

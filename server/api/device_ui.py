@@ -644,6 +644,7 @@ async def get_screen_summary(
 
 
 @router.get("/hinge")
+@logged_action("get_hinge", category="device.read")
 async def get_hinge(request: Request, udid: str | None = Query(default=None)):
     """A foldable simulator's hinge angle and lit panel (#537)."""
     controller = _get_controller(request)

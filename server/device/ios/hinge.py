@@ -11,7 +11,9 @@ Each command is its own spawn, about half a second: a pose is rare enough that
 a helper kept running per device would buy little for the lifecycle it brings.
 A command that outlives its deadline is killed in the guest too -- the host's
 `simctl spawn` child does not own the guest process, which would otherwise go
-on and move the hinge after quern had given up.
+on and move the hinge after quern had given up. A simulator's processes are
+the Mac's own, so it is killed from here, by the pid the helper prints first;
+the runtime has no `kill` to spawn.
 """
 
 from __future__ import annotations
@@ -20,8 +22,10 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import os
 import platform
 import re
+import signal
 import time
 from pathlib import Path
 
@@ -102,13 +106,23 @@ class HingeControl:
             _bin_dir().mkdir(parents=True, exist_ok=True)
             sdk = await self._run_text(["xcrun", "--sdk", "iphonesimulator", "--show-sdk-path"])
             arch = platform.machine() or "arm64"
+            # Built beside it and renamed into place: a second server sharing
+            # CONFIG_DIR/bin may be spawning the old binary while this builds.
+            tmp = self.binary_path.with_name(f"{BINARY_NAME}.{os.getpid()}.tmp")
             cmd = ["xcrun", "clang", "-arch", arch, "-isysroot", sdk,
                    "-target", f"{arch}-apple-ios17.0-simulator",
                    "-framework", "Foundation", "-fobjc-arc", "-Wl,-adhoc_codesign",
-                   "-o", str(self.binary_path),
+                   "-o", str(tmp),
                    *(str(self._root / s) for s in SOURCES)]
             logger.info("Compiling hinge-control for %s", arch)
-            await self._run_text(cmd, timeout=_COMPILE_TIMEOUT_S)
+            try:
+                await self._run_text(cmd, timeout=_COMPILE_TIMEOUT_S)
+                os.replace(tmp, self.binary_path)
+            except OSError as e:
+                raise DeviceError(f"could not install hinge-control: {e}", tool=_TOOL) from e
+            finally:
+                with contextlib.suppress(OSError):
+                    tmp.unlink()
             try:
                 self._stamp_path.write_text(digest)
             except OSError:
@@ -120,8 +134,9 @@ class HingeControl:
         """The hinge's angle in degrees; None when the guest gives no reading.
 
         The guest goes silent after a SpringBoard restart until the hinge next
-        moves (baguette's finding), so None is an answer, not a failure. A
-        helper that could not be run at all raises.
+        moves (baguette's finding), so None is an answer, not a failure -- but
+        only when the helper says that is what happened. Any other exit 1,
+        `simctl spawn` failing or dyld refusing the binary, raises.
         """
         binary = await self.ensure_binary()
         code, out, err = await self._spawn(udid, [str(binary), "read-angle"], _READ_TIMEOUT_S)
@@ -129,7 +144,7 @@ class HingeControl:
             m = _ANGLE_RE.search(out)
             if m:
                 return float(m.group(1))
-        if code == 1:
+        if code == 1 and "no hinge sample" in err:
             return None
         raise DeviceError(f"could not read the hinge of {udid[:8]}: exit {code}: "
                           f"{(err or out).strip()[:200]}", tool=_TOOL)
@@ -167,8 +182,9 @@ class HingeControl:
                           f"{(err or out).strip()[:200]}", tool=_TOOL)
 
     async def _spawn(self, udid: str, argv: list[str], timeout: float) -> tuple[int, str, str]:
-        """Run the helper in the simulator. On a timeout the guest process is
-        killed as well as the host's `simctl spawn`, which does not own it."""
+        """Run the helper in the simulator. On a timeout or cancellation the
+        guest process is killed as well as the host's `simctl spawn`, which
+        does not own it."""
         try:
             proc = await asyncio.create_subprocess_exec(
                 "xcrun", "simctl", "spawn", udid, *argv,
@@ -176,44 +192,82 @@ class HingeControl:
                 stdin=asyncio.subprocess.DEVNULL)
         except OSError as e:
             raise DeviceError(f"could not run simctl: {e}", tool=_TOOL) from e
+        # Read into lists that outlive a cancelled wait: `communicate()` keeps
+        # what it read to itself, so the `pid` line was lost with it.
+        out_parts: list[bytes] = []
+        err_parts: list[bytes] = []
+
+        async def pump(stream: asyncio.StreamReader | None, into: list[bytes]) -> None:
+            while stream is not None and (chunk := await stream.read(4096)):
+                into.append(chunk)
+
         try:
-            out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout)
+            await asyncio.wait_for(asyncio.gather(
+                pump(proc.stdout, out_parts), pump(proc.stderr, err_parts), proc.wait()), timeout)
         except BaseException as e:
             # Timed out or cancelled: stop it here and in the guest, where it
             # would otherwise go on and move the hinge after quern gave up.
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
-            out_b = b""
-            with contextlib.suppress(Exception):
-                if proc.stdout is not None:
-                    out_b = await asyncio.wait_for(proc.stdout.read(), 1.0)
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(proc.wait(), 2.0)
-            await self._kill_guest(udid, out_b.decode(errors="replace"))
+            stopped = await self._kill_guest(b"".join(out_parts).decode(errors="replace"))
             if isinstance(e, TimeoutError):
+                outcome = ("and was stopped" if stopped else
+                           "and could not be stopped in the simulator, so it may still act")
                 raise DeviceError(f"hinge-control on {udid[:8]} did not finish within "
-                                  f"{timeout:.0f}s and was stopped; read the hinge before "
-                                  "trying again, since it may have moved", tool=_TOOL) from e
+                                  f"{timeout:.0f}s {outcome}; read the hinge before trying "
+                                  "again, since it may have moved", tool=_TOOL) from e
             raise
-        return proc.returncode or 0, out_b.decode(errors="replace"), err_b.decode(errors="replace")
+        return (proc.returncode or 0, b"".join(out_parts).decode(errors="replace"),
+                b"".join(err_parts).decode(errors="replace"))
 
-    async def _kill_guest(self, udid: str, out: str) -> None:
+    async def _kill_guest(self, out: str) -> bool:
+        """Kill the helper whose `pid` line is in `out`. True when it is gone:
+        killed, already exited, or never printed a pid and so never acted."""
         m = _PID_RE.search(out)
         if not m:
-            return
-        with contextlib.suppress(Exception):
-            p = await asyncio.create_subprocess_exec(
-                "xcrun", "simctl", "spawn", udid, "kill", "-9", m.group(1),
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-            await asyncio.wait_for(p.wait(), 5.0)
+            return True
+        pid = int(m.group(1))
+        # Only if that pid is still the helper: by now it may have exited and
+        # the number been reused by something of the user's.
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ps", "-p", str(pid), "-o", "comm=",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+            out_b, _ = await asyncio.wait_for(proc.communicate(), 5.0)
+        except (OSError, TimeoutError):
+            logger.warning("Could not look up hinge-control pid %d", pid, exc_info=True)
+            return False
+        if not out_b.decode(errors="replace").strip().endswith(BINARY_NAME):
+            return True
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            logger.warning("Could not kill hinge-control pid %d", pid, exc_info=True)
+            return False
+        return True
 
     async def _run_text(self, cmd: list[str], timeout: float = 30.0) -> str:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            out, err = await asyncio.wait_for(proc.communicate(), timeout)
-        except (OSError, TimeoutError) as e:
+        except OSError as e:
             raise DeviceError(f"could not build hinge-control: {e}", tool=_TOOL) from e
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout)
+        except BaseException as e:
+            # Not left running to write a binary the next build also writes.
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(proc.wait(), 2.0)
+            if isinstance(e, TimeoutError):
+                raise DeviceError(f"could not build hinge-control: {' '.join(cmd[:2])} "
+                                  f"did not finish within {timeout:.0f}s", tool=_TOOL) from e
+            raise
         if proc.returncode != 0:
             raise DeviceError(f"could not build hinge-control: "
                               f"{(err or out).decode(errors='replace').strip()[-400:]}", tool=_TOOL)

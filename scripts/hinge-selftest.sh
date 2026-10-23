@@ -10,7 +10,7 @@
 # 2. The helper still compiles for the simulator, the way quern builds it
 #    (server/device/ios/hinge.py): iphonesimulator SDK, signed at link time.
 #
-# Run it on the newest Xcode before a release (RELEASING.md).
+# Run it on the newest Xcode before a release (docs/release-channels.md).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HC="$ROOT/tools/hinge-control"
