@@ -114,10 +114,14 @@ public final class StreamPipeline {
     /// Feed one captured frame in. Call this from a `FrameSource` callback.
     ///
     /// Encodes synchronously on the caller's queue, deliberately. The
-    /// `IOSurface` is wrapped rather than copied, and both sources rewrite
-    /// theirs in place — a capture buffer belongs to a recycling pool and the
-    /// simulator's framebuffer surface is a single persistent one. Handing the
-    /// work to another queue would encode whichever frame arrived next.
+    /// `IOSurface` is wrapped rather than copied, and every source rewrites
+    /// its surfaces in place — a capture buffer and a Duo's letterboxed frame
+    /// belong to recycling pools, and a simulator's framebuffer surface is a
+    /// single persistent one. Handing the work to another queue would encode
+    /// whichever frame arrived next.
+    ///
+    /// A frame's `prepare` runs only here, after the frame is known to be
+    /// wanted, so an idle preview stays free on a Duo too.
     public func consume(_ frame: CapturedFrame) {
         lock.lock()
         framesOffered += 1
@@ -132,7 +136,7 @@ public final class StreamPipeline {
         lock.unlock()
         guard due else { return }
 
-        guard let payload = encode(frame, forceKeyframe: wantKey) else { return }
+        guard let payload = encode(frame.resolved(), forceKeyframe: wantKey) else { return }
 
         lock.lock()
         framesEncoded += 1

@@ -46,10 +46,58 @@ public enum PanelChoice {
     }
 }
 
+/// A multi-panel device's built-in panels and the one being shown: what
+/// `SimulatorFramebuffer` decides per frame, pure apart from reading the
+/// surfaces it is given, so a test drives it with synthetic ones.
+public struct PanelTracker {
+    /// In screenID order.
+    public let panels: [Panel]
+    /// The panel shown last. Survives a detach, since the device does.
+    public private(set) var shown: UInt32?
+
+    /// Nil unless there are two or more built-in panels. Whether a device
+    /// has them is its device type's, read from the descriptors alone --
+    /// never from whether their surfaces exist yet: they lag the booted state
+    /// during boot, and a device judged single-panel then stayed on the
+    /// largest framebuffer, the black inner panel, for the whole attach.
+    public init?(panels found: [Panel?], shown: UInt32? = nil) {
+        let real = found.compactMap { $0 }.sorted { $0.screenID < $1.screenID }
+        guard real.count > 1 else { return nil }
+        panels = real
+        self.shown = shown
+    }
+
+    /// The panel to show now, given each panel's surface in `panels` order
+    /// (nil where it has none yet), and whether that is a change. Nil when
+    /// the chosen panel has no surface.
+    public mutating func select(_ surfaces: [IOSurface?])
+        -> (panel: Panel, surface: IOSurface, changed: Bool)? {
+        guard surfaces.count == panels.count else { return nil }
+        let lit = surfaces.map { $0.map(surfaceIsLit) ?? false }
+        guard let i = PanelChoice.choose(panels, lit: lit, last: shown),
+              let surface = surfaces[i] else { return nil }
+        let changed = panels[i].screenID != shown
+        shown = panels[i].screenID
+        return (panels[i], surface, changed)
+    }
+
+    /// The canvas for these surfaces, or nil while any panel has none yet:
+    /// sized from some of them, it could be smaller than the panel that
+    /// arrives later.
+    public static func canvasSize(of surfaces: [IOSurface?]) -> (width: Int, height: Int)? {
+        let present = surfaces.compactMap { $0 }
+        guard present.count == surfaces.count else { return nil }
+        return PanelChoice.canvasSize(present.map { (IOSurfaceGetWidth($0), IOSurfaceGetHeight($0)) })
+    }
+}
+
 /// Whether a framebuffer shows anything: 256 samples on a grid, any channel
 /// above 8. An unlit panel is exactly black; a lit one showing a dark
 /// interface still has a status bar. The same test as sim-bridge's
-/// `surfaceIsLit`, which #536 measured on a Duo.
+/// `surfaceIsLit`, which #536 measured on a Duo, with one addition: a
+/// surface that is not 4 bytes a pixel cannot be read this way, and reads as
+/// lit -- "cannot tell", which for two panels means neither is preferred and
+/// the one shown last stays. A Duo's panels measure BGRA, 4 bytes.
 public func surfaceIsLit(_ surface: IOSurface) -> Bool {
     guard IOSurfaceGetBytesPerElement(surface) == 4 else { return true }
     IOSurfaceLock(surface, .readOnly, nil)
@@ -76,10 +124,6 @@ public final class PanelCanvas {
     public let height: Int
     private var session: VTPixelTransferSession?
     private var pool: CVPixelBufferPool?
-    /// The buffer handed out last, held until the next compose: the encoders
-    /// wrap the surface rather than copying it, so the pool must not recycle
-    /// it while one is still reading.
-    private var lastOut: CVPixelBuffer?
 
     public init?(width: Int, height: Int) {
         guard width > 0, height > 0 else { return nil }
@@ -123,7 +167,10 @@ public final class PanelCanvas {
         // around the smaller one. The fold-back test holds VideoToolbox to it.
         guard VTPixelTransferSessionTransferImage(session, from: source, to: dest) == noErr,
               let out = CVPixelBufferGetIOSurface(dest)?.takeUnretainedValue() else { return nil }
-        lastOut = dest
+        // Nothing holds `dest` past here, and nothing needs to: the encoders
+        // wrap the surface in a CVPixelBuffer of their own, which raises its
+        // IOSurface use count, and the pool does not hand back a surface in
+        // use (measured: a held one was skipped and kept its pixels).
         return out
     }
 }

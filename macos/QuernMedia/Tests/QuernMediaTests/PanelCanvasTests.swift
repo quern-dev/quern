@@ -1,3 +1,4 @@
+import CoreMedia
 import CoreVideo
 import Foundation
 import IOSurface
@@ -67,6 +68,146 @@ func barsAreClearedWhenThePanelChanges() throws {
     for _ in 0..<6 {
         let out = try #require(canvas.compose(small))
         #expect(pixel(out, x: 5, y: 200) & 0x00FF_FFFF == 0)
+    }
+}
+
+// MARK: - The tracker: which panels, and which is shown
+
+@Test("two built-in panels among other framebuffers make a multi-panel device")
+func findsTheBuiltInPanels() throws {
+    // A Duo reports five display descriptors; three are not built-in panels.
+    let tracker = try #require(PanelTracker(panels: [inner, nil, cover, nil, nil]))
+    #expect(tracker.panels == [cover, inner], "in screenID order")
+}
+
+@Test("one built-in panel, or none, is not a multi-panel device", arguments: [
+    [Panel?](arrayLiteral: cover, nil, nil), [Panel?](arrayLiteral: nil, nil), [Panel?](),
+])
+func onePanelIsAPhone(found: [Panel?]) {
+    #expect(PanelTracker(panels: found) == nil)
+}
+
+@Test("the tracker follows a fold, and says when it changed")
+func trackerFollowsAFold() throws {
+    var tracker = try #require(PanelTracker(panels: [cover, inner]))
+    let black = try #require(solid(width: 140, height: 200, bgra: 0xFF00_0000))
+    let lit = try #require(TestSurface.make(width: 200, height: 280))
+
+    let foldedRead = tracker.select([lit, black])
+    let folded = try #require(foldedRead)
+    #expect(folded.panel == cover && folded.changed && folded.surface === lit)
+    #expect(tracker.select([lit, black])?.changed == false)
+    let openRead = tracker.select([black, lit])
+    let open = try #require(openRead)
+    #expect(open.panel == inner && open.changed && open.surface === lit)
+    // Mid-fold, neither lit: the panel shown last, not the cover.
+    #expect(tracker.select([black, black])?.panel == inner)
+}
+
+@Test("a panel with no surface yet is never chosen, and does not size the canvas")
+func surfacelessPanelDuringBoot() throws {
+    var tracker = try #require(PanelTracker(panels: [cover, inner]))
+    let lit = try #require(TestSurface.make(width: 200, height: 280))
+    #expect(tracker.select([lit, nil])?.panel == cover)
+    #expect(PanelTracker.canvasSize(of: [lit, nil]) == nil,
+            "sized from one panel, the canvas could be smaller than the other")
+    let other = try #require(TestSurface.make(width: 300, height: 100))
+    let size = try #require(PanelTracker.canvasSize(of: [lit, other]))
+    #expect(size.width == 300 && size.height == 280)
+}
+
+@Test("the panel shown before a reattach is carried into the next tracker")
+func shownSurvivesAReattach() throws {
+    var tracker = try #require(PanelTracker(panels: [cover, inner], shown: 3))
+    let black = try #require(solid(width: 140, height: 200, bgra: 0xFF00_0000))
+    #expect(tracker.select([black, black])?.panel == inner)
+}
+
+// MARK: - Lit: what the grid catches
+
+@Test("a dark screen whose only content is a small mark on the grid is lit", arguments: [
+    UInt32(0xFF00_0014),  // blue 20
+    UInt32(0xFF00_1400),  // green 20
+    UInt32(0xFF14_0000),  // red 20
+])
+func smallMarkInOneChannelIsLit(colour: UInt32) throws {
+    // 320x320: grid point (gx, gy) = (0, 0) is pixel (10, 10).
+    let surface = try #require(solid(width: 320, height: 320, bgra: 0xFF00_0000))
+    paint(surface, x: 8..<13, y: 8..<13, bgra: colour)
+    #expect(surfaceIsLit(surface))
+}
+
+@Test("a level of 8 or less is black, as an unlit panel's noise is")
+func nearBlackIsUnlit() throws {
+    let surface = try #require(solid(width: 320, height: 320, bgra: 0xFF08_0808))
+    #expect(!surfaceIsLit(surface))
+}
+
+@Test("a mark between grid points is not seen: the grid is a sample, not a scan")
+func offGridMarkIsMissed() throws {
+    let surface = try #require(solid(width: 320, height: 320, bgra: 0xFF00_0000))
+    paint(surface, x: 0..<3, y: 0..<3, bgra: 0xFFFF_FFFF)
+    #expect(!surfaceIsLit(surface))
+}
+
+@Test("a surface it cannot read reads as lit: cannot tell, not black")
+func unreadableFormatReadsLit() throws {
+    let props: [IOSurfacePropertyKey: Any] = [
+        .width: 64, .height: 64, .bytesPerElement: 2,
+        .pixelFormat: kCVPixelFormatType_16Gray,
+    ]
+    let surface = try #require(IOSurface(properties: props))
+    #expect(surfaceIsLit(surface))
+}
+
+// MARK: - Letterboxing is paid only by a frame that is encoded
+
+private final class Wanting: FrameSink {
+    var wantsFrames: Bool
+    init(_ wants: Bool) { wantsFrames = wants }
+    func receive(_ payload: EncodedPayload) {}
+}
+
+@Test("a frame nobody wants, or the throttle drops, is never letterboxed")
+func preparationIsDeferred() throws {
+    let surface = try #require(TestSurface.make(width: 200, height: 280))
+    var prepared = 0
+    func frame(_ i: Int) -> CapturedFrame {
+        CapturedFrame(surface: surface, time: CMTime(value: CMTimeValue(i * 10), timescale: 600),
+                      timeAccuracy: .arrival, prepare: { prepared += 1; return surface })
+    }
+    let pipeline = StreamPipeline(codec: .mjpeg, fps: 15, maxDimension: 0)
+    defer { pipeline.invalidate() }
+    let sink = Wanting(false)
+    pipeline.add(sink)
+    for i in 0..<8 { pipeline.consume(frame(i)) }
+    #expect(prepared == 0, "an idle preview must stay free on a Duo")
+
+    sink.wantsFrames = true
+    for i in 8..<16 { pipeline.consume(frame(i)) }   // 60 fps offered, 15 encoded
+    #expect(prepared == pipeline.framesEncoded && prepared < 8)
+}
+
+@Test("the encoded frame is the prepared one, or the raw one when preparing fails")
+func resolvedFrame() throws {
+    let raw = try #require(TestSurface.make(width: 200, height: 280))
+    let boxed = try #require(TestSurface.make(width: 300, height: 300))
+    let t = CMTime(value: 1, timescale: 600)
+    #expect(CapturedFrame(surface: raw, time: t, timeAccuracy: .arrival,
+                          prepare: { boxed }).resolved().surface === boxed)
+    #expect(CapturedFrame(surface: raw, time: t, timeAccuracy: .arrival,
+                          prepare: { nil }).resolved().surface === raw,
+            "no frames at all reads as a still screen")
+    #expect(CapturedFrame(surface: raw, time: t, timeAccuracy: .arrival).resolved().surface === raw)
+}
+
+private func paint(_ surface: IOSurface, x: Range<Int>, y: Range<Int>, bgra: UInt32) {
+    surface.lock(options: [], seed: nil)
+    defer { surface.unlock(options: [], seed: nil) }
+    for row in y {
+        let p = surface.baseAddress.advanced(by: row * surface.bytesPerRow)
+            .assumingMemoryBound(to: UInt32.self)
+        for col in x { p[col] = bgra }
     }
 }
 
