@@ -161,6 +161,73 @@ public enum PrivateFrameworks {
         return (set.value(forKey: "availableDevices") as? [NSObject]) ?? []
     }
 
+    // MARK: - Screen properties (#538)
+
+    /// Only a yes is kept; a no is cheap to ask again.
+    private nonisolated(unsafe) static var screenInterfacesConfirmed = false
+
+    /// Every declaration `panel(of:)` calls, with the return type it reads it
+    /// as: what is missing or typed otherwise, by name. Empty means all are
+    /// there. The same list as sim-bridge's `screenInterfaceProblems`.
+    ///
+    /// A descriptor and its properties are XPC proxies that claim every
+    /// selector, so neither `responds(to:)` nor `class_getMethodImplementation`
+    /// can say whether one has a method, and an unrecognised selector raises
+    /// an exception Swift cannot catch -- here, inside a capture that a
+    /// recording depends on. So what is called is checked against what
+    /// CoreSimulator declares first. Xcode 26.6 has no `deviceName`.
+    static func screenInterfaceProblems() -> [String] {
+        let wanted: [(String, String, String)] = [
+            ("SimScreen", "screenProperties", "@"),
+            ("SimScreenProperties", "screenID", "I"),
+            ("SimScreenProperties", "screenType", "Q"),
+            ("SimScreenProperties", "deviceName", "@"),
+        ]
+        var problems: [String] = []
+        for (protoName, method, type) in wanted {
+            guard let proto = objc_getProtocol(protoName) else {
+                problems.append("\(protoName) is not declared"); continue
+            }
+            let d = protocol_getMethodDescription(proto, NSSelectorFromString(method), true, true)
+            guard d.name != nil, let types = d.types else {
+                problems.append("\(protoName) has no \(method)"); continue
+            }
+            if !String(cString: types).hasPrefix(type) {
+                problems.append("\(protoName).\(method) is not typed \(type)")
+            }
+        }
+        return problems
+    }
+
+    static func screenInterfacesAvailable() -> Bool {
+        if screenInterfacesConfirmed { return true }
+        screenInterfacesConfirmed = screenInterfaceProblems().isEmpty
+        return screenInterfacesConfirmed
+    }
+
+    /// The built-in panel a display descriptor is (`screenType` 0), or nil:
+    /// an overlay or secondary plane, or an Xcode without the interfaces.
+    static func panel(of descriptor: NSObject) -> Panel? {
+        guard screenInterfacesAvailable(),
+              let screen = objc_getProtocol("SimScreen"), descriptor.conforms(to: screen),
+              let props = descriptor.perform(NSSelectorFromString("screenProperties"))?
+                .takeUnretainedValue() as? NSObject,
+              let cls = object_getClass(props) else { return nil }
+        typealias U32Fn = @convention(c) (AnyObject, Selector) -> UInt32
+        typealias U64Fn = @convention(c) (AnyObject, Selector) -> UInt64
+        typealias ObjFn = @convention(c) (AnyObject, Selector) -> AnyObject?
+        let idSel = NSSelectorFromString("screenID"), typeSel = NSSelectorFromString("screenType")
+        let nameSel = NSSelectorFromString("deviceName")
+        guard let idImp = class_getMethodImplementation(cls, idSel),
+              let typeImp = class_getMethodImplementation(cls, typeSel),
+              let nameImp = class_getMethodImplementation(cls, nameSel) else { return nil }
+        guard unsafeBitCast(typeImp, to: U64Fn.self)(props, typeSel) == 0 else { return nil }
+        return Panel(
+            screenID: unsafeBitCast(idImp, to: U32Fn.self)(props, idSel),
+            deviceName: unsafeBitCast(nameImp, to: ObjFn.self)(props, nameSel) as? String ?? ""
+        )
+    }
+
     public static func resolveDevice(udid: String) -> NSObject? {
         for device in availableDevices()
         where (device.value(forKey: "UDID") as? NSUUID)?.uuidString.lowercased()

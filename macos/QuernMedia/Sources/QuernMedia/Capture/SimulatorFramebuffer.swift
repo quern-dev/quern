@@ -48,6 +48,15 @@ public final class SimulatorFramebuffer: FrameSource {
     private var stopped = false
     private var ioClient: NSObject?
     private var descriptors: [NSObject] = []
+    /// The built-in panels among `descriptors`, when there are two or more
+    /// (iPhone Duo, #538). Empty for every other device. Capture queue only.
+    private var panels: [(panel: Panel, descriptor: NSObject)] = []
+    /// What a multi-panel device's frames are letterboxed into; nil on every
+    /// other device, which keeps the zero-copy path. Capture queue only.
+    private var canvas: PanelCanvas?
+    /// The panel shown last, for the moment neither or both read lit. Kept
+    /// across a detach, as the device it describes is. Capture queue only.
+    private var lastPanel: UInt32?
     private var callbackUUIDs: [ObjectIdentifier: NSUUID] = [:]
 
     /// The resolved `SimDevice`, kept to read its state. Capture queue only.
@@ -147,6 +156,7 @@ public final class SimulatorFramebuffer: FrameSource {
             throw SimulatorFramebufferError.noFramebuffer
         }
         MediaLog.log("[capture] framebuffer descriptors: \(descriptors.count)")
+        findPanels(surfaceSelector: surfSel)
 
         do {
             for desc in descriptors { try register(on: desc) }
@@ -172,6 +182,8 @@ public final class SimulatorFramebuffer: FrameSource {
             }
         }
         descriptors.removeAll()
+        panels.removeAll()
+        canvas = nil
         callbackUUIDs.removeAll()
         ioClient = nil
         attached = false
@@ -309,6 +321,44 @@ public final class SimulatorFramebuffer: FrameSource {
         )
     }
 
+    /// Finds the built-in panels among the descriptors, and the canvas
+    /// they are shown in when there is more than one. Capture queue only.
+    private func findPanels(surfaceSelector surfSel: Selector) {
+        var found: [(panel: Panel, descriptor: NSObject)] = []
+        var sizes: [(width: Int, height: Int)] = []
+        for desc in descriptors {
+            guard let panel = PrivateFrameworks.panel(of: desc),
+                  let surfObj = desc.perform(surfSel)?.takeUnretainedValue() else { continue }
+            let surf = unsafeBitCast(surfObj, to: IOSurface.self)
+            found.append((panel, desc))
+            sizes.append((IOSurfaceGetWidth(surf), IOSurfaceGetHeight(surf)))
+        }
+        guard found.count > 1, let size = PanelChoice.canvasSize(sizes),
+              let made = PanelCanvas(width: size.width, height: size.height) else { return }
+        panels = found.sorted { $0.panel.screenID < $1.panel.screenID }
+        canvas = made
+        MediaLog.log("[capture] \(found.count) panels; following the lit one in a "
+                     + "\(size.width)x\(size.height) frame")
+    }
+
+    /// The lit panel's frame, letterboxed into the canvas. Capture queue only.
+    private func panelFrame(canvas: PanelCanvas, surfaceSelector surfSel: Selector) -> IOSurface? {
+        var surfaces: [IOSurface?] = []
+        for entry in panels {
+            let obj = entry.descriptor.perform(surfSel)?.takeUnretainedValue()
+            surfaces.append(obj.map { unsafeBitCast($0, to: IOSurface.self) })
+        }
+        let lit = surfaces.map { $0.map(surfaceIsLit) ?? false }
+        guard let i = PanelChoice.choose(panels.map(\.panel), lit: lit, last: lastPanel),
+              let surface = surfaces[i] else { return nil }
+        let chosen = panels[i].panel
+        if chosen.screenID != lastPanel {
+            MediaLog.log("[capture] showing panel \(chosen.screenID) (\(chosen.deviceName))")
+            lastPanel = chosen.screenID
+        }
+        return canvas.compose(surface)
+    }
+
     private func captureLatest() {
         stateLock.lock()
         let done = stopped
@@ -316,6 +366,15 @@ public final class SimulatorFramebuffer: FrameSource {
         guard !done else { return }
 
         let surfSel = NSSelectorFromString("framebufferSurface")
+        if let canvas {
+            guard let frame = panelFrame(canvas: canvas, surfaceSelector: surfSel) else { return }
+            onFrame(CapturedFrame(
+                surface: frame,
+                time: CMClockGetTime(CMClockGetHostTimeClock()),
+                timeAccuracy: .arrival
+            ))
+            return
+        }
         var best: IOSurface?
         var bestArea = 0
         for desc in descriptors {
