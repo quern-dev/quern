@@ -38,6 +38,7 @@ import {
 } from "./project-knowledge.js";
 import { registerLandmarkTools } from "./tools/landmarks.js";
 import { registerSystemTools } from "./tools/system.js";
+import { registerPreviewAppTools } from "./tools/preview-app.js";
 import { registerRecordingTools } from "./tools/recordings.js";
 import { discoverServer } from "./config.js";
 
@@ -138,6 +139,7 @@ function buildServer(instructions: string): McpServer {
   registerAppKnowledgeTools(server);
   registerLandmarkTools(server);
   registerSystemTools(server);
+  registerPreviewAppTools(server);
 
   // ---------------------------------------------------------------------------
   // Resources
