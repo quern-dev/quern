@@ -46,6 +46,45 @@ public enum PanelChoice {
     }
 }
 
+/// How a panel's framebuffer is turned to show its interface upright.
+///
+/// A panel's framebuffer has one fixed shape -- the Duo's inner panel is
+/// portrait, 2007x2853 -- while the interface on it turns: unfolded, the
+/// inner panel's interface is landscape, so shown as captured it lay 90
+/// degrees anticlockwise. `uiOrientation` says how the interface is turned,
+/// as `take_screenshot` reads it (sim-bridge's `rotated`).
+public enum PanelRotation: Equatable {
+    case none, clockwise, anticlockwise, upsideDown
+
+    /// From a display's `uiOrientation` (UIDeviceOrientation: 1 portrait,
+    /// 2 upside down, 3 landscape left, 4 landscape right). Anything else
+    /// is shown as captured.
+    public init(uiOrientation: UInt32) {
+        switch uiOrientation {
+        case 2: self = .upsideDown
+        case 3: self = .clockwise
+        case 4: self = .anticlockwise
+        default: self = .none
+        }
+    }
+
+    public var turnsSideways: Bool { self == .clockwise || self == .anticlockwise }
+
+    /// A width and height as they are once turned.
+    public func apply(_ size: (width: Int, height: Int)) -> (width: Int, height: Int) {
+        turnsSideways ? (size.height, size.width) : size
+    }
+
+    var videoToolbox: CFString {
+        switch self {
+        case .none: return kVTRotation_0
+        case .clockwise: return kVTRotation_CW90
+        case .anticlockwise: return kVTRotation_CCW90
+        case .upsideDown: return kVTRotation_180
+        }
+    }
+}
+
 /// A multi-panel device's built-in panels and the one being shown: what
 /// `SimulatorFramebuffer` decides per frame, pure apart from reading the
 /// surfaces it is given, so a test drives it with synthetic ones.
@@ -71,23 +110,37 @@ public struct PanelTracker {
     /// (nil where it has none yet), and whether that is a change. Nil when
     /// the chosen panel has no surface.
     public mutating func select(_ surfaces: [IOSurface?])
-        -> (panel: Panel, surface: IOSurface, changed: Bool)? {
+        -> (panel: Panel, index: Int, surface: IOSurface, changed: Bool)? {
         guard surfaces.count == panels.count else { return nil }
         let lit = surfaces.map { $0.map(surfaceIsLit) ?? false }
         guard let i = PanelChoice.choose(panels, lit: lit, last: shown),
               let surface = surfaces[i] else { return nil }
         let changed = panels[i].screenID != shown
         shown = panels[i].screenID
-        return (panels[i], surface, changed)
+        return (panels[i], i, surface, changed)
     }
 
     /// The canvas for these surfaces, or nil while any panel has none yet:
     /// sized from some of them, it could be smaller than the panel that
     /// arrives later.
+    ///
+    /// Landscape, as long as the longest panel edge and as tall as the
+    /// longest short edge: an unfolded Duo's inner panel turned upright,
+    /// 2854x2008, which it fills. The folded cover, upright, sits inside with
+    /// bars either side. Fixed, rather than following each panel's shape,
+    /// because a movie's players show every frame at its first frame's size
+    /// (measured: AVFoundation drew a 952x668 half of a movie squashed into
+    /// its first 466x678); and from the panels' shapes rather than their
+    /// orientations at start, since the unlit cover reports the inner
+    /// panel's, so a canvas sized from orientations differed with whether
+    /// capture started folded.
     public static func canvasSize(of surfaces: [IOSurface?]) -> (width: Int, height: Int)? {
         let present = surfaces.compactMap { $0 }
         guard present.count == surfaces.count else { return nil }
-        return PanelChoice.canvasSize(present.map { (IOSurfaceGetWidth($0), IOSurfaceGetHeight($0)) })
+        let sizes = present.map { (IOSurfaceGetWidth($0), IOSurfaceGetHeight($0)) }
+        let long = sizes.map { max($0.0, $0.1) }.max() ?? 0
+        let short = sizes.map { min($0.0, $0.1) }.max() ?? 0
+        return PanelChoice.canvasSize([(long, short)])
     }
 }
 
@@ -115,57 +168,114 @@ public func surfaceIsLit(_ surface: IOSurface) -> Bool {
     return false
 }
 
-/// Letterboxes a surface into a fixed-size one, on the GPU.
+/// Turns a surface upright, on the GPU, ahead of the letterbox.
+public final class PanelTurner {
+    private var rotator: VTPixelRotationSession?
+    /// One pool per turned size: a panel turned sideways is its own shape.
+    private var pools: [String: CVPixelBufferPool] = [:]
+
+    public init() {}
+
+    deinit {
+        if let rotator { VTPixelRotationSessionInvalidate(rotator) }
+    }
+
+    /// `source` turned by `rotation`, or nil if it could not be. `.none` is
+    /// not a turn: callers keep the surface they have. One queue at a time.
+    public func turn(_ source: CVPixelBuffer, _ rotation: PanelRotation) -> CVPixelBuffer? {
+        if rotator == nil {
+            var made: VTPixelRotationSession?
+            guard VTPixelRotationSessionCreate(nil, &made) == noErr, let made else { return nil }
+            rotator = made
+        }
+        guard let rotator else { return nil }
+        let size = rotation.apply((CVPixelBufferGetWidth(source), CVPixelBufferGetHeight(source)))
+        let key = "\(size.width)x\(size.height)"
+        if pools[key] == nil { pools[key] = makeBGRAPool(width: size.width, height: size.height) }
+        guard let pool = pools[key], let dest = bufferFrom(pool),
+              VTSessionSetProperty(rotator, key: kVTPixelRotationPropertyKey_Rotation,
+                                   value: rotation.videoToolbox) == noErr,
+              VTPixelRotationSessionRotateImage(rotator, source, dest) == noErr
+        else { return nil }
+        return dest
+    }
+}
+
+func makeBGRAPool(width: Int, height: Int) -> CVPixelBufferPool? {
+    let attrs: [CFString: Any] = [
+        kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+        kCVPixelBufferWidthKey: width,
+        kCVPixelBufferHeightKey: height,
+        kCVPixelBufferIOSurfacePropertiesKey: [:] as [CFString: Any],
+    ]
+    var created: CVPixelBufferPool?
+    guard CVPixelBufferPoolCreate(nil, nil, attrs as CFDictionary, &created) == kCVReturnSuccess
+    else { return nil }
+    return created
+}
+
+func bufferFrom(_ pool: CVPixelBufferPool) -> CVPixelBuffer? {
+    var out: CVPixelBuffer?
+    guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &out) == kCVReturnSuccess else { return nil }
+    return out
+}
+
+func wrap(_ surface: IOSurface) -> CVPixelBuffer? {
+    var src: Unmanaged<CVPixelBuffer>?
+    guard CVPixelBufferCreateWithIOSurface(nil, surface, nil, &src) == kCVReturnSuccess else { return nil }
+    return src?.takeRetainedValue()
+}
+
+/// Turns a surface upright and letterboxes it into a fixed-size one, on the
+/// GPU. See `PanelTracker.canvasSize(of:)` for why the size is fixed.
 ///
 /// Only a device with more than one panel pays for this: a phone keeps the
 /// zero-copy path, its framebuffer handed straight to the encoder.
 public final class PanelCanvas {
     public let width: Int
     public let height: Int
-    private var session: VTPixelTransferSession?
-    private var pool: CVPixelBufferPool?
+    private let transfer: VTPixelTransferSession
+    private let pool: CVPixelBufferPool
+    private let turner = PanelTurner()
 
     public init?(width: Int, height: Int) {
-        guard width > 0, height > 0 else { return nil }
+        guard width > 0, height > 0, let made = makeBGRAPool(width: width, height: height) else {
+            return nil
+        }
+        pool = made
+        var session: VTPixelTransferSession?
+        guard VTPixelTransferSessionCreate(allocator: nil, pixelTransferSessionOut: &session) == noErr,
+              let session else { return nil }
+        // Checked: unset, the default scaling stretches every panel to the
+        // canvas's shape, a distorted picture with nothing to say so.
+        guard VTSessionSetProperty(session, key: kVTPixelTransferPropertyKey_ScalingMode,
+                                   value: kVTScalingMode_Letterbox) == noErr else {
+            VTPixelTransferSessionInvalidate(session)
+            return nil
+        }
+        transfer = session
         self.width = width
         self.height = height
-        let attrs: [CFString: Any] = [
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
-            kCVPixelBufferWidthKey: width,
-            kCVPixelBufferHeightKey: height,
-            kCVPixelBufferIOSurfacePropertiesKey: [:] as [CFString: Any],
-        ]
-        var created: CVPixelBufferPool?
-        guard CVPixelBufferPoolCreate(nil, nil, attrs as CFDictionary, &created) == kCVReturnSuccess,
-              let created else { return nil }
-        pool = created
-        var transfer: VTPixelTransferSession?
-        guard VTPixelTransferSessionCreate(allocator: nil, pixelTransferSessionOut: &transfer) == noErr,
-              let transfer else { return nil }
-        VTSessionSetProperty(transfer, key: kVTPixelTransferPropertyKey_ScalingMode,
-                             value: kVTScalingMode_Letterbox)
-        session = transfer
     }
 
     deinit {
-        if let session { VTPixelTransferSessionInvalidate(session) }
+        VTPixelTransferSessionInvalidate(transfer)
     }
 
-    /// `surface` letterboxed into the canvas, or nil if it could not be.
-    /// Called from one queue at a time.
-    public func compose(_ surface: IOSurface) -> IOSurface? {
-        guard let session, let pool else { return nil }
-        var src: Unmanaged<CVPixelBuffer>?
-        guard CVPixelBufferCreateWithIOSurface(nil, surface, nil, &src) == kCVReturnSuccess,
-              let source = src?.takeRetainedValue() else { return nil }
-        var dst: CVPixelBuffer?
-        guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &dst) == kCVReturnSuccess,
-              let dest = dst else { return nil }
+    /// `surface` turned by `rotation` and letterboxed into the canvas, or nil
+    /// if it could not be. Called from one queue at a time.
+    public func compose(_ surface: IOSurface, rotation: PanelRotation = .none) -> IOSurface? {
+        guard var source = wrap(surface) else { return nil }
+        if rotation != .none {
+            guard let turned = turner.turn(source, rotation) else { return nil }
+            source = turned
+        }
+        guard let dest = bufferFrom(pool) else { return nil }
         // Letterboxing paints the bars black as well as drawing the panel
         // (measured: a destination filled white came back with black bars),
         // so a pooled buffer that last held the larger panel shows none of it
         // around the smaller one. The fold-back test holds VideoToolbox to it.
-        guard VTPixelTransferSessionTransferImage(session, from: source, to: dest) == noErr,
+        guard VTPixelTransferSessionTransferImage(transfer, from: source, to: dest) == noErr,
               let out = CVPixelBufferGetIOSurface(dest)?.takeUnretainedValue() else { return nil }
         // Nothing holds `dest` past here, and nothing needs to: the encoders
         // wrap the surface in a CVPixelBuffer of their own, which raises its

@@ -107,11 +107,11 @@ What to know:
   state, folded or not, before this support existed or since, so quern says
   so rather than answering `ok`. Navigate with taps, or press Home.
 - **Video recording and the preview window follow the lit panel too
-  (#538).** Each panel is shown in one fixed frame the size of the inner
-  panel, so a fold mid-recording does not change the movie's size: the
-  cover with bars either side, the inner panel in its native orientation --
-  sideways, as a landscape app records on any iPhone. A frame or two mid-fold
-  is black, while neither panel is lit.
+  (#538)**, turned upright as screenshots are, in one fixed frame the shape
+  of the unfolded inner panel. Unfolded fills it; folded, the cover sits in
+  the middle with bars either side. The size never changes mid-recording,
+  which a movie's players cannot follow. A frame or two mid-fold is black,
+  while neither panel is lit.
 - **Which panel is lit is read from the screen, not the hinge.** The panel
   SpringBoard lights depends on how the hinge got where it is, not only its
   angle: measured, stepping it closed kept the inner panel lit down to 20°,

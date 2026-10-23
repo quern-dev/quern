@@ -113,7 +113,7 @@ func surfacelessPanelDuringBoot() throws {
             "sized from one panel, the canvas could be smaller than the other")
     let other = try #require(TestSurface.make(width: 300, height: 100))
     let size = try #require(PanelTracker.canvasSize(of: [lit, other]))
-    #expect(size.width == 300 && size.height == 280)
+    #expect(size.width == 300 && size.height == 200, "landscape: longest edge by longest short edge")
 }
 
 @Test("the panel shown before a reattach is carried into the next tracker")
@@ -121,6 +121,58 @@ func shownSurvivesAReattach() throws {
     var tracker = try #require(PanelTracker(panels: [cover, inner], shown: 3))
     let black = try #require(solid(width: 140, height: 200, bgra: 0xFF00_0000))
     #expect(tracker.select([black, black])?.panel == inner)
+}
+
+// MARK: - Upright, in the unfolded panel's shape
+
+@Test("the canvas is the unfolded inner panel turned upright, whatever order the panels come in")
+func canvasIsTheUnfoldedShape() throws {
+    // A Duo's panels at a tenth of their size: cover 140x204, inner 200x286.
+    let cover = try #require(TestSurface.make(width: 140, height: 204))
+    let inner = try #require(TestSurface.make(width: 200, height: 286))
+    for order in [[cover, inner], [inner, cover]] {
+        let size = try #require(PanelTracker.canvasSize(of: order))
+        #expect(size.width == 286 && size.height == 200)
+    }
+}
+
+@Test("each interface orientation turns the panel the way take_screenshot does", arguments: [
+    (UInt32(1), PanelRotation.none), (2, .upsideDown), (3, .clockwise), (4, .anticlockwise),
+    (0, .none), (7, .none),
+])
+func rotationFromOrientation(orientation: UInt32, expected: PanelRotation) {
+    #expect(PanelRotation(uiOrientation: orientation) == expected)
+}
+
+@Test("turning sideways swaps width and height; upside down does not")
+func turnedSizes() {
+    #expect(PanelRotation.clockwise.apply((200, 286)) == (286, 200))
+    #expect(PanelRotation.anticlockwise.apply((200, 286)) == (286, 200))
+    #expect(PanelRotation.upsideDown.apply((200, 286)) == (200, 286))
+    #expect(PanelRotation.none.apply((200, 286)) == (200, 286))
+}
+
+@Test("an unfolded panel is turned clockwise to fill the canvas, its top left becoming top right")
+func composeTurnsClockwise() throws {
+    // Measured on a Duo: unfolded, the inner panel reports uiOrientation 3
+    // and its framebuffer shows the interface 90 degrees anticlockwise.
+    let canvas = try #require(PanelCanvas(width: 200, height: 100))
+    let panel = try #require(solid(width: 100, height: 200, bgra: 0xFF00_0000))
+    paint(panel, x: 0..<20, y: 0..<20, bgra: 0xFFFF_FFFF)
+    let out = try #require(canvas.compose(panel, rotation: .clockwise))
+    #expect(pixel(out, x: 190, y: 10) & 0x00FF_FFFF == 0x00FF_FFFF, "top left is now top right")
+    #expect(pixel(out, x: 10, y: 10) & 0x00FF_FFFF == 0, "and filled the canvas, with no bars")
+    #expect(pixel(out, x: 10, y: 90) & 0x00FF_FFFF == 0)
+}
+
+@Test("the folded cover sits in the unfolded shape with bars either side")
+func coverInTheUnfoldedShape() throws {
+    let canvas = try #require(PanelCanvas(width: 286, height: 200))
+    let cover = try #require(solid(width: 140, height: 204, bgra: 0xFFFF_FFFF))
+    let out = try #require(canvas.compose(cover, rotation: .none))
+    #expect(pixel(out, x: 143, y: 100) & 0x00FF_FFFF == 0x00FF_FFFF)
+    #expect(pixel(out, x: 20, y: 100) & 0x00FF_FFFF == 0, "a bar on the left")
+    #expect(pixel(out, x: 265, y: 100) & 0x00FF_FFFF == 0, "and on the right")
 }
 
 // MARK: - Lit: what the grid catches

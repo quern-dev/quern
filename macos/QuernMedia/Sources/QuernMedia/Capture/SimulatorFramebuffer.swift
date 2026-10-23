@@ -348,11 +348,11 @@ public final class SimulatorFramebuffer: FrameSource {
             }
             return
         }
-        let descs = made.panels.compactMap { byScreen[$0.screenID] }
-        // Two panels claiming one screenID cannot be told apart.
-        guard descs.count == made.panels.count else { return }
+        // Two panels claiming one screenID cannot be told apart: the map
+        // above kept one descriptor for both, so count the IDs themselves.
+        guard Set(made.panels.map(\.screenID)).count == made.panels.count else { return }
         tracker = made
-        panelDescriptors = descs
+        panelDescriptors = made.panels.compactMap { byScreen[$0.screenID] }
         MediaLog.log("[capture] \(made.panels.count) panels; following the lit one")
     }
 
@@ -363,8 +363,8 @@ public final class SimulatorFramebuffer: FrameSource {
         }
     }
 
-    /// The canvas, built the first time every panel has a surface. Capture
-    /// queue only.
+    /// The canvas, built the first time every panel has a surface; its
+    /// shape is `PanelTracker.canvasSize(of:)`'s. Capture queue only.
     private func ensureCanvas(_ surfaces: [IOSurface?]) -> PanelCanvas? {
         if let canvas { return canvas }
         guard let size = PanelTracker.canvasSize(of: surfaces) else { return nil }
@@ -373,7 +373,7 @@ public final class SimulatorFramebuffer: FrameSource {
             return nil
         }
         canvas = made
-        MediaLog.log("[capture] panels shown in a \(size.width)x\(size.height) frame")
+        MediaLog.log("[capture] panels shown upright in a \(size.width)x\(size.height) frame")
         return made
     }
 
@@ -396,13 +396,16 @@ public final class SimulatorFramebuffer: FrameSource {
         }
         let canvas = ensureCanvas(surfaces)
         let surface = chosen.surface
+        let descriptor = panelDescriptors[chosen.index]
         return CapturedFrame(
             surface: surface,
             time: CMClockGetTime(CMClockGetHostTimeClock()),
             timeAccuracy: .arrival,
             prepare: { [weak self] in
                 guard let canvas else { return nil }
-                if let out = canvas.compose(surface) { return out }
+                let rotation = PanelRotation(
+                    uiOrientation: PrivateFrameworks.uiOrientation(of: descriptor) ?? 1)
+                if let out = canvas.compose(surface, rotation: rotation) { return out }
                 self?.reportCanvasFailure("letterboxing a frame failed")
                 return nil
             }

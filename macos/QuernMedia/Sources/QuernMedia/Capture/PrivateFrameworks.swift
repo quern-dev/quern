@@ -182,6 +182,7 @@ public enum PrivateFrameworks {
             ("SimScreenProperties", "screenID", "I"),
             ("SimScreenProperties", "screenType", "Q"),
             ("SimScreenProperties", "deviceName", "@"),
+            ("SimScreenProperties", "uiOrientation", "I"),
         ]
         var problems: [String] = []
         for (protoName, method, type) in wanted {
@@ -226,6 +227,21 @@ public enum PrivateFrameworks {
             screenID: unsafeBitCast(idImp, to: U32Fn.self)(props, idSel),
             deviceName: unsafeBitCast(nameImp, to: ObjFn.self)(props, nameSel) as? String ?? ""
         )
+    }
+
+    /// How a display's interface is turned now (UIDeviceOrientation), or
+    /// nil on an Xcode without the interfaces. Read per encoded frame: the
+    /// interface turns under a running stream.
+    static func uiOrientation(of descriptor: NSObject) -> UInt32? {
+        guard screenInterfacesAvailable(),
+              let screen = objc_getProtocol("SimScreen"), descriptor.conforms(to: screen),
+              let props = descriptor.perform(NSSelectorFromString("screenProperties"))?
+                .takeUnretainedValue() as? NSObject,
+              let cls = object_getClass(props) else { return nil }
+        let sel = NSSelectorFromString("uiOrientation")
+        guard let imp = class_getMethodImplementation(cls, sel) else { return nil }
+        typealias U32Fn = @convention(c) (AnyObject, Selector) -> UInt32
+        return unsafeBitCast(imp, to: U32Fn.self)(props, sel)
     }
 
     public static func resolveDevice(udid: String) -> NSObject? {
