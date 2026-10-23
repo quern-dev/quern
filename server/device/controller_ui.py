@@ -803,6 +803,8 @@ class DeviceControllerUI:
     #: How long a fold may take to light the panel it should: the sweep is
     #: 0.8s and SpringBoard's swap and rotation about a second more.
     _HINGE_SETTLE_S = 3.0
+    #: How long a changed panel must read the same before it is the answer.
+    _HINGE_HOLD_S = 1.0
     _ORIENTATIONS = ("portrait", "pud", "landscape-left", "landscape-right")
 
     async def _foldable(self, udid: str) -> dict:
@@ -938,33 +940,36 @@ class DeviceControllerUI:
 
         With a panel to expect, until that one lights. Without -- an angle, or
         only an orientation -- until the panel or its orientation differs from
-        `before` and reads the same twice running: SpringBoard's swap and
-        rotation take about a second after the helper exits, so the first read
-        is usually the panel from before. Gives up after _HINGE_SETTLE_S with
-        what it last read; (None, False) when no read worked.
+        `before` and holds for _HINGE_HOLD_S: SpringBoard's swap and rotation
+        come after the helper exits, and not together. Measured on a Duo going
+        from 180 to 10 degrees: the inner panel turned at 0.1s and the cover lit
+        at 0.55s, so a reading that held for one poll was the wrong answer.
+        Gives up after _HINGE_SETTLE_S with what it last read; (None, False)
+        when no read worked.
         """
         def key(p: dict) -> tuple:
             return (p.get("screen_id"), int(p.get("orientation") or 0))
 
         lit: dict | None = None
-        previous: dict | None = None
-        deadline = time.monotonic() + self._HINGE_SETTLE_S
+        since = time.monotonic()
+        deadline = since + self._HINGE_SETTLE_S
         while True:
             try:
                 read, _ = await self.sim_bridge.panels(udid)
             except Exception:  # noqa: BLE001 -- reported by the caller as no reading
                 logger.debug("Could not read the panels of %s", udid[:8], exc_info=True)
                 read = None
+            now = time.monotonic()
             if read:
+                if lit is None or key(read) != key(lit):
+                    since = now
                 lit = read
                 if expect is not None:
                     if read.get("device_name") == expect:
                         return lit, True
-                elif (key(read) != key(before) and previous is not None
-                        and key(previous) == key(read)):
+                elif key(read) != key(before) and now - since >= self._HINGE_HOLD_S:
                     return lit, True
-                previous = read
-            if time.monotonic() >= deadline:
+            if now >= deadline:
                 return lit, False
             await asyncio.sleep(0.25)
 

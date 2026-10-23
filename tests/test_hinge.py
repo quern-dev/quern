@@ -309,6 +309,7 @@ def _controller(*, panels=None, angles=(0.0, 130.0)) -> DeviceController:
     ctrl = DeviceController()
     ctrl._device_type_cache[DUO] = DeviceType.SIMULATOR
     ctrl._sim_bridge_ok = True
+    ctrl._HINGE_HOLD_S = 0.3
     ctrl.resolve_udid = AsyncMock(return_value=DUO)
     answers = list(panels or [(COVER, 2), (INNER, 2)])
 
@@ -373,6 +374,16 @@ async def test_an_angle_waits_for_the_panel_to_change_and_hold():
     ctrl.hinge.move.assert_awaited_once_with(DUO, 0.0, 100, 300)
     assert result["lit_panel"]["device_name"] == "primary-1"
     assert result["requested_angle"] == 100 and "warning" not in result and "note" not in result
+
+
+async def test_a_reading_mid_rotation_is_not_the_answer():
+    """The panel turns before it swaps, about half a second apart: a change
+    must hold before it is reported."""
+    mid = {**INNER, "orientation": 1}
+    ctrl = _controller(panels=[(COVER, 2), (COVER, 2), (mid, 2), (INNER, 2), (INNER, 2)],
+                       angles=(0.0, 100.0))
+    result = await ctrl.set_hinge(DUO, angle=100)
+    assert result["lit_panel"]["orientation"] == 3
 
 
 async def test_an_angle_that_swaps_nothing_says_the_panel_is_unchanged(monkeypatch):
