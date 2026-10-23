@@ -44,6 +44,9 @@ class FakeDevice:
         self.installed = set(installed)
         self.broken = broken
         self.hang = hang
+        #: When set, every shell call waits for it (at most 5s, so a
+        #: regression fails rather than hanging the suite).
+        self.hold: threading.Event | None = None
         self.calls: list[list[str]] = []
         self.timeouts: list = []
 
@@ -52,6 +55,8 @@ class FakeDevice:
         self.timeouts.append(timeout)
         if self.hang:
             time.sleep(self.hang)
+        if self.hold is not None:
+            self.hold.wait(5)
         if self.broken:
             raise ConnectionError("device offline")
         if cmd == ["dumpsys", "input_method"]:
@@ -336,28 +341,37 @@ class TestU2Backend:
 
     async def test_a_hung_shell_never_blocks_the_event_loop(self, state_dir):
         """The first version took its lock on the loop while a worker held it
-        across device I/O: one hung shell stalled every request (review)."""
+        across device I/O: one hung shell stalled every request (review).
+
+        The shell hangs until both calls have answered, so the bug blocks the
+        loop for the fake's full 5s, and a healthy loop never waits on it. A
+        timed hang left 0.15s between the two, and a slow CI runner's own
+        jitter crossed it."""
         device = FakeDevice(GBOARD)
         backend = _backend(device)
         backend.ime.remember(SERIAL, device)
         device.current = U2
         backend.RESTORE_TIMEOUT_S = 0.2
-        device.hang = 0.3                 # every shell call now hangs past the bound
+        device.hold = threading.Event()   # every shell call hangs past the bound
         done = _finished(backend)
-        gaps, last = [], time.monotonic()
+        gaps, last, running = [], time.monotonic(), True
 
         async def ticker():
             nonlocal last
-            for _ in range(15):
+            while running:
                 await asyncio.sleep(0.02)
                 gaps.append(time.monotonic() - last)
                 last = time.monotonic()
         tick = asyncio.create_task(ticker())
-        first = await backend.restore_keyboard(SERIAL)
-        second = await backend.restore_keyboard(SERIAL)   # its lock is still held
+        try:
+            first = await backend.restore_keyboard(SERIAL)
+            second = await backend.restore_keyboard(SERIAL)   # its lock is still held
+        finally:
+            running = False
+            device.hold.set()
         await tick
+        assert max(gaps) < 2.0, f"the loop stalled for {max(gaps):.2f}s"
         assert first["ok"] is False and second["ok"] is False
-        assert max(gaps) < 0.15, f"the loop stalled for {max(gaps):.2f}s"
         assert done.wait(10), "the worker never finished"
 
     async def test_a_restore_waits_for_typing_in_progress(self, state_dir):
