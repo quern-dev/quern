@@ -314,19 +314,49 @@ struct Panel {
 /// Only a yes is kept; a no is cheap to ask again.
 nonisolated(unsafe) var screenPropertiesConfirmed = false
 
+/// Every declaration the panel code calls, with the return type it reads
+/// it as: what is missing or typed otherwise, by name. Empty means all are
+/// there. Pure and uncached, so the self-test can hold the cached answer to
+/// it -- and say which one changed, on an Xcode that changes one.
+func screenInterfaceProblems() -> [String] {
+    let wanted: [(String, String, String)] = [
+        ("SimScreen", "screenProperties", "@"),
+        ("SimScreenProperties", "screenID", "I"),
+        ("SimScreenProperties", "uiOrientation", "I"),
+        ("SimScreenProperties", "screenType", "Q"),
+        ("SimScreenProperties", "deviceName", "@"),
+    ]
+    var problems: [String] = []
+    for (protoName, method, type) in wanted {
+        guard let proto = objc_getProtocol(protoName) else {
+            problems.append("\(protoName) is not declared"); continue
+        }
+        let d = protocol_getMethodDescription(proto, NSSelectorFromString(method), true, true)
+        guard d.name != nil, let types = d.types else {
+            problems.append("\(protoName) has no \(method)"); continue
+        }
+        let encoding = String(cString: types)
+        if !encoding.hasPrefix(type) {
+            problems.append("\(protoName).\(method) returns \(encoding.prefix(1)), not \(type)")
+        }
+    }
+    return problems
+}
+
 func screenPropertiesAvailable() -> Bool {
     if screenPropertiesConfirmed { return true }
-    guard let screen = objc_getProtocol("SimScreen"),
-          let props = objc_getProtocol("SimScreenProperties") else { return false }
-    func declares(_ proto: Protocol, _ name: String, _ type: String) -> Bool {
-        let d = protocol_getMethodDescription(proto, NSSelectorFromString(name), true, true)
-        guard d.name != nil, let types = d.types else { return false }
-        return String(cString: types).hasPrefix(type)
-    }
-    screenPropertiesConfirmed = declares(screen, "screenProperties", "@")
-        && declares(props, "screenID", "I") && declares(props, "uiOrientation", "I")
-        && declares(props, "screenType", "Q") && declares(props, "deviceName", "@")
+    screenPropertiesConfirmed = screenInterfaceProblems().isEmpty
     return screenPropertiesConfirmed
+}
+
+/// Whether a device can be remembered as having one panel, from one read.
+/// One built-in panel, or none on an Xcode without the screen interfaces:
+/// there every device reads none for good, since CoreSimulator is loaded
+/// before the bridge answers anything, and asking again cost each screenshot
+/// a trip through the bridge's lock on Xcode 26 (review). None on an Xcode
+/// that has them is a device still booting, and is asked again.
+func recordsSinglePanel(found: Int, interfacesAvailable: Bool) -> Bool {
+    found == 1 || (found == 0 && !interfacesAvailable)
 }
 
 func screenProperties(of descriptor: NSObject)
@@ -436,7 +466,9 @@ func choosePanel(_ panels: [Panel], last: UInt32?) -> Panel? {
 func readPanels(udid: String, device: NSObject) -> (lit: (Panel, NSObject)?, all: [Panel]) {
     if singlePanelDevices.contains(udid) { return (nil, []) }
     let found = integratedPanels(device: device)
-    if found.count == 1 { singlePanelDevices.insert(udid) }
+    if recordsSinglePanel(found: found.count, interfacesAvailable: screenPropertiesAvailable()) {
+        singlePanelDevices.insert(udid)
+    }
     let all = found.map { $0.0 }
     guard let chosen = choosePanel(all, last: lastLitPanel[udid]),
           let desc = found.first(where: { $0.0.screenID == chosen.screenID })?.1 else { return (nil, all) }
@@ -606,11 +638,20 @@ func panelSelfTest() -> [String] {
     // The interface check answers from what is loaded now: as a global
     // initialiser it ran before CoreSimulator was, said no for good, and
     // every Duo read as one screen -- found live, after every other check here
-    // passed. An Xcode without the interfaces is not tested by this.
-    if let props = objc_getProtocol("SimScreenProperties"),
-       protocol_getMethodDescription(props, NSSelectorFromString("uiOrientation"), true, true).name != nil,
-       !screenPropertiesAvailable() {
-        failures.append("CoreSimulator declares the screen interfaces, but the check says it does not")
+    // passed. So the cached answer must agree with a fresh look, whatever this
+    // Xcode declares. (CI's Xcode 26.6 declares only part of it, which is not a
+    // failure: it has no foldable. What it lacks is reported, below.)
+    if screenPropertiesAvailable() != screenInterfaceProblems().isEmpty {
+        failures.append("the interface check says \(screenPropertiesAvailable()) but CoreSimulator " +
+                        "declares \(screenInterfaceProblems().isEmpty ? "all of them" : "\(screenInterfaceProblems())")")
+    }
+    // A device is remembered as one-panel on one panel, or on none where the
+    // interfaces are missing; not on none where they are (a booting device).
+    if !recordsSinglePanel(found: 1, interfacesAvailable: true)
+        || !recordsSinglePanel(found: 0, interfacesAvailable: false)
+        || recordsSinglePanel(found: 0, interfacesAvailable: true)
+        || recordsSinglePanel(found: 2, interfacesAvailable: true) {
+        failures.append("recordsSinglePanel decides wrongly")
     }
 
     // The target is what reaches the message: 0x6c and 0x10c (review: a
@@ -2350,7 +2391,10 @@ func handleCommand(_ dict: [String: Any]) {
         // (#536), runnable without a simulator: scripts/sim-bridge-selftest.sh,
         // which CI runs. Each failure is named; none means ok.
         let failures = panelSelfTest()
-        respond(["ok": failures.isEmpty, "failures": failures])
+        // What this Xcode lacks of the screen interfaces, reported and not a
+        // failure: an Xcode before 27.1 has no foldable to drive.
+        respond(["ok": failures.isEmpty, "failures": failures,
+                 "screen_interfaces_missing": screenInterfaceProblems()])
 
     case "panels":
         // The built-in panels and which one is lit (#536). `lit` is null on a
