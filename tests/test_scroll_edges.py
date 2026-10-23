@@ -45,15 +45,16 @@ def _device(screens, *, found_after: int | None = None, found_below: int | None 
     started (a swipe up brings it back one)."""
     device = MagicMock()
     device.window_size.return_value = (1080, 2400)
-    shots = iter(screens)
+    swipes = []
 
     def shot(scale, quality):
-        name = next(shots)
+        # The screen as it is after the latest swipe: a frame settles at once,
+        # as a list that is not springing back does (#232).
+        name = screens[min(len(swipes), len(screens) - 1)]
         if name is None:
             raise RuntimeError("screenshot failed")
         return base64.b64encode(name.encode()).decode()
     device.jsonrpc.takeScreenshot.side_effect = shot
-    swipes = []
     device.swipe.side_effect = lambda *a, **k: swipes.append(a)
     device.swipes = swipes
 
@@ -287,3 +288,178 @@ class TestTheFixedSleepIsGone:
         assert result["status"] == "ok"
         assert sleeps == slept
         assert backend.tap_by_selector.await_args_list[1].kwargs["confirm_rest"] is not skip
+
+
+class TestSettledFrames:
+    """Android 12+ springs a list dragged past its end back into place, so a
+    capture straight after a swipe at the bottom differs from the last one and
+    the bottom was never found (#232). Frames are compared once settled."""
+
+    def _springing(self, bottom_after: int, captures_to_settle: int = 2):
+        """A list that reaches its bottom after `bottom_after` swipes down and,
+        at the bottom, shows a different spring frame for the first
+        `captures_to_settle` captures after each swipe."""
+        device = _device(["unused"])
+        swipes = device.swipes
+        seen = {"swipe": -1, "n": 0}
+
+        def shot(scale, quality):
+            if len(swipes) != seen["swipe"]:
+                seen.update(swipe=len(swipes), n=0)
+            seen["n"] += 1
+            down = sum(1 if a[1] > a[3] else -1 for a in swipes)
+            if down >= bottom_after:
+                if seen["n"] <= captures_to_settle:
+                    name = f"spring-{len(swipes)}-{seen['n']}"
+                else:
+                    name = "bottom"
+            else:
+                name = f"row-{max(down, 0)}"
+            return base64.b64encode(name.encode()).decode()
+
+        device.jsonrpc.takeScreenshot.side_effect = shot
+        return device
+
+    async def test_the_bottom_is_found_although_the_list_springs_back(self):
+        device = self._springing(bottom_after=4)
+        found, report = await _sweep(device, max_swipes=30)
+        assert found is None
+        assert "bottom" in report["ends"], report
+        # Down to the bottom and one more to see it still -- not all 30.
+        down = sum(1 for a in device.swipes if a[1] > a[3])
+        assert down <= 6, f"{down} swipes down for a list 4 swipes long"
+
+    async def test_a_screen_alternating_between_two_images_is_no_end(self, monkeypatch):
+        """Returning an unsettled frame's last capture could declare a false
+        end: a screen alternating A, B, A, B shows the same image either side
+        of every swipe if the same number of captures fits each time (#535
+        review). Unsettled is no frame, so it reads as moved."""
+        clock = {"t": 0.0, "n": 0}
+        monkeypatch.setattr("server.device.android.u2_client.time.monotonic",
+                            lambda: clock["t"])
+        device = _device(["unused"])
+
+        def alternating(scale, quality):
+            # 0.6 s a capture against the 1 s limit: two captures, never alike.
+            clock["t"] += 0.6
+            clock["n"] += 1
+            return base64.b64encode(("A" if clock["n"] % 2 else "B").encode()).decode()
+
+        device.jsonrpc.takeScreenshot.side_effect = alternating
+        found, report = await _sweep(device, max_swipes=3, deadline_s=1e9)
+        assert found is None
+        assert not report.get("ends"), f"a false end: {report}"
+        assert "no_progress" not in report
+        assert report["swipes"] == 9, "the whole budget, as an unknown screen gets"
+
+    async def test_a_screen_that_never_settles_stops_at_the_deadline_and_says_so(
+        self, monkeypatch,
+    ):
+        """A looping animation or a video row never settles, so every swipe
+        reads as moved and no end is found. At the default budget each swipe
+        also spends the whole settle limit, so the deadline is what stops it --
+        and the report must say that, not claim an edge (#535 review)."""
+        clock = {"t": 0.0, "n": 0}
+        monkeypatch.setattr("server.device.android.u2_client.time.monotonic",
+                            lambda: clock["t"])
+        device = _device(["unused"])
+
+        def never_alike(scale, quality):
+            clock["t"] += 0.3
+            clock["n"] += 1
+            return base64.b64encode(f"frame-{clock['n']}".encode()).decode()
+
+        device.jsonrpc.takeScreenshot.side_effect = never_alike
+        device.swipe.side_effect = (
+            lambda *a, **k: (device.swipes.append(a), clock.update(t=clock["t"] + 0.6)))
+        found, report = await _sweep(device)          # the default budget, 30
+        assert found is None
+        assert report["timed_out"] is True, report
+        assert not report.get("ends") and "no_progress" not in report, report
+        assert report["swipes"] < 90, "it ran out of budget before the deadline"
+
+    async def test_a_screen_that_never_settles_reads_as_moved(self, monkeypatch):
+        """Unsettled is the old behaviour -- moved -- never a false end."""
+        monkeypatch.setattr("server.device.android.u2_client.SETTLE_LIMIT_S", 0.0)
+        device = self._springing(bottom_after=0, captures_to_settle=10_000)
+        found, report = await _sweep(device, max_swipes=3)
+        assert found is None
+        assert "bottom" not in (report.get("ends") or []), report
+
+
+class TestTheSweepHasADeadline:
+    """A swipe count is not a time bound: a list that never ends costs the
+    whole budget down and twice it up (#535 review). The sweep stops at a
+    wall-clock deadline, as iOS's does, and says so."""
+
+    def _endless(self):
+        """Every swipe shows a new screen: no end in either direction."""
+        device = _device(["unused"])
+        device.jsonrpc.takeScreenshot.side_effect = (
+            lambda scale, quality: base64.b64encode(
+                f"screen-{len(device.swipes)}".encode()).decode())
+        return device
+
+    async def test_out_of_time_stops_and_says_so(self, monkeypatch):
+        clock = {"t": 0.0}
+        monkeypatch.setattr("server.device.android.u2_client.time.monotonic",
+                            lambda: clock["t"])
+
+        device = self._endless()
+        device.swipe.side_effect = (
+            lambda *a, **k: (device.swipes.append(a), clock.update(t=clock["t"] + 10.0)))
+        found, report = await _sweep(device, max_swipes=30, deadline_s=35.0)
+        assert found is None
+        assert report["timed_out"] is True and report["deadline_s"] == 35.0
+        # 10 s a swipe against 35 s: four swipes, then out of time -- and no
+        # sweep up after a down sweep that ran out of time.
+        assert report["swipes"] == 4, report
+        assert all(a[1] > a[3] for a in device.swipes), "it swept up after the deadline"
+
+    async def test_an_endless_list_within_the_deadline_spends_its_budget(self):
+        found, report = await _sweep(self._endless(), max_swipes=3)
+        assert found is None
+        assert report["swipes"] == 9, "3 down and 6 up, no end either way"
+        assert "timed_out" not in report
+
+
+class TestTheSweepStopsWhenItsCallerDoes:
+    async def test_a_cancelled_sweep_stops_swiping(self):
+        """Cancelling the await does not stop the worker thread; before #535's
+        review a caller that hung up left it swiping until its deadline."""
+        import asyncio
+        import time as real_time
+
+        device = TestTheSweepHasADeadline()._endless()
+
+        def slow_swipe(*a, **k):
+            device.swipes.append(a)
+            real_time.sleep(0.02)
+
+        device.swipe.side_effect = slow_swipe
+        task = asyncio.ensure_future(_sweep(device, max_swipes=30))
+        await asyncio.sleep(0.15)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.2)          # let the worker reach its next check
+        settled = len(device.swipes)
+        await asyncio.sleep(0.3)
+        assert len(device.swipes) == settled, "the sweep went on swiping after it was cancelled"
+        assert settled < 90, "it ran to the end of its budget"
+
+
+class TestTheConfirmingSwipeRespectsTheDeadline:
+    async def test_no_third_swipe_after_the_deadline(self, monkeypatch):
+        """A screen that does not scroll gets a third, confirming swipe; past
+        the deadline it must not be sent (#535 review)."""
+        clock = {"t": 0.0}
+        monkeypatch.setattr("server.device.android.u2_client.time.monotonic",
+                            lambda: clock["t"])
+        device = _device(["a"] * 10)
+        device.swipe.side_effect = (
+            lambda *a, **k: (device.swipes.append(a), clock.update(t=clock["t"] + 10.0)))
+        found, report = await _sweep(device, deadline_s=15.0)
+        assert found is None
+        assert report["swipes"] == 2, report
+        assert report["timed_out"] is True

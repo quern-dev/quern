@@ -609,7 +609,15 @@ distinguished them was a control: the *same* test on the simulator that had
 been booted earlier, which also failed, so the variable was the boot rather
 than the runtime.
 
-## F14 — Android's sweep cannot reach a deep row at the default budget → #232
+## F14 — Android's sweep cannot reach a deep row at the default budget → fixed in #232
+
+**Resolved (2026-10-22).** A sweep swipe moves about 7.5 rows of the probe's
+list (measured on emulator-5554; the ~11 once assumed was wrong), so a budget
+of 10 reached about row 75. Android's default is now 30 down (60 up); since
+#515 a direction ends at the list's end, so short lists cost the same. Row
+150 is found in about 20 swipes. The suite's driver had also been sending
+`max_swipes=15`, so the far-row test never measured the default; it now
+sends none. The original finding follows.
 
 Reach is capped by `max_swipes`: at the default of 10, row 150 of a 200-row
 list is unreachable, and the 404 cannot be told from "no such element".
