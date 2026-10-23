@@ -421,6 +421,7 @@ class FakeVideo:
         self.start_host_time = start_host_time
         self.started, self.stopped, self.keyframes = [], [], []
         self.keyframe_counted = []
+        self.stopping = self.most_stopping_at_once = 0
 
     async def start(self, udid, path):
         if self.fail_start:
@@ -441,7 +442,12 @@ class FakeVideo:
 
     async def stop(self, seg):
         self.stopped.append(seg.path)
-        await asyncio.sleep(self.stop_takes)
+        self.stopping += 1
+        self.most_stopping_at_once = max(self.most_stopping_at_once, self.stopping)
+        try:
+            await asyncio.sleep(self.stop_takes)
+        finally:
+            self.stopping -= 1
         if self.stop_error:
             return {"path": str(seg.path), "start_host_time": None, "error": self.stop_error}
         return {"path": str(seg.path), "start_host_time": self.start_host_time,
@@ -987,12 +993,16 @@ class TestTheManager:
         assert seg["start_host_time"] == 1000.0
 
     async def test_shutdown_finishes_every_movie_at_once(self, tmp_path):
-        manager = Sources().manager(FakeVideo(stop_takes=0.4))
+        # Counted, not timed: a wall-clock bound (< 0.7s for two 0.4s stops)
+        # failed on a loaded CI runner at 1.03s, longer than stopping them one
+        # after the other would take. Overlap is the claim, so it is measured.
+        video = FakeVideo(stop_takes=0.05)
+        manager = Sources().manager(video)
         await manager.start(SIM, str(tmp_path / "a"), Filters(video=True))
         await manager.start("SIM-W", str(tmp_path / "b"), Filters(video=True))
-        began = asyncio.get_running_loop().time()
         await manager.shutdown()
-        assert asyncio.get_running_loop().time() - began < 0.7
+        assert len(video.stopped) == 2
+        assert video.most_stopping_at_once == 2, "stopped one after the other"
 
     async def test_a_failed_recordings_movie_is_finished_and_kept(self, tmp_path):
         video = FakeVideo(stop_takes=0.05)
