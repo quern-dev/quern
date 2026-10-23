@@ -44,7 +44,9 @@ jobs:
           echo "compare=$(jq -r .compare pin.json)" >> "$GITHUB_OUTPUT"
           {
             echo "commits<<EOF_COMMITS"
-            jq -r '.commits[] | "- [`\(.sha[0:10])`](https://github.com/tddworks/baguette/commit/\(.sha)) \(.date[0:10]) \(.message)"' pin.json
+            # In a code span: an upstream "(#45)" or "@name" would otherwise
+            # link to quern's #45, or notify someone.
+            jq -r '.commits[] | "- [`\(.sha[0:10])`](https://github.com/tddworks/baguette/commit/\(.sha)) \(.date[0:10]) `\(.message | gsub("`"; "'"'"'"))`"' pin.json
             echo "EOF_COMMITS"
           } >> "$GITHUB_OUTPUT"
       - name: Open, update or close the tracking issue
