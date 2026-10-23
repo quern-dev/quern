@@ -106,8 +106,12 @@ What to know:
 - **Edge swipes are refused on the Duo.** No edge gesture reached it in any
   state, folded or not, before this support existed or since, so quern says
   so rather than answering `ok`. Navigate with taps, or press Home.
-- **Video recording and the preview window still show the cover (#538)**,
-  which is black while the Duo is unfolded.
+- **Video recording and the preview window follow the lit panel too
+  (#538)**, turned upright as screenshots are, in one fixed frame the shape
+  of the unfolded inner panel. Unfolded fills it; folded, the cover sits in
+  the middle with bars either side. The size never changes mid-recording,
+  which a movie's players cannot follow. A frame or two mid-fold is black,
+  while neither panel is lit.
 - **Which panel is lit is read from the screen, not the hinge.** The panel
   SpringBoard lights depends on how the hinge got where it is, not only its
   angle: measured, stepping it closed kept the inner panel lit down to 20°,

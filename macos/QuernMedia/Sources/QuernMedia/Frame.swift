@@ -16,11 +16,27 @@ public struct CapturedFrame {
     /// Whether `time` is the moment the frame was composited, or merely the
     /// moment we noticed it.
     public let timeAccuracy: TimeAccuracy
+    /// Work to do to `surface` before it is encoded, deferred until the
+    /// frame is known to be wanted: an iPhone Duo's panel is letterboxed into
+    /// a fixed frame (#538), ~3ms on the GPU, which a frame nobody is
+    /// watching or the throttle drops should not pay. Nil for every other
+    /// source. Called on the source's queue, synchronously, once.
+    public let prepare: (() -> IOSurface?)?
 
-    public init(surface: IOSurface, time: CMTime, timeAccuracy: TimeAccuracy) {
+    public init(surface: IOSurface, time: CMTime, timeAccuracy: TimeAccuracy,
+                prepare: (() -> IOSurface?)? = nil) {
         self.surface = surface
         self.time = time
         self.timeAccuracy = timeAccuracy
+        self.prepare = prepare
+    }
+
+    /// The frame as it is encoded: `prepare`'s surface, or `surface` itself
+    /// when there is nothing to prepare or preparing failed. A frame of
+    /// another size beats none: no frames at all reads as a still screen.
+    public func resolved() -> CapturedFrame {
+        guard let prepare else { return self }
+        return CapturedFrame(surface: prepare() ?? surface, time: time, timeAccuracy: timeAccuracy)
     }
 }
 

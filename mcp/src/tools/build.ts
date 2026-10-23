@@ -28,6 +28,8 @@ Builds once per required architecture — not once per device:
 
 Both architectures are built concurrently when the target list mixes physical and simulator devices.
 
+Each checkout builds into its own DerivedData, under builds/ in quern's state directory (~/.quern unless QUERN_STATE_DIR moves it) and keyed by the project's path, scheme and platform -- never Xcode's default, nor another checkout's. So no -derivedDataPath is needed to keep two checkouts of one project, or this build and Xcode's, from colliding.
+
 Handles UDID resolution automatically — pass Quern device UDIDs from list_devices and Quern
 will resolve the correct xcodebuild destination format (including CoreDevice UUID → hardware
 UDID translation for physical iOS 17+ devices).

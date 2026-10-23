@@ -48,6 +48,20 @@ public final class SimulatorFramebuffer: FrameSource {
     private var stopped = false
     private var ioClient: NSObject?
     private var descriptors: [NSObject] = []
+    /// A multi-panel device's built-in panels (iPhone Duo, #538), and the
+    /// descriptor of each, in the tracker's order. Nil for every other
+    /// device, which keeps the zero-copy path. Capture queue only.
+    private var tracker: PanelTracker?
+    private var panelDescriptors: [NSObject] = []
+    /// What the panels are letterboxed into; built once every panel has a
+    /// surface, which during boot may be after attach. Capture queue only.
+    private var canvas: PanelCanvas?
+    /// The panel shown last, carried across a detach -- the device it
+    /// describes outlives one. Capture queue only.
+    private var lastPanel: UInt32?
+    /// Whether this attach has said that frames cannot be letterboxed, so
+    /// it says so once rather than per frame. Capture queue only.
+    private var reportedCanvasFailure = false
     private var callbackUUIDs: [ObjectIdentifier: NSUUID] = [:]
 
     /// The resolved `SimDevice`, kept to read its state. Capture queue only.
@@ -147,6 +161,7 @@ public final class SimulatorFramebuffer: FrameSource {
             throw SimulatorFramebufferError.noFramebuffer
         }
         MediaLog.log("[capture] framebuffer descriptors: \(descriptors.count)")
+        findPanels()
 
         do {
             for desc in descriptors { try register(on: desc) }
@@ -172,6 +187,11 @@ public final class SimulatorFramebuffer: FrameSource {
             }
         }
         descriptors.removeAll()
+        lastPanel = tracker?.shown ?? lastPanel
+        tracker = nil
+        panelDescriptors.removeAll()
+        canvas = nil
+        reportedCanvasFailure = false
         callbackUUIDs.removeAll()
         ioClient = nil
         attached = false
@@ -309,6 +329,89 @@ public final class SimulatorFramebuffer: FrameSource {
         )
     }
 
+    /// Finds the built-in panels among the descriptors. Capture queue only.
+    private func findPanels() {
+        var found: [Panel?] = []
+        var byScreen: [UInt32: NSObject] = [:]
+        for desc in descriptors {
+            let panel = PrivateFrameworks.panel(of: desc)
+            found.append(panel)
+            if let panel { byScreen[panel.screenID] = desc }
+        }
+        guard let made = PanelTracker(panels: found, shown: lastPanel) else {
+            let problems = PrivateFrameworks.screenInterfaceProblems()
+            if !problems.isEmpty, descriptors.count > 1 {
+                // A Duo on an Xcode whose screen interfaces changed would
+                // record its black inner panel; this is what says why.
+                MediaLog.log("[capture] cannot tell built-in panels apart: "
+                             + problems.joined(separator: "; "))
+            }
+            return
+        }
+        // Two panels claiming one screenID cannot be told apart: the map
+        // above kept one descriptor for both, so count the IDs themselves.
+        guard Set(made.panels.map(\.screenID)).count == made.panels.count else { return }
+        tracker = made
+        panelDescriptors = made.panels.compactMap { byScreen[$0.screenID] }
+        MediaLog.log("[capture] \(made.panels.count) panels; following the lit one")
+    }
+
+    private func panelSurfaces(_ surfSel: Selector) -> [IOSurface?] {
+        panelDescriptors.map { desc -> IOSurface? in
+            guard let obj = desc.perform(surfSel)?.takeUnretainedValue() else { return nil }
+            return unsafeBitCast(obj, to: IOSurface.self)
+        }
+    }
+
+    /// The canvas, built the first time every panel has a surface; its
+    /// shape is `PanelTracker.canvasSize(of:)`'s. Capture queue only.
+    private func ensureCanvas(_ surfaces: [IOSurface?]) -> PanelCanvas? {
+        if let canvas { return canvas }
+        guard let size = PanelTracker.canvasSize(of: surfaces) else { return nil }
+        guard let made = PanelCanvas(width: size.width, height: size.height) else {
+            reportCanvasFailure("could not create a \(size.width)x\(size.height) canvas")
+            return nil
+        }
+        canvas = made
+        MediaLog.log("[capture] panels shown upright in a \(size.width)x\(size.height) frame")
+        return made
+    }
+
+    /// Once per attach: frames go out at the lit panel's own size, which a
+    /// recording's movie may refuse after a fold, rather than not at all.
+    private func reportCanvasFailure(_ why: String) {
+        guard !reportedCanvasFailure else { return }
+        reportedCanvasFailure = true
+        MediaLog.log("[capture] \(why); sending the lit panel unletterboxed")
+    }
+
+    /// The lit panel's frame, to be letterboxed only if it is encoded.
+    /// Capture queue only.
+    private func panelFrame(_ surfSel: Selector) -> CapturedFrame? {
+        let surfaces = panelSurfaces(surfSel)
+        guard var current = tracker, let chosen = current.select(surfaces) else { return nil }
+        tracker = current
+        if chosen.changed {
+            MediaLog.log("[capture] showing panel \(chosen.panel.screenID) (\(chosen.panel.deviceName))")
+        }
+        let canvas = ensureCanvas(surfaces)
+        let surface = chosen.surface
+        let descriptor = panelDescriptors[chosen.index]
+        return CapturedFrame(
+            surface: surface,
+            time: CMClockGetTime(CMClockGetHostTimeClock()),
+            timeAccuracy: .arrival,
+            prepare: { [weak self] in
+                guard let canvas else { return nil }
+                let rotation = PanelRotation(
+                    uiOrientation: PrivateFrameworks.uiOrientation(of: descriptor) ?? 1)
+                if let out = canvas.compose(surface, rotation: rotation) { return out }
+                self?.reportCanvasFailure("letterboxing a frame failed")
+                return nil
+            }
+        )
+    }
+
     private func captureLatest() {
         stateLock.lock()
         let done = stopped
@@ -316,6 +419,10 @@ public final class SimulatorFramebuffer: FrameSource {
         guard !done else { return }
 
         let surfSel = NSSelectorFromString("framebufferSurface")
+        if tracker != nil {
+            if let frame = panelFrame(surfSel) { onFrame(frame) }
+            return
+        }
         var best: IOSurface?
         var bestArea = 0
         for desc in descriptors {
