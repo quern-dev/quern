@@ -224,6 +224,13 @@ jobs:
         # measured on the device (#536); it needs no simulator.
         run: scripts/sim-bridge-selftest.sh
 
+      - name: Self-test the hinge helper
+        working-directory: .
+        # The iPhone Duo hinge helper (#537) runs only inside a simulator, so
+        # CI checks what it can on the host: its pose-event bytes against those
+        # that moved a Duo, and that it still builds for the simulator.
+        run: scripts/hinge-selftest.sh
+
   mcp-build:
     runs-on: ubuntu-latest
 

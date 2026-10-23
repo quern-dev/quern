@@ -11,6 +11,7 @@ import time
 
 from server.device import gestures
 from server.device.element_types import equivalence, related_type_names
+from server.device.ios.hinge import DEFAULT_SWEEP_MS, POSES
 from server.device.media.screenshots import annotate_screenshot
 from server.device.probing import frame_key
 from server.device.ui_elements import (
@@ -586,6 +587,8 @@ class DeviceControllerUI:
     - self._last_ui_change: dict[str, float]
     - self._screen_bounds: dict[str, tuple[float, float, float, float]]
     - self._single_panel: set[str]
+    - self._lit_seen: dict[str, tuple[int, int]]
+    - self.hinge: HingeControl
     - self.resolve_udid(udid) -> str
     - self._invalidate_ui_cache(udid) -> None
     - self._is_physical(udid) -> bool
@@ -753,9 +756,38 @@ class DeviceControllerUI:
         return (self._device_type(udid) == DeviceType.SIMULATOR
                 and not self._served_by_wda(udid))
 
+    async def _note_fold(self, udid: str) -> None:
+        """Count a fold as a screen change, whoever made it (#537).
+
+        A fold in Device Hub is no quern action, so nothing marked it: the
+        panel swap and rotation that follow took a tap sent in them, which
+        reached the screen that was there before. The lit panel or its
+        orientation differing from the last look is the fold. Asked only of a
+        simulator not known to have one panel, so a phone pays one question,
+        once. The first look records and counts nothing.
+        """
+        if not self._sim_bridge_ok or udid in self._single_panel:
+            return
+        try:
+            lit, count = await self.sim_bridge.panels(udid)
+        except Exception:  # noqa: BLE001 -- a check that could not run does not stop the tap
+            logger.debug("Could not read the panels of %s", udid[:8], exc_info=True)
+            return
+        if count == 1:
+            self._single_panel.add(udid)
+            return
+        if not lit or not isinstance(lit.get("screen_id"), int):
+            return
+        seen = (lit["screen_id"], int(lit.get("orientation") or 0))
+        before = self._lit_seen.get(udid)
+        self._lit_seen[udid] = seen
+        if before is not None and before != seen:
+            self._last_ui_change[udid] = time.monotonic()
+
     async def _settle_if_just_changed(self, udid: str) -> int | None:
         """Wait for the screen to settle if an action changed it moments ago.
         Returns the milliseconds waited, or None when no wait was needed."""
+        await self._note_fold(udid)
         since = time.monotonic() - self._last_ui_change.get(udid, float("-inf"))
         if since >= self._RECENT_CHANGE_S:
             return None
@@ -767,6 +799,120 @@ class DeviceControllerUI:
             # than tapping without one, which is what happened before.
             logger.debug("settle before tap failed", exc_info=True)
         return round((time.monotonic() - started) * 1000)
+
+    #: How long a fold may take to light the panel it should: the sweep is
+    #: 0.8s and SpringBoard's swap and rotation about a second more.
+    _HINGE_SETTLE_S = 3.0
+    _ORIENTATIONS = ("portrait", "pud", "landscape-left", "landscape-right")
+
+    async def _foldable(self, udid: str) -> dict:
+        """The lit panel of a foldable simulator, or a 400 saying why not."""
+        if self._is_android(udid) or self._is_physical(udid):
+            raise InvalidDeviceRequestError(
+                "Only a foldable simulator (iPhone Duo, Xcode 27.1+) has a hinge to move.",
+                tool="hinge-control")
+        if not self._sim_bridge_ok:
+            raise DeviceOperationUnsupportedError(
+                "Moving the hinge needs sim-bridge to see which panel is lit, and it is "
+                "not available.", tool="hinge-control")
+        lit, count = await self.sim_bridge.panels(udid)
+        if count == 1:
+            self._single_panel.add(udid)
+        if count < 2 or not lit:
+            raise InvalidDeviceRequestError(
+                f"{udid[:8]} has {'one screen' if count == 1 else 'no screens reported'}: only "
+                "a foldable simulator (iPhone Duo, Xcode 27.1+) has a hinge to move.",
+                tool="hinge-control")
+        return lit
+
+    async def get_hinge(self, udid: str | None = None) -> dict:
+        """The hinge's angle and the panel that is lit (#537)."""
+        resolved = await self.resolve_udid(udid)
+        lit = await self._foldable(resolved)
+        angle = await self.hinge.read_angle(resolved)
+        return {"udid": resolved, "angle": angle, "lit_panel": lit,
+                **({} if angle is not None else {"note": (
+                    "The hinge gave no reading: the guest goes quiet after SpringBoard "
+                    "restarts, until the hinge next moves.")})}
+
+    async def set_hinge(self, udid: str | None = None, *, pose: str | None = None,
+                        angle: float | None = None, duration: float | None = None,
+                        orientation: str | None = None) -> dict:
+        """Fold, unfold or turn a foldable simulator, and report what lit (#537).
+
+        `pose` is Device Hub's: closed (0 degrees), open (130) or flat (180);
+        `angle` any value from 0 to 180. Either is swept over `duration`
+        seconds (Device Hub's 0.8 by default; 0 sets it at once) from the angle
+        the hinge reads now. `orientation` is the physical orientation, as
+        Device Hub's picker names it, applied after any move.
+
+        Which panel SpringBoard lights depends on how the hinge got there, not
+        only its angle -- stepped closed, the inner panel stayed lit down to
+        20 degrees -- so the outcome is read back rather than assumed: a pose's
+        panel is waited for, and a pose whose panel did not light says so.
+        """
+        if pose is not None and angle is not None:
+            raise InvalidDeviceRequestError("Give pose or angle, not both.", tool="hinge-control")
+        if pose is None and angle is None and orientation is None:
+            raise InvalidDeviceRequestError("Give one of pose or angle, or an orientation.",
+                                            tool="hinge-control")
+        if pose is not None and pose not in POSES:
+            raise InvalidDeviceRequestError(
+                f"pose must be one of {', '.join(POSES)}, not {pose!r}", tool="hinge-control")
+        if angle is not None and not 0 <= angle <= 180:
+            raise InvalidDeviceRequestError(f"angle must be 0 to 180 degrees, not {angle}",
+                                            tool="hinge-control")
+        if duration is not None and not 0 <= duration <= 5:
+            raise InvalidDeviceRequestError(f"duration must be 0 to 5 seconds, not {duration}",
+                                            tool="hinge-control")
+        if orientation is not None and orientation not in self._ORIENTATIONS:
+            raise InvalidDeviceRequestError(
+                f"orientation must be one of {', '.join(self._ORIENTATIONS)}, not {orientation!r}",
+                tool="hinge-control")
+
+        resolved = await self.resolve_udid(udid)
+        before = await self._foldable(resolved)
+        target = POSES[pose] if pose is not None else angle
+        moved_from = None
+        if target is not None:
+            # From where it is: a sweep from anywhere else would jump there
+            # first. No reading (a guest quiet since SpringBoard restarted)
+            # sets it at once instead.
+            moved_from = await self.hinge.read_angle(resolved)
+            ms = DEFAULT_SWEEP_MS if duration is None else int(duration * 1000)
+            await self.hinge.move(resolved, moved_from if moved_from is not None else target,
+                                  target, ms if moved_from is not None else 0)
+        if orientation is not None:
+            await self.hinge.orient(resolved, orientation)
+        self._invalidate_ui_cache(resolved)  # a fold is a screen change
+
+        # A pose has a panel it should light; wait for it.
+        expect = {"closed": "primary"}.get(pose or "", "primary-1" if pose else None)
+        lit = before
+        deadline = time.monotonic() + self._HINGE_SETTLE_S
+        while True:
+            lit, _ = await self.sim_bridge.panels(resolved)
+            lit = lit or before
+            if expect is None or lit.get("device_name") == expect or time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(0.25)
+        self._lit_seen[resolved] = (lit["screen_id"], int(lit.get("orientation") or 0))
+        result = {"udid": resolved, "status": "ok",
+                  "angle": await self.hinge.read_angle(resolved), "lit_panel": lit,
+                  "lit_panel_before": before}
+        if pose is not None:
+            result["pose"] = pose
+        if angle is not None:
+            result["requested_angle"] = angle
+        if orientation is not None:
+            result["orientation"] = orientation
+        if expect is not None and lit.get("device_name") != expect:
+            result["warning"] = (
+                f"The hinge moved, but the {'cover' if expect == 'primary' else 'inner panel'} "
+                f"did not light within {self._HINGE_SETTLE_S:.0f}s: SpringBoard decides which "
+                "panel to light from how the hinge moved, not only where it is. Read the panel "
+                "again, or move the hinge through a pose.")
+        return result
 
     async def _obstruction(self, udid: str, target: UIElement,
                            x: float, y: float) -> dict | None:

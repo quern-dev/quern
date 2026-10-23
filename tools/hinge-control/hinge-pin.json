@@ -1,0 +1,7 @@
+{
+  "repo": "tddworks/baguette",
+  "path": "Injected/HingeControl",
+  "commit": "d98c6cc76422486f91dc9ac19e527b9adde8f70a",
+  "reviewed": "2026-10-23",
+  "note": "The last upstream commit touching the path that has been reviewed for this copy. Moved with scripts/hinge-pin.py --bump, including when a change is reviewed and nothing is taken."
+}
