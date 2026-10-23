@@ -117,36 +117,13 @@ public final class PanelCanvas {
         var dst: CVPixelBuffer?
         guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &dst) == kCVReturnSuccess,
               let dest = dst else { return nil }
-        // Letterboxing leaves the bars as they were, and a pooled buffer holds
-        // whatever the last panel drew there: cleared, or a fold back to the
-        // smaller panel shows the edges of the larger one around it. Only
-        // when this buffer last held a panel of another size -- clearing
-        // every frame costs ~5ms of CPU at 2007x2853.
-        let size = "\(IOSurfaceGetWidth(surface))x\(IOSurfaceGetHeight(surface))" as CFString
-        let held = CVBufferCopyAttachment(dest, Self.sizeKey, nil) as? String
-        if held != size as String {
-            Self.fillBlack(dest)
-            CVBufferSetAttachment(dest, Self.sizeKey, size, .shouldNotPropagate)
-        }
+        // Letterboxing paints the bars black as well as drawing the panel
+        // (measured: a destination filled white came back with black bars),
+        // so a pooled buffer that last held the larger panel shows none of it
+        // around the smaller one. The fold-back test holds VideoToolbox to it.
         guard VTPixelTransferSessionTransferImage(session, from: source, to: dest) == noErr,
               let out = CVPixelBufferGetIOSurface(dest)?.takeUnretainedValue() else { return nil }
         lastOut = dest
         return out
-    }
-
-    /// The size of the panel a pooled buffer was last composed from.
-    private static let sizeKey = "quern.panelSize" as CFString
-
-    private static func fillBlack(_ buffer: CVPixelBuffer) {
-        CVPixelBufferLockBaseAddress(buffer, [])
-        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
-        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return }
-        // BGRA, opaque black: zero colour, 0xFF alpha.
-        let bpr = CVPixelBufferGetBytesPerRow(buffer)
-        let h = CVPixelBufferGetHeight(buffer), w = CVPixelBufferGetWidth(buffer)
-        for y in 0..<h {
-            let row = base.advanced(by: y * bpr).assumingMemoryBound(to: UInt32.self)
-            for x in 0..<w { row[x] = 0xFF00_0000 }
-        }
     }
 }
