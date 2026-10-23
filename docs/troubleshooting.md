@@ -82,6 +82,35 @@ typically one booted while Xcode or its Device Hub was open.
 Quitting Device Hub does **not** fix a simulator that is already affected: the
 state persists for the life of that boot.
 
+### A foldable simulator (iPhone Duo)
+
+Xcode 27.1's **iPhone Duo** has two screens: a cover, lit when folded (the
+boot state), and a larger inner panel, lit when unfolded and turned to
+landscape. Quern follows whichever is lit (#536). Taps, accessibility reads,
+hit-tests and screenshots are all of that panel, in its points as the screen
+is turned, so element frames and tap coordinates mean what you see. Typing
+and the Home button work folded and unfolded. A phone with one screen behaves
+as before.
+
+What to know:
+
+- **Quern cannot fold it yet (#537).** Fold and unfold it in Device Hub, which
+  replaces Simulator.app on Xcode 27. Quern follows the change on its next
+  action.
+- **Just after a fold, wait a moment.** SpringBoard swaps panels and rotates
+  over about a second. An action sent in that window can land on the screen
+  that was there before, and quern's settle wait does not cover a fold made
+  outside quern.
+- **Edge swipes are refused on the Duo.** No edge gesture reached it in any
+  state, folded or not, before this support existed or since, so quern says
+  so rather than answering `ok`. Navigate with taps, or press Home.
+- **Video recording and the preview window still show the cover (#538)**,
+  which is black while the Duo is unfolded.
+- **Which panel is lit is read from the screen, not the hinge.** The panel
+  SpringBoard lights depends on how the hinge got where it is, not only its
+  angle: measured, stepping it closed kept the inner panel lit down to 20°,
+  and stepping it open kept the cover lit up to 150°.
+
 ## Reading Crash Reports
 
 Simulator crash reports from `~/Library/Logs/DiagnosticReports/` are watched automatically. To suppress the macOS crash dialog (useful on CI), run `defaults write com.apple.CrashReporter DialogType none` or use `quern setup`.

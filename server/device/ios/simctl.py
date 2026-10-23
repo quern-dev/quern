@@ -477,16 +477,21 @@ class SimctlBackend:
             else:
                 child.unlink()
 
-    async def screenshot(self, udid: str) -> bytes:
+    async def screenshot(self, udid: str, display: int | None = None) -> bytes:
         """Capture a screenshot from a simulator.
 
-        Writes to a temp file, reads bytes, then cleans up.
+        Writes to a temp file, reads bytes, then cleans up. ``display`` is a
+        screen ID: simctl's default is the device's first screen, which on an
+        unfolded iPhone Duo is the dark cover (#536).
         """
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
             tmp_path = tmp.name
 
         try:
-            await self._run_simctl("io", udid, "screenshot", tmp_path)
+            args = ["io", udid, "screenshot"]
+            if display is not None:
+                args.append(f"--display={display}")
+            await self._run_simctl(*args, tmp_path)
             return Path(tmp_path).read_bytes()
         finally:
             Path(tmp_path).unlink(missing_ok=True)

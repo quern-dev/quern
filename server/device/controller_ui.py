@@ -585,6 +585,7 @@ class DeviceControllerUI:
     - self._input_probe_cooldown: dict[str, float]
     - self._last_ui_change: dict[str, float]
     - self._screen_bounds: dict[str, tuple[float, float, float, float]]
+    - self._single_panel: set[str]
     - self.resolve_udid(udid) -> str
     - self._invalidate_ui_cache(udid) -> None
     - self._is_physical(udid) -> bool
@@ -4766,6 +4767,7 @@ class DeviceControllerUI:
         elif self._is_physical(resolved):
             raw_png = await self.pmd3.screenshot(resolved)
         else:
-            raw_png = await self.simctl.screenshot(resolved)
+            display = await self._lit_display(resolved)
+            raw_png = await self.simctl.screenshot(resolved, display=display)
         elements, _ = await self.get_ui_elements(resolved)
         return annotate_screenshot(raw_png, elements, scale=scale, quality=quality, grid=grid)

@@ -530,7 +530,8 @@ class TestScreenshot:
             mock_proc.return_value = (b"processed", "image/png")
             result_bytes, media_type = await ctrl.screenshot(format="png", scale=0.5)
 
-        ctrl.simctl.screenshot.assert_called_once_with("AAAA-1111")
+        # No sim-bridge in this test, so no lit panel to name: simctl's default screen.
+        ctrl.simctl.screenshot.assert_called_once_with("AAAA-1111", display=None)
         mock_proc.assert_called_once_with(fake_png, format="png", scale=0.5, quality=85)
         assert result_bytes == b"processed"
         assert media_type == "image/png"
@@ -985,7 +986,8 @@ class TestScreenshotAnnotated:
             mock_annotate.return_value = (b"annotated-png", "image/png")
             result_bytes, media_type = await ctrl.screenshot_annotated(scale=0.5)
 
-        ctrl.simctl.screenshot.assert_called_once_with("AAAA-1111")
+        # No sim-bridge in this test, so no lit panel to name: simctl's default screen.
+        ctrl.simctl.screenshot.assert_called_once_with("AAAA-1111", display=None)
         # annotate_screenshot should receive the raw png and parsed elements
         assert mock_annotate.call_count == 1
         call_args = mock_annotate.call_args

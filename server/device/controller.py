@@ -184,6 +184,10 @@ class DeviceController(DeviceControllerUI):
         # Each device's screen size, from the Application element of the last
         # tree read that had one: a filtered read does not carry it.
         self._screen_bounds: dict[str, tuple[float, float, float, float]] = {}
+        #: Simulators known to have one built-in panel (#536). A device type
+        #: never gains a panel, so once a booted device answers with one, its
+        #: screenshots go straight to simctl and never queue on sim-bridge.
+        self._single_panel: set[str] = set()
         # One long-lived Web Inspector connection. Reconnecting per request cost
         # ~3.4s of handshake, and webinspectord did not re-report its connected
         # applications to a connection opened immediately after the previous one
@@ -1743,7 +1747,29 @@ class DeviceController(DeviceControllerUI):
             return await self.adb.screenshot(resolved)
         if self._is_physical(resolved):
             return await self.pmd3.screenshot(resolved)
-        return await self.simctl.screenshot(resolved)
+        return await self.simctl.screenshot(resolved, display=await self._lit_display(resolved))
+
+    async def _lit_display(self, udid: str) -> int | None:
+        """The screen to capture on a simulator with several built-in panels:
+        the lit one (#536). None -- simctl's default screen -- for every other
+        device, and whenever the answer cannot be had: a screenshot of the
+        default screen is what was taken before this existed, and failing the
+        capture over it would be worse."""
+        if not self._sim_bridge_ok or udid in self._single_panel:
+            return None
+        try:
+            lit, count = await self.sim_bridge.panels(udid)
+        except Exception:  # noqa: BLE001 -- a capture must not fail over which screen
+            logger.debug("Could not read the lit panel of %s", udid[:8], exc_info=True)
+            return None
+        if count == 1:
+            # Only on a definite one: a simulator still booting has no screens
+            # yet, and is asked again next time.
+            self._single_panel.add(udid)
+        if not lit:
+            return None
+        screen_id = lit.get("screen_id")
+        return screen_id if isinstance(screen_id, int) else None
 
     async def set_location(
         self, latitude: float, longitude: float, udid: str | None = None,
