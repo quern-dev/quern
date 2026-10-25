@@ -4,7 +4,15 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # And a stable line's patches, which are cut from stabilize/N.M (0.24.2):
+    # without this a PR there had no CI at all, and merge-pr.sh rightly
+    # refused to read that as passing.
+    branches: [main, "stabilize/**"]
+
+# Every job only reads the repository; a pull request's code must not get a
+# token that can write to it (CodeRabbit, #548).
+permissions:
+  contents: read
 
 jobs:
   test:

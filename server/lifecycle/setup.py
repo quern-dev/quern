@@ -2220,7 +2220,14 @@ def check_node(sites: list | None = None) -> CheckResult:
                 detail=(
                     f"Found at {found.path} for {found.place.lower()}, and not on this "
                     f"process's PATH.\n{where}\n"
-                    f"{quern_cmd()} doctor shows each place a node is picked."
+                    # The node it found may lack the Brotli fix too; this early
+                    # return skipped that (CodeRabbit, #547).
+                    + "".join(
+                        f"{site.place}: {gap}. Run: "
+                        f"{node_env.security_fix(site.path, site.version)}\n"
+                        for site in elsewhere
+                        if (gap := node_env.security_gap(site.version)))
+                    + f"{quern_cmd()} doctor shows each place a node is picked."
                 ),
             )
         return CheckResult(
