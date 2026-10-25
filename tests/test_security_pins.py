@@ -25,7 +25,7 @@ def test_brotli_is_pinned_to_the_fixed_release():
 
 @pytest.mark.parametrize("installed, left", [
     ("1.2.0", True), ("1.1.0", True), ("1.0.9", True),
-    ("1.2.1", False), ("1.2.10", False), ("1.3.0", False), ("2.0", False),
+    ("1.2.1", False), ("1.2.10", False), ("1.10.0", False), ("1.3.0", False), ("2.0", False),
 ])
 def test_unfixed_compares_versions_as_numbers(installed, left):
     assert bool(security_pins.unfixed(_versions(Brotli=installed))) is left
