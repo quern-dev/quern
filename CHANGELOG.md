@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0-beta.6] - 2026-10-25
+
 ### Fixed
 - **Webview inspection on simulators works with pymobiledevice3 11.43 and later (#551).** pymobiledevice3 11.43.0 changed how a service connection is made: the constructor takes a stream reader and writer, and a raw socket goes through `ServiceConnection.from_socket`. quern still passed the socket to the constructor, so `get_web_content` failed with a `TypeError` on any install that had pulled in 11.43 or later -- every fresh install of 0.24.2 and 0.25.0-beta.5, and any install `quern update` moved forward. quern now uses `from_socket` when pymobiledevice3 has it and the old constructor when it does not, so both work with no version cap; the calls made afterwards are the same in both. Checked live on a booted simulator with pymobiledevice3 11.15.0 and 11.44.0. A new test builds the real installed `ServiceConnection` and sends a message through it, so the next change of this kind fails CI instead of an install.
 
@@ -908,7 +910,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.25.0-beta.5...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.25.0-beta.6...main
+[0.25.0-beta.6]: https://github.com/quern-dev/quern/releases/tag/v0.25.0-beta.6
 [0.25.0-beta.5]: https://github.com/quern-dev/quern/releases/tag/v0.25.0-beta.5
 [0.25.0-beta.4]: https://github.com/quern-dev/quern/releases/tag/v0.25.0-beta.4
 [0.25.0-beta.3]: https://github.com/quern-dev/quern/releases/tag/v0.25.0-beta.3
