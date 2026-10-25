@@ -17,6 +17,7 @@ Brotli 1.2.1 itself (mitmproxy/mitmproxy#8514).
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -34,16 +35,10 @@ def requirements() -> list[str]:
     return [f"{name}>={version}" for name, version, _ in OVERRIDES]
 
 
-def apply(pip: str, cwd: str | None = None, timeout: int = 300) -> str | None:
-    """Install the overrides with `pip`, without touching anything else.
-
-    Returns None on success, or what went wrong. Already-current packages cost
-    pip a metadata read and no download.
-    """
+def _pip(pip: str, args: list[str], cwd: str | None, timeout: int) -> str | None:
     try:
         result = subprocess.run(
-            [pip, "install", "--no-deps", *requirements()],
-            cwd=cwd, capture_output=True, text=True, timeout=timeout,
+            [pip, *args], cwd=cwd, capture_output=True, text=True, timeout=timeout,
             stdin=subprocess.DEVNULL,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -51,6 +46,51 @@ def apply(pip: str, cwd: str | None = None, timeout: int = 300) -> str | None:
     if result.returncode != 0:
         err = (result.stderr or result.stdout or "").strip()
         return err.splitlines()[-1][:200] if err else f"pip exited {result.returncode}"
+    return None
+
+
+def _metadata(venv: Path, name: str) -> list[tuple[Path, str]]:
+    """Every `*.dist-info` directory for `name` in the venv, with its version."""
+    key = re.sub(r"[-_.]+", "_", name).lower()
+    out = []
+    for info in venv.glob("lib/python*/site-packages/*.dist-info"):
+        dist, _, version = info.name[: -len(".dist-info")].partition("-")
+        if re.sub(r"[-_.]+", "_", dist).lower() == key:
+            out.append((info, version))
+    return out
+
+
+def apply(pip: str, cwd: str | None = None, timeout: int = 300) -> str | None:
+    """Install the overrides with `pip` (in the venv `pip` belongs to), without
+    touching anything else. Returns None on success, or what went wrong.
+
+    An interrupted upgrade can leave an old version's metadata beside the fixed
+    one. pip then sees the fixed one, does nothing, and `unfixed_in_venv` goes
+    on reporting the old -- a venv `doctor --fix` could never clear, reinstalled
+    at every start (CodeRabbit, #548). So when that is what is left, the fixed
+    release is reinstalled over whatever files are there, and only then is the
+    stale metadata removed: metadata, never a package's files, and never when
+    no fixed metadata stands beside it.
+    """
+    problem = _pip(pip, ["install", "--no-deps", *requirements()], cwd, timeout)
+    if problem:
+        return problem
+    venv = Path(pip).parent.parent
+    for name, fixed, _ in OVERRIDES:
+        found = _metadata(venv, name)
+        stale = [info for info, version in found if _below(version, fixed)]
+        if not stale or len(stale) == len(found):
+            continue
+        problem = _pip(pip, ["install", "--no-deps", "--force-reinstall",
+                             f"{name}>={fixed}"], cwd, timeout)
+        if problem:
+            return problem
+        for info, version in _metadata(venv, name):
+            if _below(version, fixed):
+                try:
+                    shutil.rmtree(info)
+                except OSError as exc:
+                    return f"could not remove {info.name}: {exc}"
     return None
 
 

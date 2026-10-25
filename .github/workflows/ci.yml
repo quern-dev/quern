@@ -9,6 +9,11 @@ on:
     # refused to read that as passing.
     branches: [main, "stabilize/**"]
 
+# Every job only reads the repository; a pull request's code must not get a
+# token that can write to it (CodeRabbit, #548).
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: macos-latest
