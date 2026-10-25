@@ -753,6 +753,13 @@ class TestCheckNode:
         assert "CVE-2026-111497" not in result.message
         assert "CVE-2026-111497" not in (result.detail or "")
 
+    def test_a_node_only_elsewhere_still_gets_its_security_note(self):
+        """No node here returns early; the one found elsewhere may lack the
+        fix, and that was skipped (CodeRabbit, #547)."""
+        result = check_node(_sites(here=("missing", None), login=("ok", "v22.22.2")))
+        assert result.status == CheckStatus.MISSING
+        assert "CVE-2026-111497" in result.detail and "login shell" in result.detail
+
     def test_a_fixed_node_on_every_line_is_ok(self):
         for version in ("v22.23.4", "v24.22.1", "v26.12.1", "v27.0.0"):
             assert check_node(_sites(here=("ok", version))).status == CheckStatus.OK, version

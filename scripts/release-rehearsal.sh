@@ -291,16 +291,24 @@ step "A git install updating from $PREV to $candidate_version"
 # (server/lifecycle/security_pins.py), so an update can succeed in every other
 # way and still leave 1.2.0 -- which reads exactly like a pass without this.
 check_brotli() {   # $1 = the installed tree
-  local dist version
+  local dist version rc
   dist="$(ls -d "$1"/.venv/lib/python*/site-packages/[Bb]rotli-*.dist-info 2>/dev/null | head -1 || true)"
   version="${dist##*/}"; version="${version#[Bb]rotli-}"; version="${version%.dist-info}"
   if [[ -z "$dist" ]]; then
     bad "no Brotli in the venv at $1/.venv"
-  elif printf '1.2.1\n%s\n' "$version" | sort -V -C; then
-    ok "the venv has Brotli $version, with the CVE-2026-111497 fix"
-  else
-    bad "the venv has Brotli $version, below 1.2.1 (CVE-2026-111497)"
+    return
   fi
+  # Python's ordering, not sort -V: 1.2.1rc1 is before 1.2.1 there, and after
+  # it for sort (CodeRabbit, #547). Exit 0 fixed, 10 below; anything else --
+  # 1 is an exception, such as a version packaging cannot read -- is "could
+  # not compare", which must not read as either.
+  rc=0
+  "$1/.venv/bin/python" -c 'import sys; from packaging.version import Version as V; sys.exit(10 if V(sys.argv[1]) < V("1.2.1") else 0)' "$version" 2>/dev/null || rc=$?
+  case $rc in
+    0) ok "the venv has Brotli $version, with the CVE-2026-111497 fix" ;;
+    10) bad "the venv has Brotli $version, below 1.2.1 (CVE-2026-111497)" ;;
+    *) bad "could not compare the venv's Brotli $version with 1.2.1 (exit $rc)" ;;
+  esac
 }
 
 case_git_update() {

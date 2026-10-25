@@ -82,12 +82,15 @@ def unfixed_in_venv(venv: Path) -> list[tuple[str, str | None, str, str]]:
     out = []
     for name, fixed, why in OVERRIDES:
         key = re.sub(r"[-_.]+", "_", name).lower()
-        found = None
+        versions = []
         for info in infos:
             dist, _, version = info.name[: -len(".dist-info")].partition("-")
             if re.sub(r"[-_.]+", "_", dist).lower() == key:
-                found = version
-                break
-        if found is None or _below(found, fixed):
-            out.append((name, found, fixed, why))
+                versions.append(version)
+        # Every match, not the first: an interrupted upgrade can leave both
+        # 1.2.0's metadata and 1.2.1's, and the older may describe the files
+        # actually installed (CodeRabbit, #547).
+        stale = [v for v in versions if _below(v, fixed)]
+        if not versions or stale:
+            out.append((name, stale[0] if stale else None, fixed, why))
     return out

@@ -147,7 +147,7 @@ class TestVersions:
             [node, "-r", str(tmp_path / "pre.cjs"), str(tmp_path / "launcher.cjs")],
             capture_output=True, text=True, timeout=30,
             env={"PATH": "/usr/bin:/bin", "FAKE_NODE": version})
-        assert ("CVE-2026-111497" in run.stderr) is warns, run.stderr
+        assert ("lacks the fix for CVE-2026-111497" in run.stderr) is warns, run.stderr
         refused = version == "20.20.2"
         assert ("LOADED" in run.stdout) is not refused, (run.stdout, run.stderr)
 

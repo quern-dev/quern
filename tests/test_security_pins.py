@@ -90,6 +90,12 @@ class TestTheStartPathSeesIt:
         (tmp_path / ".venv" / "bin").mkdir(parents=True)
         assert security_pins.unfixed_in_venv(tmp_path / ".venv") == []
 
+    def test_any_stale_metadata_counts(self, tmp_path):
+        """An interrupted upgrade can leave both; the older may describe the
+        files installed (CodeRabbit, #547)."""
+        venv = _venv_with(tmp_path, "brotli-1.2.1", "Brotli-1.2.0")
+        assert security_pins.unfixed_in_venv(venv)[0][1] == "1.2.0"
+
     def test_a_current_stamp_with_an_unfixed_brotli_is_out_of_sync(self, tmp_path):
         from server.__main__ import DEPS_STAMP_NAME, python_deps_state
 
