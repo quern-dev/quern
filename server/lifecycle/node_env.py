@@ -210,6 +210,32 @@ def security_gap(version: str | None) -> str | None:
             f"the {major}.x line has from {'.'.join(map(str, floor))}")
 
 
+#: The line to move to from one with no fixed release (23, 25, 20 and older):
+#: an LTS line, rather than the oldest one still patched.
+SECURITY_MOVE_TO = 24
+
+
+def security_fix(path: str | None, version: str | None) -> str:
+    """How to get a fixed Node, with the tool that installed this one.
+
+    On its own line when that line has a fix -- an unfixed 24 is told to get the
+    newest 24, not moved to 22 -- and onto `SECURITY_MOVE_TO` when it has none.
+    Homebrew is the exception, both ways: it installs whatever its formula
+    holds, and it shipped the fixed releases days after Node did (node 26.12.0,
+    node@22 22.23.3 and node@24 24.22.0 when this was written). So it is not
+    told that `brew upgrade node` fixes anything; it is told to check.
+    """
+    parsed = parse_version(version)
+    line = parsed[0] if parsed and parsed[0] in NODE_SECURITY_FLOORS else SECURITY_MOVE_TO
+    manager = manager_of(path)
+    command = upgrade_command(manager, line)
+    if manager in (None, "brew", "brew-keg"):
+        return (f"{command}, if Homebrew's node is now {NODE_SECURITY_TEXT} "
+                f"(`brew info node` says; it lagged Node's release). If not, install "
+                f"Node {line} from https://nodejs.org")
+    return command
+
+
 def _classify(path: str | None, version: str | None) -> str:
     if not path:
         return MISSING

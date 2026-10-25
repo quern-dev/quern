@@ -1928,7 +1928,7 @@ def _report_node() -> bool:
         elif gap := node_env.security_gap(site.version):
             # Works, so the mark stays a tick; the fix still has to be seen.
             print(f"      security: {gap}. Run: "
-                  f"{node_env.upgrade_command(node_env.manager_of(site.path))}")
+                  f"{node_env.security_fix(site.path, site.version)}")
     # A place whose probe failed was not checked, and doctor's exit code says
     # when a check could not be made. An unsupported shell is not that: it is
     # a permanent fact about the machine, and failing on it would fail every
