@@ -101,6 +101,27 @@ class TestVersions:
         assert f'var newestLine = {max(node_env.NODE_SECURITY_FLOORS)};' in launcher
         assert f'"{node_env.NODE_SECURITY_TEXT}"' in launcher
 
+    @pytest.mark.parametrize("manager, version, wants", [
+        ("fnm", "v24.20.0", "fnm install 24 && fnm default 24"),   # its own line
+        ("fnm", "v22.22.2", "fnm install 22 && fnm default 22"),
+        ("nvm", "v26.0.0", "nvm install 26"),
+        ("nvm", "v23.11.0", "nvm install 24"),                     # no fix: to LTS
+        ("volta", "v20.20.2", "volta install node@24"),
+    ])
+    def test_the_fix_keeps_the_line_or_moves_to_lts(self, monkeypatch, manager, version, wants):
+        monkeypatch.setattr(node_env, "manager_of", lambda path: manager)
+        advice = node_env.security_fix("/n", version)
+        assert wants in advice
+        assert "nodejs.org" not in advice
+
+    @pytest.mark.parametrize("manager", ["brew", "brew-keg", None])
+    def test_homebrew_is_not_promised_a_fix_it_may_not_have(self, monkeypatch, manager):
+        """Homebrew shipped node 26.12.0 after Node's 26.12.1: `brew upgrade
+        node` was a no-op that the advice said would fix it."""
+        monkeypatch.setattr(node_env, "manager_of", lambda path: manager)
+        advice = node_env.security_fix("/opt/homebrew/bin/node", "v26.12.0")
+        assert "brew info node" in advice and "nodejs.org" in advice
+
     @pytest.mark.parametrize("version, warns", [
         ("22.22.2", True), ("23.11.0", True), ("24.22.0", True), ("20.20.2", False),
         ("22.23.4", False), ("24.22.1", False), ("26.12.1", False), ("27.0.0", False),

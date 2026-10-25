@@ -2066,8 +2066,7 @@ def check_node(sites: list | None = None) -> CheckResult:
         lines.append(f"  {node_env.fix_for(site, sites)}")
     for site, gap in unfixed:
         lines.append(f"{site.place} ({site.used_by}): {site.version} at {site.path}")
-        lines.append(f"  {gap}. Run: "
-                     f"{node_env.upgrade_command(node_env.manager_of(site.path))}")
+        lines.append(f"  {gap}. Run: {node_env.security_fix(site.path, site.version)}")
     lines.append(f"Details: {quern_cmd()} doctor")
     parts = []
     if problems:
