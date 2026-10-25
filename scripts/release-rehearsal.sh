@@ -286,6 +286,37 @@ step "A git install updating from $PREV to $candidate_version"
 # subshell's exit status is the only way back. The first version of this script
 # did not do that, printed a ✗ and summarised "the rehearsal passed": the exact
 # defect it exists to catch, inside itself.
+# CVE-2026-111497: an update must end on the fixed Brotli. It is installed
+# after the project's own install, past mitmproxy's <=1.2.0 cap
+# (server/lifecycle/security_pins.py), so an update can succeed in every other
+# way and still leave 1.2.0 -- which reads exactly like a pass without this.
+check_brotli() {   # $1 = the installed tree
+  local dist version rc found=0 failed=0 seen=""
+  # Every matching directory, as unfixed_in_venv reads them: an interrupted
+  # upgrade can leave 1.2.0's beside 1.2.1's (CodeRabbit, #547).
+  for dist in "$1"/.venv/lib/python*/site-packages/[Bb]rotli-*.dist-info; do
+    [[ -d "$dist" ]] || continue
+    found=1
+    version="${dist##*/}"; version="${version#[Bb]rotli-}"; version="${version%.dist-info}"
+    # Python's ordering, not sort -V: 1.2.1rc1 is before 1.2.1 there, and
+    # after it for sort. Exit 0 fixed, 10 below; anything else -- 1 is an
+    # exception, such as a version packaging cannot read -- is "could not
+    # compare", which must not read as either.
+    rc=0
+    "$1/.venv/bin/python" -c 'import sys; from packaging.version import Version as V; sys.exit(10 if V(sys.argv[1]) < V("1.2.1") else 0)' "$version" 2>/dev/null || rc=$?
+    case $rc in
+      0) seen="$seen $version" ;;
+      10) bad "the venv has Brotli $version metadata, below 1.2.1 (CVE-2026-111497)"; failed=1 ;;
+      *) bad "could not compare the venv's Brotli $version with 1.2.1 (exit $rc)"; failed=1 ;;
+    esac
+  done
+  if (( ! found )); then
+    bad "no Brotli in the venv at $1/.venv"
+  elif (( ! failed )); then
+    ok "the venv has Brotli${seen}, with the CVE-2026-111497 fix"
+  fi
+}
+
 case_git_update() {
   failures=0   # a subshell copy: a case reports only its own
   sb="$WORK/git-update"
@@ -332,6 +363,7 @@ case_git_update() {
   [[ "$landed" == "$candidate_version" ]] \
     && ok "the tree is $candidate_version" \
     || bad "the tree is ${landed:-nothing}, expected $candidate_version"
+  check_brotli "$sb/install"
 
   # The record every surface reads -- the CLI, the menu bar, the result file.
   # An update that says it worked and writes nothing here is the state #212
@@ -492,7 +524,7 @@ case_gui_node_message() {
   # down the file than this case runs, so calling it here would be a
   # "command not found" at the moment the case executes.
   mkdir -p "$h/nodebin"
-  printf '#!/bin/sh\n[ "$1" = "--version" ] && { echo "v22.9.0"; exit 0; }\nexit 0\n' \
+  printf '#!/bin/sh\n[ "$1" = "--version" ] && { echo "v22.23.4"; exit 0; }\nexit 0\n' \
     > "$h/nodebin/node"
   chmod +x "$h/nodebin/node"
   : > "$h/.zshenv"
@@ -700,7 +732,7 @@ case_node_matrix() {
   # have no node.
   local h="$arrangements/zshrc-only"
   mkdir -p "$h/state"
-  make_fake_node "$h/nodebin" "v22.9.0"
+  make_fake_node "$h/nodebin" "v22.23.4"
   : > "$h/.zshenv"
   echo 'export PATH="$HOME/nodebin:$PATH"' > "$h/.zshrc"
   run_doctor "$h" /bin/zsh
@@ -716,7 +748,7 @@ case_node_matrix() {
   # The same node, moved to .zshenv: every shell sees it, GUI apps still do not.
   h="$arrangements/zshenv"
   mkdir -p "$h/state"
-  make_fake_node "$h/nodebin" "v22.9.0"
+  make_fake_node "$h/nodebin" "v22.23.4"
   echo 'export PATH="$HOME/nodebin:$PATH"' > "$h/.zshenv"
   : > "$h/.zshrc"
   run_doctor "$h" /bin/zsh
@@ -1341,6 +1373,7 @@ case_tarball_update() {
   [[ "$landed" == "$candidate_version" ]] \
     && ok "the install is $candidate_version" \
     || bad "the install is ${landed:-nothing}, expected $candidate_version"
+  check_brotli "$installed"
 
   # A release install must not need npm at start: the asset ships mcp/dist
   # already built, and the swap has to preserve that (#193).

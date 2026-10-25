@@ -73,6 +73,81 @@ class TestVersions:
     def test_major_version(self, text, major):
         assert node_env.major_version(text) == major
 
+    @pytest.mark.parametrize("text, has_fix", [
+        ("v22.23.4", True), ("v22.30.0", True), ("v24.22.1", True), ("v24.23.0", True),
+        ("v26.12.1", True), ("v26.13.0", True), ("v27.0.0", True), ("v30.1.2", True),
+        ("v22.23.3", False), ("v22.22.2", False), ("v22.19.0", False),
+        ("v24.22.0", False), ("v26.12.0", False), ("v26.0.0", False),
+        ("v23.11.0", False), ("v25.2.1", False), ("v20.20.2", False), ("v18.20.8", False),
+    ])
+    def test_the_brotli_fix_is_judged_per_line(self, text, has_fix):
+        """CVE-2026-111497 was fixed in 22.23.4, 24.22.1 and 26.12.1; 23, 25
+        and 20 are end of life and were not fixed at all."""
+        assert (node_env.security_gap(text) is None) is has_fix
+
+    @pytest.mark.parametrize("text", ["", None, "node: bad option"])
+    def test_an_unreadable_version_is_not_a_security_finding(self, text):
+        assert node_env.security_gap(text) is None
+
+    def test_the_security_floors_match_the_launcher(self):
+        """The launcher warns from its own copy; a fix moved in one place only
+        would warn about a fixed Node, or stay silent about an unfixed one."""
+        launcher = (ROOT / "mcp" / "src" / "launcher.cjs").read_text()
+        m = re.search(r"var SECURITY\s*=\s*\{([^}]*)\}", launcher)
+        assert m, "launcher.cjs has no SECURITY table"
+        table = {int(k): tuple(int(x) for x in v.split(","))
+                 for k, v in re.findall(r"(\d+)\s*:\s*\[([\d\s,]+)\]", m.group(1))}
+        assert table == node_env.NODE_SECURITY_FLOORS
+        assert f'var newestLine = {max(node_env.NODE_SECURITY_FLOORS)};' in launcher
+        assert f'"{node_env.NODE_SECURITY_TEXT}"' in launcher
+
+    @pytest.mark.parametrize("manager, version, wants", [
+        ("fnm", "v24.20.0", "fnm install 24 && fnm default 24"),   # its own line
+        ("fnm", "v22.22.2", "fnm install 22 && fnm default 22"),
+        ("nvm", "v26.0.0", "nvm install 26"),
+        ("nvm", "v23.11.0", "nvm install 24"),                     # no fix: to LTS
+        ("volta", "v20.20.2", "volta install node@24"),
+    ])
+    def test_the_fix_keeps_the_line_or_moves_to_lts(self, monkeypatch, manager, version, wants):
+        monkeypatch.setattr(node_env, "manager_of", lambda path: manager)
+        advice = node_env.security_fix("/n", version)
+        assert wants in advice
+        assert "nodejs.org" not in advice
+
+    @pytest.mark.parametrize("manager", ["brew", "brew-keg", None])
+    def test_homebrew_is_not_promised_a_fix_it_may_not_have(self, monkeypatch, manager):
+        """Homebrew shipped node 26.12.0 after Node's 26.12.1: `brew upgrade
+        node` was a no-op that the advice said would fix it."""
+        monkeypatch.setattr(node_env, "manager_of", lambda path: manager)
+        advice = node_env.security_fix("/opt/homebrew/bin/node", "v26.12.0")
+        assert "brew info node" in advice and "nodejs.org" in advice
+
+    @pytest.mark.parametrize("version, warns", [
+        ("22.22.2", True), ("23.11.0", True), ("24.22.0", True), ("20.20.2", False),
+        ("22.23.4", False), ("24.22.1", False), ("26.12.1", False), ("27.0.0", False),
+    ])
+    def test_the_launcher_warns_and_still_starts(self, tmp_path, version, warns):
+        """Run the real launcher on a faked `process.versions.node`: an unfixed
+        Node gets the warning and the wrapper still loads -- refusing would
+        take every quern tool away from a Node that runs it. 20.20.2 is below
+        the 22.19 floor and refused outright, so it never reaches the warning."""
+        import shutil
+        node = shutil.which("node")
+        if not node:
+            pytest.skip("no node to run the launcher with")
+        shutil.copy(ROOT / "mcp" / "src" / "launcher.cjs", tmp_path / "launcher.cjs")
+        (tmp_path / "index.js").write_text('process.stdout.write("LOADED\\n");\n')
+        (tmp_path / "pre.cjs").write_text(
+            'Object.defineProperty(process, "versions", {value: Object.assign('
+            '{}, process.versions, {node: process.env.FAKE_NODE})});\n')
+        run = subprocess.run(
+            [node, "-r", str(tmp_path / "pre.cjs"), str(tmp_path / "launcher.cjs")],
+            capture_output=True, text=True, timeout=30,
+            env={"PATH": "/usr/bin:/bin", "FAKE_NODE": version})
+        assert ("lacks the fix for CVE-2026-111497" in run.stderr) is warns, run.stderr
+        refused = version == "20.20.2"
+        assert ("LOADED" in run.stdout) is not refused, (run.stdout, run.stderr)
+
     def test_the_floor_matches_the_wrapper(self):
         """Three copies of one number; the launcher's is the one that bites."""
         launcher = (ROOT / "mcp" / "src" / "launcher.cjs").read_text()
