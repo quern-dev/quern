@@ -22,6 +22,36 @@ if (isNaN(major) || major < REQUIRED_MAJOR) {
   process.exit(1);
 }
 
+// ES5 on purpose -- this has to parse on the old node it is refusing.
+var have = process.versions.node.split(".").map(function (n) { return parseInt(n, 10); });
+
+function below(v, floor) {
+  for (var i = 0; i < floor.length; i++) {
+    var part = isNaN(v[i]) ? 0 : v[i];
+    if (part !== floor[i]) { return part < floor[i]; }
+  }
+  return false;
+}
+
+// Each line's first release with the fix for CVE-2026-111497, the Brotli
+// decoder flaw. Mirrors NODE_SECURITY_FLOORS in server/lifecycle/node_env.py;
+// a test keeps the two in step. Warned about, never refused: the wrapper only
+// talks to the local quern server, and refusing would take every quern tool
+// away from a Node that runs it. A line not listed and older than the newest
+// listed (23, 25, 20) has no fixed release.
+var SECURITY = { 22: [22, 23, 4], 24: [24, 22, 1], 26: [26, 12, 1] };
+var SECURITY_TEXT = "22.23.4+, 24.22.1+ or 26.12.1+";
+var newestLine = 26;
+var lineFloor = SECURITY[have[0]];
+if (lineFloor ? below(have, lineFloor) : have[0] < newestLine) {
+  process.stderr.write(
+    "quern-debug-mcp: warning: Node " + process.versions.node + " has no fix for " +
+    "CVE-2026-111497 (Brotli decoder).\n" +
+    "  Binary: " + process.execPath + "\n" +
+    "  Upgrade to Node " + SECURITY_TEXT + "; `quern doctor` shows the command.\n"
+  );
+}
+
 var path = require("path");
 var url = require("url");
 var entryUrl = url.pathToFileURL(path.resolve(__dirname, "index.js")).href;

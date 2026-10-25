@@ -492,7 +492,7 @@ case_gui_node_message() {
   # down the file than this case runs, so calling it here would be a
   # "command not found" at the moment the case executes.
   mkdir -p "$h/nodebin"
-  printf '#!/bin/sh\n[ "$1" = "--version" ] && { echo "v22.9.0"; exit 0; }\nexit 0\n' \
+  printf '#!/bin/sh\n[ "$1" = "--version" ] && { echo "v22.23.4"; exit 0; }\nexit 0\n' \
     > "$h/nodebin/node"
   chmod +x "$h/nodebin/node"
   : > "$h/.zshenv"
@@ -700,7 +700,7 @@ case_node_matrix() {
   # have no node.
   local h="$arrangements/zshrc-only"
   mkdir -p "$h/state"
-  make_fake_node "$h/nodebin" "v22.9.0"
+  make_fake_node "$h/nodebin" "v22.23.4"
   : > "$h/.zshenv"
   echo 'export PATH="$HOME/nodebin:$PATH"' > "$h/.zshrc"
   run_doctor "$h" /bin/zsh
@@ -716,7 +716,7 @@ case_node_matrix() {
   # The same node, moved to .zshenv: every shell sees it, GUI apps still do not.
   h="$arrangements/zshenv"
   mkdir -p "$h/state"
-  make_fake_node "$h/nodebin" "v22.9.0"
+  make_fake_node "$h/nodebin" "v22.23.4"
   echo 'export PATH="$HOME/nodebin:$PATH"' > "$h/.zshenv"
   : > "$h/.zshrc"
   run_doctor "$h" /bin/zsh

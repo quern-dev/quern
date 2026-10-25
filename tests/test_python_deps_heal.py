@@ -230,7 +230,10 @@ def test_the_default_install_does_not_upgrade(project, monkeypatch):
     """
     seen = _capture_pip(monkeypatch, project)
     assert _ensure_python_deps(quiet=True) is True
-    assert seen == [[str(project / ".venv" / "bin" / "pip"), "install", "-e", "."]]
+    pip = str(project / ".venv" / "bin" / "pip")
+    # The install, then the security overrides it has just undone.
+    assert seen == [[pip, "install", "-e", "."],
+                    [pip, "install", "--no-deps", "Brotli>=1.2.1"]]
     assert "--upgrade" not in seen[0]
 
 
@@ -325,8 +328,9 @@ def test_the_next_start_retries_after_a_failed_eager_update(project, monkeypatch
     monkeypatch.setattr(subprocess, "run", succeeding)
     assert _ensure_python_deps(quiet=True) is True
 
-    assert len(calls) == 2, "the start path skipped instead of retrying"
-    assert "--upgrade" not in calls[1], "the retry must stay non-eager"
+    installs = [c for c in calls if "-e" in c]
+    assert len(installs) == 2, "the start path skipped instead of retrying"
+    assert "--upgrade" not in installs[1], "the retry must stay non-eager"
     assert _stamp(project).exists(), "a successful retry should stamp again"
 
 
@@ -367,3 +371,26 @@ def test_a_raised_install_failure_also_clears_the_stamp(project, monkeypatch, fa
 
     assert not _stamp(project).exists()
     assert python_deps_state()["in_sync"] is False
+
+
+def test_the_security_overrides_follow_every_install(project, monkeypatch):
+    """`pip install -e .` puts back mitmproxy's Brotli<=1.2.0 cap each time, so
+    Brotli 1.2.1 (CVE-2026-111497) goes on again after it, without deps."""
+    seen = _capture_pip(monkeypatch, project)
+    assert _ensure_python_deps(quiet=True, force=True, eager=True) is True
+    assert seen[0][1:4] == ["install", "-e", "."]
+    assert seen[1][1:] == ["install", "--no-deps", "Brotli>=1.2.1"]
+    assert _stamp(project).exists()
+
+
+def test_a_failed_security_override_is_a_failed_install(project, monkeypatch):
+    """The venv works, but on a version with a known hole: the stamp must not
+    say done, so the next start tries again."""
+    _stamp(project).touch()
+
+    def run(cmd, **_kw):
+        return _pip_result(1, "no network") if "--no-deps" in cmd else _pip_result(0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert _ensure_python_deps(quiet=True, force=True) is False
+    assert not _stamp(project).exists()

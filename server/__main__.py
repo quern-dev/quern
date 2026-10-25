@@ -198,6 +198,19 @@ def _ensure_python_deps(
               "starting Quern again will retry automatically.")
         return failed()
 
+    # The install above has just put back whatever a dependency caps -- see
+    # server.lifecycle.security_pins -- so the fixed versions go on again.
+    # A failure is a failed install: the venv works, but on a version with a
+    # known hole, and the stamp must not say otherwise.
+    from server.lifecycle import security_pins
+
+    problem = security_pins.apply(str(venv_pip), cwd=str(project_root))
+    if problem:
+        print("Error: could not install the security fixes "
+              f"({', '.join(security_pins.requirements())}): {problem}")
+        print("  Quern will start; starting it again will retry.")
+        return failed()
+
     # Only on success — a failed install must not look done to the next start.
     (project_root / ".venv" / DEPS_STAMP_NAME).touch()
     if not quiet:

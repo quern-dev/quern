@@ -43,6 +43,19 @@ from pathlib import Path
 #: and `engines` in `mcp/package.json`; a test keeps the three in step.
 MIN_NODE_MAJOR = 22
 
+#: Each Node line's first release with the fix for CVE-2026-111497, an
+#: out-of-bounds write in the Brotli decoder (Node's October 2026 security
+#: release). Mirrors `SECURITY` in `mcp/src/launcher.cjs`; a test keeps the two
+#: in step. Not part of `MIN_NODE_MAJOR`, which is what the wrapper needs to *run*: the
+#: wrapper only talks to the local server, so an unfixed Node is warned about
+#: everywhere quern reports on Node, and never refused -- refusing would take
+#: every quern tool away from people whose Node works. A line not listed and
+#: older than the newest listed (23, 25, 20 and earlier) is end of life and has
+#: no fixed release; a line newer than all of them has the fix.
+NODE_SECURITY_FLOORS = {22: (22, 23, 4), 24: (24, 22, 1), 26: (26, 12, 1)}
+NODE_SECURITY_TEXT = "22.23.4+, 24.22.1+ or 26.12.1+"
+NODE_ADVISORY = "CVE-2026-111497 (Brotli decoder)"
+
 #: launchd's default PATH for a user's GUI apps.
 GUI_PATH = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
 
@@ -145,6 +158,44 @@ def major_version(version: str | None) -> int | None:
         return None
     m = re.match(r"v?(\d+)\.", version.strip())
     return int(m.group(1)) if m else None
+
+
+def parse_version(version: str | None) -> tuple[int, int, int] | None:
+    """(22, 22, 2) from "v22.22.2"; None when there is nothing to parse.
+
+    A missing minor or patch reads as 0, so "v22" is (22, 0, 0) -- below any
+    fixed release, which is the safe direction for a version that says too little.
+    """
+    if not version:
+        return None
+    m = re.match(r"v?(\d+)(?:\.(\d+))?(?:\.(\d+))?", version.strip())
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2) or 0), int(m.group(3) or 0)
+
+
+def security_gap(version: str | None) -> str | None:
+    """Why a Node version lacks the fix for `NODE_ADVISORY`, as a sentence;
+    None when it has the fix or says too little to tell.
+
+    "Could not tell" is not "fixed": it is None here because every caller
+    already reports a node whose version cannot be read, and a second, vaguer
+    line about the same node helps nobody.
+    """
+    parsed = parse_version(version)
+    if parsed is None:
+        return None
+    major = parsed[0]
+    floor = NODE_SECURITY_FLOORS.get(major)
+    if floor is None:
+        if major > max(NODE_SECURITY_FLOORS):
+            return None
+        return (f"Node {version.lstrip('v')} is on the {major}.x line, which is end of "
+                f"life and has no fix for {NODE_ADVISORY}; use Node {NODE_SECURITY_TEXT}")
+    if parsed >= floor:
+        return None
+    return (f"Node {version.lstrip('v')} lacks the fix for {NODE_ADVISORY}, which "
+            f"the {major}.x line has from {'.'.join(map(str, floor))}")
 
 
 def _classify(path: str | None, version: str | None) -> str:

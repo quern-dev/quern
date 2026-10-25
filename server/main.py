@@ -1632,6 +1632,10 @@ def _report_node() -> bool:
         if not site.ok:
             label = "note" if site.status == node_env.SKIPPED else "fix"
             print(f"      {label}: {node_env.fix_for(site, sites)}")
+        elif gap := node_env.security_gap(site.version):
+            # Works, so the mark stays a tick; the fix still has to be seen.
+            print(f"      security: {gap}. Run: "
+                  f"{node_env.upgrade_command(node_env.manager_of(site.path))}")
     # A place whose probe failed was not checked, and doctor's exit code says
     # when a check could not be made. An unsupported shell is not that: it is
     # a permanent fact about the machine, and failing on it would fail every
@@ -1866,9 +1870,27 @@ def _report_python_deps(fix: bool) -> bool | None:
 
     if state["in_sync"]:
         print("  ✓ in sync with pyproject.toml")
-        if fix:
-            print("    --fix: nothing to do")
-        return None
+        # In sync and still on a version with a known hole: the overrides go
+        # on after each install, so a venv can match pyproject.toml without
+        # them (server.lifecycle.security_pins).
+        from server.lifecycle import security_pins
+
+        left = security_pins.unfixed()
+        if not left:
+            if fix:
+                print("    --fix: nothing to do")
+            return None
+        for name, installed, fixed, why in left:
+            print(f"  ✗ {name} {installed or 'not installed'}, needs {fixed}+ — {why}")
+        if not fix:
+            print("    Repair with: quern doctor --fix")
+            return None
+        problem = security_pins.apply(str(Path(sys.prefix) / "bin" / "pip"))
+        if problem is None and not security_pins.unfixed():
+            print("  ✓ repaired")
+            return True
+        print(f"  ✗ repair failed{': ' + problem if problem else ''}")
+        return False
 
     print(f"  ✗ out of sync — {state['reason']}")
     if not fix:
