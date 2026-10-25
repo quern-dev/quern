@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.2] - 2026-10-25
+
 ### Security
 - **CVE-2026-111497, the Brotli decoder flaw: quern installs the fixed Brotli and warns about an unfixed Node.** The bug is an out-of-bounds write in Brotli decompression, fixed in Python's `Brotli` 1.2.1 and in Node 22.23.4, 24.22.1 and 26.12.1.
   - **Brotli.** mitmproxy decodes `br` response bodies with it, from whatever servers the app under test talks to, so the proxy put attacker-chosen bytes into the decoder. Every mitmproxy release so far still declares `Brotli<=1.2.0` (the fix upstream is mitmproxy/mitmproxy#8514), so a dependency floor alone would make pip refuse the install. Instead, setup, `quern update`, every start that reconciles the venv, and `quern doctor --fix` install `Brotli>=1.2.1` after the project's own install, without its dependencies. pip will report it as conflicting with mitmproxy's cap; 1.2.1 is a patch release with the same API. Setup and `quern doctor` say when a venv is still on 1.2.0. A failed install of the fix counts as a failed dependency install, so the next start tries again.
@@ -801,7 +803,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.24.1...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.24.2...main
+[0.24.2]: https://github.com/quern-dev/quern/releases/tag/v0.24.2
 [0.24.1]: https://github.com/quern-dev/quern/releases/tag/v0.24.1
 [0.24.0]: https://github.com/quern-dev/quern/releases/tag/v0.24.0
 [0.24.0-beta.3]: https://github.com/quern-dev/quern/releases/tag/v0.24.0-beta.3
