@@ -8,7 +8,12 @@ that has booted more than one simulator.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
+import socket
+
+import pytest
 
 from server.device.web import webinspector
 
@@ -254,3 +259,98 @@ def test_both_real_socket_directories_are_configured():
     assert all(
         g.endswith("/com.apple.webinspectord_sim.socket") for g in globs
     ), f"a pattern does not name the socket: {globs}"
+
+
+# ── #551: pymobiledevice3 11.43 changed how a ServiceConnection is made ──
+
+class _OldStyleService:
+    """Before 11.43: the constructor took the socket."""
+
+    def __init__(self, sock):
+        self.sock = sock
+
+
+class _NewStyleService:
+    """11.43 and later: `from_socket` takes the socket; the constructor takes
+    a reader and writer, so passing a socket fails as it does for real."""
+
+    made_from: list = []
+
+    def __init__(self, reader, writer, mux_device=None):
+        self.reader, self.writer = reader, writer
+
+    @classmethod
+    async def from_socket(cls, sock):
+        cls.made_from.append(sock)
+        return cls("reader", "writer")
+
+
+async def test_the_old_constructor_is_used_when_there_is_no_from_socket():
+    sock = object()
+    service = await webinspector._service_over(_OldStyleService, sock)
+    assert service.sock is sock
+
+
+async def test_from_socket_is_used_when_the_class_has_it():
+    sock = object()
+    _NewStyleService.made_from = []
+    service = await webinspector._service_over(_NewStyleService, sock)
+    assert _NewStyleService.made_from == [sock]
+    assert (service.reader, service.writer) == ("reader", "writer")
+
+
+def _listening_unix_socket():
+    """A live socket for connect() to reach. Short path: macOS caps AF_UNIX
+    paths at 104 bytes, which pytest's tmp_path can exceed."""
+    import tempfile
+    path = os.path.join(tempfile.mkdtemp(dir="/tmp"), "wi.sock")
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(path)
+    server.listen(1)
+    return server, path
+
+
+async def test_a_failed_from_socket_is_a_webinspector_error_and_drops_the_socket(monkeypatch):
+    """from_socket closes the socket itself when it fails, so connect() must
+    let go of it rather than keep or reuse it."""
+    import pymobiledevice3.service_connection as sc
+
+    class Failing(_NewStyleService):
+        @classmethod
+        async def from_socket(cls, sock):
+            sock.close()
+            raise ConnectionError("device went away")
+
+    monkeypatch.setattr(sc, "ServiceConnection", Failing)
+    server, path = _listening_unix_socket()
+    try:
+        inspector = webinspector.SimulatorWebInspector(socket_path=path)
+        with pytest.raises(webinspector.WebInspectorError, match="device went away"):
+            await inspector.connect()
+        assert inspector._sock is None and inspector._service is None
+    finally:
+        server.close()
+
+
+async def test_the_installed_pymobiledevice3_makes_a_working_connection():
+    """The real class, whatever version is installed: two connections over a
+    socket pair, one plist across. CI installs the newest pymobiledevice3, so
+    a release that changes construction again fails here rather than in a
+    user's install -- 11.43 broke `ServiceConnection(sock)` and nothing here
+    noticed, because every test used a stand-in."""
+    from pymobiledevice3.service_connection import ServiceConnection
+
+    a, b = socket.socketpair()
+    left = await webinspector._service_over(ServiceConnection, a)
+    right = await webinspector._service_over(ServiceConnection, b)
+    try:
+        await left.send_plist({"__selector": "_rpc_reportIdentifier:", "n": 1})
+        got = await asyncio.wait_for(right.recv_plist(), timeout=5)
+        assert got == {"__selector": "_rpc_reportIdentifier:", "n": 1}
+    finally:
+        for service in (left, right):
+            with contextlib.suppress(Exception):
+                await service.close()
+        for sock in (a, b):
+            with contextlib.suppress(Exception):
+                sock.close()
