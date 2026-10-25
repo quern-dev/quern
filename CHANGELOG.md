@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **CVE-2026-111497, the Brotli decoder flaw: quern installs the fixed Brotli and warns about an unfixed Node.** The bug is an out-of-bounds write in Brotli decompression, fixed in Python's `Brotli` 1.2.1 and in Node 22.23.4, 24.22.1 and 26.12.1.
+  - **Brotli.** mitmproxy decodes `br` response bodies with it, from whatever servers the app under test talks to, so the proxy put attacker-chosen bytes into the decoder. Every mitmproxy release so far still declares `Brotli<=1.2.0` (the fix upstream is mitmproxy/mitmproxy#8514), so a dependency floor alone would make pip refuse the install. Instead, setup, `quern update`, every start that reconciles the venv, and `quern doctor --fix` install `Brotli>=1.2.1` after the project's own install, without its dependencies. pip will report it as conflicting with mitmproxy's cap; 1.2.1 is a patch release with the same API. Setup and `quern doctor` say when a venv is still on 1.2.0. A failed install of the fix counts as a failed dependency install, so the next start tries again.
+  - **Node.** setup, `quern update` and `quern doctor` now flag a Node below 22.23.4, 24.22.1 or 26.12.1 for the line it is on, and any Node on 23, 25, 20 or earlier, which are end of life and have no fix, with the command to upgrade it on the line it is on (an end-of-life line is pointed at 24). Homebrew shipped its fixed Node days after Node did, so a Homebrew Node is told to check `brew info node` and, until it has the fix, to install from nodejs.org, rather than that `brew upgrade node` fixes it. The MCP wrapper prints the same warning when it starts. Nothing is refused: the wrapper still runs on 22.19 and later, because it only talks to the local quern server, and refusing would take every quern tool away from people whose Node works.
+
 ## [0.25.0-beta.4] - 2026-10-23
 
 ### Added

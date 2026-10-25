@@ -51,6 +51,19 @@ MIN_NODE_TEXT = f"{MIN_NODE[0]}.{MIN_NODE[1]}"
 #: meets the floor; naming a minor would pin people to it.
 MIN_NODE_MAJOR = MIN_NODE[0]
 
+#: Each Node line's first release with the fix for CVE-2026-111497, an
+#: out-of-bounds write in the Brotli decoder (Node's October 2026 security
+#: release). Mirrors `SECURITY` in `mcp/src/launcher.cjs`; a test keeps the two
+#: in step. Not part of `MIN_NODE`, which is what the wrapper needs to *run*: the
+#: wrapper only talks to the local server, so an unfixed Node is warned about
+#: everywhere quern reports on Node, and never refused -- refusing would take
+#: every quern tool away from people whose Node works. A line not listed and
+#: older than the newest listed (23, 25, 20 and earlier) is end of life and has
+#: no fixed release; a line newer than all of them has the fix.
+NODE_SECURITY_FLOORS = {22: (22, 23, 4), 24: (24, 22, 1), 26: (26, 12, 1)}
+NODE_SECURITY_TEXT = "22.23.4+, 24.22.1+ or 26.12.1+"
+NODE_ADVISORY = "CVE-2026-111497 (Brotli decoder)"
+
 #: launchd's default PATH for a user's GUI apps.
 GUI_PATH = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
 
@@ -171,6 +184,56 @@ def meets_floor(version: str | None) -> bool | None:
     """Whether a reported version is at or above `MIN_NODE`; None if unparseable."""
     parsed = parse_version(version)
     return None if parsed is None else parsed >= MIN_NODE
+
+
+def security_gap(version: str | None) -> str | None:
+    """Why a Node version lacks the fix for `NODE_ADVISORY`, as a sentence;
+    None when it has the fix or says too little to tell.
+
+    "Could not tell" is not "fixed": it is None here because every caller
+    already reports a node whose version cannot be read, and a second, vaguer
+    line about the same node helps nobody.
+    """
+    parsed = parse_version(version)
+    if parsed is None:
+        return None
+    major = parsed[0]
+    floor = NODE_SECURITY_FLOORS.get(major)
+    if floor is None:
+        if major > max(NODE_SECURITY_FLOORS):
+            return None
+        return (f"Node {version.lstrip('v')} is on the {major}.x line, which is end of "
+                f"life and has no fix for {NODE_ADVISORY}; use Node {NODE_SECURITY_TEXT}")
+    if parsed >= floor:
+        return None
+    return (f"Node {version.lstrip('v')} lacks the fix for {NODE_ADVISORY}, which "
+            f"the {major}.x line has from {'.'.join(map(str, floor))}")
+
+
+#: The line to move to from one with no fixed release (23, 25, 20 and older):
+#: an LTS line, rather than the oldest one still patched.
+SECURITY_MOVE_TO = 24
+
+
+def security_fix(path: str | None, version: str | None) -> str:
+    """How to get a fixed Node, with the tool that installed this one.
+
+    On its own line when that line has a fix -- an unfixed 24 is told to get the
+    newest 24, not moved to 22 -- and onto `SECURITY_MOVE_TO` when it has none.
+    Homebrew is the exception, both ways: it installs whatever its formula
+    holds, and it shipped the fixed releases days after Node did (node 26.12.0,
+    node@22 22.23.3 and node@24 24.22.0 when this was written). So it is not
+    told that `brew upgrade node` fixes anything; it is told to check.
+    """
+    parsed = parse_version(version)
+    line = parsed[0] if parsed and parsed[0] in NODE_SECURITY_FLOORS else SECURITY_MOVE_TO
+    manager = manager_of(path)
+    command = upgrade_command(manager, line)
+    if manager in (None, "brew", "brew-keg"):
+        return (f"{command}, if Homebrew's node is now {NODE_SECURITY_TEXT} "
+                f"(`brew info node` says; it lagged Node's release). If not, install "
+                f"Node {line} from https://nodejs.org")
+    return command
 
 
 def _classify(path: str | None, version: str | None) -> str:
