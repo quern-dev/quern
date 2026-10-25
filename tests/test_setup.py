@@ -725,6 +725,18 @@ class TestCheckNode:
         assert result.status == CheckStatus.WARNING
         assert "end of life" in result.detail
 
+    def test_a_place_that_could_not_tell_gets_no_security_finding(self):
+        """A timed-out version check is UNKNOWN, not broken or old, and so
+        not unfixed either."""
+        from server.lifecycle import node_env
+
+        sites = _sites()
+        sites[1] = node_env.NodeSite("login shell", "someone", node_env.UNKNOWN,
+                                     "/x/login/node", None, detail="timed out")
+        result = check_node(sites)
+        assert "CVE-2026-111497" not in result.message
+        assert "CVE-2026-111497" not in (result.detail or "")
+
     def test_a_fixed_node_on_every_line_is_ok(self):
         for version in ("v22.23.4", "v24.22.1", "v26.12.1", "v27.0.0"):
             assert check_node(_sites(here=("ok", version))).status == CheckStatus.OK, version
