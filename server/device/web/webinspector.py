@@ -249,6 +249,23 @@ def _mtime(path: str) -> float:
         return 0.0
 
 
+async def _service_over(service_class: Any, sock: socket.socket) -> Any:
+    """A pymobiledevice3 ServiceConnection over a connected socket (#551).
+
+    11.43.0 rewrote the class: the constructor takes a stream reader and writer,
+    and a raw socket goes through `await ServiceConnection.from_socket(sock)`,
+    which takes ownership of it. Before that, `ServiceConnection(sock)` was the
+    way. The methods used afterwards -- `send_plist`, `recv_plist`, `close` --
+    are async and the same in both, so construction is the only difference.
+    Chosen by what the class has, not by version number: pymobiledevice3
+    ships several releases a week.
+    """
+    from_socket = getattr(service_class, "from_socket", None)
+    if from_socket is not None:
+        return await from_socket(sock)
+    return service_class(sock)
+
+
 class SimulatorWebInspector:
     """A connection to one simulator's Web Inspector channel.
 
@@ -318,7 +335,19 @@ class SimulatorWebInspector:
                 "pymobiledevice3>=8.0 is required for webview inspection"
             ) from exc
 
-        self._service = ServiceConnection(sock)
+        try:
+            self._service = await _service_over(ServiceConnection, sock)
+        except Exception as exc:
+            # from_socket closes the socket itself when it fails; the old
+            # constructor never took it. Either way it is no longer ours to
+            # keep, and closing a closed one is harmless.
+            self._sock = None
+            with contextlib.suppress(Exception):
+                if sock.fileno() != -1:
+                    sock.close()
+            raise WebInspectorError(
+                f"could not open a service connection on {chosen}: {exc}"
+            ) from exc
         await self._send(
             _SEL_REPORT_IDENTIFIER,
             {"WIRConnectionIdentifierKey": self._connection_id},
