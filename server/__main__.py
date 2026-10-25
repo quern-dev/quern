@@ -112,9 +112,10 @@ def python_deps_state(project_root: Path | None = None) -> dict:
 
     left = security_pins.unfixed_in_venv(project_root / ".venv")
     if left:
-        found = ", ".join(f"{name} {version}" for name, version, _, _ in left)
+        found = ", ".join(f"{name} {version or 'not installed'}"
+                          for name, version, _, _ in left)
         return {"applicable": True, "in_sync": False,
-                "reason": f"{found} lacks a security fix ({left[0][3]})"}
+                "reason": f"{found}: needs a security fix ({left[0][3]})"}
     return {"applicable": True, "in_sync": True, "reason": "up to date"}
 
 

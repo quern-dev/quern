@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import re
 import subprocess
-from importlib import metadata
 from pathlib import Path
 
 from packaging.version import InvalidVersion, Version
@@ -64,40 +63,31 @@ def _below(installed: str, fixed: str) -> bool:
         return True
 
 
-def unfixed(version_of=metadata.version) -> list[tuple[str, str | None, str, str]]:
-    """Each override that is not installed at its fixed version in this
-    interpreter: (name, installed version or None, fixed version, why).
+def unfixed_in_venv(venv: Path) -> list[tuple[str, str | None, str, str]]:
+    """Each override not installed at its fixed version in the venv at `venv`:
+    (name, installed version or None, fixed version, why). Read from its
+    `*.dist-info` directories, with no pip and no import, so it can answer for
+    a venv other than the running interpreter's, and cheaply enough for the
+    start path.
 
-    A package that is not installed at all is listed with None: it is a
-    dependency of quern's, so its absence is a broken venv, not a safe one.
+    Missing counts as unfixed (CodeRabbit, #546): a venv with
+    a current stamp and no Brotli would otherwise never get one. A directory
+    with no site-packages at all is not a venv anyone installed into, so it has
+    nothing to report.
     """
-    out = []
-    for name, fixed, why in OVERRIDES:
-        try:
-            installed = version_of(name)
-        except metadata.PackageNotFoundError:
-            out.append((name, None, fixed, why))
-            continue
-        if _below(installed, fixed):
-            out.append((name, installed, fixed, why))
-    return out
-
-
-def unfixed_in_venv(venv: Path) -> list[tuple[str, str, str, str]]:
-    """The same answer as `unfixed`, for the venv at `venv`, read from its
-    `*.dist-info` directories rather than by importing anything.
-
-    For the start path's cheap "is the venv current?" check, which runs in
-    whatever interpreter asked and must not run pip. Unlike `unfixed`, a
-    package that is not there at all is not listed: a missing dependency is
-    the install's business, and the stamp already covers it.
-    """
+    sites = list(venv.glob("lib/python*/site-packages"))
+    if not sites:
+        return []
+    infos = [info for site in sites for info in site.glob("*.dist-info")]
     out = []
     for name, fixed, why in OVERRIDES:
         key = re.sub(r"[-_.]+", "_", name).lower()
-        for info in venv.glob("lib/python*/site-packages/*.dist-info"):
+        found = None
+        for info in infos:
             dist, _, version = info.name[: -len(".dist-info")].partition("-")
-            if re.sub(r"[-_.]+", "_", dist).lower() == key and _below(version, fixed):
-                out.append((name, version, fixed, why))
+            if re.sub(r"[-_.]+", "_", dist).lower() == key:
+                found = version
                 break
+        if found is None or _below(found, fixed):
+            out.append((name, found, fixed, why))
     return out
