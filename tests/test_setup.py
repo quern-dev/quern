@@ -295,13 +295,27 @@ def _venv_ok(cmd, **kwargs):
 
 
 class TestCreateVenv:
-    def _create(self, tmp_path, pip, python=None, venv=_venv_ok):
+    def _create(self, tmp_path, pip, python=None, venv=_venv_ok, pins=None):
+        pins = pins if pins is not None else []
         with (
             patch("server.lifecycle.setup.subprocess.run", side_effect=venv),
             patch("server.lifecycle.setup.subprocess.Popen", pip),
             patch("server.lifecycle.setup._find_best_python", return_value="/usr/bin/python3"),
+            patch("server.lifecycle.security_pins.apply",
+                  side_effect=lambda p, cwd=None: pins.append(p)),
         ):
             return create_venv(tmp_path, python=python)
+
+    def test_the_security_overrides_follow_the_install(self, tmp_path):
+        """mitmproxy's cap puts Brotli 1.2.0 in; 1.2.1 goes on after it."""
+        pins = []
+        assert self._create(tmp_path, _FakePip(), pins=pins) is True
+        assert pins == [str(tmp_path / ".venv" / "bin" / "pip")]
+
+    def test_no_override_after_a_failed_install(self, tmp_path):
+        pins = []
+        assert self._create(tmp_path, _FakePip(returncode=1), pins=pins) is False
+        assert pins == []
 
     def test_success(self, tmp_path):
         pip = _FakePip()
@@ -681,7 +695,7 @@ def _sites(**status_by_place):
             "app": "the Quern app"}
     out = []
     for key, place in keys.items():
-        status, version = status_by_place.get(key, (node_env.OK, "v22.21.0"))
+        status, version = status_by_place.get(key, (node_env.OK, "v22.23.4"))
         path = None if status == node_env.MISSING else f"/x/{key}/node"
         out.append(node_env.NodeSite(place, "someone", status, path, version))
     return out
@@ -695,6 +709,25 @@ class TestCheckNode:
         result = check_node(_sites())
         assert result.status == CheckStatus.OK
         assert "v22" in result.message
+
+    def test_a_node_without_the_brotli_fix_is_a_warning_with_its_command(self):
+        """CVE-2026-111497: a node that runs the wrapper but lacks the fix is
+        said, with the upgrade, and never fails setup -- an update must not
+        refuse over it."""
+        result = check_node(_sites(gui=("ok", "v22.22.2")))
+        assert result.status == CheckStatus.WARNING
+        assert "CVE-2026-111497" in result.message and "GUI apps" in result.message
+        assert "this command" not in result.message.split("CVE-2026-111497")[1]
+        assert "22.23.4" in result.detail and "Run: " in result.detail
+
+    def test_an_end_of_life_line_is_a_warning_too(self):
+        result = check_node(_sites(here=("ok", "v23.11.0")))
+        assert result.status == CheckStatus.WARNING
+        assert "end of life" in result.detail
+
+    def test_a_fixed_node_on_every_line_is_ok(self):
+        for version in ("v22.23.4", "v24.22.1", "v26.12.1", "v27.0.0"):
+            assert check_node(_sites(here=("ok", version))).status == CheckStatus.OK, version
 
     def test_not_installed_anywhere_is_offered_a_fix(self):
         """Genuinely absent: installing one is the right offer."""

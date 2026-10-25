@@ -64,7 +64,7 @@ Other things you can ask:
 
 - macOS
 - Python 3.11+
-- Node.js 22.19+
+- Node.js 22.19+ to run; 22.23.4+, 24.22.1+ or 26.12.1+ for the fix to CVE-2026-111497 (quern warns on anything older)
 - For iOS: Xcode and Command Line Tools
 - For Android: Android Studio or `adb` via Homebrew
 

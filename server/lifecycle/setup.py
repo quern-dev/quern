@@ -1690,6 +1690,15 @@ def create_venv(project_root: Path, python: str | None = None) -> bool:
         _print_log_tail(log_path)
         return False
 
+    # Versions newer than a dependency's own cap (server.lifecycle.security_pins).
+    # Not a failed venv when it fails: everything works, and setup's Brotli
+    # check, run next inside the venv, reports the version that is left.
+    from server.lifecycle import security_pins
+
+    problem = security_pins.apply(pip, cwd=str(project_root))
+    if problem:
+        print(f"    Could not install {', '.join(security_pins.requirements())}: {problem}")
+
     print("    Python dependencies installed.")
     return True
 
@@ -1985,6 +1994,30 @@ def check_mitmdump() -> CheckResult:
     )
 
 
+def check_security_pins(version_of=None) -> CheckResult:
+    """The packages installed past a dependency's own cap, at their fixed
+    versions (server.lifecycle.security_pins). A WARNING when not: everything
+    still works, and refusing setup over it would leave an install that cannot
+    be repaired by running setup."""
+    from server.lifecycle import security_pins
+
+    left = (security_pins.unfixed(version_of) if version_of
+            else security_pins.unfixed())
+    if not left:
+        return CheckResult(name="Security fixes", status=CheckStatus.OK,
+                           message=", ".join(security_pins.requirements()))
+    pip = Path(sys.prefix) / "bin" / "pip"
+    found = ", ".join(f"{name} {installed or 'not installed'}" for name, installed, _, _ in left)
+    return CheckResult(
+        name="Security fixes",
+        status=CheckStatus.WARNING,
+        message=f"{found}; needs " + ", ".join(f"{n} {fixed}+" for n, _, fixed, _ in left),
+        detail="\n".join(f"{name}: {why}" for name, _, _, why in left)
+               + f"\nInstall: {pip} install --no-deps "
+               + " ".join(f"'{r}'" for r in security_pins.requirements()),
+    )
+
+
 def _probe_node_sites() -> list | None:
     """Every place's node, or None when the probe itself failed.
 
@@ -2185,7 +2218,11 @@ def check_node(sites: list | None = None) -> CheckResult:
         )
 
     problems = [site for site in sites if site.status not in (node_env.OK, node_env.SKIPPED)]
-    if not problems:
+    # A node that runs the wrapper but lacks the Brotli fix: a WARNING like the
+    # rest, never a failure (see node_env.NODE_SECURITY_FLOORS).
+    unfixed = [(site, gap) for site in sites
+               if site.status == node_env.OK and (gap := node_env.security_gap(site.version))]
+    if not problems and not unfixed:
         return CheckResult(name="Node.js", status=CheckStatus.OK,
                            message=here.version or "installed")
 
@@ -2194,13 +2231,24 @@ def check_node(sites: list | None = None) -> CheckResult:
         found = f"{site.version or 'no version'} at {site.path}" if site.path else site.status
         lines.append(f"{site.place} ({site.used_by}): {found}")
         lines.append(f"  {node_env.fix_for(site, sites)}")
+    for site, gap in unfixed:
+        lines.append(f"{site.place} ({site.used_by}): {site.version} at {site.path}")
+        lines.append(f"  {gap}. Run: "
+                     f"{node_env.upgrade_command(node_env.manager_of(site.path))}")
     lines.append(f"Details: {quern_cmd()} doctor")
-    names = ", ".join(site.place for site in problems)
+    parts = []
+    if problems:
+        names = ", ".join(site.place for site in problems)
+        parts.append(f"needs attention for: {names} "
+                     f"(the MCP wrapper needs Node {node_env.MIN_NODE_TEXT}+)")
+    if unfixed:
+        names = ", ".join(site.place for site, _ in unfixed)
+        parts.append(f"no fix for {node_env.NODE_ADVISORY} for: {names} "
+                     f"(use Node {node_env.NODE_SECURITY_TEXT})")
     return CheckResult(
         name="Node.js",
         status=CheckStatus.WARNING,
-        message=f"{here.version or 'installed'} here; needs attention for: {names} "
-                f"(the MCP wrapper needs Node {node_env.MIN_NODE_TEXT}+)",
+        message=f"{here.version or 'installed'} here; " + "; ".join(parts),
         detail="\n".join(lines),
     )
 
@@ -3305,6 +3353,7 @@ def run_setup(assume_yes: bool = False, after_update: bool | None = None) -> int
     # ── Core dependencies ──
 
     report.add(check_mitmdump())
+    report.add(check_security_pins())
 
     node_sites = _probe_node_sites()
     node_result = check_node(node_sites)

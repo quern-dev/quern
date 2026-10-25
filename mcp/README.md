@@ -5,7 +5,7 @@ MCP (Model Context Protocol) server that wraps the Quern HTTP API, letting AI ag
 ## Prerequisites
 
 - The Python Quern must be running (`quern start`)
-- Node.js 22.19+
+- Node.js 22.19+ to run; 22.23.4+, 24.22.1+ or 26.12.1+ for the fix to CVE-2026-111497 (quern warns on anything older)
 
 ## Usage
 
