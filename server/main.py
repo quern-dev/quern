@@ -1870,27 +1870,9 @@ def _report_python_deps(fix: bool) -> bool | None:
 
     if state["in_sync"]:
         print("  ✓ in sync with pyproject.toml")
-        # In sync and still on a version with a known hole: the overrides go
-        # on after each install, so a venv can match pyproject.toml without
-        # them (server.lifecycle.security_pins).
-        from server.lifecycle import security_pins
-
-        left = security_pins.unfixed()
-        if not left:
-            if fix:
-                print("    --fix: nothing to do")
-            return None
-        for name, installed, fixed, why in left:
-            print(f"  ✗ {name} {installed or 'not installed'}, needs {fixed}+ — {why}")
-        if not fix:
-            print("    Repair with: quern doctor --fix")
-            return None
-        problem = security_pins.apply(str(Path(sys.prefix) / "bin" / "pip"))
-        if problem is None and not security_pins.unfixed():
-            print("  ✓ repaired")
-            return True
-        print(f"  ✗ repair failed{': ' + problem if problem else ''}")
-        return False
+        if fix:
+            print("    --fix: nothing to do")
+        return None
 
     print(f"  ✗ out of sync — {state['reason']}")
     if not fix:

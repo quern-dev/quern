@@ -64,51 +64,103 @@ def test_setup_says_when_the_fix_is_missing():
     result = setup.check_security_pins(_versions(Brotli="1.2.0"))
     assert result.status == CheckStatus.WARNING
     assert "Brotli 1.2.0" in result.message and "1.2.1+" in result.message
-    assert "CVE-2026-111497" in result.detail and "--no-deps" in result.detail
+    assert "CVE-2026-111497" in result.detail and "doctor --fix" in result.detail
 
 
 def test_setup_is_ok_when_the_fix_is_in():
     assert setup.check_security_pins(_versions(Brotli="1.2.1")).status == CheckStatus.OK
 
 
-class TestDoctor:
-    """A venv can match pyproject.toml and still be on Brotli 1.2.0: the
-    override goes on after the install, not through it."""
+class TestApplyFailures:
+    """Every way pip can fail is a message, never a crash on the start path."""
 
-    @pytest.fixture
-    def in_sync(self, monkeypatch):
-        monkeypatch.setattr("server.__main__.python_deps_state",
-                            lambda *a: {"applicable": True, "in_sync": True, "reason": ""})
+    def test_a_pip_that_is_not_executable(self, tmp_path):
+        pip = tmp_path / "pip"
+        pip.write_text("#!/bin/sh\nexit 0\n")      # no exec bit: PermissionError
+        assert security_pins.apply(str(pip))
 
-    def test_says_so_and_how_to_repair(self, in_sync, monkeypatch, capsys):
-        from server.main import _report_python_deps
-        monkeypatch.setattr(security_pins, "unfixed",
-                            lambda *a: [("Brotli", "1.2.0", "1.2.1", "CVE-2026-111497")])
-        monkeypatch.setattr(security_pins, "apply", lambda *a, **k: pytest.fail("read-only"))
-        assert _report_python_deps(fix=False) is None
-        out = capsys.readouterr().out
-        assert "Brotli 1.2.0, needs 1.2.1+" in out and "doctor --fix" in out
+    def test_a_pip_that_hangs(self, tmp_path):
+        pip = tmp_path / "pip"
+        pip.write_text("#!/bin/sh\nsleep 5\n")
+        pip.chmod(0o755)
+        assert security_pins.apply(str(pip), timeout=1)
 
-    def test_fix_applies_and_checks_it_took(self, in_sync, monkeypatch):
-        from server.main import _report_python_deps
-        state = {"left": [("Brotli", "1.2.0", "1.2.1", "x")]}
-        monkeypatch.setattr(security_pins, "unfixed", lambda *a: state["left"])
+    def test_an_error_on_stdout_only_is_still_named(self, tmp_path):
+        pip = tmp_path / "pip"
+        pip.write_text("#!/bin/sh\necho 'no matching distribution'\nexit 1\n")
+        pip.chmod(0o755)
+        assert security_pins.apply(str(pip)) == "no matching distribution"
 
-        def apply(*a, **k):
-            state["left"] = []
-        monkeypatch.setattr(security_pins, "apply", apply)
-        assert _report_python_deps(fix=True) is True
 
-    def test_fix_that_did_not_take_is_a_failure(self, in_sync, monkeypatch):
-        """pip said yes and the version is still old: not repaired."""
-        from server.main import _report_python_deps
-        monkeypatch.setattr(security_pins, "unfixed",
-                            lambda *a: [("Brotli", "1.2.0", "1.2.1", "x")])
-        monkeypatch.setattr(security_pins, "apply", lambda *a, **k: None)
-        assert _report_python_deps(fix=True) is False
+def _venv_with(tmp_path, *dists):
+    site = tmp_path / ".venv" / "lib" / "python3.12" / "site-packages"
+    site.mkdir(parents=True)
+    for d in dists:
+        (site / f"{d}.dist-info").mkdir()
+    return tmp_path / ".venv"
 
-    def test_nothing_to_say_when_fixed(self, in_sync, monkeypatch, capsys):
-        from server.main import _report_python_deps
-        monkeypatch.setattr(security_pins, "unfixed", lambda *a: [])
-        assert _report_python_deps(fix=False) is None
-        assert "Brotli" not in capsys.readouterr().out
+
+class TestTheStartPathSeesIt:
+    """The blocker the review found: `git pull` or a re-run install.sh keeps a
+    venv whose stamp is current, so the start path skipped and the override
+    never ran. An unfixed Brotli in the venv now reads as out of sync."""
+
+    @pytest.mark.parametrize("dist, left", [
+        ("brotli-1.2.0", True), ("Brotli-1.2.0", True), ("brotli-1.2.0rc1", True),
+        ("brotli-1.2.1", False), ("brotli-1.10.0", False),
+    ])
+    def test_reads_the_venvs_own_metadata(self, tmp_path, dist, left):
+        venv = _venv_with(tmp_path, "mitmproxy-12.3.0", dist)
+        assert bool(security_pins.unfixed_in_venv(venv)) is left
+
+    def test_a_venv_without_it_is_not_this_checks_business(self, tmp_path):
+        assert security_pins.unfixed_in_venv(_venv_with(tmp_path, "mitmproxy-12.3.0")) == []
+
+    def test_a_current_stamp_with_an_unfixed_brotli_is_out_of_sync(self, tmp_path):
+        from server.__main__ import DEPS_STAMP_NAME, python_deps_state
+
+        venv = _venv_with(tmp_path, "brotli-1.2.0")
+        (venv / "bin").mkdir()
+        (venv / "bin" / "pip").write_text("")
+        (tmp_path / "pyproject.toml").write_text("")
+        (venv / DEPS_STAMP_NAME).touch()          # newer than pyproject.toml
+        state = python_deps_state(tmp_path)
+        assert state["in_sync"] is False and "Brotli 1.2.0" in state["reason"]
+
+
+class TestSetupApplies:
+    def test_setup_installs_it_when_missing(self, monkeypatch):
+        installed = {"Brotli": "1.2.0"}
+        monkeypatch.setattr(security_pins, "apply",
+                            lambda pip, **k: installed.update(Brotli="1.2.1"))
+        result = setup.check_security_pins(_versions_live(installed), apply=True)
+        assert result.status == CheckStatus.OK
+
+    def test_a_failed_install_is_said(self, monkeypatch):
+        monkeypatch.setattr(security_pins, "apply", lambda pip, **k: "no network")
+        result = setup.check_security_pins(_versions(Brotli="1.2.0"), apply=True)
+        assert result.status == CheckStatus.WARNING and "no network" in result.detail
+
+    def test_setup_runs_the_check(self):
+        """Removing the row from setup's report would leave nothing that says
+        a venv is still on 1.2.0."""
+        import inspect
+        assert "check_security_pins(apply=True)" in inspect.getsource(setup.run_setup)
+
+
+def _versions_live(installed):
+    def version_of(name):
+        return installed[name]
+    return version_of
+
+
+def test_doctor_names_an_unfixed_node(monkeypatch, capsys):
+    from server.lifecycle import node_env
+    from server.main import _report_node
+
+    site = node_env.NodeSite("this command", "x", node_env.OK, "/n/node", "v22.22.2")
+    monkeypatch.setattr(node_env, "probe", lambda: [site])
+    monkeypatch.setattr(node_env, "manager_of", lambda path: "fnm")
+    _report_node()
+    out = capsys.readouterr().out
+    assert "security: Node 22.22.2 lacks the fix" in out and "fnm install 22" in out
