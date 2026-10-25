@@ -1994,24 +1994,29 @@ def check_mitmdump() -> CheckResult:
     )
 
 
-def check_security_pins(version_of=None, *, apply: bool = False) -> CheckResult:
+def check_security_pins(venv: Path | None, *, apply: bool = False) -> CheckResult:
     """The packages installed past a dependency's own cap, at their fixed
-    versions (server.lifecycle.security_pins), installing them first when
-    `apply` is set and they are not. A WARNING when they are still not:
-    everything works, and refusing setup over it would leave an install that
-    cannot be repaired by running setup."""
+    versions (server.lifecycle.security_pins), in quern's own venv -- installing
+    them first when `apply` is set and they are not. A WARNING when they are
+    still not: everything works, and refusing setup over it would leave an
+    install that cannot be repaired by running setup.
+
+    The venv is named rather than read from this interpreter: setup run from a
+    developer's own active venv does not re-exec, and checking (or repairing)
+    that one said OK while quern's still held the hole (CodeRabbit, #546).
+    """
     from server.lifecycle import security_pins
 
-    def left_now():
-        return security_pins.unfixed(version_of) if version_of else security_pins.unfixed()
-
-    pip = Path(sys.prefix) / "bin" / "pip"
-    left = left_now()
+    pip = venv / "bin" / "pip" if venv else None
+    if not pip or not pip.exists():
+        return CheckResult(name="Security fixes", status=CheckStatus.SKIPPED,
+                           message="no quern venv to check")
+    left = security_pins.unfixed_in_venv(venv)
     problem = None
     if left and apply:
         print(f"    Installing {', '.join(security_pins.requirements())} (security fix)...")
         problem = security_pins.apply(str(pip))
-        left = left_now()
+        left = security_pins.unfixed_in_venv(venv)
     if not left:
         return CheckResult(name="Security fixes", status=CheckStatus.OK,
                            message=", ".join(security_pins.requirements()))
@@ -3363,7 +3368,8 @@ def run_setup(assume_yes: bool = False, after_update: bool | None = None) -> int
     # Applied here as well as after each install: setup run on a venv it did
     # not build (install.sh keeps one; a `git pull`) is the one way in that no
     # install step covers (server.lifecycle.security_pins).
-    report.add(check_security_pins(apply=True))
+    report.add(check_security_pins(project_root / ".venv" if project_root else None,
+                                   apply=True))
 
     node_sites = _probe_node_sites()
     node_result = check_node(node_sites)

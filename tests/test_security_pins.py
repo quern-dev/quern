@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import stat
-from importlib import metadata
 
 import pytest
 
@@ -11,30 +10,8 @@ from server.lifecycle import security_pins, setup
 from server.lifecycle.setup import CheckStatus
 
 
-def _versions(**installed):
-    def version_of(name):
-        if name not in installed:
-            raise metadata.PackageNotFoundError(name)
-        return installed[name]
-    return version_of
-
-
 def test_brotli_is_pinned_to_the_fixed_release():
     assert security_pins.requirements() == ["Brotli>=1.2.1"]
-
-
-@pytest.mark.parametrize("installed, left", [
-    ("1.2.0", True), ("1.1.0", True), ("1.0.9", True),
-    ("1.2.1", False), ("1.2.10", False), ("1.10.0", False), ("1.3.0", False), ("2.0", False),
-])
-def test_unfixed_compares_versions_as_numbers(installed, left):
-    assert bool(security_pins.unfixed(_versions(Brotli=installed))) is left
-
-
-def test_a_missing_package_is_unfixed_not_safe():
-    """It is a dependency of quern's; absent is a broken venv, not a safe one."""
-    assert security_pins.unfixed(_versions()) == [
-        ("Brotli", None, "1.2.1", security_pins.OVERRIDES[0][2])]
 
 
 def _fake_pip(tmp_path, code):
@@ -58,17 +35,6 @@ def test_apply_reports_pips_failure(tmp_path):
 
 def test_apply_reports_a_pip_that_cannot_run(tmp_path):
     assert security_pins.apply(str(tmp_path / "no-such-pip"))
-
-
-def test_setup_says_when_the_fix_is_missing():
-    result = setup.check_security_pins(_versions(Brotli="1.2.0"))
-    assert result.status == CheckStatus.WARNING
-    assert "Brotli 1.2.0" in result.message and "1.2.1+" in result.message
-    assert "CVE-2026-111497" in result.detail and "doctor --fix" in result.detail
-
-
-def test_setup_is_ok_when_the_fix_is_in():
-    assert setup.check_security_pins(_versions(Brotli="1.2.1")).status == CheckStatus.OK
 
 
 class TestApplyFailures:
@@ -113,8 +79,16 @@ class TestTheStartPathSeesIt:
         venv = _venv_with(tmp_path, "mitmproxy-12.3.0", dist)
         assert bool(security_pins.unfixed_in_venv(venv)) is left
 
-    def test_a_venv_without_it_is_not_this_checks_business(self, tmp_path):
-        assert security_pins.unfixed_in_venv(_venv_with(tmp_path, "mitmproxy-12.3.0")) == []
+    def test_a_venv_without_it_is_unfixed(self, tmp_path):
+        """CodeRabbit, #546: a current stamp and no Brotli at all must not read
+        as safe, or the start path never installs one."""
+        venv = _venv_with(tmp_path, "mitmproxy-12.3.0")
+        assert security_pins.unfixed_in_venv(venv) == [
+            ("Brotli", None, "1.2.1", security_pins.OVERRIDES[0][2])]
+
+    def test_a_directory_nobody_installed_into_has_nothing_to_report(self, tmp_path):
+        (tmp_path / ".venv" / "bin").mkdir(parents=True)
+        assert security_pins.unfixed_in_venv(tmp_path / ".venv") == []
 
     def test_a_current_stamp_with_an_unfixed_brotli_is_out_of_sync(self, tmp_path):
         from server.__main__ import DEPS_STAMP_NAME, python_deps_state
@@ -128,32 +102,6 @@ class TestTheStartPathSeesIt:
         assert state["in_sync"] is False and "Brotli 1.2.0" in state["reason"]
 
 
-class TestSetupApplies:
-    def test_setup_installs_it_when_missing(self, monkeypatch):
-        installed = {"Brotli": "1.2.0"}
-        monkeypatch.setattr(security_pins, "apply",
-                            lambda pip, **k: installed.update(Brotli="1.2.1"))
-        result = setup.check_security_pins(_versions_live(installed), apply=True)
-        assert result.status == CheckStatus.OK
-
-    def test_a_failed_install_is_said(self, monkeypatch):
-        monkeypatch.setattr(security_pins, "apply", lambda pip, **k: "no network")
-        result = setup.check_security_pins(_versions(Brotli="1.2.0"), apply=True)
-        assert result.status == CheckStatus.WARNING and "no network" in result.detail
-
-    def test_setup_runs_the_check(self):
-        """Removing the row from setup's report would leave nothing that says
-        a venv is still on 1.2.0."""
-        import inspect
-        assert "check_security_pins(apply=True)" in inspect.getsource(setup.run_setup)
-
-
-def _versions_live(installed):
-    def version_of(name):
-        return installed[name]
-    return version_of
-
-
 def test_doctor_names_an_unfixed_node(monkeypatch, capsys):
     from server.lifecycle import node_env
     from server.main import _report_node
@@ -164,3 +112,52 @@ def test_doctor_names_an_unfixed_node(monkeypatch, capsys):
     _report_node()
     out = capsys.readouterr().out
     assert "security: Node 22.22.2 lacks the fix" in out and "fnm install 22" in out
+
+
+class TestSetupChecksQuernsOwnVenv:
+    """CodeRabbit, #546: setup run from another active venv does not re-exec,
+    so the check must name quern's venv rather than read this interpreter."""
+
+    def _venv(self, tmp_path, *dists):
+        venv = _venv_with(tmp_path, *dists)
+        (venv / "bin").mkdir()
+        (venv / "bin" / "pip").write_text("")
+        return venv
+
+    def test_reports_the_hole_in_querns_venv(self, tmp_path):
+        result = setup.check_security_pins(self._venv(tmp_path, "brotli-1.2.0"))
+        assert result.status == CheckStatus.WARNING
+        assert "Brotli 1.2.0" in result.message and "1.2.1+" in result.message
+        assert "CVE-2026-111497" in result.detail and "doctor --fix" in result.detail
+
+    def test_repairs_querns_venv_with_its_own_pip(self, tmp_path, monkeypatch):
+        venv = self._venv(tmp_path, "brotli-1.2.0")
+        used = []
+
+        def apply(pip, **_k):
+            used.append(pip)
+            site = next(venv.glob("lib/python*/site-packages"))
+            (site / "brotli-1.2.0.dist-info").rename(site / "brotli-1.2.1.dist-info")
+        monkeypatch.setattr(security_pins, "apply", apply)
+        result = setup.check_security_pins(venv, apply=True)
+        assert result.status == CheckStatus.OK
+        assert used == [str(venv / "bin" / "pip")]
+
+    def test_a_failed_repair_is_said(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(security_pins, "apply", lambda pip, **k: "no network")
+        result = setup.check_security_pins(self._venv(tmp_path, "brotli-1.2.0"), apply=True)
+        assert result.status == CheckStatus.WARNING and "no network" in result.detail
+
+    def test_ok_when_fixed(self, tmp_path):
+        result = setup.check_security_pins(self._venv(tmp_path, "brotli-1.2.1"))
+        assert result.status == CheckStatus.OK
+
+    def test_no_venv_is_skipped_not_ok(self, tmp_path):
+        """Could not check is not checked: SKIPPED, never OK."""
+        assert setup.check_security_pins(None).status == CheckStatus.SKIPPED
+        assert setup.check_security_pins(tmp_path / ".venv").status == CheckStatus.SKIPPED
+
+    def test_setup_runs_the_check_on_querns_venv(self):
+        import inspect
+        source = inspect.getsource(setup.run_setup)
+        assert 'check_security_pins(project_root / ".venv"' in source and "apply=True" in source
