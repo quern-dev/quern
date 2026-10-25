@@ -294,10 +294,16 @@ check_brotli() {   # $1 = the installed tree
   local dist version rc found=0 failed=0 seen=""
   # Every matching directory, as unfixed_in_venv reads them: an interrupted
   # upgrade can leave 1.2.0's beside 1.2.1's (CodeRabbit, #547).
-  for dist in "$1"/.venv/lib/python*/site-packages/[Bb]rotli-*.dist-info; do
+  # Any casing: installed metadata has not always been normalised, and a
+  # stale BROTLI-1.2.0 beside brotli-1.2.1 must not pass (CodeRabbit, #548).
+  local name base
+  for dist in "$1"/.venv/lib/python*/site-packages/*.dist-info; do
     [[ -d "$dist" ]] || continue
+    base="${dist##*/}"; base="${base%.dist-info}"
+    name="$(printf '%s' "${base%%-*}" | tr '[:upper:]' '[:lower:]')"
+    [[ "$name" == "brotli" ]] || continue
     found=1
-    version="${dist##*/}"; version="${version#[Bb]rotli-}"; version="${version%.dist-info}"
+    version="${base#*-}"
     # Python's ordering, not sort -V: 1.2.1rc1 is before 1.2.1 there, and
     # after it for sort. Exit 0 fixed, 10 below; anything else -- 1 is an
     # exception, such as a version packaging cannot read -- is "could not

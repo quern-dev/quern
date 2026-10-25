@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import stat
+from pathlib import Path
 
 import pytest
 
@@ -167,3 +168,90 @@ class TestSetupChecksQuernsOwnVenv:
         import inspect
         source = inspect.getsource(setup.run_setup)
         assert 'check_security_pins(project_root / ".venv"' in source and "apply=True" in source
+
+
+class TestStaleMetadataRepair:
+    """CodeRabbit, #548: 1.2.0's metadata beside 1.2.1's left pip satisfied and
+    the check unfixed, so `doctor --fix` could never clear it."""
+
+    def _venv(self, tmp_path, *versions):
+        site = tmp_path / ".venv" / "lib" / "python3.12" / "site-packages"
+        site.mkdir(parents=True)
+        for v in versions:
+            (site / f"brotli-{v}.dist-info").mkdir()
+        log = tmp_path / "pip.log"
+        pip = tmp_path / ".venv" / "bin" / "pip"
+        pip.parent.mkdir()
+        # Like pip: installing (or reinstalling) Brotli writes 1.2.1's metadata.
+        pip.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\n'
+                       f'mkdir -p "{site}/brotli-1.2.1.dist-info"\n')
+        pip.chmod(0o755)
+        return tmp_path / ".venv", str(pip), log, site
+
+    def test_stale_beside_fixed_is_reinstalled_then_removed(self, tmp_path):
+        venv, pip, log, site = self._venv(tmp_path, "1.2.0", "1.2.1")
+        assert security_pins.apply(pip) is None
+        calls = log.read_text().splitlines()
+        assert calls[0].split() == ["install", "--no-deps", "Brotli>=1.2.1"]
+        assert "--force-reinstall" in calls[1].split()
+        assert sorted(p.name for p in site.iterdir()) == ["brotli-1.2.1.dist-info"]
+        assert security_pins.unfixed_in_venv(venv) == []
+
+    def test_a_clean_venv_is_installed_once(self, tmp_path):
+        venv, pip, log, site = self._venv(tmp_path, "1.2.1")
+        assert security_pins.apply(pip) is None
+        assert len(log.read_text().splitlines()) == 1
+
+    def test_metadata_is_never_removed_without_a_fixed_one_beside_it(self, tmp_path):
+        """A pip that installed nothing leaves 1.2.0 alone: it is the only
+        record of what is there."""
+        venv, pip, log, site = self._venv(tmp_path, "1.2.0")
+        Path(pip).write_text(f'#!/bin/sh\necho "$@" >> "{log}"\n')
+        assert security_pins.apply(pip) is None
+        assert (site / "brotli-1.2.0.dist-info").is_dir()
+
+    def test_a_failed_reinstall_is_reported_and_removes_nothing(self, tmp_path):
+        venv, pip, log, site = self._venv(tmp_path, "1.2.0", "1.2.1")
+        Path(pip).write_text(
+            f'#!/bin/sh\necho "$@" >> "{log}"\n'
+            'case "$*" in *force-reinstall*) echo "no network" >&2; exit 1;; esac\n')
+        assert security_pins.apply(pip) == "no network"
+        assert (site / "brotli-1.2.0.dist-info").is_dir()
+
+
+class TestWithoutPackaging:
+    """The 0.24.2 rehearsal: create_venv runs in the base interpreter, which
+    has no `packaging`, and a module-level import of it failed every fresh
+    install. Run in a subprocess with `packaging` blocked, as a stock Python."""
+
+    def _run(self, code):
+        import subprocess
+        import sys
+        from pathlib import Path as P
+        root = P(__file__).resolve().parent.parent
+        # -I: no user site, no PYTHONPATH -- so the tree goes on sys.path
+        # first, ahead of the editable install, and packaging is blocked.
+        prelude = (f"import sys; sys.path.insert(0, {str(root)!r}); "
+                   "sys.modules['packaging'] = None; sys.modules['packaging.version'] = None\n")
+        return subprocess.run([sys.executable, "-I", "-c", prelude + code],
+                              cwd=root, capture_output=True, text=True, timeout=60)
+
+    def test_the_module_imports_and_applies(self, tmp_path):
+        pip = tmp_path / ".venv" / "bin" / "pip"
+        pip.parent.mkdir(parents=True)
+        pip.write_text("#!/bin/sh\nexit 0\n")
+        pip.chmod(0o755)
+        run = self._run("import server.lifecycle.security_pins as s\n"
+                        f"print(s.apply({str(pip)!r}))")
+        assert run.returncode == 0, run.stderr
+        assert run.stdout.strip() == "None"
+
+    @pytest.mark.parametrize("installed, below", [
+        ("1.2.0", True), ("1.2.1", False), ("1.2.10", False), ("1.10.0", False),
+        ("1.2", True), ("1.2.1rc1", True), ("1.2.0+local", True), ("garbage", True),
+    ])
+    def test_the_fallback_comparison(self, installed, below):
+        run = self._run("import server.lifecycle.security_pins as s\n"
+                        f"print(s._below({installed!r}, '1.2.1'))")
+        assert run.returncode == 0, run.stderr
+        assert run.stdout.strip() == str(below)
