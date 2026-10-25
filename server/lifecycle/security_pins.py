@@ -21,8 +21,6 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from packaging.version import InvalidVersion, Version
-
 #: (distribution, first fixed version, why). Each is installed at or above the
 #: version after every dependency install.
 OVERRIDES: tuple[tuple[str, str, str], ...] = (
@@ -96,7 +94,24 @@ def apply(pip: str, cwd: str | None = None, timeout: int = 300) -> str | None:
 
 def _below(installed: str, fixed: str) -> bool:
     """Whether `installed` is older than `fixed`. A version that cannot be read
-    counts as older: "could not tell" is not "fixed"."""
+    counts as older: "could not tell" is not "fixed".
+
+    `packaging` is imported here, not at the top: `create_venv` runs this in
+    the base interpreter, before quern's venv exists, and a stock Python has
+    no `packaging` -- the module-level import failed every fresh install (the
+    0.24.2 rehearsal). Without it, only a plain dotted release is compared;
+    anything else (a pre-release, a local build) reads as older, which costs
+    at most a reinstall.
+    """
+    try:
+        from packaging.version import InvalidVersion, Version
+    except ImportError:
+        if not re.fullmatch(r"\d+(\.\d+)*", installed):
+            return True
+        have = [int(x) for x in installed.split(".")]
+        want = [int(x) for x in fixed.split(".")]
+        width = max(len(have), len(want))
+        return have + [0] * (width - len(have)) < want + [0] * (width - len(want))
     try:
         return Version(installed) < Version(fixed)
     except InvalidVersion:
