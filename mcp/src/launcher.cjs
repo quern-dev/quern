@@ -45,7 +45,7 @@ var newestLine = 26;
 var lineFloor = SECURITY[have[0]];
 if (lineFloor ? below(have, lineFloor) : have[0] < newestLine) {
   process.stderr.write(
-    "quern-debug-mcp: warning: Node " + process.versions.node + " has no fix for " +
+    "quern-debug-mcp: warning: Node " + process.versions.node + " lacks the fix for " +
     "CVE-2026-111497 (Brotli decoder).\n" +
     "  Binary: " + process.execPath + "\n" +
     "  Upgrade to Node " + SECURITY_TEXT + "; `quern doctor` shows the command.\n"
