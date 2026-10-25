@@ -16,8 +16,12 @@ Brotli 1.2.1 itself (mitmproxy/mitmproxy#8514).
 
 from __future__ import annotations
 
+import re
 import subprocess
 from importlib import metadata
+from pathlib import Path
+
+from packaging.version import InvalidVersion, Version
 
 #: (distribution, first fixed version, why). Each is installed at or above the
 #: version after every dependency install.
@@ -51,14 +55,13 @@ def apply(pip: str, cwd: str | None = None, timeout: int = 300) -> str | None:
     return None
 
 
-def _version_tuple(text: str) -> tuple[int, ...]:
-    parts = []
-    for piece in text.split("."):
-        digits = "".join(ch for ch in piece if ch.isdigit())
-        if not digits:
-            break
-        parts.append(int(digits))
-    return tuple(parts)
+def _below(installed: str, fixed: str) -> bool:
+    """Whether `installed` is older than `fixed`. A version that cannot be read
+    counts as older: "could not tell" is not "fixed"."""
+    try:
+        return Version(installed) < Version(fixed)
+    except InvalidVersion:
+        return True
 
 
 def unfixed(version_of=metadata.version) -> list[tuple[str, str | None, str, str]]:
@@ -75,6 +78,26 @@ def unfixed(version_of=metadata.version) -> list[tuple[str, str | None, str, str
         except metadata.PackageNotFoundError:
             out.append((name, None, fixed, why))
             continue
-        if _version_tuple(installed) < _version_tuple(fixed):
+        if _below(installed, fixed):
             out.append((name, installed, fixed, why))
+    return out
+
+
+def unfixed_in_venv(venv: Path) -> list[tuple[str, str, str, str]]:
+    """The same answer as `unfixed`, for the venv at `venv`, read from its
+    `*.dist-info` directories rather than by importing anything.
+
+    For the start path's cheap "is the venv current?" check, which runs in
+    whatever interpreter asked and must not run pip. Unlike `unfixed`, a
+    package that is not there at all is not listed: a missing dependency is
+    the install's business, and the stamp already covers it.
+    """
+    out = []
+    for name, fixed, why in OVERRIDES:
+        key = re.sub(r"[-_.]+", "_", name).lower()
+        for info in venv.glob("lib/python*/site-packages/*.dist-info"):
+            dist, _, version = info.name[: -len(".dist-info")].partition("-")
+            if re.sub(r"[-_.]+", "_", dist).lower() == key and _below(version, fixed):
+                out.append((name, version, fixed, why))
+                break
     return out

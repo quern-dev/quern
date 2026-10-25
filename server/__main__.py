@@ -104,6 +104,17 @@ def python_deps_state(project_root: Path | None = None) -> dict:
     if pyproject.stat().st_mtime > stamp.stat().st_mtime:
         return {"applicable": True, "in_sync": False,
                 "reason": "pyproject.toml is newer than the last successful install"}
+    # A venv can match pyproject.toml and still hold a version with a known
+    # hole: the security overrides go on after the install, not through it, so
+    # a `git pull` or a re-run installer that keeps the venv never ran them
+    # (server.lifecycle.security_pins). Read from the venv's metadata, no pip.
+    from server.lifecycle import security_pins
+
+    left = security_pins.unfixed_in_venv(project_root / ".venv")
+    if left:
+        found = ", ".join(f"{name} {version}" for name, version, _, _ in left)
+        return {"applicable": True, "in_sync": False,
+                "reason": f"{found} lacks a security fix ({left[0][3]})"}
     return {"applicable": True, "in_sync": True, "reason": "up to date"}
 
 
@@ -208,7 +219,8 @@ def _ensure_python_deps(
     if problem:
         print("Error: could not install the security fixes "
               f"({', '.join(security_pins.requirements())}): {problem}")
-        print("  Quern will start; starting it again will retry.")
+        print("  Quern will start; starting it again will retry, and "
+              "`quern doctor --fix` shows the error if it keeps failing.")
         return failed()
 
     # Only on success — a failed install must not look done to the next start.

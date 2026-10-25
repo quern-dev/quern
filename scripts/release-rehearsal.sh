@@ -286,6 +286,23 @@ step "A git install updating from $PREV to $candidate_version"
 # subshell's exit status is the only way back. The first version of this script
 # did not do that, printed a ✗ and summarised "the rehearsal passed": the exact
 # defect it exists to catch, inside itself.
+# CVE-2026-111497: an update must end on the fixed Brotli. It is installed
+# after the project's own install, past mitmproxy's <=1.2.0 cap
+# (server/lifecycle/security_pins.py), so an update can succeed in every other
+# way and still leave 1.2.0 -- which reads exactly like a pass without this.
+check_brotli() {   # $1 = the installed tree
+  local dist version
+  dist="$(ls -d "$1"/.venv/lib/python*/site-packages/[Bb]rotli-*.dist-info 2>/dev/null | head -1 || true)"
+  version="${dist##*/}"; version="${version#[Bb]rotli-}"; version="${version%.dist-info}"
+  if [[ -z "$dist" ]]; then
+    bad "no Brotli in the venv at $1/.venv"
+  elif printf '1.2.1\n%s\n' "$version" | sort -V -C; then
+    ok "the venv has Brotli $version, with the CVE-2026-111497 fix"
+  else
+    bad "the venv has Brotli $version, below 1.2.1 (CVE-2026-111497)"
+  fi
+}
+
 case_git_update() {
   failures=0   # a subshell copy: a case reports only its own
   sb="$WORK/git-update"
@@ -332,6 +349,7 @@ case_git_update() {
   [[ "$landed" == "$candidate_version" ]] \
     && ok "the tree is $candidate_version" \
     || bad "the tree is ${landed:-nothing}, expected $candidate_version"
+  check_brotli "$sb/install"
 
   # The record every surface reads -- the CLI, the menu bar, the result file.
   # An update that says it worked and writes nothing here is the state #212
@@ -1372,6 +1390,7 @@ case_tarball_update() {
   [[ "$landed" == "$candidate_version" ]] \
     && ok "the install is $candidate_version" \
     || bad "the install is ${landed:-nothing}, expected $candidate_version"
+  check_brotli "$installed"
 
   # A release install must not need npm at start: the asset ships mcp/dist
   # already built, and the swap has to preserve that (#193).

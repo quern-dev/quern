@@ -1994,27 +1994,35 @@ def check_mitmdump() -> CheckResult:
     )
 
 
-def check_security_pins(version_of=None) -> CheckResult:
+def check_security_pins(version_of=None, *, apply: bool = False) -> CheckResult:
     """The packages installed past a dependency's own cap, at their fixed
-    versions (server.lifecycle.security_pins). A WARNING when not: everything
-    still works, and refusing setup over it would leave an install that cannot
-    be repaired by running setup."""
+    versions (server.lifecycle.security_pins), installing them first when
+    `apply` is set and they are not. A WARNING when they are still not:
+    everything works, and refusing setup over it would leave an install that
+    cannot be repaired by running setup."""
     from server.lifecycle import security_pins
 
-    left = (security_pins.unfixed(version_of) if version_of
-            else security_pins.unfixed())
+    def left_now():
+        return security_pins.unfixed(version_of) if version_of else security_pins.unfixed()
+
+    pip = Path(sys.prefix) / "bin" / "pip"
+    left = left_now()
+    problem = None
+    if left and apply:
+        print(f"    Installing {', '.join(security_pins.requirements())} (security fix)...")
+        problem = security_pins.apply(str(pip))
+        left = left_now()
     if not left:
         return CheckResult(name="Security fixes", status=CheckStatus.OK,
                            message=", ".join(security_pins.requirements()))
-    pip = Path(sys.prefix) / "bin" / "pip"
     found = ", ".join(f"{name} {installed or 'not installed'}" for name, installed, _, _ in left)
     return CheckResult(
         name="Security fixes",
         status=CheckStatus.WARNING,
         message=f"{found}; needs " + ", ".join(f"{n} {fixed}+" for n, _, fixed, _ in left),
         detail="\n".join(f"{name}: {why}" for name, _, _, why in left)
-               + f"\nInstall: {pip} install --no-deps "
-               + " ".join(f"'{r}'" for r in security_pins.requirements()),
+               + (f"\nThe install failed: {problem}" if problem else "")
+               + f"\nRepair with: {quern_cmd()} doctor --fix",
     )
 
 
@@ -3352,7 +3360,10 @@ def run_setup(assume_yes: bool = False, after_update: bool | None = None) -> int
     # ── Core dependencies ──
 
     report.add(check_mitmdump())
-    report.add(check_security_pins())
+    # Applied here as well as after each install: setup run on a venv it did
+    # not build (install.sh keeps one; a `git pull`) is the one way in that no
+    # install step covers (server.lifecycle.security_pins).
+    report.add(check_security_pins(apply=True))
 
     node_sites = _probe_node_sites()
     node_result = check_node(node_sites)
