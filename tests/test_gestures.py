@@ -45,6 +45,10 @@ def _ends(plan):
     return starts, ends
 
 
+def _flat(points):
+    return [c for point in points for c in point]
+
+
 class TestPinch:
     @pytest.mark.parametrize("scale", [3.0, 0.5, 1.5, 0.2])
     def test_the_separation_ratio_is_the_scale(self, scale):
@@ -123,8 +127,9 @@ class TestRotate:
 class TestPanAndTaps:
     def test_pan_moves_both_fingers_together(self):
         starts, ends = _ends(gestures.plan("pan", 200, 400, dx=80, dy=-40, distance=40))
-        assert starts == pytest.approx([(180, 400), (220, 400)])
-        assert ends == pytest.approx([(260, 360), (300, 360)])
+        # Flattened: pytest 9.2 refuses nested data in approx().
+        assert _flat(starts) == pytest.approx([180, 400, 220, 400])
+        assert _flat(ends) == pytest.approx([260, 360, 300, 360])
 
     def test_a_pan_that_goes_nowhere_is_refused(self):
         with pytest.raises(InvalidDeviceRequestError, match="dx or dy"):
