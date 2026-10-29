@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -21,7 +22,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections import deque
+from collections import Counter, deque
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -136,6 +137,15 @@ def _signal(process: asyncio.subprocess.Process, method: str) -> None:
         getattr(process, method)()
 
 
+def _rules_locked(method):
+    """Run a rule-changing method under the adapter's rules lock (#562)."""
+    @functools.wraps(method)
+    async def locked(self, *args, **kwargs):
+        async with self._rules_lock:
+            return await method(self, *args, **kwargs)
+    return locked
+
+
 class ProxyAdapter(BaseSourceAdapter):
     """Captures HTTP traffic via mitmdump subprocess."""
 
@@ -183,6 +193,15 @@ class ProxyAdapter(BaseSourceAdapter):
 
         # Bypass state (server-side mirror)
         self._bypass_patterns: list[str] = []
+        #: Rule changes and `restart()` take turns (#562): a mock set while the
+        #: proxy restarts was either cleared by the stop or recorded with no
+        #: process to send it to, and quern then claimed a rule mitmdump lacked.
+        self._rules_lock = asyncio.Lock()
+        #: Status events the addon has sent, by name, across runs: a restart
+        #: compares counts to know the new process is serving with its rules.
+        self._addon_events: Counter[str] = Counter()
+        #: How long a restart waits for that before reporting it unconfirmed.
+        self.restart_confirm_timeout = 5.0
 
         # Simulators whose TLS the addon may decrypt (#354); None = all of
         # them. Unlike the state above this is NOT cleared on stop: it is a
@@ -309,7 +328,34 @@ class ProxyAdapter(BaseSourceAdapter):
         logger.warning("Port %d still busy after killing stale mitmdump", port)
 
     async def start(self) -> None:
-        """Spawn mitmdump with our addon and begin reading output."""
+        """Spawn mitmdump with our addon and begin reading output.
+
+        Sends the new process every mock, bypass pattern and intercept the
+        server holds (#562), so a start after a failed restart or a crash does
+        not leave the server listing rules mitmdump lacks.
+        """
+        async with self._rules_lock:
+            await self._start()
+
+    async def _start(self) -> bool:
+        """`start()` under the rules lock. True when mitmdump was started and
+        sent the rules."""
+        if self._running:
+            # A second spawn would kill this run (`_kill_stale_mitmdump`) and
+            # report the first caller's proxy as up while it was being replaced.
+            return False
+        if not await self._spawn():
+            return False
+        if not await self._send_rules():
+            # Its stdin broke, so it is going away with some rules unsent.
+            # Stopped here, not left to the read loop, so the next start is
+            # not turned away by the guard above and sends them all.
+            await self._stop(keep_rules=True)
+            return False
+        return True
+
+    async def _spawn(self) -> bool:
+        """Launch mitmdump and its readers. False when it did not start."""
         try:
             mitmdump = self._find_mitmdump()
         except FileNotFoundError:
@@ -317,7 +363,7 @@ class ProxyAdapter(BaseSourceAdapter):
                 "mitmdump not found. Install mitmproxy: pip install mitmproxy"
             )
             logger.warning(self._error)
-            return
+            return False
 
         # Kill any stale mitmdump from a previous run
         await asyncio.to_thread(self._kill_stale_mitmdump, self.listen_port)
@@ -383,7 +429,7 @@ class ProxyAdapter(BaseSourceAdapter):
             os.close(read_fd)
             self._error = f"Failed to start mitmdump: {e}"
             logger.error(self._error)
-            return
+            return False
         finally:
             os.close(write_fd)
 
@@ -417,7 +463,7 @@ class ProxyAdapter(BaseSourceAdapter):
                     transport.close()
             await asyncio.sleep(0)
             self._process = None
-            return
+            return False
 
         self._running = True
         self.started_at = self._now()
@@ -455,9 +501,42 @@ class ProxyAdapter(BaseSourceAdapter):
             self.listen_host,
             self.listen_port,
         )
+        return True
+
+    async def _send_rules(self) -> bool:
+        """Send a new process the rules the server holds. False when a send
+        failed: the process is going away (its stdin broke), and the rules stay
+        listed for the next start rather than half-sent and forgotten."""
+        try:
+            for rule in self._mock_rules:
+                await self.send_command({
+                    "action": "set_mock",
+                    "rule_id": rule["rule_id"],
+                    "pattern": rule["pattern"],
+                    "response": rule["response"],
+                    "simulator_udid": rule.get("simulator_udid"),
+                })
+            if self._bypass_patterns:
+                await self.send_command({
+                    "action": "set_bypass", "patterns": list(self._bypass_patterns),
+                })
+            if self._intercept_pattern is not None:
+                await self.send_command({
+                    "action": "set_intercept", "pattern": self._intercept_pattern,
+                })
+        except Exception:
+            logger.exception("Could not send the proxy rules to mitmdump")
+            return False
+        return True
 
     async def stop(self) -> None:
-        """Terminate the mitmdump subprocess and clean up."""
+        """Terminate the mitmdump subprocess and clean up, rules included."""
+        async with self._rules_lock:
+            await self._stop(keep_rules=False)
+
+    async def _stop(self, *, keep_rules: bool) -> None:
+        """`stop()` under the rules lock. `keep_rules` keeps mocks, bypass
+        patterns and the intercept for the next start to send (#562)."""
         self._running = False
         # Held before any await, so an overlapping stop never re-reads what
         # another has cleared.
@@ -500,11 +579,13 @@ class ProxyAdapter(BaseSourceAdapter):
         self._stderr_task = None
         self._stdout_task = None
 
-        # Clear intercept/mock/bypass state
-        self._intercept_pattern = None
+        # Held flows belong to the process: the addon releases them, unmodified,
+        # as it shuts down.
         self._held_flows.clear()
-        self._mock_rules.clear()
-        self._bypass_patterns.clear()
+        if not keep_rules:
+            self._intercept_pattern = None
+            self._mock_rules.clear()
+            self._bypass_patterns.clear()
         # Rejections too. Restarting the proxy is what someone does *after*
         # installing the cert, so carrying them across would report a problem
         # they have just fixed.
@@ -591,12 +672,85 @@ class ProxyAdapter(BaseSourceAdapter):
     # Intercept convenience methods
     # -------------------------------------------------------------------
 
+    async def restart(self, **settings) -> dict | None:
+        """Stop mitmdump and start it again, keeping the rules callers set (#562).
+
+        `stop()` clears mocks, the intercept pattern and bypass patterns, which
+        is right for a stop someone asked for and wrong for a restart nobody
+        asked for: changing local capture restarts mitmdump -- its process list
+        is a launch argument, and on macOS a live mode change leaves the
+        redirector on the old list -- and every mock on the server silently
+        stopped applying. A restart keeps them, and the start sends them to the
+        new process, rule ids and device scopes unchanged.
+
+        `settings` are passed to `reconfigure` between the stop and the start.
+
+        Held flows cannot come across: each is a request waiting inside the old
+        process, which releases it unmodified as it exits. The count released
+        is returned, with what was re-sent -- None when the new process did not
+        start or could not be sent the rules, which then wait for the next
+        start -- so the caller can say what happened. `confirmed` says the new
+        process reported it was serving (`running`) and echoed every rule
+        within `restart_confirm_timeout`: until then, traffic is not captured
+        or mocked, so the call returns only once it is, or says it is not.
+        None, with the settings
+        applied for the next start, when the proxy was no longer running: a
+        stop that got the lock first is not undone.
+        """
+        async with self._rules_lock:
+            if not self._running:
+                self.reconfigure(**settings)
+                return None
+            held = len(self._held_flows)
+            await self._stop(keep_rules=True)
+            # `reconfigure` refuses while running, so new settings -- a local
+            # capture list -- go in between the stop and the start.
+            if settings:
+                self.reconfigure(**settings)
+            before = Counter(self._addon_events)
+            sent = await self._start()
+            restored = {
+                "mock_rules": len(self._mock_rules),
+                "bypass_patterns": len(self._bypass_patterns),
+                "intercept": self._intercept_pattern,
+            } if sent else None
+            confirmed = sent and await self._serving_with_rules(before)
+            return {
+                "held_flows_released": held,
+                "restored": restored,
+                "confirmed": confirmed,
+            }
+
+    async def _serving_with_rules(self, before: Counter[str]) -> bool:
+        """Whether the addon has, since `before`, said it is serving and echoed
+        each rule `_send_rules` sent. False on timeout -- an addon on disk older
+        than the server never sends `running` -- or if the process ended."""
+        want = {"running": 1, "mock_set": len(self._mock_rules)}
+        if self._bypass_patterns:
+            want["bypass_updated"] = 1
+        if self._intercept_pattern is not None:
+            want["intercept_set"] = 1
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.restart_confirm_timeout
+        while any(self._addon_events[k] - before[k] < n for k, n in want.items()):
+            if loop.time() >= deadline or not self.is_running:
+                return False
+            await asyncio.sleep(0.05)
+        # The events can all be in when the process has already gone. Its read
+        # loop clears `_running` at EOF, which the loop above never re-checks
+        # once nothing is missing -- and until the loop gets there, only the
+        # return code says so.
+        process = self._process
+        return self.is_running and (process is None or process.returncode is None)
+
+    @_rules_locked
     async def set_intercept(self, pattern: str) -> None:
         """Set an intercept pattern on the addon. Raises ValueError if pattern is invalid."""
         validate_filter_pattern(pattern)
         self._intercept_pattern = pattern
         await self.send_command({"action": "set_intercept", "pattern": pattern})
 
+    @_rules_locked
     async def clear_intercept(self) -> None:
         """Clear the intercept pattern and release all held flows."""
         self._intercept_pattern = None
@@ -619,6 +773,7 @@ class ProxyAdapter(BaseSourceAdapter):
         self._held_flows.clear()
         await self.send_command({"action": "release_all"})
 
+    @_rules_locked
     async def set_mock(
         self, pattern: str, response: dict,
         rule_id: str | None = None,
@@ -647,6 +802,7 @@ class ProxyAdapter(BaseSourceAdapter):
         })
         return rule_id
 
+    @_rules_locked
     async def update_mock(
         self, rule_id: str, pattern: str | None = None,
         response: dict | None = None,
@@ -689,6 +845,7 @@ class ProxyAdapter(BaseSourceAdapter):
         })
         return updated
 
+    @_rules_locked
     async def clear_mock(self, rule_id: str | None = None) -> int:
         """Remove a specific mock rule or all of them. Returns how many went.
 
@@ -720,6 +877,7 @@ class ProxyAdapter(BaseSourceAdapter):
     # Bypass convenience methods
     # -------------------------------------------------------------------
 
+    @_rules_locked
     async def set_bypass(self, patterns: list[str]) -> list[str]:
         """Add bypass patterns. Returns the full list after update."""
         for p in patterns:
@@ -731,6 +889,7 @@ class ProxyAdapter(BaseSourceAdapter):
         })
         return list(self._bypass_patterns)
 
+    @_rules_locked
     async def remove_bypass(self, patterns: list[str]) -> list[str]:
         """Remove specific bypass patterns. Returns the remaining list."""
         self._bypass_patterns = [
@@ -743,6 +902,7 @@ class ProxyAdapter(BaseSourceAdapter):
         })
         return list(self._bypass_patterns)
 
+    @_rules_locked
     async def clear_bypass(self) -> None:
         """Remove all bypass patterns."""
         self._bypass_patterns.clear()
@@ -1154,6 +1314,7 @@ class ProxyAdapter(BaseSourceAdapter):
     async def _handle_status_event(self, data: dict) -> None:
         """Handle status events from the addon that update local state mirrors."""
         event = data.get("event")
+        self._addon_events[event] += 1
         # update_state() takes fcntl.LOCK_EX and does synchronous file I/O, so
         # calling it inline would block the event loop behind whichever writer
         # holds the lock -- stalling unrelated coroutines for a state write
@@ -1162,8 +1323,9 @@ class ProxyAdapter(BaseSourceAdapter):
             # state.json's proxy_status was written as "starting" at boot and
             # never advanced, so every unauthenticated consumer saw a proxy that
             # was permanently starting up (#122). The addon's own "started" is
-            # the honest signal -- it means the script loaded and mitmproxy is
-            # up, rather than merely that the subprocess was spawned.
+            # the honest signal -- it means the script loaded, rather than
+            # merely that the subprocess was spawned. (Its servers come up
+            # about 0.1 s later, with "running".)
             await asyncio.to_thread(update_state, proxy_status="running")
         elif event == "stopped":
             await asyncio.to_thread(update_state, proxy_status="stopped")

@@ -466,6 +466,9 @@ def _running_adapter():
     a.trusted_simulators = []
     a.start = AsyncMock()
     a.reconfigure = MagicMock()
+    # set_local_capture applies its list through restart(), which reconfigures
+    # a stopped proxy (#562).
+    a.restart = AsyncMock(side_effect=lambda **kw: a.reconfigure(**kw) and None)
     return a
 
 

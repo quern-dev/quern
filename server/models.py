@@ -1385,6 +1385,28 @@ class SimulatorTls(BaseModel):
     last_host: str | None = None
 
 
+class ProxyRestart(BaseModel):
+    """What restarting mitmdump did, on a response that caused it (#562).
+
+    Changing local capture restarts the proxy. Mock rules, bypass patterns and
+    the intercept come across; open connections cannot, and held flows are
+    released unmodified by the old process as it exits.
+    """
+
+    connections_reset: bool = True
+    held_flows_released: int = 0
+    #: What was re-sent to the new process: counts of mock rules and bypass
+    #: patterns, and the intercept pattern. Sent, not confirmed by the addon.
+    #: None when the proxy did not come back up or could not be sent them --
+    #: the server keeps them and sends them at the next start, and
+    #: `status`/`error` say why.
+    restored: dict[str, Any] | None = None
+    #: The new process said it was serving and echoed every re-sent rule
+    #: before the response. False when that did not happen within 5 s:
+    #: traffic may not be captured or mocked yet.
+    confirmed: bool = False
+
+
 class ProxyStatusResponse(BaseModel):
     """Response from GET /api/v1/proxy/status."""
 
@@ -1421,6 +1443,8 @@ class ProxyStatusResponse(BaseModel):
     bypass_patterns: list[str] = Field(default_factory=list)
     error: str | None = None
     local_capture: list[str] = Field(default_factory=list)
+    #: Set on a response that restarted mitmdump: what came across (#562).
+    restart: ProxyRestart | None = None
     local_ip: str | None = None
     """OS default-route IP — one entry from ``local_ips``. Convenient when
     there's only one interface; misleading in dual-interface setups. Prefer

@@ -1073,6 +1073,9 @@ class TestLocalCaptureIsGatedToo:
         adapter._error = None
         adapter.get_bypass_patterns = MagicMock(return_value=[])
         adapter.reconfigure = MagicMock()
+        # set_local_capture applies its list through restart(), which reconfigures
+        # a stopped proxy (#562).
+        adapter.restart = AsyncMock(side_effect=lambda **kw: adapter.reconfigure(**kw) and None)
         adapter.stop = AsyncMock()
         adapter.start = AsyncMock()
         app.state.proxy_adapter = adapter
@@ -1561,6 +1564,9 @@ class TestSettingCaptureSaysWhatItDropped:
         adapter._tls_rejections = []
         adapter.get_bypass_patterns = MagicMock(return_value=[])
         adapter.reconfigure = MagicMock()
+        # set_local_capture applies its list through restart(), which reconfigures
+        # a stopped proxy (#562).
+        adapter.restart = AsyncMock(side_effect=lambda **kw: adapter.reconfigure(**kw) and None)
         adapter.stop = AsyncMock()
         adapter.start = AsyncMock()
         app.state.proxy_adapter = adapter
@@ -1687,6 +1693,9 @@ class TestStartingTheSystemProxyIsGatedToo:
         adapter._error = None
         adapter.get_bypass_patterns = MagicMock(return_value=[])
         adapter.reconfigure = MagicMock()
+        # set_local_capture applies its list through restart(), which reconfigures
+        # a stopped proxy (#562).
+        adapter.restart = AsyncMock(side_effect=lambda **kw: adapter.reconfigure(**kw) and None)
         adapter.stop = AsyncMock()
         adapter.start = AsyncMock()
         app.state.proxy_adapter = adapter
@@ -1838,6 +1847,9 @@ class TestAutoInstallCertClearsEveryHttpGate:
         adapter._error = None
         adapter.get_bypass_patterns = MagicMock(return_value=[])
         adapter.reconfigure = MagicMock()
+        # set_local_capture applies its list through restart(), which reconfigures
+        # a stopped proxy (#562).
+        adapter.restart = AsyncMock(side_effect=lambda **kw: adapter.reconfigure(**kw) and None)
         adapter.stop = AsyncMock()
         adapter.start = AsyncMock()
         app.state.proxy_adapter = adapter
@@ -1939,6 +1951,9 @@ class TestStartProxyKeepsItsOldContract:
         adapter._error = None
         adapter.get_bypass_patterns = MagicMock(return_value=[])
         adapter.reconfigure = MagicMock()
+        # set_local_capture applies its list through restart(), which reconfigures
+        # a stopped proxy (#562).
+        adapter.restart = AsyncMock(side_effect=lambda **kw: adapter.reconfigure(**kw) and None)
         adapter.stop = AsyncMock()
         adapter.start = AsyncMock()
         app.state.proxy_adapter = adapter

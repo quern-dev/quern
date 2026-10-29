@@ -945,7 +945,7 @@ the background and can be re-enabled with configure_system_proxy.`,
   server.registerTool("set_bypass", {
     description: `Add domain patterns to the proxy bypass allowlist. Traffic to bypassed domains gets true TLS passthrough — no certificate replacement, no interception, no capture. Uses glob/fnmatch patterns.
 
-Essential for cert-pinned services (e.g. *.apple.com during app installation) that reject mitmproxy's CA certificate. Bypass patterns persist until cleared or the proxy is restarted.
+Essential for cert-pinned services (e.g. *.apple.com during app installation) that reject mitmproxy's CA certificate. Bypass patterns persist until cleared with clear_bypass or the proxy is stopped; the restart set_local_capture makes keeps them.
 
 The bypass_patterns field in proxy_status shows the current list.`,
     inputSchema: strictParams({
@@ -1052,7 +1052,17 @@ To drop one process from a capture, put the exclusion after an include:
 ["MyApp", "!12345"], not ["!12345"].
 
 Restarts the proxy automatically to apply the new configuration — no server
-restart needed. Pass an empty list to disable local capture.
+restart needed. Pass an empty list to disable local capture. Mocks, bypass
+patterns and the intercept pattern are kept across that restart; open
+connections are reset and held flows are released unmodified. When the proxy
+was running, the response's restart field says so: connections_reset,
+held_flows_released (a count), and restored: {mock_rules: count,
+bypass_patterns: count, intercept: the pattern or null}, or null itself if the
+proxy failed to come back up or could not be sent them -- the server keeps
+them and sends them at the next start_proxy. The call returns once the new
+proxy is serving with its rules applied, about a second; confirmed: true says
+so. confirmed: false means that did not happen within 5 s, and traffic may not
+be captured or mocked yet.
 
 SETS THE LIST, but a minimum is always kept. Naming ["MyApp"] no longer drops
 MobileSafari or com.apple.WebKit.Networking: a webview's requests leave through
