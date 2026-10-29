@@ -6,8 +6,9 @@ a stop someone asked for -- so every mock on the server used to stop applying
 while the call returned 200 (measured on a live server: the next request went
 upstream). `ProxyAdapter.restart()` re-sends them to the new process.
 
-These drive the real `stop()`, with no process behind it; only the spawn in
-`start()` and the stdin pipe in `send_command()` are faked.
+These drive the real `start()`, `stop()` and `restart()`, with no process
+behind them; only the spawn (`_spawn()`) and the stdin pipe (`send_command()`)
+are faked.
 """
 
 from __future__ import annotations
@@ -34,18 +35,24 @@ def _adapter(*, starts: bool = True) -> ProxyAdapter:
     a = ProxyAdapter(local_capture_processes=["Safari"])
     a._running = True
     a.sent = []
+    a.spawns = []
+    a.fail_send_at = None  # index in `sent` at which a send breaks
 
     async def send(command):
         # Like the real one: nothing to write to without a running process.
-        if a._running:
-            a.sent.append(command)
+        if not a._running:
+            return
+        if a.fail_send_at is not None and len(a.sent) == a.fail_send_at:
+            raise BrokenPipeError("mitmdump went away")
+        a.sent.append(command)
 
-    async def start():
-        a.started_with = list(a.local_capture_processes)
+    async def spawn():
+        a.spawns.append(list(a.local_capture_processes))
         a._running = starts
+        return starts
 
     a.send_command = send
-    a.start = start
+    a._spawn = spawn
     return a
 
 
@@ -66,7 +73,7 @@ async def test_restart_resends_every_rule_to_the_new_process():
 
     result = await a.restart(local_capture_processes=["Safari", "Metatext"])
 
-    assert a.started_with == ["Safari", "Metatext"]
+    assert a.spawns == [["Safari", "Metatext"]]
     mocks = [c for c in a.sent if c["action"] == "set_mock"]
     assert [(m["rule_id"], m["pattern"], m["simulator_udid"]) for m in mocks] == [
         ("m1", "~d api.example.com", ALPHA),
@@ -80,7 +87,7 @@ async def test_restart_resends_every_rule_to_the_new_process():
     assert a.get_bypass_patterns() == ["~d apple.com"]
     assert a._intercept_pattern == "~d auth.example.com"
     assert result == {
-        "held_flows_dropped": 1,
+        "held_flows_released": 1,
         "restored": {"mock_rules": 2, "bypass_patterns": 1,
                      "intercept": "~d auth.example.com"},
     }
@@ -92,7 +99,7 @@ async def test_restart_with_no_rules_sends_nothing():
     result = await a.restart(local_capture_processes=["Safari"])
     assert a.sent == []
     assert result == {
-        "held_flows_dropped": 0,
+        "held_flows_released": 0,
         "restored": {"mock_rules": 0, "bypass_patterns": 0, "intercept": None},
     }
 
@@ -103,7 +110,7 @@ async def test_a_failed_start_keeps_the_rules_for_the_next_one():
 
     result = await a.restart(local_capture_processes=["Metatext"])
 
-    assert result == {"held_flows_dropped": 1, "restored": None}
+    assert result == {"held_flows_released": 1, "restored": None}
     assert [r["rule_id"] for r in a._mock_rules] == ["m1", "m2"]
     assert a.get_bypass_patterns() == ["~d apple.com"]
     assert a._intercept_pattern == "~d auth.example.com"
@@ -133,6 +140,73 @@ async def test_a_mock_set_during_the_restart_reaches_the_new_process():
 
     assert [r["rule_id"] for r in a._mock_rules] == ["late"]
     assert [c["rule_id"] for c in a.sent if c["action"] == "set_mock"] == ["late"]
+
+
+@pytest.mark.asyncio
+async def test_a_start_after_a_failed_restart_sends_the_kept_rules():
+    """The rules a failed restart kept reach the next process -- listed but
+    never sent would be the #562 symptom one call later."""
+    a = await _with_rules(_adapter(starts=False))
+    await a.restart(local_capture_processes=["Metatext"])
+    a._spawn = AsyncMock(side_effect=lambda: setattr(a, "_running", True) or True)
+
+    await a.start()
+
+    assert [c["rule_id"] for c in a.sent if c["action"] == "set_mock"] == ["m1", "m2"]
+    assert {"action": "set_bypass", "patterns": ["~d apple.com"]} in a.sent
+    assert {"action": "set_intercept", "pattern": "~d auth.example.com"} in a.sent
+
+
+@pytest.mark.asyncio
+async def test_a_send_that_fails_keeps_every_rule():
+    a = await _with_rules(_adapter())
+    a.fail_send_at = 1
+
+    result = await a.restart(local_capture_processes=["Metatext"])
+
+    assert result["restored"] is None
+    assert [r["rule_id"] for r in a._mock_rules] == ["m1", "m2"]
+    assert a.get_bypass_patterns() == ["~d apple.com"]
+    assert a._intercept_pattern == "~d auth.example.com"
+
+
+@pytest.mark.asyncio
+async def test_a_stop_during_the_restart_waits_for_it():
+    """Without the lock a stop landing while the rules are re-sent clears them,
+    and the restart goes on sending to a process that is gone."""
+    a = await _with_rules(_adapter())
+    gate = asyncio.Event()
+    real_send = a.send_command
+
+    async def slow_send(command):
+        await gate.wait()
+        await real_send(command)
+
+    a.send_command = slow_send
+    restart = asyncio.create_task(a.restart(local_capture_processes=["Metatext"]))
+    for _ in range(5):
+        await asyncio.sleep(0)  # restart is now blocked re-sending the first rule
+    stop = asyncio.create_task(a.stop())
+    await asyncio.sleep(0)
+    assert not stop.done()
+    gate.set()
+    result = await restart
+    await stop
+
+    assert result["restored"]["mock_rules"] == 2
+    assert len([c for c in a.sent if c["action"] == "set_mock"]) == 2
+    assert not a.is_running
+    assert a._mock_rules == []
+
+
+@pytest.mark.asyncio
+async def test_start_does_not_respawn_a_running_proxy():
+    """A second spawn kills the running one, and a start_proxy that slipped in
+    during a restart would replace the run the restart just made."""
+    a = await _with_rules(_adapter())
+    await a.start()
+    assert a.spawns == []
+    assert a.sent == []
 
 
 @pytest.mark.asyncio
@@ -174,7 +248,7 @@ async def test_set_local_capture_restarts_through_the_adapter(monkeypatch, runni
     if running:
         assert status.restart is not None
         assert status.restart.connections_reset is True
-        assert status.restart.held_flows_dropped == 1
+        assert status.restart.held_flows_released == 1
         assert status.restart.restored["mock_rules"] == 2
         assert [r["rule_id"] for r in a._mock_rules] == ["m1", "m2"]
     else:

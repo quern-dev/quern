@@ -1389,14 +1389,17 @@ class ProxyRestart(BaseModel):
     """What restarting mitmdump did, on a response that caused it (#562).
 
     Changing local capture restarts the proxy. Mock rules, bypass patterns and
-    the intercept come across; open connections and held flows cannot.
+    the intercept come across; open connections cannot, and held flows are
+    released unmodified by the old process as it exits.
     """
 
     connections_reset: bool = True
-    held_flows_dropped: int = 0
-    #: What was put back: counts of mock rules and bypass patterns, and the
-    #: intercept pattern. None when the proxy did not come back up -- then
-    #: nothing could be restored, and `status`/`error` say why.
+    held_flows_released: int = 0
+    #: What was re-sent to the new process: counts of mock rules and bypass
+    #: patterns, and the intercept pattern. Sent, not confirmed by the addon.
+    #: None when the proxy did not come back up or could not be sent them --
+    #: the server keeps them and sends them at the next start, and
+    #: `status`/`error` say why.
     restored: dict[str, Any] | None = None
 
 

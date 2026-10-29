@@ -323,7 +323,28 @@ class ProxyAdapter(BaseSourceAdapter):
         logger.warning("Port %d still busy after killing stale mitmdump", port)
 
     async def start(self) -> None:
-        """Spawn mitmdump with our addon and begin reading output."""
+        """Spawn mitmdump with our addon and begin reading output.
+
+        Sends the new process every mock, bypass pattern and intercept the
+        server holds (#562), so a start after a failed restart or a crash does
+        not leave the server listing rules mitmdump lacks.
+        """
+        async with self._rules_lock:
+            await self._start()
+
+    async def _start(self) -> bool:
+        """`start()` under the rules lock. True when mitmdump was started and
+        sent the rules."""
+        if self._running:
+            # A second spawn would kill this run (`_kill_stale_mitmdump`) and
+            # report the first caller's proxy as up while it was being replaced.
+            return False
+        if not await self._spawn():
+            return False
+        return await self._send_rules()
+
+    async def _spawn(self) -> bool:
+        """Launch mitmdump and its readers. False when it did not start."""
         try:
             mitmdump = self._find_mitmdump()
         except FileNotFoundError:
@@ -331,7 +352,7 @@ class ProxyAdapter(BaseSourceAdapter):
                 "mitmdump not found. Install mitmproxy: pip install mitmproxy"
             )
             logger.warning(self._error)
-            return
+            return False
 
         # Kill any stale mitmdump from a previous run
         await asyncio.to_thread(self._kill_stale_mitmdump, self.listen_port)
@@ -397,7 +418,7 @@ class ProxyAdapter(BaseSourceAdapter):
             os.close(read_fd)
             self._error = f"Failed to start mitmdump: {e}"
             logger.error(self._error)
-            return
+            return False
         finally:
             os.close(write_fd)
 
@@ -431,7 +452,7 @@ class ProxyAdapter(BaseSourceAdapter):
                     transport.close()
             await asyncio.sleep(0)
             self._process = None
-            return
+            return False
 
         self._running = True
         self.started_at = self._now()
@@ -469,9 +490,42 @@ class ProxyAdapter(BaseSourceAdapter):
             self.listen_host,
             self.listen_port,
         )
+        return True
+
+    async def _send_rules(self) -> bool:
+        """Send a new process the rules the server holds. False when a send
+        failed: the process is going away (its stdin broke), and the rules stay
+        listed for the next start rather than half-sent and forgotten."""
+        try:
+            for rule in self._mock_rules:
+                await self.send_command({
+                    "action": "set_mock",
+                    "rule_id": rule["rule_id"],
+                    "pattern": rule["pattern"],
+                    "response": rule["response"],
+                    "simulator_udid": rule.get("simulator_udid"),
+                })
+            if self._bypass_patterns:
+                await self.send_command({
+                    "action": "set_bypass", "patterns": list(self._bypass_patterns),
+                })
+            if self._intercept_pattern is not None:
+                await self.send_command({
+                    "action": "set_intercept", "pattern": self._intercept_pattern,
+                })
+        except Exception:
+            logger.exception("Could not send the proxy rules to mitmdump")
+            return False
+        return True
 
     async def stop(self) -> None:
-        """Terminate the mitmdump subprocess and clean up."""
+        """Terminate the mitmdump subprocess and clean up, rules included."""
+        async with self._rules_lock:
+            await self._stop(keep_rules=False)
+
+    async def _stop(self, *, keep_rules: bool) -> None:
+        """`stop()` under the rules lock. `keep_rules` keeps mocks, bypass
+        patterns and the intercept for the next start to send (#562)."""
         self._running = False
         # Held before any await, so an overlapping stop never re-reads what
         # another has cleared.
@@ -514,11 +568,13 @@ class ProxyAdapter(BaseSourceAdapter):
         self._stderr_task = None
         self._stdout_task = None
 
-        # Clear intercept/mock/bypass state
-        self._intercept_pattern = None
+        # Held flows belong to the process: the addon releases them, unmodified,
+        # as it shuts down.
         self._held_flows.clear()
-        self._mock_rules.clear()
-        self._bypass_patterns.clear()
+        if not keep_rules:
+            self._intercept_pattern = None
+            self._mock_rules.clear()
+            self._bypass_patterns.clear()
         # Rejections too. Restarting the proxy is what someone does *after*
         # installing the cert, so carrying them across would report a problem
         # they have just fixed.
@@ -613,62 +669,31 @@ class ProxyAdapter(BaseSourceAdapter):
         asked for: changing local capture restarts mitmdump -- its process list
         is a launch argument, and on macOS a live mode change leaves the
         redirector on the old list -- and every mock on the server silently
-        stopped applying. So they are taken before the stop and sent to the new
-        process after the start, rule ids and device scopes unchanged.
+        stopped applying. A restart keeps them, and the start sends them to the
+        new process, rule ids and device scopes unchanged.
 
         `settings` are passed to `reconfigure` between the stop and the start.
 
         Held flows cannot come across: each is a request waiting inside the old
-        process, whose connection the restart closes. The count dropped is
-        returned, with the rules restored, so the caller can say what happened.
+        process, which releases it unmodified as it exits. The count released
+        is returned, with what was re-sent -- None when the new process did not
+        start or could not be sent the rules, which then wait for the next
+        start -- so the caller can say what happened.
         """
         async with self._rules_lock:
-            return await self._restart_locked(settings)
-
-    async def _restart_locked(self, settings: dict) -> dict:
-        mocks = [dict(rule) for rule in self._mock_rules]
-        intercept = self._intercept_pattern
-        bypass = list(self._bypass_patterns)
-        held = len(self._held_flows)
-
-        await self.stop()
-        # `reconfigure` refuses while running, so new settings -- a local
-        # capture list -- go in between the stop and the start.
-        if settings:
-            self.reconfigure(**settings)
-        await self.start()
-        if not self.is_running:
-            # Nothing to send them to. Kept, so a later start is not handed a
-            # server that has forgotten them -- the caller reports the failure.
-            self._mock_rules = mocks
-            self._intercept_pattern = intercept
-            self._bypass_patterns = bypass
-            return {"held_flows_dropped": held, "restored": None}
-
-        for rule in mocks:
-            self._mock_rules.append(rule)
-            await self.send_command({
-                "action": "set_mock",
-                "rule_id": rule["rule_id"],
-                "pattern": rule["pattern"],
-                "response": rule["response"],
-                "simulator_udid": rule.get("simulator_udid"),
-            })
-        # Sent directly: the public setters take the rules lock, held here.
-        if bypass:
-            self._bypass_patterns = list(bypass)
-            await self.send_command({"action": "set_bypass", "patterns": bypass})
-        if intercept is not None:
-            self._intercept_pattern = intercept
-            await self.send_command({"action": "set_intercept", "pattern": intercept})
-        return {
-            "held_flows_dropped": held,
-            "restored": {
-                "mock_rules": len(mocks),
-                "bypass_patterns": len(bypass),
-                "intercept": intercept,
-            },
-        }
+            held = len(self._held_flows)
+            await self._stop(keep_rules=True)
+            # `reconfigure` refuses while running, so new settings -- a local
+            # capture list -- go in between the stop and the start.
+            if settings:
+                self.reconfigure(**settings)
+            sent = await self._start()
+            restored = {
+                "mock_rules": len(self._mock_rules),
+                "bypass_patterns": len(self._bypass_patterns),
+                "intercept": self._intercept_pattern,
+            } if sent else None
+            return {"held_flows_released": held, "restored": restored}
 
     @_rules_locked
     async def set_intercept(self, pattern: str) -> None:

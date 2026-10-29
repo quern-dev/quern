@@ -1362,7 +1362,7 @@ async def set_local_capture(
     if restart is not None:
         status.restart = ProxyRestart(
             connections_reset=True,
-            held_flows_dropped=restart["held_flows_dropped"],
+            held_flows_released=restart["held_flows_released"],
             restored=restart["restored"],
         )
     return status
