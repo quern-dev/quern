@@ -619,6 +619,13 @@ ALWAYS_BYPASS: tuple[str, ...] = ("quern.dev", "*.quern.dev")
 #: caller's `skip_cert_check`). Unset means nothing is trusted.
 TRUSTED_SIMULATORS_ENV = "QUERN_TRUSTED_SIMULATORS"
 
+#: Set to "1" for a session proxy (#558): every connection that is not from a
+#: simulator is passed through untouched. Its process names come from a client,
+#: and a name matches any executable path on the Mac that contains it -- so
+#: without this, a client holding one simulator could have the owner's own
+#: apps redirected through a proxy that decrypts them.
+SIMULATORS_ONLY_ENV = "QUERN_SIMULATORS_ONLY"
+
 #: A connection from a simulator whose UDID is not known yet. Never trusted.
 UNKNOWN_SIMULATOR = "unknown-simulator"
 
@@ -1034,6 +1041,7 @@ class IOSDebugAddon:
         )
         self._trusted_instances: dict[str, int] = {}
         self._trust_lock = threading.Lock()
+        self._simulators_only = os.environ.get(SIMULATORS_ONLY_ENV) == "1"
 
         # Intercept state — protected by _held_lock
         self._intercept_pattern: str | None = None
@@ -1097,6 +1105,38 @@ class IOSDebugAddon:
                 if fnmatch.fnmatch(host, pattern):
                     return True
         return False
+
+    def next_layer(self, nextlayer: Any) -> None:
+        """A session proxy passes through, untouched, every connection that is
+        not from a simulator (#558). Decided here, before any layer -- plain
+        HTTP never reaches `tls_clienthello` -- and set before mitmproxy's own
+        next-layer addon, which never overrides a layer already chosen.
+
+        "Could not tell" passes through: for a session proxy the safe side is
+        not capturing, since what it would capture is the Mac's own traffic."""
+        if not self._simulators_only:
+            return
+        context = nextlayer.context
+        try:
+            keep = self._from_a_simulator(context.client)
+        except Exception:
+            keep = False
+        if keep:
+            return
+        from mitmproxy.proxy import layers
+        if getattr(context.client, "transport_protocol", "tcp") == "udp":
+            nextlayer.layer = layers.UDPLayer(context, ignore=True)
+        else:
+            nextlayer.layer = layers.TCPLayer(context, ignore=True)
+
+    def _from_a_simulator(self, client: Any) -> bool:
+        """Whether a launchd_sim is among the connection's process ancestors."""
+        info = _client_process_info.get(getattr(client, "id", None) or "")
+        pid = info.get("pid") if info else None
+        if pid is None:
+            return False
+        _udid, simulator_launchd = _simulator_instance_for_pid(pid)
+        return simulator_launchd is not None
 
     def tls_clienthello(self, data: Any) -> None:
         """Skip TLS interception for bypassed hosts.

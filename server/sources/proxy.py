@@ -50,6 +50,9 @@ logger = logging.getLogger(__name__)
 #: process would run its module-level monkey-patch of mitmproxy's connection
 #: handler here too. `tests/test_sim_tls.py` asserts the two spellings agree.
 TRUSTED_SIMULATORS_ENV = "QUERN_TRUSTED_SIMULATORS"
+#: Makes a session proxy pass through every connection not from a simulator
+#: (#558); the addon's spelling, asserted equal by `tests/test_session_proxies.py`.
+SIMULATORS_ONLY_ENV = "QUERN_SIMULATORS_ONLY"
 #: Where the addon writes events: a pipe of their own, not mitmdump's stdout.
 #: mitmproxy logs errors and their tracebacks to stdout even with `--quiet`,
 #: and a traceback line that is only a string literal parses as JSON -- which
@@ -427,6 +430,10 @@ class ProxyAdapter(BaseSourceAdapter):
         # when mitmdump exits.
         read_fd, write_fd = os.pipe()
         env[EVENT_FD_ENV] = str(write_fd)
+        if self.leader is not None:
+            env[SIMULATORS_ONLY_ENV] = "1"
+        else:
+            env.pop(SIMULATORS_ONLY_ENV, None)  # never inherited by the main one
         # mitmproxy's logger prints without flushing, so on a pipe its errors
         # sat in an 8 KB block until something else flushed -- the addon's
         # events did that by accident, on the shared stdout. Unbuffered, a
@@ -969,8 +976,10 @@ class ProxyAdapter(BaseSourceAdapter):
         return list(self._bypass_patterns)
 
     def _all(self) -> list[ProxyAdapter]:
-        """This proxy and the session proxies following it."""
-        return [self, *self.followers]
+        """This proxy and the running session proxies following it. One whose
+        mitmdump has gone holds nothing any more -- its held flows went with it
+        -- and stays listed only until the next claim prunes it."""
+        return [self, *(f for f in self.followers if f.is_running)]
 
     def held_count(self) -> int:
         """Flows held by this proxy and its session proxies."""
@@ -1141,15 +1150,19 @@ class ProxyAdapter(BaseSourceAdapter):
             unexpected = self._running and mine
             if mine:
                 self._running = False
-                # Nothing mitmdump was carrying will finish now. Left in place,
-                # they would read as in flight forever.
-                dropped = self.flow_store.drop_pending(
-                    self._pending_ids, announce=self.leader is None)
-                self._pending_ids.clear()
-                if dropped:
-                    logger.info("Proxy stopped with %d request(s) in flight", dropped)
+                self._drop_own_pending()
             if unexpected:
                 await self._end_unexpected_run(process)
+
+    def _drop_own_pending(self) -> None:
+        """Nothing mitmdump was carrying will finish now. Left in place, those
+        requests would read as in flight forever. Only this proxy's: the store
+        is shared with any session proxies (#558)."""
+        dropped = self.flow_store.drop_pending(
+            self._pending_ids, announce=self.leader is None)
+        self._pending_ids.clear()
+        if dropped:
+            logger.info("Proxy stopped with %d request(s) in flight", dropped)
 
     async def _end_unexpected_run(self, process: asyncio.subprocess.Process) -> None:
         """The loop ended without `stop()`: report it, and leave nothing half-alive.

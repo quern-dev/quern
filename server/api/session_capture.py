@@ -23,7 +23,11 @@ from server.models import (
     SessionCaptureResponse,
 )
 from server.proxy import sim_tls
-from server.proxy.session_proxies import SessionCaptureError, SessionProxies
+from server.proxy.session_proxies import (
+    MainProxyStopped,
+    SessionCaptureError,
+    SessionProxies,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +55,10 @@ def _refusal(processes: list[str], *, owner: bool) -> str | None:
                     "the Mac; name the processes to capture instead")
         if entry.isdigit():
             return f"{entry!r} is a PID; name the app's process instead"
+        if "," in entry or "/" in entry:
+            # The list is joined with commas, so "App,4242" would pass a PID;
+            # and a path fragment matches far more than one app.
+            return f"{entry!r} is not a process name; name the app's process"
     return None
 
 
@@ -84,19 +92,25 @@ async def add_session_capture(
     try:
         result = await manager.claim(session=caller.session, principal=caller.principal,
                                      udid=body.simulator_udid, names=processes)
+    except MainProxyStopped as e:
+        raise HTTPException(status_code=409, detail=(
+            "The proxy stopped, so nothing can be captured. Its owner starts it "
+            "(start_proxy).")) from e
     except SessionCaptureError as e:
         raise HTTPException(status_code=500, detail=(
             f"Could not start a proxy for {', '.join(processes)}: {e}")) from e
 
     # After the claim, not before: the gate checks only while some proxy
     # captures in local mode, and for a server whose own list is empty that is
-    # the session proxy just started. A refusal hands the names back.
+    # the session proxy just started. A refusal hands back what this call
+    # added -- not names an earlier call claimed, which were working (review).
     try:
         check = await sim_tls.ensure_capturable(
             request.app, body.simulator_udid, allow_passthrough=body.allow_passthrough)
     except sim_tls.CaptureNotReady as e:
-        await manager.release(session=caller.session, principal=caller.principal,
-                              udid=body.simulator_udid, names=processes)
+        if result["added"]:
+            await manager.release(principal=caller.principal,
+                                  udid=body.simulator_udid, names=result["added"])
         raise HTTPException(status_code=e.status_code, detail=e.detail) from e
 
     warnings = list(check.warnings)
@@ -133,8 +147,8 @@ async def remove_session_capture(
     caller = visibility.current_caller()
     body = body or SessionCaptureReleaseRequest()
     stopped = await _manager(request).release(
-        session=caller.session, principal=caller.principal,
-        udid=body.simulator_udid, names=body.processes or None)
+        principal=caller.principal, udid=body.simulator_udid,
+        names=body.processes or None)
     return {"stopped": stopped, "claims": _claims(request, caller)}
 
 

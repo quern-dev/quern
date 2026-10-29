@@ -94,7 +94,7 @@ async def test_names_the_main_proxy_captures_start_nothing(tmp_path):
     result = await m.claim(session="s1", principal="client:a", udid=ALPHA,
                            names=["MobileSafari"])
     assert result == {"main_proxy": ["MobileSafari"], "shared": [], "started": [],
-                      "confirmed": None}
+                      "confirmed": None, "added": []}
     assert m.made == [] and leader.followers == []
 
 
@@ -121,7 +121,7 @@ async def test_a_running_session_proxy_counts_as_local_capture(tmp_path):
     m = _manager(leader, tmp_path)
     await m.claim(session="s1", principal="client:a", udid=ALPHA, names=["Metatext"])
     assert leader.local_capture
-    await m.release(session="s1", principal="client:a")
+    await m.release(principal="client:a")
     assert not leader.local_capture
 
 
@@ -142,20 +142,19 @@ async def test_the_proxy_stops_when_the_last_claim_on_it_goes(tmp_path):
     await m.claim(session="s2", principal="client:b", udid=BRAVO, names=["Metatext"])
     follower = m.made[0]
 
-    assert await m.release(session="s1", principal="client:a") == []
+    assert await m.release(principal="client:a") == []
     assert follower.is_running and leader.followers == [follower]
 
-    assert await m.release(session="s2", principal="client:b") == ["Metatext"]
+    assert await m.release(principal="client:b") == ["Metatext"]
     assert not follower.is_running and leader.followers == []
     assert m.claims() == []
 
 
-async def test_a_release_names_its_own_session_only(tmp_path):
-    """Same session id under another principal is someone else's claim."""
+async def test_a_release_names_its_own_principal_only(tmp_path):
     leader = _leader()
     m = _manager(leader, tmp_path)
     await m.claim(session="s1", principal="client:a", udid=ALPHA, names=["Metatext"])
-    assert await m.release(session="s1", principal="client:b") == []
+    assert await m.release(principal="client:b") == []
     assert m.made[0].is_running
 
 
@@ -164,7 +163,7 @@ async def test_releasing_one_name_keeps_the_others(tmp_path):
     m = _manager(leader, tmp_path)
     await m.claim(session="s1", principal="client:a", udid=ALPHA, names=["Metatext"])
     await m.claim(session="s1", principal="client:a", udid=ALPHA, names=["Ivory"])
-    assert await m.release(session="s1", principal="client:a",
+    assert await m.release(principal="client:a",
                            names=["Ivory"]) == ["Ivory"]
     assert [c.names for c in m.claims()] == [["Metatext"]]
 
@@ -321,7 +320,7 @@ async def test_a_session_proxy_never_writes_state_json(tmp_path, _no_state_file)
     follower = m.made[0]
     await follower._handle_status_event({"event": "started"})
     await follower._handle_status_event({"event": "stopped"})
-    await m.release(session="s1", principal="client:a")
+    await m.release(principal="client:a")
     assert _no_state_file == []
     await leader._handle_status_event({"event": "started"})
     assert _no_state_file == [{"proxy_status": "running"}]
@@ -421,7 +420,7 @@ async def test_running_proxies_are_written_down(tmp_path):
     m.made[0]._process = SimpleNamespace(pid=4242, returncode=0)
     m._write_pids()
     assert '"pids": [4242]' in m.pid_file.read_text()
-    await m.release(session="s1", principal="client:a")
+    await m.release(principal="client:a")
     assert not m.pid_file.exists()
 
 
@@ -541,3 +540,207 @@ async def test_a_hold_kept_through_another_session_keeps_the_capture(tmp_path):
 
     await sessions_api._end_client_work(app, registry, session)
     assert [c.names for c in m.claims()] == [["Metatext"]]
+
+    # ...and the key's other session, which holds it now, can hand it back:
+    # a claim keyed by the session that made it could be released by neither.
+    assert await m.release(principal="client:a", udid=ALPHA) == ["Metatext"]
+
+
+# ---------------------------------------------------------------------------
+# Review findings
+# ---------------------------------------------------------------------------
+
+
+async def test_a_claim_behind_a_stop_does_not_start_a_proxy(tmp_path):
+    """stop_proxy took the lock first and stopped the main proxy; the claim
+    that waited behind it must not start one that runs on after "stopped"."""
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    leader._running = False
+    with pytest.raises(sp_mod.MainProxyStopped):
+        await m.claim(session="s1", principal="client:a", udid=ALPHA, names=["Metatext"])
+    assert m.made == [] and m.claims() == []
+
+
+async def test_stop_proxy_stops_the_session_proxies(tmp_path):
+    from server.api import proxy as proxy_api
+
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    await m.claim(session="s1", principal="client:a", udid=ALPHA, names=["Metatext"])
+    req = _request(leader, m)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(proxy_api, "update_state", lambda **kw: None)
+        mp.setattr(proxy_api, "_get_proxy_status", AsyncMock(
+            return_value=proxy_api.ProxyStatusResponse(status="stopped")))
+        await proxy_api.stop_proxy.__wrapped__(req)
+    assert not m.made[0].is_running and m.claims() == [] and not leader.is_running
+
+
+async def test_a_ca_refusal_keeps_names_an_earlier_call_claimed(tmp_path, as_client,
+                                                                 monkeypatch):
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    await _post(leader, m, processes=["Metatext"], only=True)
+    monkeypatch.setattr(api.sim_tls, "ensure_capturable", AsyncMock(
+        side_effect=sim_tls.CaptureNotReady({"message": "no CA"})))
+    with pytest.raises(HTTPException):
+        await _post(leader, m, processes=["Metatext", "Ivory"], only=True)
+    assert [c.names for c in m.claims()] == [["Metatext"]]
+    assert m.made[0].is_running
+
+
+@pytest.mark.parametrize("name", ["MyApp,4242", "/Applications", "a/b"])
+async def test_a_client_cannot_smuggle_a_pid_or_a_path(tmp_path, as_client, name):
+    leader = _leader()
+    with pytest.raises(HTTPException) as e:
+        await _post(leader, _manager(leader, tmp_path), processes=[name])
+    assert e.value.status_code == 400
+
+
+async def test_a_client_sees_only_its_own_names_on_a_shared_proxy(tmp_path):
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    await m.claim(session="s1", principal="client:a", udid=ALPHA,
+                  names=["Metatext", "Ivory"])
+    await m.claim(session="s2", principal="client:b", udid=BRAVO, names=["Ivory"])
+    assert [d["processes"] for d in m.describe("client:b")] == [["Ivory"]]
+    assert m.describe("client:b")[0]["udids"] == [BRAVO]
+
+
+async def test_a_dead_session_proxy_holds_nothing(tmp_path):
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    await m.claim(session="s1", principal="client:a", udid=ALPHA, names=["Metatext"])
+    follower = m.made[0]
+    follower._handle_intercepted({"id": "f1", "request": {}})
+    assert leader.held_count() == 1
+    follower._running = False                         # its mitmdump exited
+    assert leader.held_count() == 0 and not leader.holds("f1")
+    await leader.set_mock("~d x.com", {"status_code": 200}, rule_id="after")
+    assert "after" not in [c.get("rule_id") for c in follower.sent]
+
+
+async def test_a_stopping_proxy_drops_only_its_own_pending(tmp_path):
+    store = FlowStore()
+    leader = _leader(store)
+    m = _manager(leader, tmp_path)
+    await m.claim(session="s1", principal="client:a", udid=ALPHA, names=["Metatext"])
+    follower = m.made[0]
+    started = {"request": {"method": "GET", "url": "http://x/", "host": "x", "path": "/"},
+               "timestamp": 1}
+    leader._handle_started({**started, "id": "lead"})
+    follower._handle_started({**started, "id": "foll"})
+
+    follower._drop_own_pending()
+
+    assert [f.id for f in store.pending()] == ["lead"]
+
+
+async def test_only_a_session_proxy_is_told_to_pass_the_mac_through(tmp_path, monkeypatch):
+    """Spawn's environment: the session proxy gets the variable; the main
+    proxy never inherits it."""
+    monkeypatch.setenv(proxy_mod.SIMULATORS_ONLY_ENV, "1")
+    seen: dict[str, dict] = {}
+
+    async def fake_exec(*cmd, env, **kw):
+        seen["env"] = env
+        raise OSError("not spawning in a test")
+
+    monkeypatch.setattr(proxy_mod.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(ProxyAdapter, "_find_mitmdump", lambda self: "/bin/false")
+    monkeypatch.setattr(ProxyAdapter, "_kill_stale_mitmdump", staticmethod(lambda port: None))
+
+    main = ProxyAdapter(flow_store=FlowStore(), local_capture_processes=["Safari"])
+    assert await main._spawn() is False
+    assert proxy_mod.SIMULATORS_ONLY_ENV not in seen["env"]
+
+    follower = ProxyAdapter(flow_store=FlowStore(), listen_port=None,
+                            local_capture_processes=["Metatext"])
+    follower.leader = main
+    assert await follower._spawn() is False
+    assert seen["env"][proxy_mod.SIMULATORS_ONLY_ENV] == "1"
+
+
+def test_the_two_spellings_of_the_variable_agree():
+    from server.proxy import addon as addon_mod
+    assert addon_mod.SIMULATORS_ONLY_ENV == proxy_mod.SIMULATORS_ONLY_ENV
+
+
+class _NextLayer:
+    def __init__(self, client_id: str, protocol: str = "tcp"):
+        self.context = SimpleNamespace(client=SimpleNamespace(
+            id=client_id, transport_protocol=protocol))
+        self.layer = None
+
+
+def _addon(monkeypatch, simulators_only: bool, ancestry: dict[int, int | None]):
+    from server.proxy import addon as addon_mod
+    if simulators_only:
+        monkeypatch.setenv(addon_mod.SIMULATORS_ONLY_ENV, "1")
+    else:
+        monkeypatch.delenv(addon_mod.SIMULATORS_ONLY_ENV, raising=False)
+    monkeypatch.setattr(addon_mod, "_simulator_instance_for_pid",
+                        lambda pid: (ALPHA if ancestry[pid] else None, ancestry[pid]))
+    monkeypatch.setattr(addon_mod, "_client_process_info", {
+        "sim": {"pid": 10}, "mac": {"pid": 20}, "unknown": {"pid": 30}})
+    # The real layers need a live connection's context; what matters here is
+    # which one is chosen, and that it ignores the connection.
+    from mitmproxy.proxy import layers
+    monkeypatch.setattr(layers, "TCPLayer", lambda ctx, ignore=False: ("tcp", ignore))
+    monkeypatch.setattr(layers, "UDPLayer", lambda ctx, ignore=False: ("udp", ignore))
+    return addon_mod, addon_mod.IOSDebugAddon()
+
+
+@pytest.mark.parametrize("client_id,passed_through", [
+    ("sim", False), ("mac", True), ("unknown", True), ("no-pid", True)])
+def test_a_session_proxy_passes_the_macs_own_traffic_through(monkeypatch, client_id,
+                                                              passed_through):
+    """Found by review: a client's name matches any executable path on the
+    Mac, so ["a"] redirected the owner's own apps through a proxy that
+    decrypts. A session proxy now keeps only connections from a simulator."""
+    addon_mod, addon = _addon(monkeypatch, True, {10: 555, 20: None, 30: None})
+    nl = _NextLayer(client_id)
+    addon.next_layer(nl)
+    if passed_through:
+        assert nl.layer == ("tcp", True)
+    else:
+        assert nl.layer is None
+
+
+def test_udp_from_the_mac_passes_through_as_udp(monkeypatch):
+    _, addon = _addon(monkeypatch, True, {10: 555, 20: None, 30: None})
+    nl = _NextLayer("mac", protocol="udp")
+    addon.next_layer(nl)
+    assert nl.layer == ("udp", True)
+
+
+def test_the_main_proxy_decides_nothing_here(monkeypatch):
+    _, addon = _addon(monkeypatch, False, {10: 555, 20: None, 30: None})
+    nl = _NextLayer("mac")
+    addon.next_layer(nl)
+    assert nl.layer is None
+
+
+def test_a_lookup_that_raises_passes_through(monkeypatch):
+    """Could not tell is not "a simulator": capturing would mean capturing the
+    Mac's own traffic."""
+    addon_mod, addon = _addon(monkeypatch, True, {10: 555, 20: None, 30: None})
+
+    def boom(pid):
+        raise OSError("ps failed")
+
+    monkeypatch.setattr(addon_mod, "_simulator_instance_for_pid", boom)
+    nl = _NextLayer("sim")
+    addon.next_layer(nl)
+    assert nl.layer == ("tcp", True)
+
+
+async def test_one_key_on_one_device_is_one_claim(tmp_path):
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    await m.claim(session="client:a/s1", principal="client:a", udid=ALPHA,
+                  names=["Metatext"])
+    await m.claim(session="client:a/s2", principal="client:a", udid=ALPHA,
+                  names=["Ivory"])
+    assert [(c.udid, c.names) for c in m.claims()] == [(ALPHA, ["Metatext", "Ivory"])]

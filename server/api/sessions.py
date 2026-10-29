@@ -418,7 +418,7 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
         if session_proxies is not None and session_proxies.claims(session.principal):
             try:
                 stopped = await session_proxies.release(
-                    session=session.id, principal=session.principal, udid=udid)
+                    principal=session.principal, udid=udid)
                 actions.append({"udid": udid, "action": "session_capture_released",
                                 "ok": True, "stopped": stopped})
             except Exception as e:  # noqa: BLE001 -- reported, never raised

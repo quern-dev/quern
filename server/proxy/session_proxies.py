@@ -53,14 +53,25 @@ class SessionCaptureError(Exception):
     """A session proxy could not be started; the message says why."""
 
 
+class MainProxyStopped(SessionCaptureError):
+    """The main proxy is not running: session proxies take its rules, and
+    `stop_proxy` means nothing is captured."""
+
+
 @dataclass
 class Claim:
-    """One session's request for names, made on behalf of one device."""
+    """A principal's names, asked for its work on one device.
 
-    session: str
+    Keyed by principal and device, not session: a key holds a device through
+    whichever of its sessions holds it, and the hold is what a claim lasts
+    for. Keyed by session, a claim made by one session and outlived by the
+    key's hold through another could be released by neither (review)."""
+
     principal: str
     udid: str
     names: list[str] = field(default_factory=list)
+    #: The session that last asked, for status only.
+    session: str = ""
 
 
 @dataclass
@@ -100,7 +111,8 @@ class SessionProxies:
 
     def describe(self, principal: str | None = None) -> list[dict]:
         """The running session proxies, for status. With `principal`, only
-        those its claims use, and only its own claims on them."""
+        those its claims use, and of those only its own names and claims: a
+        shared proxy's other names are other principals' apps."""
         out = []
         for proxy in self._proxies:
             claims = [c for c in self._claims
@@ -108,9 +120,11 @@ class SessionProxies:
                       and (principal is None or c.principal == principal)]
             if principal is not None and not claims:
                 continue
+            shown = proxy.names if principal is None else [
+                n for n in proxy.names if any(n in c.names for c in claims)]
             process = proxy.adapter._process
             out.append({
-                "processes": list(proxy.names),
+                "processes": list(shown),
                 "running": proxy.adapter.is_running,
                 "pid": getattr(process, "pid", None),
                 "error": proxy.adapter._error,
@@ -126,13 +140,20 @@ class SessionProxies:
         """Capture `names` for `session`'s work on `udid`.
 
         Returns which names the main proxy already captures, which an existing
-        session proxy does, which a new one was started for, and whether that
-        one confirmed it was capturing with the rules applied. Raises
-        `SessionCaptureError` when the new proxy did not start.
+        session proxy does, which a new one was started for, whether that one
+        confirmed it was capturing with the rules applied, and which names this
+        call added to the principal's claim on `udid` (`added`, for a caller
+        that has to undo it). Raises `MainProxyStopped` when the main proxy is
+        not running, `SessionCaptureError` when the new proxy did not start.
         """
         async with self._lock:
+            # Inside the lock: a stop_proxy that took it first has stopped the
+            # main proxy, and a claim waiting behind it must not start a proxy
+            # that would run on after "stopped" (review).
+            if not self.leader.is_running:
+                raise MainProxyStopped("the proxy is not running")
             await self._prune_dead()
-            main = set(self.leader.local_capture_processes) if self.leader.is_running else set()
+            main = set(self.leader.local_capture_processes)
             by_main, shared, new = [], [], []
             for name in dict.fromkeys(names):
                 if name in main:
@@ -145,9 +166,9 @@ class SessionProxies:
             confirmed: bool | None = None
             if new:
                 confirmed = await self._start(new)
-            self._add_claim(Claim(session, principal, udid, [*shared, *new]))
+            added = self._add_claim(Claim(principal, udid, [*shared, *new], session))
             return {"main_proxy": by_main, "shared": shared, "started": new,
-                    "confirmed": confirmed}
+                    "confirmed": confirmed, "added": added}
 
     async def _start(self, names: list[str]) -> bool:
         adapter = self._make_adapter(names)
@@ -187,25 +208,28 @@ class SessionProxies:
         except Exception:  # noqa: BLE001 -- already failing; say so and go on
             logger.exception("Could not stop a session proxy that failed to start")
 
-    def _add_claim(self, claim: Claim) -> None:
+    def _add_claim(self, claim: Claim) -> list[str]:
+        """Merge `claim` in; returns the names it added."""
         for existing in self._claims:
-            if (existing.session, existing.principal, existing.udid) == (
-                    claim.session, claim.principal, claim.udid):
-                existing.names = list(dict.fromkeys([*existing.names, *claim.names]))
-                return
+            if (existing.principal, existing.udid) == (claim.principal, claim.udid):
+                added = [n for n in claim.names if n not in existing.names]
+                existing.names = [*existing.names, *added]
+                existing.session = claim.session
+                return added
         if claim.names:
             self._claims.append(claim)
+        return list(claim.names)
 
     # -- releasing -----------------------------------------------------------
 
-    async def release(self, *, session: str, principal: str, udid: str | None = None,
+    async def release(self, *, principal: str, udid: str | None = None,
                       names: list[str] | None = None) -> list[str]:
-        """Drop `session`'s claims -- on `udid`, and only `names`, when given --
-        and stop every session proxy no claim uses any more. Returns the names
-        whose proxies stopped."""
+        """Drop `principal`'s claims -- on `udid`, and only `names`, when given
+        -- and stop every session proxy no claim uses any more. Returns the
+        names whose proxies stopped."""
         async with self._lock:
             for claim in self._claims:
-                if claim.session != session or claim.principal != principal:
+                if claim.principal != principal:
                     continue
                 if udid is not None and claim.udid != udid:
                     continue
