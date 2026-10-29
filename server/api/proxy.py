@@ -38,6 +38,7 @@ from server.models import (
     FlowSummaryResponse,
     InterfaceInfo,
     LocalCaptureRequest,
+    ProxyRestart,
     ProxyStatusResponse,
     StartProxyRequest,
     SystemProxyInfo,
@@ -1334,12 +1335,13 @@ async def set_local_capture(
         local_capture_added=added_defaults or [],
     )
 
-    # Restart proxy if running to apply new mode
-    was_running = adapter.is_running
-    if was_running:
-        await adapter.stop()
-        adapter.reconfigure(local_capture_processes=processes)
-        await adapter.start()
+    # The list is a launch argument, so a running proxy restarts to apply it
+    # (on macOS a live mode change leaves the redirector on the old list). The
+    # restart keeps mocks, bypass patterns and the intercept (#562); what it
+    # cannot keep -- open connections, held flows -- the response says.
+    restart: dict | None = None
+    if adapter.is_running:
+        restart = await adapter.restart(local_capture_processes=processes)
     else:
         adapter.reconfigure(local_capture_processes=processes)
 
@@ -1357,4 +1359,10 @@ async def set_local_capture(
     status.capture_added = added_defaults or None
     status.capture_removed = removed or None
     status.deprecations = _deprecations(body)
+    if restart is not None:
+        status.restart = ProxyRestart(
+            connections_reset=True,
+            held_flows_dropped=restart["held_flows_dropped"],
+            restored=restart["restored"],
+        )
     return status

@@ -18,6 +18,7 @@ applied to a write rather than a read.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -39,6 +40,7 @@ def adapter():
 
     a = ProxyAdapter.__new__(ProxyAdapter)
     a._mock_rules = []
+    a._rules_lock = asyncio.Lock()  # set by __init__, which this skips (#562)
     a.send_command = AsyncMock()
     a._running = True  # `is_running` is a read-only property over this
     return a

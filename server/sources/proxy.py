@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -136,6 +137,15 @@ def _signal(process: asyncio.subprocess.Process, method: str) -> None:
         getattr(process, method)()
 
 
+def _rules_locked(method):
+    """Run a rule-changing method under the adapter's rules lock (#562)."""
+    @functools.wraps(method)
+    async def locked(self, *args, **kwargs):
+        async with self._rules_lock:
+            return await method(self, *args, **kwargs)
+    return locked
+
+
 class ProxyAdapter(BaseSourceAdapter):
     """Captures HTTP traffic via mitmdump subprocess."""
 
@@ -183,6 +193,10 @@ class ProxyAdapter(BaseSourceAdapter):
 
         # Bypass state (server-side mirror)
         self._bypass_patterns: list[str] = []
+        #: Rule changes and `restart()` take turns (#562): a mock set while the
+        #: proxy restarts was either cleared by the stop or recorded with no
+        #: process to send it to, and quern then claimed a rule mitmdump lacked.
+        self._rules_lock = asyncio.Lock()
 
         # Simulators whose TLS the addon may decrypt (#354); None = all of
         # them. Unlike the state above this is NOT cleared on stop: it is a
@@ -591,12 +605,79 @@ class ProxyAdapter(BaseSourceAdapter):
     # Intercept convenience methods
     # -------------------------------------------------------------------
 
+    async def restart(self, **settings) -> dict:
+        """Stop mitmdump and start it again, keeping the rules callers set (#562).
+
+        `stop()` clears mocks, the intercept pattern and bypass patterns, which
+        is right for a stop someone asked for and wrong for a restart nobody
+        asked for: changing local capture restarts mitmdump -- its process list
+        is a launch argument, and on macOS a live mode change leaves the
+        redirector on the old list -- and every mock on the server silently
+        stopped applying. So they are taken before the stop and sent to the new
+        process after the start, rule ids and device scopes unchanged.
+
+        `settings` are passed to `reconfigure` between the stop and the start.
+
+        Held flows cannot come across: each is a request waiting inside the old
+        process, whose connection the restart closes. The count dropped is
+        returned, with the rules restored, so the caller can say what happened.
+        """
+        async with self._rules_lock:
+            return await self._restart_locked(settings)
+
+    async def _restart_locked(self, settings: dict) -> dict:
+        mocks = [dict(rule) for rule in self._mock_rules]
+        intercept = self._intercept_pattern
+        bypass = list(self._bypass_patterns)
+        held = len(self._held_flows)
+
+        await self.stop()
+        # `reconfigure` refuses while running, so new settings -- a local
+        # capture list -- go in between the stop and the start.
+        if settings:
+            self.reconfigure(**settings)
+        await self.start()
+        if not self.is_running:
+            # Nothing to send them to. Kept, so a later start is not handed a
+            # server that has forgotten them -- the caller reports the failure.
+            self._mock_rules = mocks
+            self._intercept_pattern = intercept
+            self._bypass_patterns = bypass
+            return {"held_flows_dropped": held, "restored": None}
+
+        for rule in mocks:
+            self._mock_rules.append(rule)
+            await self.send_command({
+                "action": "set_mock",
+                "rule_id": rule["rule_id"],
+                "pattern": rule["pattern"],
+                "response": rule["response"],
+                "simulator_udid": rule.get("simulator_udid"),
+            })
+        # Sent directly: the public setters take the rules lock, held here.
+        if bypass:
+            self._bypass_patterns = list(bypass)
+            await self.send_command({"action": "set_bypass", "patterns": bypass})
+        if intercept is not None:
+            self._intercept_pattern = intercept
+            await self.send_command({"action": "set_intercept", "pattern": intercept})
+        return {
+            "held_flows_dropped": held,
+            "restored": {
+                "mock_rules": len(mocks),
+                "bypass_patterns": len(bypass),
+                "intercept": intercept,
+            },
+        }
+
+    @_rules_locked
     async def set_intercept(self, pattern: str) -> None:
         """Set an intercept pattern on the addon. Raises ValueError if pattern is invalid."""
         validate_filter_pattern(pattern)
         self._intercept_pattern = pattern
         await self.send_command({"action": "set_intercept", "pattern": pattern})
 
+    @_rules_locked
     async def clear_intercept(self) -> None:
         """Clear the intercept pattern and release all held flows."""
         self._intercept_pattern = None
@@ -619,6 +700,7 @@ class ProxyAdapter(BaseSourceAdapter):
         self._held_flows.clear()
         await self.send_command({"action": "release_all"})
 
+    @_rules_locked
     async def set_mock(
         self, pattern: str, response: dict,
         rule_id: str | None = None,
@@ -647,6 +729,7 @@ class ProxyAdapter(BaseSourceAdapter):
         })
         return rule_id
 
+    @_rules_locked
     async def update_mock(
         self, rule_id: str, pattern: str | None = None,
         response: dict | None = None,
@@ -689,6 +772,7 @@ class ProxyAdapter(BaseSourceAdapter):
         })
         return updated
 
+    @_rules_locked
     async def clear_mock(self, rule_id: str | None = None) -> int:
         """Remove a specific mock rule or all of them. Returns how many went.
 
@@ -720,6 +804,7 @@ class ProxyAdapter(BaseSourceAdapter):
     # Bypass convenience methods
     # -------------------------------------------------------------------
 
+    @_rules_locked
     async def set_bypass(self, patterns: list[str]) -> list[str]:
         """Add bypass patterns. Returns the full list after update."""
         for p in patterns:
@@ -731,6 +816,7 @@ class ProxyAdapter(BaseSourceAdapter):
         })
         return list(self._bypass_patterns)
 
+    @_rules_locked
     async def remove_bypass(self, patterns: list[str]) -> list[str]:
         """Remove specific bypass patterns. Returns the remaining list."""
         self._bypass_patterns = [
@@ -743,6 +829,7 @@ class ProxyAdapter(BaseSourceAdapter):
         })
         return list(self._bypass_patterns)
 
+    @_rules_locked
     async def clear_bypass(self) -> None:
         """Remove all bypass patterns."""
         self._bypass_patterns.clear()

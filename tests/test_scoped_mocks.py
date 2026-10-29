@@ -13,6 +13,7 @@ a request whose simulator cannot be told is never mocked by a scoped rule.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import time
@@ -330,6 +331,7 @@ def adapter():
 
     a = ProxyAdapter.__new__(ProxyAdapter)
     a._mock_rules = []
+    a._rules_lock = asyncio.Lock()  # set by __init__, which this skips (#562)
     a.send_command = AsyncMock()
     a._running = True
     a.local_capture_processes = ["MockProbe"]
