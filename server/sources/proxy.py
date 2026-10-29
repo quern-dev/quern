@@ -513,11 +513,15 @@ class ProxyAdapter(BaseSourceAdapter):
         self._read_task = asyncio.create_task(self._read_loop(process, stream))
         self._stderr_task = asyncio.create_task(self._drain_stderr())
         self._stdout_task = asyncio.create_task(self._drain_stdout())
-        logger.info(
-            "Proxy adapter started (mitmdump on %s:%d)",
-            self.listen_host,
-            self.listen_port,
-        )
+        if self.listen_port is None:
+            logger.info("Session proxy started (mitmdump capturing %s)",
+                        ", ".join(self.local_capture_processes))
+        else:
+            logger.info(
+                "Proxy adapter started (mitmdump on %s:%d)",
+                self.listen_host,
+                self.listen_port,
+            )
         return True
 
     async def _send_rules(self) -> bool:

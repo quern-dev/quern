@@ -163,16 +163,26 @@ class SessionProxies:
         before = Counter(adapter._addon_events)
         try:
             await adapter.start()
-        except Exception:
-            self.leader.followers.remove(adapter)
-            raise
+        except Exception as e:
+            # It may have spawned before failing. Left running and unlisted,
+            # it would hold its names with nothing to stop it.
+            await self._abandon(adapter)
+            raise SessionCaptureError(f"the session proxy failed to start: {e}") from e
         if not adapter.is_running:
-            self.leader.followers.remove(adapter)
+            await self._abandon(adapter)
             raise SessionCaptureError(
                 adapter._error or "the session proxy did not start")
         self._proxies.append(SessionProxy(adapter, list(names)))
         self._write_pids()
         return await adapter._serving_with_rules(before)
+
+    async def _abandon(self, adapter: ProxyAdapter) -> None:
+        if adapter in self.leader.followers:
+            self.leader.followers.remove(adapter)
+        try:
+            await adapter.stop()
+        except Exception:  # noqa: BLE001 -- already failing; say so and go on
+            logger.exception("Could not stop a session proxy that failed to start")
 
     def _add_claim(self, claim: Claim) -> None:
         for existing in self._claims:

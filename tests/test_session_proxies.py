@@ -177,6 +177,31 @@ async def test_a_proxy_that_did_not_start_is_not_listed_or_claimed(tmp_path):
     assert leader.followers == [] and m.claims() == [] and m.describe() == []
 
 
+async def test_a_start_that_raises_after_spawning_stops_the_process(tmp_path):
+    """Found live: the start log raised after mitmdump had spawned, and the
+    process stayed up, unlisted, holding its name."""
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    real_make = m._make_adapter
+
+    def make(names):
+        a = real_make(names)
+        real_spawn = a._spawn
+
+        async def spawn_then_fail():
+            await real_spawn()
+            raise TypeError("a log line that cannot format")
+
+        a._spawn = spawn_then_fail
+        return a
+
+    m._make_adapter = make
+    with pytest.raises(sp_mod.SessionCaptureError, match="cannot format"):
+        await m.claim(session="s1", principal="client:a", udid=ALPHA, names=["Metatext"])
+    assert not m.made[0].is_running
+    assert leader.followers == [] and m.claims() == []
+
+
 async def test_a_proxy_that_died_is_started_again(tmp_path):
     leader = _leader()
     m = _manager(leader, tmp_path)
