@@ -14,6 +14,7 @@ are faked.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -167,6 +168,25 @@ async def test_a_proxy_that_exits_after_echoing_is_unconfirmed():
     a.send_command = send
     result = await asyncio.wait_for(
         a.restart(local_capture_processes=["Metatext"]), timeout=2)
+    assert result["confirmed"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_proxy_whose_process_exited_is_unconfirmed_before_the_loop_notices():
+    """The read loop is still working through queued events, so `_running` is
+    still True; the subprocess has a return code already."""
+    a = await _with_rules(_adapter())
+    real_send = a.send_command
+
+    async def send(command):
+        await real_send(command)
+        if command["action"] == "set_intercept":  # the last one sent
+            a._process = SimpleNamespace(returncode=1)
+
+    a.send_command = send
+    result = await asyncio.wait_for(
+        a.restart(local_capture_processes=["Metatext"]), timeout=2)
+    assert a.is_running
     assert result["confirmed"] is False
 
 

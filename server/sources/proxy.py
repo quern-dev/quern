@@ -736,10 +736,12 @@ class ProxyAdapter(BaseSourceAdapter):
             if loop.time() >= deadline or not self.is_running:
                 return False
             await asyncio.sleep(0.05)
-        # The events can all be in when the process has already gone: its read
+        # The events can all be in when the process has already gone. Its read
         # loop clears `_running` at EOF, which the loop above never re-checks
-        # once nothing is missing.
-        return self.is_running
+        # once nothing is missing -- and until the loop gets there, only the
+        # return code says so.
+        process = self._process
+        return self.is_running and (process is None or process.returncode is None)
 
     @_rules_locked
     async def set_intercept(self, pattern: str) -> None:
