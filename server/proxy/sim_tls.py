@@ -570,7 +570,7 @@ def rejection_note(app: Any, udid: str | None, since: str | None = None,
         return None
     floor = max(filter(None, (since, _trusted_since(app, udid))), default=None)
     hits = [
-        r for r in getattr(adapter, "_tls_rejections", ())
+        r for r in adapter.tls_rejections()
         if (r.simulator_udid or "").upper() == udid.upper()
         and (floor is None or (r.last_at or "") >= floor)
         and (until is None or (r.first_at or "") <= until)

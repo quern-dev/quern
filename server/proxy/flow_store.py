@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 
 from server.models import FlowQueryParams, FlowRecord
@@ -375,11 +375,24 @@ class FlowStore:
         `PENDING_MAX` at once, so `pending()` is not all of them."""
         return self._pending_evicted
 
-    def drop_pending(self) -> int:
-        """The proxy stopped: nothing it was carrying will finish. Returns how
-        many were dropped."""
-        dropped = len(self._pending)
-        self._pending.clear()
+    def drop_pending(self, ids: Iterable[str] | None = None, *,
+                     announce: bool = True) -> int:
+        """A proxy stopped: nothing it was carrying will finish. Returns how
+        many were dropped. `ids` limits it to that proxy's requests -- the store
+        is shared by the main proxy and any session proxies (#558), and one
+        stopping must not end the others' in-flight requests. Listeners are
+        told even of none dropped, unless `announce` is off: a session proxy
+        stopping with nothing in flight is not news to every recording."""
+        if ids is None:
+            dropped = len(self._pending)
+            self._pending.clear()
+        else:
+            dropped = 0
+            for flow_id in list(ids):
+                if self._pending.pop(flow_id, None) is not None:
+                    dropped += 1
+        if not (announce or dropped):
+            return 0
         for listener in list(self.pending_dropped_listeners):
             try:
                 listener(dropped)

@@ -64,7 +64,7 @@ async def set_intercept(request: Request, body: InterceptSetRequest) -> dict:
 async def clear_intercept(request: Request) -> dict:
     """Clear the intercept pattern and release all held flows."""
     adapter = _require_running_proxy(request)
-    count = len(adapter._held_flows)
+    count = adapter.held_count()
     await adapter.clear_intercept()
     return {
         "status": "accepted",
@@ -88,7 +88,7 @@ async def list_held_flows(
         return InterceptStatusResponse()
 
     # Long-poll: wait for a held flow if none exist and timeout > 0
-    if timeout > 0 and not adapter._held_flows:
+    if timeout > 0 and not adapter.held_count():
         await adapter.wait_for_held(timeout)
 
     held = adapter.get_held_flows()
@@ -113,12 +113,12 @@ async def release_flow(request: Request, body: ReleaseFlowRequest) -> dict:
     """Release a single held flow, optionally with request modifications."""
     adapter = _require_running_proxy(request)
 
-    if body.flow_id not in adapter._held_flows:
+    if not adapter.holds(body.flow_id):
         raise HTTPException(status_code=404, detail=f"Flow {body.flow_id} not held")
 
     await adapter.release_flow(body.flow_id, modifications=body.modifications)
     # Remove from server-side tracking (addon will also emit a released event)
-    adapter._held_flows.pop(body.flow_id, None)
+    adapter.forget_held(body.flow_id)
     return {"status": "released", "flow_id": body.flow_id}
 
 
@@ -127,7 +127,7 @@ async def release_flow(request: Request, body: ReleaseFlowRequest) -> dict:
 async def release_all(request: Request) -> dict:
     """Release all currently held flows."""
     adapter = _require_running_proxy(request)
-    count = len(adapter._held_flows)
+    count = adapter.held_count()
     await adapter.release_all()
     return {"status": "released", "count": count}
 

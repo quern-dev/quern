@@ -260,8 +260,8 @@ async def _get_proxy_status(
             flows_captured=flow_store.size if flow_store else 0,
             flow_store=flow_store.stats() if flow_store else None,
             active_intercept=adapter._intercept_pattern,
-            held_flows_count=len(adapter._held_flows),
-            tls_rejections=list(adapter._tls_rejections),
+            held_flows_count=adapter.held_count(),
+            tls_rejections=adapter.tls_rejections(),
             simulator_tls=sim_tls_report,
             mock_rules_count=len(adapter._mock_rules),
             bypass_patterns=adapter.get_bypass_patterns(),
@@ -284,8 +284,8 @@ async def _get_proxy_status(
             flows_captured=flow_store.size if flow_store else 0,
             flow_store=flow_store.stats() if flow_store else None,
             active_intercept=adapter._intercept_pattern,
-            held_flows_count=len(adapter._held_flows),
-            tls_rejections=list(adapter._tls_rejections),
+            held_flows_count=adapter.held_count(),
+            tls_rejections=adapter.tls_rejections(),
             simulator_tls=sim_tls_report,
             mock_rules_count=len(adapter._mock_rules),
             bypass_patterns=adapter.get_bypass_patterns(),
@@ -312,7 +312,7 @@ async def _get_proxy_status(
         # and are meaningless once the addon is gone; a rejection history is not,
         # and this branch is reachable with data in it when mitmdump died on its
         # own -- which is exactly when there is no other trace to go on.
-        tls_rejections=list(adapter._tls_rejections),
+        tls_rejections=adapter.tls_rejections(),
         simulator_tls=sim_tls_report,
         warnings=warnings,
         cert_setup=cert_setup,
@@ -1225,10 +1225,10 @@ async def set_proxy_filter(request: Request, body: dict) -> dict[str, str]:
 
     host = body.get("host")
     if host:
-        await proxy_adapter.send_command({"action": "set_filter", "host": host})
+        await proxy_adapter.broadcast({"action": "set_filter", "host": host})
         return {"status": "accepted", "filter": host}
     else:
-        await proxy_adapter.send_command({"action": "clear_filter"})
+        await proxy_adapter.broadcast({"action": "clear_filter"})
         return {"status": "accepted", "filter": "none"}
 
 

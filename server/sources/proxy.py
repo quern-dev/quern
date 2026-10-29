@@ -197,6 +197,15 @@ class ProxyAdapter(BaseSourceAdapter):
         #: proxy restarts was either cleared by the stop or recorded with no
         #: process to send it to, and quern then claimed a rule mitmdump lacked.
         self._rules_lock = asyncio.Lock()
+        #: Session proxies (#558): more mitmdumps, each capturing other apps in
+        #: local mode, that take this one's rules -- every rule change is
+        #: broadcast to them -- and report into the same flow store. Set on
+        #: the main adapter; a session proxy has `leader` instead.
+        self.followers: list[ProxyAdapter] = []
+        self.leader: ProxyAdapter | None = None
+        #: Requests this run has in flight, so a stop drops only its own: the
+        #: store is shared with the other proxies.
+        self._pending_ids: set[str] = set()
         #: Status events the addon has sent, by name, across runs: a restart
         #: compares counts to know the new process is serving with its rules.
         self._addon_events: Counter[str] = Counter()
@@ -225,8 +234,10 @@ class ProxyAdapter(BaseSourceAdapter):
 
     @property
     def local_capture(self) -> bool:
-        """Whether local capture is enabled (any processes configured)."""
-        return bool(self.local_capture_processes)
+        """Whether local capture is enabled: processes configured here, or a
+        session proxy capturing some (#558)."""
+        return bool(self.local_capture_processes) or any(
+            f.is_running for f in self.followers)
 
     def reconfigure(
         self,
@@ -365,8 +376,10 @@ class ProxyAdapter(BaseSourceAdapter):
             logger.warning(self._error)
             return False
 
-        # Kill any stale mitmdump from a previous run
-        await asyncio.to_thread(self._kill_stale_mitmdump, self.listen_port)
+        # Kill any stale mitmdump from a previous run. A session proxy has no
+        # port: it is found by pid instead (`server.proxy.session_proxies`).
+        if self.listen_port is not None:
+            await asyncio.to_thread(self._kill_stale_mitmdump, self.listen_port)
 
         cmd = [
             mitmdump,
@@ -376,7 +389,11 @@ class ProxyAdapter(BaseSourceAdapter):
             "--quiet",
         ]
 
-        if self.local_capture_processes:
+        if self.listen_port is None:
+            # A session proxy (#558): local mode only. Nothing listens, so it
+            # needs no port and cannot take the main proxy's.
+            cmd.extend(["--mode", "local:" + ",".join(self.local_capture_processes)])
+        elif self.local_capture_processes:
             # --mode regular@PORT handles the listen port; --mode local:Process1,Process2
             # adds transparent capture for specific processes via macOS System Extension.
             # Don't also pass --listen-port or mitmdump will try to bind the same address twice.
@@ -507,8 +524,9 @@ class ProxyAdapter(BaseSourceAdapter):
         """Send a new process the rules the server holds. False when a send
         failed: the process is going away (its stdin broke), and the rules stay
         listed for the next start rather than half-sent and forgotten."""
+        rules = self.leader or self
         try:
-            for rule in self._mock_rules:
+            for rule in rules._mock_rules:
                 await self.send_command({
                     "action": "set_mock",
                     "rule_id": rule["rule_id"],
@@ -516,13 +534,13 @@ class ProxyAdapter(BaseSourceAdapter):
                     "response": rule["response"],
                     "simulator_udid": rule.get("simulator_udid"),
                 })
-            if self._bypass_patterns:
+            if rules._bypass_patterns:
                 await self.send_command({
-                    "action": "set_bypass", "patterns": list(self._bypass_patterns),
+                    "action": "set_bypass", "patterns": list(rules._bypass_patterns),
                 })
-            if self._intercept_pattern is not None:
+            if rules._intercept_pattern is not None:
                 await self.send_command({
-                    "action": "set_intercept", "pattern": self._intercept_pattern,
+                    "action": "set_intercept", "pattern": rules._intercept_pattern,
                 })
         except Exception:
             logger.exception("Could not send the proxy rules to mitmdump")
@@ -547,7 +565,8 @@ class ProxyAdapter(BaseSourceAdapter):
         # kill gives the addon no chance to emit, and the state file would then
         # keep claiming the proxy is running. Off-thread for the same reason as
         # the handler -- this runs on the event loop.
-        await asyncio.to_thread(update_state, proxy_status="stopped")
+        if self.leader is None:  # state.json describes the main proxy
+            await asyncio.to_thread(update_state, proxy_status="stopped")
 
         if process and process.returncode is None:
             _signal(process, "terminate")
@@ -600,6 +619,18 @@ class ProxyAdapter(BaseSourceAdapter):
             self._process.stdin.write(data.encode("utf-8"))
             await self._process.stdin.drain()
 
+    async def broadcast(self, command: dict) -> None:
+        """Send a command to this mitmdump and every session proxy following it
+        (#558). A follower that cannot take it is logged, not raised: it is going
+        away, and the next start sends it the rules from here anyway."""
+        await self.send_command(command)
+        for follower in list(self.followers):
+            try:
+                await follower.send_command(command)
+            except Exception:
+                logger.exception("Could not send %s to a session proxy",
+                                 command.get("action"))
+
     @property
     def trusted_simulators(self) -> list[str] | None:
         """UDIDs whose TLS is decrypted; None means every simulator."""
@@ -614,7 +645,7 @@ class ProxyAdapter(BaseSourceAdapter):
         self._trusted_simulators = (
             None if udids is None else sorted({u.upper() for u in udids})
         )
-        await self.send_command({
+        await self.broadcast({
             "action": "set_trusted_simulators",
             "udids": self._trusted_simulators,
         })
@@ -639,8 +670,24 @@ class ProxyAdapter(BaseSourceAdapter):
         return confirmed is None or udid.upper() in confirmed
 
     def passthrough_counts(self) -> dict[str, dict]:
-        """Connections passed through since start, keyed by simulator UDID."""
-        return {k: dict(v) for k, v in self._passthrough.items()}
+        """Connections passed through since start, keyed by simulator UDID --
+        by this proxy and its session proxies, which see other apps on the
+        same simulators (#558)."""
+        merged: dict[str, dict] = {}
+        for adapter in self._all():
+            for udid, entry in adapter._passthrough.items():
+                into = merged.setdefault(
+                    udid, {"connections": 0, "last_host": None, "last_at": None})
+                into["connections"] += entry["connections"]
+                if (entry["last_at"] or "") >= (into["last_at"] or ""):
+                    into["last_host"] = entry["last_host"]
+                    into["last_at"] = entry["last_at"]
+        return merged
+
+    def tls_rejections(self) -> list[TlsRejection]:
+        """Clients that refused our certificate, this proxy's and its session
+        proxies'."""
+        return [r for a in self._all() for r in a._tls_rejections]
 
     def _handle_tls_passthrough(self, data: dict) -> None:
         udid = data.get("simulator_udid")
@@ -725,10 +772,11 @@ class ProxyAdapter(BaseSourceAdapter):
         """Whether the addon has, since `before`, said it is serving and echoed
         each rule `_send_rules` sent. False on timeout -- an addon on disk older
         than the server never sends `running` -- or if the process ended."""
-        want = {"running": 1, "mock_set": len(self._mock_rules)}
-        if self._bypass_patterns:
+        rules = self.leader or self
+        want = {"running": 1, "mock_set": len(rules._mock_rules)}
+        if rules._bypass_patterns:
             want["bypass_updated"] = 1
-        if self._intercept_pattern is not None:
+        if rules._intercept_pattern is not None:
             want["intercept_set"] = 1
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.restart_confirm_timeout
@@ -748,30 +796,34 @@ class ProxyAdapter(BaseSourceAdapter):
         """Set an intercept pattern on the addon. Raises ValueError if pattern is invalid."""
         validate_filter_pattern(pattern)
         self._intercept_pattern = pattern
-        await self.send_command({"action": "set_intercept", "pattern": pattern})
+        await self.broadcast({"action": "set_intercept", "pattern": pattern})
 
     @_rules_locked
     async def clear_intercept(self) -> None:
         """Clear the intercept pattern and release all held flows."""
         self._intercept_pattern = None
-        self._held_flows.clear()
-        await self.send_command({"action": "clear_intercept"})
+        for adapter in self._all():
+            adapter._held_flows.clear()
+        await self.broadcast({"action": "clear_intercept"})
 
     async def release_flow(self, flow_id: str, modifications: dict | None = None) -> None:
-        """Release a single held flow, optionally with modifications."""
+        """Release a single held flow, optionally with modifications. Sent to the
+        proxy holding it, which may be a session proxy (#558)."""
+        holder = next((a for a in self._all() if flow_id in a._held_flows), self)
         if modifications:
-            await self.send_command({
+            await holder.send_command({
                 "action": "modify_and_release",
                 "flow_id": flow_id,
                 "modifications": modifications,
             })
         else:
-            await self.send_command({"action": "release_flow", "flow_id": flow_id})
+            await holder.send_command({"action": "release_flow", "flow_id": flow_id})
 
     async def release_all(self) -> None:
         """Release all held flows."""
-        self._held_flows.clear()
-        await self.send_command({"action": "release_all"})
+        for adapter in self._all():
+            adapter._held_flows.clear()
+        await self.broadcast({"action": "release_all"})
 
     @_rules_locked
     async def set_mock(
@@ -793,7 +845,7 @@ class ProxyAdapter(BaseSourceAdapter):
             "rule_id": rule_id, "pattern": pattern,
             "response": response, "simulator_udid": simulator_udid,
         })
-        await self.send_command({
+        await self.broadcast({
             "action": "set_mock",
             "rule_id": rule_id,
             "pattern": pattern,
@@ -836,7 +888,7 @@ class ProxyAdapter(BaseSourceAdapter):
         # behind rules set after it -- so updating a scoped rule's body could
         # leave it shadowed by a catch-all.
         self._mock_rules = [updated if r["rule_id"] == rule_id else r for r in self._mock_rules]
-        await self.send_command({
+        await self.broadcast({
             "action": "set_mock",
             "rule_id": rule_id,
             "pattern": new_pattern,
@@ -870,7 +922,7 @@ class ProxyAdapter(BaseSourceAdapter):
         else:
             removed = len(self._mock_rules)
             self._mock_rules.clear()
-        await self.send_command({"action": "clear_mock", "rule_id": rule_id})
+        await self.broadcast({"action": "clear_mock", "rule_id": rule_id})
         return removed
 
     # -------------------------------------------------------------------
@@ -883,7 +935,7 @@ class ProxyAdapter(BaseSourceAdapter):
         for p in patterns:
             if p not in self._bypass_patterns:
                 self._bypass_patterns.append(p)
-        await self.send_command({
+        await self.broadcast({
             "action": "set_bypass",
             "patterns": patterns,
         })
@@ -896,7 +948,7 @@ class ProxyAdapter(BaseSourceAdapter):
             p for p in self._bypass_patterns
             if p not in patterns
         ]
-        await self.send_command({
+        await self.broadcast({
             "action": "remove_bypass",
             "patterns": patterns,
         })
@@ -906,17 +958,35 @@ class ProxyAdapter(BaseSourceAdapter):
     async def clear_bypass(self) -> None:
         """Remove all bypass patterns."""
         self._bypass_patterns.clear()
-        await self.send_command({"action": "clear_bypass"})
+        await self.broadcast({"action": "clear_bypass"})
 
     def get_bypass_patterns(self) -> list[str]:
         """Return current bypass patterns."""
         return list(self._bypass_patterns)
 
+    def _all(self) -> list[ProxyAdapter]:
+        """This proxy and the session proxies following it."""
+        return [self, *self.followers]
+
+    def held_count(self) -> int:
+        """Flows held by this proxy and its session proxies."""
+        return sum(len(a._held_flows) for a in self._all())
+
+    def holds(self, flow_id: str) -> bool:
+        return any(flow_id in a._held_flows for a in self._all())
+
+    def forget_held(self, flow_id: str) -> None:
+        """Drop a released flow from whichever proxy held it (the addon's own
+        `released` event does the same, later)."""
+        for adapter in self._all():
+            adapter._held_flows.pop(flow_id, None)
+
     def get_held_flows(self) -> list[dict]:
-        """Return held flows with computed age_seconds."""
+        """Return held flows with computed age_seconds, session proxies' too."""
         now = datetime.now(UTC)
         result = []
-        for flow_id, info in self._held_flows.items():
+        held = {k: v for a in self._all() for k, v in a._held_flows.items()}
+        for flow_id, info in held.items():
             held_at = info["held_at"]
             age = (now - held_at).total_seconds()
             result.append({
@@ -1069,7 +1139,10 @@ class ProxyAdapter(BaseSourceAdapter):
                 self._running = False
                 # Nothing mitmdump was carrying will finish now. Left in place,
                 # they would read as in flight forever.
-                if dropped := self.flow_store.drop_pending():
+                dropped = self.flow_store.drop_pending(
+                    self._pending_ids, announce=self.leader is None)
+                self._pending_ids.clear()
+                if dropped:
                     logger.info("Proxy stopped with %d request(s) in flight", dropped)
             if unexpected:
                 await self._end_unexpected_run(process)
@@ -1111,7 +1184,8 @@ class ProxyAdapter(BaseSourceAdapter):
             self._error = reason
         logger.error("Proxy stopped: %s", self._error)
         try:
-            await asyncio.to_thread(update_state, proxy_status="stopped")
+            if self.leader is None:  # state.json describes the main proxy
+                await asyncio.to_thread(update_state, proxy_status="stopped")
         except Exception:
             logger.exception("Could not record the proxy as stopped")
 
@@ -1245,6 +1319,7 @@ class ProxyAdapter(BaseSourceAdapter):
         """A request has started (#364): in flight until its flow arrives."""
         flow = self._parse_flow(data)
         if flow is not None:
+            self._pending_ids.add(flow.id)
             self.flow_store.note_started(flow)
 
     async def _handle_flow(self, data: dict) -> None:
@@ -1254,6 +1329,7 @@ class ProxyAdapter(BaseSourceAdapter):
             return
 
         # 1. Store full flow record
+        self._pending_ids.discard(flow.id)
         await self.flow_store.add(flow)
 
         # 2. Emit summary log entry into the processing pipeline
@@ -1289,6 +1365,9 @@ class ProxyAdapter(BaseSourceAdapter):
             "request": req_data,
         }
         self._intercept_event.set()
+        if self.leader is not None:
+            # Waiters wait on the main adapter, which lists every proxy's.
+            self.leader._intercept_event.set()
 
         # Emit NOTICE log entry
         method = req_data.get("method", "?")
@@ -1325,10 +1404,13 @@ class ProxyAdapter(BaseSourceAdapter):
             # was permanently starting up (#122). The addon's own "started" is
             # the honest signal -- it means the script loaded, rather than
             # merely that the subprocess was spawned. (Its servers come up
-            # about 0.1 s later, with "running".)
-            await asyncio.to_thread(update_state, proxy_status="running")
+            # about 0.1 s later, with "running".) Only the main proxy's:
+            # state.json has one proxy_status, and it is the main one's.
+            if self.leader is None:
+                await asyncio.to_thread(update_state, proxy_status="running")
         elif event == "stopped":
-            await asyncio.to_thread(update_state, proxy_status="stopped")
+            if self.leader is None:
+                await asyncio.to_thread(update_state, proxy_status="stopped")
         elif event == "trusted_simulators_updated":
             udids = data.get("udids")
             self._addon_trusted = None if udids is None else [str(u).upper() for u in udids]
