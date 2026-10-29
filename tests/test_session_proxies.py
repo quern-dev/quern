@@ -890,3 +890,64 @@ async def test_too_many_names_in_one_request_is_a_400(tmp_path, as_client):
     with pytest.raises(HTTPException) as e:
         await _post(leader, _manager(leader, tmp_path), processes=names, only=True)
     assert e.value.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# CodeRabbit on #566, second round
+# ---------------------------------------------------------------------------
+
+
+async def test_joining_only_shared_proxies_is_capped_too(tmp_path):
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    await m.claim(session="s2", principal="client:b", udid=BRAVO, names=["Shared"])
+    await _fill(m)
+    with pytest.raises(sp_mod.SessionCaptureLimit):
+        await m.claim(session="s1", principal="client:a", udid=ALPHA,
+                      names=["Shared"], max_proxies=4)
+    assert "Shared" not in [n for c in m.claims("client:a") for n in c.names]
+
+
+async def test_the_limit_names_only_the_callers_own(tmp_path):
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    await m.claim(session="s2", principal="client:b", udid=BRAVO,
+                  names=["Secret", "Shared"])
+    await m.claim(session="s1", principal="client:a", udid=ALPHA, names=["Shared"])
+    await _fill(m, n=3)
+    with pytest.raises(sp_mod.SessionCaptureLimit) as e:
+        await m.claim(session="s1", principal="client:a", udid=ALPHA,
+                      names=["Brand"], max_proxies=4)
+    assert "Secret" not in [n for names in e.value.using for n in names]
+    assert ["Shared"] in e.value.using
+
+
+async def test_a_hold_that_ended_during_the_start_commits_nothing(tmp_path):
+    """The release ran while the proxy started and found no claim to end;
+    the claim must not land after it."""
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    with pytest.raises(sp_mod.HoldEnded):
+        await m.claim(session="s1", principal="client:a", udid=ALPHA,
+                      names=["Metatext"], still_held=lambda: False)
+    assert m.claims() == [] and leader.followers == []
+    assert not m.made[0].is_running
+
+
+async def test_a_hold_still_held_commits(tmp_path):
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    result = await m.claim(session="s1", principal="client:a", udid=ALPHA,
+                           names=["Metatext"], still_held=lambda: True)
+    assert result["started"] == ["Metatext"] and len(m.claims()) == 1
+
+
+async def test_the_endpoint_answers_409_for_a_hold_ended_mid_start(tmp_path, as_client,
+                                                                   monkeypatch):
+    held = iter([None, "not reserved"])     # held at the check, gone at commit
+    monkeypatch.setattr(api.device_access, "why_not", lambda udid: next(held))
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    with pytest.raises(HTTPException) as e:
+        await _post(leader, m, processes=["Metatext"], only=True)
+    assert e.value.status_code == 409 and m.claims() == []

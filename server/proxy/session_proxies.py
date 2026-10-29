@@ -73,6 +73,10 @@ class SessionCaptureLimit(SessionCaptureError):
             "existing proxy already captures.")
 
 
+class HoldEnded(SessionCaptureError):
+    """The caller's hold on the device ended while its capture was starting."""
+
+
 class MainProxyStopped(SessionCaptureError):
     """The main proxy is not running: session proxies take its rules, and
     `stop_proxy` means nothing is captured."""
@@ -162,7 +166,8 @@ class SessionProxies:
                 if p.adapter.is_running and claimed & set(p.names)]
 
     async def claim(self, *, session: str, principal: str, udid: str,
-                    names: list[str], max_proxies: int | None = None) -> dict:
+                    names: list[str], max_proxies: int | None = None,
+                    still_held: Callable[[], bool] | None = None) -> dict:
         """Capture `names` for `session`'s work on `udid`.
 
         Returns which names the main proxy already captures, which an existing
@@ -172,7 +177,7 @@ class SessionProxies:
         that has to undo it). Raises `MainProxyStopped` when the main proxy is
         not running, `SessionCaptureLimit` when a new proxy would take
         `principal` past `max_proxies`, `SessionCaptureError` when the new
-        proxy did not start.
+        proxy did not start or `still_held` says the hold ended meanwhile.
         """
         async with self._lock:
             # Inside the lock: a stop_proxy that took it first has stopped the
@@ -191,17 +196,30 @@ class SessionProxies:
                 else:
                     new.append(name)
 
+            # Shared proxies count too: the cap is on what a key keeps running,
+            # and a shared one stops only when every user is done -- so joining
+            # one is checked even when nothing new starts (CodeRabbit).
+            using = self.using(principal)
+            after = len(using) + bool(new) + sum(
+                1 for p in self._proxies if p.adapter.is_running
+                and p not in using and set(p.names) & set(shared))
+            if max_proxies is not None and after > max_proxies:
+                claimed = {n for c in self._claims if c.principal == principal
+                           for n in c.names}
+                # Only its own names: a shared proxy's others are other keys'.
+                raise SessionCaptureLimit(
+                    [[n for n in p.names if n in claimed] for p in using])
+
             confirmed: bool | None = None
             if new:
-                using = self.using(principal)
-                # Shared proxies count too: the cap is on what a key keeps
-                # running, and a shared one stops only when every user is done.
-                after = len(using) + 1 + sum(
-                    1 for p in self._proxies if p.adapter.is_running
-                    and p not in using and set(p.names) & set(shared))
-                if max_proxies is not None and after > max_proxies:
-                    raise SessionCaptureLimit([list(p.names) for p in using])
                 confirmed = await self._start(new)
+            # The hold may have ended while the proxy started, and its release
+            # found no claim to end. Checked here, under the lock its release
+            # takes, so the claim is either committed before the release runs
+            # or not at all (CodeRabbit).
+            if still_held is not None and not still_held():
+                await self._stop_unclaimed()
+                raise HoldEnded(f"{udid} was released while its capture was starting")
             added = self._add_claim(Claim(principal, udid, [*shared, *new], session))
             return {"main_proxy": by_main, "shared": shared, "started": new,
                     "confirmed": confirmed, "added": added}

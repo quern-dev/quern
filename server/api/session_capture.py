@@ -26,6 +26,7 @@ from server.proxy import sim_tls
 from server.proxy.session_proxies import (
     MAX_NAMES_PER_REQUEST,
     MAX_PROXIES_PER_CLIENT,
+    HoldEnded,
     MainProxyStopped,
     SessionCaptureError,
     SessionCaptureLimit,
@@ -103,11 +104,15 @@ async def add_session_capture(
         result = await manager.claim(
             session=caller.session, principal=caller.principal,
             udid=body.simulator_udid, names=processes,
-            max_proxies=None if caller.is_owner else MAX_PROXIES_PER_CLIENT)
+            max_proxies=None if caller.is_owner else MAX_PROXIES_PER_CLIENT,
+            still_held=lambda: device_access.why_not(body.simulator_udid) is None)
     except SessionCaptureLimit as e:
         raise HTTPException(status_code=429, detail={
             "message": str(e), "limit": MAX_PROXIES_PER_CLIENT,
             "using": e.using}) from e
+    except HoldEnded as e:
+        raise HTTPException(status_code=409, detail=(
+            f"{e}; nothing was captured. Reserve it again to capture on it.")) from e
     except MainProxyStopped as e:
         raise HTTPException(status_code=409, detail=(
             "The proxy stopped, so nothing can be captured. Its owner starts it "
