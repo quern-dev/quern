@@ -50,6 +50,7 @@ def _adapter(*, local_capture=("MyApp",), in_set=(), confirms=True):
     a.addon_trust_seq = 0
     a.addon_decrypts = AsyncMock(return_value=confirms)
     a._tls_rejections = []
+    a.tls_rejections = lambda: list(a._tls_rejections)
     return a
 
 

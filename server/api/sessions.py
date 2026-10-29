@@ -378,9 +378,10 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
     by the previous holder's rules -- whose patterns and bodies a blind
     server then showed it -- and the previous holder's recording went on
     filming the next holder's work (review). The owner's are left: the
-    owner's work is the owner's to end. Never raises."""
-    if principal.label_of(session.principal) is None:
-        return []
+    owner's work is the owner's to end. Session capture (#558) ends for every
+    principal, the owner included: it is asked for *as* a hold's, and its
+    tool says it lasts as long as the hold (CodeRabbit). Never raises."""
+    is_client = principal.label_of(session.principal) is not None
     actions: list[dict] = []
     owners = getattr(app.state, "mock_owners", {}) or {}
     adapter = getattr(app.state, "proxy_adapter", None)
@@ -389,7 +390,7 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
         held = registry.holder_of(udid)
         if held is not None and held.session.principal == session.principal:
             continue                       # still the key's, through another session
-        for rule in list(getattr(adapter, "_mock_rules", []) or []):
+        for rule in list(getattr(adapter, "_mock_rules", []) or []) if is_client else []:
             if rule.get("simulator_udid") != udid or owners.get(rule.get("rule_id")) \
                     != session.principal:
                 continue
@@ -401,7 +402,7 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
             except Exception as e:  # noqa: BLE001 -- reported, never raised
                 actions.append({"udid": udid, "action": "mock_removed", "ok": False,
                                 "rule_id": rule.get("rule_id"), "error": str(e)})
-        for rec in list(manager.list() if manager is not None else []):
+        for rec in list(manager.list() if manager is not None else []) if is_client else []:
             if rec.udid != udid or rec.principal != session.principal \
                     or rec.state not in ("recording", "interrupted"):
                 continue
@@ -412,6 +413,18 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
             except Exception as e:  # noqa: BLE001 -- reported, never raised
                 actions.append({"udid": udid, "action": "recording_stopped", "ok": False,
                                 "recording": rec.id, "error": str(e)})
+        # Its session capture (#558): the names it asked for on this device,
+        # and any session proxy nobody else's capture uses.
+        session_proxies = getattr(app.state, "session_proxies", None)
+        if session_proxies is not None and session_proxies.claims(session.principal):
+            try:
+                stopped = await session_proxies.release(
+                    principal=session.principal, udid=udid)
+                actions.append({"udid": udid, "action": "session_capture_released",
+                                "ok": True, "stopped": stopped})
+            except Exception as e:  # noqa: BLE001 -- reported, never raised
+                actions.append({"udid": udid, "action": "session_capture_released",
+                                "ok": False, "error": str(e)})
     return actions
 
 

@@ -1029,6 +1029,10 @@ The bypass_patterns field in proxy_status shows the current list.`,
 macOS System Extension to transparently capture traffic from specific processes
 without configuring a system proxy.
 
+FROM A REMOTE CLIENT, or only for your own work on a simulator you hold: use
+add_session_capture instead. It captures an app without changing this list or
+restarting the proxy, and a client key cannot call this tool.
+
 ONE SIMULATOR? Don't configure anything here. Capture is by process and spans
 every simulator on the Mac; it cannot be scoped to one device. Per-simulator is
 a FILTER: every captured flow is attributed to its simulator through process
@@ -1143,6 +1147,83 @@ extension in System Settings > Privacy & Security.`,
         content: [{ type: "text" as const, text: errorText(e) }],
         isError: true,
       };
+    }
+  });
+
+  server.registerTool("add_session_capture", {
+    description: `Capture an app's traffic on a simulator you hold, without changing the
+server's local capture list or restarting its proxy. Use this, not
+set_local_capture, from a remote client (a client key cannot change that list)
+or whenever you only need capture for your own work.
+
+You must hold the simulator (reserve_devices). Names the main proxy already
+captures are served by it; names another session already asked for share its
+session proxy; any others get a new session proxy -- a second mitmdump
+capturing just those processes. Nothing restarts and nobody's connections drop.
+Flows are tagged with their simulator, so query_flows/get_flow_summary with
+simulator_udid show your device's traffic whichever proxy carried it. Mocks,
+intercepts and bypass patterns apply to every proxy.
+
+Capture covers NEW connections: an app already running keeps the connections
+it has open uncaptured. Relaunch the app after this call to capture everything.
+
+The capture lasts while you hold the simulator, and ends when you release it
+(or remove_session_capture). Names are process names, as for set_local_capture
+(the app's executable name, not its bundle id); a client may not use
+exclusions (!name) or PIDs. A client key may be using at most 4 session
+proxies at once (429 names them: hand some back first) and ask for at most 16
+names per call. MobileSafari and com.apple.WebKit.Networking are
+added unless only is set, so in-app web views are captured too.
+
+The response says which names each proxy serves (main_proxy, shared,
+started), whether a started proxy confirmed it is capturing (confirmed), and
+the simulator's TLS state (simulator_tls): a simulator that does not trust the
+CA is refused with 428 unless allow_passthrough is set, or the CA is installed
+first when the server's auto_install_cert is on.`,
+    inputSchema: strictParams({
+      simulator_udid: z.string().describe("The simulator to capture for. You must hold it."),
+      processes: z
+        .array(z.string())
+        .min(1)
+        .describe("Process names to capture, e.g. [\"Metatext\"] -- the app's executable name."),
+      only: z
+        .boolean()
+        .optional()
+        .describe("Capture exactly these processes, without adding MobileSafari and com.apple.WebKit.Networking."),
+      allow_passthrough: z
+        .boolean()
+        .optional()
+        .describe("Capture a simulator that does not trust the CA anyway; its HTTPS is passed through, not decrypted."),
+    }),
+  }, async ({ simulator_udid, processes, only, allow_passthrough }) => {
+    try {
+      const body: Record<string, unknown> = { simulator_udid, processes };
+      if (only) body.only = true;
+      if (allow_passthrough) body.allow_passthrough = true;
+      const data = await apiRequest("POST", "/api/v1/proxy/session-capture", undefined, body);
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text" as const, text: errorText(e) }], isError: true };
+    }
+  });
+
+  server.registerTool("remove_session_capture", {
+    description: `Hand back capture you asked for with add_session_capture: all of it, or
+only one simulator's, or only some processes. A session proxy stops once no
+session's capture uses it. Releasing a simulator does this for you.`,
+    inputSchema: strictParams({
+      simulator_udid: z.string().optional().describe("Only this simulator's capture."),
+      processes: z.array(z.string()).optional().describe("Only these processes."),
+    }),
+  }, async ({ simulator_udid, processes }) => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (simulator_udid) body.simulator_udid = simulator_udid;
+      if (processes) body.processes = processes;
+      const data = await apiRequest("DELETE", "/api/v1/proxy/session-capture", undefined, body);
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text" as const, text: errorText(e) }], isError: true };
     }
   });
 }

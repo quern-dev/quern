@@ -260,6 +260,11 @@ ROUTES: dict[tuple[str, str], Rule] = {
     ("POST", "/api/v1/proxy/configure-system"): _OWNER,
     ("POST", "/api/v1/proxy/unconfigure-system"): _OWNER,
     ("POST", "/api/v1/proxy/local-capture"): _OWNER,
+    # The caller's own capture of apps on a simulator it holds (#558): names
+    # only, which the handler checks, and released with the hold.
+    ("POST", "/api/v1/proxy/session-capture"): _named("simulator_udid"),
+    ("DELETE", "/api/v1/proxy/session-capture"): _RESERVE,   # the caller's own
+    ("GET", "/api/v1/proxy/session-capture"): _VIEW,
     ("POST", "/api/v1/proxy/filter"): _OWNER,
     ("POST", "/api/v1/proxy/start"): _OWNER,
     ("POST", "/api/v1/proxy/stop"): _OWNER,
@@ -339,6 +344,7 @@ BLIND: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/logs/summary"): "filtered",
     ("GET", "/api/v1/logs/sources"): "filtered",
     ("GET", "/api/v1/proxy/status"): "filtered",
+    ("GET", "/api/v1/proxy/session-capture"): "filtered",   # the caller's own claims
     ("GET", "/api/v1/proxy/cert/status"): "filtered",
     ("GET", "/api/v1/proxy/flows"): "filtered",
     ("GET", "/api/v1/proxy/flows/pending"): "filtered",

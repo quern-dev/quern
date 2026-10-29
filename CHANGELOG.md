@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A client can capture its app's traffic on a simulator it holds, without restarting the proxy (#558).** Local capture is a Mac-wide list of process names handed to mitmdump at launch, so adding one restarts the proxy for everyone (#562), and a client key may not change it at all -- the first remote trial recorded 0 flows for that reason. `add_session_capture` (`POST /api/v1/proxy/session-capture`) takes a simulator the caller holds and the app's process names:
+  - **Already captured names are served as they are.** Names the main proxy captures are served by it, and names another session asked for share its session proxy.
+  - **Any others get a session proxy:** a second mitmdump, in local mode only, so it has no port to collide on.
+  - **Nothing restarts.** No one's connections drop, and the main proxy's process is untouched.
+  - **Every proxy follows the main one.** Each takes its mocks, intercepts, bypass patterns and trusted-simulator set, and feeds the same flow store, tagged by simulator, so a client sees its own device's traffic whichever proxy carried it.
+  - **The CA gate applies as for a capture session.** It answers 428 unless `allow_passthrough` is set, or installs the CA under `auto_install_cert`.
+  - **A client's capture ends with its hold on the simulator.** A session proxy stops once no capture uses it, and `remove_session_capture` hands names back early.
+  - **A session proxy only ever captures simulators.** A process name matches any executable path on the Mac that contains it, so a client's name could otherwise redirect the owner's own apps through a proxy that decrypts. A session proxy passes every connection that is not from a simulator through untouched, deciding before TLS and treating "could not tell" as not a simulator. Measured: with a client capturing `curl`, the Mac's own curl got its real response and was recorded nowhere. A client also may not use exclusions, PIDs, `,` or `/` in a name, may be using at most 4 session proxies at once (429), and may ask for at most 16 names per request.
+  - **Checked live on a second Mac**, with a real client key, a held session and a reservation:
+    - the client's app was captured through a session proxy that started and confirmed in about 2 s, while the main proxy kept capturing another app on another simulator with the same pid;
+    - the client's device-scoped mock answered its app (299) and not the other simulator;
+    - releasing the simulator stopped the session proxy, and capture of that app stopped;
+    - an adversarial review found a Mac-wide capture hole, stranded claims, a stop/claim race and an over-eager rollback, all fixed with tests.
+  - **New connections only:** an app already running keeps its open connections uncaptured until it reconnects, and the response says so (measured: 140 requests on one kept-alive connection, none captured).
+
 ### Fixed
 - **Changing local capture no longer drops mocks, bypass patterns or the intercept (#562).** The process list is a mitmdump launch argument, so `set_local_capture` restarts the proxy -- on macOS a live mode change leaves the system extension on the old list, measured -- and the stop cleared every rule while the call returned 200. Mocks silently stopped applying: on a live server, a mocked request went upstream and got the real response straight after the change. The restart now re-sends each mock, with its rule id and device scope, along with bypass patterns and the intercept; if the proxy fails to come back up they are kept, and every start now sends the new process the rules the server holds -- so `start_proxy` after a failed restart or a mitmdump crash no longer lists mocks that mitmdump lacks. Rule changes, starts, stops and the restart take turns, so a mock set or a `stop_proxy` while the restart is under way waits for it rather than racing it. The call now returns only once the new mitmdump is serving with the rules applied -- it used to return on spawn, and a request in the next half-second or so went upstream -- and the response's new `restart` field says whether that was confirmed (`confirmed`). It also reports what a restart cannot keep: open connections are reset, and held flows are released unmodified by the old process and counted. Checked live against main and the fix: after the change, main's mock went upstream, its bypassed host was recorded and its intercept held nothing, and the fix kept all three.
 
