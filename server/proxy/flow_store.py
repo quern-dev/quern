@@ -365,6 +365,10 @@ class FlowStore:
             self._pending_evicted += 1
         self._start_fanout.publish(flow)
 
+    def is_pending(self, flow_id: str) -> bool:
+        """Whether `flow_id` is in flight: started, not finished, not evicted."""
+        return flow_id in self._pending
+
     def pending(self) -> list[FlowRecord]:
         """Requests in flight now, oldest first."""
         return list(self._pending.values())

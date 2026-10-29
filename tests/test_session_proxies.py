@@ -744,3 +744,61 @@ async def test_one_key_on_one_device_is_one_claim(tmp_path):
     await m.claim(session="client:a/s2", principal="client:a", udid=ALPHA,
                   names=["Ivory"])
     assert [(c.udid, c.names) for c in m.claims()] == [(ALPHA, ["Metatext", "Ivory"])]
+
+
+# ---------------------------------------------------------------------------
+# CodeRabbit on #566
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", [" ", "  ", " Metatext", "Metatext "])
+async def test_a_client_name_is_not_blank_or_padded(tmp_path, as_client, name):
+    leader = _leader()
+    with pytest.raises(HTTPException) as e:
+        await _post(leader, _manager(leader, tmp_path), processes=[name])
+    assert e.value.status_code == 400
+
+
+async def test_releasing_a_simulator_ends_the_owners_session_capture_too(tmp_path):
+    from server.api import sessions as sessions_api
+    from server.session_registry import OWNER
+
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    await m.claim(session="ci", principal=OWNER, udid=ALPHA, names=["Metatext"])
+    app = SimpleNamespace(state=SimpleNamespace(
+        session_proxies=m, proxy_adapter=leader, recordings=None,
+        mock_owners={"owners": OWNER}))   # the owner's own, as set_mock records it
+    await leader.set_mock("~d x.com", {"status_code": 200}, rule_id="owners",
+                          simulator_udid=ALPHA)
+    registry = SimpleNamespace(holder_of=lambda udid: None)
+    session = SimpleNamespace(id="ci", principal=OWNER, reservations=[ALPHA])
+
+    actions = await sessions_api._end_client_work(app, registry, session)
+
+    assert m.claims() == [] and not m.made[0].is_running
+    assert [a["action"] for a in actions] == ["session_capture_released"]
+    # The owner's mocks are still the owner's to end.
+    assert [r["rule_id"] for r in leader._mock_rules] == ["owners"]
+
+
+async def test_a_start_after_its_flow_is_not_tracked_as_in_flight(tmp_path):
+    leader = _leader()
+    started = {"request": {"method": "GET", "url": "http://x/", "host": "x", "path": "/"},
+               "timestamp": 1, "id": "late"}
+    await leader._handle_flow({**started, "response": {"status_code": 200}})
+    leader._handle_started(started)
+    assert leader._pending_ids == set()
+
+
+async def test_tracked_ids_are_trimmed_to_what_the_store_still_holds(monkeypatch):
+    monkeypatch.setattr(proxy_mod, "PENDING_IDS_TRIM", 3)
+    store = FlowStore()
+    store._pending_max = 2               # evicts all but the newest two
+    leader = _leader(store)
+    for n in range(5):
+        leader._handle_started({"request": {"method": "GET", "url": "http://x/",
+                                            "host": "x", "path": "/"},
+                                "timestamp": 1, "id": f"r{n}"})
+    assert leader._pending_ids <= {"r2", "r3", "r4"}
+    assert {"r3", "r4"} <= leader._pending_ids

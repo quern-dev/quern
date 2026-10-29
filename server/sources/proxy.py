@@ -40,7 +40,7 @@ from server.models import (
     LogSource,
     TlsRejection,
 )
-from server.proxy.flow_store import FlowStore
+from server.proxy.flow_store import PENDING_MAX, FlowStore
 from server.sources import BaseSourceAdapter, EntryCallback
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,10 @@ TRUSTED_SIMULATORS_ENV = "QUERN_TRUSTED_SIMULATORS"
 #: Makes a session proxy pass through every connection not from a simulator
 #: (#558); the addon's spelling, asserted equal by `tests/test_session_proxies.py`.
 SIMULATORS_ONLY_ENV = "QUERN_SIMULATORS_ONLY"
+#: Past this many tracked in-flight ids, keep only those the store still holds:
+#: it evicts past PENDING_MAX, and a request that never finishes would
+#: otherwise stay tracked here until the proxy stops.
+PENDING_IDS_TRIM = PENDING_MAX
 #: Where the addon writes events: a pipe of their own, not mitmdump's stdout.
 #: mitmproxy logs errors and their tracebacks to stdout even with `--quiet`,
 #: and a traceback line that is only a string literal parses as JSON -- which
@@ -1336,8 +1340,16 @@ class ProxyAdapter(BaseSourceAdapter):
         """A request has started (#364): in flight until its flow arrives."""
         flow = self._parse_flow(data)
         if flow is not None:
-            self._pending_ids.add(flow.id)
             self.flow_store.note_started(flow)
+            # Only what the store took: a start arriving after its flow is not
+            # in flight (CodeRabbit). And trimmed to what it still holds once
+            # past its bound, which evicts requests that never finish -- left
+            # here, those would grow without limit on a long-lived proxy.
+            if self.flow_store.is_pending(flow.id):
+                self._pending_ids.add(flow.id)
+            if len(self._pending_ids) > PENDING_IDS_TRIM:
+                self._pending_ids = {
+                    i for i in self._pending_ids if self.flow_store.is_pending(i)}
 
     async def _handle_flow(self, data: dict) -> None:
         """Process a flow event from the addon."""

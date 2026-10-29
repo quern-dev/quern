@@ -50,6 +50,10 @@ def _refusal(processes: list[str], *, owner: bool) -> str | None:
     if owner:
         return None
     for entry in processes:
+        if not entry.strip() or entry != entry.strip():
+            # " " is a substring of every path with a space in it, and padding
+            # is not what any process is called (CodeRabbit).
+            return f"{entry!r} is not a process name; name the app's process"
         if entry.startswith("!"):
             return (f"{entry!r} is an exclusion, which captures every other process on "
                     "the Mac; name the processes to capture instead")
