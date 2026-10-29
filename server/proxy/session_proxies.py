@@ -24,8 +24,11 @@ devices' traffic, whichever proxy carried it.
 
 A proxy belongs to its names, not to a session: every session that asks for a
 name shares the proxy capturing it, and the proxy stops when no claim names any
-of its names. Claims are in memory; their pids are written down so a server
-that died leaves no mitmdump behind holding names the next one cannot get.
+of its names. Claims are in memory. Their pids are written down too, because a
+mitmdump left behind would hold its names and the next server's proxy would
+get nothing -- though measured, a SIGKILLed server's mitmdumps (main and
+session) exit by themselves within 0.5 s, when their pipes close. The record is
+for one that does not, as a mitmdump outliving its worktree once did.
 """
 
 from __future__ import annotations
