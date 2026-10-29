@@ -121,16 +121,17 @@ async def test_a_mock_set_during_the_restart_reaches_the_new_process():
     """Without the lock it lands between stop and start: either cleared by the
     stop or recorded with no process to send it to."""
     a = _adapter()
-    real_start = a.start
-    gate = asyncio.Event()
+    real_spawn = a._spawn
+    gate, spawning = asyncio.Event(), asyncio.Event()
 
-    async def slow_start():
-        await gate.wait()
-        await real_start()
+    async def slow_spawn():
+        spawning.set()
+        await asyncio.wait_for(gate.wait(), timeout=1)
+        return await real_spawn()
 
-    a.start = slow_start
+    a._spawn = slow_spawn
     restart = asyncio.create_task(a.restart(local_capture_processes=["Metatext"]))
-    await asyncio.sleep(0)  # restart is now inside start()
+    await asyncio.wait_for(spawning.wait(), timeout=1)  # stopped, not yet started
     mock = asyncio.create_task(
         a.set_mock("~d late.example.com", {"status_code": 418}, rule_id="late"))
     await asyncio.sleep(0)
@@ -165,6 +166,8 @@ async def test_a_send_that_fails_keeps_every_rule():
     result = await a.restart(local_capture_processes=["Metatext"])
 
     assert result["restored"] is None
+    # Stopped, so the next start is not turned away and sends them all.
+    assert not a.is_running
     assert [r["rule_id"] for r in a._mock_rules] == ["m1", "m2"]
     assert a.get_bypass_patterns() == ["~d apple.com"]
     assert a._intercept_pattern == "~d auth.example.com"
@@ -175,17 +178,17 @@ async def test_a_stop_during_the_restart_waits_for_it():
     """Without the lock a stop landing while the rules are re-sent clears them,
     and the restart goes on sending to a process that is gone."""
     a = await _with_rules(_adapter())
-    gate = asyncio.Event()
+    gate, sending = asyncio.Event(), asyncio.Event()
     real_send = a.send_command
 
     async def slow_send(command):
-        await gate.wait()
+        sending.set()
+        await asyncio.wait_for(gate.wait(), timeout=1)
         await real_send(command)
 
     a.send_command = slow_send
     restart = asyncio.create_task(a.restart(local_capture_processes=["Metatext"]))
-    for _ in range(5):
-        await asyncio.sleep(0)  # restart is now blocked re-sending the first rule
+    await asyncio.wait_for(sending.wait(), timeout=1)  # blocked re-sending
     stop = asyncio.create_task(a.stop())
     await asyncio.sleep(0)
     assert not stop.done()
@@ -197,6 +200,43 @@ async def test_a_stop_during_the_restart_waits_for_it():
     assert len([c for c in a.sent if c["action"] == "set_mock"]) == 2
     assert not a.is_running
     assert a._mock_rules == []
+
+
+@pytest.mark.asyncio
+async def test_a_start_during_the_restart_does_not_spawn_a_second_proxy():
+    """The restart has stopped the proxy, so `is_running` is False and
+    start_proxy's own check passes. Without the lock both spawn, and the
+    second kills the first (`_kill_stale_mitmdump`)."""
+    a = await _with_rules(_adapter())
+    real_spawn = a._spawn
+    gate, spawning = asyncio.Event(), asyncio.Event()
+
+    async def slow_spawn():
+        spawning.set()
+        await asyncio.wait_for(gate.wait(), timeout=1)
+        return await real_spawn()
+
+    a._spawn = slow_spawn
+    restart = asyncio.create_task(a.restart(local_capture_processes=["Metatext"]))
+    await asyncio.wait_for(spawning.wait(), timeout=1)
+    start = asyncio.create_task(a.start())
+    await asyncio.sleep(0)
+    gate.set()
+    await asyncio.gather(restart, start)
+
+    assert a.spawns == [["Metatext"]]
+    assert len([c for c in a.sent if c["action"] == "set_mock"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_restart_queued_behind_a_stop_does_not_undo_it():
+    a = await _with_rules(_adapter())
+    await a.stop()
+
+    assert await a.restart(local_capture_processes=["Metatext"]) is None
+    assert a.spawns == []
+    assert not a.is_running
+    assert a.local_capture_processes == ["Metatext"]
 
 
 @pytest.mark.asyncio

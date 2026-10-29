@@ -945,7 +945,7 @@ the background and can be re-enabled with configure_system_proxy.`,
   server.registerTool("set_bypass", {
     description: `Add domain patterns to the proxy bypass allowlist. Traffic to bypassed domains gets true TLS passthrough — no certificate replacement, no interception, no capture. Uses glob/fnmatch patterns.
 
-Essential for cert-pinned services (e.g. *.apple.com during app installation) that reject mitmproxy's CA certificate. Bypass patterns persist until cleared or the proxy is restarted.
+Essential for cert-pinned services (e.g. *.apple.com during app installation) that reject mitmproxy's CA certificate. Bypass patterns persist until cleared with clear_bypass or the proxy is stopped; the restart set_local_capture makes keeps them.
 
 The bypass_patterns field in proxy_status shows the current list.`,
     inputSchema: strictParams({

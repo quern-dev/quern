@@ -341,7 +341,13 @@ class ProxyAdapter(BaseSourceAdapter):
             return False
         if not await self._spawn():
             return False
-        return await self._send_rules()
+        if not await self._send_rules():
+            # Its stdin broke, so it is going away with some rules unsent.
+            # Stopped here, not left to the read loop, so the next start is
+            # not turned away by the guard above and sends them all.
+            await self._stop(keep_rules=True)
+            return False
+        return True
 
     async def _spawn(self) -> bool:
         """Launch mitmdump and its readers. False when it did not start."""
@@ -661,7 +667,7 @@ class ProxyAdapter(BaseSourceAdapter):
     # Intercept convenience methods
     # -------------------------------------------------------------------
 
-    async def restart(self, **settings) -> dict:
+    async def restart(self, **settings) -> dict | None:
         """Stop mitmdump and start it again, keeping the rules callers set (#562).
 
         `stop()` clears mocks, the intercept pattern and bypass patterns, which
@@ -678,9 +684,14 @@ class ProxyAdapter(BaseSourceAdapter):
         process, which releases it unmodified as it exits. The count released
         is returned, with what was re-sent -- None when the new process did not
         start or could not be sent the rules, which then wait for the next
-        start -- so the caller can say what happened.
+        start -- so the caller can say what happened. None, with the settings
+        applied for the next start, when the proxy was no longer running: a
+        stop that got the lock first is not undone.
         """
         async with self._rules_lock:
+            if not self._running:
+                self.reconfigure(**settings)
+                return None
             held = len(self._held_flows)
             await self._stop(keep_rules=True)
             # `reconfigure` refuses while running, so new settings -- a local
