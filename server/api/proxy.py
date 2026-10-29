@@ -371,9 +371,16 @@ async def proxy_status(
     """Get current proxy status and configuration."""
     status = await _get_proxy_status(request, include_offline=include_offline)
     view = visibility.data_view()
+    session_proxies = getattr(request.app.state, "session_proxies", None)
     if view.everything:
+        if session_proxies is not None:
+            status.session_proxies = session_proxies.describe()
         return status
-    return await _blind_status(request, status, view)
+    status = await _blind_status(request, status, view)
+    if session_proxies is not None:
+        status.session_proxies = session_proxies.describe(
+            visibility.current_caller().principal)
+    return status
 
 
 async def _blind_status(request: Request, status: ProxyStatusResponse,
@@ -493,6 +500,10 @@ async def stop_proxy(request: Request) -> dict:
     if not adapter.is_running:
         raise HTTPException(status_code=409, detail="Proxy is not running")
 
+    # Session proxies too (#558): stopping the proxy means nothing is captured,
+    # and they take their rules from this one. Their claims go with them.
+    if (session_proxies := getattr(request.app.state, "session_proxies", None)) is not None:
+        await session_proxies.stop_all()
     await adapter.stop()
     try:
         update_state(proxy_status="stopped")

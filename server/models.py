@@ -1407,6 +1407,48 @@ class ProxyRestart(BaseModel):
     confirmed: bool = False
 
 
+class SessionCaptureRequest(BaseModel):
+    """Body for ``POST /proxy/session-capture`` (#558)."""
+
+    simulator_udid: str
+    """The simulator the capture is for. The caller must hold it."""
+    processes: list[str]
+    """Process names to capture, as for local capture. A client may not use
+    exclusions (``!name``) or PIDs."""
+    only: bool = False
+    """Capture exactly ``processes``, without the web-view minimum."""
+    allow_passthrough: bool = False
+    """Capture a simulator that does not trust the CA, its HTTPS passed through."""
+
+
+class SessionCaptureReleaseRequest(BaseModel):
+    """Body for ``DELETE /proxy/session-capture``. Empty releases everything the
+    caller's session asked for."""
+
+    simulator_udid: str | None = None
+    processes: list[str] | None = None
+
+
+class SessionCaptureResponse(BaseModel):
+    """What a session capture request did (#558)."""
+
+    simulator_udid: str
+    processes: list[str]
+    #: The web-view minimum added to `processes`, unless `only` was set.
+    capture_added: list[str] | None = None
+    #: Already captured by the main proxy: nothing was started for these.
+    main_proxy: list[str] = []
+    #: Already captured by a session proxy another request started.
+    shared: list[str] = []
+    #: Captured by a session proxy this request started.
+    started: list[str] = []
+    #: Whether the started proxy said it was capturing with the proxy's rules
+    #: applied; None when none was started.
+    confirmed: bool | None = None
+    simulator_tls: SimulatorTls | None = None
+    warnings: list[str] = []
+
+
 class ProxyStatusResponse(BaseModel):
     """Response from GET /api/v1/proxy/status."""
 
@@ -1445,6 +1487,10 @@ class ProxyStatusResponse(BaseModel):
     local_capture: list[str] = Field(default_factory=list)
     #: Set on a response that restarted mitmdump: what came across (#562).
     restart: ProxyRestart | None = None
+    #: Session proxies running beside this one (#558), on `GET /proxy/status`
+    #: only: the processes each captures, for which simulators and how many
+    #: sessions. A client sees those its own capture uses.
+    session_proxies: list[dict[str, Any]] | None = None
     local_ip: str | None = None
     """OS default-route IP — one entry from ``local_ips``. Convenient when
     there's only one interface; misleading in dual-interface setups. Prefer

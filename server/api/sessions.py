@@ -412,6 +412,18 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
             except Exception as e:  # noqa: BLE001 -- reported, never raised
                 actions.append({"udid": udid, "action": "recording_stopped", "ok": False,
                                 "recording": rec.id, "error": str(e)})
+        # Its session capture (#558): the names it asked for on this device,
+        # and any session proxy nobody else's capture uses.
+        session_proxies = getattr(app.state, "session_proxies", None)
+        if session_proxies is not None and session_proxies.claims(session.principal):
+            try:
+                stopped = await session_proxies.release(
+                    session=session.id, principal=session.principal, udid=udid)
+                actions.append({"udid": udid, "action": "session_capture_released",
+                                "ok": True, "stopped": stopped})
+            except Exception as e:  # noqa: BLE001 -- reported, never raised
+                actions.append({"udid": udid, "action": "session_capture_released",
+                                "ok": False, "error": str(e)})
     return actions
 
 

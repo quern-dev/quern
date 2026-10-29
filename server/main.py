@@ -49,6 +49,7 @@ from server.api.proxy import router as proxy_router
 from server.api.proxy_certs import router as proxy_certs_router
 from server.api.proxy_intercept import router as proxy_intercept_router
 from server.api.recordings import router as recordings_router
+from server.api.session_capture import router as session_capture_router
 from server.api.sessions import router as sessions_router
 from server.api.system import router as system_router
 from server.api.trace import router as trace_router
@@ -344,6 +345,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # start, so this one trusts nobody; it is refreshed as soon as it does.
     from server.proxy import sim_tls
     sim_tls.install(app, proxy)
+    # Session proxies (#558). Any left by a server that died still hold the
+    # names they capture, and would take them from the ones started now.
+    from server.config import CONFIG_DIR as _session_dir
+    from server.proxy.session_proxies import SessionProxies
+    _pid_file = _session_dir / "session-proxies.json"
+    await asyncio.to_thread(SessionProxies.clean_up_leftovers, _pid_file)
+    app.state.session_proxies = SessionProxies(proxy, _pid_file)
     if app.state.enable_proxy:
         await proxy.start()
 
@@ -760,6 +768,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.warning("Stopping the Android gesture servers failed", exc_info=True)
 
+    if (session_proxies := getattr(app.state, "session_proxies", None)) is not None:
+        try:
+            await session_proxies.stop_all()
+        except Exception:
+            logger.warning("Stopping the session proxies failed", exc_info=True)
     await _stop_all([
         *adapters.values(),
         *app.state.sim_log_adapters.values(),
@@ -936,6 +949,7 @@ def create_app(
     app.include_router(builds_router)
     app.include_router(proxy_router)
     app.include_router(proxy_intercept_router)
+    app.include_router(session_capture_router)
     app.include_router(proxy_certs_router)
     app.include_router(device_router)
     app.include_router(device_ui_router)

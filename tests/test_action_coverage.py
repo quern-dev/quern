@@ -60,6 +60,7 @@ _NOT_ACTIONS: frozenset[str] = frozenset({
     "logs.py:set_filter",
     "logs.py:get_filter",
     "proxy.py:proxy_status",
+    "session_capture.py:list_session_capture",  # a read of the caller's own claims
     "proxy.py:query_flows",
     "proxy.py:flow_summary",
     "proxy.py:stream_flows",
