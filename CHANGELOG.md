@@ -15,11 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Every proxy follows the main one.** Each takes its mocks, intercepts, bypass patterns and trusted-simulator set, and feeds the same flow store, tagged by simulator, so a client sees its own device's traffic whichever proxy carried it.
   - **The CA gate applies as for a capture session.** It answers 428 unless `allow_passthrough` is set, or installs the CA under `auto_install_cert`.
   - **A client's capture ends with its hold on the simulator.** A session proxy stops once no capture uses it, and `remove_session_capture` hands names back early.
-  - **A client may name processes only.** Exclusions and PIDs are refused, because they reach other processes on the Mac.
+  - **A session proxy only ever captures simulators.** A process name matches any executable path on the Mac that contains it, so a client's name could otherwise redirect the owner's own apps through a proxy that decrypts. A session proxy passes every connection that is not from a simulator through untouched, deciding before TLS and treating "could not tell" as not a simulator. Measured: with a client capturing `curl`, the Mac's own curl got its real response and was recorded nowhere. A client also may not use exclusions, PIDs, `,` or `/` in a name.
   - **Checked live on a second Mac**, with a real client key, a held session and a reservation:
     - the client's app was captured through a session proxy that started and confirmed in about 2 s, while the main proxy kept capturing another app on another simulator with the same pid;
     - the client's device-scoped mock answered its app (299) and not the other simulator;
-    - releasing the simulator stopped the session proxy, and capture of that app stopped.
+    - releasing the simulator stopped the session proxy, and capture of that app stopped;
+    - an adversarial review found a Mac-wide capture hole, stranded claims, a stop/claim race and an over-eager rollback, all fixed with tests.
   - **New connections only:** an app already running keeps its open connections uncaptured until it reconnects, and the response says so (measured: 140 requests on one kept-alive connection, none captured).
 
 ### Fixed
