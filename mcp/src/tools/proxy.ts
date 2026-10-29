@@ -1059,7 +1059,10 @@ was running, the response's restart field says so: connections_reset,
 held_flows_released (a count), and restored: {mock_rules: count,
 bypass_patterns: count, intercept: the pattern or null}, or null itself if the
 proxy failed to come back up or could not be sent them -- the server keeps
-them and sends them at the next start_proxy.
+them and sends them at the next start_proxy. The call returns once the new
+proxy is serving with its rules applied, about a second; confirmed: true says
+so. confirmed: false means that did not happen within 5 s, and traffic may not
+be captured or mocked yet.
 
 SETS THE LIST, but a minimum is always kept. Naming ["MyApp"] no longer drops
 MobileSafari or com.apple.WebKit.Networking: a webview's requests leave through

@@ -1365,5 +1365,6 @@ async def set_local_capture(
             connections_reset=True,
             held_flows_released=restart["held_flows_released"],
             restored=restart["restored"],
+            confirmed=restart["confirmed"],
         )
     return status

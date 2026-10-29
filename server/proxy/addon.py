@@ -1062,6 +1062,13 @@ class IOSDebugAddon:
         threading.Thread(target=self._bind_trusted, daemon=True).start()
         _write_json({"type": "status", "event": "started", "timestamp": time.time()})
 
+    def running(self) -> None:
+        """Called once mitmproxy's servers are up. `started` comes from `load()`,
+        before them; this is the one that means traffic is being captured --
+        measured in local mode: the first new connection is captured within
+        0.05-0.2 s of it, every time (#562)."""
+        _write_json({"type": "status", "event": "running", "timestamp": time.time()})
+
     def done(self) -> None:
         """Called when mitmdump is shutting down. Resume all held flows."""
         self._running = False

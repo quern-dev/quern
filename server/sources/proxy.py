@@ -22,7 +22,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections import deque
+from collections import Counter, deque
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -197,6 +197,11 @@ class ProxyAdapter(BaseSourceAdapter):
         #: proxy restarts was either cleared by the stop or recorded with no
         #: process to send it to, and quern then claimed a rule mitmdump lacked.
         self._rules_lock = asyncio.Lock()
+        #: Status events the addon has sent, by name, across runs: a restart
+        #: compares counts to know the new process is serving with its rules.
+        self._addon_events: Counter[str] = Counter()
+        #: How long a restart waits for that before reporting it unconfirmed.
+        self.restart_confirm_timeout = 5.0
 
         # Simulators whose TLS the addon may decrypt (#354); None = all of
         # them. Unlike the state above this is NOT cleared on stop: it is a
@@ -684,7 +689,11 @@ class ProxyAdapter(BaseSourceAdapter):
         process, which releases it unmodified as it exits. The count released
         is returned, with what was re-sent -- None when the new process did not
         start or could not be sent the rules, which then wait for the next
-        start -- so the caller can say what happened. None, with the settings
+        start -- so the caller can say what happened. `confirmed` says the new
+        process reported it was serving (`running`) and echoed every rule
+        within `restart_confirm_timeout`: until then, traffic is not captured
+        or mocked, so the call returns only once it is, or says it is not.
+        None, with the settings
         applied for the next start, when the proxy was no longer running: a
         stop that got the lock first is not undone.
         """
@@ -698,13 +707,36 @@ class ProxyAdapter(BaseSourceAdapter):
             # capture list -- go in between the stop and the start.
             if settings:
                 self.reconfigure(**settings)
+            before = Counter(self._addon_events)
             sent = await self._start()
             restored = {
                 "mock_rules": len(self._mock_rules),
                 "bypass_patterns": len(self._bypass_patterns),
                 "intercept": self._intercept_pattern,
             } if sent else None
-            return {"held_flows_released": held, "restored": restored}
+            confirmed = sent and await self._serving_with_rules(before)
+            return {
+                "held_flows_released": held,
+                "restored": restored,
+                "confirmed": confirmed,
+            }
+
+    async def _serving_with_rules(self, before: Counter[str]) -> bool:
+        """Whether the addon has, since `before`, said it is serving and echoed
+        each rule `_send_rules` sent. False on timeout -- an addon on disk older
+        than the server never sends `running` -- or if the process ended."""
+        want = {"running": 1, "mock_set": len(self._mock_rules)}
+        if self._bypass_patterns:
+            want["bypass_updated"] = 1
+        if self._intercept_pattern is not None:
+            want["intercept_set"] = 1
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.restart_confirm_timeout
+        while any(self._addon_events[k] - before[k] < n for k, n in want.items()):
+            if loop.time() >= deadline or not self.is_running:
+                return False
+            await asyncio.sleep(0.05)
+        return True
 
     @_rules_locked
     async def set_intercept(self, pattern: str) -> None:
@@ -1277,6 +1309,7 @@ class ProxyAdapter(BaseSourceAdapter):
     async def _handle_status_event(self, data: dict) -> None:
         """Handle status events from the addon that update local state mirrors."""
         event = data.get("event")
+        self._addon_events[event] += 1
         # update_state() takes fcntl.LOCK_EX and does synchronous file I/O, so
         # calling it inline would block the event loop behind whichever writer
         # holds the lock -- stalling unrelated coroutines for a state write
@@ -1285,8 +1318,9 @@ class ProxyAdapter(BaseSourceAdapter):
             # state.json's proxy_status was written as "starting" at boot and
             # never advanced, so every unauthenticated consumer saw a proxy that
             # was permanently starting up (#122). The addon's own "started" is
-            # the honest signal -- it means the script loaded and mitmproxy is
-            # up, rather than merely that the subprocess was spawned.
+            # the honest signal -- it means the script loaded, rather than
+            # merely that the subprocess was spawned. (Its servers come up
+            # about 0.1 s later, with "running".)
             await asyncio.to_thread(update_state, proxy_status="running")
         elif event == "stopped":
             await asyncio.to_thread(update_state, proxy_status="stopped")

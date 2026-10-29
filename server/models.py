@@ -1401,6 +1401,10 @@ class ProxyRestart(BaseModel):
     #: the server keeps them and sends them at the next start, and
     #: `status`/`error` say why.
     restored: dict[str, Any] | None = None
+    #: The new process said it was serving and echoed every re-sent rule
+    #: before the response. False when that did not happen within 5 s:
+    #: traffic may not be captured or mocked yet.
+    confirmed: bool = False
 
 
 class ProxyStatusResponse(BaseModel):
