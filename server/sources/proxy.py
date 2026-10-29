@@ -55,8 +55,9 @@ TRUSTED_SIMULATORS_ENV = "QUERN_TRUSTED_SIMULATORS"
 SIMULATORS_ONLY_ENV = "QUERN_SIMULATORS_ONLY"
 #: Past this many tracked in-flight ids, keep only those the store still holds:
 #: it evicts past PENDING_MAX, and a request that never finishes would
-#: otherwise stay tracked here until the proxy stops.
-PENDING_IDS_TRIM = PENDING_MAX
+#: otherwise stay tracked here until the proxy stops. Twice the store's bound,
+#: so a full store does not make every request start re-scan the set.
+PENDING_IDS_TRIM = 2 * PENDING_MAX
 #: Where the addon writes events: a pipe of their own, not mitmdump's stdout.
 #: mitmproxy logs errors and their tracebacks to stdout even with `--quiet`,
 #: and a traceback line that is only a string literal parses as JSON -- which
