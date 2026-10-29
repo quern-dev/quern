@@ -153,6 +153,24 @@ async def test_a_restart_is_unconfirmed_until_the_addon_says_so(missing):
 
 
 @pytest.mark.asyncio
+async def test_a_proxy_that_exits_after_echoing_is_unconfirmed():
+    """Every event arrived, then mitmdump exited and the read loop cleared
+    `_running`: confirming that would report a stopped proxy as serving."""
+    a = await _with_rules(_adapter())
+    real_send = a.send_command
+
+    async def send(command):
+        await real_send(command)
+        if command["action"] == "set_intercept":  # the last one sent
+            a._running = False
+
+    a.send_command = send
+    result = await asyncio.wait_for(
+        a.restart(local_capture_processes=["Metatext"]), timeout=2)
+    assert result["confirmed"] is False
+
+
+@pytest.mark.asyncio
 async def test_a_mock_echo_short_of_the_count_is_unconfirmed():
     a = await _with_rules(_adapter())
     a.echoes = False
