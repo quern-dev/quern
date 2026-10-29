@@ -368,6 +368,12 @@ com.apple.WebKit.Networking, not MobileSafari, so ["MobileSafari"] alone capture
 nothing. The default is ["MobileSafari", "com.apple.WebKit.Networking"].
 Use set_local_capture to change the process list on the fly.
 
+The session_proxies field lists session proxies running beside the main one
+(add_session_capture): the processes each captures, the simulators it was asked
+for and how many sessions use it. In shared visibility (the default) every
+caller sees all of them; in blind mode a client key sees only those its own
+capture uses, and only its own names on them.
+
 The simulator_tls field (present while local capture is on) says, per booted
 simulator, whether its TLS is "decrypted" or "passed_through" -- passed
 through when it does not trust the mitmproxy CA, so its apps work but its
@@ -1166,6 +1172,12 @@ intercepts and bypass patterns apply to every proxy.
 
 Capture covers NEW connections: an app already running keeps the connections
 it has open uncaptured. Relaunch the app after this call to capture everything.
+
+Capture is by process name, so a session proxy captures its names on every
+simulator, not only yours -- as the main proxy's list does. Which flows you can
+see is the server's visibility mode, not this tool: in shared mode (the
+default) every device's, in blind mode only those of devices you hold. It never
+captures the Mac's own processes.
 
 The capture lasts while you hold the simulator, and ends when you release it
 (or remove_session_capture). Names are process names, as for set_local_capture
