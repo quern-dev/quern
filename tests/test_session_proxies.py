@@ -802,3 +802,91 @@ async def test_tracked_ids_are_trimmed_to_what_the_store_still_holds(monkeypatch
                                 "timestamp": 1, "id": f"r{n}"})
     assert leader._pending_ids <= {"r2", "r3", "r4"}
     assert {"r3", "r4"} <= leader._pending_ids
+
+
+# ---------------------------------------------------------------------------
+# A client key's session proxies are capped (#566, CodeRabbit)
+# ---------------------------------------------------------------------------
+
+
+async def _fill(m, principal="client:a", n=4):
+    for i in range(n):
+        await m.claim(session="s1", principal=principal, udid=ALPHA,
+                      names=[f"App{i}"], max_proxies=4)
+
+
+async def test_a_key_at_its_cap_cannot_start_another(tmp_path):
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    await _fill(m)
+    with pytest.raises(sp_mod.SessionCaptureLimit) as e:
+        await m.claim(session="s1", principal="client:a", udid=ALPHA,
+                      names=["App4"], max_proxies=4)
+    assert len(m.made) == 4 and len(e.value.using) == 4
+    assert "App4" not in [n for c in m.claims() for n in c.names]
+
+
+async def test_joining_a_shared_proxy_counts_toward_the_cap(tmp_path):
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    await m.claim(session="s2", principal="client:b", udid=BRAVO, names=["Shared"])
+    await _fill(m, n=3)
+    with pytest.raises(sp_mod.SessionCaptureLimit):
+        await m.claim(session="s1", principal="client:a", udid=ALPHA,
+                      names=["Shared", "Brand"], max_proxies=4)
+
+
+async def test_names_already_captured_need_no_room(tmp_path):
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    await _fill(m)
+    result = await m.claim(session="s1", principal="client:a", udid=ALPHA,
+                           names=["App0", "MobileSafari"], max_proxies=4)
+    assert result["started"] == []
+
+
+async def test_handing_one_back_makes_room(tmp_path):
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    await _fill(m)
+    await m.release(principal="client:a", names=["App0"])
+    result = await m.claim(session="s1", principal="client:a", udid=ALPHA,
+                           names=["App4"], max_proxies=4)
+    assert result["started"] == ["App4"]
+
+
+async def test_the_cap_is_per_key(tmp_path):
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    await _fill(m)
+    result = await m.claim(session="s2", principal="client:b", udid=BRAVO,
+                           names=["Other"], max_proxies=4)
+    assert result["started"] == ["Other"]
+
+
+async def test_the_endpoint_refuses_past_the_cap_with_429(tmp_path, as_client):
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    for i in range(sp_mod.MAX_PROXIES_PER_CLIENT):
+        await _post(leader, m, processes=[f"App{i}"], only=True)
+    with pytest.raises(HTTPException) as e:
+        await _post(leader, m, processes=["OneMore"], only=True)
+    assert e.value.status_code == 429
+    assert len(e.value.detail["using"]) == sp_mod.MAX_PROXIES_PER_CLIENT
+
+
+async def test_the_owner_is_not_capped(tmp_path, as_client):
+    as_client.is_owner = True
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    for i in range(sp_mod.MAX_PROXIES_PER_CLIENT + 1):
+        await _post(leader, m, processes=[f"App{i}"], only=True)
+    assert len(m.made) == sp_mod.MAX_PROXIES_PER_CLIENT + 1
+
+
+async def test_too_many_names_in_one_request_is_a_400(tmp_path, as_client):
+    leader = _leader()
+    names = [f"App{i}" for i in range(sp_mod.MAX_NAMES_PER_REQUEST + 1)]
+    with pytest.raises(HTTPException) as e:
+        await _post(leader, _manager(leader, tmp_path), processes=names, only=True)
+    assert e.value.status_code == 400

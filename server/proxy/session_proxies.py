@@ -53,6 +53,26 @@ class SessionCaptureError(Exception):
     """A session proxy could not be started; the message says why."""
 
 
+#: Session proxies one client key may be using at once, and names it may ask
+#: for in one request (#566, CodeRabbit). Each proxy is a mitmdump, ~60-80 MB;
+#: one held simulator bounds nothing here, since names are not per device.
+#: The owner is not limited.
+MAX_PROXIES_PER_CLIENT = 4
+MAX_NAMES_PER_REQUEST = 16
+
+
+class SessionCaptureLimit(SessionCaptureError):
+    """A client key is using as many session proxies as it may."""
+
+    def __init__(self, using: list[list[str]]):
+        self.using = using
+        super().__init__(
+            f"this key is already using {len(using)} session proxies, the most it may: "
+            + "; ".join(", ".join(names) for names in using)
+            + ". Hand some back with remove_session_capture, or name processes an "
+            "existing proxy already captures.")
+
+
 class MainProxyStopped(SessionCaptureError):
     """The main proxy is not running: session proxies take its rules, and
     `stop_proxy` means nothing is captured."""
@@ -135,8 +155,14 @@ class SessionProxies:
 
     # -- claiming ------------------------------------------------------------
 
+    def using(self, principal: str) -> list[SessionProxy]:
+        """The running session proxies `principal`'s claims use."""
+        claimed = {n for c in self._claims if c.principal == principal for n in c.names}
+        return [p for p in self._proxies
+                if p.adapter.is_running and claimed & set(p.names)]
+
     async def claim(self, *, session: str, principal: str, udid: str,
-                    names: list[str]) -> dict:
+                    names: list[str], max_proxies: int | None = None) -> dict:
         """Capture `names` for `session`'s work on `udid`.
 
         Returns which names the main proxy already captures, which an existing
@@ -144,7 +170,9 @@ class SessionProxies:
         confirmed it was capturing with the rules applied, and which names this
         call added to the principal's claim on `udid` (`added`, for a caller
         that has to undo it). Raises `MainProxyStopped` when the main proxy is
-        not running, `SessionCaptureError` when the new proxy did not start.
+        not running, `SessionCaptureLimit` when a new proxy would take
+        `principal` past `max_proxies`, `SessionCaptureError` when the new
+        proxy did not start.
         """
         async with self._lock:
             # Inside the lock: a stop_proxy that took it first has stopped the
@@ -165,6 +193,14 @@ class SessionProxies:
 
             confirmed: bool | None = None
             if new:
+                using = self.using(principal)
+                # Shared proxies count too: the cap is on what a key keeps
+                # running, and a shared one stops only when every user is done.
+                after = len(using) + 1 + sum(
+                    1 for p in self._proxies if p.adapter.is_running
+                    and p not in using and set(p.names) & set(shared))
+                if max_proxies is not None and after > max_proxies:
+                    raise SessionCaptureLimit([list(p.names) for p in using])
                 confirmed = await self._start(new)
             added = self._add_claim(Claim(principal, udid, [*shared, *new], session))
             return {"main_proxy": by_main, "shared": shared, "started": new,

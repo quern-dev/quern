@@ -1170,7 +1170,9 @@ it has open uncaptured. Relaunch the app after this call to capture everything.
 The capture lasts while you hold the simulator, and ends when you release it
 (or remove_session_capture). Names are process names, as for set_local_capture
 (the app's executable name, not its bundle id); a client may not use
-exclusions (!name) or PIDs. MobileSafari and com.apple.WebKit.Networking are
+exclusions (!name) or PIDs. A client key may be using at most 4 session
+proxies at once (429 names them: hand some back first) and ask for at most 16
+names per call. MobileSafari and com.apple.WebKit.Networking are
 added unless only is set, so in-app web views are captured too.
 
 The response says which names each proxy serves (main_proxy, shared,

@@ -24,8 +24,11 @@ from server.models import (
 )
 from server.proxy import sim_tls
 from server.proxy.session_proxies import (
+    MAX_NAMES_PER_REQUEST,
+    MAX_PROXIES_PER_CLIENT,
     MainProxyStopped,
     SessionCaptureError,
+    SessionCaptureLimit,
     SessionProxies,
 )
 
@@ -49,6 +52,9 @@ def _refusal(processes: list[str], *, owner: bool) -> str | None:
         return "name at least one process to capture"
     if owner:
         return None
+    if len(processes) > MAX_NAMES_PER_REQUEST:
+        return (f"{len(processes)} processes in one request; ask for at most "
+                f"{MAX_NAMES_PER_REQUEST}")
     for entry in processes:
         if not entry.strip() or entry != entry.strip():
             # " " is a substring of every path with a space in it, and padding
@@ -94,8 +100,14 @@ async def add_session_capture(
 
     manager = _manager(request)
     try:
-        result = await manager.claim(session=caller.session, principal=caller.principal,
-                                     udid=body.simulator_udid, names=processes)
+        result = await manager.claim(
+            session=caller.session, principal=caller.principal,
+            udid=body.simulator_udid, names=processes,
+            max_proxies=None if caller.is_owner else MAX_PROXIES_PER_CLIENT)
+    except SessionCaptureLimit as e:
+        raise HTTPException(status_code=429, detail={
+            "message": str(e), "limit": MAX_PROXIES_PER_CLIENT,
+            "using": e.using}) from e
     except MainProxyStopped as e:
         raise HTTPException(status_code=409, detail=(
             "The proxy stopped, so nothing can be captured. Its owner starts it "
