@@ -1339,11 +1339,12 @@ async def set_local_capture(
     # (on macOS a live mode change leaves the redirector on the old list). The
     # restart keeps mocks, bypass patterns and the intercept (#562); what it
     # cannot keep -- open connections, held flows -- the response says.
-    restart: dict | None = None
-    if adapter.is_running:
-        restart = await adapter.restart(local_capture_processes=processes)
-    else:
-        adapter.reconfigure(local_capture_processes=processes)
+    # Always through `restart()`, which decides under the rules lock: a check
+    # of `is_running` out here could see a start that is still spawning --
+    # launching with the old list -- or one that finished, which
+    # `reconfigure()` then refuses. A stopped proxy is reconfigured, not
+    # started, and gives None.
+    restart = await adapter.restart(local_capture_processes=processes)
 
     # Update state file
     try:

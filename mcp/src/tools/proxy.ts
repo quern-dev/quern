@@ -1056,9 +1056,10 @@ restart needed. Pass an empty list to disable local capture. Mocks, bypass
 patterns and the intercept pattern are kept across that restart; open
 connections are reset and held flows are released unmodified. When the proxy
 was running, the response's restart field says so: connections_reset,
-held_flows_released, and restored (counts of the rules re-sent, or null if the
-proxy failed to come back up or could not be sent them; the server keeps them
-and sends them at the next start_proxy).
+held_flows_released (a count), and restored: {mock_rules: count,
+bypass_patterns: count, intercept: the pattern or null}, or null itself if the
+proxy failed to come back up or could not be sent them -- the server keeps
+them and sends them at the next start_proxy.
 
 SETS THE LIST, but a minimum is always kept. Naming ["MyApp"] no longer drops
 MobileSafari or com.apple.WebKit.Networking: a webview's requests leave through

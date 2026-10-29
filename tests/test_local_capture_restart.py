@@ -295,3 +295,39 @@ async def test_set_local_capture_restarts_through_the_adapter(monkeypatch, runni
         # Nothing to restart: the list waits for the next start.
         assert status.restart is None
         assert a.local_capture_processes == ["Metatext"]
+
+
+@pytest.mark.asyncio
+async def test_set_local_capture_during_a_start_applies_the_new_list(monkeypatch):
+    """A start still spawning has built its command from the old list. Deciding
+    on `is_running` outside the lock saw "stopped", only reconfigured, and the
+    proxy came up capturing the old list."""
+    a = _adapter()
+    a._running = False
+    gate, spawning = asyncio.Event(), asyncio.Event()
+    launched: list[list[str]] = []
+
+    async def slow_spawn():
+        launched.append(list(a.local_capture_processes))  # the command is built
+        spawning.set()
+        await asyncio.wait_for(gate.wait(), timeout=1)
+        a._running = True
+        return True
+
+    a._spawn = slow_spawn
+    monkeypatch.setattr(proxy_api, "_ensure_ca_is_trusted", AsyncMock())
+    monkeypatch.setattr(proxy_api, "update_state", lambda **kw: None)
+    monkeypatch.setattr(proxy_api, "_get_proxy_status",
+                        AsyncMock(return_value=proxy_api.ProxyStatusResponse(status="running")))
+    body = proxy_api.LocalCaptureRequest(processes=["Metatext"], only=True)
+
+    start = asyncio.create_task(a.start())
+    await asyncio.wait_for(spawning.wait(), timeout=1)
+    with patch("server.config.set_local_capture_processes"):
+        change = asyncio.create_task(
+            proxy_api.set_local_capture.__wrapped__(_request(a), body))
+        await asyncio.sleep(0)
+        gate.set()
+        await asyncio.gather(start, change)
+
+    assert launched[-1] == ["Metatext"]

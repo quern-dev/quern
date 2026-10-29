@@ -97,6 +97,9 @@ class TestTheHandlerActuallyWidens:
         adapter = MagicMock()
         adapter.is_running = False
         adapter.reconfigure = MagicMock()
+        # set_local_capture applies its list through restart(), which reconfigures
+        # a stopped proxy (#562).
+        adapter.restart = AsyncMock(side_effect=lambda **kw: adapter.reconfigure(**kw) and None)
         adapter.stop = AsyncMock()
         adapter.start = AsyncMock()
 
