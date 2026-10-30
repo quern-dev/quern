@@ -23,6 +23,7 @@ from server.device import frames
 from server.device.controller import DeviceController
 from server.knowledge import navigation
 from server.knowledge.landmarks import LandmarkRegistry, needs_page_urls
+from server.knowledge.session_landmarks import SessionLandmarks
 from server.models import (
     ClearTextRequest,
     DeviceError,
@@ -102,7 +103,7 @@ async def _navigation_plan(
     """
     # A real registry only: anything else -- None, or a stand-in -- has no
     # edges to check, and treating it as one costs a read for nothing.
-    if (not isinstance(registry, LandmarkRegistry) or not body.verify_navigation
+    if (not isinstance(registry, (LandmarkRegistry, SessionLandmarks)) or not body.verify_navigation
             or body.duration is not None):
         return None
     call = {
@@ -160,7 +161,8 @@ def _remember_documented_tap(
         return
     store.pop(udid, None)
     tapped = result.get("tapped")
-    if not isinstance(registry, LandmarkRegistry) or not isinstance(tapped, dict):
+    if (not isinstance(registry, (LandmarkRegistry, SessionLandmarks))
+            or not isinstance(tapped, dict)):
         return
     try:
         edges = registry.edges_for_tapped(tapped)
@@ -196,7 +198,7 @@ def _note_previous_tap(
         if tap is None:
             return
         shared = (
-            isinstance(registry, LandmarkRegistry)
+            isinstance(registry, (LandmarkRegistry, SessionLandmarks))
             and len(registry.apps_with_screen(context.get("identified_as"))) > 1
         )
         note = navigation.previous_tap_note(
@@ -229,7 +231,7 @@ def _frame_grace(registry, tapped: dict) -> float:
     """How long after this tap a miss must wait before blaming it: the
     longest `timeout:` of any documented edge it matches, else
     `frames.MIN_AGE` -- the grace `previous_tap` gives the same tap."""
-    if not isinstance(registry, LandmarkRegistry):
+    if not isinstance(registry, (LandmarkRegistry, SessionLandmarks)):
         return frames.MIN_AGE
     try:
         timeouts = [e.timeout for _a, _s, e in registry.edges_for_tapped(tapped) if e.timeout]

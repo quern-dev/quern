@@ -300,8 +300,12 @@ ROUTES: dict[tuple[str, str], Rule] = {
     ("POST", "/api/v1/landmarks/identify"): _VIEW,
     ("POST", "/api/v1/landmarks/validate"): Rule(Access.VIEW,
                                                  owner_fields=frozenset({"source"})),
-    ("POST", "/api/v1/landmarks/load"): _OWNER,
-    ("DELETE", "/api/v1/landmarks/"): _OWNER,
+    # A client loads an uploaded knowledge base for its own held session
+    # (#560); a path, inline sets and remembering stay the owner's.
+    ("POST", "/api/v1/landmarks/load"): Rule(Access.RESERVE, owner_fields=frozenset(
+        {"source", "remember", "landmarks", "global_leads_to"})),
+    # A client unloads only its session's own; the route refuses the rest.
+    ("DELETE", "/api/v1/landmarks/"): Rule(Access.RESERVE, owner_fields=frozenset({"forget"})),
     ("GET", "/api/v1/system/channel"): _VIEW,
     ("PUT", "/api/v1/system/channel"): _OWNER,
     ("POST", "/api/v1/system/update"): _OWNER,

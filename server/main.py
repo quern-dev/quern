@@ -880,7 +880,10 @@ def create_app(
     # Screen landmarks
     from server.config import get_knowledge_bases
     from server.knowledge.landmarks import LandmarkRegistry, load_remembered
-    app.state.landmark_registry = LandmarkRegistry()
+    from server.knowledge.session_landmarks import SessionLandmarks
+    # Answers as the calling session sees the sets: its own uploaded ones in
+    # place of the server-wide ones, app by app (#560).
+    app.state.landmark_registry = SessionLandmarks(LandmarkRegistry())
     # Knowledge bases remembered with load_landmarks(remember=true), and how
     # each one loaded -- list_landmarks reports it.
     app.state.landmark_startup = load_remembered(
@@ -914,7 +917,9 @@ def create_app(
 
     _uploads_cfg = _upload_settings()
     app.state.uploads = UploadStore(_CONFIG_DIR / "uploads", _uploads_cfg["max_bytes"],
-                                    min_free_bytes=_uploads_cfg["min_free_bytes"])
+                                    min_free_bytes=_uploads_cfg["min_free_bytes"],
+                                    knowledge_max_bytes=_uploads_cfg["knowledge_max_bytes"],
+                                    knowledge_max_files=_uploads_cfg["knowledge_max_files"])
     app.add_middleware(APIKeyMiddleware, api_key=config.api_key, clients=app.state.clients)
 
     # Session attribution (#254). Outside auth, so it is set before anything

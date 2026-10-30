@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import ValidationError
 
 from server import config as config_mod
+from server import visibility
 from server.api.actions import logged_action
 from server.knowledge.landmarks import (
     FileConventions,
@@ -107,6 +108,74 @@ def _knowledge_dir(source: str) -> Path:
     return path
 
 
+async def _load_upload(request: Request, body: LoadLandmarksRequest) -> dict:
+    """Load an uploaded knowledge base for the caller's held session (#560).
+
+    The set is the session's alone: for `app`, that session sees only these
+    screens; every other caller, and every other app, is as before. It ends
+    with the session -- which is why a held session is required: one that is
+    never held never ends, and its set would outlive anyone using it."""
+    from server.knowledge.session_landmarks import SessionLandmarks
+    from server.uploads import UploadError
+
+    if body.source or body.landmarks or body.remember or body.global_leads_to:
+        raise HTTPException(status_code=400, detail=(
+            "upload_id is used on its own (with app): it is the knowledge base"))
+    if not body.app:
+        raise HTTPException(status_code=400, detail="app is required with upload_id")
+    caller = visibility.current_caller()
+    sessions = getattr(request.app.state, "sessions", None)
+    held = sessions.get(caller.session) if sessions is not None and caller.session else None
+    if held is None or held.principal != caller.principal:
+        raise HTTPException(status_code=409, detail=(
+            "an uploaded knowledge base is loaded for a held session, and ends with it: "
+            "send X-Quern-Session for a session you hold (the quern MCP holds one, as "
+            "does `quern session hold NAME`)"))
+    landmarks = request.app.state.landmark_registry
+    if not isinstance(landmarks, SessionLandmarks):
+        raise HTTPException(status_code=503, detail="session knowledge bases are not available")
+    store = request.app.state.uploads
+    try:
+        upload = store.get(body.upload_id, caller.principal)
+    except UploadError as e:
+        raise HTTPException(status_code=e.status, detail=str(e)) from None
+    if upload.kind != "knowledge":
+        raise HTTPException(status_code=400, detail=(
+            f"{body.upload_id} is {upload.kind!r}, not a knowledge base: upload one as "
+            "<name>.knowledge.tar.gz"))
+    # The archive holds the knowledge directory's contents (app.md,
+    # screens/); one wrapped in a single top folder is taken as that folder.
+    root = upload.path
+    if not (root / "screens").is_dir():
+        inner = [p for p in root.iterdir() if p.is_dir()] if root.is_dir() else []
+        if len(inner) == 1 and (inner[0] / "screens").is_dir():
+            root = inner[0]
+    if not (root / "screens").is_dir():
+        raise HTTPException(status_code=400, detail=(
+            "the uploaded knowledge base has no screens/ folder: send the contents of "
+            ".quern/knowledge (app.md and screens/*.md)"))
+    scan = await asyncio.to_thread(scan_knowledge_base, root)
+    if not scan.screens:
+        # Refused before anything is replaced: loading nothing over a set the
+        # session already has would empty it and still answer "loaded".
+        raise HTTPException(status_code=400, detail=(
+            "not loaded: the uploaded knowledge base has no screens with landmarks"))
+    own = landmarks.own(caller.session)
+    count, skipped = own.load_scan(body.app, scan, f"uploaded ({body.upload_id})")
+    store.discard(body.upload_id)
+    return {
+        "loaded": body.app,
+        "source": "upload",
+        "scope": "session",
+        "session": caller.session,
+        "screens": count,
+        "skipped": _serialize_skipped(skipped),
+        "remembered": False,
+        "conventions": conventions_report(own.conventions(body.app)),
+        "navigation": own.navigation_report(body.app),
+    }
+
+
 def _app_from_project(knowledge: Path) -> str | None:
     """The bundle id a project's `.quern/config.json` names -- the file
     `init_app_knowledge` writes -- for `.quern/knowledge` or its `screens/`."""
@@ -124,8 +193,12 @@ def _app_from_project(knowledge: Path) -> str | None:
 @router.post("/load")
 @logged_action("load_landmarks", category="knowledge")
 async def load_landmarks(request: Request, body: LoadLandmarksRequest):
-    """Load screen landmarks from a knowledge base path or inline JSON."""
+    """Load screen landmarks from a knowledge base path or inline JSON, or --
+    for the caller's held session only -- from an uploaded one (#560)."""
     registry = _get_registry(request)
+
+    if body.upload_id:
+        return await _load_upload(request, body)
 
     if body.source:
         # Directory checks, file reads, the scan and the config lock all go
@@ -338,8 +411,28 @@ async def unload_landmarks(
     app: str | None = Query(default=None, description="App to unload (omit = all)"),
     forget: bool = Query(default=False, description="Also stop loading it at every start"),
 ):
-    """Unload landmarks for a specific app or all apps."""
+    """Unload landmarks for a specific app or all apps. The caller's own
+    session sets (#560) are unloaded first, when it has any for `app`; a
+    client has only those."""
+    from server.knowledge.session_landmarks import SessionLandmarks
+
     registry = _get_registry(request)
+    caller = visibility.current_caller()
+    mine = (registry.own_apps(caller.session)
+            if isinstance(registry, SessionLandmarks) and caller.session else [])
+    if mine and (app is None or app in mine):
+        if forget:
+            raise HTTPException(status_code=400, detail=(
+                "forget applies to the server-wide sets; this session's own are never "
+                "remembered"))
+        if app is None:
+            return {"unloaded": registry.drop(caller.session), "scope": "session"}
+        registry.own(caller.session).unload(app)
+        return {"unloaded": app, "scope": "session"}
+    if not caller.is_owner:
+        raise HTTPException(status_code=404, detail=(
+            f"this session has no knowledge base of its own loaded"
+            f"{' for ' + app if app else ''}; the server-wide sets are the owner's"))
     unloaded = registry.unload(app)
     if not forget:
         return {"unloaded": unloaded}

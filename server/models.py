@@ -2335,6 +2335,10 @@ class LoadLandmarksRequest(BaseModel):
     #: a project's `.quern/`: its config.json names the app.
     app: str | None = None
     source: str | None = None  # path to knowledge base directory
+    #: A knowledge base uploaded as `<name>.knowledge.tar.gz` (#560), loaded
+    #: for the caller's held session only, in place of the server-wide set for
+    #: `app`. Used alone, with `app`.
+    upload_id: str | None = None
     #: Load this knowledge base again at every server start (~/.quern/config.json
     #: `knowledge_bases`). Only for a `source` path, and only once it loaded.
     remember: bool = False

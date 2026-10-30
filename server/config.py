@@ -449,32 +449,45 @@ UPLOAD_DEFAULT_MB = 2048
 #: Free space the uploads' volume keeps by default (#481).
 UPLOAD_DEFAULT_MIN_FREE_MB = 4096
 
+#: What a knowledge-base upload may unpack to (#560). Knowledge bases are
+#: small -- the probe apps' are 60 KB / 15 files -- but screenshots for visual
+#: diffs are likely later, so these are settings, not constants.
+UPLOAD_DEFAULT_KNOWLEDGE_MB = 5
+UPLOAD_DEFAULT_KNOWLEDGE_FILES = 2000
+
 
 def upload_settings() -> dict:
     """The upload limits from config.json's `uploads` object:
 
-        {"uploads": {"max_mb": 2048, "min_free_mb": 4096}}
+        {"uploads": {"max_mb": 2048, "min_free_mb": 4096,
+                     "knowledge_max_mb": 5, "knowledge_max_files": 2000}}
 
     `max_mb` is what one key may hold at once; `min_free_mb` the free space
-    the volume keeps, whatever every key holds together (0 turns it off).
+    the volume keeps, whatever every key holds together (0 turns it off);
+    `knowledge_max_mb` and `knowledge_max_files` what one knowledge-base
+    upload may unpack to (#560).
     A value that is not a whole number of megabytes -- or, for `max_mb`,
     not positive -- reads as the default, with a note."""
     raw = read_user_config().get("uploads")
     raw = raw if isinstance(raw, dict) else {}
     notes = []
 
-    def whole(key: str, default: int, least: int) -> int:
+    def whole(key: str, default: int, least: int, unit: str = "megabytes") -> int:
         value = raw.get(key, default)
         if isinstance(value, bool) or not isinstance(value, int) or value < least:
             notes.append(f"config.json's uploads.{key} is {value!r}, not a whole number of "
-                         f"megabytes {'above 0' if least else 'of 0 or more'}: "
+                         f"{unit} {'above 0' if least else 'of 0 or more'}: "
                          f"using {default}")
             return default
         return value
 
     max_mb = whole("max_mb", UPLOAD_DEFAULT_MB, 1)
     min_free_mb = whole("min_free_mb", UPLOAD_DEFAULT_MIN_FREE_MB, 0)
+    knowledge_mb = whole("knowledge_max_mb", UPLOAD_DEFAULT_KNOWLEDGE_MB, 1)
+    knowledge_files = whole("knowledge_max_files", UPLOAD_DEFAULT_KNOWLEDGE_FILES, 1, "files")
     return {"max_bytes": max_mb * 1024 * 1024, "min_free_bytes": min_free_mb * 1024 * 1024,
+            "knowledge_max_bytes": knowledge_mb * 1024 * 1024,
+            "knowledge_max_files": knowledge_files,
             "note": "; ".join(notes) or None}
 
 
