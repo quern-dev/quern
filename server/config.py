@@ -401,7 +401,33 @@ def remote_settings() -> dict:
             "key_warning": _unused_remote_keys(raw)}
 
 
-_REMOTE_KEYS = ("enabled", "bind", "hosts")
+_REMOTE_KEYS = ("enabled", "bind", "hosts", "client_viewer_links")
+
+
+def client_viewer_links() -> bool:
+    """Whether a client key may issue viewer links for its own recordings
+    (#559): `remote.client_viewer_links`, on when unset or literally true.
+
+    On by default because it grants nothing new: links exist only where the
+    owner has enabled the viewer, and only for a client's own recordings,
+    whose files it can already download in full. An owner who wants to be the
+    only one handing out links sets it to false.
+
+    Every other value is off, and so is a config.json that cannot be read: an
+    owner who wrote "false", or set false and then broke the file elsewhere,
+    turned it off and must not find it back on (review)."""
+    try:
+        config = read_user_config(strict=True)
+    except ConfigUnreadable:
+        return False
+    if "remote" not in config:
+        return True
+    raw = config["remote"]
+    if not isinstance(raw, dict):      # null or junk: not a setting anyone meant as on
+        return False
+    if "client_viewer_links" not in raw:
+        return True
+    return raw["client_viewer_links"] is True
 
 
 def _unused_remote_keys(raw: dict) -> str | None:

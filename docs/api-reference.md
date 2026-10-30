@@ -120,7 +120,7 @@ To drive quern from another machine -- a laptop reaching a CI Mac, a team sharin
 {"remote": {"enabled": true, "bind": "0.0.0.0:9130", "hosts": ["ci.lan"]}}
 ```
 
-`hosts` are extra names it answers to besides this Mac's LAN address (a request naming anything else gets 421). The main API stays on 127.0.0.1.
+`hosts` are extra names it answers to besides this Mac's LAN address (a request naming anything else gets 421). The main API stays on 127.0.0.1. `client_viewer_links` (default on) lets a client key issue viewer links for its own recordings; see [The LAN viewer](#the-lan-viewer).
 
 **Pairing** gives the other machine a client key and the listener's certificate fingerprint in one step:
 
@@ -166,6 +166,7 @@ quern mcp-install --remote office      # or QUERN_REMOTE=office for `session run
 - **The listener is limited**, since anyone on the LAN can reach it without a token: 64 connections, a connection that sends no complete request within 5 seconds is closed, and 8 streams per recording (32 in all) before it answers 503 "too many viewers". A viewer's keyframe requests are limited to one a second per recording and aren't counted in the recording's keyframes.
 - **The page decodes with WebCodecs where the browser has it**, and otherwise with Media Source Extensions through quern's own fMP4 muxer (`server/device/media/web/fmp4.js`). That covers Chrome on a plain-HTTP LAN origin, which hides WebCodecs. `?muxer=quern` or `?muxer=jmuxer` forces an MSE path for comparison; jmuxer is served only when `viewer.jmuxer_path` points at a local copy.
 - **Anyone who has the link can watch** until it expires, so treat it like the screen it shows.
+- **A client key may issue links for its own recordings** (#559) -- `viewer: true` at the start, or `POST` / `DELETE` on the recording's `viewer` -- since it can already download those recordings in full. Another principal's recording answers 403 (404 to a blind client). The owner can turn this off with `{"remote": {"client_viewer_links": false}}`; it is on when unset or `true`, and off for any other value or a config.json that cannot be read. When it is off a client asking for a link is refused with a 403 saying so; links already issued keep working until they expire, so revoke them if that matters. A client may always revoke its own recording's links. The owner may issue a link for any recording.
 
 ## Tools and their endpoints
 
