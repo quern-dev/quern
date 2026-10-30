@@ -7,11 +7,14 @@ every route is in it, so a new route is a decision rather than an accident.
 
     PUBLIC   no key needed (APIKeyMiddleware's PUBLIC_PATHS)
     VIEW     reads: watching a device, its logs, flows and records
-    RESERVE  the session routes: open, reserve, release (`/api/v1/sessions`)
+    RESERVE  the session routes: open, reserve, release (`/api/v1/sessions`),
+             and what is the session's own: its capture (#558), its knowledge
+             base (#560)
     CONTROL  changes to one device, which a client may make only to a device
              its own session holds (server/device_access.py)
     OWNER    anything Mac-wide: the proxy, capture, the host log, updates,
-             landmarks, and anything that reads or writes a Mac path
+             server-wide landmark sets, and anything that reads or writes a
+             Mac path
 
 A view grant never widens into control: VIEW holds only reads (GET, and the
 POSTs `device_access.READ_POSTS` lists), and CONTROL only changes, which the
@@ -300,8 +303,12 @@ ROUTES: dict[tuple[str, str], Rule] = {
     ("POST", "/api/v1/landmarks/identify"): _VIEW,
     ("POST", "/api/v1/landmarks/validate"): Rule(Access.VIEW,
                                                  owner_fields=frozenset({"source"})),
-    ("POST", "/api/v1/landmarks/load"): _OWNER,
-    ("DELETE", "/api/v1/landmarks/"): _OWNER,
+    # A client loads an uploaded knowledge base for its own held session
+    # (#560); a path, inline sets and remembering stay the owner's.
+    ("POST", "/api/v1/landmarks/load"): Rule(Access.RESERVE, owner_fields=frozenset(
+        {"source", "remember", "landmarks", "global_leads_to"})),
+    # A client unloads only its session's own; the route refuses the rest.
+    ("DELETE", "/api/v1/landmarks/"): Rule(Access.RESERVE, owner_fields=frozenset({"forget"})),
     ("GET", "/api/v1/system/channel"): _VIEW,
     ("PUT", "/api/v1/system/channel"): _OWNER,
     ("POST", "/api/v1/system/update"): _OWNER,

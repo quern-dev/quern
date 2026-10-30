@@ -636,6 +636,9 @@ async def install_app(request: Request, body: InstallAppRequest):
                                                    visibility.current_caller().principal)
         except UploadError as e:
             raise HTTPException(e.status, str(e)) from None
+        if upload.kind == "knowledge":
+            raise HTTPException(400, f"{body.upload_id} is a knowledge base, not an app: "
+                                     "load it with load_landmarks(upload_id=...)")
     app_path = str(upload.path) if upload else body.app_path
     store = request.app.state.uploads
     with action("install_app", category="device.lifecycle") as act, (

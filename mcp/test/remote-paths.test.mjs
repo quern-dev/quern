@@ -15,7 +15,7 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 
-import { isClientKey, tarTree, uploadApp } from "../dist/remote-paths.js";
+import { isClientKey, knowledgeIncluded, tarTree, uploadApp, uploadKnowledge } from "../dist/remote-paths.js";
 
 let dir;
 let app;
@@ -295,5 +295,57 @@ test("a real 'not shared' answer is kept: /health is asked once, not per result"
     assert.equal(r.seen.filter((u) => u === "/health").length, 1);
   } finally {
     r.server.close();
+  }
+});
+
+
+test("a knowledge base's tar holds app.md and the screen files only (#560)", async () => {
+  const kb = mkdtempSync(join(dir, "kb-"));
+  mkdirSync(join(kb, "screens/nested"), { recursive: true });
+  writeFileSync(join(kb, "app.md"), "# app");
+  writeFileSync(join(kb, "README.md"), "not sent");
+  writeFileSync(join(kb, "screens/home.md"), "home");
+  writeFileSync(join(kb, "screens/home.png"), "not yet");
+  writeFileSync(join(kb, "screens/nested/deep.md"), "not read by the loader");
+  symlinkSync("home.md", join(kb, "screens/link.md"));     // followed: sent as a file
+  symlinkSync("missing.md", join(kb, "screens/broken.md")); // broken: skipped
+  const tar = await collect(tarTree(kb, "knowledge", knowledgeIncluded));
+  const listed = execFileSync("tar", ["-tvf", "-"], { input: tar }).toString().trim().split("\n");
+  const names = listed.map((l) => l.split(/\s+/).pop()).sort();
+  assert.deepEqual(names, ["knowledge/", "knowledge/app.md", "knowledge/screens/",
+                           "knowledge/screens/home.md", "knowledge/screens/link.md"]);
+  assert.ok(listed.every((l) => !l.startsWith("l")), "no link entries: the server refuses them");
+});
+
+test("a linked knowledge folder, or a linked screens/, is sent as its contents (#560)", async () => {
+  const real = mkdtempSync(join(dir, "real-"));
+  mkdirSync(join(real, "screens-store"));
+  writeFileSync(join(real, "screens-store/home.md"), "home");
+  const kb = mkdtempSync(join(dir, "kbl-"));
+  writeFileSync(join(kb, "app.md"), "# app");
+  symlinkSync(join(real, "screens-store"), join(kb, "screens"));
+  const outer = mkdtempSync(join(dir, "outer-"));
+  symlinkSync(kb, join(outer, "knowledge"));
+  const tar = await collect(tarTree(join(outer, "knowledge"), "knowledge", knowledgeIncluded));
+  const names = execFileSync("tar", ["-tf", "-"], { input: tar }).toString().trim().split("\n");
+  assert.deepEqual(names.sort(), ["knowledge/", "knowledge/app.md", "knowledge/screens/",
+                                  "knowledge/screens/home.md"]);
+});
+
+
+test("a knowledge upload to a server that stalls gives up, rather than hang startup", async () => {
+  const kb = mkdtempSync(join(dir, "kbs-"));
+  mkdirSync(join(kb, "screens"));
+  writeFileSync(join(kb, "screens/home.md"), "home");
+  const stall = createServer(() => {});                // accepts, never answers
+  await new Promise((r) => stall.listen(0, "127.0.0.1", r));
+  try {
+    const server = { url: `http://127.0.0.1:${stall.address().port}`, apiKey: "k" };
+    const started = Date.now();
+    await assert.rejects(uploadKnowledge(server, kb, "com.example.app", 300));
+    assert.ok(Date.now() - started < 5000, "bounded by its timeout");
+  } finally {
+    stall.closeAllConnections?.();
+    stall.close();
   }
 });

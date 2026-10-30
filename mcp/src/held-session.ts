@@ -63,6 +63,13 @@ const LOSS_NOTICE =
   "or its grace period ran out), so any devices you reserved are no longer yours. " +
   "Reserve them again with reserve_devices if you need them.";
 
+/** Run when the session had to be opened afresh after a loss: what was loaded
+ * for the old one -- its knowledge base (#560) -- is gone with it. */
+let onReopened: (() => Promise<void>) | null = null;
+export function whenReopened(fn: (() => Promise<void>) | null): void {
+  onReopened = fn;
+}
+
 export type HeldState = "idle" | "opening" | "connecting" | "live" | "retrying" | "stopped";
 let state: HeldState = "idle";
 
@@ -70,11 +77,52 @@ export function heldSessionState(): { id: string; state: HeldState } {
   return { id: SESSION_ID, state };
 }
 
+/** Open the session now, before its socket is held: what is loaded for the
+ * session at start (#560) needs the session to exist. `startHeldSession`
+ * then attaches with the token this got. False when it could not be opened;
+ * the start opens it again as usual. */
+export async function openHeldSession(): Promise<boolean> {
+  try {
+    const opened = (await apiRequest("POST", "/api/v1/sessions", undefined, {
+      name: SESSION_ID,
+    }, 5000)) as { resume_token?: string } | null;
+    if (!opened?.resume_token) return false;
+    token = opened.resume_token;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Whether the session exists on the server now, waiting up to `timeoutMs`
+ * for one being opened: a load made for this session (#560) needs it. Opens
+ * it at once when nothing has started it yet. */
+export async function sessionReady(timeoutMs = 5000): Promise<boolean> {
+  // Live is attached. A token not yet attached is a session just opened --
+  // opened early (idle) or on its first connect -- which exists. A reconnect
+  // after an attach is not: after a server restart its token may name a
+  // session that is gone, so it counts only once attached again (review).
+  const exists = () => state === "live" ||
+    (token !== null && !everAttached && (state === "idle" || state === "connecting"));
+  if (exists()) return true;
+  if (state === "idle" && !token) return openHeldSession();
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (exists()) return true;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return exists();
+}
+
 /** Open the session and hold its socket. Returns at once; retries quietly. */
 export function startHeldSession(): void {
   if (typeof WebSocket === "undefined") {
     // Node 22 has a global WebSocket; anything older cannot hold a session.
     console.error("Held session unavailable: this Node has no WebSocket");
+    return;
+  }
+  if (token) {
+    connect();                // opened already, for the session's knowledge base
     return;
   }
   void open();
@@ -115,7 +163,13 @@ async function open(): Promise<void> {
     // lost what it held -- whichever way it got here: a 4404, or reopening
     // after failed handshakes while the server was down, which never saw a
     // 4404 at all (found live, after that path was added).
-    if (everAttached && opened.resumed === false) notice(LOSS_NOTICE);
+    if (everAttached && opened.resumed === false) {
+      notice(LOSS_NOTICE);
+      // The session exists again (it was just opened), so what was loaded
+      // for the old one can be loaded for this one. Never awaited here, and
+      // never allowed to throw into the reconnect.
+      if (onReopened) void onReopened().catch(() => {});
+    }
     connect();
   } catch {
     retry(() => void open());

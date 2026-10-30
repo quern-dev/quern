@@ -12,11 +12,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { apiRequest, probeServer, serverFetch } from "./http.js";
-import { startHeldSession, stopHeldSession } from "./held-session.js";
+import { apiRequest, probeServer, serverFetch, sessionNotices } from "./http.js";
+import { openHeldSession, startHeldSession, stopHeldSession, whenReopened } from "./held-session.js";
 import { registerSessionTools } from "./tools/sessions.js";
 import { deliverSessionNotices } from "./notices.js";
-import { isClientKey, sharesDisk } from "./remote-paths.js";
+import { isClientKey, sharesDisk, uploadKnowledge } from "./remote-paths.js";
 import { registerLogTools } from "./tools/logs.js";
 import { registerProxyTools } from "./tools/proxy.js";
 import { registerInterceptTools } from "./tools/intercept.js";
@@ -32,6 +32,8 @@ import { registerOslogTools } from "./tools/oslog.js";
 import { registerAppKnowledgeTools } from "./tools/app-knowledge.js";
 import {
   autoloadKnowledge,
+  reloadForNewSession,
+  uploadKnowledgeForSession,
   detectProjectKnowledge,
   knowledgeInstructions,
   type KnowledgeOutcome,
@@ -268,10 +270,10 @@ async function checkVersionSkew(): Promise<void> {
   }
 }
 
-/** Why the session-start load is not attempted, or undefined to attempt it.
- * It sends this machine's path, which a server on another disk cannot read;
- * and landmark sets are server-wide, so loading them is the owner's
- * (#254, phase 3b). Said, rather than failing as an unreadable path. */
+/** Why the session-start load cannot send this project's path, or undefined
+ * when it can: a server on another disk cannot read it, and the server-wide
+ * sets are the owner's to load (#254, phase 3b). Either way the knowledge base
+ * is uploaded and loaded for this session instead (#560). */
 async function knowledgeSkip(): Promise<string | undefined> {
   try {
     const target = discoverServer();
@@ -296,9 +298,27 @@ async function main(): Promise<void> {
   if (PROJECT_KNOWLEDGE) {
     // Best-effort, bounded, and skipped outright when the probe found no
     // server -- the client is waiting on this before it can connect.
-    const outcome: KnowledgeOutcome = await autoloadKnowledge(
-      PROJECT_KNOWLEDGE, apiRequest, reachable, reachable ? await knowledgeSkip() : undefined);
+    // A path the server cannot read, or a key that may not load the
+    // server-wide sets: send the knowledge base instead, loaded for this
+    // session alone (#560).
+    const pathUnusable = reachable ? await knowledgeSkip() : undefined;
+    const outcome: KnowledgeOutcome = pathUnusable
+      ? await uploadKnowledgeForSession(
+        PROJECT_KNOWLEDGE, reachable, openHeldSession,
+        (dir, app) => uploadKnowledge(discoverServer(), dir, app), apiRequest)
+      : await autoloadKnowledge(PROJECT_KNOWLEDGE, apiRequest, reachable);
     if (outcome.kind !== "none") console.error(`Knowledge base: ${JSON.stringify(outcome)}`);
+    if (outcome.kind === "session_loaded") {
+      // Loaded for this session, it is gone when the session is: a server
+      // restart or a grace period that ran out. Loaded again for the new one,
+      // and said if that fails, rather than left described as loaded (review).
+      const pk = PROJECT_KNOWLEDGE;
+      whenReopened(async () => {
+        await reloadForNewSession(
+          pk, (dir, app) => uploadKnowledge(discoverServer(), dir, app), apiRequest,
+          (text) => sessionNotices.push(text));
+      });
+    }
     knowledge = knowledgeInstructions(PROJECT_KNOWLEDGE, outcome);
   }
 

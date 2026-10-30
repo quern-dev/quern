@@ -29,7 +29,9 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 #: What an upload's name may end with, and so what it is.
-KINDS = {".app.tar.gz": "app", ".ipa": "ipa", ".apk": "apk"}
+KINDS = {".app.tar.gz": "app", ".ipa": "ipa", ".apk": "apk",
+         # A project's `.quern/knowledge`, loaded with load_landmarks (#560).
+         ".knowledge.tar.gz": "knowledge"}
 
 #: Seconds an upload is kept when nothing installs it.
 TTL_SECONDS = 3600
@@ -75,13 +77,18 @@ def kind_of(name: str) -> str:
         if name.endswith(suffix) and len(name) > len(suffix):
             return kind
     raise UploadError(f"{name!r} is not an app: send an .ipa, an .apk, or a .app "
-                      "bundle as .app.tar.gz")
+                      "bundle as .app.tar.gz (or a knowledge base as .knowledge.tar.gz)")
 
 
 class UploadStore:
     def __init__(self, root: Path, max_bytes: int,
                  clock: Callable[[], float] = time.time, *, min_free_bytes: int = 0,
-                 disk_free: Callable[[], int] | None = None) -> None:
+                 disk_free: Callable[[], int] | None = None,
+                 knowledge_max_bytes: int = 5 * 1024 * 1024,
+                 knowledge_max_files: int = 2000) -> None:
+        #: What one knowledge-base upload may unpack to (#560).
+        self.knowledge_max_bytes = knowledge_max_bytes
+        self.knowledge_max_files = knowledge_max_files
         #: Free space the uploads' volume keeps, whatever the keys hold: the
         #: cap is per key, and the owner decides how many keys there are
         #: (#481). 0 for no floor.
@@ -192,6 +199,18 @@ class UploadStore:
             if size == 0:
                 raise UploadError("the upload was empty")
             path, held = target, size
+            if kind == "knowledge":
+                # Small and bounded by its own limits, so unpacked at once:
+                # what is held is what it unpacks to (review, as for .app).
+                room = self.max_bytes - self.held(principal)
+                if room < self.knowledge_max_bytes:
+                    limit, setting = room, "this key's upload cap (uploads.max_mb)"
+                else:
+                    limit, setting = self.knowledge_max_bytes, "uploads.knowledge_max_mb"
+                path, held = await _to_thread_to_the_end(
+                    _unpack_knowledge, target, directory / "knowledge",
+                    limit, self.knowledge_max_files, setting)
+                target.unlink()
             if kind == "app":
                 # Held is what it unpacks to: a small archive of zeros
                 # unpacked to many times the cap while counting as small
@@ -338,6 +357,50 @@ async def _to_thread_to_the_end(fn, *args):
             with contextlib.suppress(BaseException):
                 await asyncio.shield(work)
         raise
+
+
+#: What a knowledge base's entry costs at the least -- a folder, an empty
+#: file -- so entries cannot be free.
+_ENTRY_BYTES = 512
+
+
+def _unpack_knowledge(archive: Path, dest: Path, max_bytes: int, max_files: int,
+                      setting: str = "uploads.knowledge_max_mb") -> tuple[Path, int]:
+    """A knowledge base's files, unpacked under `dest`, and their bytes (#560).
+
+    Files and directories only: a knowledge base has no use for a link, and
+    one is refused rather than followed. Everything else in it is unpacked and
+    left for the loader, which reads what it understands and ignores the rest
+    -- so a later addition (screenshots) needs no change here."""
+    if not hasattr(tarfile, "data_filter"):
+        raise UploadError("this Python cannot unpack an archive safely (it needs 3.11.4 "
+                          "or later)", 501)
+    try:
+        with tarfile.open(archive, "r:gz") as tar:
+            members, total = [], 0
+            for member in tar:
+                members.append(member)
+                if member.issym() or member.islnk():
+                    raise UploadError(f"the knowledge base is refused: {member.name!r} is a "
+                                      "link; send files")
+                # Every entry counts, folders too, and each at least a block:
+                # counting files alone let an archive of nothing but folders
+                # through any limit while holding "0 bytes" (review).
+                total += max(member.size, 0, _ENTRY_BYTES)
+                if total > max_bytes:
+                    raise UploadError(f"the knowledge base unpacks to more than "
+                                      f"{max(max_bytes, 0) / (1024 * 1024):.1f} MB "
+                                      f"({setting})", 413)
+                if len(members) > max_files:
+                    raise UploadError(f"the knowledge base holds more than {max_files} files "
+                                      "and folders (uploads.knowledge_max_files)", 413)
+            if (why := unsafe_member(members)) is not None:
+                raise UploadError(f"the knowledge base is refused: {why}")
+            dest.mkdir(mode=0o700)
+            tar.extractall(dest, members=members, filter="data")
+    except (tarfile.TarError, EOFError, OSError) as e:
+        raise UploadError(f"the knowledge base could not be unpacked: {e}") from None
+    return dest, total
 
 
 def _measure_app(archive: Path, room: int) -> int:

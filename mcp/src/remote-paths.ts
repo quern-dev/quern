@@ -199,16 +199,34 @@ function* padded(data: Buffer): Generator<Buffer> {
 /** The tar stream of the tree at `root`, named `top/...` inside: files with
  * their permission bits (an app's executable needs its own), symlinks as
  * symlinks (a framework's `Versions/Current` is one), in a stable order. */
-export async function* tarTree(root: string, top: string): AsyncGenerator<Buffer> {
-  async function* walk(abs: string, rel: string): AsyncGenerator<Buffer> {
-    const st = await lstat(abs);
+export async function* tarTree(
+  root: string, top: string,
+  /** Which paths to include, relative to `root` ("" is the root itself).
+   * With a filter, links are followed and sent as what they point at (#560). */
+  include?: (rel: string, isDir: boolean) => boolean,
+): AsyncGenerator<Buffer> {
+  async function* walk(abs: string, rel: string, under: string): AsyncGenerator<Buffer> {
+    let st;
+    if (include) {
+      // Links followed: a knowledge base is the user's own files, and a
+      // linked `.quern/knowledge` or `screens/` sent nothing (review). What is
+      // sent is plain files and folders, which is all the server takes.
+      try {
+        st = await stat(abs);
+      } catch {
+        return;                                   // a broken link: nothing to send
+      }
+      if (!include(under, st.isDirectory())) return;
+    } else {
+      st = await lstat(abs);
+    }
     const mtime = Math.floor(st.mtimeMs / 1000);
     if (st.isSymbolicLink()) {
       yield* entry(rel, "2", 0, st.mode, mtime, await readlink(abs));
     } else if (st.isDirectory()) {
       yield* entry(`${rel}/`, "5", 0, st.mode, mtime);
       for (const child of (await readdir(abs)).sort()) {
-        yield* walk(join(abs, child), `${rel}/${child}`);
+        yield* walk(join(abs, child), `${rel}/${child}`, under ? `${under}/${child}` : child);
       }
     } else if (st.isFile()) {
       yield* entry(rel, "0", st.size, st.mode, mtime);
@@ -226,9 +244,46 @@ export async function* tarTree(root: string, top: string): AsyncGenerator<Buffer
     }
     // Sockets, devices and fifos have no place in an app, and are skipped.
   }
-  yield* walk(root, top);
+  yield* walk(root, top, "");
   yield Buffer.alloc(BLOCK * 2);
 }
+
+/** What of a project's `.quern/knowledge` is sent (#560): `app.md` and the
+ * screen files, which is all the server's loader reads today. One place, so
+ * screenshots for visual diffs can be added here when the server reads them. */
+export function knowledgeIncluded(rel: string, isDir: boolean): boolean {
+  if (rel === "") return true;
+  if (isDir) return rel === "screens";
+  return rel === "app.md" || /^screens\/[^/]+\.md$/.test(rel);
+}
+
+/** Send a project's knowledge base to the server, for load_landmarks
+ * (upload_id) to load for this session (#560). */
+export async function uploadKnowledge(server: Server, knowledgeDir: string,
+                                      app: string,
+                                      timeoutMs = KNOWLEDGE_UPLOAD_TIMEOUT_MS): Promise<Uploaded> {
+  const gzip = createGzip();
+  pipeline(Readable.from(tarTree(knowledgeDir, "knowledge", knowledgeIncluded)), gzip,
+           () => {});
+  const name = `${app.replace(/[^A-Za-z0-9._-]/g, "_")}.knowledge.tar.gz`;
+  const resp = await serverFetch(server,
+    `${server.url}/api/v1/uploads?name=${encodeURIComponent(name)}`, {
+      method: "POST",
+      headers: { ...quernHeaders(server.apiKey), "Content-Type": "application/octet-stream" },
+      body: gzip as unknown as BodyInit,
+      duplex: "half",
+      // Bounded: at session start the client waits on this before it can
+      // connect, and a link that stalls mid-upload must not hang it (review).
+      // A knowledge base is a few hundred KB at most.
+      signal: AbortSignal.timeout(timeoutMs),
+    } as RequestInit, { noTimeouts: true });
+  const text = await resp.text();
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${text}`);
+  return JSON.parse(text) as Uploaded;
+}
+
+/** How long a knowledge-base upload may take (#560). */
+export const KNOWLEDGE_UPLOAD_TIMEOUT_MS = 15_000;
 
 // -- paths in answers ----------------------------------------------------------
 
