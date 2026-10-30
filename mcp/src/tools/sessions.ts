@@ -4,6 +4,7 @@ import { heldSessionState } from "../held-session.js";
 import { SESSION_ID, apiRequest } from "../http.js";
 import { strictParams, errorText } from "./helpers.js";
 import { betweenSwitches, elsewhereHint } from "./system.js";
+import { applyOnReserve } from "../carried.js";
 
 function answer(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
@@ -41,8 +42,12 @@ Your reservation lasts as long as this MCP session: released when it ends, and k
       // Never during a switch: reserved on the old server after use_remote
       // checked what is held there, it was released by the switch's clean
       // close without a word (CodeRabbit). The hint below runs outside.
-      return answer(await betweenSwitches(() =>
-        apiRequest("POST", path("/reservations"), undefined, args)));
+      const data = (await betweenSwitches(() =>
+        apiRequest("POST", path("/reservations"), undefined, args))) as
+        { reserved?: { udid?: string; device_type?: string }[] } | null;
+      // What a switch moved here is set up on what was just reserved.
+      const carried = await applyOnReserve(data?.reserved ?? []);
+      return answer(carried ? { ...data, carried } : data);
     } catch (e) {
       // Nothing here matched (409): say where something does, rather than
       // leave the agent to conclude it exists nowhere (found live).
