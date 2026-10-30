@@ -214,6 +214,8 @@ export interface ReserveCriteria {
   device_family?: string;
   count?: number;
   auto_boot?: boolean;
+  /** list_devices' rules, not the pool's: its name filter reads the name only. */
+  listing?: boolean;
 }
 
 /** The pool's _effective_device_family: the family, or one inferred from the
@@ -267,7 +269,8 @@ export function matchingElsewhere(
     if (criteria.name) {
       const n = criteria.name.toLowerCase();
       const fields = (d: Record<string, unknown>) =>
-        [String(d.name ?? "").toLowerCase(), String(d.model ?? "").toLowerCase()].filter(Boolean);
+        [String(d.name ?? "").toLowerCase(),
+         ...(criteria.listing ? [] : [String(d.model ?? "").toLowerCase()])].filter(Boolean);
       const exact = devices.filter((d) => fields(d).includes(n));
       devices = exact.length ? exact : devices.filter((d) => fields(d).some((f) => f.includes(n)));
     }
@@ -281,7 +284,9 @@ export function matchingElsewhere(
 /** A line for reserve_devices' failure: where the devices it could not find
  * here are free, and how to get there. Empty when nowhere else has them or
  * the remotes could not be listed. */
-export async function elsewhereHint(criteria: ReserveCriteria, lead = "Not enough here"): Promise<string> {
+export async function elsewhereHint(
+  criteria: ReserveCriteria, lead = "Not enough here", next = "reserve_devices",
+): Promise<string> {
   let found;
   try {
     found = matchingElsewhere(await quernRemoteList(), currentRemote() ?? LOCAL, criteria);
@@ -298,7 +303,7 @@ export async function elsewhereHint(criteria: ReserveCriteria, lead = "Not enoug
   });
   const first = found[0].name;
   return `\n\n${lead}, but ${parts.join("; ")}. To use one, switch with ` +
-    `use_remote(name="${first}"), then reserve_devices again.`;
+    `use_remote(name="${first}"), then ${next} again.`;
 }
 
 /** Mark the entry this MCP talks to -- this Mac's server, or the remote

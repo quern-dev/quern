@@ -98,6 +98,11 @@ test("the hint: only for a pool shortage, and only where count and booting allow
   assert.doesNotMatch(r.notLive.text, /romulus/, "a session that is not live is not fixed elsewhere");
   assert.match(r.listEmpty.elsewhere, /^None here, but romulus has 1 free that match/,
                "an empty filtered list_devices says where to look too");
+  assert.match(r.listEmpty.elsewhere, /then list_devices again\.$/, "a listing is told to list, not reserve");
+  assert.match(r.noMatch.text, /then reserve_devices again\.$/);
+  assert.equal(r.listByState.elsewhere, undefined, "a filter the hint cannot check: no hint");
+  assert.equal(r.listByModel.elsewhere, undefined, "list_devices matches names only, so a model does not");
+  assert.match(r.listByName.elsewhere ?? "", /romulus/);
   assert.equal(r.listUnfiltered.elsewhere, undefined, "nothing asked for, nothing to point at");
 });
 

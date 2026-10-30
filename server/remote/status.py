@@ -48,8 +48,10 @@ def _get(remote: client.Remote, path: str, timeout: float) -> Any:
     # This Mac's own server is plain http on loopback, with no pin to check.
     # Told apart by having no pin, never by name: a remote paired as "local"
     # must not skip its pin (CodeRabbit).
-    opener = (urllib.request.build_opener() if not remote.fingerprint
-              else client.opener(remote))
+    # And never through a proxy from the environment, which would be handed
+    # the owner's key (CodeRabbit).
+    opener = (urllib.request.build_opener(urllib.request.ProxyHandler({}))
+              if not remote.fingerprint else client.opener(remote))
     with opener.open(req, timeout=timeout) as resp:
         body = resp.read()
     try:

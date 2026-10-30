@@ -141,7 +141,7 @@ if (scenario === "window") {
 } else if (scenario === "hint") {
   writeFileSync(join(home, "quern"), `#!/bin/sh\ncat <<'J'\n${JSON.stringify({ remotes: [
     { name: "local", devices: [] },
-    { name: "romulus", devices: [{ udid: "R1", name: "iPhone 15", os_version: "iOS 17.5",
+    { name: "romulus", devices: [{ udid: "R1", name: "iPhone 15", model: "iPhone 15 Pro", os_version: "iOS 17.5",
       device_family: "iPhone", device_type: "simulator", free: true, state: "shutdown" }] },
   ] })}\nJ\n`);
   chmodSync(join(home, "quern"), 0o755);
@@ -152,6 +152,9 @@ if (scenario === "window") {
   result.bootedOnly = text(await tools.reserve_devices({ count: 1, os_version: "17.5", auto_boot: false }));
   result.listEmpty = JSON.parse(text(await tools.list_devices({ os_version: "17.5" })).text);
   result.listUnfiltered = JSON.parse(text(await tools.list_devices({})).text);
+  result.listByState = JSON.parse(text(await tools.list_devices({ os_version: "17.5", state: "shutdown" })).text);
+  result.listByModel = JSON.parse(text(await tools.list_devices({ name: "iPhone 15 Pro" })).text);
+  result.listByName = JSON.parse(text(await tools.list_devices({ name: "Phone 15" })).text);
   globalThis.detail = "session agent-1 has no live connection";
   result.notLive = text(await tools.reserve_devices({ count: 1, os_version: "17.5" }));
 }
