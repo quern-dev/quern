@@ -98,7 +98,12 @@ export async function openHeldSession(): Promise<boolean> {
  * for one being opened: a load made for this session (#560) needs it. Opens
  * it at once when nothing has started it yet. */
 export async function sessionReady(timeoutMs = 5000): Promise<boolean> {
-  const exists = () => token !== null && (state === "connecting" || state === "live");
+  // Live is attached. A token not yet attached is a session just opened --
+  // opened early (idle) or on its first connect -- which exists. A reconnect
+  // after an attach is not: after a server restart its token may name a
+  // session that is gone, so it counts only once attached again (review).
+  const exists = () => state === "live" ||
+    (token !== null && !everAttached && (state === "idle" || state === "connecting"));
   if (exists()) return true;
   if (state === "idle" && !token) return openHeldSession();
   const deadline = Date.now() + timeoutMs;
