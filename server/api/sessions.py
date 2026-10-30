@@ -415,7 +415,7 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
 
     landmarks = getattr(app.state, "landmark_registry", None)
     if isinstance(landmarks, SessionLandmarks):
-        if dropped := landmarks.drop(session.id):
+        if dropped := landmarks.drop(session.id, session.opened_at):
             actions.append({"action": "knowledge_dropped", "ok": True, "apps": dropped})
     owners = getattr(app.state, "mock_owners", {}) or {}
     adapter = getattr(app.state, "proxy_adapter", None)

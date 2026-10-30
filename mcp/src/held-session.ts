@@ -63,6 +63,13 @@ const LOSS_NOTICE =
   "or its grace period ran out), so any devices you reserved are no longer yours. " +
   "Reserve them again with reserve_devices if you need them.";
 
+/** Run when the session had to be opened afresh after a loss: what was loaded
+ * for the old one -- its knowledge base (#560) -- is gone with it. */
+let onReopened: (() => Promise<void>) | null = null;
+export function whenReopened(fn: (() => Promise<void>) | null): void {
+  onReopened = fn;
+}
+
 export type HeldState = "idle" | "opening" | "connecting" | "live" | "retrying" | "stopped";
 let state: HeldState = "idle";
 
@@ -136,7 +143,13 @@ async function open(): Promise<void> {
     // lost what it held -- whichever way it got here: a 4404, or reopening
     // after failed handshakes while the server was down, which never saw a
     // 4404 at all (found live, after that path was added).
-    if (everAttached && opened.resumed === false) notice(LOSS_NOTICE);
+    if (everAttached && opened.resumed === false) {
+      notice(LOSS_NOTICE);
+      // The session exists again (it was just opened), so what was loaded
+      // for the old one can be loaded for this one. Never awaited here, and
+      // never allowed to throw into the reconnect.
+      if (onReopened) void onReopened().catch(() => {});
+    }
     connect();
   } catch {
     retry(() => void open());

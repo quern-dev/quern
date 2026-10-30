@@ -293,6 +293,14 @@ def _app(registry, keys):
     async def viewer_revoke(recording_id: str):
         return {"recording_id": recording_id}
 
+    @app.post("/api/v1/landmarks/load")
+    async def landmarks_load(request: Request):
+        return {"reached": True}
+
+    @app.delete("/api/v1/landmarks/")
+    async def landmarks_unload(forget: bool = False):
+        return {"reached": True}
+
     @app.post("/api/v1/not/in/the/table")
     async def unmapped(request: Request):
         return {"reached": True}
@@ -799,6 +807,31 @@ class TestReviewFindings:
         c, _, alice, _ = world
         r = getattr(c, method)("/api/v1/recordings/rec_1/viewer", headers=_h(alice))
         assert r.status_code == 200, r.text
+
+    def test_a_client_loads_an_upload_for_its_session(self, world):
+        """#560: the route decides the session; the middleware lets it through."""
+        c, _, alice, _ = world
+        r = c.post("/api/v1/landmarks/load", headers=_h(alice),
+                   json={"upload_id": "up_1", "app": "com.example"})
+        assert r.status_code == 200, r.text
+
+    @pytest.mark.parametrize("field, value", [
+        ("source", "/Users/me/app"), ("remember", True),
+        ("landmarks", {"Home": [{"element": "Button", "label": "OK"}]}),
+        ("global_leads_to", [{"to": "Home"}]),
+    ])
+    def test_server_wide_loads_stay_the_owners(self, world, field, value):
+        """Any of these loads or keeps a server-wide set, which every key shares."""
+        c, _, alice, _ = world
+        r = c.post("/api/v1/landmarks/load", headers=_h(alice),
+                   json={"app": "com.example", field: value})
+        assert r.status_code == 403 and "owner-only" in r.json()["detail"], r.text
+
+    def test_a_client_may_unload_but_not_forget(self, world):
+        c, _, alice, _ = world
+        assert c.delete("/api/v1/landmarks/?app=x", headers=_h(alice)).status_code == 200
+        r = c.delete("/api/v1/landmarks/?app=x&forget=true", headers=_h(alice))
+        assert r.status_code == 403, r.text
 
     def test_resolved_precheck_guards_a_route_that_never_calls_check(self, world, registry):
         c, app, alice, _ = world

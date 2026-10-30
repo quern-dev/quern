@@ -16,6 +16,7 @@ import {
   knowledgeInstructions,
   projectDirFromEnv,
   knowledgeAt,
+  reloadForNewSession,
   uploadKnowledgeForSession,
 } from "../dist/project-knowledge.js";
 
@@ -449,6 +450,23 @@ test("a load_landmarks path is read as the server reads one (#560)", () => {
     assert.deepEqual(knowledgeAt(given), { dir: kb, bundleId: APP }, given);
   }
   assert.equal(knowledgeAt(project()), null);
+  assert.deepEqual(knowledgeAt(join(kb, "screens")), { dir: kb, bundleId: APP });
   const bare = project({ files: { "kb/screens/home.md": "x" } });
   assert.deepEqual(knowledgeAt(join(bare, "kb")), { dir: join(bare, "kb"), bundleId: null });
+});
+
+
+test("a session opened afresh gets its knowledge base again, or is told it did not", async () => {
+  const dir = project({ files: { ".quern/knowledge/screens/home.md": "x",
+                                 ".quern/config.json": JSON.stringify({ bundle_id: APP }) } });
+  const pk = detectProjectKnowledge(dir);
+  const told = [];
+  const ok = sessionLoad();
+  const again = await reloadForNewSession(pk, ok.args[1], ok.args[2], (t) => told.push(t));
+  assert.equal(again.kind, "session_loaded");
+  assert.deepEqual(told, []);
+  const failed = sessionLoad({ answer: new Error("HTTP 413: too big") });
+  await reloadForNewSession(pk, failed.args[1], failed.args[2], (t) => told.push(t));
+  assert.equal(told.length, 1);
+  assert.match(told[0], /lost with the session and could not be loaded again \(HTTP 413/);
 });

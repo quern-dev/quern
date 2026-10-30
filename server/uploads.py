@@ -202,10 +202,14 @@ class UploadStore:
             if kind == "knowledge":
                 # Small and bounded by its own limits, so unpacked at once:
                 # what is held is what it unpacks to (review, as for .app).
+                room = self.max_bytes - self.held(principal)
+                if room < self.knowledge_max_bytes:
+                    limit, setting = room, "this key's upload cap (uploads.max_mb)"
+                else:
+                    limit, setting = self.knowledge_max_bytes, "uploads.knowledge_max_mb"
                 path, held = await _to_thread_to_the_end(
                     _unpack_knowledge, target, directory / "knowledge",
-                    min(self.knowledge_max_bytes, self.max_bytes - self.held(principal)),
-                    self.knowledge_max_files)
+                    limit, self.knowledge_max_files, setting)
                 target.unlink()
             if kind == "app":
                 # Held is what it unpacks to: a small archive of zeros
@@ -355,8 +359,13 @@ async def _to_thread_to_the_end(fn, *args):
         raise
 
 
-def _unpack_knowledge(archive: Path, dest: Path, max_bytes: int,
-                      max_files: int) -> tuple[Path, int]:
+#: What a knowledge base's entry costs at the least -- a folder, an empty
+#: file -- so entries cannot be free.
+_ENTRY_BYTES = 512
+
+
+def _unpack_knowledge(archive: Path, dest: Path, max_bytes: int, max_files: int,
+                      setting: str = "uploads.knowledge_max_mb") -> tuple[Path, int]:
     """A knowledge base's files, unpacked under `dest`, and their bytes (#560).
 
     Files and directories only: a knowledge base has no use for a link, and
@@ -368,22 +377,23 @@ def _unpack_knowledge(archive: Path, dest: Path, max_bytes: int,
                           "or later)", 501)
     try:
         with tarfile.open(archive, "r:gz") as tar:
-            members, total, files = [], 0, 0
+            members, total = [], 0
             for member in tar:
                 members.append(member)
                 if member.issym() or member.islnk():
                     raise UploadError(f"the knowledge base is refused: {member.name!r} is a "
                                       "link; send files")
-                if member.isfile():
-                    files += 1
-                    total += max(member.size, 0)
+                # Every entry counts, folders too, and each at least a block:
+                # counting files alone let an archive of nothing but folders
+                # through any limit while holding "0 bytes" (review).
+                total += max(member.size, 0, _ENTRY_BYTES)
                 if total > max_bytes:
                     raise UploadError(f"the knowledge base unpacks to more than "
-                                      f"{max_bytes // (1024 * 1024)} MB "
-                                      "(uploads.knowledge_max_mb)", 413)
-                if files > max_files:
+                                      f"{max(max_bytes, 0) / (1024 * 1024):.1f} MB "
+                                      f"({setting})", 413)
+                if len(members) > max_files:
                     raise UploadError(f"the knowledge base holds more than {max_files} files "
-                                      "(uploads.knowledge_max_files)", 413)
+                                      "and folders (uploads.knowledge_max_files)", 413)
             if (why := unsafe_member(members)) is not None:
                 raise UploadError(f"the knowledge base is refused: {why}")
             dest.mkdir(mode=0o700)

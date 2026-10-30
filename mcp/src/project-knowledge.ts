@@ -216,6 +216,7 @@ export function knowledgeAt(path: string): { dir: string; bundleId: string | nul
     [join(path, ".quern", "knowledge"), join(path, ".quern")],
     [join(path, "knowledge"), path],
     [path, join(path, "..")],
+    [join(path, ".."), join(path, "..", "..")],      // the screens/ folder itself
   ];
   for (const [dir, quern] of candidates) {
     if (!isDir(join(dir, "screens"))) continue;
@@ -266,6 +267,26 @@ export async function uploadKnowledgeForSession(
   } catch (e) {
     return { kind: "not_loaded", reason: e instanceof Error ? e.message : String(e) };
   }
+}
+
+/** Load the knowledge base again for a session opened afresh after the old
+ * one was lost (#560), and say so when that fails -- the instructions still
+ * describe it as loaded. Never throws. */
+export async function reloadForNewSession(
+  pk: ProjectKnowledge,
+  upload: (dir: string, app: string) => Promise<{ upload_id: string }>,
+  request: Request,
+  notify: (text: string) => void,
+): Promise<KnowledgeOutcome> {
+  const again = await uploadKnowledgeForSession(pk, true, async () => true, upload, request);
+  if (again.kind !== "session_loaded") {
+    const why = "reason" in again ? again.reason : again.kind;
+    notify(`This session's knowledge base${pk.bundleId ? ` for ${pk.bundleId}` : ""} was ` +
+      `lost with the session and could not be loaded again (${why}). identify_screen now ` +
+      `uses the server's own sets; load_landmarks(path="${pk.projectDir}") loads it for ` +
+      "this session again.");
+  }
+  return again;
 }
 
 /** Lines for the session instructions, from what actually happened. Nothing

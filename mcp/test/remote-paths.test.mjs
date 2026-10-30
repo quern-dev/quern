@@ -307,9 +307,27 @@ test("a knowledge base's tar holds app.md and the screen files only (#560)", asy
   writeFileSync(join(kb, "screens/home.md"), "home");
   writeFileSync(join(kb, "screens/home.png"), "not yet");
   writeFileSync(join(kb, "screens/nested/deep.md"), "not read by the loader");
-  symlinkSync("home.md", join(kb, "screens/link.md"));     // never sent: links are refused
+  symlinkSync("home.md", join(kb, "screens/link.md"));     // followed: sent as a file
+  symlinkSync("missing.md", join(kb, "screens/broken.md")); // broken: skipped
   const tar = await collect(tarTree(kb, "knowledge", knowledgeIncluded));
-  const listed = execFileSync("tar", ["-tf", "-"], { input: tar }).toString().trim().split("\n");
-  assert.deepEqual(listed.sort(), ["knowledge/", "knowledge/app.md", "knowledge/screens/",
-                                   "knowledge/screens/home.md"]);
+  const listed = execFileSync("tar", ["-tvf", "-"], { input: tar }).toString().trim().split("\n");
+  const names = listed.map((l) => l.split(/\s+/).pop()).sort();
+  assert.deepEqual(names, ["knowledge/", "knowledge/app.md", "knowledge/screens/",
+                           "knowledge/screens/home.md", "knowledge/screens/link.md"]);
+  assert.ok(listed.every((l) => !l.startsWith("l")), "no link entries: the server refuses them");
+});
+
+test("a linked knowledge folder, or a linked screens/, is sent as its contents (#560)", async () => {
+  const real = mkdtempSync(join(dir, "real-"));
+  mkdirSync(join(real, "screens-store"));
+  writeFileSync(join(real, "screens-store/home.md"), "home");
+  const kb = mkdtempSync(join(dir, "kbl-"));
+  writeFileSync(join(kb, "app.md"), "# app");
+  symlinkSync(join(real, "screens-store"), join(kb, "screens"));
+  const outer = mkdtempSync(join(dir, "outer-"));
+  symlinkSync(kb, join(outer, "knowledge"));
+  const tar = await collect(tarTree(join(outer, "knowledge"), "knowledge", knowledgeIncluded));
+  const names = execFileSync("tar", ["-tf", "-"], { input: tar }).toString().trim().split("\n");
+  assert.deepEqual(names.sort(), ["knowledge/", "knowledge/app.md", "knowledge/screens/",
+                                  "knowledge/screens/home.md"]);
 });

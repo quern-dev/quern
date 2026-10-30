@@ -12,8 +12,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { apiRequest, probeServer, serverFetch } from "./http.js";
-import { openHeldSession, startHeldSession, stopHeldSession } from "./held-session.js";
+import { apiRequest, probeServer, serverFetch, sessionNotices } from "./http.js";
+import { openHeldSession, startHeldSession, stopHeldSession, whenReopened } from "./held-session.js";
 import { registerSessionTools } from "./tools/sessions.js";
 import { deliverSessionNotices } from "./notices.js";
 import { isClientKey, sharesDisk, uploadKnowledge } from "./remote-paths.js";
@@ -32,6 +32,7 @@ import { registerOslogTools } from "./tools/oslog.js";
 import { registerAppKnowledgeTools } from "./tools/app-knowledge.js";
 import {
   autoloadKnowledge,
+  reloadForNewSession,
   uploadKnowledgeForSession,
   detectProjectKnowledge,
   knowledgeInstructions,
@@ -307,6 +308,17 @@ async function main(): Promise<void> {
         (dir, app) => uploadKnowledge(discoverServer(), dir, app), apiRequest)
       : await autoloadKnowledge(PROJECT_KNOWLEDGE, apiRequest, reachable);
     if (outcome.kind !== "none") console.error(`Knowledge base: ${JSON.stringify(outcome)}`);
+    if (outcome.kind === "session_loaded") {
+      // Loaded for this session, it is gone when the session is: a server
+      // restart or a grace period that ran out. Loaded again for the new one,
+      // and said if that fails, rather than left described as loaded (review).
+      const pk = PROJECT_KNOWLEDGE;
+      whenReopened(async () => {
+        await reloadForNewSession(
+          pk, (dir, app) => uploadKnowledge(discoverServer(), dir, app), apiRequest,
+          (text) => sessionNotices.push(text));
+      });
+    }
     knowledge = knowledgeInstructions(PROJECT_KNOWLEDGE, outcome);
   }
 

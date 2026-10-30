@@ -221,8 +221,9 @@ def _request(tmp_path, lm, store, *, held=("s1", "client:a")):
     req = MagicMock()
     req.app.state.landmark_registry = lm
     req.app.state.uploads = store
-    sessions = {held[0]: SimpleNamespace(id=held[0], principal=held[1])} if held else {}
-    req.app.state.sessions = SimpleNamespace(get=sessions.get)
+    sessions = ({held[0]: SimpleNamespace(id=held[0], principal=held[1], opened_at=1.0)}
+                if held else {})
+    req.app.state.sessions = SimpleNamespace(get=sessions.get, table=sessions)
     return req
 
 
@@ -362,8 +363,98 @@ async def test_the_set_ends_with_the_session():
     lm.own("client:a/s1").load(APP, _screens("home"))
     app = SimpleNamespace(state=SimpleNamespace(
         landmark_registry=lm, proxy_adapter=None, recordings=None, mock_owners={}))
-    session = SimpleNamespace(id="client:a/s1", principal="client:a", reservations=[])
+    session = SimpleNamespace(id="client:a/s1", principal="client:a", reservations=[],
+                              opened_at=None)
     actions = await sessions_api._end_client_work(app, SimpleNamespace(holder_of=lambda u: None),
                                                   session)
     assert {"action": "knowledge_dropped", "ok": True, "apps": [APP]} in actions
     assert lm.own_apps("client:a/s1") == []
+
+
+# ---------------------------------------------------------------------------
+# Review of #560
+# ---------------------------------------------------------------------------
+
+
+def _dirs_only(n: int) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for i in range(n):
+            info = tarfile.TarInfo(f"d{i}")
+            info.type = tarfile.DIRTYPE
+            tar.addfile(info)
+    return buf.getvalue()
+
+
+async def test_folders_count_against_the_limit(tmp_path):
+    """An archive of nothing but folders went through any file limit and held
+    "0 bytes", so it never filled the key's cap (review)."""
+    with pytest.raises(UploadError) as e:
+        await _upload(_store(tmp_path, knowledge_max_files=10), _dirs_only(20))
+    assert e.value.status == 413 and "folders" in str(e.value)
+
+
+async def test_every_entry_costs_at_least_a_block(tmp_path):
+    up = await _upload(_store(tmp_path), _dirs_only(3))
+    assert up.size >= 3 * 512
+
+
+async def test_near_the_keys_cap_the_refusal_names_that_cap(tmp_path):
+    store = UploadStore(tmp_path / "uploads", 2000)          # bytes: the key's whole cap
+    with pytest.raises(UploadError) as e:
+        await _upload(store, _tarball({**KB, "screens/big.md": "x" * 3000}))
+    assert "uploads.max_mb" in str(e.value) and "knowledge_max_mb" not in str(e.value)
+
+
+async def test_a_session_released_during_the_read_gets_no_set(tmp_path, as_session,
+                                                             monkeypatch):
+    """Its clean-up has already run; a set loaded now would never be dropped."""
+    as_session("s1")
+    lm, store = _proxy(), _store(tmp_path)
+    up = await _upload(store, _tarball(KB))
+    req = _request(tmp_path, lm, store)
+    real_scan = api.scan_knowledge_base
+
+    def scan_then_release(path):
+        req.app.state.sessions.table.clear()             # the sweep released it meanwhile
+        return real_scan(path)
+
+    monkeypatch.setattr(api, "scan_knowledge_base", scan_then_release)
+    with pytest.raises(HTTPException) as e:
+        await _load(req, upload_id=up.id, app=APP)
+    assert e.value.status_code == 409 and lm.own_apps("s1") == []
+
+
+async def test_a_refused_load_keeps_the_upload(tmp_path, as_session):
+    """Discarded only once loaded: a refusal leaves it to fix and send again."""
+    as_session("s1")
+    lm, store = _proxy(), _store(tmp_path)
+    up = await _upload(store, _tarball({"app.md": "# x", "screens/_template.md": "no"}))
+    with pytest.raises(HTTPException):
+        await _load(_request(tmp_path, lm, store), upload_id=up.id, app=APP)
+    assert store.get(up.id, "client:a") is up
+
+
+def test_a_retried_clean_up_spares_a_newer_session_of_that_name():
+    lm = _proxy()
+    lm.own("s1", 1.0).load(APP, _screens("old"))
+    lm.own("s1", 2.0).load(APP, _screens("new"))          # reopened: replaced, not merged
+    assert lm.drop("s1", 1.0) == []                        # the old session's clean-up, retried
+    assert [s.screen for s in lm.own("s1", 2.0).all_screens(APP)] == ["new"]
+    assert lm.drop("s1", 2.0) == [APP]
+
+
+async def test_install_app_refuses_a_knowledge_upload(tmp_path, monkeypatch):
+    from server.api import device as device_api
+    from server.models import InstallAppRequest
+
+    store = _store(tmp_path)
+    up = await _upload(store, _tarball(KB))
+    monkeypatch.setattr(device_api.visibility, "current_caller",
+                        lambda: SimpleNamespace(principal="client:a", session="s1",
+                                                is_owner=False))
+    req = MagicMock()
+    req.app.state.uploads = store
+    with pytest.raises(HTTPException) as e:
+        await device_api.install_app(req, InstallAppRequest(upload_id=up.id))
+    assert e.value.status_code == 400 and "knowledge base" in e.value.detail

@@ -160,7 +160,14 @@ async def _load_upload(request: Request, body: LoadLandmarksRequest) -> dict:
         # session already has would empty it and still answer "loaded".
         raise HTTPException(status_code=400, detail=(
             "not loaded: the uploaded knowledge base has no screens with landmarks"))
-    own = landmarks.own(caller.session)
+    # Asked again after the scan, which awaited: a session released meanwhile
+    # has had its clean-up, and a set loaded now would never be dropped
+    # (review).
+    now = sessions.get(caller.session)
+    if now is None or now.opened_at != held.opened_at:
+        raise HTTPException(status_code=409, detail=(
+            "not loaded: the session ended while its knowledge base was being read"))
+    own = landmarks.own(caller.session, held.opened_at)
     count, skipped = own.load_scan(body.app, scan, f"uploaded ({body.upload_id})")
     store.discard(body.upload_id)
     return {

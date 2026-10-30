@@ -202,13 +202,25 @@ function* padded(data: Buffer): Generator<Buffer> {
 export async function* tarTree(
   root: string, top: string,
   /** Which paths to include, relative to `root` ("" is the root itself).
-   * With a filter, links are skipped rather than sent (#560). */
+   * With a filter, links are followed and sent as what they point at (#560). */
   include?: (rel: string, isDir: boolean) => boolean,
 ): AsyncGenerator<Buffer> {
   async function* walk(abs: string, rel: string, under: string): AsyncGenerator<Buffer> {
-    const st = await lstat(abs);
+    let st;
+    if (include) {
+      // Links followed: a knowledge base is the user's own files, and a
+      // linked `.quern/knowledge` or `screens/` sent nothing (review). What is
+      // sent is plain files and folders, which is all the server takes.
+      try {
+        st = await stat(abs);
+      } catch {
+        return;                                   // a broken link: nothing to send
+      }
+      if (!include(under, st.isDirectory())) return;
+    } else {
+      st = await lstat(abs);
+    }
     const mtime = Math.floor(st.mtimeMs / 1000);
-    if (include && (st.isSymbolicLink() || !include(under, st.isDirectory()))) return;
     if (st.isSymbolicLink()) {
       yield* entry(rel, "2", 0, st.mode, mtime, await readlink(abs));
     } else if (st.isDirectory()) {

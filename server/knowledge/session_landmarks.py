@@ -35,22 +35,37 @@ class SessionLandmarks:
 
     def __init__(self, shared: LandmarkRegistry) -> None:
         self.shared = shared
-        self._own: dict[str, LandmarkRegistry] = {}
+        #: session id -> (which opening of it the sets belong to, the sets).
+        #: A session id is a name, reused by the next session of that name;
+        #: the incarnation (when it was opened) tells them apart (review).
+        self._own: dict[str, tuple[object, LandmarkRegistry]] = {}
 
     # -- the session's own sets ------------------------------------------------
 
-    def own(self, session: str) -> LandmarkRegistry:
-        """`session`'s own registry, made on first use."""
-        return self._own.setdefault(session, LandmarkRegistry())
+    def own(self, session: str, incarnation: object = None) -> LandmarkRegistry:
+        """`session`'s own registry, made on first use -- or afresh, when the
+        sets kept under its name belong to an earlier opening of it."""
+        kept = self._own.get(session)
+        if kept is None or (incarnation is not None and kept[0] != incarnation):
+            kept = (incarnation, LandmarkRegistry())
+            self._own[session] = kept
+        return kept[1]
 
     def own_apps(self, session: str) -> list[str]:
-        own = self._own.get(session)
-        return sorted(own.list_sets()) if own is not None else []
+        kept = self._own.get(session)
+        return sorted(kept[1].list_sets()) if kept is not None else []
 
-    def drop(self, session: str) -> list[str]:
-        """Forget `session`'s own sets: it ended. Returns the apps dropped."""
-        own = self._own.pop(session, None)
-        return sorted(own.list_sets()) if own is not None else []
+    def drop(self, session: str, incarnation: object = None) -> list[str]:
+        """Forget `session`'s own sets: it ended. With `incarnation`, only
+        if they are that opening's -- a clean-up retried after the name was
+        opened again must not take the new session's (review). Returns the
+        apps dropped."""
+        kept = self._own.get(session)
+        if kept is None or (incarnation is not None and kept[0] is not None
+                            and kept[0] != incarnation):
+            return []
+        del self._own[session]
+        return sorted(kept[1].list_sets())
 
     # -- reading ---------------------------------------------------------------
 
@@ -58,7 +73,8 @@ class SessionLandmarks:
         """The registry as `session` (default: the current caller's) sees it."""
         if session is None:
             session = current_caller().session
-        own = self._own.get(session) if session else None
+        kept = self._own.get(session) if session else None
+        own = kept[1] if kept is not None else None
         if own is None or own.is_empty:
             return self.shared
         composed = LandmarkRegistry()
