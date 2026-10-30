@@ -59,7 +59,8 @@ def test_an_answering_remote_reports_version_and_free_devices(monkeypatch):
 
 
 def test_a_different_version_is_said(monkeypatch):
-    _answers(monkeypatch, {"/health": {"version": "0.24.3"}, "/api/v1/device/list": DEVICES})
+    _answers(monkeypatch, {"/health": {"status": "ok", "version": "0.24.3"},
+                           "/api/v1/device/list": DEVICES})
     assert status.probe(_remote(), "0.25.0")["version_matches"] is False
 
 
@@ -79,7 +80,7 @@ def test_a_remote_that_cannot_be_asked_says_why(monkeypatch, failure, words):
 
 
 def test_devices_that_cannot_be_listed_are_not_reported_as_none(monkeypatch):
-    _answers(monkeypatch, {"/health": {"version": "0.25.0"},
+    _answers(monkeypatch, {"/health": {"status": "ok", "version": "0.25.0"},
                            "/api/v1/device/list": urllib.error.HTTPError("u", 503, "x", {}, None)})
     out = status.probe(_remote(), "0.25.0")
     assert out["reachable"] is True and out["devices"] is None
@@ -90,7 +91,8 @@ def test_a_broken_record_is_listed_and_the_rest_still_answer(monkeypatch):
     records = {"studio": {"url": "https://studio.lan:9130", "fingerprint": FP, "key": "k"},
                "broken": {"url": "http://plain.lan", "fingerprint": FP, "key": "k"}}
     monkeypatch.setattr(client, "_read", lambda: records)
-    _answers(monkeypatch, {"/health": {"version": "0.25.0"}, "/api/v1/device/list": DEVICES})
+    _answers(monkeypatch, {"/health": {"status": "ok", "version": "0.25.0"},
+                           "/api/v1/device/list": DEVICES})
     rows = status.statuses("0.25.0")
     assert [r["name"] for r in rows] == ["broken", "studio"]
     assert rows[0]["reachable"] is False and "https://" in rows[0]["error"]
@@ -125,7 +127,7 @@ def test_every_request_names_a_session_and_the_pinned_key(monkeypatch):
 
 
 def _rows(monkeypatch, rows):
-    monkeypatch.setattr(status, "statuses", lambda version, timeout=None: rows)
+    monkeypatch.setattr(status, "statuses", lambda version, timeout=None, deadline=None: rows)
 
 
 UP = {"name": "studio", "url": "https://studio.lan:9130", "label": "scorpius",
@@ -175,7 +177,108 @@ def test_an_unknown_flag_is_usage(capsys):
 
 def test_a_remote_with_no_devices_says_none_not_unknown(monkeypatch):
     """Asked and answered "none" is not "could not ask"."""
-    _answers(monkeypatch, {"/health": {"version": "0.25.0"},
+    _answers(monkeypatch, {"/health": {"status": "ok", "version": "0.25.0"},
                            "/api/v1/device/list": {"devices": []}})
     out = status.probe(_remote(), "0.25.0")
     assert out["devices"] == [] and out["free"] == 0 and out["error"] is None
+
+
+# -- review: answers that are not quern's, and remotes that never finish --------
+
+
+@pytest.mark.parametrize("listing", [
+    None, {"error": "x"}, [1, 2], {"devices": "ab"}, {"devices": [1]},
+    {"devices": [{"udid": "A", "reservation": "held"}]},
+])
+def test_a_device_list_that_is_not_one_is_not_none(monkeypatch, listing):
+    """A 200 with the wrong shape read as "no devices" and exited 0, or
+    crashed the whole list (review)."""
+    _answers(monkeypatch, {"/health": {"status": "ok", "version": "0.25.0"},
+                           "/api/v1/device/list": listing})
+    out = status.probe(_remote(), "0.25.0")
+    assert out["reachable"] and out["devices"] is None and out["free"] is None
+    assert "not quern's" in out["error"]
+
+
+@pytest.mark.parametrize("health", [None, [], {}, {"status": "ok"}, {"version": "1"},
+                                    {"status": "error", "version": "1"}])
+def test_a_health_answer_that_is_not_querns_is_not_up(monkeypatch, health):
+    _answers(monkeypatch, {"/health": health, "/api/v1/device/list": DEVICES})
+    out = status.probe(_remote(), "0.25.0")
+    assert out["reachable"] is False and "not quern's" in out["error"]
+
+
+def test_a_body_that_is_not_json_says_so(monkeypatch):
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b"<html>proxy error</html>"
+
+    class Opener:
+        def open(self, req, timeout):
+            return Resp()
+
+    monkeypatch.setattr(client, "opener", lambda remote: Opener())
+    out = status.probe(_remote(), "0.25.0")
+    assert out["reachable"] is False and "not JSON" in out["error"]
+
+
+def test_one_remotes_odd_answer_does_not_cost_the_others(monkeypatch):
+    records = {"good": {"url": "https://good.lan:9130", "fingerprint": FP, "key": "k"},
+               "odd": {"url": "https://odd.lan:9130", "fingerprint": FP, "key": "k"}}
+    monkeypatch.setattr(client, "_read", lambda: records)
+    _answers(monkeypatch, {"/health": {"status": "ok", "version": "0.25.0"},
+                           ("good", "/api/v1/device/list"): DEVICES,
+                           ("odd", "/api/v1/device/list"): [1, 2]})
+    rows = {r["name"]: r for r in status.statuses("0.25.0")}
+    assert rows["good"]["free"] == 2 and rows["odd"]["devices"] is None
+
+
+def test_a_remote_that_never_finishes_is_reported_at_the_deadline(monkeypatch):
+    """A body dripping a byte a second beats every per-read timeout; the list
+    stops waiting at its deadline (review)."""
+    import threading
+    import time as time_mod
+
+    records = {"slow": {"url": "https://slow.lan:9130", "fingerprint": FP, "key": "k"},
+               "quick": {"url": "https://quick.lan:9130", "fingerprint": FP, "key": "k"}}
+    monkeypatch.setattr(client, "_read", lambda: records)
+    release = threading.Event()
+    real_probe = status.probe
+
+    def probe(remote, version, timeout):
+        if remote.name == "slow":
+            release.wait(10)                       # stuck mid-answer
+        return real_probe(remote, version, timeout)
+
+    monkeypatch.setattr(status, "probe", probe)
+    _answers(monkeypatch, {"/health": {"status": "ok", "version": "0.25.0"},
+                           "/api/v1/device/list": DEVICES})
+    started = time_mod.monotonic()
+    try:
+        rows = {r["name"]: r for r in status.statuses("0.25.0", deadline=0.3)}
+    finally:
+        release.set()
+    assert time_mod.monotonic() - started < 2
+    assert rows["quick"]["free"] == 2
+    assert rows["slow"]["reachable"] is False and "not answering" in rows["slow"]["error"]
+
+
+def test_up_but_devices_not_listed_exits_1(monkeypatch, capsys):
+    """Asked, and could not list: not "all answered"."""
+    _rows(monkeypatch, [{**UP, "devices": None, "free": None,
+                         "error": "devices could not be listed: HTTP 503"}])
+    assert remote_cli._remote(["list"]) == 1
+    assert "devices could not be listed" in capsys.readouterr().out
+
+
+def test_a_403_is_not_called_a_revocation(monkeypatch):
+    _answers(monkeypatch, {"/health": {"status": "ok", "version": "0.25.0"},
+                           "/api/v1/device/list": urllib.error.HTTPError("u", 403, "x", {}, None)})
+    err = status.probe(_remote(), "0.25.0")["error"]
+    assert "HTTP 403" in err and "revoked" not in err

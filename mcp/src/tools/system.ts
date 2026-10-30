@@ -106,13 +106,18 @@ export function quernRemoteList(): Promise<unknown> {
           }
         }
         const missing = err && (err as NodeJS.ErrnoException).code === "ENOENT";
-        if (missing && i + 1 < candidates.length) {
-          resolve(attempt(i + 1));
+        const failure = new Error(missing
+          ? "the quern CLI is not installed on this machine, so its paired remotes cannot be listed"
+          : `quern remote list failed: ${String(stderr || err?.message || "no output").trim()}`);
+        if (i + 1 < candidates.length) {
+          // Not there, or an older quern on PATH that answers no --json:
+          // the installed wrapper may be newer. Its error wins only if it is
+          // there too (review).
+          attempt(i + 1).then(resolve, (next) => reject(
+            (next as Error).message.includes("not installed") && !missing ? failure : next));
           return;
         }
-        reject(new Error(missing
-          ? "the quern CLI is not installed on this machine, so its paired remotes cannot be listed"
-          : `quern remote list failed: ${String(stderr || err?.message || "no output").trim()}`));
+        reject(failure);
       });
   });
   return attempt(0);

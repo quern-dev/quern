@@ -54,3 +54,13 @@ test("the wrapper in ~/.local/bin is found when quern is not on PATH", async () 
   const data = await withEnv({ PATH: "/usr/bin:/bin", HOME: home }, quernRemoteList);
   assert.deepEqual(data, { remotes: [] });
 });
+
+
+test("an older quern on PATH falls back to the installed wrapper", async () => {
+  const { dir, bin } = fakeQuern(`echo "usage: quern remote list" >&2; exit 2`);
+  mkdirSync(join(dir, ".local", "bin"), { recursive: true });
+  writeFileSync(join(dir, ".local", "bin", "quern"), `#!/bin/sh\necho '{"remotes":[{"name":"r"}]}'\n`);
+  chmodSync(join(dir, ".local", "bin", "quern"), 0o755);
+  const data = await withEnv({ PATH: `${bin}:/usr/bin:/bin`, HOME: dir }, quernRemoteList);
+  assert.equal(data.remotes[0].name, "r");
+});

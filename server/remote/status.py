@@ -15,9 +15,10 @@ why; it is never reported as having no devices.
 from __future__ import annotations
 
 import json
+import threading
+import time
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from server.remote import client
@@ -25,6 +26,14 @@ from server.remote import client
 #: Per request. A remote on the LAN answers in milliseconds; one that is off
 #: is a connection timeout, and the list must not hang on it.
 TIMEOUT_SECONDS = 4.0
+#: For the whole list. The per-request timeout bounds each read, not a body
+#: that drips a byte at a time or a name that takes long to resolve, so the
+#: list stops waiting here and says which remotes had not answered (review).
+DEADLINE_SECONDS = 10.0
+
+
+class _Unexpected(Exception):
+    """An answer that is not what quern sends."""
 #: The session a status read names: a client key must name one, even to read.
 _SESSION = "quern-remote-status"
 
@@ -33,15 +42,23 @@ def _get(remote: client.Remote, path: str, timeout: float) -> Any:
     req = urllib.request.Request(remote.url + path, headers={
         "Authorization": f"Bearer {remote.key}", "X-Quern-Session": _SESSION})
     with client.opener(remote).open(req, timeout=timeout) as resp:
-        return json.loads(resp.read() or b"null")
+        body = resp.read()
+    try:
+        return json.loads(body)
+    except ValueError as e:
+        raise _Unexpected("not JSON") from e
 
 
 def _reason(e: BaseException) -> str:
     if isinstance(e, client.PinMismatch):
         return f"certificate changed: {e}"
+    if isinstance(e, _Unexpected):
+        return f"answered with something that is not quern's ({e})"
     if isinstance(e, urllib.error.HTTPError):
-        if e.code in (401, 403):
-            return f"refused its key (HTTP {e.code}): it was revoked, or the server was reset"
+        if e.code == 401:
+            return "refused its key (HTTP 401): it was revoked, or the server was reset"
+        if e.code == 403:
+            return "refused this request (HTTP 403)"
         return f"HTTP {e.code}"
     if isinstance(e, urllib.error.URLError):
         reason = e.reason
@@ -53,31 +70,30 @@ def _reason(e: BaseException) -> str:
     return f"could not be asked ({type(e).__name__}: {e})"
 
 
-def probe(remote: client.Remote, local_version: str | None,
-          timeout: float = TIMEOUT_SECONDS) -> dict:
-    """One remote's state now. Never raises."""
-    out: dict = {"name": remote.name, "url": remote.url, "label": remote.label,
-                 "reachable": False, "version": None, "version_matches": None,
-                 "devices": None, "free": None, "error": None}
-    try:
-        health = _get(remote, "/health", timeout)
-    except Exception as e:  # noqa: BLE001 -- every failure is reported, never raised
-        out["error"] = _reason(e)
-        return out
-    out["reachable"] = True
-    version = health.get("version") if isinstance(health, dict) else None
-    out["version"] = version
-    if version and local_version:
-        out["version_matches"] = version == local_version
-    try:
-        listing = _get(remote, "/api/v1/device/list", timeout)
-    except Exception as e:  # noqa: BLE001
-        # Answered /health but not this: say so, rather than "no devices".
-        out["error"] = f"devices could not be listed: {_reason(e)}"
-        return out
+def _blank(name: str | None, url: str | None, label: str | None) -> dict:
+    return {"name": name, "url": url, "label": label, "reachable": False, "version": None,
+            "version_matches": None, "devices": None, "free": None, "error": None}
+
+
+def _health(answer: Any) -> str:
+    """The version a quern /health answer carries; _Unexpected otherwise."""
+    if not isinstance(answer, dict) or answer.get("status") != "ok" \
+            or not isinstance(answer.get("version"), str):
+        raise _Unexpected("no quern health answer")
+    return answer["version"]
+
+
+def _devices(answer: Any) -> list[dict]:
+    """Devices from a device-list answer; _Unexpected for anything else -- an
+    answer that is not a list of devices is never read as "none" (review)."""
+    rows = answer.get("devices") if isinstance(answer, dict) else None
+    if not isinstance(rows, list) or not all(isinstance(d, dict) for d in rows):
+        raise _Unexpected("no device list")
     devices = []
-    for d in (listing or {}).get("devices") or []:
+    for d in rows:
         held = d.get("reservation")
+        if held is not None and not isinstance(held, dict):
+            raise _Unexpected("a device's reservation is not an object")
         devices.append({
             "udid": d.get("udid"), "name": d.get("name"),
             "os_version": d.get("os_version"), "device_type": d.get("device_type"),
@@ -86,12 +102,36 @@ def probe(remote: client.Remote, local_version: str | None,
             "free": held is None,
             "yours": bool(held and held.get("yours")),
         })
+    return devices
+
+
+def probe(remote: client.Remote, local_version: str | None,
+          timeout: float = TIMEOUT_SECONDS) -> dict:
+    """One remote's state now. Never raises: one remote's odd answer must not
+    cost the list every other remote (review)."""
+    out = _blank(remote.name, remote.url, remote.label)
+    try:
+        version = _health(_get(remote, "/health", timeout))
+    except Exception as e:  # noqa: BLE001 -- every failure is reported, never raised
+        out["error"] = _reason(e)
+        return out
+    out["reachable"] = True
+    out["version"] = version
+    if local_version:
+        out["version_matches"] = version == local_version
+    try:
+        devices = _devices(_get(remote, "/api/v1/device/list", timeout))
+    except Exception as e:  # noqa: BLE001
+        # Answered /health but not this: said, rather than "no devices".
+        out["error"] = f"devices could not be listed: {_reason(e)}"
+        return out
     out["devices"] = devices
     out["free"] = sum(1 for d in devices if d["free"])
     return out
 
 
-def statuses(local_version: str | None, timeout: float = TIMEOUT_SECONDS) -> list[dict]:
+def statuses(local_version: str | None, timeout: float = TIMEOUT_SECONDS,
+             deadline: float = DEADLINE_SECONDS) -> list[dict]:
     """Every paired remote's state, in name order. A record that cannot be read
     is listed with why, not dropped: the rest still answer."""
     try:
@@ -105,7 +145,34 @@ def statuses(local_version: str | None, timeout: float = TIMEOUT_SECONDS) -> lis
         except client.RemoteError as e:
             loaded.append({"name": name, "url": None, "reachable": False, "error": str(e)})
     remotes = [r for r in loaded if isinstance(r, client.Remote)]
-    with ThreadPoolExecutor(max_workers=max(1, min(8, len(remotes)))) as pool:
-        probed = dict(zip([r.name for r in remotes],
-                          pool.map(lambda r: probe(r, local_version, timeout), remotes)))
+    probed = _probe_all(remotes, local_version, timeout, deadline)
     return [probed[r.name] if isinstance(r, client.Remote) else r for r in loaded]
+
+
+def _probe_all(remotes: list[client.Remote], local_version: str | None, timeout: float,
+               deadline: float) -> dict[str, dict]:
+    """Each remote probed on its own daemon thread, waited for until
+    `deadline`: a remote still talking then is reported as not answering, and
+    its thread -- a daemon -- does not keep the process alive."""
+    results: dict[str, dict] = {}
+    lock = threading.Lock()
+
+    def run(remote: client.Remote) -> None:
+        row = probe(remote, local_version, timeout)
+        with lock:
+            results[remote.name] = row
+
+    threads = [threading.Thread(target=run, args=(r,), daemon=True) for r in remotes]
+    for t in threads:
+        t.start()
+    ends = time.monotonic() + deadline
+    for t in threads:
+        t.join(max(0.0, ends - time.monotonic()))
+    with lock:
+        done = dict(results)
+    for r in remotes:
+        if r.name not in done:
+            row = _blank(r.name, r.url, r.label)
+            row["error"] = f"not answering (no complete answer within {deadline:.0f}s)"
+            done[r.name] = row
+    return done
