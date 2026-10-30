@@ -181,9 +181,11 @@ export async function apiRequest(
   body?: unknown,
   /** Milliseconds, or "none" for a request that may legitimately take longer
    * than fetch's built-in 300s wait for headers: a build. */
-  timeoutMs?: number | "none"
+  timeoutMs?: number | "none",
+  /** Another server than the one this MCP uses now: the one a switch left. */
+  target?: ReturnType<typeof discoverServer>,
 ): Promise<unknown> {
-  const server = discoverServer();
+  const server = target ?? discoverServer();
   const url = new URL(path, server.url);
 
   if (params) {

@@ -128,3 +128,50 @@ test("a reservation made during a switch waits for it, and lands on the new serv
   assert.ok(r.logs.romulus.includes("POST /api/v1/sessions/agent-1/reservations"));
   assert.ok(!r.logs.local.includes("POST /api/v1/sessions/agent-1/reservations"));
 });
+
+test("a switch moves the agent's mocks and capture, and its next reservation sets them up", async () => {
+  const r = await run("carry");
+  const s = r.switched;
+  assert.equal(s.current, "romulus");
+  // Off the old server: removed, or already gone (404); one that could not be
+  // removed is said to still answer there.
+  for (const id of ["mock_local1", "mock_local2", "mock_local3"]) {
+    assert.ok(r.logs.local.includes(`DELETE /api/v1/proxy/mocks/${id}`), id);
+  }
+  assert.deepEqual(s.carried.still_on_old, ["mock_local3"]);
+  assert.match(s.note, /mock_local3 from local: they still answer traffic there/);
+  assert.equal(s.carried.mocks, 3);
+  assert.equal(s.carried.session_capture, 1);
+  assert.deepEqual(s.knowledge, { kind: "session_loaded", app: "com.example" });
+  assert.equal(s.proxy.status, "running");
+
+  // A reservation with no simulator sets up nothing, and says they wait.
+  assert.deepEqual(r.noSimulator.carried.still_waiting, { mocks: 3, session_capture: 1 });
+
+  // Two simulators: each mock once per simulator (a client key may not mock
+  // every device), as last updated, and the capture on each.
+  const made = r.reserved.carried.mocks_recreated;
+  assert.equal(made.length, 6);
+  const posted = r.bodies.romulus.filter((b) => b.path === "POST /api/v1/proxy/mocks").map((b) => b.body);
+  assert.equal(posted.length, 6, "all from this reservation: none before it, none after");
+  assert.deepEqual(posted.slice(0, 2).map((b) => [b.pattern, b.simulator_udid, b.response.body]),
+                   [["~u /a", "SIM-R1", "A2"], ["~u /a", "SIM-R2", "A2"]]);
+  assert.equal(posted[2].response.status_code, 500);
+  const captured = r.bodies.romulus.filter((b) => b.path === "POST /api/v1/proxy/session-capture");
+  assert.deepEqual(captured.map((b) => [b.body.simulator_udid, b.body.processes]),
+                   [["SIM-R1", ["Metatext"]], ["SIM-R2", ["Metatext"]]]);
+  assert.equal(r.reserved.carried.still_waiting, undefined);
+  // Set up once: a later reservation carries nothing more.
+  assert.equal(r.again.carried, undefined);
+});
+
+test("what could not be set up waits for the next reservation; clear_mocks drops it", async () => {
+  const r = await run("carry-retry");
+  assert.equal(r.switched.proxy.status, "stopped");
+  assert.match(r.switched.proxy.note, /proxy is not running/);
+  assert.match(r.down.carried.failed[0].error, /HTTP 503/);
+  assert.deepEqual(r.down.carried.still_waiting, { mocks: 1, session_capture: 0 });
+  assert.equal(r.up.carried.mocks_recreated.length, 1);
+  assert.equal(r.toDeimos.carried.mocks, 1, "moved on with the agent");
+  assert.equal(r.afterClear.carried, undefined, "cleared while waiting: nothing comes back");
+});

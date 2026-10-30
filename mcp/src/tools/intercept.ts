@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { apiRequest } from "../http.js";
+import { forgetAllMocks, forgetMock, recordMock, updateMock } from "../carried.js";
 import { strictParams, errorText } from "./helpers.js";
 
 export function registerInterceptTools(server: McpServer): void {
@@ -267,6 +268,11 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
           undefined,
           payload
         );
+        // Kept as set, so a switch can move it (carried.ts).
+        const ruleId = (data as { rule_id?: unknown } | null)?.rule_id;
+        if (typeof ruleId === "string") {
+          recordMock(ruleId, { pattern, response, simulator_udid: simulator_udid ?? null });
+        }
 
         return {
           content: [
@@ -377,6 +383,7 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
           undefined,
           payload
         );
+        updateMock(rule_id, payload as Parameters<typeof updateMock>[1]);
 
         return {
           content: [
@@ -416,8 +423,10 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
             "DELETE",
             `/api/v1/proxy/mocks/${encodeURIComponent(rule_id)}`
           );
+          forgetMock(rule_id);
         } else {
           data = await apiRequest("DELETE", "/api/v1/proxy/mocks");
+          forgetAllMocks();
         }
 
         return {
