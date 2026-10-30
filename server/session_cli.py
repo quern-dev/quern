@@ -1,4 +1,4 @@
-"""`quern session run|list|release`: held sessions from a shell or CI (#254).
+"""`quern session run|hold|list|release`: held sessions from a shell or CI (#254).
 
 A CI job made of shell steps can't hold a WebSocket, so `run` holds it for
 them: it opens a session, holds its live socket, reserves devices, and runs a
@@ -19,6 +19,11 @@ restarted, say -- so its devices were not protected for the whole run.
 
 A dropped connection is reconnected with the session's resume token, inside
 the server's grace period, so a blip costs nothing.
+
+`hold` is the same holder without a command (#561), for raw REST: it keeps a
+named session's socket open -- in the foreground, or `--background` -- and
+prints the session id to send as X-Quern-Session. A reservation lasts exactly
+as long as its holder's connection (#520), so REST alone cannot keep one.
 """
 
 from __future__ import annotations
@@ -42,6 +47,7 @@ USAGE = """\
 Usage: quern session run [--name NAME] [--reserve N | --udid UDID ... | --group GROUP]
                          [--device-type TYPE] [--os-version V] [--device-name NAME]
                          [--no-boot] [--on-release none|shutdown_booted] -- COMMAND ...
+       quern session hold NAME [--background] [--remote REMOTE]
        quern session list
        quern session release SESSION_ID
 
@@ -50,6 +56,11 @@ QUERN_SESSION, QUERN_SESSION_TOKEN and QUERN_DEVICES to it, and releases them
 when it exits. Another caller changing a reserved device gets 423; reading it
 still works. `--on-release shutdown_booted` shuts down the simulators the
 session booted to satisfy the reservation.
+
+`hold` keeps session NAME's live socket open so REST calls can reserve devices:
+it prints the session id (send it as X-Quern-Session), and holds until Ctrl-C,
+`quern session release`, or -- with --background -- until released. --remote
+uses a paired remote, as QUERN_REMOTE does.
 
 `list` shows held sessions, their state (live, or in grace after a dropped
 connection) and their devices. `release` ends one -- yours, or a stuck one.
@@ -136,14 +147,20 @@ class _Socket:
     said on stderr at once."""
 
     def __init__(self, url: str, key: str, session: str, token: str,
-                 grace_seconds: float = 120) -> None:
+                 grace_seconds: float = 120, prog: str = "quern session run") -> None:
         self._url = "ws" + url[len("http"):] + f"/api/v1/sessions/{session}/live"
         self._headers = {"Authorization": f"Bearer {key}", "X-Quern-Session": session,
                          "X-Quern-Resume-Token": token}
         self._session = session
         self._grace = grace_seconds
         self._closing = False
+        self._prog = prog
         self.lost = False
+        #: The server released the session on purpose (`quern session release`,
+        #: DELETE): for `hold` that is how it is meant to end, not a loss.
+        self.released = False
+        #: `run` warns about a release mid-command; `hold` ends quietly on one.
+        self.warn_on_release = prog != "quern session hold"
         # Guards _ws against close() racing a reconnect, and the loss warning
         # against printing twice (review).
         self._lock = threading.Lock()
@@ -172,15 +189,19 @@ class _Socket:
 
     def _hold(self) -> None:
         while not self._closing:
-            code = None
+            code = reason = None
             try:
                 for _ in self._ws:          # events are informational; reading
                     pass                    # keeps pings answered
                 code = getattr(self._ws, "close_code", None)
+                reason = getattr(self._ws, "close_reason", None)
             except Exception as e:  # noqa: BLE001 -- any end is handled below
                 code = getattr(getattr(e, "rcvd", None), "code", None)
+                reason = getattr(getattr(e, "rcvd", None), "reason", None)
             if self._closing:
                 return
+            if code == 4404 and reason == "session released":
+                self.released = True
             if code in (4404, 4403, 4000):
                 self._lose(code)
                 return
@@ -227,7 +248,11 @@ class _Socket:
                4403: "its resume token was refused",
                "unconfirmed": "the server could not be asked whether it still holds it",
                }.get(code, "the server could not be reached within its grace period")
-        print(f"quern session run: WARNING: session {self._session} lost its hold -- {why}. "
+        if self.released:
+            if not self.warn_on_release:
+                return
+            why = "it was released"
+        print(f"{self._prog}: WARNING: session {self._session} lost its hold -- {why}. "
               "Its devices are no longer reserved for this command.", file=sys.stderr)
 
     def close(self) -> None:
@@ -428,6 +453,102 @@ def _hand_terminal_to(fd: int, pgrp: int) -> None:
         signal.signal(signal.SIGTTOU, old)
 
 
+#: How long `hold --background` waits for its holder to report the session live.
+HOLD_START_TIMEOUT = 15.0
+#: The resume token, handed to the background holder in its environment so it
+#: never appears in `ps`.
+_HOLD_TOKEN_ENV = "QUERN_HOLD_TOKEN"
+
+
+def _hold(args: argparse.Namespace) -> int:
+    """Open session NAME and hold its live socket (#561)."""
+    if args.remote:
+        os.environ["QUERN_REMOTE"] = args.remote
+    url, key = _server()
+    if args.attach:
+        token = os.environ.pop(_HOLD_TOKEN_ENV, "")
+        return _hold_socket(url, key, args.name, token, grace=args.grace, quiet=True)
+    status, opened = _call("POST", url, key, "/api/v1/sessions", session=args.name,
+                           body={"name": args.name})
+    if status != 200:
+        print(f"quern session hold: {_detail(opened)}", file=sys.stderr)
+        return 2
+    session, token = opened["id"], opened["resume_token"]
+    grace = opened.get("grace_seconds", 120)
+    if args.background:
+        return _hold_in_background(url, key, session, token, grace)
+    print(session, flush=True)
+    return _hold_socket(url, key, session, token, grace=grace, quiet=False)
+
+
+def _hold_socket(url: str, key: str, session: str, token: str, *, grace: float,
+                 quiet: bool) -> int:
+    """Hold the socket until a signal (a clean close: the server releases the
+    session at once), a release (0), or a lost hold (HOLD_LOST)."""
+    try:
+        socket = _Socket(url, key, session, token, grace_seconds=grace,
+                         prog="quern session hold")
+    except Exception as e:  # noqa: BLE001 -- any failure to hold it is the same answer
+        print(f"quern session hold: could not hold the session's socket: {e}", file=sys.stderr)
+        _call("DELETE", url, key, f"/api/v1/sessions/{session}", session=session)
+        return 1
+    if not quiet:
+        print(f"quern session hold: holding {session}. Make REST calls with "
+              f"X-Quern-Session: {session}; Ctrl-C or `quern session release {session}` "
+              "ends it.", file=sys.stderr)
+    stop = threading.Event()
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, lambda *_: stop.set())
+    while not stop.is_set() and not socket.lost:
+        stop.wait(0.5)
+    if stop.is_set():
+        socket.close()
+        return 0
+    if socket.released:
+        print(f"quern session hold: {session} was released", file=sys.stderr)
+        return 0
+    return HOLD_LOST
+
+
+def _hold_in_background(url: str, key: str, session: str, token: str, grace: float) -> int:
+    """Hand the socket to a detached `hold --attach` and wait until the server
+    says the session is live, so a REST call made right after this returns
+    can reserve. A process, not a fork: forking after urllib may have touched
+    CoreFoundation (the system proxy lookup) is unsafe on macOS."""
+    from pathlib import Path
+
+    from server.config import CONFIG_DIR
+
+    log = CONFIG_DIR / f"session-hold-{session.replace('/', '_').replace(':', '_')}.log"
+    root = Path(__file__).resolve().parent.parent      # so `-m server` is this tree
+    cmd = [sys.executable, "-m", "server", "session", "hold", session, "--attach",
+           "--grace", str(grace)]
+    with open(log, "ab") as out:
+        child = subprocess.Popen(cmd, cwd=root, stdin=subprocess.DEVNULL, stdout=out,
+                                 stderr=out, start_new_session=True,
+                                 env={**os.environ, _HOLD_TOKEN_ENV: token})
+    deadline = time.monotonic() + HOLD_START_TIMEOUT
+    while time.monotonic() < deadline:
+        if child.poll() is not None:
+            print(f"quern session hold: the background holder exited ({child.returncode}); "
+                  f"see {log}", file=sys.stderr)
+            _call("DELETE", url, key, f"/api/v1/sessions/{session}", session=session)
+            return 1
+        status, answer = _call("GET", url, key, f"/api/v1/sessions/{session}", session=session)
+        if status == 200 and answer.get("state") == "live":
+            print(session, flush=True)
+            print(f"quern session hold: holding {session} in the background (pid "
+                  f"{child.pid}, log {log}). Make REST calls with X-Quern-Session: "
+                  f"{session}; `quern session release {session}` ends it.", file=sys.stderr)
+            return 0
+        time.sleep(0.2)
+    child.terminate()
+    _call("DELETE", url, key, f"/api/v1/sessions/{session}", session=session)
+    print(f"quern session hold: the session did not become live within "
+          f"{HOLD_START_TIMEOUT:.0f}s; see {log}", file=sys.stderr)
+    return 1
+
+
 def _still_holding(url: str, key: str, session: str, udids: list[str]) -> bool | None:
     """Whether the server still has `session`, holding every one of `udids`;
     None when it could not be asked."""
@@ -502,6 +623,12 @@ def main(argv: list[str]) -> int:
     run.add_argument("--device-name")
     run.add_argument("--no-boot", action="store_true")
     run.add_argument("--on-release", choices=("none", "shutdown_booted"), default="none")
+    hold = sub.add_parser("hold", add_help=False)
+    hold.add_argument("name")
+    hold.add_argument("--background", action="store_true")
+    hold.add_argument("--remote")
+    hold.add_argument("--attach", action="store_true", help=argparse.SUPPRESS)  # internal
+    hold.add_argument("--grace", type=float, default=120, help=argparse.SUPPRESS)
     sub.add_parser("list", add_help=False)
     release = sub.add_parser("release", add_help=False)
     release.add_argument("session_id")
@@ -514,6 +641,8 @@ def main(argv: list[str]) -> int:
         if args.what == "run":
             args.command = command
             return _run(args)
+        if args.what == "hold":
+            return _hold(args)
         if args.what == "list":
             return _list()
         if args.what == "release":

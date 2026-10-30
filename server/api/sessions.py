@@ -83,6 +83,25 @@ def _describe(registry: SessionRegistry, session: HeldSession) -> dict:
     return out
 
 
+def _not_live(request: Request, registry: SessionRegistry, session: HeldSession) -> str:
+    """Why a session with no live connection cannot reserve, and how to give it
+    one (#561). Said in full because the caller is often raw REST that has
+    never heard of the socket: a reservation lasts exactly as long as its
+    holder's connection (#520), so a client that vanishes frees its devices."""
+    path = f"/api/v1/sessions/{session.id}/live"
+    socket = str(request.base_url).replace("http", "ws", 1).rstrip("/") + path
+    left = registry.grace_remaining(session)
+    when = (f"; without one it is released in {int(left)}s" if left is not None else "")
+    return (
+        f"session {session.id} has no live connection{when}. A reservation lasts "
+        f"exactly as long as its holder's connection, so a client that vanishes frees "
+        f"its devices: open the session's live socket first -- {socket} (send the "
+        f"X-Quern-Resume-Token you were given) -- and keep it open while you hold "
+        f"devices. Or let quern hold it for you: the quern MCP does, and from a shell, "
+        f"`quern session hold {session.id}` keeps it open (in the background with "
+        f"--background) while you make REST calls as X-Quern-Session: {session.id}.")
+
+
 class OpenRequest(BaseModel):
     name: str | None = Field(default=None, description=(
         "The session's id. Default: the caller's X-Quern-Session, else a new one. "
@@ -186,10 +205,7 @@ async def reserve(request: Request, session_id: str, body: ReserveRequest) -> di
         # The same id under another key: not the session itself (review).
         raise HTTPException(403, f"session {session_id} belongs to another key")
     if session.state != "live":
-        raise HTTPException(409, (
-            "reservations need a held session: open its live socket "
-            f"(/api/v1/sessions/{session_id}/live) first -- the quern MCP and "
-            "`quern session run` do this for you"))
+        raise HTTPException(409, _not_live(request, registry, session))
     if body.on_release not in ON_RELEASE:
         raise HTTPException(400, f"on_release must be one of {', '.join(ON_RELEASE)}")
     chosen = sum(x is not None for x in (body.udids, body.group)) + (

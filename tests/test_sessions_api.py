@@ -280,7 +280,14 @@ class TestLifecycle:
     def test_reserving_needs_the_live_socket(self, client):
         _open(client, "claude-a")
         r = _reserve(client, "claude-a", udids=["SIM-1"])
-        assert r.status_code == 409 and "live socket" in r.json()["detail"]
+        detail = r.json()["detail"]
+        assert r.status_code == 409 and "live socket" in detail
+        # Enough for raw REST to act on (#561): where the socket is, why it
+        # matters, how long is left, and the two ways quern holds it for you.
+        assert "ws://testserver/api/v1/sessions/claude-a/live" in detail
+        assert "X-Quern-Resume-Token" in detail
+        assert "released in" in detail
+        assert "quern MCP" in detail and "quern session hold claude-a" in detail
 
     def test_only_the_session_itself_reserves(self, client):
         a = Held(client, "claude-a")

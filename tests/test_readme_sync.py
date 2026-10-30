@@ -323,6 +323,9 @@ def test_readme_cli_block_matches_dispatched_commands():
 # allowlisted on purpose. It is not silently absent.
 
 UNDOCUMENTED_CLI_FLAG_ALLOWLIST = {
+    # `quern session hold --background` starts itself again with these (#561):
+    # internal, never typed by a person.
+    "--attach", "--grace",
     # `quern start` tuning knobs. README documents the commands and the flags
     # that change what a command *does*; these adjust how the server runs and
     # are discoverable through `--help`, which is where they belong.
