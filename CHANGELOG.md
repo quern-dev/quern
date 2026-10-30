@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Flags.** `--devices` lists every device (name, model, OS version, family, type, state), free and booted first. `--with-local` lists this Mac's own server first. `--json` is for scripts; `--no-check` lists the records only.
   - **`list_remotes`** gives an agent the same, with this Mac first, and marks the server its MCP talks to as `"current"`, the one whose devices it can reserve now.
   - **`use_remote`** switches an agent's MCP to another of those servers mid-session, its held session with it, so it can reserve and drive a device found there. It refuses while the agent holds devices where it is, unless told to release them.
+  - **`reserve_devices` says what it reserved.** Each device in its answer carries its name, model, OS version, family and type, not just a UDID, so an agent that asked by criteria can tell you which device it got.
   - **`reserve_devices` says where else to look.** When nothing here matches, its error names the paired servers with matching free devices and the `use_remote` call to get there. An agent that wasn't told about other machines concluded the device didn't exist.
 - **Devices say what model they are.** `list_devices` gives each device a `model` ("iPad Pro 11-inch (M4)", or a physical device's marketing name or product type), whatever it's called. A `name` criterion in `reserve_devices` and `resolve_device` matches the model too, so a renamed simulator is still found by what it is.
 

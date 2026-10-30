@@ -571,7 +571,7 @@ holds in `flow_store`. `flows_captured` is only what survived.
 
 | MCP Tool | Method | Path | Description |
 |---|---|---|---|
-| `reserve_devices` | POST | `/api/v1/sessions/{id}/reservations` | Reserve devices for this session (udids, count plus criteria, or a group), all or nothing; 409 names a holder. When criteria match nothing free here, the MCP adds which paired servers have matching free devices and how to switch (`use_remote`). See "Sessions and reservations" above |
+| `reserve_devices` | POST | `/api/v1/sessions/{id}/reservations` | Reserve devices for this session (udids, count plus criteria, or a group), all or nothing; 409 names a holder. Each reserved device comes back with its name, model, OS version, family and type, so a caller that reserved by criteria knows what it got. When criteria match nothing free here, the MCP adds which paired servers have matching free devices and how to switch (`use_remote`). See "Sessions and reservations" above |
 | `release_devices` | DELETE | `/api/v1/sessions/{id}/reservations` | Release one device (`?udid=`) or all |
 | `session_status` | GET | `/api/v1/sessions/{id}` | One session: state (`live`, `grace` with `grace_remaining_s`) and reservations. With `all`, the MCP tool lists every session |
 
