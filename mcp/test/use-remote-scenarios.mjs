@@ -95,6 +95,18 @@ const plans = {
                       ? [503, { detail: "proxy is not running" }] : mockIds("romulus")(b),
                     "GET /api/v1/proxy/status": json(200, { status: "stopped" }),
                     "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
+  // Review findings on the carry record.
+  "carry-hops": [{ "POST /api/v1/proxy/mocks": mockIds("local"),
+                   "PATCH /api/v1/proxy/mocks/mock_local1": json(200, {}),
+                   "DELETE /api/v1/proxy/mocks/mock_local2": json(404, { detail: "no such rule" }) },
+                 { "POST /api/v1/proxy/mocks": mockIds("romulus"),
+                   "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }],
+                   "DELETE /api/v1/sessions/agent-1/reservations": async () => [200, { freed: globalThis.freed ?? [] }],
+                   "GET /api/v1/sessions/agent-1": json(200, { reservations: [] }) }],
+  "carry-partial": [{ "POST /api/v1/proxy/mocks": mockIds("local") },
+                    { "POST /api/v1/proxy/mocks": async (b) => globalThis.failR2 && b?.simulator_udid === "SIM-R2"
+                        ? [503, { detail: "busy" }] : mockIds("romulus")(b),
+                      "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
   hint: [{ "POST /api/v1/sessions/agent-1/reservations": async () => [409, { detail: globalThis.detail }],
            "GET /api/v1/device/list": json(200, { devices: [], tools: {}, active_udid: null }) }, {}],
 };
@@ -193,10 +205,46 @@ if (scenario === "window") {
   globalThis.mocksDown = false;
   result.up = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1"] })).text);
   // Moved on again, the mock waits once more; clearing then drops it too.
-  await tools.release_devices({});
-  result.toDeimos = JSON.parse(text(await tools.use_remote({ name: "deimos" })).text);
+  result.toDeimos = JSON.parse(text(await tools.use_remote({ name: "deimos", release: true })).text);
   await tools.clear_mocks({});
   result.afterClear = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-D1"] })).text);
+} else if (scenario === "carry-hops") {
+  // A: set 503+header, then update only the body: the server resets the rest.
+  await tools.set_mock({ pattern: "~u /a", simulator_udid: "SIM-L", status_code: 503,
+                         headers: { "retry-after": "5" }, body: "A" });
+  await tools.update_mock({ rule_id: "mock_local1", body: "B" });
+  // B: one the server says is already gone: clearing it forgets it.
+  await tools.set_mock({ pattern: "~u /gone", simulator_udid: "SIM-L", status_code: 200, body: "G" });
+  result.clearGone = text(await tools.clear_mocks({ rule_id: "mock_local2" }));
+  await tools.use_remote({ name: "romulus" });
+  // Two reservations at once, each of two simulators: each simulator gets the
+  // mock once, not once per reservation.
+  globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }, { udid: "SIM-R2", device_type: "simulator" }];
+  const [one, two] = await Promise.all([tools.reserve_devices({ count: 2 }), tools.reserve_devices({ count: 2 })]);
+  result.parallel = [JSON.parse(text(one).text).carried, JSON.parse(text(two).text).carried];
+  // A second hop: one entry moves, not one per copy.
+  result.toDeimos = JSON.parse(text(await tools.use_remote({ name: "deimos", release: true })).text);
+  result.romulusPosts = romulus.bodies.filter((b) => b.path === "POST /api/v1/proxy/mocks").length;
+}
+
+if (scenario === "carry-partial") {
+  await tools.set_mock({ pattern: "~u /p", simulator_udid: "SIM-L", status_code: 200, body: "P" });
+  await tools.use_remote({ name: "romulus" });
+  globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }, { udid: "SIM-R2", device_type: "simulator" }];
+  globalThis.failR2 = true;
+  result.first = JSON.parse(text(await tools.reserve_devices({ count: 2 })).text).carried;
+  globalThis.failR2 = false;
+  result.second = JSON.parse(text(await tools.reserve_devices({ count: 2 })).text).carried;
+  result.posts = romulus.bodies.filter((b) => b.path === "POST /api/v1/proxy/mocks").map((b) => b.body.simulator_udid);
+} else if (scenario === "carry-hops") {
+  // A client key's release ends its scoped mocks on the server: not carried.
+  await tools.use_remote({ name: "romulus" });
+  globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }];
+  await tools.reserve_devices({ udids: ["SIM-R1"] });
+  globalThis.freed = ["SIM-R1"];
+  await tools.release_devices({});
+  result.afterRelease = JSON.parse(text(await tools.use_remote({ name: "local" })).text);
+  result.mockBodies = romulus.bodies.filter((b) => b.path === "POST /api/v1/proxy/mocks").map((b) => b.body);
 } else if (scenario === "hint") {
   writeFileSync(join(home, "quern"), `#!/bin/sh\ncat <<'J'\n${JSON.stringify({ remotes: [
     { name: "local", devices: [] },

@@ -419,10 +419,17 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
       try {
         let data;
         if (rule_id) {
-          data = await apiRequest(
-            "DELETE",
-            `/api/v1/proxy/mocks/${encodeURIComponent(rule_id)}`
-          );
+          try {
+            data = await apiRequest(
+              "DELETE",
+              `/api/v1/proxy/mocks/${encodeURIComponent(rule_id)}`
+            );
+          } catch (e) {
+            // Not there is not to be carried either: kept, it came back at
+            // the next switch (review). The 404 still reaches the caller.
+            if (e instanceof Error && e.message.startsWith("HTTP 404")) forgetMock(rule_id);
+            throw e;
+          }
           forgetMock(rule_id);
         } else {
           data = await apiRequest("DELETE", "/api/v1/proxy/mocks");

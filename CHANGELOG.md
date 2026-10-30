@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **What an agent set up follows it to another server (`use_remote`).**
-  - **Mocks move.** The MCP keeps the mocks its agent set (the server can't tell one owner-key agent's from another's), removes them from the server it leaves, and recreates them on the simulators of its next reservation on the new one. The reservation's answer lists the new rule ids, what failed, and what's still waiting, for example for a proxy that isn't running.
+  - **Mocks move.** The MCP keeps the mocks its agent set and still has (the server can't tell one owner-key agent's from another's), removes them from the server it leaves, and recreates them once on each simulator of its next reservation on the new one. The reservation's answer lists the new rule ids, what failed, and what's still waiting, for example for a proxy that isn't running.
   - **Session capture moves with them.** The processes asked for with `add_session_capture` are asked for again on the newly reserved simulators.
   - **The knowledge base is loaded on the new server**, uploaded for the session on a remote, and reloaded after a restart there, as at start.
   - **Machine-wide settings stay.** Local capture, the system proxy, intercept and bypass belong to each Mac's owner. `use_remote` reports whether the new server's proxy runs instead.

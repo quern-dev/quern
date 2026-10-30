@@ -168,10 +168,40 @@ test("a switch moves the agent's mocks and capture, and its next reservation set
 test("what could not be set up waits for the next reservation; clear_mocks drops it", async () => {
   const r = await run("carry-retry");
   assert.equal(r.switched.proxy.status, "stopped");
-  assert.match(r.switched.proxy.note, /proxy is not running/);
+  assert.match(r.switched.proxy.note, /proxy is stopped/);
   assert.match(r.down.carried.failed[0].error, /HTTP 503/);
   assert.deepEqual(r.down.carried.still_waiting, { mocks: 1, session_capture: 0 });
   assert.equal(r.up.carried.mocks_recreated.length, 1);
   assert.equal(r.toDeimos.carried.mocks, 1, "moved on with the agent");
   assert.equal(r.afterClear.carried, undefined, "cleared while waiting: nothing comes back");
+});
+
+test("the record follows the server: one entry per mock, replaced responses, gone is gone", async () => {
+  const r = await run("carry-hops");
+  // A rule the server reports gone is forgotten, and the 404 still reaches the caller.
+  assert.equal(r.clearGone.error, true);
+  // Two reservations at once: each simulator gets the mock once (review: twice).
+  assert.equal(r.romulusPosts, 2);
+  const made = r.parallel.flatMap((c) => c?.mocks_recreated ?? []);
+  assert.deepEqual(made.map((m) => m.simulator_udid).sort(), ["SIM-R1", "SIM-R2"]);
+  // The next hop moves one mock, not one per copy (review: they multiplied).
+  assert.equal(r.toDeimos.carried.mocks, 1);
+  // update_mock replaced the whole response, as the server does: the status and
+  // header set before it were reset to the server's defaults (review).
+  assert.deepEqual(r.mockBodies[0].response,
+                   { status_code: 200, headers: { "content-type": "application/json" }, body: "B" });
+  // A client key's release_devices ends its scoped mocks on the server; they
+  // do not come back at the next switch (review).
+  assert.equal(r.afterRelease.carried, undefined);
+});
+
+test("a mock set up on one simulator of two is retried on the other only", async () => {
+  const r = await run("carry-partial");
+  assert.deepEqual(r.first.mocks_recreated.map((m) => m.simulator_udid), ["SIM-R1"]);
+  assert.equal(r.first.failed[0].simulator_udid, "SIM-R2");
+  assert.deepEqual(r.first.still_waiting, { mocks: 1, session_capture: 0 });
+  assert.deepEqual(r.second.mocks_recreated.map((m) => m.simulator_udid), ["SIM-R2"],
+                   "SIM-R1 already has it: not a second rule there (review)");
+  assert.equal(r.second.still_waiting, undefined);
+  assert.equal(r.posts.filter((u) => u === "SIM-R1").length, 1);
 });
