@@ -103,13 +103,19 @@ One server at a time: devices you hold on the current server must be released fi
   }, (args) => {
     // One switch at a time: two at once each restored the other's "before",
     // leaving requests on one server and the held session on another (review).
-    const run = switching.then(() => useRemote(args));
-    switching = run.catch(() => undefined);
-    return run;
+    return betweenSwitches(() => useRemote(args));
   });
 }
 
 let switching: Promise<unknown> = Promise.resolve();
+
+/** Run `fn` when no switch is under way, and keep switches waiting until it is
+ * done: switches, and the reservations a switch must account for. */
+export function betweenSwitches<T>(fn: () => Promise<T>): Promise<T> {
+  const run = switching.then(fn);
+  switching = run.catch(() => undefined);
+  return run;
+}
 
 function reply(data: unknown, isError = false) {
   return {

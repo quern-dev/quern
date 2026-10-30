@@ -118,3 +118,13 @@ for (const scenario of ["stale-start", "stale-early"]) {
     assert.equal(r.heldState, "live");
   });
 }
+
+test("a reservation made during a switch waits for it, and lands on the new server", async () => {
+  // Made on the old server after the switch checked what was held there, the
+  // switch's clean close released it unreported (CodeRabbit).
+  const r = await run("reserve-during-switch");
+  assert.equal(r.error, false, r.text);
+  assert.equal(r.current, "romulus");
+  assert.ok(r.logs.romulus.includes("POST /api/v1/sessions/agent-1/reservations"));
+  assert.ok(!r.logs.local.includes("POST /api/v1/sessions/agent-1/reservations"));
+});

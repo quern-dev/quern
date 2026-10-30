@@ -69,6 +69,7 @@ const plans = {
   holding: [{ "GET /api/v1/sessions/agent-1": json(200, { reservations: [{ udid: "SIM-1" }] }),
               "DELETE /api/v1/sessions/agent-1/reservations": json(200, { freed: ["SIM-1"] }) }, {}],
   success: [{}, {}],
+  "reserve-during-switch": [{}, { "GET /health": json(200, { status: "ok", version: "9.9" }, 1000) }],
   // local's session opens slowly: the switch happens while it is in flight.
   "stale-start": [{ "POST /api/v1/sessions": json(200, { resume_token: "t-local", resumed: false }, 800) }, {}],
   "stale-early": [{ "POST /api/v1/sessions": json(200, { resume_token: "t-local", resumed: false }, 800) }, {}],
@@ -133,6 +134,11 @@ if (scenario === "window") {
   result.refused = text(await tools.use_remote({ name: "romulus" }));
   result.currentAfterRefusal = current();
   Object.assign(result, text(await tools.use_remote({ name: "romulus", release: true })));
+} else if (scenario === "reserve-during-switch") {
+  const switching = tools.use_remote({ name: "romulus" });
+  await sleep(300);
+  result.reserve = text(await tools.reserve_devices({ udids: ["X"] }));
+  Object.assign(result, text(await switching));
 } else if (scenario.startsWith("stale")) {
   Object.assign(result, text(await tools.use_remote({ name: "romulus" })));
   // local's open answers at ~900ms; romulus drops the socket at ~1200ms and
