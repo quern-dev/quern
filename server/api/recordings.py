@@ -146,13 +146,16 @@ def _viewer_recording(request: Request, recording_id: str, *, issuing: bool = Tr
     caller = visibility.current_caller()
     if issuing:
         _may_issue_viewer_links()
+    missing = HTTPException(status_code=404, detail=f"no recording {recording_id!r}")
     try:
         rec = _manager(request).get(recording_id)
     except RecordingError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+        # The same words as another's recording to a blind client, or the
+        # difference says which ids exist (review).
+        raise missing from e
     if not caller.is_owner and rec.principal != caller.principal:
         if visibility.blind_for(caller):
-            raise HTTPException(status_code=404, detail=f"no recording {recording_id!r}")
+            raise missing
         raise HTTPException(status_code=403, detail=(
             f"{recording_id} is not your recording; only its owner or the server's "
             "owner can issue its viewer links"))

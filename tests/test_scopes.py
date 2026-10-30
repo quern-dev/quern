@@ -285,6 +285,14 @@ def _app(registry, keys):
     async def trace(session: str | None = None, recording: str | None = None):
         return {"session": session}
 
+    @app.post("/api/v1/recordings/{recording_id}/viewer")
+    async def viewer_link(recording_id: str):
+        return {"recording_id": recording_id}
+
+    @app.delete("/api/v1/recordings/{recording_id}/viewer")
+    async def viewer_revoke(recording_id: str):
+        return {"recording_id": recording_id}
+
     @app.post("/api/v1/not/in/the/table")
     async def unmapped(request: Request):
         return {"reached": True}
@@ -782,6 +790,14 @@ class TestReviewFindings:
         _hold(registry, "alice:s1", "client:alice", SIM)
         r = c.post("/api/v1/recordings", headers=_h(alice),
                    json={"udid": SIM, "video": True, "viewer": True})
+        assert r.status_code == 200, r.text
+
+    @pytest.mark.parametrize("method", ["post", "delete"])
+    def test_a_client_reaches_the_viewer_routes(self, world, method):
+        """The middleware lets a client key through to them (#559); the route
+        decides whose recording it is. Back to owner-only, this is 403."""
+        c, _, alice, _ = world
+        r = getattr(c, method)("/api/v1/recordings/rec_1/viewer", headers=_h(alice))
         assert r.status_code == 200, r.text
 
     def test_resolved_precheck_guards_a_route_that_never_calls_check(self, world, registry):

@@ -128,6 +128,22 @@ async def test_an_unknown_recording_is_404(as_caller, links):
     assert e.value.status_code == 404
 
 
+@pytest.mark.parametrize("act", [_issue, _revoke])
+async def test_a_blind_client_cannot_tell_anothers_from_none(as_caller, links, act):
+    """Different words for "not yours" and "no such id" would say which ids
+    exist (review). The real manager's message names the server."""
+    as_caller(BOB, blind=True)
+    with pytest.raises(HTTPException) as theirs:
+        await act(_request(_rec(ALICE)))
+    req = _request()
+    req.app.state.recordings.get.side_effect = RecordingError(
+        "no recording 'rec-1' on this server")
+    with pytest.raises(HTTPException) as none:
+        await act(req)
+    assert (theirs.value.status_code, theirs.value.detail) == (
+        none.value.status_code, none.value.detail)
+
+
 async def test_start_with_a_link_is_refused_up_front_when_off(as_caller, links):
     """Before anything starts: a refusal after the start would leave a
     recording running that the caller asked for only with a link."""
@@ -150,15 +166,30 @@ async def test_start_with_a_link_is_refused_up_front_when_off(as_caller, links):
     (None, True),                                   # no remote section: on
     ({}, True),
     ({"client_viewer_links": True}, True),
-    ({"client_viewer_links": False}, False),        # only literal false turns it off
+    ({"client_viewer_links": False}, False),
+    ({"client_viewer_links": "false"}, False),      # what the owner meant
+    ({"client_viewer_links": 0}, False),
+    ({"client_viewer_links": "yes"}, False),        # anything but true is off
+    ("on", False),                                  # a remote that is not an object
 ])
-def test_the_setting_is_on_unless_false(monkeypatch, remote, on):
+def test_the_setting_is_on_only_unset_or_true(monkeypatch, remote, on):
     cfg = {} if remote is None else {"remote": remote}
-    monkeypatch.setattr(config, "read_user_config", lambda: cfg)
+    monkeypatch.setattr(config, "read_user_config", lambda strict=False: cfg)
     assert config.client_viewer_links() is on
+
+
+def test_an_unreadable_config_turns_it_off(monkeypatch):
+    """An owner who set false and then broke the file elsewhere must not find
+    client links back on (review)."""
+    def unreadable(strict=False):
+        if strict:
+            raise config.ConfigUnreadable("config.json cannot be read")
+        return {}
+    monkeypatch.setattr(config, "read_user_config", unreadable)
+    assert config.client_viewer_links() is False
 
 
 def test_the_setting_is_a_known_remote_key(monkeypatch):
     monkeypatch.setattr(config, "read_user_config",
-                        lambda: {"remote": {"client_viewer_links": False}})
+                        lambda strict=False: {"remote": {"client_viewer_links": False}})
     assert config.remote_settings()["key_warning"] is None
