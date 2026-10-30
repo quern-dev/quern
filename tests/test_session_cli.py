@@ -453,7 +453,7 @@ class _Holder:
 
     def __init__(self, exits=None):
         self.exits, self.pid, self.returncode = exits, 777, exits
-        self.terminated = False
+        self.terminated = self.killed = False
         self.started: dict = {}
 
     def __call__(self, cmd, **kw):
@@ -465,6 +465,9 @@ class _Holder:
 
     def terminate(self):
         self.terminated = True
+
+    def kill(self):
+        self.killed = True
 
 
 @pytest.fixture
@@ -687,3 +690,17 @@ def test_a_holder_gone_right_after_attaching_is_not_a_success(server, quick, mon
     monkeypatch.setattr(session_cli.subprocess, "Popen", holder)
     assert session_cli.main(["hold", "rest-job", "--background"]) == 1
     assert "just after attaching" in capsys.readouterr().err
+
+
+def test_a_failed_takeover_kills_the_holder_so_the_session_keeps_its_grace(
+        server, quick, monkeypatch):
+    """SIGTERM would close the socket cleanly, and a clean close releases the
+    session at once -- the very thing not deleting it was for (CodeRabbit)."""
+    server.answers[("POST", "/api/v1/sessions")] = (
+        200, {"id": "rest-job", "resume_token": "TOK", "resumed": True})
+    server.answers[("GET", "/api/v1/sessions/rest-job")] = (200, {"state": "grace"})
+    holder = _Holder()
+    monkeypatch.setattr(session_cli.subprocess, "Popen", holder)
+    monkeypatch.setattr(session_cli, "HOLD_START_TIMEOUT", 0.01)
+    assert session_cli.main(["hold", "rest-job", "--background"]) == 1
+    assert holder.killed and not holder.terminated

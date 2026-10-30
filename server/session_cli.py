@@ -589,7 +589,13 @@ def _hold_in_background(url: str, key: str, session: str, token: str, grace: flo
         # it failed (review).
         if not holding:
             if child is not None and child.poll() is None:
-                child.terminate()
+                if release_on_failure:
+                    child.terminate()
+                else:
+                    # SIGTERM is a clean close, which releases the session at
+                    # once; killed, the socket drops without a close frame and
+                    # a session taken over keeps its grace (CodeRabbit).
+                    child.kill()
             if release_on_failure:
                 try:
                     _call("DELETE", url, key, f"/api/v1/sessions/{session}", session=session)
