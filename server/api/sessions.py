@@ -101,8 +101,9 @@ def _not_live(request: Request, registry: SessionRegistry, session: HeldSession)
                 f"token reclaims it." if session.principal == OWNER else
                 "Only this session's resume token reclaims it.")
     return (
-        f"session {session.id} has no live connection{when}. A reservation lasts "
-        f"exactly as long as its holder's connection, so a client that vanishes frees "
+        f"session {session.id} has no live connection{when}. A reservation lasts as "
+        f"long as its holder's connection, plus a short grace period to reconnect, so a "
+        f"client that vanishes frees "
         f"its devices: open the session's live socket first -- {socket} (send the "
         f"X-Quern-Resume-Token you were given) -- and keep it open while you hold "
         f"devices. Or let quern hold one for you: the quern MCP does, and from a shell "

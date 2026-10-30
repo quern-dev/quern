@@ -483,10 +483,14 @@ def _hold(args: argparse.Namespace) -> int:
         return 2
     session, token = opened["id"], opened["resume_token"]
     grace = opened.get("grace_seconds", 120)
+    # A session taken over in its grace period existed before this, and may
+    # hold devices: a failed start must not delete it (CodeRabbit).
+    fresh = not opened.get("resumed")
     if args.background:
-        return _hold_in_background(url, key, session, token, grace)
+        return _hold_in_background(url, key, session, token, grace, release_on_failure=fresh)
     print(session, flush=True)
-    return _hold_socket(url, key, session, token, grace=grace, quiet=False)
+    return _hold_socket(url, key, session, token, grace=grace, quiet=False,
+                        release_on_failure=fresh)
 
 
 def _hold_socket(url: str, key: str, session: str, token: str, *, grace: float,
@@ -496,32 +500,41 @@ def _hold_socket(url: str, key: str, session: str, token: str, *, grace: float,
     # Before connecting, which can take a while: a Ctrl-C then is still a
     # clean close, not a session left in grace (review).
     stop = threading.Event()
-    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(signum, lambda *_: stop.set())
+    signums = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    previous = {s: signal.signal(s, lambda *_: stop.set()) for s in signums}
     try:
-        socket = _Socket(url, key, session, token, grace_seconds=grace,
-                         prog="quern session hold")
-    except Exception as e:  # noqa: BLE001 -- any failure to hold it is the same answer
-        print(f"quern session hold: could not hold the session's socket: {e}", file=sys.stderr)
-        if release_on_failure:
-            _call("DELETE", url, key, f"/api/v1/sessions/{session}", session=session)
-        return 1
-    if not quiet:
-        print(f"quern session hold: holding {session}. Make REST calls with "
-              f"X-Quern-Session: {session}; Ctrl-C or `quern session release {session}` "
-              "ends it.", file=sys.stderr)
-    while not stop.is_set() and not socket.lost:
-        stop.wait(0.5)
-    if stop.is_set():
-        socket.close()
-        return 0
-    if socket.released:
-        print(f"quern session hold: {session} was released", file=sys.stderr)
-        return 0
-    return HOLD_LOST
+        try:
+            socket = _Socket(url, key, session, token, grace_seconds=grace,
+                             prog="quern session hold")
+        except Exception as e:  # noqa: BLE001 -- any failure to hold it is the same answer
+            print(f"quern session hold: could not hold the session's socket: {e}",
+                  file=sys.stderr)
+            if release_on_failure:
+                _call("DELETE", url, key, f"/api/v1/sessions/{session}", session=session)
+            return 1
+        if not quiet:
+            print(f"quern session hold: holding {session}. Make REST calls with "
+                  f"X-Quern-Session: {session}; Ctrl-C or `quern session release {session}` "
+                  "ends it.", file=sys.stderr)
+        while not stop.is_set() and not socket.lost:
+            stop.wait(0.5)
+        if stop.is_set():
+            socket.close()
+            return 0
+        if socket.released:
+            print(f"quern session hold: {session} was released", file=sys.stderr)
+            return 0
+        return HOLD_LOST
+    finally:
+        # Put back what was there: these handlers set an event nobody reads
+        # once this returns (CodeRabbit).
+        for signum, handler in previous.items():
+            if handler is not None:
+                signal.signal(signum, handler)
 
 
-def _hold_in_background(url: str, key: str, session: str, token: str, grace: float) -> int:
+def _hold_in_background(url: str, key: str, session: str, token: str, grace: float,
+                        *, release_on_failure: bool = True) -> int:
     """Hand the socket to a detached `hold --attach` and wait until the server
     says the session is live, so a REST call made right after this returns
     can reserve. A process, not a fork: forking after urllib may have touched
@@ -551,6 +564,13 @@ def _hold_in_background(url: str, key: str, session: str, token: str, grace: flo
             status, answer = _call("GET", url, key, f"/api/v1/sessions/{session}",
                                    session=session)
             if status == 200 and answer.get("state") == "live":
+                if child.poll() is not None:
+                    # Attached, then gone already: live now, but nobody is
+                    # holding it (CodeRabbit).
+                    print(f"quern session hold: the background holder exited "
+                          f"({child.returncode}) just after attaching; see {log}",
+                          file=sys.stderr)
+                    return 1
                 holding = True
                 print(session, flush=True)
                 print(f"quern session hold: holding {session} in the background (pid "
@@ -570,10 +590,11 @@ def _hold_in_background(url: str, key: str, session: str, token: str, grace: flo
         if not holding:
             if child is not None and child.poll() is None:
                 child.terminate()
-            try:
-                _call("DELETE", url, key, f"/api/v1/sessions/{session}", session=session)
-            except Exception:  # noqa: BLE001 -- already failing; the server's grace applies
-                pass
+            if release_on_failure:
+                try:
+                    _call("DELETE", url, key, f"/api/v1/sessions/{session}", session=session)
+                except Exception:  # noqa: BLE001 -- already failing; grace applies
+                    pass
 
 
 def _still_holding(url: str, key: str, session: str, udids: list[str]) -> bool | None:

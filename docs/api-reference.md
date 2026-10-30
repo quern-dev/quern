@@ -143,17 +143,18 @@ quern mcp-install --remote office      # or QUERN_REMOTE=office for `session run
 - **`QUERN_REMOTE` that cannot be read fails**, rather than falling back to this machine's own server: an agent's work must not land on a machine nobody named. `ensure_server` checks a remote's health and never starts a server locally for it.
 - **`/health` carries `host_id`**, a random id made once per installation, so a client can tell whether it shares the server's disk -- which decides what a path it sends means.
 
-**Raw REST, without the MCP** (#561). A reservation lasts exactly as long as its holder's connection, so a client that vanishes frees its devices (#520). REST calls alone cannot hold one: reserving answers 409 until the session's live socket is open, and the 409 says where it is. The MCP and `quern session run` hold it for you. For anything else, `quern session hold NAME` does:
+**Raw REST, without the MCP** (#561). A reservation lasts as long as its holder's connection, plus a grace period for reconnecting after a drop, so a client that vanishes frees its devices (#520). REST calls alone cannot hold one: reserving answers 409 until the session's live socket is open, and the 409 says where it is. The MCP and `quern session run` hold it for you. For anything else, `quern session hold NAME` does:
 
 ```text
 quern session hold ci-job --background        # prints the session id once its socket is live
 curl -X POST "$URL/api/v1/sessions/<id>/reservations" \
-     -H "Authorization: Bearer $KEY" -H "X-Quern-Session: <id>" -d '{"count": 1}'
+     -H "Authorization: Bearer $KEY" -H "X-Quern-Session: <id>" \
+     -H "Content-Type: application/json" -d '{"count": 1}'
 # ... REST calls as X-Quern-Session: <id> ...
 quern session release <id>                    # ends the hold and frees its devices
 ```
 
-It opens session NAME (or, on the server's own Mac, takes over one of yours in its grace period; from another machine only the session's resume token reclaims one), keeps its socket open -- in the foreground until Ctrl-C, or `--background`, where it returns once the server reports the session live and logs to `~/.quern/session-hold-<id>.log` -- and reconnects through blips within the grace period. Releasing the session ends it quietly; a hold lost for any other reason exits 4. It uses the paired remote given by `--remote NAME` or `QUERN_REMOTE`. A session another connection holds is refused. There is no REST-only lease: a reservation renewed by heartbeats would be a second way to hold a device, with its own expiry rules.
+It opens session NAME (or, on the server's own Mac, takes over one of yours in its grace period; from another machine only the session's resume token reclaims one), keeps its socket open -- in the foreground until Ctrl-C, or `--background`, where it returns once the server reports the session live and logs to `~/.quern/session-hold-<id>.log` -- and reconnects through blips within the grace period. Releasing the session ends it quietly; a hold lost for any other reason exits 4 -- and so does a release that lands while the socket is reconnecting, which reaches `hold` as the same 4404 as an expired session. A failed start releases the session only if `hold` opened it, not one it took over. It uses the paired remote given by `--remote NAME` or `QUERN_REMOTE`. A session another connection holds is refused. There is no REST-only lease: a reservation renewed by heartbeats would be a second way to hold a device, with its own expiry rules.
 
 **Paths, when the disk is not shared.** A path in a request is read on the server's disk, so from another machine it names nothing, and from a client key on this one it would be the server reading whatever it is told to:
 

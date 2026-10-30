@@ -430,6 +430,7 @@ def test_a_session_held_elsewhere_is_refused(server, capsys):
 
 def test_a_socket_that_cannot_open_releases_the_session(server, monkeypatch):
     _opened(server, "rest-job")
+    monkeypatch.setattr(session_cli.signal, "signal", lambda *a: None)
 
     def refuse(*a, **kw):
         raise ConnectionError("refused")
@@ -630,3 +631,59 @@ def test_background_cleans_up_when_waiting_fails(server, quick, monkeypatch, fai
         session_cli._hold_in_background("http://h", "K", "rest-job", "TOK", 120)
     assert holder.terminated
     assert any(c["method"] == "DELETE" for c in server.calls)
+
+
+# -- CodeRabbit on #569 ------------------------------------------------------------
+
+
+def test_a_failed_takeover_does_not_delete_the_session(server, monkeypatch):
+    """A session taken over in its grace period existed before, and may hold
+    devices: failing to hold it is not a reason to end it."""
+    server.answers[("POST", "/api/v1/sessions")] = (
+        200, {"id": "rest-job", "resume_token": "TOK", "resumed": True})
+    monkeypatch.setattr(session_cli.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(session_cli, "_Socket",
+                        lambda *a, **kw: (_ for _ in ()).throw(ConnectionError("refused")))
+    assert session_cli.main(["hold", "rest-job"]) == 1
+    assert not [c for c in server.calls if c["method"] == "DELETE"]
+
+
+def test_a_failed_background_takeover_stops_the_holder_but_keeps_the_session(
+        server, quick, monkeypatch):
+    server.answers[("POST", "/api/v1/sessions")] = (
+        200, {"id": "rest-job", "resume_token": "TOK", "resumed": True})
+    holder = _Holder(exits=1)
+    monkeypatch.setattr(session_cli.subprocess, "Popen", holder)
+    assert session_cli.main(["hold", "rest-job", "--background"]) == 1
+    assert not [c for c in server.calls if c["method"] == "DELETE"]
+
+
+def test_the_signal_handlers_are_put_back(server, monkeypatch):
+    installed: dict = {}
+    original = {s: f"previous-{s}" for s in (session_cli.signal.SIGINT,
+                                            session_cli.signal.SIGTERM,
+                                            session_cli.signal.SIGHUP)}
+
+    def fake_signal(signum, handler):
+        before = installed.get(signum, original.get(signum))
+        installed[signum] = handler
+        return before
+
+    monkeypatch.setattr(session_cli.signal, "signal", fake_signal)
+    server.Socket.lose = True
+    _opened(server, "rest-job")
+    session_cli.main(["hold", "rest-job"])
+    assert installed == original
+
+
+def test_a_holder_gone_right_after_attaching_is_not_a_success(server, quick, monkeypatch,
+                                                              capsys):
+    _opened(server, "rest-job")
+    server.answers[("GET", "/api/v1/sessions/rest-job")] = (200, {"state": "live"})
+    holder = _Holder()
+    polls = iter([None, 1])                    # alive at the first look, gone after "live"
+    holder.poll = lambda: next(polls, 1)
+    holder.returncode = 1
+    monkeypatch.setattr(session_cli.subprocess, "Popen", holder)
+    assert session_cli.main(["hold", "rest-job", "--background"]) == 1
+    assert "just after attaching" in capsys.readouterr().err
