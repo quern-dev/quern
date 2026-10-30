@@ -457,6 +457,7 @@ quern session run --reserve N [--device-type simulator] -- CMD ...   # Hold a se
 quern session run --udid UDID [--on-release shutdown_booted] -- CMD   # ...exactly these; shut down what it booted afterwards
 quern session run --group GROUP [--reserve N] [--name NAME] -- CMD   # A config.json device group; name the session
 quern session run --reserve N --os-version 18 --device-name "iPhone 16" --no-boot -- CMD   # Criteria; only already-booted devices
+quern session hold NAME [--background] [--remote REMOTE]   # Hold session NAME's socket for raw REST calls; prints its id
 quern session list           # Held sessions, their state (live / grace) and devices
 quern session release ID     # End a session and free its devices
 quern clients add LABEL      # Issue a client key for another caller (printed once)

@@ -23,9 +23,12 @@ def server(monkeypatch):
     class FakeSocket:
         lose = False
 
-        def __init__(self, url, key, session, token, grace_seconds=120):
+        released = False
+
+        def __init__(self, url, key, session, token, grace_seconds=120, prog=""):
             self.session, self.token, self.closed = session, token, False
             self.lost = FakeSocket.lose
+            self.released = FakeSocket.released
             sockets.append(self)
 
         def close(self):
@@ -245,6 +248,7 @@ def test_the_loss_warning_prints_once(capsys):
 
     sock = session_cli._Socket.__new__(session_cli._Socket)
     sock._session, sock.lost, sock._lock = "s", False, threading.Lock()
+    sock._prog, sock.released, sock.warn_on_release = "quern session run", False, True
     sock._lose(4404)
     sock._lose("unconfirmed")
     err = capsys.readouterr().err
@@ -377,3 +381,326 @@ def test_the_child_is_its_own_job_and_each_signal_arrives_once(server, child, mo
     assert child["signal"] == (4242, sig.SIGTERM), "SIGTERM forwarded, to the child's group"
     assert installed[sig.SIGINT] == "original" and installed[sig.SIGTERM] == "original", \
         "handlers put back once the child is gone, before the hold check"
+
+
+# ---------------------------------------------------------------------------
+# quern session hold (#561)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def stopped(monkeypatch):
+    """A signal arrives as soon as the hold waits: the user pressed Ctrl-C."""
+    def fake_signal(signum, handler):
+        if signum == session_cli.signal.SIGTERM:
+            handler(signum, None)
+    monkeypatch.setattr(session_cli.signal, "signal", fake_signal)
+
+
+def test_hold_prints_the_id_holds_and_closes_cleanly_on_a_signal(server, stopped, capsys):
+    _opened(server, "rest-job")
+    assert session_cli.main(["hold", "rest-job"]) == 0
+    out = capsys.readouterr()
+    assert out.out.strip() == "rest-job"                  # stdout: the id, for scripts
+    assert "X-Quern-Session: rest-job" in out.err
+    assert server.sockets[0].token == "TOK" and server.sockets[0].closed
+
+
+def test_a_released_hold_ends_quietly_and_succeeds(server, monkeypatch, capsys):
+    _opened(server, "rest-job")
+    monkeypatch.setattr(session_cli.signal, "signal", lambda *a: None)
+    server.Socket.lose = server.Socket.released = True
+    assert session_cli.main(["hold", "rest-job"]) == 0
+    assert "was released" in capsys.readouterr().err
+
+
+def test_a_lost_hold_exits_4(server, monkeypatch):
+    _opened(server, "rest-job")
+    monkeypatch.setattr(session_cli.signal, "signal", lambda *a: None)
+    server.Socket.lose = True
+    assert session_cli.main(["hold", "rest-job"]) == session_cli.HOLD_LOST
+
+
+def test_a_session_held_elsewhere_is_refused(server, capsys):
+    server.answers[("POST", "/api/v1/sessions")] = (
+        409, {"detail": "session rest-job is held by a live connection"})
+    assert session_cli.main(["hold", "rest-job"]) == 2
+    assert "live connection" in capsys.readouterr().err
+
+
+def test_a_socket_that_cannot_open_releases_the_session(server, monkeypatch):
+    _opened(server, "rest-job")
+    monkeypatch.setattr(session_cli.signal, "signal", lambda *a: None)
+
+    def refuse(*a, **kw):
+        raise ConnectionError("refused")
+
+    monkeypatch.setattr(session_cli, "_Socket", refuse)
+    assert session_cli.main(["hold", "rest-job"]) == 1
+    assert {"method": "DELETE", "path": "/api/v1/sessions/rest-job",
+            "session": "rest-job", "body": None} in server.calls
+
+
+def test_remote_names_the_paired_remote(server, stopped, monkeypatch):
+    monkeypatch.delenv("QUERN_REMOTE", raising=False)
+    _opened(server, "rest-job")
+    session_cli.main(["hold", "rest-job", "--remote", "office"])
+    assert session_cli.os.environ.pop("QUERN_REMOTE") == "office"
+
+
+class _Holder:
+    """The detached `hold --attach` process, faked."""
+
+    def __init__(self, exits=None):
+        self.exits, self.pid, self.returncode = exits, 777, exits
+        self.terminated = self.killed = False
+        self.started: dict = {}
+
+    def __call__(self, cmd, **kw):
+        self.started = {"cmd": cmd, **kw}
+        return self
+
+    def poll(self):
+        return self.exits
+
+    def terminate(self):
+        self.terminated = True
+
+    def kill(self):
+        self.killed = True
+
+
+@pytest.fixture
+def quick(monkeypatch, tmp_path):
+    monkeypatch.setattr(session_cli.time, "sleep", lambda s: None)
+    monkeypatch.setattr("server.config.CONFIG_DIR", tmp_path)
+
+
+def test_background_returns_once_the_session_is_live(server, quick, monkeypatch, capsys):
+    _opened(server, "rest-job")
+    server.answers[("GET", "/api/v1/sessions/rest-job")] = (200, {"state": "live"})
+    holder = _Holder()
+    monkeypatch.setattr(session_cli.subprocess, "Popen", holder)
+
+    assert session_cli.main(["hold", "rest-job", "--background"]) == 0
+    assert capsys.readouterr().out.strip() == "rest-job"
+    cmd, env = holder.started["cmd"], holder.started["env"]
+    assert cmd[3:6] == ["session", "hold", "rest-job"] and "--attach" in cmd
+    assert "TOK" not in cmd and env[session_cli._HOLD_TOKEN_ENV] == "TOK"   # not in ps
+    assert holder.started["start_new_session"] is True
+
+
+def test_background_reports_a_holder_that_died(server, quick, monkeypatch, capsys):
+    _opened(server, "rest-job")
+    monkeypatch.setattr(session_cli.subprocess, "Popen", _Holder(exits=1))
+    assert session_cli.main(["hold", "rest-job", "--background"]) == 1
+    assert "exited" in capsys.readouterr().err
+    assert any(c["method"] == "DELETE" for c in server.calls)
+
+
+def test_background_gives_up_when_never_live(server, quick, monkeypatch):
+    _opened(server, "rest-job")
+    server.answers[("GET", "/api/v1/sessions/rest-job")] = (200, {"state": "grace"})
+    holder = _Holder()
+    monkeypatch.setattr(session_cli.subprocess, "Popen", holder)
+    monkeypatch.setattr(session_cli, "HOLD_START_TIMEOUT", 0.01)
+    assert session_cli.main(["hold", "rest-job", "--background"]) == 1
+    assert holder.terminated and any(c["method"] == "DELETE" for c in server.calls)
+
+
+def test_attach_takes_the_token_from_its_environment(server, stopped, monkeypatch):
+    monkeypatch.setenv(session_cli._HOLD_TOKEN_ENV, "SECRET")
+    assert session_cli.main(["hold", "rest-job", "--attach"]) == 0
+    assert server.sockets[0].token == "SECRET"
+    assert session_cli._HOLD_TOKEN_ENV not in session_cli.os.environ
+    assert not [c for c in server.calls if c["path"] == "/api/v1/sessions"]   # no reopen
+
+
+def test_a_release_by_the_server_is_recognised(capsys):
+    """`quern session release` closes the socket with 4404 "session released":
+    for hold that is the end it was waiting for, not a loss to warn about."""
+    import threading
+
+    ws = type("WS", (), {"__iter__": lambda self: iter(()), "close_code": 4404,
+                         "close_reason": "session released"})()
+    sock = session_cli._Socket.__new__(session_cli._Socket)
+    sock._session, sock.lost, sock._lock, sock._closing = "s", False, threading.Lock(), False
+    sock._ws, sock._prog, sock.released = ws, "quern session hold", False
+    sock.warn_on_release = False
+    sock._hold()
+    assert sock.released and sock.lost
+    assert "WARNING" not in capsys.readouterr().err
+
+
+# -- review of #561 ------------------------------------------------------------
+
+
+def _bare_socket(prog="quern session hold"):
+    import threading
+
+    sock = session_cli._Socket.__new__(session_cli._Socket)
+    sock._session, sock.lost, sock._lock, sock._closing = "s", False, threading.Lock(), False
+    sock._prog, sock.released = prog, False
+    sock.warn_on_release = prog != "quern session hold"
+    return sock
+
+
+def test_a_4404_for_another_reason_is_not_a_release(capsys):
+    """A server restart also closes with 4404: hold must not exit 0 on it."""
+    sock = _bare_socket()
+    sock._ws = type("WS", (), {"__iter__": lambda self: iter(()), "close_code": 4404,
+                               "close_reason": "no held session s"})()
+    sock._hold()
+    assert sock.lost and not sock.released
+    assert "WARNING" in capsys.readouterr().err
+
+
+def test_run_still_warns_when_its_session_is_released(capsys):
+    sock = _bare_socket("quern session run")
+    sock.released = True
+    sock._lose(4404)
+    err = capsys.readouterr().err
+    assert "quern session run: WARNING" in err and "it was released" in err
+
+
+def test_only_hold_is_quiet_about_a_release(monkeypatch):
+    """The flag comes from who built the socket: run's default warns."""
+    monkeypatch.setattr(session_cli._Socket, "_connect", lambda self: None)
+    monkeypatch.setattr(session_cli.threading, "Thread",
+                        lambda **kw: SimpleNamespace(start=lambda: None))
+    assert session_cli._Socket("http://h", "K", "s", "T").warn_on_release is True
+    assert session_cli._Socket("http://h", "K", "s", "T",
+                               prog="quern session hold").warn_on_release is False
+
+
+def test_attach_without_a_token_releases_nothing(server, monkeypatch, capsys):
+    monkeypatch.delenv(session_cli._HOLD_TOKEN_ENV, raising=False)
+    # Bounded if the guard is ever lost: a hold that did start ends at once
+    # rather than waiting for a signal that never comes.
+    monkeypatch.setattr(session_cli.signal, "signal", lambda *a: None)
+    server.Socket.lose = True
+    assert session_cli.main(["hold", "someone-elses", "--attach"]) == 2
+    assert not [c for c in server.calls if c["method"] == "DELETE"]
+    assert server.sockets == []
+
+
+def test_attach_that_cannot_connect_releases_nothing(server, monkeypatch):
+    monkeypatch.setenv(session_cli._HOLD_TOKEN_ENV, "TOK")
+    monkeypatch.setattr(session_cli, "_Socket",
+                        lambda *a, **kw: (_ for _ in ()).throw(ConnectionError("4403")))
+    monkeypatch.setattr(session_cli.signal, "signal", lambda *a: None)
+    assert session_cli.main(["hold", "s", "--attach"]) == 1
+    assert not [c for c in server.calls if c["method"] == "DELETE"]
+
+
+def test_hold_closes_on_a_hangup_too(server, monkeypatch):
+    seen = []
+    monkeypatch.setattr(session_cli.signal, "signal", lambda signum, h: seen.append(signum))
+    server.Socket.lose = True
+    _opened(server, "rest-job")
+    session_cli.main(["hold", "rest-job"])
+    assert session_cli.signal.SIGHUP in seen
+
+
+def test_background_runs_this_tree_with_the_remote(server, quick, monkeypatch):
+    from pathlib import Path
+
+    monkeypatch.setenv("QUERN_REMOTE", "office")
+    _opened(server, "rest-job")
+    server.answers[("GET", "/api/v1/sessions/rest-job")] = (200, {"state": "live"})
+    holder = _Holder()
+    monkeypatch.setattr(session_cli.subprocess, "Popen", holder)
+    assert session_cli.main(["hold", "rest-job", "--background"]) == 0
+    assert Path(holder.started["cwd"]) == Path(session_cli.__file__).resolve().parent.parent
+    assert holder.started["env"]["QUERN_REMOTE"] == "office"
+
+
+@pytest.mark.parametrize("failure", [ConnectionError("server gone"), KeyboardInterrupt()])
+def test_background_cleans_up_when_waiting_fails(server, quick, monkeypatch, failure):
+    """The parent giving up for any reason stops the holder and releases the
+    session: a detached holder must not go on after "failed" (review)."""
+    _opened(server, "rest-job")
+    holder = _Holder()
+    monkeypatch.setattr(session_cli.subprocess, "Popen", holder)
+    real = session_cli._call
+
+    def flaky(method, url, key, path, session="", body=None):
+        if method == "GET":
+            raise failure
+        return real(method, url, key, path, session, body)
+
+    monkeypatch.setattr(session_cli, "_call", flaky)
+    with pytest.raises(type(failure)):
+        session_cli._hold_in_background("http://h", "K", "rest-job", "TOK", 120)
+    assert holder.terminated
+    assert any(c["method"] == "DELETE" for c in server.calls)
+
+
+# -- CodeRabbit on #569 ------------------------------------------------------------
+
+
+def test_a_failed_takeover_does_not_delete_the_session(server, monkeypatch):
+    """A session taken over in its grace period existed before, and may hold
+    devices: failing to hold it is not a reason to end it."""
+    server.answers[("POST", "/api/v1/sessions")] = (
+        200, {"id": "rest-job", "resume_token": "TOK", "resumed": True})
+    monkeypatch.setattr(session_cli.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(session_cli, "_Socket",
+                        lambda *a, **kw: (_ for _ in ()).throw(ConnectionError("refused")))
+    assert session_cli.main(["hold", "rest-job"]) == 1
+    assert not [c for c in server.calls if c["method"] == "DELETE"]
+
+
+def test_a_failed_background_takeover_stops_the_holder_but_keeps_the_session(
+        server, quick, monkeypatch):
+    server.answers[("POST", "/api/v1/sessions")] = (
+        200, {"id": "rest-job", "resume_token": "TOK", "resumed": True})
+    holder = _Holder(exits=1)
+    monkeypatch.setattr(session_cli.subprocess, "Popen", holder)
+    assert session_cli.main(["hold", "rest-job", "--background"]) == 1
+    assert not [c for c in server.calls if c["method"] == "DELETE"]
+
+
+def test_the_signal_handlers_are_put_back(server, monkeypatch):
+    installed: dict = {}
+    original = {s: f"previous-{s}" for s in (session_cli.signal.SIGINT,
+                                            session_cli.signal.SIGTERM,
+                                            session_cli.signal.SIGHUP)}
+
+    def fake_signal(signum, handler):
+        before = installed.get(signum, original.get(signum))
+        installed[signum] = handler
+        return before
+
+    monkeypatch.setattr(session_cli.signal, "signal", fake_signal)
+    server.Socket.lose = True
+    _opened(server, "rest-job")
+    session_cli.main(["hold", "rest-job"])
+    assert installed == original
+
+
+def test_a_holder_gone_right_after_attaching_is_not_a_success(server, quick, monkeypatch,
+                                                              capsys):
+    _opened(server, "rest-job")
+    server.answers[("GET", "/api/v1/sessions/rest-job")] = (200, {"state": "live"})
+    holder = _Holder()
+    polls = iter([None, 1])                    # alive at the first look, gone after "live"
+    holder.poll = lambda: next(polls, 1)
+    holder.returncode = 1
+    monkeypatch.setattr(session_cli.subprocess, "Popen", holder)
+    assert session_cli.main(["hold", "rest-job", "--background"]) == 1
+    assert "just after attaching" in capsys.readouterr().err
+
+
+def test_a_failed_takeover_kills_the_holder_so_the_session_keeps_its_grace(
+        server, quick, monkeypatch):
+    """SIGTERM would close the socket cleanly, and a clean close releases the
+    session at once -- the very thing not deleting it was for (CodeRabbit)."""
+    server.answers[("POST", "/api/v1/sessions")] = (
+        200, {"id": "rest-job", "resume_token": "TOK", "resumed": True})
+    server.answers[("GET", "/api/v1/sessions/rest-job")] = (200, {"state": "grace"})
+    holder = _Holder()
+    monkeypatch.setattr(session_cli.subprocess, "Popen", holder)
+    monkeypatch.setattr(session_cli, "HOLD_START_TIMEOUT", 0.01)
+    assert session_cli.main(["hold", "rest-job", "--background"]) == 1
+    assert holder.killed and not holder.terminated
