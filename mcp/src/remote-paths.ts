@@ -260,7 +260,8 @@ export function knowledgeIncluded(rel: string, isDir: boolean): boolean {
 /** Send a project's knowledge base to the server, for load_landmarks
  * (upload_id) to load for this session (#560). */
 export async function uploadKnowledge(server: Server, knowledgeDir: string,
-                                      app: string): Promise<Uploaded> {
+                                      app: string,
+                                      timeoutMs = KNOWLEDGE_UPLOAD_TIMEOUT_MS): Promise<Uploaded> {
   const gzip = createGzip();
   pipeline(Readable.from(tarTree(knowledgeDir, "knowledge", knowledgeIncluded)), gzip,
            () => {});
@@ -271,11 +272,18 @@ export async function uploadKnowledge(server: Server, knowledgeDir: string,
       headers: { ...quernHeaders(server.apiKey), "Content-Type": "application/octet-stream" },
       body: gzip as unknown as BodyInit,
       duplex: "half",
+      // Bounded: at session start the client waits on this before it can
+      // connect, and a link that stalls mid-upload must not hang it (review).
+      // A knowledge base is a few hundred KB at most.
+      signal: AbortSignal.timeout(timeoutMs),
     } as RequestInit, { noTimeouts: true });
   const text = await resp.text();
   if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${text}`);
   return JSON.parse(text) as Uploaded;
 }
+
+/** How long a knowledge-base upload may take (#560). */
+export const KNOWLEDGE_UPLOAD_TIMEOUT_MS = 15_000;
 
 // -- paths in answers ----------------------------------------------------------
 

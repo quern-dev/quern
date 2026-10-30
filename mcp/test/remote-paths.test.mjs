@@ -15,7 +15,7 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 
-import { isClientKey, knowledgeIncluded, tarTree, uploadApp } from "../dist/remote-paths.js";
+import { isClientKey, knowledgeIncluded, tarTree, uploadApp, uploadKnowledge } from "../dist/remote-paths.js";
 
 let dir;
 let app;
@@ -330,4 +330,22 @@ test("a linked knowledge folder, or a linked screens/, is sent as its contents (
   const names = execFileSync("tar", ["-tf", "-"], { input: tar }).toString().trim().split("\n");
   assert.deepEqual(names.sort(), ["knowledge/", "knowledge/app.md", "knowledge/screens/",
                                   "knowledge/screens/home.md"]);
+});
+
+
+test("a knowledge upload to a server that stalls gives up, rather than hang startup", async () => {
+  const kb = mkdtempSync(join(dir, "kbs-"));
+  mkdirSync(join(kb, "screens"));
+  writeFileSync(join(kb, "screens/home.md"), "home");
+  const stall = createServer(() => {});                // accepts, never answers
+  await new Promise((r) => stall.listen(0, "127.0.0.1", r));
+  try {
+    const server = { url: `http://127.0.0.1:${stall.address().port}`, apiKey: "k" };
+    const started = Date.now();
+    await assert.rejects(uploadKnowledge(server, kb, "com.example.app", 300));
+    assert.ok(Date.now() - started < 5000, "bounded by its timeout");
+  } finally {
+    stall.closeAllConnections?.();
+    stall.close();
+  }
 });

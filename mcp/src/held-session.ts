@@ -94,6 +94,21 @@ export async function openHeldSession(): Promise<boolean> {
   }
 }
 
+/** Whether the session exists on the server now, waiting up to `timeoutMs`
+ * for one being opened: a load made for this session (#560) needs it. Opens
+ * it at once when nothing has started it yet. */
+export async function sessionReady(timeoutMs = 5000): Promise<boolean> {
+  const exists = () => token !== null && (state === "connecting" || state === "live");
+  if (exists()) return true;
+  if (state === "idle" && !token) return openHeldSession();
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (exists()) return true;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return exists();
+}
+
 /** Open the session and hold its socket. Returns at once; retries quietly. */
 export function startHeldSession(): void {
   if (typeof WebSocket === "undefined") {

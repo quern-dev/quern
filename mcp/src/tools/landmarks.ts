@@ -6,6 +6,7 @@ import { inlineLandmarks } from "./landmark-schema.js";
 import { discoverServer } from "../config.js";
 import { knowledgeAt } from "../project-knowledge.js";
 import { mustUpload, uploadKnowledge } from "../remote-paths.js";
+import { sessionReady } from "../held-session.js";
 
 export function registerLandmarkTools(server: McpServer): void {
   server.registerTool("load_landmarks", {
@@ -54,6 +55,12 @@ Element types are matched across backends: a landmark on the accessibility tree'
         if (remember) {
           throw new Error("remember=true needs the server's own disk: a knowledge base sent " +
             "from here is loaded for this session only, and ends with it");
+        }
+        // The load is for this session, which must exist first: started
+        // without a knowledge base, the MCP may still be opening it (review).
+        if (!(await sessionReady())) {
+          throw new Error("this MCP's quern session is not open yet, so there is nothing to " +
+            "load the knowledge base into; try again in a moment");
         }
         const found = knowledgeAt(path);
         if (!found) throw new Error(`${path} holds no knowledge base (no screens/ folder)`);
@@ -156,7 +163,7 @@ A landmark that matched only because its element type is named differently on th
   });
 
   server.registerTool("unload_landmarks", {
-    description: `Unload landmarks for a specific app or all apps. Frees the memory used by landmark definitions. With forget=true it also stops a remembered knowledge base loading at every start -- every one of them, if app is omitted.`,
+    description: `Unload landmarks for a specific app or all apps. Frees the memory used by landmark definitions. A knowledge base loaded for this session (from a remote quern or a client key) is unloaded first, and is all a client key may unload; the server-wide sets are the owner's. With forget=true it also stops a remembered knowledge base loading at every start -- every one of them, if app is omitted. forget applies to server-wide sets only, and is refused for this session's own.`,
     inputSchema: strictParams({
       app: z
         .string()
@@ -165,7 +172,7 @@ A landmark that matched only because its element type is named differently on th
       forget: z
         .boolean()
         .optional()
-        .describe("Also stop loading it at every start, if it was remembered. With no app, every remembered knowledge base is forgotten."),
+        .describe("Also stop loading it at every start, if it was remembered (owner only; server-wide sets only -- a session's own knowledge base is never remembered). With no app, every remembered knowledge base is forgotten."),
     }),
   }, async ({ app, forget }) => {
     try {

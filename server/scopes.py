@@ -7,11 +7,14 @@ every route is in it, so a new route is a decision rather than an accident.
 
     PUBLIC   no key needed (APIKeyMiddleware's PUBLIC_PATHS)
     VIEW     reads: watching a device, its logs, flows and records
-    RESERVE  the session routes: open, reserve, release (`/api/v1/sessions`)
+    RESERVE  the session routes: open, reserve, release (`/api/v1/sessions`),
+             and what is the session's own: its capture (#558), its knowledge
+             base (#560)
     CONTROL  changes to one device, which a client may make only to a device
              its own session holds (server/device_access.py)
     OWNER    anything Mac-wide: the proxy, capture, the host log, updates,
-             landmarks, and anything that reads or writes a Mac path
+             server-wide landmark sets, and anything that reads or writes a
+             Mac path
 
 A view grant never widens into control: VIEW holds only reads (GET, and the
 POSTs `device_access.READ_POSTS` lists), and CONTROL only changes, which the
