@@ -61,6 +61,8 @@ async def start_recording(request: Request, body: RecordingStartRequest) -> dict
             # nothing for 90 minutes and look like a quiet run.
             warnings.append(f"{udid} is not a device quern knows right now; recording "
                             f"anyway, in case it appears")
+    if body.viewer:
+        _may_issue_viewer_links()
     if body.viewer and not body.video:
         # The viewer relays the recording's movie; without one there is
         # nothing to show, and a link that never plays is worse than none.
@@ -123,6 +125,40 @@ async def start_recording(request: Request, body: RecordingStartRequest) -> dict
             "simulator_tls": simulator_tls.model_dump() if simulator_tls else None}
 
 
+CLIENT_VIEWER_LINKS_OFF = (
+    "this server's owner has turned off viewer links for client keys "
+    "(remote.client_viewer_links); ask them for one")
+
+
+def _may_issue_viewer_links() -> None:
+    """Refuse a client key a viewer link when the owner has turned them off
+    (#559). The owner may always issue one."""
+    from server.config import client_viewer_links
+    if not visibility.current_caller().is_owner and not client_viewer_links():
+        raise HTTPException(status_code=403, detail=CLIENT_VIEWER_LINKS_OFF)
+
+
+def _viewer_recording(request: Request, recording_id: str, *, issuing: bool = True):
+    """The recording a viewer link is asked for, if the caller may have one:
+    any for the owner; for a client key, its own (#559). Another's is 403 --
+    or 404 to a blind client, to which it does not exist. Revoking is allowed
+    with client links turned off: it only takes access away."""
+    caller = visibility.current_caller()
+    if issuing:
+        _may_issue_viewer_links()
+    try:
+        rec = _manager(request).get(recording_id)
+    except RecordingError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    if not caller.is_owner and rec.principal != caller.principal:
+        if visibility.blind_for(caller):
+            raise HTTPException(status_code=404, detail=f"no recording {recording_id!r}")
+        raise HTTPException(status_code=403, detail=(
+            f"{recording_id} is not your recording; only its owner or the server's "
+            "owner can issue its viewer links"))
+    return rec
+
+
 def _issue_viewer_link(request: Request, recording_id: str) -> tuple[str | None, str | None]:
     """(viewer URL, reason there is none) for a recording (#449)."""
     viewer = getattr(request.app.state, "viewer", None)
@@ -137,12 +173,9 @@ def _issue_viewer_link(request: Request, recording_id: str) -> tuple[str | None,
 @router.post("/{recording_id}/viewer")
 @logged_action("recording_viewer_link", category="media")
 async def recording_viewer_link(request: Request, recording_id: str) -> dict:
-    """Issue another viewer link for a recording that is filming (#449)."""
-    manager = _manager(request)
-    try:
-        rec = manager.get(recording_id)
-    except RecordingError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+    """Issue another viewer link for a recording that is filming (#449) --
+    by a client key, for its own recordings (#559)."""
+    rec = _viewer_recording(request, recording_id)
     if not rec.filters.video or rec.state != "recording":
         raise HTTPException(status_code=409,
                             detail=f"{recording_id} is not filming, so there is nothing to view")
@@ -155,7 +188,9 @@ async def recording_viewer_link(request: Request, recording_id: str) -> dict:
 @router.delete("/{recording_id}/viewer")
 @logged_action("recording_viewer_revoke", category="media")
 async def recording_viewer_revoke(request: Request, recording_id: str) -> dict:
-    """Revoke every viewer link for a recording at once (#449)."""
+    """Revoke every viewer link for a recording at once (#449) -- by a client
+    key, for its own recordings (#559)."""
+    _viewer_recording(request, recording_id, issuing=False)
     viewer = getattr(request.app.state, "viewer", None)
     revoked = viewer.grants.revoke(recording_id) if viewer is not None else 0
     return {"recording_id": recording_id, "revoked": revoked}

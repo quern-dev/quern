@@ -462,8 +462,10 @@ class TestTheGuardCoversEveryRoute:
         ("DELETE", "/api/v1/proxy/mocks/{rule_id}"): "route checks the rule's simulator_udid",
         ("POST", "/api/v1/recordings/{recording_id}/stop"): "route checks the recording's udid",
         ("POST", "/api/v1/recordings/{recording_id}/keyframe"): "route checks the recording's udid",
-        ("POST", "/api/v1/recordings/{recording_id}/viewer"): "issues a view link; no device",
-        ("DELETE", "/api/v1/recordings/{recording_id}/viewer"): "revokes view links; no device",
+        ("POST", "/api/v1/recordings/{recording_id}/viewer"):
+            "route checks the recording is the caller's (#559); no device",
+        ("DELETE", "/api/v1/recordings/{recording_id}/viewer"):
+            "route checks the recording is the caller's (#559); no device",
         ("DELETE", "/api/v1/device/app/state/{label}"): "deletes a snapshot on the Mac's disk",
         ("POST", "/api/v1/proxy/replay/{flow_id}"): "replays a request from the Mac; no device",
     }

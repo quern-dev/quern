@@ -208,9 +208,10 @@ ROUTES: dict[tuple[str, str], Rule] = {
     ("POST", "/api/v1/proxy/mocks"): _named("simulator_udid"),  # unscoped: every device's
     ("PATCH", "/api/v1/proxy/mocks/{rule_id}"): _PATH_ID,
     ("DELETE", "/api/v1/proxy/mocks/{rule_id}"): _PATH_ID,
-    # output_dir is a path on the Mac; a viewer link is the owner's to issue.
+    # output_dir is a path on the Mac. `viewer` is the client's own recording's
+    # link (#559), which the route refuses when the owner has turned that off.
     ("POST", "/api/v1/recordings"): Rule(Access.CONTROL, "resolved",
-                                         owner_fields=frozenset({"output_dir", "viewer"})),
+                                         owner_fields=frozenset({"output_dir"})),
     ("POST", "/api/v1/recordings/{recording_id}/stop"): _PATH_ID,
     ("POST", "/api/v1/recordings/{recording_id}/keyframe"): _PATH_ID,
 
@@ -277,8 +278,10 @@ ROUTES: dict[tuple[str, str], Rule] = {
     ("GET", "/api/v1/recordings/{recording_id}/files"): _VIEW,
     ("GET", "/api/v1/screenshots"): _VIEW,     # the caller's own session's only
     ("GET", "/api/v1/recordings/{recording_id}/files/{name}"): _VIEW,
-    ("POST", "/api/v1/recordings/{recording_id}/viewer"): _OWNER,
-    ("DELETE", "/api/v1/recordings/{recording_id}/viewer"): _OWNER,
+    # A client's own recording's link (#559): the route checks it is the
+    # caller's, and that the owner has not turned client links off.
+    ("POST", "/api/v1/recordings/{recording_id}/viewer"): _PATH_ID,
+    ("DELETE", "/api/v1/recordings/{recording_id}/viewer"): _PATH_ID,
 
     # -- Mac-wide state -----------------------------------------------------------
     ("POST", "/api/v1/device/screenshot/timeline/start"): _OWNER,   # one timeline per server

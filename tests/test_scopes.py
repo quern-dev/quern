@@ -762,7 +762,6 @@ class TestReviewFindings:
 
     @pytest.mark.parametrize("path, body", [
         ("/api/v1/recordings", {"udid": SIM, "output_dir": "/tmp/anywhere"}),
-        ("/api/v1/recordings", {"udid": SIM, "video": True, "viewer": True}),
         ("/api/v1/device/logging/start", {"udid": SIM, "preset": "quiet"}),
     ])
     def test_owner_fields_are_refused_to_a_client(self, world, registry, path, body):
@@ -775,6 +774,15 @@ class TestReviewFindings:
         # The owner may -- on a device alice does not hold.
         theirs = {**body, "udid": "SIM-OWNERS"}
         assert c.post(path, headers=_h(KEY), json=theirs).status_code == 200
+
+    def test_a_client_may_ask_for_its_own_recordings_viewer_link(self, world, registry):
+        """No longer owner-only (#559): the route decides, by whose recording
+        it is and whether the owner has turned client links off."""
+        c, _, alice, _ = world
+        _hold(registry, "alice:s1", "client:alice", SIM)
+        r = c.post("/api/v1/recordings", headers=_h(alice),
+                   json={"udid": SIM, "video": True, "viewer": True})
+        assert r.status_code == 200, r.text
 
     def test_resolved_precheck_guards_a_route_that_never_calls_check(self, world, registry):
         c, app, alice, _ = world
