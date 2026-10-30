@@ -97,9 +97,12 @@ def _not_live(request: Request, registry: SessionRegistry, session: HeldSession)
         f"exactly as long as its holder's connection, so a client that vanishes frees "
         f"its devices: open the session's live socket first -- {socket} (send the "
         f"X-Quern-Resume-Token you were given) -- and keep it open while you hold "
-        f"devices. Or let quern hold it for you: the quern MCP does, and from a shell, "
-        f"`quern session hold {session.id}` keeps it open (in the background with "
-        f"--background) while you make REST calls as X-Quern-Session: {session.id}.")
+        f"devices. Or let quern hold one for you: the quern MCP does, and from a shell "
+        f"`quern session hold NAME` opens a session and keeps its socket open (in the "
+        f"background with --background) while you make REST calls as its "
+        f"X-Quern-Session. On the server's own Mac it can take over this one: "
+        f"`quern session hold {session.id}`; from elsewhere only its resume token "
+        f"reclaims it.")
 
 
 class OpenRequest(BaseModel):

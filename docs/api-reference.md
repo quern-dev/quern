@@ -153,7 +153,7 @@ curl -X POST "$URL/api/v1/sessions/<id>/reservations" \
 quern session release <id>                    # ends the hold and frees its devices
 ```
 
-It opens session NAME (or takes over one of yours in its grace period on this Mac), keeps its socket open -- in the foreground until Ctrl-C, or `--background`, where it returns once the server reports the session live and logs to `~/.quern/session-hold-<id>.log` -- and reconnects through blips within the grace period. Releasing the session ends it quietly; a hold lost for any other reason exits 4. It uses the paired remote given by `--remote NAME` or `QUERN_REMOTE`. A session another connection holds is refused. There is no REST-only lease: a reservation renewed by heartbeats would be a second way to hold a device, with its own expiry rules.
+It opens session NAME (or, on the server's own Mac, takes over one of yours in its grace period; from another machine only the session's resume token reclaims one), keeps its socket open -- in the foreground until Ctrl-C, or `--background`, where it returns once the server reports the session live and logs to `~/.quern/session-hold-<id>.log` -- and reconnects through blips within the grace period. Releasing the session ends it quietly; a hold lost for any other reason exits 4. It uses the paired remote given by `--remote NAME` or `QUERN_REMOTE`. A session another connection holds is refused. There is no REST-only lease: a reservation renewed by heartbeats would be a second way to hold a device, with its own expiry rules.
 
 **Paths, when the disk is not shared.** A path in a request is read on the server's disk, so from another machine it names nothing, and from a client key on this one it would be the server reading whatever it is told to:
 

@@ -287,7 +287,8 @@ class TestLifecycle:
         assert "ws://testserver/api/v1/sessions/claude-a/live" in detail
         assert "X-Quern-Resume-Token" in detail
         assert "released in" in detail
-        assert "quern MCP" in detail and "quern session hold claude-a" in detail
+        assert "quern MCP" in detail and "quern session hold NAME" in detail
+        assert "quern session hold claude-a" in detail and "resume token" in detail
 
     def test_only_the_session_itself_reserves(self, client):
         a = Held(client, "claude-a")
