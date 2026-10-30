@@ -171,9 +171,10 @@ async def test_start_with_a_link_is_refused_up_front_when_off(as_caller, links):
     ({"client_viewer_links": 0}, False),
     ({"client_viewer_links": "yes"}, False),        # anything but true is off
     ("on", False),                                  # a remote that is not an object
+    ("NULL", False),                                # "remote": null is not absent
 ])
 def test_the_setting_is_on_only_unset_or_true(monkeypatch, remote, on):
-    cfg = {} if remote is None else {"remote": remote}
+    cfg = {} if remote is None else {"remote": None if remote == "NULL" else remote}
     monkeypatch.setattr(config, "read_user_config", lambda strict=False: cfg)
     assert config.client_viewer_links() is on
 

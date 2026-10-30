@@ -420,9 +420,13 @@ def client_viewer_links() -> bool:
         config = read_user_config(strict=True)
     except ConfigUnreadable:
         return False
-    raw = config.get("remote")
-    if not isinstance(raw, dict) or "client_viewer_links" not in raw:
-        return raw is None or isinstance(raw, dict)
+    if "remote" not in config:
+        return True
+    raw = config["remote"]
+    if not isinstance(raw, dict):      # null or junk: not a setting anyone meant as on
+        return False
+    if "client_viewer_links" not in raw:
+        return True
     return raw["client_viewer_links"] is True
 
 
