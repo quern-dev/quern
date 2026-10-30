@@ -70,11 +70,32 @@ export function heldSessionState(): { id: string; state: HeldState } {
   return { id: SESSION_ID, state };
 }
 
+/** Open the session now, before its socket is held: what is loaded for the
+ * session at start (#560) needs the session to exist. `startHeldSession`
+ * then attaches with the token this got. False when it could not be opened;
+ * the start opens it again as usual. */
+export async function openHeldSession(): Promise<boolean> {
+  try {
+    const opened = (await apiRequest("POST", "/api/v1/sessions", undefined, {
+      name: SESSION_ID,
+    }, 5000)) as { resume_token?: string } | null;
+    if (!opened?.resume_token) return false;
+    token = opened.resume_token;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Open the session and hold its socket. Returns at once; retries quietly. */
 export function startHeldSession(): void {
   if (typeof WebSocket === "undefined") {
     // Node 22 has a global WebSocket; anything older cannot hold a session.
     console.error("Held session unavailable: this Node has no WebSocket");
+    return;
+  }
+  if (token) {
+    connect();                // opened already, for the session's knowledge base
     return;
   }
   void open();

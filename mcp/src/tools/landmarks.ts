@@ -3,12 +3,17 @@ import { z } from "zod";
 import { apiRequest } from "../http.js";
 import { strictParams, errorText } from "./helpers.js";
 import { inlineLandmarks } from "./landmark-schema.js";
+import { discoverServer } from "../config.js";
+import { knowledgeAt } from "../project-knowledge.js";
+import { mustUpload, uploadKnowledge } from "../remote-paths.js";
 
 export function registerLandmarkTools(server: McpServer): void {
   server.registerTool("load_landmarks", {
     description: `Load screen landmarks for an app from a knowledge base directory or inline JSON. Landmarks enable screen identification — matching the current UI state against known screen definitions. Landmarks are scoped by app identifier so multiple apps can be loaded simultaneously.
 
 Landmarks are held in memory and gone at every restart: set remember=true with a path to load that knowledge base again at every start (list_landmarks shows what is remembered; unload_landmarks with forget=true stops it). With a path inside a project's .quern/, app can be omitted -- the project's .quern/config.json names it.
+
+From a remote quern, or with a client key, a path is sent rather than named: its knowledge base (app.md and screens/*.md) is uploaded and loaded for this session only, in place of any set the server has for that app, and it ends with the session (remember is refused then). Other sessions are unaffected. This MCP does that at session start already when the project has a knowledge base.
 
 The response includes a 'skipped' array listing screen files the loader couldn't turn into landmarks, with categorized reasons:
   - legacy_format: file uses the pre-landmarks 'identify_by:' field. Includes the original entries so an agent can propose a migration to the new schema with user review.
@@ -41,6 +46,27 @@ Element types are matched across backends: a landmark on the accessibility tree'
     try {
       const body: Record<string, unknown> = {};
       if (app) body.app = app;
+      const target = discoverServer();
+      if (path && await mustUpload(target)) {
+        // The server cannot read this path, or this key may not load the
+        // server-wide sets: send the knowledge base, loaded for this session
+        // alone and gone when it ends (#560).
+        if (remember) {
+          throw new Error("remember=true needs the server's own disk: a knowledge base sent " +
+            "from here is loaded for this session only, and ends with it");
+        }
+        const found = knowledgeAt(path);
+        if (!found) throw new Error(`${path} holds no knowledge base (no screens/ folder)`);
+        const forApp = app ?? found.bundleId;
+        if (!forApp) {
+          throw new Error("app is required: no .quern/config.json with a bundle_id beside " +
+            found.dir);
+        }
+        const uploaded = await uploadKnowledge(target, found.dir, forApp);
+        const data = await apiRequest("POST", "/api/v1/landmarks/load", undefined,
+          { upload_id: uploaded.upload_id, app: forApp });
+        return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+      }
       if (path) body.source = path;
       if (landmarks) body.landmarks = landmarks;
       if (remember !== undefined) body.remember = remember;

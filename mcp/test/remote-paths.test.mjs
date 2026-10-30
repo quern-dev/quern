@@ -15,7 +15,7 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 
-import { isClientKey, tarTree, uploadApp } from "../dist/remote-paths.js";
+import { isClientKey, knowledgeIncluded, tarTree, uploadApp } from "../dist/remote-paths.js";
 
 let dir;
 let app;
@@ -296,4 +296,20 @@ test("a real 'not shared' answer is kept: /health is asked once, not per result"
   } finally {
     r.server.close();
   }
+});
+
+
+test("a knowledge base's tar holds app.md and the screen files only (#560)", async () => {
+  const kb = mkdtempSync(join(dir, "kb-"));
+  mkdirSync(join(kb, "screens/nested"), { recursive: true });
+  writeFileSync(join(kb, "app.md"), "# app");
+  writeFileSync(join(kb, "README.md"), "not sent");
+  writeFileSync(join(kb, "screens/home.md"), "home");
+  writeFileSync(join(kb, "screens/home.png"), "not yet");
+  writeFileSync(join(kb, "screens/nested/deep.md"), "not read by the loader");
+  symlinkSync("home.md", join(kb, "screens/link.md"));     // never sent: links are refused
+  const tar = await collect(tarTree(kb, "knowledge", knowledgeIncluded));
+  const listed = execFileSync("tar", ["-tf", "-"], { input: tar }).toString().trim().split("\n");
+  assert.deepEqual(listed.sort(), ["knowledge/", "knowledge/app.md", "knowledge/screens/",
+                                   "knowledge/screens/home.md"]);
 });

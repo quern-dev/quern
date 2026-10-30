@@ -15,6 +15,8 @@ import {
   detectProjectKnowledge,
   knowledgeInstructions,
   projectDirFromEnv,
+  knowledgeAt,
+  uploadKnowledgeForSession,
 } from "../dist/project-knowledge.js";
 
 const APP = "com.example.app";
@@ -316,22 +318,33 @@ function knowledgeServer(seen) {
       res.setHeader("content-type", "application/json");
       if (req.url === "/health") res.end(JSON.stringify({ status: "ok", host_id: HOST_ID }));
       else if (req.method === "GET") res.end(JSON.stringify({ sets: {}, sources: {} }));
-      else res.end(JSON.stringify({ loaded: APP, screens: 2 }));
+      else if (req.url === "/api/v1/sessions") {
+        res.end(JSON.stringify({ id: "s", resume_token: "TOK" }));
+      } else if (req.url.startsWith("/api/v1/uploads")) {
+        res.end(JSON.stringify({ upload_id: "up_9", kind: "knowledge" }));
+      } else res.end(JSON.stringify({ loaded: APP, screens: 2 }));
     });
   });
   return new Promise((r) => fake.listen(0, "127.0.0.1", () => r(fake)));
 }
 
-test("started on another machine's server, it does not send this machine's path", async () => {
+test("started on another machine's server, it uploads the knowledge base, never its path", async () => {
+  // A server on another disk cannot read this path (#254, 3b); the knowledge
+  // base is sent instead and loaded for this session alone (#560).
   const dir = project({ knowledge: true, bundle: APP });
   const seen = [];
   const fake = await knowledgeServer(seen);
   try {
     const instructions = await handshake(dir, `http://127.0.0.1:${fake.address().port}`,
                                          { hostId: "f".repeat(32) });
-    assert.match(instructions, /not loaded: the quern server is another machine/);
-    assert.ok(!seen.some(([m, url]) => m === "POST" && url === "/api/v1/landmarks/load"),
-              JSON.stringify(seen));
+    assert.match(instructions, /loaded for this session only: 2 screens for com\.example\.app/);
+    const opened = seen.findIndex(([m, url]) => m === "POST" && url === "/api/v1/sessions");
+    const sent = seen.findIndex(([m, url]) => m === "POST" && url.startsWith("/api/v1/uploads"));
+    const loaded = seen.findIndex(([m, url]) => m === "POST" && url === "/api/v1/landmarks/load");
+    assert.ok(opened >= 0 && opened < sent && sent < loaded, JSON.stringify(seen.map((x) => x[1])));
+    assert.match(seen[sent][1], /name=com\.example\.app\.knowledge\.tar\.gz/);
+    assert.deepEqual(JSON.parse(seen[loaded][2]), { upload_id: "up_9", app: APP });
+    assert.ok(!seen.some(([, , body]) => body.includes(dir)), "this machine's path was sent");
   } finally {
     fake.close();
   }
@@ -364,4 +377,78 @@ test("autoload skipped for a reason sends nothing and says why, not load_landmar
   const lines = knowledgeInstructions(pk, outcome).join("\n");
   assert.match(lines, /not loaded: the quern server is another machine/);
   assert.doesNotMatch(lines, /load_landmarks\(path=/, "a local path would mean nothing there");
+});
+
+
+// -- uploaded for this session (#560) -----------------------------------------
+
+function sessionLoad({ opens = true, upload = async () => ({ upload_id: "up_1" }),
+                       answer = { screens: 3 } } = {}) {
+  const calls = [];
+  const request = async (method, path, params, body) => {
+    calls.push({ method, path, body });
+    if (answer instanceof Error) throw answer;
+    return answer;
+  };
+  return { calls, args: [async () => opens, upload, request] };
+}
+
+test("a client's knowledge base is uploaded and loaded for its session", async () => {
+  const dir = project({ files: { ".quern/knowledge/screens/home.md": "x",
+                                 ".quern/config.json": JSON.stringify({ bundle_id: APP }) } });
+  const pk = detectProjectKnowledge(dir);
+  const { calls, args } = sessionLoad();
+  const outcome = await uploadKnowledgeForSession(pk, true, ...args);
+  assert.deepEqual(outcome, { kind: "session_loaded", app: APP, screens: 3 });
+  assert.deepEqual(calls, [{ method: "POST", path: "/api/v1/landmarks/load",
+                             body: { upload_id: "up_1", app: APP } }]);
+  const lines = knowledgeInstructions(pk, outcome).join(" ");
+  assert.match(lines, /loaded for this session only/);
+  assert.match(lines, /other sessions are unaffected/);
+});
+
+test("a session that cannot be opened loads nothing, and says so", async () => {
+  const dir = project({ files: { ".quern/knowledge/screens/home.md": "x",
+                                 ".quern/config.json": JSON.stringify({ bundle_id: APP }) } });
+  let uploaded = false;
+  const { calls, args } = sessionLoad({ opens: false,
+                                        upload: async () => { uploaded = true; return {}; } });
+  const outcome = await uploadKnowledgeForSession(detectProjectKnowledge(dir), true, ...args);
+  assert.equal(outcome.kind, "not_loaded");
+  assert.equal(uploaded, false);
+  assert.deepEqual(calls, []);
+});
+
+test("a failed upload or a refused load is not_loaded, never thrown", async () => {
+  const dir = project({ files: { ".quern/knowledge/screens/home.md": "x",
+                                 ".quern/config.json": JSON.stringify({ bundle_id: APP }) } });
+  const pk = detectProjectKnowledge(dir);
+  const failing = sessionLoad({ upload: async () => { throw new Error("HTTP 413: too big"); } });
+  assert.deepEqual(await uploadKnowledgeForSession(pk, true, ...failing.args),
+                   { kind: "not_loaded", reason: "HTTP 413: too big" });
+  const refused = sessionLoad({ answer: new Error("HTTP 409: no held session") });
+  assert.equal((await uploadKnowledgeForSession(pk, true, ...refused.args)).kind, "not_loaded");
+});
+
+test("nothing to upload, or no bundle id, sends nothing", async () => {
+  const { calls, args } = sessionLoad();
+  const none = detectProjectKnowledge(project());
+  assert.equal((await uploadKnowledgeForSession(none, true, ...args)).kind, "none");
+  const unnamed = detectProjectKnowledge(project({
+    files: { ".quern/knowledge/screens/home.md": "x" } }));
+  assert.equal((await uploadKnowledgeForSession(unnamed, true, ...args)).kind, "not_loaded");
+  assert.deepEqual(calls, []);
+});
+
+
+test("a load_landmarks path is read as the server reads one (#560)", () => {
+  const dir = project({ files: { ".quern/knowledge/screens/home.md": "x",
+                                 ".quern/config.json": JSON.stringify({ bundle_id: APP }) } });
+  const kb = join(dir, ".quern", "knowledge");
+  for (const given of [dir, join(dir, ".quern"), kb]) {
+    assert.deepEqual(knowledgeAt(given), { dir: kb, bundleId: APP }, given);
+  }
+  assert.equal(knowledgeAt(project()), null);
+  const bare = project({ files: { "kb/screens/home.md": "x" } });
+  assert.deepEqual(knowledgeAt(join(bare, "kb")), { dir: join(bare, "kb"), bundleId: null });
 });

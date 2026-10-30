@@ -40,7 +40,9 @@ export type KnowledgeOutcome =
   | { kind: "load_unknown"; reason: string }
   /** Not attempted: the server cannot read this machine's path, or this
    * key may not load the server-wide sets (#254, phase 3b). */
-  | { kind: "skipped"; reason: string };
+  | { kind: "skipped"; reason: string }
+  /** Uploaded and loaded for this session alone (#560). */
+  | { kind: "session_loaded"; app: string; screens: number };
 
 function isDir(path: string): boolean {
   try {
@@ -205,6 +207,67 @@ export async function autoloadKnowledge(
   }
 }
 
+/** The knowledge directory a `load_landmarks` path names, as the server reads
+ * one: a project root (its `.quern/knowledge`), a `.quern`, or the knowledge
+ * directory itself -- and the app its project's config names. Null when the
+ * path holds no `screens/`. */
+export function knowledgeAt(path: string): { dir: string; bundleId: string | null } | null {
+  const candidates: [string, string][] = [
+    [join(path, ".quern", "knowledge"), join(path, ".quern")],
+    [join(path, "knowledge"), path],
+    [path, join(path, "..")],
+  ];
+  for (const [dir, quern] of candidates) {
+    if (!isDir(join(dir, "screens"))) continue;
+    let bundleId: string | null = null;
+    try {
+      const parsed = JSON.parse(readFileSync(join(quern, "config.json"), "utf-8"));
+      if (parsed && typeof parsed.bundle_id === "string" && parsed.bundle_id) {
+        bundleId = parsed.bundle_id;
+      }
+    } catch {
+      bundleId = null;
+    }
+    return { dir, bundleId };
+  }
+  return null;
+}
+
+/** Upload the project's knowledge base and load it for this session only
+ * (#560): what a client key or a remote server gets instead of a path load.
+ * `open` makes the session exist first -- the server loads it for a held
+ * session, so it ends with it. Never throws. */
+export async function uploadKnowledgeForSession(
+  pk: ProjectKnowledge,
+  reachable: boolean,
+  open: () => Promise<boolean>,
+  upload: (dir: string, app: string) => Promise<{ upload_id: string }>,
+  request: Request,
+): Promise<KnowledgeOutcome> {
+  if (!pk.knowledgeDir) return { kind: "none" };
+  if (pk.screenFiles === 0) return { kind: "empty" };
+  if (!pk.bundleId) {
+    return { kind: "not_loaded", reason: "its .quern/config.json names no bundle_id" };
+  }
+  if (!reachable) return { kind: "not_loaded", reason: "the quern server was not reachable" };
+  try {
+    if (!(await open())) {
+      return { kind: "not_loaded", reason: "the session could not be opened to load it into" };
+    }
+    const uploaded = await upload(pk.knowledgeDir, pk.bundleId);
+    const result = (await request("POST", "/api/v1/landmarks/load", undefined,
+      { upload_id: uploaded.upload_id, app: pk.bundleId }, AUTOLOAD_TIMEOUT_MS)) as {
+      screens?: number;
+    };
+    if (typeof result?.screens === "number" && result.screens > 0) {
+      return { kind: "session_loaded", app: pk.bundleId, screens: result.screens };
+    }
+    return { kind: "not_loaded", reason: `the server answered ${JSON.stringify(result).slice(0, 200)}` };
+  } catch (e) {
+    return { kind: "not_loaded", reason: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 /** Lines for the session instructions, from what actually happened. Nothing
  * at all for a directory that is neither a knowledge base nor an app project. */
 export function knowledgeInstructions(pk: ProjectKnowledge, outcome: KnowledgeOutcome): string[] {
@@ -217,6 +280,11 @@ export function knowledgeInstructions(pk: ProjectKnowledge, outcome: KnowledgeOu
       return ["", `${kb} -- loaded ${outcome.screens} screens for ${outcome.app} at the start of ` +
         "this session, so identify_screen and get_screen_summary(identify=true) can name " +
         `screens. ${readIt}`];
+    case "session_loaded":
+      return ["", `${kb} -- uploaded to the quern server and loaded for this session only: ` +
+        `${outcome.screens} screens for ${outcome.app}. identify_screen and ` +
+        "get_screen_summary(identify=true) use them in place of any set the server has for " +
+        `that app; other sessions are unaffected, and they end with this session. ${readIt}`];
     case "already":
       return ["", `${kb} -- quern already had its ${outcome.screens} screens for ${outcome.app} ` +
         `loaded. ${readIt}`];
