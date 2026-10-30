@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { quernRemoteList } from "../dist/tools/system.js";
+import { markCurrent, quernRemoteList } from "../dist/tools/system.js";
 
 function fakeQuern(script) {
   const dir = mkdtempSync(join(tmpdir(), "quern-lr-"));
@@ -63,4 +63,20 @@ test("an older quern on PATH falls back to the installed wrapper", async () => {
   chmodSync(join(dir, ".local", "bin", "quern"), 0o755);
   const data = await withEnv({ PATH: `${bin}:/usr/bin:/bin`, HOME: dir }, quernRemoteList);
   assert.equal(data.remotes[0].name, "r");
+});
+
+
+test("the server this MCP talks to is marked current, and only it", () => {
+  const data = { remotes: [{ name: "local", local: true }, { name: "romulus" }, { name: "studio" }] };
+  assert.deepEqual(markCurrent(structuredClone(data), "local").remotes.map((r) => r.current),
+                   [true, false, false]);
+  assert.deepEqual(markCurrent(structuredClone(data), "romulus").remotes.map((r) => r.current),
+                   [false, true, false]);
+  assert.equal(markCurrent({ error: "x" }, "local").error, "x");          // not a list: untouched
+});
+
+test("it asks for this Mac's server too", async () => {
+  const { dir, bin } = fakeQuern(`printf '{"args": "%s"}' "$*"`);
+  const data = await withEnv({ PATH: `${bin}:/usr/bin:/bin`, HOME: dir }, quernRemoteList);
+  assert.equal(data.args, "remote list --json --with-local");
 });

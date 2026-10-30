@@ -98,6 +98,7 @@ class DevicePool:
                     entry.runtime = device_info.runtime
                     entry.is_available = device_info.is_available
                     entry.device_family = device_info.device_family
+                    entry.model = device_info.model
                 else:
                     # New device discovered
                     entry = DevicePoolEntry(
@@ -108,6 +109,7 @@ class DevicePool:
                         os_version=device_info.os_version,
                         runtime=device_info.runtime,
                         device_family=device_info.device_family,
+                        model=device_info.model,
                         last_used=now,
                         is_available=device_info.is_available,
                     )
@@ -185,18 +187,25 @@ class DevicePool:
         devices: list[DevicePoolEntry],
         name: str | None,
     ) -> list[DevicePoolEntry]:
-        """Filter devices by name, preferring exact matches over substring.
+        """Filter devices by name or model, preferring exact matches over
+        substring.
 
-        If any device name matches exactly (case-insensitive), return only
-        exact matches. Otherwise fall back to substring matching.
+        If any device's name or model matches exactly (case-insensitive),
+        return only exact matches. Otherwise fall back to substring matching.
+        The model counts as well as the name: a simulator renamed "CI 3" is
+        still an "iPhone 15 Pro", and asking for one should find it.
         """
         if not name:
             return devices
         name_lower = name.lower()
-        exact = [d for d in devices if d.name.lower() == name_lower]
+
+        def fields(d: DevicePoolEntry) -> tuple[str, str]:
+            return d.name.lower(), (d.model or "").lower()
+
+        exact = [d for d in devices if name_lower in fields(d)]
         if exact:
             return exact
-        return [d for d in devices if name_lower in d.name.lower()]
+        return [d for d in devices if any(name_lower in f for f in fields(d) if f)]
 
     @staticmethod
     def _effective_device_family(device: DevicePoolEntry) -> str:

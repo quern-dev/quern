@@ -30,7 +30,7 @@ Your reservation lasts as long as this MCP session: released when it ends, and k
       group: z.string().optional().describe("A named group from config.json's device_groups"),
       device_type: z.enum(["simulator", "device", "android_emulator", "android_device"]).optional(),
       os_version: z.string().optional().describe("OS version prefix, e.g. '18'"),
-      name: z.string().optional().describe("Device name pattern, e.g. 'iPhone 16'"),
+      name: z.string().optional().describe("Device name or model, e.g. 'iPhone 16' or 'iPad Pro 11-inch (M4)'; matches a renamed simulator by its model"),
       device_family: z.string().optional().describe("'iPhone', 'iPad', ..."),
       auto_boot: z.boolean().optional().describe("Boot shutdown devices to make up the count (default true)"),
       on_release: z.enum(["none", "shutdown_booted"]).optional().describe("shutdown_booted: when released, shut down the simulators this reservation booted. Default none"),

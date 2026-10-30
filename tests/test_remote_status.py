@@ -127,7 +127,7 @@ def test_every_request_names_a_session_and_the_pinned_key(monkeypatch):
 
 
 def _rows(monkeypatch, rows):
-    monkeypatch.setattr(status, "statuses", lambda version, timeout=None, deadline=None: rows)
+    monkeypatch.setattr(status, "statuses", lambda version, **kw: rows)
 
 
 UP = {"name": "studio", "url": "https://studio.lan:9130", "label": "scorpius",
@@ -348,3 +348,42 @@ def test_without_devices_the_list_stays_one_line_each(monkeypatch, capsys):
     _rows(monkeypatch, [UP])
     remote_cli._remote(["list"])
     assert len(capsys.readouterr().out.splitlines()) == 1
+
+
+# -- this Mac, listed first -------------------------------------------------------
+
+
+def test_this_mac_is_listed_first_when_asked(monkeypatch):
+    records = {"studio": {"url": "https://studio.lan:9130", "fingerprint": FP, "key": "k"}}
+    monkeypatch.setattr(client, "_read", lambda: records)
+    monkeypatch.setattr(status, "_local", lambda: client.Remote(
+        name=status.LOCAL, url="http://127.0.0.1:9110", fingerprint="", key="owner",
+        label="this Mac"))
+    _answers(monkeypatch, {"/health": {"status": "ok", "version": "0.25.0"},
+                           "/api/v1/device/list": DEVICES})
+    rows = status.statuses("0.25.0", include_local=True)
+    assert [(r["name"], r["local"]) for r in rows] == [("local", True), ("studio", False)]
+    assert status.statuses("0.25.0")[0]["name"] == "studio"         # only when asked
+
+
+def test_this_macs_server_down_is_said_and_does_not_fail_the_list(monkeypatch, capsys):
+    local = {**status._blank("local", None, "this Mac"), "local": True,
+             "error": "not running here (quern start)"}
+    _rows(monkeypatch, [local, UP])
+    assert remote_cli._remote(["list", "--with-local"]) == 0
+    assert "not running here" in capsys.readouterr().out
+
+
+def test_this_mac_talks_plain_http_on_loopback_with_no_pin(monkeypatch):
+    used = {}
+
+    class Opener:
+        def open(self, req, timeout):
+            used["url"] = req.full_url
+            raise urllib.error.URLError("stop")
+
+    monkeypatch.setattr(status.urllib.request, "build_opener", lambda *a: Opener())
+    monkeypatch.setattr(client, "opener", lambda r: (_ for _ in ()).throw(AssertionError("pinned")))
+    status.probe(client.Remote(name="local", url="http://127.0.0.1:9110", fingerprint="",
+                               key="owner", label="this Mac"), None)
+    assert used["url"] == "http://127.0.0.1:9110/health"

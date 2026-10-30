@@ -74,18 +74,31 @@ export function registerSystemTools(server: McpServer): void {
   );
 
   server.registerTool("list_remotes", {
-    description: `List the remote quern servers this machine is paired with (quern connect), each asked now: whether it answers, its quern version (and whether it differs from this Mac's), and its devices -- each with name, device_family, os_version (e.g. "iOS 17.5"), device_type, state, and model where the remote reports one -- with which are free (not held by anyone), which this key holds (yours) and who holds the rest (held_by).
+    description: `List the quern servers this agent could use -- this Mac's own (first, "local": true) and the remote ones this machine is paired with (quern connect) -- each asked now: whether it answers, its quern version (and whether it differs from this Mac's), and its devices -- each with name, device_family, os_version (e.g. "iOS 17.5"), device_type, state, and model where the remote reports one -- with which are free (not held by anyone), which this key holds (yours) and who holds the rest (held_by).
 
-Use it to see what other Macs could lend before choosing where to work: a remote's devices are used by starting an MCP with QUERN_REMOTE=<name>, or quern session run / record with it. A remote that could not be asked says why (down, timed out, certificate changed, key refused), never "no devices". Read-only; it uses only what each remote already lets this key read.`,
+The entry marked "current": true is the server this MCP talks to. Its devices are the ones you can use now: reserve one with reserve_devices(os_version="18.6", device_family="iPad", name=<name or model>), or by udid. A device on another server cannot be used from this session -- tell the user which server has it; they can start an MCP with QUERN_REMOTE=<name> to work there.
+
+A server that could not be asked says why (not running, timed out, certificate changed, key refused), never "no devices". Read-only; it uses only what each server already lets this key read.`,
     inputSchema: strictParams({}),
   }, async () => {
     try {
-      const data = await quernRemoteList();
+      const data = markCurrent(await quernRemoteList(), process.env.QUERN_REMOTE?.trim() || "local");
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text" as const, text: errorText(e) }], isError: true };
     }
   });
+}
+
+/** Mark the entry this MCP talks to -- this Mac's server, or the remote
+ * QUERN_REMOTE names -- so an agent knows which devices it can reserve now. */
+export function markCurrent(data: unknown, current: string): unknown {
+  const remotes = (data as { remotes?: unknown })?.remotes;
+  if (!Array.isArray(remotes)) return data;
+  for (const r of remotes as Record<string, unknown>[]) {
+    if (r && typeof r === "object") r.current = r.name === current;
+  }
+  return data;
 }
 
 /** `quern remote list --json`, from the quern CLI on this machine: the paired
@@ -94,7 +107,7 @@ Use it to see what other Macs could lend before choosing where to work: a remote
 export function quernRemoteList(): Promise<unknown> {
   const candidates = ["quern", `${homedir()}/.local/bin/quern`];
   const attempt = (i: number): Promise<unknown> => new Promise((resolve, reject) => {
-    execFile(candidates[i], ["remote", "list", "--json"], { timeout: 60_000 },
+    execFile(candidates[i], ["remote", "list", "--json", "--with-local"], { timeout: 60_000 },
       (err, stdout, stderr) => {
         const out = String(stdout ?? "").trim();
         if (out) {

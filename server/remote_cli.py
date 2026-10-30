@@ -6,10 +6,11 @@
                                         on the client: remember one paired by hand
     quern remote status                 on the server: the listener and its certificate
     quern remote rotate-cert            on the server: a new certificate; clients re-pair
-    quern remote list [--json] [--no-check] [--devices]
+    quern remote list [--json] [--no-check] [--devices] [--with-local]
                                         on the client: the servers it is paired with,
                                         each asked now: up or not, version, free devices;
-                                        --devices lists each device: OS, family, state
+                                        --devices lists each device: OS, model, state;
+                                        --with-local lists this Mac's own server first
     quern remote forget NAME            on the client: forget one
 """
 
@@ -155,6 +156,7 @@ def _remote(args: list[str]) -> int:
         parser.add_argument("--json", action="store_true")
         parser.add_argument("--no-check", action="store_true")
         parser.add_argument("--devices", action="store_true")
+        parser.add_argument("--with-local", action="store_true")
         try:
             opts = parser.parse_args(args[1:])
         except SystemExit:
@@ -176,7 +178,8 @@ def _remote(args: list[str]) -> int:
                 print(f"{r.name:<16} {r.url:<32} as {r.label or '?':<16} "
                       f"{cert_mod.show(r.fingerprint)[:23]}...")
             return 0
-        return _list_status(as_json=opts.json, devices=opts.devices)
+        return _list_status(as_json=opts.json, devices=opts.devices,
+                            with_local=opts.with_local)
     if args[:1] == ["forget"] and len(args) == 2:
         if client.forget(args[1]):
             print(f"Forgot {args[1]}. Its client key still works until the server's owner "
@@ -188,16 +191,18 @@ def _remote(args: list[str]) -> int:
     return 2
 
 
-def _list_status(*, as_json: bool, devices: bool = False) -> int:
+def _list_status(*, as_json: bool, devices: bool = False, with_local: bool = False) -> int:
     """Every paired remote, asked now (`server.remote.status`). Exits 1 when
     any could not be asked, so a script can tell "all up" from "listed"."""
     from server import get_version
     from server.remote import status
 
-    rows = status.statuses(get_version())
+    rows = status.statuses(get_version(), include_local=with_local)
     if as_json:
         print(json.dumps({"local_version": get_version(), "remotes": rows}, indent=2))
-    elif not rows:
+    elif not rows or (with_local and len(rows) == 1):
+        for r in rows:
+            print(_status_line(r))
         print("Not paired with any remote quern. Pair with `quern connect`.")
     else:
         for r in rows:
@@ -205,7 +210,10 @@ def _list_status(*, as_json: bool, devices: bool = False) -> int:
             if devices and r.get("devices"):
                 for line in _device_lines(r["devices"]):
                     print(line)
-    return 0 if all(r.get("reachable") and r.get("devices") is not None for r in rows) else 1
+    # This Mac's server not running is a normal state for someone who uses
+    # only remotes: said, but not a failure of the remote list.
+    return 0 if all(r.get("reachable") and r.get("devices") is not None
+                    for r in rows if not r.get("local")) else 1
 
 
 def _device_lines(devices: list[dict]) -> list[str]:

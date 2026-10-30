@@ -1878,6 +1878,12 @@ class DeviceInfo(BaseModel):
     #: Empty for simulators and for devices that are not attached.
     connection_type: str = ""
     device_family: str = ""  # "iPhone", "iPad", "Apple Watch", "Apple TV", or ""
+    #: The hardware model, as Apple names it ("iPhone 15 Pro", "iPad Pro
+    #: 11-inch (M4)"), or "" when unknown. A simulator's `name` is only its
+    #: default and can be renamed; this is what it is. A physical device's
+    #: marketing name, or its product type ("iPhone16,1") when that is all
+    #: devicectl gives.
+    model: str = ""
     # True for simulators; physical devices: True when
     # reachable (tunnel not "unavailable")
     is_connected: bool = True
@@ -2835,6 +2841,7 @@ class DevicePoolEntry(BaseModel):
     os_version: str
     runtime: str
     device_family: str = ""  # "iPhone", "iPad", "Apple Watch", "Apple TV", or ""
+    model: str = ""  # as DeviceInfo.model: what the device is, whatever it is called
 
     last_used: datetime
     is_available: bool

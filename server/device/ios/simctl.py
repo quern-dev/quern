@@ -41,6 +41,27 @@ def _launched_pid(stdout: str) -> int | None:
 class SimctlBackend:
     """Manages iOS simulators via xcrun simctl subprocess calls."""
 
+    #: deviceTypeIdentifier -> the model's name, from `simctl list
+    #: devicetypes`. Kept for the process: the set changes only with an Xcode
+    #: install, and an identifier not in it triggers one refresh.
+    _device_type_names: dict[str, str] | None = None
+
+    async def _model_names(self, wanted: set[str]) -> dict[str, str]:
+        """Model names for these deviceTypeIdentifiers; {} when simctl cannot
+        say -- a missing model is shown as unknown, never guessed."""
+        names = SimctlBackend._device_type_names
+        if names is None or not wanted <= names.keys():
+            try:
+                stdout, _ = await self._run_simctl("list", "devicetypes", "--json")
+                names = {t["identifier"]: t["name"]
+                         for t in json.loads(stdout).get("devicetypes", [])
+                         if isinstance(t, dict) and t.get("identifier") and t.get("name")}
+            except (DeviceError, OSError, ValueError, AttributeError):
+                logger.debug("Could not read simulator device types", exc_info=True)
+                return names or {}
+            SimctlBackend._device_type_names = names
+        return names
+
     async def _run_simctl(self, *args: str) -> tuple[str, str]:
         """Run an xcrun simctl command and return (stdout, stderr).
 
@@ -121,6 +142,9 @@ class SimctlBackend:
             logger.warning("Could not parse the simctl device list; treating as empty")
             return []
         devices: list[DeviceInfo] = []
+        models = await self._model_names({
+            d.get("deviceTypeIdentifier", "") for ds in data.get("devices", {}).values()
+            for d in ds if isinstance(d, dict) and d.get("deviceTypeIdentifier")})
 
         for runtime_key, device_list in data.get("devices", {}).items():
             os_version = self._parse_runtime(runtime_key)
@@ -145,6 +169,7 @@ class SimctlBackend:
                     runtime=runtime_key,
                     is_available=True,
                     device_family=device_family,
+                    model=models.get(device_type_id, ""),
                 ))
 
         return devices

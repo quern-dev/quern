@@ -253,6 +253,10 @@ class DevicectlBackend:
                 connection_type=connection_type,
                 device_family=device_type_str,  # Already "iPhone", "iPad", etc.
                 is_connected=is_connected,
+                # The marketing name when devicectl has it; the product type
+                # ("iPhone16,1") is still the model, where it does not.
+                model=(hardware_props.get("marketingName")
+                       or hardware_props.get("productType") or ""),
             ))
 
         return devices

@@ -38,10 +38,17 @@ class _Unexpected(Exception):
 _SESSION = "quern-remote-status"
 
 
+#: The name this Mac's own server is listed under, first.
+LOCAL = "local"
+
+
 def _get(remote: client.Remote, path: str, timeout: float) -> Any:
     req = urllib.request.Request(remote.url + path, headers={
         "Authorization": f"Bearer {remote.key}", "X-Quern-Session": _SESSION})
-    with client.opener(remote).open(req, timeout=timeout) as resp:
+    # This Mac's own server is plain http on loopback, with no pin to check.
+    opener = (urllib.request.build_opener() if remote.name == LOCAL
+              else client.opener(remote))
+    with opener.open(req, timeout=timeout) as resp:
         body = resp.read()
     try:
         return json.loads(body)
@@ -139,8 +146,21 @@ def probe(remote: client.Remote, local_version: str | None,
     return out
 
 
+def _local() -> client.Remote | dict:
+    """This Mac's own server, to list beside the remotes, or why it cannot be."""
+    from server.__main__ import _server_base_url
+    from server.config import client_api_key
+
+    url = _server_base_url()
+    if url is None:
+        return {**_blank(LOCAL, None, "this Mac"), "local": True,
+                "error": "not running here (quern start)"}
+    return client.Remote(name=LOCAL, url=url.rstrip("/"), fingerprint="", key=client_api_key(),
+                         label="this Mac")
+
+
 def statuses(local_version: str | None, timeout: float = TIMEOUT_SECONDS,
-             deadline: float = DEADLINE_SECONDS) -> list[dict]:
+             deadline: float = DEADLINE_SECONDS, include_local: bool = False) -> list[dict]:
     """Every paired remote's state, in name order. A record that cannot be read
     is listed with why, not dropped: the rest still answer."""
     try:
@@ -153,9 +173,19 @@ def statuses(local_version: str | None, timeout: float = TIMEOUT_SECONDS,
             loaded.append(client.load(name))
         except client.RemoteError as e:
             loaded.append({"name": name, "url": None, "reachable": False, "error": str(e)})
+    if include_local:
+        # First, so a caller comparing machines starts from the one it is on.
+        try:
+            loaded.insert(0, _local())
+        except Exception as e:  # noqa: BLE001 -- the remotes still answer
+            loaded.insert(0, {**_blank(LOCAL, None, "this Mac"), "local": True,
+                              "error": f"could not be asked ({e})"})
     remotes = [r for r in loaded if isinstance(r, client.Remote)]
     probed = _probe_all(remotes, local_version, timeout, deadline)
-    return [probed[r.name] if isinstance(r, client.Remote) else r for r in loaded]
+    rows = [probed[r.name] if isinstance(r, client.Remote) else r for r in loaded]
+    for row in rows:
+        row["local"] = row.get("name") == LOCAL and row.get("label") == "this Mac"
+    return rows
 
 
 def _probe_all(remotes: list[client.Remote], local_version: str | None, timeout: float,
