@@ -97,7 +97,12 @@ def _devices(answer: Any, label: str = "") -> list[dict]:
         devices.append({
             "udid": d.get("udid"), "name": d.get("name"),
             "os_version": d.get("os_version"), "device_type": d.get("device_type"),
-            "state": d.get("state"),
+            "device_family": d.get("device_family"),
+            # What the remote says when it knows the model (newer servers);
+            # None otherwise -- a simulator's name is only its default.
+            "model": d.get("model"),
+            "state": d.get("state"), "is_available": d.get("is_available"),
+            "held_by": held.get("held_by") if held else None,
             # Free: nobody holds it. "Yours": held by this key, through any of
             # its sessions. The server's own `yours` means this *session*, and
             # this read names a session of its own, so it never matched; a

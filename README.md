@@ -468,7 +468,7 @@ quern connect URL --code CODE   # On that machine: pair, and remember the server
 quern connect URL --key KEY --fingerprint SHA256   # ...or remember one whose key was issued by hand
 quern remote status          # The remote listener here: its address and certificate
 quern remote rotate-cert     # A new certificate for it; every client pairs again
-quern remote list [--json] [--no-check]   # The remote querns this machine is paired with, each asked now: up or down, version, free devices
+quern remote list [--json] [--no-check] [--devices]   # The remote querns this machine is paired with, each asked now: up or down, version, free devices; --devices lists each one (OS, family, state, who holds it)
 quern remote forget NAME     # Forget one
 quern set-update-check [on|off]
                              # Show or set the automatic daily update check

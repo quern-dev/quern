@@ -74,7 +74,7 @@ export function registerSystemTools(server: McpServer): void {
   );
 
   server.registerTool("list_remotes", {
-    description: `List the remote quern servers this machine is paired with (quern connect), each asked now: whether it answers, its quern version (and whether it differs from this Mac's), and its devices with which are free -- not held by anyone -- and which this key holds.
+    description: `List the remote quern servers this machine is paired with (quern connect), each asked now: whether it answers, its quern version (and whether it differs from this Mac's), and its devices -- each with name, device_family, os_version (e.g. "iOS 17.5"), device_type, state, and model where the remote reports one -- with which are free (not held by anyone), which this key holds (yours) and who holds the rest (held_by).
 
 Use it to see what other Macs could lend before choosing where to work: a remote's devices are used by starting an MCP with QUERN_REMOTE=<name>, or quern session run / record with it. A remote that could not be asked says why (down, timed out, certificate changed, key refused), never "no devices". Read-only; it uses only what each remote already lets this key read.`,
     inputSchema: strictParams({}),

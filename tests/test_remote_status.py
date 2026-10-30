@@ -301,3 +301,50 @@ def test_a_device_held_by_another_session_of_this_key_is_yours(monkeypatch):
                            "/api/v1/device/list": listing})
     out = status.probe(_remote(), "0.25.0")          # paired as label "scorpius"
     assert [d["udid"] for d in out["devices"] if d["yours"]] == ["A"]
+
+
+
+def test_each_device_carries_what_the_remote_says_about_it(monkeypatch):
+    listing = {"devices": [
+        {"udid": "A", "name": "iPhone 15 Pro", "state": "booted", "device_type": "simulator",
+         "os_version": "iOS 17.5", "device_family": "iPhone", "is_available": True,
+         "reservation": None},
+        {"udid": "B", "name": "Studio iPad", "state": "shutdown", "device_type": "simulator",
+         "os_version": "iOS 26.1", "device_family": "iPad", "model": "iPad Pro 13-inch (M5)",
+         "reservation": {"held_by": "other:ci", "yours": False}},
+    ]}
+    _answers(monkeypatch, {"/health": {"status": "ok", "version": "0.25.0"},
+                           "/api/v1/device/list": listing})
+    a, b = status.probe(_remote(), "0.25.0")["devices"]
+    assert (a["os_version"], a["device_family"], a["model"], a["held_by"]) == (
+        "iOS 17.5", "iPhone", None, None)
+    assert (b["model"], b["held_by"]) == ("iPad Pro 13-inch (M5)", "other:ci")
+
+
+def test_devices_lists_each_one_free_and_booted_first(monkeypatch, capsys):
+    row = {**UP, "devices": [
+        {"udid": "H", "name": "iPhone SE", "device_family": "iPhone", "os_version": "iOS 18.0",
+         "device_type": "simulator", "state": "booted", "free": False, "yours": False,
+         "held_by": "other:ci"},
+        {"udid": "S", "name": "iPhone 16", "device_family": "iPhone", "os_version": "iOS 18.0",
+         "device_type": "simulator", "state": "shutdown", "free": True, "yours": False},
+        {"udid": "B", "name": "iPhone 15 Pro", "device_family": "iPhone",
+         "os_version": "iOS 17.5", "device_type": "simulator", "state": "booted",
+         "free": True, "yours": False},
+        {"udid": "Y", "name": "iPad", "device_family": "iPad", "os_version": "iOS 26.1",
+         "device_type": "simulator", "state": "booted", "free": False, "yours": True,
+         "model": "iPad Pro 13-inch (M5)"},
+    ]}
+    _rows(monkeypatch, [row])
+    remote_cli._remote(["list", "--devices"])
+    lines = capsys.readouterr().out.splitlines()[1:]
+    assert [line.split()[-1] for line in lines] == ["B", "S", "Y", "H"]
+    assert "iOS 17.5" in lines[0] and "iPhone" in lines[0] and "free" in lines[0]
+    assert "iPad (iPad Pro 13-inch (M5))" in lines[2] and "yours" in lines[2]
+    assert "held by other:ci" in lines[3]
+
+
+def test_without_devices_the_list_stays_one_line_each(monkeypatch, capsys):
+    _rows(monkeypatch, [UP])
+    remote_cli._remote(["list"])
+    assert len(capsys.readouterr().out.splitlines()) == 1

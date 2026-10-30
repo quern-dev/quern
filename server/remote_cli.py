@@ -6,9 +6,10 @@
                                         on the client: remember one paired by hand
     quern remote status                 on the server: the listener and its certificate
     quern remote rotate-cert            on the server: a new certificate; clients re-pair
-    quern remote list [--json] [--no-check]
+    quern remote list [--json] [--no-check] [--devices]
                                         on the client: the servers it is paired with,
-                                        each asked now: up or not, version, free devices
+                                        each asked now: up or not, version, free devices;
+                                        --devices lists each device: OS, family, state
     quern remote forget NAME            on the client: forget one
 """
 
@@ -153,6 +154,7 @@ def _remote(args: list[str]) -> int:
         parser = argparse.ArgumentParser(prog="quern remote list", add_help=False)
         parser.add_argument("--json", action="store_true")
         parser.add_argument("--no-check", action="store_true")
+        parser.add_argument("--devices", action="store_true")
         try:
             opts = parser.parse_args(args[1:])
         except SystemExit:
@@ -174,7 +176,7 @@ def _remote(args: list[str]) -> int:
                 print(f"{r.name:<16} {r.url:<32} as {r.label or '?':<16} "
                       f"{cert_mod.show(r.fingerprint)[:23]}...")
             return 0
-        return _list_status(as_json=opts.json)
+        return _list_status(as_json=opts.json, devices=opts.devices)
     if args[:1] == ["forget"] and len(args) == 2:
         if client.forget(args[1]):
             print(f"Forgot {args[1]}. Its client key still works until the server's owner "
@@ -186,7 +188,7 @@ def _remote(args: list[str]) -> int:
     return 2
 
 
-def _list_status(*, as_json: bool) -> int:
+def _list_status(*, as_json: bool, devices: bool = False) -> int:
     """Every paired remote, asked now (`server.remote.status`). Exits 1 when
     any could not be asked, so a script can tell "all up" from "listed"."""
     from server import get_version
@@ -200,7 +202,32 @@ def _list_status(*, as_json: bool) -> int:
     else:
         for r in rows:
             print(_status_line(r))
+            if devices and r.get("devices"):
+                for line in _device_lines(r["devices"]):
+                    print(line)
     return 0 if all(r.get("reachable") and r.get("devices") is not None for r in rows) else 1
+
+
+def _device_lines(devices: list[dict]) -> list[str]:
+    """One line per device: free and booted first, which is what a caller
+    choosing where to run wants to see; then the rest; held last."""
+    def order(d: dict) -> tuple:
+        return (not d.get("free"), d.get("state") != "booted",
+                d.get("device_family") or "", d.get("os_version") or "", d.get("name") or "")
+
+    lines = []
+    for d in sorted(devices, key=order):
+        who = ("free" if d.get("free") else
+               "yours" if d.get("yours") else f"held by {d.get('held_by') or 'another session'}")
+        if d.get("is_available") is False:
+            who += ", unavailable"
+        name = d.get("name") or "?"
+        if d.get("model") and d["model"] != name:
+            name += f" ({d['model']})"
+        lines.append(f"    {name:<34} {d.get('device_family') or '':<8} "
+                     f"{d.get('os_version') or '':<12} {d.get('device_type') or '':<16} "
+                     f"{d.get('state') or '':<9} {who}  {d.get('udid') or ''}")
+    return lines
 
 
 def _status_line(r: dict) -> str:
