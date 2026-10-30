@@ -3,6 +3,7 @@ import { z } from "zod";
 import { heldSessionState } from "../held-session.js";
 import { SESSION_ID, apiRequest } from "../http.js";
 import { strictParams, errorText } from "./helpers.js";
+import { elsewhereHint } from "./system.js";
 
 function answer(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
@@ -39,6 +40,15 @@ Your reservation lasts as long as this MCP session: released when it ends, and k
     try {
       return answer(await apiRequest("POST", path("/reservations"), undefined, args));
     } catch (e) {
+      // Nothing here matched (409): say where something does, rather than
+      // leave the agent to conclude it exists nowhere (found live).
+      const message = e instanceof Error ? e.message : String(e);
+      if (message.includes("HTTP 409") && !args.udids && !args.group) {
+        const hint = await elsewhereHint(args);
+        if (hint) {
+          return { content: [{ type: "text" as const, text: errorText(e) + hint }], isError: true };
+        }
+      }
       return failure(e);
     }
   });

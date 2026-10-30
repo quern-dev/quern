@@ -80,3 +80,75 @@ test("it asks for this Mac's server too", async () => {
   const data = await withEnv({ PATH: `${bin}:/usr/bin:/bin`, HOME: dir }, quernRemoteList);
   assert.equal(data.args, "remote list --json --with-local");
 });
+
+import { matchingElsewhere, elsewhereHint } from "../dist/tools/system.js";
+import { currentRemote, selectServer } from "../dist/config.js";
+
+const LIST = {
+  remotes: [
+    { name: "local", devices: [
+      { udid: "L1", name: "iPhone 16 Pro", model: "iPhone 16 Pro", os_version: "iOS 18.6",
+        device_family: "iPhone", device_type: "simulator", free: true, state: "booted" },
+    ] },
+    { name: "romulus", devices: [
+      { udid: "R1", name: "iPhone 15 Pro", model: "iPhone 15 Pro", os_version: "iOS 17.5",
+        device_family: "iPhone", device_type: "simulator", free: true, state: "booted" },
+      { udid: "R2", name: "CI 3", model: "iPhone 15", os_version: "iOS 17.5",
+        device_family: "iPhone", device_type: "simulator", free: true, state: "shutdown" },
+      { udid: "R3", name: "iPhone SE", model: "iPhone SE", os_version: "iOS 17.5.1",
+        device_family: "iPhone", device_type: "simulator", free: false, state: "booted" },
+      { udid: "R4", name: "iPad Air", model: "iPad Air", os_version: "iOS 17.5",
+        device_family: "iPad", device_type: "simulator", free: true, state: "shutdown" },
+      { udid: "R5", name: "iPhone 15", model: "iPhone 15", os_version: "iOS 17.50",
+        device_family: "iPhone", device_type: "simulator", free: true, state: "shutdown" },
+    ] },
+    { name: "studio", reachable: false, devices: null, error: "timed out" },
+  ],
+};
+const udids = (found) => found.flatMap((f) => f.devices.map((d) => `${f.name}:${d.udid}`));
+
+test("elsewhere: the pool's rules -- OS prefix on a dot, family, free only, never the current server", () => {
+  assert.deepEqual(udids(matchingElsewhere(LIST, "local", { os_version: "17.5", device_family: "iPhone" })),
+                   ["romulus:R1", "romulus:R2"], "17.50 is not 17.5; held R3 is not offered");
+  assert.deepEqual(udids(matchingElsewhere(LIST, "local", { os_version: "iOS 17" })),
+                   ["romulus:R1", "romulus:R2", "romulus:R4", "romulus:R5"]);
+  assert.deepEqual(udids(matchingElsewhere(LIST, "romulus", { device_family: "iphone" })), ["local:L1"],
+                   "from a remote, this Mac is elsewhere; family is case-insensitive");
+  assert.deepEqual(matchingElsewhere(LIST, "local", { device_type: "device" }), []);
+});
+
+test("elsewhere: a name matches name or model, exact before substring", () => {
+  assert.deepEqual(udids(matchingElsewhere(LIST, "local", { name: "iphone 15" })), ["romulus:R2", "romulus:R5"],
+                   "exact on R2's model and R5's name, so the substring R1 is left out");
+  assert.deepEqual(udids(matchingElsewhere(LIST, "local", { name: "15 Pro" })), ["romulus:R1"]);
+});
+
+test("the hint names the server and how to switch; nothing when nowhere has a match", async () => {
+  const { dir, bin } = fakeQuern(`cat <<'J'\n${JSON.stringify(LIST)}\nJ`);
+  const hint = await withEnv({ PATH: `${bin}:/usr/bin:/bin`, HOME: dir },
+    () => elsewhereHint({ os_version: "17.5", device_family: "iPhone" }));
+  assert.match(hint, /romulus has 2 free that match: iPhone 15 Pro \(booted\), CI 3/);
+  assert.match(hint, /use_remote\(name="romulus"\)/);
+  const none = await withEnv({ PATH: `${bin}:/usr/bin:/bin`, HOME: dir },
+    () => elsewhereHint({ os_version: "16.0" }));
+  assert.equal(none, "");
+  const broken = fakeQuern("exit 2");
+  assert.equal(await withEnv({ PATH: `${broken.bin}:/usr/bin:/bin`, HOME: broken.dir },
+    () => elsewhereHint({ os_version: "17.5" })), "", "a list that fails costs only the hint");
+});
+
+test("use_remote's selection wins over QUERN_REMOTE, and 'local' means this Mac", () => {
+  const saved = process.env.QUERN_REMOTE;
+  try {
+    process.env.QUERN_REMOTE = "romulus";
+    assert.equal(currentRemote(), "romulus");
+    selectServer("local");
+    assert.equal(currentRemote(), undefined);
+    selectServer("studio");
+    assert.equal(currentRemote(), "studio");
+    selectServer(undefined);
+    assert.equal(currentRemote(), "romulus", "undefined goes back to QUERN_REMOTE");
+  } finally {
+    if (saved === undefined) delete process.env.QUERN_REMOTE; else process.env.QUERN_REMOTE = saved;
+  }
+});

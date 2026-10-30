@@ -43,6 +43,28 @@ export const DEFAULT_SERVER_PORT = 9110;
  * "nothing told us where to look". */
 export type ServerSource = "remote" | "env" | "state" | "default";
 
+/** The server use_remote switched this MCP to: a remote's name, LOCAL for
+ * this Mac's own, or undefined for whatever QUERN_REMOTE says. */
+export const LOCAL = "local";
+let selected: string | undefined;
+
+/** The paired remote this MCP talks to now, or undefined for this Mac's. */
+export function currentRemote(): string | undefined {
+  if (selected !== undefined) return selected === LOCAL ? undefined : selected;
+  return process.env.QUERN_REMOTE?.trim() || undefined;
+}
+
+/** Point every later request at `name` -- a paired remote, or LOCAL;
+ * undefined goes back to what QUERN_REMOTE says. */
+export function selectServer(name: string | undefined): void {
+  selected = name;
+}
+
+/** What selectServer was last given, to put back if a switch fails. */
+export function selectedServer(): string | undefined {
+  return selected;
+}
+
 export function discoverServer(): {
   url: string;
   apiKey: string;
@@ -50,11 +72,12 @@ export function discoverServer(): {
   /** Set for a remote quern: every connection is pinned to it (remote.ts). */
   fingerprint?: string;
 } {
-  // Priority 0: a paired remote quern (#254, phase 3). Named explicitly, so
+  // Priority 0: a paired remote quern (#254, phase 3), named by QUERN_REMOTE
+  // or chosen with use_remote. Named explicitly, so
   // it wins over everything -- and if it cannot be read this throws rather
   // than falling back: quietly driving this Mac's server instead of the one
   // asked for would put an agent's work on the wrong machine.
-  const remoteName = process.env.QUERN_REMOTE?.trim();
+  const remoteName = currentRemote();
   if (remoteName) {
     const remote = loadRemote(remoteName);
     return { url: remote.url, apiKey: remote.key, source: "remote",

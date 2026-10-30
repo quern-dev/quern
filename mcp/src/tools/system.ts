@@ -1,6 +1,9 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { apiRequest } from "../http.js";
+import { LOCAL, currentRemote, discoverServer, selectServer, selectedServer } from "../config.js";
+import { switchHeldSession } from "../held-session.js";
+import { SESSION_ID, apiRequest, serverFetch } from "../http.js";
+import { loadRemote } from "../remote.js";
 import { errorText, strictParams } from "./helpers.js";
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
@@ -76,18 +79,165 @@ export function registerSystemTools(server: McpServer): void {
   server.registerTool("list_remotes", {
     description: `List the quern servers this agent could use -- this Mac's own (first, "local": true) and the remote ones this machine is paired with (quern connect) -- each asked now: whether it answers, its quern version (and whether it differs from this Mac's), and its devices -- each with name, device_family, os_version (e.g. "iOS 17.5"), device_type, state, and model where the remote reports one -- with which are free (not held by anyone), which this key holds (yours) and who holds the rest (held_by).
 
-The entry marked "current": true is the server this MCP talks to. Its devices are the ones you can use now: reserve one with reserve_devices(os_version="18.6", device_family="iPad", name=<name or model>), or by udid. A device on another server cannot be used from this session -- tell the user which server has it; they can start an MCP with QUERN_REMOTE=<name> to work there.
+The entry marked "current": true is the server this MCP talks to. Its devices are the ones you can use now: reserve one with reserve_devices(os_version="18.6", device_family="iPad", name=<name or model>), or by udid. To use a device on another server, switch to it first with use_remote(name=<its name>), then reserve it.
 
 A server that could not be asked says why (not running, timed out, certificate changed, key refused), never "no devices". Read-only; it uses only what each server already lets this key read.`,
     inputSchema: strictParams({}),
   }, async () => {
     try {
-      const data = markCurrent(await quernRemoteList(), process.env.QUERN_REMOTE?.trim() || "local");
+      const data = markCurrent(await quernRemoteList(), currentRemote() ?? LOCAL);
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text" as const, text: errorText(e) }], isError: true };
     }
   });
+
+  server.registerTool("use_remote", {
+    description: `Switch this session to another quern server -- a paired remote from list_remotes, or "local" for this Mac's own -- so every later tool call (reserve_devices, take_screenshot, tap_element, ...) works on that machine and its devices. Use it when the device the user wants is on another server.
+
+One server at a time: devices you hold on the current server must be released first (release_devices), or pass release=true to release them as part of the switch. Nothing else follows you -- mocks, proxy settings and loaded landmarks stay where they were set. The quern CLI in your shell is not switched; it still talks to this Mac's server.`,
+    inputSchema: strictParams({
+      name: z.string().describe(`A server's name from list_remotes, or "local" for this Mac's own`),
+      release: z.boolean().optional().describe("Release the devices you hold on the current server as part of the switch (default false: refuse)"),
+    }),
+  }, async ({ name, release }) => {
+    const text = (data: unknown, isError = false) => ({
+      content: [{ type: "text" as const, text: typeof data === "string" ? data : JSON.stringify(data, null, 2) }],
+      ...(isError ? { isError: true } : {}),
+    });
+    const target = name.trim();
+    const from = currentRemote() ?? LOCAL;
+    if (target === from) return text({ current: target, note: "already using this server" });
+    if (target !== LOCAL) {
+      try {
+        loadRemote(target);
+      } catch {
+        return text(`No paired remote named "${target}": list_remotes shows the servers ` +
+          `this machine is paired with, and "local" is this Mac's own.`, true);
+      }
+    }
+    // What this session holds where it is now: switching would strand it, so
+    // it is released only when asked to.
+    let held: string[] = [];
+    try {
+      const session = (await apiRequest("GET", `/api/v1/sessions/${encodeURIComponent(SESSION_ID)}`)) as
+        { reservations?: { udid?: string }[] } | null;
+      held = (session?.reservations ?? []).map((r) => String(r.udid));
+    } catch {
+      // No session there, or the server is down: nothing is held that a
+      // switch could strand.
+    }
+    if (held.length && !release) {
+      return text(`You hold ${held.join(", ")} on ${from}. Release them first ` +
+        `(release_devices), or call use_remote(name="${target}", release=true).`, true);
+    }
+    // Is the new server there? Asked before switching, so a dead one leaves
+    // this session where it was.
+    const before = selectedServer();
+    selectServer(target);
+    let version: unknown;
+    let url: string;
+    try {
+      const server = discoverServer();
+      url = server.url;
+      const resp = await serverFetch(server, new URL("/health", server.url).toString(),
+        { signal: AbortSignal.timeout(5000) });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      version = ((await resp.json()) as { version?: unknown }).version;
+    } catch (e) {
+      selectServer(before);
+      return text(`${target} did not answer (${errorText(e)}); still using ${from}.`, true);
+    }
+    let released: string[] = [];
+    if (held.length) {
+      selectServer(before);
+      try {
+        await apiRequest("DELETE", `/api/v1/sessions/${encodeURIComponent(SESSION_ID)}/reservations`);
+        released = held;
+      } catch {
+        // The clean close below releases them as well.
+      }
+      selectServer(target);
+    }
+    await switchHeldSession();
+    return text({
+      current: target, server_url: url, version, ...(released.length ? { released } : {}),
+      note: `Every tool call now goes to ${target}. Reserve a device there with reserve_devices.`,
+    });
+  });
+}
+
+export interface ReserveCriteria {
+  device_type?: string;
+  os_version?: string;
+  name?: string;
+  device_family?: string;
+}
+
+/** The OS version's number part: "iOS 18.6" -> "18.6". */
+function versionOf(v: unknown): string | undefined {
+  return String(v ?? "").match(/[\d.]+/)?.[0];
+}
+
+/** The free devices on servers other than `current` that reserve_devices'
+ * criteria would pick -- the pool's own rules (server/device/pool.py): an OS
+ * version prefix, exact type and family, and the name or model exact if any
+ * is, else a substring. Servers that could not be asked are left out. */
+export function matchingElsewhere(
+  data: unknown, current: string, criteria: ReserveCriteria,
+): { name: string; devices: Record<string, unknown>[] }[] {
+  const remotes = (data as { remotes?: unknown })?.remotes;
+  if (!Array.isArray(remotes)) return [];
+  const want = versionOf(criteria.os_version);
+  const out: { name: string; devices: Record<string, unknown>[] }[] = [];
+  for (const r of remotes as Record<string, unknown>[]) {
+    if (!r || r.name === current || !Array.isArray(r.devices)) continue;
+    let devices = (r.devices as Record<string, unknown>[]).filter((d) => {
+      if (!d.free || d.is_available === false) return false;
+      if (criteria.os_version) {
+        const have = versionOf(d.os_version);
+        if (!want || !have || !(have === want || have.startsWith(want + "."))) return false;
+      }
+      if (criteria.device_type && d.device_type !== criteria.device_type) return false;
+      if (criteria.device_family &&
+          String(d.device_family ?? "").toLowerCase() !== criteria.device_family.toLowerCase()) {
+        return false;
+      }
+      return true;
+    });
+    if (criteria.name) {
+      const n = criteria.name.toLowerCase();
+      const fields = (d: Record<string, unknown>) =>
+        [String(d.name ?? "").toLowerCase(), String(d.model ?? "").toLowerCase()].filter(Boolean);
+      const exact = devices.filter((d) => fields(d).includes(n));
+      devices = exact.length ? exact : devices.filter((d) => fields(d).some((f) => f.includes(n)));
+    }
+    if (devices.length) out.push({ name: String(r.name), devices });
+  }
+  return out;
+}
+
+/** A line for reserve_devices' failure: where the devices it could not find
+ * here are free, and how to get there. Empty when nowhere else has them or
+ * the remotes could not be listed. */
+export async function elsewhereHint(criteria: ReserveCriteria): Promise<string> {
+  let found;
+  try {
+    found = matchingElsewhere(await quernRemoteList(), currentRemote() ?? LOCAL, criteria);
+  } catch {
+    return "";
+  }
+  if (!found.length) return "";
+  const parts = found.map(({ name, devices }) => {
+    const shown = devices.slice(0, 5).map((d) =>
+      `${d.name}${d.state === "booted" ? " (booted)" : ""}`).join(", ");
+    const more = devices.length > 5 ? `, and ${devices.length - 5} more` : "";
+    return `${name === LOCAL ? "this Mac (local)" : name} has ${devices.length} free that ` +
+      `match: ${shown}${more}`;
+  });
+  const first = found[0].name;
+  return `\n\nNot on this server, but ${parts.join("; ")}. To use one, switch with ` +
+    `use_remote(name="${first}"), then reserve_devices again.`;
 }
 
 /** Mark the entry this MCP talks to -- this Mac's server, or the remote
