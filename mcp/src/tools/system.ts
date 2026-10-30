@@ -250,11 +250,14 @@ async function proxyThere(): Promise<Record<string, unknown>> {
   try {
     const s = (await apiRequest("GET", "/api/v1/proxy/status", undefined, undefined, 5000)) as
       { status?: string; local_capture?: string[]; mock_rules_count?: number } | null;
-    const running = s?.status === "running";
+    if (typeof s?.status !== "string") {
+      return { status: "unknown", note: "its proxy status did not say whether it runs" };
+    }
     return {
-      status: s?.status ?? "unknown", local_capture: s?.local_capture ?? [],
-      ...(running ? {} : { note: "Its proxy is not running, so mocks and capture cannot work " +
-        "there until its owner starts it (start_proxy)." }),
+      status: s.status, local_capture: s.local_capture ?? [],
+      ...(s.status === "running" ? {} : { note: `Its proxy is ${s.status}, so mocks and ` +
+        "capture cannot work there until it is started (start_proxy, which takes the " +
+        "server's owner key)." }),
     };
   } catch (e) {
     return { status: "unknown", note: `could not ask (${errorText(e)})` };
