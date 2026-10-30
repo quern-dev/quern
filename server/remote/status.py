@@ -83,7 +83,7 @@ def _health(answer: Any) -> str:
     return answer["version"]
 
 
-def _devices(answer: Any) -> list[dict]:
+def _devices(answer: Any, label: str = "") -> list[dict]:
     """Devices from a device-list answer; _Unexpected for anything else -- an
     answer that is not a list of devices is never read as "none" (review)."""
     rows = answer.get("devices") if isinstance(answer, dict) else None
@@ -98,9 +98,13 @@ def _devices(answer: Any) -> list[dict]:
             "udid": d.get("udid"), "name": d.get("name"),
             "os_version": d.get("os_version"), "device_type": d.get("device_type"),
             "state": d.get("state"),
-            # Free: nobody holds it. A device this key holds is "yours".
+            # Free: nobody holds it. "Yours": held by this key, through any of
+            # its sessions. The server's own `yours` means this *session*, and
+            # this read names a session of its own, so it never matched; a
+            # client key's session ids carry its label (found live).
             "free": held is None,
-            "yours": bool(held and held.get("yours")),
+            "yours": bool(held and (held.get("yours") or (
+                label and str(held.get("held_by") or "").startswith(f"{label}:")))),
         })
     return devices
 
@@ -120,7 +124,7 @@ def probe(remote: client.Remote, local_version: str | None,
     if local_version:
         out["version_matches"] = version == local_version
     try:
-        devices = _devices(_get(remote, "/api/v1/device/list", timeout))
+        devices = _devices(_get(remote, "/api/v1/device/list", timeout), remote.label)
     except Exception as e:  # noqa: BLE001
         # Answered /health but not this: said, rather than "no devices".
         out["error"] = f"devices could not be listed: {_reason(e)}"

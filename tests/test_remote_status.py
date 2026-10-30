@@ -282,3 +282,22 @@ def test_a_403_is_not_called_a_revocation(monkeypatch):
                            "/api/v1/device/list": urllib.error.HTTPError("u", 403, "x", {}, None)})
     err = status.probe(_remote(), "0.25.0")["error"]
     assert "HTTP 403" in err and "revoked" not in err
+
+
+
+def test_a_device_held_by_another_session_of_this_key_is_yours(monkeypatch):
+    """The server's `yours` means this session; this read names its own, so a
+    device the key holds through `quern session run` read as someone else's
+    (found live). The key's label prefixes its session ids."""
+    listing = {"devices": [
+        {"udid": "A", "state": "booted",
+         "reservation": {"held_by": "scorpius:status-check", "yours": False}},
+        {"udid": "B", "state": "booted",
+         "reservation": {"held_by": "other:job", "yours": False}},
+        {"udid": "C", "state": "booted",
+         "reservation": {"held_by": "scorpiusx:job", "yours": False}},   # not a prefix match
+    ]}
+    _answers(monkeypatch, {"/health": {"status": "ok", "version": "0.25.0"},
+                           "/api/v1/device/list": listing})
+    out = status.probe(_remote(), "0.25.0")          # paired as label "scorpius"
+    assert [d["udid"] for d in out["devices"] if d["yours"]] == ["A"]
