@@ -65,7 +65,9 @@ export function selectedServer(): string | undefined {
   return selected;
 }
 
-export function discoverServer(): {
+/** Where requests go: the remote `remoteName` names -- by default the one this
+ * MCP uses now -- or, for an empty name, this Mac's server. */
+export function discoverServer(remoteName: string | undefined = currentRemote()): {
   url: string;
   apiKey: string;
   source: ServerSource;
@@ -77,7 +79,6 @@ export function discoverServer(): {
   // it wins over everything -- and if it cannot be read this throws rather
   // than falling back: quietly driving this Mac's server instead of the one
   // asked for would put an agent's work on the wrong machine.
-  const remoteName = currentRemote();
   if (remoteName) {
     const remote = loadRemote(remoteName);
     return { url: remote.url, apiKey: remote.key, source: "remote",

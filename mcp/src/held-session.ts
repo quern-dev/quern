@@ -85,10 +85,14 @@ export function heldSessionState(): { id: string; state: HeldState } {
  * then attaches with the token this got. False when it could not be opened;
  * the start opens it again as usual. */
 export async function openHeldSession(): Promise<boolean> {
+  const gen = generation;
   try {
     const opened = (await apiRequest("POST", "/api/v1/sessions", undefined, {
       name: SESSION_ID,
     }, 5000)) as { resume_token?: string } | null;
+    // Opened on a server this client has since left (use_remote): its token
+    // must not be presented to the new one (review).
+    if (gen !== generation) return false;
     if (!opened?.resume_token) return false;
     token = opened.resume_token;
     return true;
@@ -183,8 +187,11 @@ async function open(): Promise<void> {
 
 /** Move the held session to the server discoverServer() names now (use_remote):
  * the old socket is closed cleanly -- which releases anything still held there
- * -- and a session under the same id is opened on the new server and held. */
-export async function switchHeldSession(): Promise<void> {
+ * -- and a session under the same id is opened on the new server and held.
+ * True once it is live there; false if it is not within `timeoutMs`, or the
+ * client is exiting. */
+export async function switchHeldSession(timeoutMs = 10_000): Promise<boolean> {
+  if (stopping) return false;   // exiting: open nothing new anywhere (review)
   generation += 1;
   if (timer) clearTimeout(timer);
   const old = socket;
@@ -199,10 +206,22 @@ export async function switchHeldSession(): Promise<void> {
   failedHandshakes = 0;
   reopenedAtOnce = false;
   backoffMs = 1000;
-  stopping = false;
   state = "idle";
+  // What was said about, and loaded for, the old server's session does not
+  // carry over: a notice would read as being about the new one, and the
+  // knowledge-base reload would upload to it (review).
+  sessionNotices.length = 0;
+  onReopened = null;
   await openHeldSession();
   startHeldSession();
+  // Read through a call: TypeScript narrows `state` to "idle" from the
+  // assignment above, not knowing the socket's handlers change it meanwhile.
+  const live = () => heldSessionState().state === "live";
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline && !live() && !stopping) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return live();
 }
 
 function connect(): void {

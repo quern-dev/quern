@@ -95,75 +95,112 @@ A server that could not be asked says why (not running, timed out, certificate c
   server.registerTool("use_remote", {
     description: `Switch this session to another quern server -- a paired remote from list_remotes, or "local" for this Mac's own -- so every later tool call (reserve_devices, take_screenshot, tap_element, ...) works on that machine and its devices. Use it when the device the user wants is on another server.
 
-One server at a time: devices you hold on the current server must be released first (release_devices), or pass release=true to release them as part of the switch. Nothing else follows you -- mocks, proxy settings and loaded landmarks stay where they were set. The quern CLI in your shell is not switched; it still talks to this Mac's server.`,
+One server at a time: devices you hold on the current server must be released first (release_devices), or pass release=true to release them as part of the switch -- also needed when the current server cannot say what you hold. The switch is made only once your session is live on the new server; if it cannot be, you stay where you were. Nothing else follows you -- mocks, proxy settings and loaded landmarks stay where they were set. The quern CLI in your shell is not switched; it still talks to this Mac's server.`,
     inputSchema: strictParams({
       name: z.string().describe(`A server's name from list_remotes, or "local" for this Mac's own`),
       release: z.boolean().optional().describe("Release the devices you hold on the current server as part of the switch (default false: refuse)"),
     }),
-  }, async ({ name, release }) => {
-    const text = (data: unknown, isError = false) => ({
-      content: [{ type: "text" as const, text: typeof data === "string" ? data : JSON.stringify(data, null, 2) }],
-      ...(isError ? { isError: true } : {}),
-    });
-    const target = name.trim();
-    const from = currentRemote() ?? LOCAL;
-    if (target === from) return text({ current: target, note: "already using this server" });
-    if (target !== LOCAL) {
-      try {
-        loadRemote(target);
-      } catch {
-        return text(`No paired remote named "${target}": list_remotes shows the servers ` +
-          `this machine is paired with, and "local" is this Mac's own.`, true);
-      }
-    }
-    // What this session holds where it is now: switching would strand it, so
-    // it is released only when asked to.
-    let held: string[] = [];
+  }, (args) => {
+    // One switch at a time: two at once each restored the other's "before",
+    // leaving requests on one server and the held session on another (review).
+    const run = switching.then(() => useRemote(args));
+    switching = run.catch(() => undefined);
+    return run;
+  });
+}
+
+let switching: Promise<unknown> = Promise.resolve();
+
+function reply(data: unknown, isError = false) {
+  return {
+    content: [{ type: "text" as const, text: typeof data === "string" ? data : JSON.stringify(data, null, 2) }],
+    ...(isError ? { isError: true } : {}),
+  };
+}
+
+async function useRemote({ name, release }: { name: string; release?: boolean }) {
+  const target = name.trim();
+  const from = currentRemote() ?? LOCAL;
+  if (target === from) return reply({ current: target, note: "already using this server" });
+  if (target !== LOCAL) {
     try {
-      const session = (await apiRequest("GET", `/api/v1/sessions/${encodeURIComponent(SESSION_ID)}`)) as
-        { reservations?: { udid?: string }[] } | null;
-      held = (session?.reservations ?? []).map((r) => String(r.udid));
+      loadRemote(target);
     } catch {
-      // No session there, or the server is down: nothing is held that a
-      // switch could strand.
+      return reply(`No paired remote named "${target}": list_remotes shows the servers ` +
+        `this machine is paired with, and "local" is this Mac's own.`, true);
     }
-    if (held.length && !release) {
-      return text(`You hold ${held.join(", ")} on ${from}. Release them first ` +
-        `(release_devices), or call use_remote(name="${target}", release=true).`, true);
+  }
+  // Is the new server there? Asked of it directly, before anything is
+  // switched: selecting it first sent every concurrent tool call there, even
+  // when the switch was then abandoned (review).
+  let url: string;
+  let version: unknown;
+  try {
+    const server = discoverServer(target === LOCAL ? "" : target);
+    url = server.url;
+    const resp = await serverFetch(server, new URL("/health", server.url).toString(),
+      { signal: AbortSignal.timeout(5000) });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    version = ((await resp.json()) as { version?: unknown }).version;
+  } catch (e) {
+    return reply(`${target} did not answer (${errorText(e)}); still using ${from}.`, true);
+  }
+  // What this session holds where it is now: switching would strand it, so
+  // it is released only when asked to. "Could not ask" is not "nothing" -- a
+  // clean close would release whatever is held without saying so (review).
+  const sessionPath = `/api/v1/sessions/${encodeURIComponent(SESSION_ID)}`;
+  let held: string[] | null;
+  let unknown = "";
+  try {
+    const session = (await apiRequest("GET", sessionPath)) as
+      { reservations?: { udid?: string }[] } | null;
+    held = (session?.reservations ?? []).map((r) => String(r.udid));
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (message.startsWith("HTTP 404")) {
+      held = [];                // no session there: nothing held
+    } else {
+      held = null;
+      unknown = message;
     }
-    // Is the new server there? Asked before switching, so a dead one leaves
-    // this session where it was.
-    const before = selectedServer();
-    selectServer(target);
-    let version: unknown;
-    let url: string;
+  }
+  if (!release && held === null) {
+    return reply(`Could not tell whether you hold devices on ${from} (${unknown}), and ` +
+      `switching releases anything you hold there. Call use_remote(name="${target}", ` +
+      `release=true) to switch anyway.`, true);
+  }
+  if (!release && held?.length) {
+    return reply(`You hold ${held.join(", ")} on ${from}. Release them first ` +
+      `(release_devices), or call use_remote(name="${target}", release=true).`, true);
+  }
+  let released: string[] = [];
+  let releaseNote = "";
+  if (release && (held === null || held.length)) {
     try {
-      const server = discoverServer();
-      url = server.url;
-      const resp = await serverFetch(server, new URL("/health", server.url).toString(),
-        { signal: AbortSignal.timeout(5000) });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      version = ((await resp.json()) as { version?: unknown }).version;
+      const freed = (await apiRequest("DELETE", `${sessionPath}/reservations`)) as
+        { freed?: string[] } | null;
+      released = freed?.freed ?? held ?? [];
     } catch (e) {
-      selectServer(before);
-      return text(`${target} did not answer (${errorText(e)}); still using ${from}.`, true);
+      releaseNote = `Could not release on ${from} (${errorText(e)}): anything held there is ` +
+        "freed when its connection closes or its grace period ends.";
     }
-    let released: string[] = [];
-    if (held.length) {
-      selectServer(before);
-      try {
-        await apiRequest("DELETE", `/api/v1/sessions/${encodeURIComponent(SESSION_ID)}/reservations`);
-        released = held;
-      } catch {
-        // The clean close below releases them as well.
-      }
-      selectServer(target);
-    }
-    await switchHeldSession();
-    return text({
-      current: target, server_url: url, version, ...(released.length ? { released } : {}),
-      note: `Every tool call now goes to ${target}. Reserve a device there with reserve_devices.`,
-    });
+  }
+  const before = selectedServer();
+  selectServer(target);
+  if (!(await switchHeldSession())) {
+    // Requests would go to a server where nothing can be reserved: go back,
+    // and say so, rather than report a switch that did not happen (review).
+    selectServer(before);
+    const back = await switchHeldSession();
+    return reply(`${target} answered, but no session could be held there, so this ` +
+      `session is back on ${from}` + (back ? "." : ", where its session is not live " +
+      "yet either: session_status shows it.") + (released.length
+      ? ` ${released.join(", ")} were released on ${from}.` : ""), true);
+  }
+  return reply({
+    current: target, server_url: url, version, ...(released.length ? { released } : {}),
+    note: `Every tool call now goes to ${target}. Reserve a device there with reserve_devices.` +
+      (releaseNote ? ` ${releaseNote}` : ""),
   });
 }
 
@@ -172,6 +209,20 @@ export interface ReserveCriteria {
   os_version?: string;
   name?: string;
   device_family?: string;
+  count?: number;
+  auto_boot?: boolean;
+}
+
+/** The pool's _effective_device_family: the family, or one inferred from the
+ * name when a device has none. */
+function familyOf(d: Record<string, unknown>): string {
+  if (d.device_family) return String(d.device_family);
+  const n = String(d.name ?? "").toLowerCase();
+  if (n.includes("ipad")) return "iPad";
+  if (n.includes("iphone")) return "iPhone";
+  if (n.includes("apple watch")) return "Apple Watch";
+  if (n.includes("apple tv")) return "Apple TV";
+  return "";
 }
 
 /** The OS version's number part: "iOS 18.6" -> "18.6". */
@@ -180,9 +231,12 @@ function versionOf(v: unknown): string | undefined {
 }
 
 /** The free devices on servers other than `current` that reserve_devices'
- * criteria would pick -- the pool's own rules (server/device/pool.py): an OS
- * version prefix, exact type and family, and the name or model exact if any
- * is, else a substring. Servers that could not be asked are left out. */
+ * criteria would pick -- the pool's own rules (server/device/pool.py and
+ * _choose in server/api/sessions.py): an OS version prefix, exact type and
+ * family (inferred from the name when unset), the name or model exact if any
+ * is, else a substring; booted, or shut down when auto_boot allows booting;
+ * and only servers with `count` of them. Servers that could not be asked are
+ * left out. */
 export function matchingElsewhere(
   data: unknown, current: string, criteria: ReserveCriteria,
 ): { name: string; devices: Record<string, unknown>[] }[] {
@@ -194,13 +248,15 @@ export function matchingElsewhere(
     if (!r || r.name === current || !Array.isArray(r.devices)) continue;
     let devices = (r.devices as Record<string, unknown>[]).filter((d) => {
       if (!d.free || d.is_available === false) return false;
+      const bootable = criteria.auto_boot !== false && d.state === "shutdown";
+      if (d.state !== "booted" && !bootable) return false;
       if (criteria.os_version) {
         const have = versionOf(d.os_version);
         if (!want || !have || !(have === want || have.startsWith(want + "."))) return false;
       }
       if (criteria.device_type && d.device_type !== criteria.device_type) return false;
       if (criteria.device_family &&
-          String(d.device_family ?? "").toLowerCase() !== criteria.device_family.toLowerCase()) {
+          familyOf(d).toLowerCase() !== criteria.device_family.toLowerCase()) {
         return false;
       }
       return true;
@@ -212,7 +268,9 @@ export function matchingElsewhere(
       const exact = devices.filter((d) => fields(d).includes(n));
       devices = exact.length ? exact : devices.filter((d) => fields(d).some((f) => f.includes(n)));
     }
-    if (devices.length) out.push({ name: String(r.name), devices });
+    if (devices.length && devices.length >= (criteria.count ?? 1)) {
+      out.push({ name: String(r.name), devices });
+    }
   }
   return out;
 }
@@ -236,7 +294,7 @@ export async function elsewhereHint(criteria: ReserveCriteria): Promise<string> 
       `match: ${shown}${more}`;
   });
   const first = found[0].name;
-  return `\n\nNot on this server, but ${parts.join("; ")}. To use one, switch with ` +
+  return `\n\nNot enough here, but ${parts.join("; ")}. To use one, switch with ` +
     `use_remote(name="${first}"), then reserve_devices again.`;
 }
 

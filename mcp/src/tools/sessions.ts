@@ -43,7 +43,10 @@ Your reservation lasts as long as this MCP session: released when it ends, and k
       // Nothing here matched (409): say where something does, rather than
       // leave the agent to conclude it exists nowhere (found live).
       const message = e instanceof Error ? e.message : String(e);
-      if (message.includes("HTTP 409") && !args.udids && !args.group) {
+      // Only the pool's "not enough free" 409: a session with no live
+      // connection, or a race lost, is not fixed by going elsewhere (review).
+      if (/HTTP 409.*asked for \d+ device\(s\), \d+ free/.test(message) &&
+          !args.udids && !args.group) {
         const hint = await elsewhereHint(args);
         if (hint) {
           return { content: [{ type: "text" as const, text: errorText(e) + hint }], isError: true };

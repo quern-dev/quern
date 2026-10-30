@@ -115,6 +115,10 @@ test("elsewhere: the pool's rules -- OS prefix on a dot, family, free only, neve
   assert.deepEqual(udids(matchingElsewhere(LIST, "romulus", { device_family: "iphone" })), ["local:L1"],
                    "from a remote, this Mac is elsewhere; family is case-insensitive");
   assert.deepEqual(matchingElsewhere(LIST, "local", { device_type: "device" }), []);
+  const unset = { remotes: [{ name: "romulus", devices: [
+    { udid: "P1", name: "iPad Pro (M4)", device_family: "", free: true, state: "booted" }] }] };
+  assert.deepEqual(udids(matchingElsewhere(unset, "local", { device_family: "iPad" })),
+                   ["romulus:P1"], "no family: inferred from the name, as the pool does");
 });
 
 test("elsewhere: a name matches name or model, exact before substring", () => {

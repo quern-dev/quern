@@ -189,7 +189,7 @@ It opens session NAME (or, on the server's own Mac, takes over one of yours in i
 |---|---|---|---|
 | `ensure_server` | GET | `/api/v1/system/update-status` | Most recent persisted update-check result |
 | `list_remotes` | — | — | No route: runs `quern remote list --json` on the MCP's own machine, where the paired remotes are recorded. Each paired remote is asked now: whether it answers or why not, its version, and its devices with which are free. See "Remote access" |
-| `use_remote` | — | — | No route: switches this MCP to another server -- a paired remote by name, or `local` -- so every later tool call goes there, and moves its held session with it. Refused while the session holds devices on the current server unless `release` is true; a server that does not answer leaves the MCP where it was. Only the MCP is switched, not the `quern` CLI |
+| `use_remote` | — | — | No route: switches this MCP to another server -- a paired remote by name, or `local` -- so every later tool call goes there, and moves its held session with it. Refused while the session holds devices on the current server, or when it cannot tell, unless `release` is true. The target is checked before anything is switched, the switch succeeds only once a session is live there (otherwise the MCP goes back), and switches run one at a time. Notices about the old server are dropped. Only the MCP is switched, not the `quern` CLI |
 | `update_quern` | POST | `/api/v1/system/update` | Launch `quern update` in a detached child; returns immediately |
 | `set_update_channel` | PUT | `/api/v1/system/channel` | Set the update channel (`stable` or `beta`) |
 
@@ -571,7 +571,7 @@ holds in `flow_store`. `flows_captured` is only what survived.
 
 | MCP Tool | Method | Path | Description |
 |---|---|---|---|
-| `reserve_devices` | POST | `/api/v1/sessions/{id}/reservations` | Reserve devices for this session (udids, count plus criteria, or a group), all or nothing; 409 names a holder. Each reserved device comes back with its name, model, OS version, family and type, so a caller that reserved by criteria knows what it got. When criteria match nothing free here, the MCP adds which paired servers have matching free devices and how to switch (`use_remote`). See "Sessions and reservations" above |
+| `reserve_devices` | POST | `/api/v1/sessions/{id}/reservations` | Reserve devices for this session (udids, count plus criteria, or a group), all or nothing; 409 names a holder. Each reserved device comes back with its name, model, OS version, family and type, so a caller that reserved by criteria knows what it got. When the pool has too few free devices for the criteria, the MCP adds which paired servers have enough -- booted, or shut down when `auto_boot` allows -- and how to switch (`use_remote`). See "Sessions and reservations" above |
 | `release_devices` | DELETE | `/api/v1/sessions/{id}/reservations` | Release one device (`?udid=`) or all |
 | `session_status` | GET | `/api/v1/sessions/{id}` | One session: state (`live`, `grace` with `grace_remaining_s`) and reservations. With `all`, the MCP tool lists every session |
 
