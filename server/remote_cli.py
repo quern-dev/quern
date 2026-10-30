@@ -6,7 +6,9 @@
                                         on the client: remember one paired by hand
     quern remote status                 on the server: the listener and its certificate
     quern remote rotate-cert            on the server: a new certificate; clients re-pair
-    quern remote list                   on the client: the servers it is paired with
+    quern remote list [--json] [--no-check]
+                                        on the client: the servers it is paired with,
+                                        each asked now: up or not, version, free devices
     quern remote forget NAME            on the client: forget one
 """
 
@@ -147,18 +149,32 @@ def _remote(args: list[str]) -> int:
         print("Restart quern for the listener to use it. Every client must pair again: "
               "the old certificate's pin no longer matches.")
         return 0
-    if args[:1] == ["list"] and len(args) == 1:
+    if args[:1] == ["list"]:
+        parser = argparse.ArgumentParser(prog="quern remote list", add_help=False)
+        parser.add_argument("--json", action="store_true")
+        parser.add_argument("--no-check", action="store_true")
         try:
-            remotes = client.list_remotes()
-        except client.RemoteError as e:
-            print(f"quern remote list: {e}", file=sys.stderr)
-            return 1
-        if not remotes:
-            print("Not paired with any remote quern. Pair with `quern connect`.")
-        for r in remotes:
-            print(f"{r.name:<16} {r.url:<32} as {r.label or '?':<16} "
-                  f"{cert_mod.show(r.fingerprint)[:23]}...")
-        return 0
+            opts = parser.parse_args(args[1:])
+        except SystemExit:
+            print(USAGE, end="", file=sys.stderr)
+            return 2
+        if opts.no_check:
+            try:
+                remotes = client.list_remotes()
+            except client.RemoteError as e:
+                print(f"quern remote list: {e}", file=sys.stderr)
+                return 1
+            if opts.json:
+                print(json.dumps([{"name": r.name, "url": r.url, "label": r.label}
+                                  for r in remotes], indent=2))
+                return 0
+            if not remotes:
+                print("Not paired with any remote quern. Pair with `quern connect`.")
+            for r in remotes:
+                print(f"{r.name:<16} {r.url:<32} as {r.label or '?':<16} "
+                      f"{cert_mod.show(r.fingerprint)[:23]}...")
+            return 0
+        return _list_status(as_json=opts.json)
     if args[:1] == ["forget"] and len(args) == 2:
         if client.forget(args[1]):
             print(f"Forgot {args[1]}. Its client key still works until the server's owner "
@@ -168,6 +184,38 @@ def _remote(args: list[str]) -> int:
         return 1
     print(USAGE, end="", file=sys.stderr)
     return 2
+
+
+def _list_status(*, as_json: bool) -> int:
+    """Every paired remote, asked now (`server.remote.status`). Exits 1 when
+    any could not be asked, so a script can tell "all up" from "listed"."""
+    from server import get_version
+    from server.remote import status
+
+    rows = status.statuses(get_version())
+    if as_json:
+        print(json.dumps({"local_version": get_version(), "remotes": rows}, indent=2))
+    elif not rows:
+        print("Not paired with any remote quern. Pair with `quern connect`.")
+    else:
+        for r in rows:
+            print(_status_line(r))
+    return 0 if all(r.get("reachable") and r.get("devices") is not None for r in rows) else 1
+
+
+def _status_line(r: dict) -> str:
+    head = f"{r.get('name') or '?':<16} {r.get('url') or '':<32} as {r.get('label') or '?':<14}"
+    if not r.get("reachable"):
+        return f"{head} down: {r.get('error')}"
+    version = r.get("version") or "?"
+    if r.get("version_matches") is False:
+        version += " (differs from this Mac's)"
+    if r.get("devices") is None:
+        return f"{head} up  {version}  {r.get('error')}"
+    devices = r["devices"]
+    booted = sum(1 for d in devices if d.get("state") == "booted")
+    return (f"{head} up  {version}  {len(devices)} devices ({booted} booted), "
+            f"{r.get('free')} free")
 
 
 def main(command: str, args: list[str]) -> int:

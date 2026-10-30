@@ -2,6 +2,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { apiRequest } from "../http.js";
 import { errorText, strictParams } from "./helpers.js";
+import { execFile } from "node:child_process";
+import { homedir } from "node:os";
 
 export function registerSystemTools(server: McpServer): void {
   server.registerTool(
@@ -70,4 +72,48 @@ export function registerSystemTools(server: McpServer): void {
       }
     },
   );
+
+  server.registerTool("list_remotes", {
+    description: `List the remote quern servers this machine is paired with (quern connect), each asked now: whether it answers, its quern version (and whether it differs from this Mac's), and its devices with which are free -- not held by anyone -- and which this key holds.
+
+Use it to see what other Macs could lend before choosing where to work: a remote's devices are used by starting an MCP with QUERN_REMOTE=<name>, or quern session run / record with it. A remote that could not be asked says why (down, timed out, certificate changed, key refused), never "no devices". Read-only; it uses only what each remote already lets this key read.`,
+    inputSchema: strictParams({}),
+  }, async () => {
+    try {
+      const data = await quernRemoteList();
+      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+    } catch (e) {
+      return { content: [{ type: "text" as const, text: errorText(e) }], isError: true };
+    }
+  });
+}
+
+/** `quern remote list --json`, from the quern CLI on this machine: the paired
+ * remotes live in its ~/.quern/remotes.json, whichever server this MCP talks to.
+ * It exits 1 when a remote could not be asked, and still prints the list. */
+export function quernRemoteList(): Promise<unknown> {
+  const candidates = ["quern", `${homedir()}/.local/bin/quern`];
+  const attempt = (i: number): Promise<unknown> => new Promise((resolve, reject) => {
+    execFile(candidates[i], ["remote", "list", "--json"], { timeout: 60_000 },
+      (err, stdout, stderr) => {
+        const out = String(stdout ?? "").trim();
+        if (out) {
+          try {
+            resolve(JSON.parse(out));
+            return;
+          } catch {
+            // not JSON: an older quern, or an error; fall through
+          }
+        }
+        const missing = err && (err as NodeJS.ErrnoException).code === "ENOENT";
+        if (missing && i + 1 < candidates.length) {
+          resolve(attempt(i + 1));
+          return;
+        }
+        reject(new Error(missing
+          ? "the quern CLI is not installed on this machine, so its paired remotes cannot be listed"
+          : `quern remote list failed: ${String(stderr || err?.message || "no output").trim()}`));
+      });
+  });
+  return attempt(0);
 }
