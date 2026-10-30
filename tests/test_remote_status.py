@@ -387,3 +387,17 @@ def test_this_mac_talks_plain_http_on_loopback_with_no_pin(monkeypatch):
     status.probe(client.Remote(name="local", url="http://127.0.0.1:9110", fingerprint="",
                                key="owner", label="this Mac"), None)
     assert used["url"] == "http://127.0.0.1:9110/health"
+
+
+def test_an_unknown_local_version_is_not_compared(monkeypatch, capsys):
+    # get_version's "unknown" is not a version: compared, every remote read as
+    # differing from this Mac (CodeRabbit). JSON still says what it returned.
+    import server
+
+    seen = []
+    monkeypatch.setattr(server, "get_version", lambda: "unknown")
+    monkeypatch.setattr(status, "statuses",
+                        lambda version, **kw: seen.append(version) or [])
+    remote_cli._remote(["list", "--json"])
+    assert seen == [None]
+    assert json.loads(capsys.readouterr().out)["local_version"] == "unknown"

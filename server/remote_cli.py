@@ -197,9 +197,12 @@ def _list_status(*, as_json: bool, devices: bool = False, with_local: bool = Fal
     from server import get_version
     from server.remote import status
 
-    rows = status.statuses(get_version(), include_local=with_local)
+    version = get_version()
+    # "unknown" is get_version's sentinel, not a version: compared, every
+    # remote read as differing from this Mac (CodeRabbit).
+    rows = status.statuses(None if version == "unknown" else version, include_local=with_local)
     if as_json:
-        print(json.dumps({"local_version": get_version(), "remotes": rows}, indent=2))
+        print(json.dumps({"local_version": version, "remotes": rows}, indent=2))
     elif not rows or (with_local and len(rows) == 1):
         for r in rows:
             print(_status_line(r))
