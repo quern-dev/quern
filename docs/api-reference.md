@@ -480,7 +480,7 @@ holds in `flow_store`. `flows_captured` is only what survived.
 
 | MCP Tool | Method | Path | Description |
 |---|---|---|---|
-| `list_devices` | GET | `/api/v1/device/list` | List simulators, emulators, and physical devices. Each carries `model`: what the hardware is, as Apple names it ("iPad Pro 11-inch (M4)"), whatever the device is called -- a simulator's from its device type, a physical device's marketing name or product type ("iPhone16,1") -- or "" when unknown. A `name` criterion in `reserve_devices` and `resolve_device` matches the model too, so a renamed simulator is still found by what it is |
+| `list_devices` | GET | `/api/v1/device/list` | List simulators, emulators, and physical devices. Each carries `model`: what the hardware is, as Apple names it ("iPad Pro 11-inch (M4)"), whatever the device is called -- a simulator's from its device type, a physical device's marketing name or product type ("iPhone16,1") -- or "" when unknown. A `name` criterion in `reserve_devices` and `resolve_device` matches the model too, so a renamed simulator is still found by what it is. Through the MCP, a filtered list that comes back empty carries `elsewhere`: which paired servers have matching free devices, and the `use_remote` call to get there |
 | `boot_device` | POST | `/api/v1/device/boot` | Boot simulator |
 | `shutdown_device` | POST | `/api/v1/device/shutdown` | Shutdown simulator |
 | `erase_device` | POST | `/api/v1/device/erase` | Erase a simulator or Android emulator, resetting it to factory state (an emulator is relaunched, possibly on a new serial) |

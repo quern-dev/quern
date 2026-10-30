@@ -278,7 +278,7 @@ export function matchingElsewhere(
 /** A line for reserve_devices' failure: where the devices it could not find
  * here are free, and how to get there. Empty when nowhere else has them or
  * the remotes could not be listed. */
-export async function elsewhereHint(criteria: ReserveCriteria): Promise<string> {
+export async function elsewhereHint(criteria: ReserveCriteria, lead = "Not enough here"): Promise<string> {
   let found;
   try {
     found = matchingElsewhere(await quernRemoteList(), currentRemote() ?? LOCAL, criteria);
@@ -294,7 +294,7 @@ export async function elsewhereHint(criteria: ReserveCriteria): Promise<string> 
       `match: ${shown}${more}`;
   });
   const first = found[0].name;
-  return `\n\nNot enough here, but ${parts.join("; ")}. To use one, switch with ` +
+  return `\n\n${lead}, but ${parts.join("; ")}. To use one, switch with ` +
     `use_remote(name="${first}"), then reserve_devices again.`;
 }
 

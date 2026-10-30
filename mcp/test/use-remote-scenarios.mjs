@@ -72,7 +72,8 @@ const plans = {
   // local's session opens slowly: the switch happens while it is in flight.
   "stale-start": [{ "POST /api/v1/sessions": json(200, { resume_token: "t-local", resumed: false }, 800) }, {}],
   "stale-early": [{ "POST /api/v1/sessions": json(200, { resume_token: "t-local", resumed: false }, 800) }, {}],
-  hint: [{ "POST /api/v1/sessions/agent-1/reservations": async () => [409, { detail: globalThis.detail }] }, {}],
+  hint: [{ "POST /api/v1/sessions/agent-1/reservations": async () => [409, { detail: globalThis.detail }],
+           "GET /api/v1/device/list": json(200, { devices: [], tools: {}, active_udid: null }) }, {}],
 };
 const [localRoutes, romulusRoutes] = plans[scenario];
 const local = await fake("local", false, { ...base("local"), ...localRoutes });
@@ -88,6 +89,7 @@ writeFileSync(join(home, ".quern", "remotes.json"), JSON.stringify({ remotes: {
 const DIST = new URL("../dist/", import.meta.url).href;
 const sys = await import(`${DIST}tools/system.js`);
 const ses = await import(`${DIST}tools/sessions.js`);
+const dev = await import(`${DIST}tools/device.js`);
 const held = await import(`${DIST}held-session.js`);
 const cfg = await import(`${DIST}config.js`);
 const httpm = await import(`${DIST}http.js`);
@@ -95,6 +97,7 @@ const tools = {};
 const stub = { registerTool: (n, _d, h) => { tools[n] = h; } };
 sys.registerSystemTools(stub);
 ses.registerSessionTools(stub);
+dev.registerDeviceTools(stub);
 const text = (r) => ({ error: !!r.isError, text: r.content[0].text });
 const current = () => cfg.currentRemote() ?? "local";
 const result = {};
@@ -147,6 +150,8 @@ if (scenario === "window") {
   result.noMatch = text(await tools.reserve_devices({ count: 1, os_version: "17.5" }));
   result.tooMany = text(await tools.reserve_devices({ count: 2, os_version: "17.5" }));
   result.bootedOnly = text(await tools.reserve_devices({ count: 1, os_version: "17.5", auto_boot: false }));
+  result.listEmpty = JSON.parse(text(await tools.list_devices({ os_version: "17.5" })).text);
+  result.listUnfiltered = JSON.parse(text(await tools.list_devices({})).text);
   globalThis.detail = "session agent-1 has no live connection";
   result.notLive = text(await tools.reserve_devices({ count: 1, os_version: "17.5" }));
 }

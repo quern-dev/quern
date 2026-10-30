@@ -96,6 +96,9 @@ test("the hint: only for a pool shortage, and only where count and booting allow
   assert.doesNotMatch(r.tooMany.text, /romulus/, "one match is not two");
   assert.doesNotMatch(r.bootedOnly.text, /romulus/, "shut down, and booting is off");
   assert.doesNotMatch(r.notLive.text, /romulus/, "a session that is not live is not fixed elsewhere");
+  assert.match(r.listEmpty.elsewhere, /^None here, but romulus has 1 free that match/,
+               "an empty filtered list_devices says where to look too");
+  assert.equal(r.listUnfiltered.elsewhere, undefined, "nothing asked for, nothing to point at");
 });
 
 for (const scenario of ["stale-start", "stale-early"]) {
