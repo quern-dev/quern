@@ -163,3 +163,23 @@ test("use_remote's selection wins over QUERN_REMOTE, and 'local' means this Mac"
     if (saved === undefined) delete process.env.QUERN_REMOTE; else process.env.QUERN_REMOTE = saved;
   }
 });
+
+test("the listing hint is list_devices' own filter: name first, stored family", () => {
+  const data = { remotes: [{ name: "romulus", devices: [
+    { udid: "A", name: "iPhone 15", os_version: "iOS 18.6", device_family: "iPhone", free: true, state: "booted" },
+    { udid: "B", name: "iPhone 15 Pro", os_version: "iOS 17.5", device_family: "iPhone", free: true, state: "booted" },
+    { udid: "C", name: "iPhone SE (2nd generation)", os_version: "iOS 17.5", device_family: "", free: true, state: "booted" },
+    { udid: "D", name: "iPhone SE", os_version: "iOS 17.5", device_family: "iPhone", free: false, state: "booted" },
+  ] }] };
+  // The exact name wins before the OS filter, as in the endpoint: listing
+  // there finds nothing, so nothing is offered (CodeRabbit).
+  assert.deepEqual(matchingElsewhere(data, "local", { name: "iPhone 15", os_version: "17.5", listing: true }), []);
+  assert.deepEqual(udids(matchingElsewhere(data, "local", { name: "iPhone 15", os_version: "17.5" })),
+                   ["romulus:B"], "the pool filters first, then names");
+  // No family stored: the listing compares it as stored, so it is not an iPhone.
+  assert.deepEqual(udids(matchingElsewhere(data, "local", { device_family: "iPhone", os_version: "17.5", listing: true })),
+                   ["romulus:B"]);
+  // A held exact match still decides what the listing shows: it lists the
+  // held one, not the free substring match, so none is offered.
+  assert.deepEqual(matchingElsewhere(data, "local", { name: "iPhone SE", listing: true }), []);
+});

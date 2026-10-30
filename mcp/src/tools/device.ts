@@ -10,7 +10,7 @@ import { elsewhereHint } from "./system.js";
 
 export function registerDeviceTools(server: McpServer): void {
   server.registerTool("list_devices", {
-    description: `List available iOS and Android devices (simulators, emulators, physical), plus tool availability (simctl, idb, devicectl, adb). Returns device UDIDs, names, states, and OS versions. Does NOT change the active device.`,
+    description: `List available iOS and Android devices (simulators, emulators, physical), plus tool availability (simctl, idb, devicectl, adb). Returns device UDIDs, names, models (what the hardware is, e.g. "iPhone 15 Pro", whatever the device is called), states, and OS versions; the name filter matches names only. Does NOT change the active device. A filtered list that comes back empty may carry "elsewhere": paired servers that have matching devices, and the use_remote call to get there.`,
     inputSchema: strictParams({
       state: z
         .enum(["booted", "shutdown"])

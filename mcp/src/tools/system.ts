@@ -214,7 +214,7 @@ export interface ReserveCriteria {
   device_family?: string;
   count?: number;
   auto_boot?: boolean;
-  /** list_devices' rules, not the pool's: its name filter reads the name only. */
+  /** list_devices' rules (listed), not reserve_devices' (reservable). */
   listing?: boolean;
 }
 
@@ -235,6 +235,50 @@ function versionOf(v: unknown): string | undefined {
   return String(v ?? "").match(/[\d.]+/)?.[0];
 }
 
+function osMatches(have: unknown, wanted: string | undefined): boolean {
+  const want = versionOf(wanted);
+  const v = versionOf(have);
+  return !!want && !!v && (v === want || v.startsWith(want + "."));
+}
+
+/** Exact (case-insensitive) on any of `fields` if one is, else a substring. */
+function byName(devices: Record<string, unknown>[], name: string,
+                fields: (d: Record<string, unknown>) => string[]): Record<string, unknown>[] {
+  const n = name.toLowerCase();
+  const of = (d: Record<string, unknown>) => fields(d).map((f) => f.toLowerCase()).filter(Boolean);
+  const exact = devices.filter((d) => of(d).includes(n));
+  return exact.length ? exact : devices.filter((d) => of(d).some((f) => f.includes(n)));
+}
+
+/** What reserve_devices would pick: the pool's rules (server/device/pool.py
+ * and _choose in server/api/sessions.py). */
+function reservable(devices: Record<string, unknown>[], c: ReserveCriteria): Record<string, unknown>[] {
+  const out = devices.filter((d) => {
+    if (d.is_available === false) return false;
+    const bootable = c.auto_boot !== false && d.state === "shutdown";
+    if (d.state !== "booted" && !bootable) return false;
+    if (c.os_version && !osMatches(d.os_version, c.os_version)) return false;
+    if (c.device_type && d.device_type !== c.device_type) return false;
+    if (c.device_family && familyOf(d).toLowerCase() !== c.device_family.toLowerCase()) return false;
+    return true;
+  });
+  return c.name ? byName(out, c.name, (d) => [String(d.name ?? ""), String(d.model ?? "")]) : out;
+}
+
+/** What list_devices would list, in its own order (server/api/device.py):
+ * type, then the name -- the name alone, exact before substring -- then the
+ * OS version prefix, then the stored family, nothing inferred (CodeRabbit). */
+function listed(devices: Record<string, unknown>[], c: ReserveCriteria): Record<string, unknown>[] {
+  let out = c.device_type ? devices.filter((d) => d.device_type === c.device_type) : devices;
+  if (c.name) out = byName(out, c.name, (d) => [String(d.name ?? "")]);
+  if (c.os_version) out = out.filter((d) => osMatches(d.os_version, c.os_version));
+  if (c.device_family) {
+    const want = c.device_family.toLowerCase();
+    out = out.filter((d) => String(d.device_family ?? "").toLowerCase() === want);
+  }
+  return out;
+}
+
 /** The free devices on servers other than `current` that reserve_devices'
  * criteria would pick -- the pool's own rules (server/device/pool.py and
  * _choose in server/api/sessions.py): an OS version prefix, exact type and
@@ -247,33 +291,14 @@ export function matchingElsewhere(
 ): { name: string; devices: Record<string, unknown>[] }[] {
   const remotes = (data as { remotes?: unknown })?.remotes;
   if (!Array.isArray(remotes)) return [];
-  const want = versionOf(criteria.os_version);
   const out: { name: string; devices: Record<string, unknown>[] }[] = [];
   for (const r of remotes as Record<string, unknown>[]) {
     if (!r || r.name === current || !Array.isArray(r.devices)) continue;
-    let devices = (r.devices as Record<string, unknown>[]).filter((d) => {
-      if (!d.free || d.is_available === false) return false;
-      const bootable = criteria.auto_boot !== false && d.state === "shutdown";
-      if (d.state !== "booted" && !bootable) return false;
-      if (criteria.os_version) {
-        const have = versionOf(d.os_version);
-        if (!want || !have || !(have === want || have.startsWith(want + "."))) return false;
-      }
-      if (criteria.device_type && d.device_type !== criteria.device_type) return false;
-      if (criteria.device_family &&
-          familyOf(d).toLowerCase() !== criteria.device_family.toLowerCase()) {
-        return false;
-      }
-      return true;
-    });
-    if (criteria.name) {
-      const n = criteria.name.toLowerCase();
-      const fields = (d: Record<string, unknown>) =>
-        [String(d.name ?? "").toLowerCase(),
-         ...(criteria.listing ? [] : [String(d.model ?? "").toLowerCase()])].filter(Boolean);
-      const exact = devices.filter((d) => fields(d).includes(n));
-      devices = exact.length ? exact : devices.filter((d) => fields(d).some((f) => f.includes(n)));
-    }
+    const all = r.devices as Record<string, unknown>[];
+    // A listing shows held devices too, so its name rule runs over all of
+    // them; only the free ones it keeps are offered.
+    const devices = (criteria.listing ? listed(all, criteria)
+      : reservable(all.filter((d) => d.free), criteria)).filter((d) => d.free);
     if (devices.length && devices.length >= (criteria.count ?? 1)) {
       out.push({ name: String(r.name), devices });
     }
