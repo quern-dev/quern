@@ -290,6 +290,22 @@ class TestLifecycle:
         assert "quern MCP" in detail and "quern session hold NAME" in detail
         assert "quern session hold claude-a" in detail and "resume token" in detail
 
+    def test_a_clients_409_does_not_offer_a_takeover_it_cannot_make(self):
+        """A client's id is qualified by its key; `hold` on the server's Mac
+        would open it as the owner and be refused (review)."""
+        from types import SimpleNamespace
+
+        from server.api import sessions as sessions_api
+
+        req = SimpleNamespace(base_url="https://mac:9130/")
+        registry = SimpleNamespace(grace_remaining=lambda s: 100.0)
+        client = SimpleNamespace(id="alice:job", principal="client:alice")
+        owner = SimpleNamespace(id="job", principal=sessions_api.OWNER)
+        theirs = sessions_api._not_live(req, registry, client)
+        assert "wss://mac:9130/api/v1/sessions/alice:job/live" in theirs
+        assert "take over" not in theirs and "Only this session's resume token" in theirs
+        assert "quern session hold job" in sessions_api._not_live(req, registry, owner)
+
     def test_only_the_session_itself_reserves(self, client):
         a = Held(client, "claude-a")
         r = client.post("/api/v1/sessions/claude-a/reservations", headers=_h("claude-b"),

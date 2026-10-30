@@ -30,6 +30,7 @@ from server.api.actions import logged_action
 from server.session import current_session, parse_session
 from server.session_registry import (
     ON_RELEASE,
+    OWNER,
     HeldSession,
     SessionError,
     SessionRegistry,
@@ -92,6 +93,13 @@ def _not_live(request: Request, registry: SessionRegistry, session: HeldSession)
     socket = str(request.base_url).replace("http", "ws", 1).rstrip("/") + path
     left = registry.grace_remaining(session)
     when = (f"; without one it is released in {int(left)}s" if left is not None else "")
+    # Taking over by name works only for the owner's own sessions on the
+    # server's Mac: a client's id is qualified by its key, which `hold` there
+    # does not send (review).
+    takeover = (f"On the server's own Mac it can take over this one: "
+                f"`quern session hold {session.id}`; from elsewhere only its resume "
+                f"token reclaims it." if session.principal == OWNER else
+                "Only this session's resume token reclaims it.")
     return (
         f"session {session.id} has no live connection{when}. A reservation lasts "
         f"exactly as long as its holder's connection, so a client that vanishes frees "
@@ -100,9 +108,7 @@ def _not_live(request: Request, registry: SessionRegistry, session: HeldSession)
         f"devices. Or let quern hold one for you: the quern MCP does, and from a shell "
         f"`quern session hold NAME` opens a session and keeps its socket open (in the "
         f"background with --background) while you make REST calls as its "
-        f"X-Quern-Session. On the server's own Mac it can take over this one: "
-        f"`quern session hold {session.id}`; from elsewhere only its resume token "
-        f"reclaims it.")
+        f"X-Quern-Session. {takeover}")
 
 
 class OpenRequest(BaseModel):

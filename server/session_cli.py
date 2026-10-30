@@ -467,7 +467,15 @@ def _hold(args: argparse.Namespace) -> int:
     url, key = _server()
     if args.attach:
         token = os.environ.pop(_HOLD_TOKEN_ENV, "")
-        return _hold_socket(url, key, args.name, token, grace=args.grace, quiet=True)
+        if not token:
+            # Internal, and never without its token: attaching with none fails
+            # with 4403, and the failure path must not release a session this
+            # process never opened -- someone else's (review).
+            print("quern session hold: --attach needs the token in "
+                  f"{_HOLD_TOKEN_ENV}", file=sys.stderr)
+            return 2
+        return _hold_socket(url, key, args.name, token, grace=args.grace, quiet=True,
+                            release_on_failure=False)
     status, opened = _call("POST", url, key, "/api/v1/sessions", session=args.name,
                            body={"name": args.name})
     if status != 200:
@@ -482,23 +490,26 @@ def _hold(args: argparse.Namespace) -> int:
 
 
 def _hold_socket(url: str, key: str, session: str, token: str, *, grace: float,
-                 quiet: bool) -> int:
+                 quiet: bool, release_on_failure: bool = True) -> int:
     """Hold the socket until a signal (a clean close: the server releases the
     session at once), a release (0), or a lost hold (HOLD_LOST)."""
+    # Before connecting, which can take a while: a Ctrl-C then is still a
+    # clean close, not a session left in grace (review).
+    stop = threading.Event()
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, lambda *_: stop.set())
     try:
         socket = _Socket(url, key, session, token, grace_seconds=grace,
                          prog="quern session hold")
     except Exception as e:  # noqa: BLE001 -- any failure to hold it is the same answer
         print(f"quern session hold: could not hold the session's socket: {e}", file=sys.stderr)
-        _call("DELETE", url, key, f"/api/v1/sessions/{session}", session=session)
+        if release_on_failure:
+            _call("DELETE", url, key, f"/api/v1/sessions/{session}", session=session)
         return 1
     if not quiet:
         print(f"quern session hold: holding {session}. Make REST calls with "
               f"X-Quern-Session: {session}; Ctrl-C or `quern session release {session}` "
               "ends it.", file=sys.stderr)
-    stop = threading.Event()
-    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(signum, lambda *_: stop.set())
     while not stop.is_set() and not socket.lost:
         stop.wait(0.5)
     if stop.is_set():
@@ -523,30 +534,46 @@ def _hold_in_background(url: str, key: str, session: str, token: str, grace: flo
     root = Path(__file__).resolve().parent.parent      # so `-m server` is this tree
     cmd = [sys.executable, "-m", "server", "session", "hold", session, "--attach",
            "--grace", str(grace)]
-    with open(log, "ab") as out:
-        child = subprocess.Popen(cmd, cwd=root, stdin=subprocess.DEVNULL, stdout=out,
-                                 stderr=out, start_new_session=True,
-                                 env={**os.environ, _HOLD_TOKEN_ENV: token})
-    deadline = time.monotonic() + HOLD_START_TIMEOUT
-    while time.monotonic() < deadline:
-        if child.poll() is not None:
-            print(f"quern session hold: the background holder exited ({child.returncode}); "
-                  f"see {log}", file=sys.stderr)
-            _call("DELETE", url, key, f"/api/v1/sessions/{session}", session=session)
-            return 1
-        status, answer = _call("GET", url, key, f"/api/v1/sessions/{session}", session=session)
-        if status == 200 and answer.get("state") == "live":
-            print(session, flush=True)
-            print(f"quern session hold: holding {session} in the background (pid "
-                  f"{child.pid}, log {log}). Make REST calls with X-Quern-Session: "
-                  f"{session}; `quern session release {session}` ends it.", file=sys.stderr)
-            return 0
-        time.sleep(0.2)
-    child.terminate()
-    _call("DELETE", url, key, f"/api/v1/sessions/{session}", session=session)
-    print(f"quern session hold: the session did not become live within "
-          f"{HOLD_START_TIMEOUT:.0f}s; see {log}", file=sys.stderr)
-    return 1
+    child = None
+    holding = False
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)   # a remotes-only machine has none
+        with open(log, "ab") as out:
+            child = subprocess.Popen(cmd, cwd=root, stdin=subprocess.DEVNULL, stdout=out,
+                                     stderr=out, start_new_session=True,
+                                     env={**os.environ, _HOLD_TOKEN_ENV: token})
+        deadline = time.monotonic() + HOLD_START_TIMEOUT
+        while time.monotonic() < deadline:
+            if child.poll() is not None:
+                print(f"quern session hold: the background holder exited "
+                      f"({child.returncode}); see {log}", file=sys.stderr)
+                return 1
+            status, answer = _call("GET", url, key, f"/api/v1/sessions/{session}",
+                                   session=session)
+            if status == 200 and answer.get("state") == "live":
+                holding = True
+                print(session, flush=True)
+                print(f"quern session hold: holding {session} in the background (pid "
+                      f"{child.pid}, log {log}). Make REST calls with X-Quern-Session: "
+                      f"{session}; `quern session release {session}` ends it.",
+                      file=sys.stderr)
+                return 0
+            time.sleep(0.2)
+        print(f"quern session hold: the session did not become live within "
+              f"{HOLD_START_TIMEOUT:.0f}s; see {log}", file=sys.stderr)
+        return 1
+    finally:
+        # Every way out but success -- the server stopped answering, Ctrl-C,
+        # a log that cannot be opened -- stops the holder and releases the
+        # session, or a detached holder could go on holding after this said
+        # it failed (review).
+        if not holding:
+            if child is not None and child.poll() is None:
+                child.terminate()
+            try:
+                _call("DELETE", url, key, f"/api/v1/sessions/{session}", session=session)
+            except Exception:  # noqa: BLE001 -- already failing; the server's grace applies
+                pass
 
 
 def _still_holding(url: str, key: str, session: str, udids: list[str]) -> bool | None:
