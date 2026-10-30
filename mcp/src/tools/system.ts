@@ -152,7 +152,9 @@ async function useRemote({ name, release }: { name: string; release?: boolean })
   let held: string[] | null;
   let unknown = "";
   try {
-    const session = (await apiRequest("GET", sessionPath)) as
+    // Bounded: a current server that has hung is when a switch is most
+    // needed, and switches queue behind this one (CodeRabbit).
+    const session = (await apiRequest("GET", sessionPath, undefined, undefined, 5000)) as
       { reservations?: { udid?: string }[] } | null;
     held = (session?.reservations ?? []).map((r) => String(r.udid));
   } catch (e) {
@@ -177,7 +179,8 @@ async function useRemote({ name, release }: { name: string; release?: boolean })
   let releaseNote = "";
   if (release && (held === null || held.length)) {
     try {
-      const freed = (await apiRequest("DELETE", `${sessionPath}/reservations`)) as
+      const freed = (await apiRequest("DELETE", `${sessionPath}/reservations`, undefined,
+        undefined, 5000)) as
         { freed?: string[] } | null;
       released = freed?.freed ?? held ?? [];
     } catch (e) {

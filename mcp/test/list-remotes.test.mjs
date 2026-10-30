@@ -17,12 +17,19 @@ function fakeQuern(script) {
 }
 
 async function withEnv(env, fn) {
-  const saved = { PATH: process.env.PATH, HOME: process.env.HOME };
+  // QUERN_REMOTE cleared: one exported by a developer would change which
+  // server counts as current (CodeRabbit). Unset ones are deleted again, not
+  // restored as the string "undefined".
+  const keys = [...new Set(["PATH", "HOME", "QUERN_REMOTE", ...Object.keys(env)])];
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  delete process.env.QUERN_REMOTE;
   Object.assign(process.env, env);
   try {
     return await fn();
   } finally {
-    Object.assign(process.env, saved);
+    for (const k of keys) {
+      if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
+    }
   }
 }
 

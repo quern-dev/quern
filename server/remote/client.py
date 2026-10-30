@@ -90,6 +90,9 @@ def list_remotes() -> list[Remote]:
 
 
 def save(remote: Remote) -> None:
+    if remote.name.lower() == "local":
+        # This Mac's own server goes by that name in `remote list` and use_remote.
+        raise RemoteError('"local" names this Mac\'s own server; give the remote another name')
     with _locked() as remotes:
         remotes[remote.name] = {k: v for k, v in asdict(remote).items() if k != "name"}
 

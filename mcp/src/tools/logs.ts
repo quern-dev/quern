@@ -9,7 +9,7 @@ import { type LogQueryAnswer, tailLogsResult } from "./log-responses.js";
 
 export function registerLogTools(server: McpServer): void {
   server.registerTool("ensure_server", {
-    description: `Ensure Quern is running. Reads state.json, health checks, and starts the server if needed. This is the recommended first tool call for any agent session. Returns connection info including server URL, proxy port, and API key. With QUERN_REMOTE set, it only health-checks that remote over the pinned connection and never starts anything; the answer has server_url and version, not proxy or key details.`,
+    description: `Ensure Quern is running. Reads state.json, health checks, and starts the server if needed. This is the recommended first tool call for any agent session. Returns connection info including server URL, proxy port, and API key. Pointed at a remote (QUERN_REMOTE, or use_remote), it only health-checks that remote over the pinned connection and never starts anything; the answer has server_url and version, not proxy or key details.`,
     inputSchema: strictParams({}),
   }, async () => {
       // A remote quern (QUERN_REMOTE, #254 phase 3): checked over the pinned

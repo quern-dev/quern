@@ -169,6 +169,9 @@ def test_no_check_asks_nothing(monkeypatch, capsys):
     monkeypatch.setattr(status, "statuses", must_not)
     assert remote_cli._remote(["list", "--no-check"]) == 0
     assert "studio" in capsys.readouterr().out
+    # The JSON is the checked list's shape, records only (CodeRabbit).
+    assert remote_cli._remote(["list", "--no-check", "--json"]) == 0
+    assert [r["name"] for r in json.loads(capsys.readouterr().out)["remotes"]] == ["studio"]
 
 
 def test_an_unknown_flag_is_usage(capsys):
@@ -401,3 +404,100 @@ def test_an_unknown_local_version_is_not_compared(monkeypatch, capsys):
     remote_cli._remote(["list", "--json"])
     assert seen == [None]
     assert json.loads(capsys.readouterr().out)["local_version"] == "unknown"
+
+
+@pytest.mark.parametrize("args", [
+    ["https://romulus.lan:9130", "--code", "AAAA-BBBB", "--name", "local"],
+    ["https://romulus.lan:9130", "--code", "AAAA-BBBB", "--name", "Local"],
+    ["https://local.lan:9130", "--code", "AAAA-BBBB"],              # named from the URL
+])
+def test_a_remote_cannot_be_called_local(monkeypatch, capsys, args):
+    # "local" is this Mac's own entry in the list and in use_remote: a remote
+    # by that name collided with it and was probed without its pin (CodeRabbit).
+    monkeypatch.setattr(client, "pair", lambda *a: (_ for _ in ()).throw(
+        AssertionError("paired, spending the code")))
+    assert remote_cli._connect(args) == 2
+    assert "this Mac's own server" in capsys.readouterr().err
+    with pytest.raises(client.RemoteError, match="this Mac's own server"):
+        client.save(client.Remote(name="local", url="https://x:9130", fingerprint=FP, key="k"))
+
+
+def test_a_pinned_record_is_never_opened_unpinned_whatever_its_name(monkeypatch):
+    used = []
+    monkeypatch.setattr(status.urllib.request, "build_opener",
+                        lambda *a: (_ for _ in ()).throw(AssertionError("unpinned")))
+
+    class Pinned:
+        def open(self, req, timeout):
+            used.append(req.full_url)
+            raise urllib.error.URLError("stop")
+
+    monkeypatch.setattr(client, "opener", lambda r: Pinned())
+    status.probe(client.Remote(name="local", url="https://odd.lan:9130", fingerprint=FP,
+                               key="k", label="scorpius"), None)
+    assert used == ["https://odd.lan:9130/health"]
+
+
+def test_entries_that_share_a_name_keep_their_own_answers(monkeypatch):
+    # Results were keyed by name: two "local" entries took whichever finished
+    # last, and the failed one could drop out of the exit check (CodeRabbit).
+    records = {"local": {"url": "https://local.lan:9130", "fingerprint": FP, "key": "k"}}
+    monkeypatch.setattr(client, "_read", lambda: records)
+    monkeypatch.setattr(status, "_local", lambda: client.Remote(
+        name=status.LOCAL, url="http://127.0.0.1:9110", fingerprint="", key="owner",
+        label="this Mac"))
+
+    def fake_probe(remote, local_version, timeout):
+        row = status._blank(remote.name, remote.url, remote.label)
+        if remote.fingerprint:
+            row["error"] = "not reachable (refused)"
+        else:
+            row.update(reachable=True, devices=[], free=0)
+        return row
+
+    monkeypatch.setattr(status, "probe", fake_probe)
+    rows = status.statuses(None, include_local=True)
+    assert [(r["url"], r["reachable"]) for r in rows] == [
+        ("http://127.0.0.1:9110", True), ("https://local.lan:9130", False)]
+
+
+def test_the_deadline_counts_the_local_lookup(monkeypatch):
+    import time
+
+    records = {"studio": {"url": "https://studio.lan:9130", "fingerprint": FP, "key": "k"}}
+    monkeypatch.setattr(client, "_read", lambda: records)
+
+    def slow_local():
+        time.sleep(0.4)
+        return {**status._blank("local", None, "this Mac"), "local": True, "error": "x"}
+
+    def slow_probe(remote, local_version, timeout):
+        time.sleep(0.4)
+        return {**status._blank(remote.name, remote.url, remote.label), "reachable": True}
+
+    monkeypatch.setattr(status, "_local", slow_local)
+    monkeypatch.setattr(status, "probe", slow_probe)
+    start = time.monotonic()
+    rows = status.statuses(None, deadline=0.6, include_local=True)
+    assert time.monotonic() - start < 0.75, "the whole list keeps to the deadline"
+    assert "not answering" in rows[1]["error"]
+
+
+def test_this_key_from_the_server_marks_yours(monkeypatch):
+    # The local row's label never prefixes a session id, and the server's
+    # `yours` is per session: `this_key` is what says it (CodeRabbit).
+    out = status._devices({"devices": [
+        {"udid": "A", "reservation": {"held_by": "claude-x", "yours": False, "this_key": True}},
+        {"udid": "B", "reservation": {"held_by": "claude-y", "yours": False, "this_key": False}},
+    ]}, "this Mac")
+    assert [d["udid"] for d in out if d["yours"]] == ["A"]
+
+
+def test_with_local_devices_and_no_remotes_lists_this_macs_devices(monkeypatch, capsys):
+    local = {**status._blank("local", "http://127.0.0.1:9110", "this Mac"), "local": True,
+             "reachable": True, "version": "1", "free": 1,
+             "devices": [{"udid": "L1", "name": "iPhone 16", "free": True, "state": "booted"}]}
+    _rows(monkeypatch, [local])
+    remote_cli._remote(["list", "--with-local", "--devices"])
+    out = capsys.readouterr().out
+    assert "L1" in out and "Not paired with any remote" in out

@@ -56,7 +56,10 @@ def holder_detail(held: Held, caller: Caller) -> dict | None:
     session = held.session
     return {"held_by": session.id, "state": session.state,
             "since": session.reservations[held.udid].since.isoformat(),
-            "yours": session.id == caller.session}
+            "yours": session.id == caller.session,
+            # Held by any session of the caller's own key: a listing asks under
+            # a session of its own, so `yours` never matches it (CodeRabbit).
+            "this_key": session.principal == caller.principal}
 
 
 def visible_sessions(sessions: list[HeldSession], caller: Caller) -> list[HeldSession]:

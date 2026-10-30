@@ -88,6 +88,11 @@ def _connect(args: list[str]) -> int:
         print(USAGE, end="", file=sys.stderr)
         return 2
     name = opts.name or _default_name(opts.url)
+    if name.lower() == "local":
+        # The name this Mac's own server is listed and switched to under.
+        print("quern connect: \"local\" names this Mac's own server; give the remote "
+              "another name with --name", file=sys.stderr)
+        return 2
     try:
         if opts.code:
             if opts.key or opts.fingerprint:
@@ -169,8 +174,10 @@ def _remote(args: list[str]) -> int:
                 print(f"quern remote list: {e}", file=sys.stderr)
                 return 1
             if opts.json:
-                print(json.dumps([{"name": r.name, "url": r.url, "label": r.label}
-                                  for r in remotes], indent=2))
+                # The checked list's shape, with only the records: one shape
+                # for scripts either way (CodeRabbit).
+                print(json.dumps({"remotes": [{"name": r.name, "url": r.url, "label": r.label}
+                                              for r in remotes]}, indent=2))
                 return 0
             if not remotes:
                 print("Not paired with any remote quern. Pair with `quern connect`.")
@@ -206,6 +213,9 @@ def _list_status(*, as_json: bool, devices: bool = False, with_local: bool = Fal
     elif not rows or (with_local and len(rows) == 1):
         for r in rows:
             print(_status_line(r))
+            if devices and r.get("devices"):
+                for line in _device_lines(r["devices"]):
+                    print(line)
         print("Not paired with any remote quern. Pair with `quern connect`.")
     else:
         for r in rows:

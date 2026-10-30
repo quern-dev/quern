@@ -46,7 +46,9 @@ def _get(remote: client.Remote, path: str, timeout: float) -> Any:
     req = urllib.request.Request(remote.url + path, headers={
         "Authorization": f"Bearer {remote.key}", "X-Quern-Session": _SESSION})
     # This Mac's own server is plain http on loopback, with no pin to check.
-    opener = (urllib.request.build_opener() if remote.name == LOCAL
+    # Told apart by having no pin, never by name: a remote paired as "local"
+    # must not skip its pin (CodeRabbit).
+    opener = (urllib.request.build_opener() if not remote.fingerprint
               else client.opener(remote))
     with opener.open(req, timeout=timeout) as resp:
         body = resp.read()
@@ -115,7 +117,9 @@ def _devices(answer: Any, label: str = "") -> list[dict]:
             # this read names a session of its own, so it never matched; a
             # client key's session ids carry its label (found live).
             "free": held is None,
-            "yours": bool(held and (held.get("yours") or (
+            # A server that says (`this_key`) is believed; an older one is read
+            # by the label its key's sessions carry.
+            "yours": bool(held and (held.get("this_key") or held.get("yours") or (
                 label and str(held.get("held_by") or "").startswith(f"{label}:")))),
         })
     return devices
@@ -163,6 +167,7 @@ def statuses(local_version: str | None, timeout: float = TIMEOUT_SECONDS,
              deadline: float = DEADLINE_SECONDS, include_local: bool = False) -> list[dict]:
     """Every paired remote's state, in name order. A record that cannot be read
     is listed with why, not dropped: the rest still answer."""
+    ends = time.monotonic() + deadline   # the whole list, the local lookup included
     try:
         names = sorted(client._read())
     except client.RemoteError as e:
@@ -181,37 +186,44 @@ def statuses(local_version: str | None, timeout: float = TIMEOUT_SECONDS,
             loaded.insert(0, {**_blank(LOCAL, None, "this Mac"), "local": True,
                               "error": f"could not be asked ({e})"})
     remotes = [r for r in loaded if isinstance(r, client.Remote)]
-    probed = _probe_all(remotes, local_version, timeout, deadline)
-    rows = [probed[r.name] if isinstance(r, client.Remote) else r for r in loaded]
+    probed = _probe_all(remotes, local_version, timeout, deadline, ends)
+    # By position, not name: two entries may share one (CodeRabbit).
+    answers = iter(probed)
+    rows = [next(answers) if isinstance(r, client.Remote) else r for r in loaded]
     for row in rows:
         row["local"] = row.get("name") == LOCAL and row.get("label") == "this Mac"
     return rows
 
 
 def _probe_all(remotes: list[client.Remote], local_version: str | None, timeout: float,
-               deadline: float) -> dict[str, dict]:
-    """Each remote probed on its own daemon thread, waited for until
-    `deadline`: a remote still talking then is reported as not answering, and
-    its thread -- a daemon -- does not keep the process alive."""
-    results: dict[str, dict] = {}
+               deadline: float, ends: float | None = None) -> list[dict]:
+    """Each remote probed on its own daemon thread, waited for until `ends`
+    (`deadline` from now if not given): a remote still talking then is
+    reported as not answering, and its thread -- a daemon -- does not keep the
+    process alive. Answers in the order of `remotes`."""
+    results: dict[int, dict] = {}
     lock = threading.Lock()
 
-    def run(remote: client.Remote) -> None:
+    def run(i: int, remote: client.Remote) -> None:
         row = probe(remote, local_version, timeout)
         with lock:
-            results[remote.name] = row
+            results[i] = row
 
-    threads = [threading.Thread(target=run, args=(r,), daemon=True) for r in remotes]
+    threads = [threading.Thread(target=run, args=(i, r), daemon=True)
+               for i, r in enumerate(remotes)]
     for t in threads:
         t.start()
-    ends = time.monotonic() + deadline
+    if ends is None:
+        ends = time.monotonic() + deadline
     for t in threads:
         t.join(max(0.0, ends - time.monotonic()))
     with lock:
         done = dict(results)
-    for r in remotes:
-        if r.name not in done:
+    rows = []
+    for i, r in enumerate(remotes):
+        row = done.get(i)
+        if row is None:
             row = _blank(r.name, r.url, r.label)
             row["error"] = f"not answering (no complete answer within {deadline:.0f}s)"
-            done[r.name] = row
-    return done
+        rows.append(row)
+    return rows

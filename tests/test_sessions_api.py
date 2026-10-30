@@ -574,6 +574,9 @@ class TestThePoolAndTheListing:
             _SESSION.reset(token_b)
         assert out[0]["reservation"]["held_by"] == "claude-a"
         assert out[0]["reservation"]["yours"] is False
+        # Another session, but the same key (both are the owner here): a
+        # listing made under a session of its own can still tell its key's.
+        assert out[0]["reservation"]["this_key"] is True
         assert out[1]["reservation"] is None
 
 
