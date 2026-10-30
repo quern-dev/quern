@@ -458,3 +458,29 @@ async def test_install_app_refuses_a_knowledge_upload(tmp_path, monkeypatch):
     with pytest.raises(HTTPException) as e:
         await device_api.install_app(req, InstallAppRequest(upload_id=up.id))
     assert e.value.status_code == 400 and "knowledge base" in e.value.detail
+
+
+async def test_releasing_one_device_keeps_the_sessions_knowledge_base():
+    # release_devices for one device queued a released record carrying the
+    # live session's own id and opening, and the clean-up for it dropped the
+    # session's knowledge base while the session lived on.
+    from server.api import sessions as sessions_api
+    from server.session_registry import SessionRegistry
+
+    registry = SessionRegistry()
+    session, token = registry.open("client:a/s1", principal="client:a")
+    registry.attach(session.id, token)
+    registry.reserve(session.id, ["SIM-1", "SIM-2"])
+    lm = _proxy()
+    lm.own(session.id, session.opened_at).load(APP, _screens("home"))
+    app = SimpleNamespace(state=SimpleNamespace(
+        sessions=registry, device_controller=None, landmark_registry=lm,
+        proxy_adapter=None, recordings=None, mock_owners={}))
+
+    registry.unreserve(session.id, ["SIM-1"])
+    await sessions_api.run_release_policies(app)
+    assert lm.own_apps(session.id) == [APP], "the session lives on, and so does its set"
+
+    registry.release(session.id)
+    await sessions_api.run_release_policies(app)
+    assert lm.own_apps(session.id) == [], "it still ends with the session"

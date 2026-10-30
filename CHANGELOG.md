@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **`reserve_devices` and `list_devices` say where else to look.** When nothing here matches, the reserve error, or an `elsewhere` field on an empty filtered list, names the paired servers with matching free devices and the `use_remote` call to get there. An agent that wasn't told about other machines concluded the device didn't exist.
 - **Devices say what model they are.** `list_devices` gives each device a `model` ("iPad Pro 11-inch (M4)", or a physical device's marketing name or product type), whatever it's called. A `name` criterion in `reserve_devices` and `resolve_device` matches the model too, so a renamed simulator is still found by what it is.
 
+### Fixed
+- **Releasing one device no longer unloads the session's knowledge base.** A knowledge base loaded for a session (a remote or client-key MCP's, #560) was dropped by `release_devices` for any single device, though the session went on; screen identification then returned nothing until the MCP reconnected. It now ends only with the session.
+
 ### Security
 - **A remote's redirects are followed only within its https origin.** The pinned connection that `quern remote`, `quern session` and `quern record` use followed any redirect, including to plain http, and urllib carried the `Authorization` header along, so a remote answering 302 to an `http://` address sent the client key in clear.
 - **A remote or client-key MCP loads the project's knowledge base for its own session (#560).** From another machine `load_landmarks(path=...)` names nothing, and loading was owner-only because landmark sets are server-wide, so the first remote trial's screen identification returned nothing.
