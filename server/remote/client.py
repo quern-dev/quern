@@ -90,6 +90,9 @@ def list_remotes() -> list[Remote]:
 
 
 def save(remote: Remote) -> None:
+    if remote.name.lower() == "local":
+        # This Mac's own server goes by that name in `remote list` and use_remote.
+        raise RemoteError('"local" names this Mac\'s own server; give the remote another name')
     with _locked() as remotes:
         remotes[remote.name] = {k: v for k, v in asdict(remote).items() if k != "name"}
 
@@ -181,9 +184,29 @@ class _PinnedHandler(urllib.request.HTTPSHandler):
                                               fingerprint=self._fingerprint), req)
 
 
+class _SameOriginRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only to the same https origin. urllib follows any
+    redirect, to plain http too, and carries the Authorization header with it,
+    so a remote answering 302 to an http:// address sent the client key in
+    clear to a host no pin covers (review). A trailing-slash redirect --
+    FastAPI's -- stays on the origin and is still followed."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old = urllib.parse.urlsplit(req.full_url)
+        joined = urllib.parse.urljoin(req.full_url, newurl)
+        new = urllib.parse.urlsplit(joined)
+        if new.scheme != "https" or (new.hostname, new.port or 443) != (
+                old.hostname, old.port or 443):
+            raise RemoteError(f"the remote redirected to {newurl}, away from its paired "
+                              "address; not followed, and its key was not sent")
+        return super().redirect_request(req, fp, code, msg, headers, joined)
+
+
 def opener(remote: Remote) -> urllib.request.OpenerDirector:
-    """A urllib opener whose every HTTPS connection is pinned to `remote`."""
-    return urllib.request.build_opener(_PinnedHandler(remote.fingerprint))
+    """A urllib opener whose every HTTPS connection is pinned to `remote`, and
+    which follows redirects only within its origin."""
+    return urllib.request.build_opener(_PinnedHandler(remote.fingerprint),
+                                       _SameOriginRedirects())
 
 
 class _PinningContext(ssl.SSLContext):

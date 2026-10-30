@@ -52,6 +52,9 @@ const REOPEN_AFTER_FAILED_HANDSHAKES = 3;
  * again, back off -- a repeated 4404 was a tight POST/WebSocket loop
  * (CodeRabbit). Reset on attach. */
 let reopenedAtOnce = false;
+/** Bumped when use_remote moves the session to another server: an open or a
+ * connect begun for the old server must not attach this client there. */
+let generation = 0;
 
 /** Queue a notice unless the same one is already waiting to be delivered. */
 function notice(text: string): void {
@@ -82,10 +85,14 @@ export function heldSessionState(): { id: string; state: HeldState } {
  * then attaches with the token this got. False when it could not be opened;
  * the start opens it again as usual. */
 export async function openHeldSession(): Promise<boolean> {
+  const gen = generation;
   try {
     const opened = (await apiRequest("POST", "/api/v1/sessions", undefined, {
       name: SESSION_ID,
     }, 5000)) as { resume_token?: string } | null;
+    // Opened on a server this client has since left (use_remote): its token
+    // must not be presented to the new one (review).
+    if (gen !== generation) return false;
     if (!opened?.resume_token) return false;
     token = opened.resume_token;
     return true;
@@ -152,11 +159,13 @@ function retry(step: () => void): void {
 
 async function open(): Promise<void> {
   if (stopping) return;
+  const gen = generation;
   state = "opening";
   try {
     const opened = (await apiRequest("POST", "/api/v1/sessions", undefined, {
       name: SESSION_ID,
     })) as { resume_token?: string; resumed?: boolean } | null;
+    if (gen !== generation) return;   // moved to another server meanwhile
     if (!opened?.resume_token) throw new Error("no resume token in the answer");
     token = opened.resume_token;
     // A client that has held a session before and is handed a *new* one has
@@ -172,8 +181,47 @@ async function open(): Promise<void> {
     }
     connect();
   } catch {
-    retry(() => void open());
+    if (gen === generation) retry(() => void open());
   }
+}
+
+/** Move the held session to the server discoverServer() names now (use_remote):
+ * the old socket is closed cleanly -- which releases anything still held there
+ * -- and a session under the same id is opened on the new server and held.
+ * True once it is live there; false if it is not within `timeoutMs`, or the
+ * client is exiting. */
+export async function switchHeldSession(timeoutMs = 10_000): Promise<boolean> {
+  if (stopping) return false;   // exiting: open nothing new anywhere (review)
+  generation += 1;
+  if (timer) clearTimeout(timer);
+  const old = socket;
+  socket = null;              // its end is no longer the current attempt's
+  try {
+    old?.close(1000, "switching server");
+  } catch {
+    // already closed
+  }
+  token = null;
+  everAttached = false;       // a new server's fresh session is not a loss
+  failedHandshakes = 0;
+  reopenedAtOnce = false;
+  backoffMs = 1000;
+  state = "idle";
+  // What was said about, and loaded for, the old server's session does not
+  // carry over: a notice would read as being about the new one, and the
+  // knowledge-base reload would upload to it (review).
+  sessionNotices.length = 0;
+  onReopened = null;
+  await openHeldSession();
+  startHeldSession();
+  // Read through a call: TypeScript narrows `state` to "idle" from the
+  // assignment above, not knowing the socket's handlers change it meanwhile.
+  const live = () => heldSessionState().state === "live";
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline && !live() && !stopping) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return live();
 }
 
 function connect(): void {

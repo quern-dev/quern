@@ -68,7 +68,7 @@ It's all or nothing: **409** names the holder of any device another session has.
 
 **Seeing who holds what:**
 
-- `list_devices` gives each device a `reservation` (`null`, or `{held_by, state, since, yours}`).
+- `list_devices` gives each device a `reservation` (`null`, or `{held_by, state, since, yours, this_key}`): `yours` when this session holds it, `this_key` when any session of the caller's key does.
 - `GET /api/v1/sessions` lists sessions with their state (`live`, or `grace` with `grace_remaining_s`) and devices.
 - The server's owner can release any session.
 
@@ -139,7 +139,7 @@ quern mcp-install --remote office      # or QUERN_REMOTE=office for `session run
 - **The code never crosses the network.** The client connects without trusting the certificate, and the two sides exchange HMAC proofs keyed by the code and bound to the certificate the client actually sees, so a machine in the middle presenting its own certificate can neither pass the server's proof nor turn the client's into one the server accepts. A code lasts five minutes, works once, and is void after five failed attempts. Pairing answers only on the remote listener.
 - **The owner's key is refused** on the remote listener, with 403: the key that reaches everything stays on the server's Mac. Pair even the owner's own laptop as a client.
 - **What a remote client may do** is what any client key may do (above): blind sharing, scopes and revocation apply unchanged.
-- **Remotes on the client** are kept in `~/.quern/remotes.json` (0600): `quern remote list`, `quern remote forget NAME`. A key issued by hand with `quern clients add` can be recorded with `quern connect URL --key KEY --fingerprint SHA256:...`.
+- **Remotes on the client** are kept in `~/.quern/remotes.json` (0600): `quern remote list`, `quern remote forget NAME`. `quern remote list` asks each remote now, with its own key and pinned certificate, in parallel -- each request may take 4 s, and a remote with no complete answer after 10 s is listed as not answering: whether it answers (or why not: unreachable, timed out, certificate changed, key refused), its version and whether it differs from this Mac's, and its devices with which are free and which this key holds. A remote that could not be asked is never shown as having no devices, and the command exits 1 when any could not be asked. `--devices` lists each device under its remote -- name, model, family, OS version, type, state, and free, yours or who holds it -- free and booted first. `--with-local` lists this Mac's own server first; its not running is said, and is not a failure. `--json` gives the same for scripts, and `--no-check` lists the records without asking (with `--json`, the same `{"remotes": [...]}` shape, records only). A remote can't be named `local`, which is this Mac's own entry. The `list_remotes` MCP tool runs it with `--with-local` on the MCP's machine and marks the server the MCP talks to `"current": true`, so an agent can compare every machine's devices and knows which it can reserve now; `use_remote` switches the MCP to another of them. A key issued by hand with `quern clients add` can be recorded with `quern connect URL --key KEY --fingerprint SHA256:...`.
 - **`QUERN_REMOTE` that cannot be read fails**, rather than falling back to this machine's own server: an agent's work must not land on a machine nobody named. `ensure_server` checks a remote's health and never starts a server locally for it.
 - **`/health` carries `host_id`**, a random id made once per installation, so a client can tell whether it shares the server's disk -- which decides what a path it sends means.
 
@@ -188,6 +188,8 @@ It opens session NAME (or, on the server's own Mac, takes over one of yours in i
 | MCP Tool | Method | Path | Description |
 |---|---|---|---|
 | `ensure_server` | GET | `/api/v1/system/update-status` | Most recent persisted update-check result |
+| `list_remotes` | — | — | No route: runs `quern remote list --json --with-local` on the MCP's own machine, so this Mac comes first as `local`, where the paired remotes are recorded. Each paired remote is asked now: whether it answers or why not, its version, and its devices with which are free. See "Remote access" |
+| `use_remote` | — | — | No route: switches this MCP to another server -- a paired remote by name, or `local` -- so every later tool call goes there, and moves its held session with it. Refused while the session holds devices on the current server, or when it cannot tell, unless `release` is true. The target is checked before anything is switched, the switch succeeds only once a session is live there (otherwise the MCP goes back), and switches run one at a time. Notices about the old server are dropped. Only the MCP is switched, not the `quern` CLI |
 | `update_quern` | POST | `/api/v1/system/update` | Launch `quern update` in a detached child; returns immediately |
 | `set_update_channel` | PUT | `/api/v1/system/channel` | Set the update channel (`stable` or `beta`) |
 
@@ -478,7 +480,7 @@ holds in `flow_store`. `flows_captured` is only what survived.
 
 | MCP Tool | Method | Path | Description |
 |---|---|---|---|
-| `list_devices` | GET | `/api/v1/device/list` | List simulators, emulators, and physical devices |
+| `list_devices` | GET | `/api/v1/device/list` | List simulators, emulators, and physical devices. Each carries `model`: what the hardware is, as Apple names it ("iPad Pro 11-inch (M4)"), whatever the device is called -- a simulator's from its device type, a physical device's marketing name or product type ("iPhone16,1") -- or "" when unknown. A `name` criterion in `reserve_devices` and `resolve_device` matches the model too, so a renamed simulator is still found by what it is. Through the MCP, a list filtered by name, OS, family or type that comes back empty carries `elsewhere`: which paired servers have matching free devices, and the `use_remote` call to get there |
 | `boot_device` | POST | `/api/v1/device/boot` | Boot simulator |
 | `shutdown_device` | POST | `/api/v1/device/shutdown` | Shutdown simulator |
 | `erase_device` | POST | `/api/v1/device/erase` | Erase a simulator or Android emulator, resetting it to factory state (an emulator is relaunched, possibly on a new serial) |
@@ -569,7 +571,7 @@ holds in `flow_store`. `flows_captured` is only what survived.
 
 | MCP Tool | Method | Path | Description |
 |---|---|---|---|
-| `reserve_devices` | POST | `/api/v1/sessions/{id}/reservations` | Reserve devices for this session (udids, count plus criteria, or a group), all or nothing; 409 names a holder. See "Sessions and reservations" above |
+| `reserve_devices` | POST | `/api/v1/sessions/{id}/reservations` | Reserve devices for this session (udids, count plus criteria, or a group), all or nothing; 409 names a holder. Each reserved device comes back with its name, model, OS version, family and type, so a caller that reserved by criteria knows what it got. When the pool has too few free devices for the criteria, the MCP adds which paired servers have enough -- booted, or shut down when `auto_boot` allows -- and how to switch (`use_remote`). See "Sessions and reservations" above |
 | `release_devices` | DELETE | `/api/v1/sessions/{id}/reservations` | Release one device (`?udid=`) or all |
 | `session_status` | GET | `/api/v1/sessions/{id}` | One session: state (`live`, `grace` with `grace_remaining_s`) and reservations. With `all`, the MCP tool lists every session |
 

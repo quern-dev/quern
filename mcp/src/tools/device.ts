@@ -6,10 +6,11 @@ import { discoverServer } from "../config.js";
 import { apiRequest, quernHeaders, ServerRefused, serverFetch } from "../http.js";
 import { mustUpload, type Uploaded, uploadApp } from "../remote-paths.js";
 import { strictParams, errorText } from "./helpers.js";
+import { elsewhereHint } from "./system.js";
 
 export function registerDeviceTools(server: McpServer): void {
   server.registerTool("list_devices", {
-    description: `List available iOS and Android devices (simulators, emulators, physical), plus tool availability (simctl, idb, devicectl, adb). Returns device UDIDs, names, states, and OS versions. Does NOT change the active device.`,
+    description: `List available iOS and Android devices (simulators, emulators, physical), plus tool availability (simctl, idb, devicectl, adb). Returns device UDIDs, names, models (what the hardware is, e.g. "iPhone 15 Pro", whatever the device is called), states, and OS versions; the name filter matches names only. Does NOT change the active device. A filtered list that comes back empty may carry "elsewhere": paired servers that have matching devices, and the use_remote call to get there.`,
     inputSchema: strictParams({
       state: z
         .enum(["booted", "shutdown"])
@@ -58,7 +59,21 @@ export function registerDeviceTools(server: McpServer): void {
         devices: Array<Record<string, unknown>>;
         tools: Record<string, boolean>;
         active_udid: string | null;
+        elsewhere?: string;
       };
+      // Nothing here matches what was asked for: say where something does.
+      // An agent that found no iOS 17.5 iPhone here told the user none
+      // existed, and offered to download the runtime (found live).
+      // Only filters the hint can check: state and cert_installed it cannot,
+      // so a remote it named could list nothing (CodeRabbit).
+      if (Array.isArray(data?.devices) && !data.devices.length &&
+          (name || os_version || device_family || type) &&
+          state === undefined && cert_installed === undefined) {
+        const hint = await elsewhereHint({
+          name, os_version, device_family, device_type: type, listing: true,
+        }, "None here", "list_devices");
+        if (hint) data.elsewhere = hint.trim();
+      }
 
       return {
         content: [

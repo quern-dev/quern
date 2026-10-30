@@ -24,7 +24,7 @@ auto_boot is enabled).`,
       name: z
         .string()
         .optional()
-        .describe("Device name pattern (e.g., 'iPhone 16 Pro'). Exact matches are preferred over substring matches."),
+        .describe("Device name or model (e.g., 'iPhone 16 Pro', 'iPad Pro 11-inch (M4)'). Matches a simulator's model too, so a renamed one is still found by what it is. Exact matches are preferred over substring matches."),
       os_version: z
         .string()
         .optional()
@@ -95,7 +95,7 @@ The first device becomes the active device for subsequent tool calls.`,
       name: z
         .string()
         .optional()
-        .describe("Device name pattern (e.g., 'iPhone 16 Pro'). Exact matches are preferred over substring matches."),
+        .describe("Device name or model (e.g., 'iPhone 16 Pro', 'iPad Pro 11-inch (M4)'). Matches a simulator's model too, so a renamed one is still found by what it is. Exact matches are preferred over substring matches."),
       os_version: z
         .string()
         .optional()

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { heldSessionState } from "../held-session.js";
 import { SESSION_ID, apiRequest } from "../http.js";
 import { strictParams, errorText } from "./helpers.js";
+import { betweenSwitches, elsewhereHint } from "./system.js";
 
 function answer(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
@@ -30,15 +31,31 @@ Your reservation lasts as long as this MCP session: released when it ends, and k
       group: z.string().optional().describe("A named group from config.json's device_groups"),
       device_type: z.enum(["simulator", "device", "android_emulator", "android_device"]).optional(),
       os_version: z.string().optional().describe("OS version prefix, e.g. '18'"),
-      name: z.string().optional().describe("Device name pattern, e.g. 'iPhone 16'"),
+      name: z.string().optional().describe("Device name or model, e.g. 'iPhone 16' or 'iPad Pro 11-inch (M4)'; matches a renamed simulator by its model"),
       device_family: z.string().optional().describe("'iPhone', 'iPad', ..."),
       auto_boot: z.boolean().optional().describe("Boot shutdown devices to make up the count (default true)"),
       on_release: z.enum(["none", "shutdown_booted"]).optional().describe("shutdown_booted: when released, shut down the simulators this reservation booted. Default none"),
     }),
   }, async (args) => {
     try {
-      return answer(await apiRequest("POST", path("/reservations"), undefined, args));
+      // Never during a switch: reserved on the old server after use_remote
+      // checked what is held there, it was released by the switch's clean
+      // close without a word (CodeRabbit). The hint below runs outside.
+      return answer(await betweenSwitches(() =>
+        apiRequest("POST", path("/reservations"), undefined, args)));
     } catch (e) {
+      // Nothing here matched (409): say where something does, rather than
+      // leave the agent to conclude it exists nowhere (found live).
+      const message = e instanceof Error ? e.message : String(e);
+      // Only the pool's "not enough free" 409: a session with no live
+      // connection, or a race lost, is not fixed by going elsewhere (review).
+      if (/HTTP 409.*asked for \d+ device\(s\), \d+ free/.test(message) &&
+          !args.udids && !args.group) {
+        const hint = await elsewhereHint(args);
+        if (hint) {
+          return { content: [{ type: "text" as const, text: errorText(e) + hint }], isError: true };
+        }
+      }
       return failure(e);
     }
   });

@@ -574,6 +574,9 @@ class TestThePoolAndTheListing:
             _SESSION.reset(token_b)
         assert out[0]["reservation"]["held_by"] == "claude-a"
         assert out[0]["reservation"]["yours"] is False
+        # Another session, but the same key (both are the owner here): a
+        # listing made under a session of its own can still tell its key's.
+        assert out[0]["reservation"]["this_key"] is True
         assert out[1]["reservation"] is None
 
 
@@ -695,6 +698,26 @@ class TestReservingThroughThePool:
         assert [x["udid"] for x in r.json()["reserved"]] == ["SIM-1", "SIM-2"]
         assert pool.booted == ["SIM-2"]
         assert [x["booted_here"] for x in r.json()["reserved"]] == [False, True]
+        a.close()
+
+    def test_the_answer_says_what_each_device_is(self, client, pool):
+        # Reserved by criteria, an agent was told only udids and could not say
+        # which device it had (found live).
+        from server.models import DeviceType
+
+        pool.devices["SIM-2"].__dict__.update(
+            name="CI 3", model="iPhone 15 Pro", os_version="iOS 17.5",
+            device_family="iPhone", device_type=DeviceType.SIMULATOR)
+        a = Held(client, "claude-a")
+        r = _reserve(client, "claude-a", udids=["SIM-2", "SIM-3"])
+        assert r.status_code == 200, r.text
+        two, three = r.json()["reserved"]
+        assert {k: two[k] for k in ("name", "model", "os_version", "device_family",
+                                    "device_type")} == {
+            "name": "CI 3", "model": "iPhone 15 Pro", "os_version": "iOS 17.5",
+            "device_family": "iPhone", "device_type": "simulator"}
+        assert three["udid"] == "SIM-3" and three["model"] is None, \
+            "a device the pool knows less about still answers, with what it has"
         a.close()
 
     def test_count_skips_devices_another_session_holds(self, client, pool, registry):

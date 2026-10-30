@@ -6,7 +6,11 @@
                                         on the client: remember one paired by hand
     quern remote status                 on the server: the listener and its certificate
     quern remote rotate-cert            on the server: a new certificate; clients re-pair
-    quern remote list                   on the client: the servers it is paired with
+    quern remote list [--json] [--no-check] [--devices] [--with-local]
+                                        on the client: the servers it is paired with,
+                                        each asked now: up or not, version, free devices;
+                                        --devices lists each device: OS, model, state;
+                                        --with-local lists this Mac's own server first
     quern remote forget NAME            on the client: forget one
 """
 
@@ -84,6 +88,11 @@ def _connect(args: list[str]) -> int:
         print(USAGE, end="", file=sys.stderr)
         return 2
     name = opts.name or _default_name(opts.url)
+    if name.lower() == "local":
+        # The name this Mac's own server is listed and switched to under.
+        print("quern connect: \"local\" names this Mac's own server; give the remote "
+              "another name with --name", file=sys.stderr)
+        return 2
     try:
         if opts.code:
             if opts.key or opts.fingerprint:
@@ -147,18 +156,37 @@ def _remote(args: list[str]) -> int:
         print("Restart quern for the listener to use it. Every client must pair again: "
               "the old certificate's pin no longer matches.")
         return 0
-    if args[:1] == ["list"] and len(args) == 1:
+    if args[:1] == ["list"]:
+        parser = argparse.ArgumentParser(prog="quern remote list", add_help=False)
+        parser.add_argument("--json", action="store_true")
+        parser.add_argument("--no-check", action="store_true")
+        parser.add_argument("--devices", action="store_true")
+        parser.add_argument("--with-local", action="store_true")
         try:
-            remotes = client.list_remotes()
-        except client.RemoteError as e:
-            print(f"quern remote list: {e}", file=sys.stderr)
-            return 1
-        if not remotes:
-            print("Not paired with any remote quern. Pair with `quern connect`.")
-        for r in remotes:
-            print(f"{r.name:<16} {r.url:<32} as {r.label or '?':<16} "
-                  f"{cert_mod.show(r.fingerprint)[:23]}...")
-        return 0
+            opts = parser.parse_args(args[1:])
+        except SystemExit:
+            print(USAGE, end="", file=sys.stderr)
+            return 2
+        if opts.no_check:
+            try:
+                remotes = client.list_remotes()
+            except client.RemoteError as e:
+                print(f"quern remote list: {e}", file=sys.stderr)
+                return 1
+            if opts.json:
+                # The checked list's shape, with only the records: one shape
+                # for scripts either way (CodeRabbit).
+                print(json.dumps({"remotes": [{"name": r.name, "url": r.url, "label": r.label}
+                                              for r in remotes]}, indent=2))
+                return 0
+            if not remotes:
+                print("Not paired with any remote quern. Pair with `quern connect`.")
+            for r in remotes:
+                print(f"{r.name:<16} {r.url:<32} as {r.label or '?':<16} "
+                      f"{cert_mod.show(r.fingerprint)[:23]}...")
+            return 0
+        return _list_status(as_json=opts.json, devices=opts.devices,
+                            with_local=opts.with_local)
     if args[:1] == ["forget"] and len(args) == 2:
         if client.forget(args[1]):
             print(f"Forgot {args[1]}. Its client key still works until the server's owner "
@@ -168,6 +196,74 @@ def _remote(args: list[str]) -> int:
         return 1
     print(USAGE, end="", file=sys.stderr)
     return 2
+
+
+def _list_status(*, as_json: bool, devices: bool = False, with_local: bool = False) -> int:
+    """Every paired remote, asked now (`server.remote.status`). Exits 1 when
+    any could not be asked, so a script can tell "all up" from "listed"."""
+    from server import get_version
+    from server.remote import status
+
+    version = get_version()
+    # "unknown" is get_version's sentinel, not a version: compared, every
+    # remote read as differing from this Mac (CodeRabbit).
+    rows = status.statuses(None if version == "unknown" else version, include_local=with_local)
+    if as_json:
+        print(json.dumps({"local_version": version, "remotes": rows}, indent=2))
+    elif not rows or (with_local and len(rows) == 1):
+        for r in rows:
+            print(_status_line(r))
+            if devices and r.get("devices"):
+                for line in _device_lines(r["devices"]):
+                    print(line)
+        print("Not paired with any remote quern. Pair with `quern connect`.")
+    else:
+        for r in rows:
+            print(_status_line(r))
+            if devices and r.get("devices"):
+                for line in _device_lines(r["devices"]):
+                    print(line)
+    # This Mac's server not running is a normal state for someone who uses
+    # only remotes: said, but not a failure of the remote list.
+    return 0 if all(r.get("reachable") and r.get("devices") is not None
+                    for r in rows if not r.get("local")) else 1
+
+
+def _device_lines(devices: list[dict]) -> list[str]:
+    """One line per device: free and booted first, which is what a caller
+    choosing where to run wants to see; then the rest; held last."""
+    def order(d: dict) -> tuple:
+        return (not d.get("free"), d.get("state") != "booted",
+                d.get("device_family") or "", d.get("os_version") or "", d.get("name") or "")
+
+    lines = []
+    for d in sorted(devices, key=order):
+        who = ("free" if d.get("free") else
+               "yours" if d.get("yours") else f"held by {d.get('held_by') or 'another session'}")
+        if d.get("is_available") is False:
+            who += ", unavailable"
+        name = d.get("name") or "?"
+        if d.get("model") and d["model"] != name:
+            name += f" ({d['model']})"
+        lines.append(f"    {name:<34} {d.get('device_family') or '':<8} "
+                     f"{d.get('os_version') or '':<12} {d.get('device_type') or '':<16} "
+                     f"{d.get('state') or '':<9} {who}  {d.get('udid') or ''}")
+    return lines
+
+
+def _status_line(r: dict) -> str:
+    head = f"{r.get('name') or '?':<16} {r.get('url') or '':<32} as {r.get('label') or '?':<14}"
+    if not r.get("reachable"):
+        return f"{head} down: {r.get('error')}"
+    version = r.get("version") or "?"
+    if r.get("version_matches") is False:
+        version += " (differs from this Mac's)"
+    if r.get("devices") is None:
+        return f"{head} up  {version}  {r.get('error')}"
+    devices = r["devices"]
+    booted = sum(1 for d in devices if d.get("state") == "booted")
+    return (f"{head} up  {version}  {len(devices)} devices ({booted} booted), "
+            f"{r.get('free')} free")
 
 
 def main(command: str, args: list[str]) -> int:

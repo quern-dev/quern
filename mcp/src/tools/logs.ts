@@ -2,14 +2,14 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { execSync } from "node:child_process";
 import { homedir } from "node:os";
 import { z } from "zod";
-import { discoverServer, readStateFile } from "../config.js";
+import { currentRemote, discoverServer, readStateFile } from "../config.js";
 import { apiRequest, SESSION_ID, serverFetch } from "../http.js";
 import { strictParams, errorText } from "./helpers.js";
 import { type LogQueryAnswer, tailLogsResult } from "./log-responses.js";
 
 export function registerLogTools(server: McpServer): void {
   server.registerTool("ensure_server", {
-    description: `Ensure Quern is running. Reads state.json, health checks, and starts the server if needed. This is the recommended first tool call for any agent session. Returns connection info including server URL, proxy port, and API key. With QUERN_REMOTE set, it only health-checks that remote over the pinned connection and never starts anything; the answer has server_url and version, not proxy or key details.`,
+    description: `Ensure Quern is running. Reads state.json, health checks, and starts the server if needed. This is the recommended first tool call for any agent session. Returns connection info including server URL, proxy port, and API key. Pointed at a remote (QUERN_REMOTE, or use_remote), it only health-checks that remote over the pinned connection and never starts anything; the answer has server_url and version, not proxy or key details.`,
     inputSchema: strictParams({}),
   }, async () => {
       // A remote quern (QUERN_REMOTE, #254 phase 3): checked over the pinned
@@ -23,13 +23,13 @@ export function registerLogTools(server: McpServer): void {
           });
           const health = (await resp.json()) as Record<string, unknown>;
           return { content: [{ type: "text" as const, text: JSON.stringify({
-            status: resp.ok ? "running" : "unhealthy", remote: process.env.QUERN_REMOTE,
+            status: resp.ok ? "running" : "unhealthy", remote: currentRemote(),
             server_url: target.url, version: health.version,
             note: "a remote quern: it is started on its own machine, never from here",
           }, null, 2) }] };
         } catch (e) {
           return { content: [{ type: "text" as const, text:
-            `The remote quern ${process.env.QUERN_REMOTE} at ${target.url} did not answer: ` +
+            `The remote quern ${currentRemote()} at ${target.url} did not answer: ` +
             `${errorText(e)}. It is started on its own machine, not from here.` }],
             isError: true };
         }

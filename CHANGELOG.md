@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **See what your paired remote quern servers could lend before choosing where to work.**
+  - **`quern remote list`** used to print only what `quern connect` recorded. It now asks each remote, with its own key and pinned certificate: whether it answers, or why not (unreachable, timed out, certificate changed, key refused); its version, and whether it differs from this Mac's; and its devices, free, yours or held.
+  - **Bounded.** Remotes are asked in parallel, 4 s per request and 10 s per remote. A remote that couldn't be asked is never shown as having no devices, and the command exits 1 when any couldn't be asked.
+  - **Flags.** `--devices` lists every device (name, model, OS version, family, type, state), free and booted first. `--with-local` lists this Mac's own server first. `--json` is for scripts; `--no-check` lists the records only.
+  - **`list_remotes`** gives an agent the same, with this Mac first, and marks the server its MCP talks to as `"current"`, the one whose devices it can reserve now.
+  - **`use_remote`** switches an agent's MCP to another of those servers mid-session, its held session with it, so it can reserve and drive a device found there. It refuses while the agent holds devices where it is, or can't tell, unless told to release them, and it reports a switch only once the session is live on the new server.
+  - **`reserve_devices` says what it reserved.** Each device in its answer carries its name, model, OS version, family and type, not just a UDID, so an agent that asked by criteria can tell you which device it got.
+  - **`reserve_devices` and `list_devices` say where else to look.** When nothing here matches, the reserve error, or an `elsewhere` field on an empty filtered list, names the paired servers with matching free devices and the `use_remote` call to get there. An agent that wasn't told about other machines concluded the device didn't exist.
+- **Devices say what model they are.** `list_devices` gives each device a `model` ("iPad Pro 11-inch (M4)", or a physical device's marketing name or product type), whatever it's called. A `name` criterion in `reserve_devices` and `resolve_device` matches the model too, so a renamed simulator is still found by what it is.
+
+### Security
+- **A remote's redirects are followed only within its https origin.** The pinned connection that `quern remote`, `quern session` and `quern record` use followed any redirect, including to plain http, and urllib carried the `Authorization` header along, so a remote answering 302 to an `http://` address sent the client key in clear.
 - **A remote or client-key MCP loads the project's knowledge base for its own session (#560).** From another machine `load_landmarks(path=...)` names nothing, and loading was owner-only because landmark sets are server-wide, so the first remote trial's screen identification returned nothing.
   - **Sent, not named.** The MCP uploads `app.md` and `screens/*.md` as `<app>.knowledge.tar.gz` at session start and loads it with `load_landmarks(upload_id, app)`. `load_landmarks` with a path does the same from such an MCP.
   - **Scoped to the session.** For its app, the session sees only its own screens, replacing any server-wide set for that app rather than merging with it. Other apps fall back to the server-wide sets, and no other caller sees it. It ends with the session, after the reconnect grace period, and is never remembered.

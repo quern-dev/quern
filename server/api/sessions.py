@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import logging
 import secrets
+from typing import Any
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
@@ -269,10 +270,27 @@ async def reserve(request: Request, session_id: str, body: ReserveRequest) -> di
         controller = getattr(request.app.state, "device_controller", None)
         if controller is not None:
             controller._active_udid = reservations[0].udid
+    # What each device is, from the pool: an agent that reserved by criteria
+    # was told only udids, and could not say which device it had (found live).
+    known = pool._read_state().devices if pool is not None else {}
     return {"session": session_id,
-            "reserved": [{"udid": r.udid, "on_release": r.on_release,
-                          "booted_here": r.booted_here} for r in reservations],
+            "reserved": [{"udid": r.udid, **_what(known.get(r.udid)),
+                          "on_release": r.on_release, "booted_here": r.booted_here}
+                         for r in reservations],
             "holding": list(session.reservations)}
+
+
+def _what(device: Any) -> dict:
+    """A reserved device's name, model, OS, family and type; empty when the
+    pool does not know it."""
+    if device is None:
+        return {}
+    kind = getattr(device, "device_type", None)
+    return {"name": getattr(device, "name", None),
+            "model": getattr(device, "model", "") or None,
+            "os_version": getattr(device, "os_version", None),
+            "device_family": getattr(device, "device_family", "") or None,
+            "device_type": getattr(kind, "value", kind)}
 
 
 @router.delete("/{session_id}/reservations")

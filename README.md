@@ -468,7 +468,7 @@ quern connect URL --code CODE   # On that machine: pair, and remember the server
 quern connect URL --key KEY --fingerprint SHA256   # ...or remember one whose key was issued by hand
 quern remote status          # The remote listener here: its address and certificate
 quern remote rotate-cert     # A new certificate for it; every client pairs again
-quern remote list            # The remote querns this machine is paired with
+quern remote list [--json] [--no-check] [--devices] [--with-local]   # The remote querns this machine is paired with, each asked now: up or down, version, free devices; --devices lists each one (OS, model, state, who holds it); --with-local lists this Mac's server first
 quern remote forget NAME     # Forget one
 quern set-update-check [on|off]
                              # Show or set the automatic daily update check
@@ -500,11 +500,11 @@ quern tunneld <cmd>          # Manage the tunneld LaunchDaemon (install/uninstal
 
 ## MCP Tools
 
-131 tools available via MCP. All tools are lazy-loaded and won't hog your context just by connecting the MCP. They are lightweight API wrappers and are easy for the Agent to use.
+133 tools available via MCP. All tools are lazy-loaded and won't hog your context just by connecting the MCP. They are lightweight API wrappers and are easy for the Agent to use.
 
 | Category | Tools |
 |----------|-------|
-| Server | `ensure_server` |
+| Server | `ensure_server`, `list_remotes`, `use_remote` |
 | Updates | `update_quern`, `set_update_channel` |
 | Logs | `tail_logs`, `query_logs`, `get_log_summary`, `get_errors`, `get_build_result`, `parse_build_output`, `get_latest_crash`, `clear_crashes`, `clear_device_crashes`, `set_log_filter`, `get_log_filter`, `list_log_sources`, `get_trace`, `start_recording`, `stop_recording`, `recording_keyframe`, `get_recording`, `list_recordings`, `download_recording`, `start_simulator_logging`, `stop_simulator_logging`, `start_device_logging`, `stop_device_logging`, `start_oslog_streaming`, `stop_oslog_streaming` |
 | Network | `query_flows`, `list_pending_requests`, `wait_for_flow`, `get_flow_detail`, `get_flow_summary`, `start_capture_session`, `stop_capture_session`, `proxy_status`, `start_proxy`, `stop_proxy`, `proxy_setup_guide`, `verify_proxy_setup`, `install_proxy_cert`, `record_device_proxy_config`, `set_local_capture`, `add_session_capture`, `remove_session_capture`, `set_bypass`, `clear_bypass` |
