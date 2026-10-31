@@ -33,7 +33,7 @@ Quern manages four kinds of devices:
 
 Most of the time, device selection is automatic. But there are cases where you'll need to provide guidance:
 
-- **No matching device exists**: If you ask for "iPad with iOS 17" but don't have one installed, you'll need to create it in Xcode first (Window > Devices and Simulators).
+- **No matching device exists**: If you ask for "iPad with iOS 17" but don't have one installed, you'll need to create it in Xcode first (Window > Devices and Simulators). If another Mac you've paired with has one free, your agent will say so and can switch there -- see [Using Remote Devices](remote-agents.md).
 - **Physical device not showing up**: Make sure you've tapped "Trust This Computer" on the device. For iOS 17+, developer mode must also be enabled (Settings > Privacy & Security > Developer Mode).
 - **Android "unauthorized"**: The USB debugging prompt on the device hasn't been accepted. Tap "Allow" on the device screen.
 
@@ -92,6 +92,7 @@ If no Android emulator is running, Quern discovers available AVDs and boots one.
 
 - **Be specific when it matters.** "Use the iPhone 15 Pro simulator" is better than "use a simulator" if you need a specific screen size or Dynamic Island behavior.
 - **OS version prefixes work.** Asking for "iOS 18" matches 18.0, 18.1, 18.2, etc. You don't need to specify the exact point release.
+- **Models work as well as names.** Asking for "iPad Pro 11-inch (M4)" finds a simulator of that model even if it was renamed.
 - **Multi-device is supported.** You can ask your agent to boot and manage multiple devices for parallel testing. Quern ranks and selects the best candidates.
 - **Physical devices must be plugged in.** Unlike simulators, physical devices can't be "booted" on demand. They need to be connected, trusted, and (on iOS 17+) have developer mode enabled.
 - **Restart Quern after installing new simulators.** If you create a new simulator runtime in Xcode, the server needs a refresh to see it. Either restart the server or ask your agent to refresh the device list.

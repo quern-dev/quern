@@ -41,13 +41,19 @@ import time
 # else has it, and `quern restart` used to be enough to move it.
 BASE = f"{os.environ['QUERN_SERVER_URL']}/api/v1"
 API_KEY = os.environ["QUERN_API_KEY"]
-HEADERS = {"Authorization": f"Bearer {API_KEY}"}
+# Every request names the session it belongs to. Under `quern session run`
+# that's the session it opened for you (QUERN_SESSION); a reservation needs it.
+HEADERS = {"Authorization": f"Bearer {API_KEY}",
+           "X-Quern-Session": os.environ.get("QUERN_SESSION", "my-tests")}
 
 @pytest.fixture(autouse=True)
 def setup_device():
     """Boot simulator, install app, restore clean state."""
-    # Resolve a simulator
-    r = requests.post(f"{BASE}/devices/resolve", json={"device_type": "simulator"}, headers=HEADERS)
+    # Under `quern session run`, use a device it reserved for this run;
+    # run on its own, resolve any simulator.
+    reserved = os.environ.get("QUERN_DEVICES")
+    criteria = {"udid": reserved.split(",")[0]} if reserved else {"device_type": "simulator"}
+    r = requests.post(f"{BASE}/devices/resolve", json=criteria, headers=HEADERS)
     udid = r.json()["udid"]
 
     # Restore known-good state
@@ -206,38 +212,35 @@ Your agent kicks off the test script, watches the output, and when a test fails,
 
 ## Advanced: Remote Test Farm
 
-Your test scripts talk to Quern over HTTP. That HTTP server doesn't have to be on your laptop.
+Your test scripts talk to Quern over HTTP. That server doesn't have to be on your laptop.
 
 ### The Setup
 
-Any Mac you can dedicate to this will do. Install Quern on it and start the server, and you have a test machine. RAM is what bounds how many simulators run at once, so it is the spec worth spending on.
+Any Mac you can dedicate to this will do. RAM is what bounds how many simulators run at once, so it is the spec worth spending on. Install Quern on it, and run your test scripts **on that machine** -- from a CI runner installed there (a GitHub Actions self-hosted runner, a Jenkins agent), from a cron job, or over `ssh`. The scripts then talk to its own quern exactly as they do on your laptop: `eval "$(quern env)"` gives them the URL and key.
 
-Your test scripts just need one change:
+Run the suite under `quern session run`, which holds a session, reserves the devices, hands them to your script, and releases them when it exits:
 
-```python
-# Point at the test machine's server instead of a local one.
-BASE = f"{os.environ['QUERN_REMOTE_URL']}/api/v1"
-API_KEY = os.environ["QUERN_REMOTE_KEY"]
+```text
+eval "$(quern env)"
+quern session run --reserve 6 --device-type simulator -- python run_tests.py
 ```
 
-Both values come from the **test machine**, not from your laptop. Run `quern url`
-there for the URL — quern starts on whatever port was free, so do not assume
-9110 — and read its `~/.quern/api-key` for the key. `quern env` cannot help
-here: it reads the local `~/.quern/state.json`, which knows nothing about a
-server on another host.
+Your script reads the reserved devices from `QUERN_DEVICES` and sends `QUERN_SESSION` as `X-Quern-Session` on every request (the sample above does). Your laptop stays free for development, and your agent can still watch the run from there: pair your laptop with the test machine ([Setting Up a Remote Server](remote-setup.md)) and ask it what's happening on that Mac.
 
-That's it. Your scripts run on your laptop (or a CI runner, or a cron job, or anywhere) and the simulators, proxy, and UI automation all happen on the test machine. Your laptop stays free for development.
+Why not run the scripts on your laptop against the test machine's quern? Over the network quern speaks only TLS with its own pinned certificate, and only the quern MCP and the `quern` command know how to pin it. A plain HTTP client like `requests` doesn't, so a script on another machine would have to turn certificate checking off -- don't.
 
 ### Parallel Test Execution
 
 This is where it gets exciting. A typical UI automation test suite that takes 2 hours running serially can finish in **20 minutes** spread across 6 simulators running in parallel.
 
-Your test script boots multiple simulators, partitions the test cases across them, and runs them concurrently:
+Your test script takes the simulators it was given, partitions the test cases across them, and runs them concurrently:
 
 ```python
 import concurrent.futures
+import os
 
-devices = ensure_devices(count=6, type="simulator")
+# Reserved for this run by `quern session run --reserve 6` (see above).
+devices = os.environ["QUERN_DEVICES"].split(",")
 
 # Partition tests across devices
 test_groups = distribute_tests(all_tests, devices)

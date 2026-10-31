@@ -48,7 +48,7 @@ templates/   The app-knowledge scaffold `init_app_knowledge` writes
 scripts/     Review, merge and release tooling, and the git hooks
 ```
 
-The MCP server is intentionally thin — just translates tool calls into HTTP requests. All logic lives in the Python server. `server/device/` has outgrown its name; #396 tracks splitting it.
+The MCP server is thin where it can be: device, proxy and log logic lives in the Python server. What only the agent's side can know lives in the MCP: which server it talks to (`use_remote`), which mocks and session capture *this* agent set -- the server cannot tell one owner-key agent's from another's (#576) -- and the project's knowledge base on the agent's disk (#560). `server/device/` has outgrown its name; #396 tracks splitting it.
 
 ## Running it
 
@@ -347,7 +347,8 @@ the state it prevents, so it warns, and installs when `auto_install_cert` says
 to.
 
 **Starting a capture of one simulator is gated too** (#414). A recording with
-flows, or a capture session with `simulator_udid`, asks that simulator whether
+flows, a capture session with `simulator_udid`, or session capture for one
+simulator (`add_session_capture`, #558) asks that simulator whether
 it trusts the CA before saying started -- under local capture, where it would
 otherwise be passed through and record nothing, and under the system proxy,
 where every request from it would fail. `sim_tls.ensure_capturable` holds it.
@@ -381,6 +382,18 @@ record is reported without the stored field disagreeing with the file.
 even with None.** So a caller writes what it actually learned, never a whole
 `model_dump()` -- naming a field is how you clear it, and a verification that
 dumps the model erases the fields it has no opinion about.
+
+That is the repo's rule for every partial update, not just this one. A
+Pydantic model with defaults cannot tell "not given" from "given as the
+default", so read what was named from `model_fields_set` (or dump with
+`exclude_unset`). `update_mock` broke it: a body-only update reset the status
+code and headers to the spec's defaults (#574, fixed in #578).
+
+**A session proxy only ever captures simulators** (#558). Session capture names
+processes, and a process name matches any executable path on the Mac, so a
+client's name could otherwise route the owner's own apps through a decrypting
+proxy. The mirror of the trusted-list rule above: whatever cannot be shown to
+be a simulator's -- including "could not tell" -- is passed through.
 
 `auto_install_cert` in `~/.quern/config.json` answers the question once. It is
 surfaced in `proxy_status` and in the menu-bar app's Settings pane on purpose:

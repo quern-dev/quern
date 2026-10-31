@@ -14,7 +14,7 @@ Your agent will make sure the proxy certificate is installed on the simulator, e
 
 ### Local Capture (The Default)
 
-Local capture uses mitmproxy's macOS System Extension to transparently intercept traffic from specific processes. Safari and WebKit networking are enabled by default (configured in `~/.quern/config.json`). When you start debugging an app, ask your agent to add your app's process name to the capture list.
+Local capture uses mitmproxy's macOS System Extension to transparently intercept traffic from specific processes. Safari and WebKit networking are enabled by default (configured in `~/.quern/config.json`). When you start debugging an app, ask your agent to add your app's process name to the capture list. Changing the list restarts the proxy if it's running (a stopped proxy is reconfigured, not started): your mocks, bypass patterns and intercept pattern are kept, but open connections reset, and any requests the intercept is holding are released unmodified. To capture one app on a simulator you've reserved without any restart -- or from another Mac or a client key, where changing the list isn't allowed -- ask for **session capture** instead.
 
 Say **add**, and check what comes back. The web-view minimum (`MobileSafari`, `com.apple.WebKit.Networking`) is kept for you, so naming your app no longer loses page traffic — but everything else is set rather than merged, so an agent that sends only your app's name still drops anything else you had. Quern reports what a change added and removed on the response (`capture_added`, `capture_removed`), and the CLI prints both. The server log carries **removals only** — an addition is not logged — so read the response rather than the log if you want to know what was kept for you. The request itself is valid either way, so nothing refuses it.
 
@@ -35,7 +35,7 @@ If local capture isn't working (System Extension issues, corporate MDM blocking 
 
 The proxy certificate needs to be installed on each simulator for HTTPS decryption to work. Without it, your agent can see that traffic is happening but can't read the request/response bodies.
 
-Quern checks for it before enabling capture, and **asks before installing it**. Capturing through a simulator that does not trust the certificate fails every HTTPS request from that device, and the symptom points nowhere near the proxy — a blank screen, or an app that seems to have no network — so Quern refuses to create that state rather than leaving you to discover it.
+Quern checks for it before enabling capture, and by default **asks before installing it** -- unless you've turned on `quern set-auto-install-cert on`, which installs it automatically. Capturing through a simulator that does not trust the certificate fails every HTTPS request from that device, and the symptom points nowhere near the proxy — a blank screen, or an app that seems to have no network — so Quern doesn't leave you to discover it: enabling the system proxy refuses in that state, and local capture passes such a simulator's HTTPS through (its apps work, and the traffic is simply not decrypted) and says so.
 
 You are asked rather than having it done for you because installing a certificate authority is a bigger commitment than turning capture on: it persists across sessions, outlives the capture window, and you have to know it happened in order to undo it.
 

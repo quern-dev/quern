@@ -16,6 +16,14 @@ For the AI agent's reference, see the [Agent Guide](../agent-guide.md). For inst
 
 ---
 
+## Remote Servers
+
+- [Setting Up a Remote Server](remote-setup.md) — Turn on a Mac's remote listener and pair your machine with it
+- [Using Remote Devices](remote-agents.md) — How your agent finds, switches to and works on another Mac's devices
+- [Sharing a Server](remote-sharing.md) — Client keys, what each caller may do, blind sharing, and taking access away
+
+---
+
 ## iOS
 
 ### Network Proxy

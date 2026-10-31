@@ -28,7 +28,7 @@ Quern closes that loop. It gives agents direct, token-efficient access to everyt
 
 Quern isn't a cloud testing platform. It's local infrastructure that makes the AI tools you already use actually effective at debugging and testing mobile apps. 
 
-- **Local-first** — No cloud, no accounts, no third-party API keys. Your code and logs never leave your machine.
+- **Local-first** — No cloud, no accounts, no third-party API keys. Your code and logs never leave your machine, unless you point quern at another Mac you've paired with.
 - **Works with your existing AI** — Not a replacement for Claude, Cursor, or Codex. It makes them better by giving them live access to what your app is actually doing.
 - **Built for your editor and CLI** — Designed for agents already in your workflow, not a separate QA portal.
 - **Great for QA and SDET workflows** — Pair with an agent during manual testing. Let it intercept network calls, mock error responses, or verify analytics payloads while you drive the app — no more juggling Charles Proxy and a terminal.
@@ -164,7 +164,10 @@ The server prints connection info on startup — URL, API key, and proxy port. A
 | `active-device.json` | The active device set via `resolve_device` — its UDID, name and type — persists across stop/start so you don't have to re-resolve after every restart, and is what the Quern app reads. Each agent session's own active device is kept here too, under `sessions`, for a day of inactivity (#254) |
 | `cert-state.json` | Per-device certificate installation state, including per-SSID Wi-Fi proxy configs — persists across restarts |
 | `device-pool.json` | Device pool state (simctl cache) — persists across restarts |
-| `config.json` | Local capture processes, update channel, and the automatic-update-check and certificate-install settings |
+| `config.json` | Local capture processes, update channel, the automatic-update-check and certificate-install settings, and the sessions, remote listener, viewer and upload settings |
+| `remotes.json` | The remote quern servers this machine is paired with (0600): read by `quern remote list`, `QUERN_REMOTE` and `use_remote` |
+| `session-proxies.json` | Running session proxies' pids (`add_session_capture`), so a crashed server's leftovers are stopped at the next start |
+| `session-hold-<id>.log` | The log of a `quern session hold --background` |
 | `update-info.json` | The last update check's result — what the menu bar reads to offer an update |
 | `last-update-check` | When the automatic check last ran, so it runs at most once a day |
 | `last-update.json` | What `quern update` last did — updated, nothing to do, or failed |
@@ -368,6 +371,7 @@ Spawns `mitmdump` as a subprocess to capture HTTP/HTTPS traffic (port 9101 by de
 - **Capture sessions** — bracket a single UI action and get back only the flows it produced, instead of filtering them out of everything else
 - **Bypass** — exclude domains from capture with an allowlist, so analytics and telemetry noise never enters the flow store
 - **Local capture** — transparently capture simulator traffic per-process via mitmproxy's macOS System Extension, without configuring a system proxy. Each flow is tagged with the originating simulator's UDID for per-simulator filtering
+- **Session capture** — capture one app on a simulator you hold through a separate session proxy, without changing the Mac-wide list or restarting anything (`add_session_capture`). It's how a client key, or an agent on another Mac, captures its own traffic
 - **System proxy** — auto-configures macOS network settings to route traffic through the proxy (for physical devices or non-simulator traffic)
 - **Certificate management** — check, install, and verify mitmproxy CA certificates. Trust is read from the device every time rather than from a record, so an erased simulator is noticed rather than reported as still trusting the CA. Quern asks before installing one: capturing through a device that does not trust the CA fails every HTTPS request with nothing pointing at the proxy, so enabling capture refuses in that state rather than creating it. `quern set-auto-install-cert on` answers the question once
 - **Refused handshakes are recorded** — a client that rejects the certificate never becomes a flow, so it used to leave no trace anywhere. `proxy_status` now reports each rejection with the host, the process and simulator that refused, and the TLS alert verbatim — which is what separates "this device does not trust the CA" from "this app pins its certificate", two causes with identical symptoms and different fixes
@@ -393,7 +397,7 @@ The process name is usually the target name in Xcode. Name the process that actu
 
 Entries are mitmproxy's local-mode syntax, not only names: a name matches any part of the process's executable path, a bare number is a PID, and `!` excludes. Put exclusions *after* an include (`MyApp '!12345'`, quoted so the shell leaves the `!` alone). A list that *starts* with an exclusion captures every process on the Mac except those excluded, so it is refused unless you pass `--whole-mac`.
 
-You can also update the list at runtime via the `set_local_capture` MCP tool without restarting the server.
+You can also change the list at runtime with the `set_local_capture` MCP tool. That restarts the proxy, not the server: mocks, bypass patterns and the intercept are kept, but open connections reset and held flows are released. To capture one app on one simulator you hold without any restart, use `add_session_capture`.
 
 **Proxy setup for physical devices:** Configure the device's Wi-Fi proxy in Settings, then call `record_device_proxy_config` with the SSID and device IP. Quern automatically finds the correct Mac interface IP by subnet-matching, so it works correctly even when multiple interfaces are active. Configs are stored per SSID — switching between home and work networks just works. `proxy_status` shows `wifi_proxy_stale` per device if the stored config no longer matches the current network, and `network_state` (refreshed by a ~15s background poll) reports the current SSID/IP plus a `last_changed_at` timestamp so the response surfaces *when* the network shifted, not just that it's currently mismatched. When the laptop and physical devices travel together between locations, this lets agents notice the change and prompt for proxy reconfiguration without anyone having to remember to ask.
 
@@ -414,6 +418,7 @@ Manage iOS simulators and physical devices, and interact with running apps.
 - **App state checkpoints** — save and restore a named snapshot of an app's data container and app groups, so a test can start from a seeded state instead of driving the UI there every time. Auth tokens live in the simulator keychain, *outside* every app container, so a checkpoint restores logged-out unless you pass `include_keychain` — which additionally requires the device to be shut down, since the keychain is a WAL-mode SQLite database held open by `securityd`
 - **Plist inspection** — read, diff, set, and delete defaults inside a simulator app's container, or watch a plist and have per-key changes land in the log pipeline alongside app logs and proxy flows
 - **Device pool** — smart device resolution with active device tracking for multi-device workflows
+- **Shared and remote servers** — reserve devices so agents sharing a server don't collide, pair another Mac (`quern pair` / `quern connect`), see each paired Mac's free devices (`quern remote list`, `list_remotes`), and switch an agent to one (`use_remote`) with its mocks, session capture and knowledge base following. See the [remote server guides](docs/guides/remote-setup.md)
 
 **Simulator UI automation** uses a native Swift helper, `sim-bridge`, that talks to `CoreSimulator` / `SimulatorKit` / `AccessibilityPlatformTranslation` directly — no daemon, no subprocess per call. It's built automatically on first use and requires Xcode 26+ on Apple Silicon. On Intel Macs or older Xcode, Quern falls back to [idb](https://fbidb.io/) (`brew install idb-companion` + `pip install fb-idb`); `quern setup` handles the install in that case. Device management and screenshots use `xcrun simctl` (always available with Xcode).
 
