@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-10-31
+
+The stable release of everything in 0.25.0-beta.1 through beta.6, below, plus the changes since beta.6 listed here. Its headline is working against other Macs: see what each paired quern server could lend (`quern remote list`, `list_remotes`), switch an agent to it mid-session (`use_remote`) with its mocks, session capture and knowledge base following, and hold, capture and load knowledge for a session from a remote client. Android emulators in this remote work are #582, for the next version.
+
 ### Added
 - **What an agent set up follows it to another server (`use_remote`).**
   - **Mocks move.** The MCP keeps the mocks its agent set and still has (the server can't tell one owner-key agent's from another's), removes them from the server it leaves, and recreates them once on each simulator of its next reservation on the new one. The reservation's answer lists the new rule ids, what failed, and what's still waiting, for example for a proxy that isn't running.
@@ -24,9 +28,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **`reserve_devices` says what it reserved.** Each device in its answer carries its name, model, OS version, family and type, not just a UDID, so an agent that asked by criteria can tell you which device it got.
   - **`reserve_devices` and `list_devices` say where else to look.** When nothing here matches, the reserve error, or an `elsewhere` field on an empty filtered list, names the paired servers with matching free devices and the `use_remote` call to get there. An agent that wasn't told about other machines concluded the device didn't exist.
 - **Devices say what model they are.** `list_devices` gives each device a `model` ("iPad Pro 11-inch (M4)", or a physical device's marketing name or product type), whatever it's called. A `name` criterion in `reserve_devices` and `resolve_device` matches the model too, so a renamed simulator is still found by what it is.
-
-### Security
-- **A remote's redirects are followed only within its https origin.** The pinned connection that `quern remote`, `quern session` and `quern record` use followed any redirect, including to plain http, and urllib carried the `Authorization` header along, so a remote answering 302 to an `http://` address sent the client key in clear.
 - **A remote or client-key MCP loads the project's knowledge base for its own session (#560).** From another machine `load_landmarks(path=...)` names nothing, and loading was owner-only because landmark sets are server-wide, so the first remote trial's screen identification returned nothing.
   - **Sent, not named.** The MCP uploads `app.md` and `screens/*.md` as `<app>.knowledge.tar.gz` at session start and loads it with `load_landmarks(upload_id, app)`. `load_landmarks` with a path does the same from such an MCP.
   - **Scoped to the session.** For its app, the session sees only its own screens, replacing any server-wide set for that app rather than merging with it. Other apps fall back to the server-wide sets, and no other caller sees it. It ends with the session, after the reconnect grace period, and is never remembered.
@@ -48,6 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - releasing the simulator stopped the session proxy, and capture of that app stopped;
     - an adversarial review found a Mac-wide capture hole, stranded claims, a stop/claim race and an over-eager rollback, all fixed with tests.
   - **New connections only:** an app already running keeps its open connections uncaptured until it reconnects, and the response says so (measured: 140 requests on one kept-alive connection, none captured).
+
+### Security
+- **A remote's redirects are followed only within its https origin.** The pinned connection that `quern remote`, `quern session` and `quern record` use followed any redirect, including to plain http, and urllib carried the `Authorization` header along, so a remote answering 302 to an `http://` address sent the client key in clear.
 
 ### Changed
 - **Reserving without a live connection says how to get one (#561).** The 409 now names the session's socket URL and the resume-token header, says why a reservation needs a held connection, says how long until the session is released, and points to the MCP and `quern session hold`. The API reference has a section on raw REST against quern.
@@ -961,7 +965,8 @@ First versioned release — MVP with iOS and Android support.
 - Live device preview (CoreMediaIO for iOS, MJPEG streaming for Android).
 - `quern --version` command.
 
-[Unreleased]: https://github.com/quern-dev/quern/compare/v0.25.0-beta.6...main
+[Unreleased]: https://github.com/quern-dev/quern/compare/v0.25.0...main
+[0.25.0]: https://github.com/quern-dev/quern/releases/tag/v0.25.0
 [0.25.0-beta.6]: https://github.com/quern-dev/quern/releases/tag/v0.25.0-beta.6
 [0.25.0-beta.5]: https://github.com/quern-dev/quern/releases/tag/v0.25.0-beta.5
 [0.25.0-beta.4]: https://github.com/quern-dev/quern/releases/tag/v0.25.0-beta.4

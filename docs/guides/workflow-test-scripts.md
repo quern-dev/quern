@@ -206,25 +206,30 @@ Your agent kicks off the test script, watches the output, and when a test fails,
 
 ## Advanced: Remote Test Farm
 
-Your test scripts talk to Quern over HTTP. That HTTP server doesn't have to be on your laptop.
+Your test scripts talk to Quern over HTTP. That server doesn't have to be on your laptop.
 
 ### The Setup
 
-Any Mac you can dedicate to this will do. Install Quern on it and start the server, and you have a test machine. RAM is what bounds how many simulators run at once, so it is the spec worth spending on.
+Any Mac you can dedicate to this will do. RAM is what bounds how many simulators run at once, so it is the spec worth spending on. Install Quern on it, turn on its remote listener, and pair the machine that runs your scripts with it -- your laptop, a CI runner. [Setting Up a Remote Server](remote-setup.md) walks through it; in short:
 
-Your test scripts just need one change:
+```text
+# on the test machine: {"remote": {"enabled": true}} in ~/.quern/config.json, then
+quern restart
+quern pair ci-runner
 
-```python
-# Point at the test machine's server instead of a local one.
-BASE = f"{os.environ['QUERN_REMOTE_URL']}/api/v1"
-API_KEY = os.environ["QUERN_REMOTE_KEY"]
+# on the machine that runs the scripts
+quern connect https://<test-machine>:9130 --code <code> --name farm
 ```
 
-Both values come from the **test machine**, not from your laptop. Run `quern url`
-there for the URL — quern starts on whatever port was free, so do not assume
-9110 — and read its `~/.quern/api-key` for the key. `quern env` cannot help
-here: it reads the local `~/.quern/state.json`, which knows nothing about a
-server on another host.
+The test machine's main API listens only on 127.0.0.1, and its own API key is refused over the network, so scripts don't use either. Pairing gives the runner a client key and pins the test machine's certificate.
+
+Then run your suite under `quern session run`, which holds a session on the test machine, reserves the devices, hands them to your script, and releases them when it exits:
+
+```text
+QUERN_REMOTE=farm quern session run --reserve 6 --device-type simulator -- python run_tests.py
+```
+
+Your script reads the reserved devices from `QUERN_DEVICES`, and its session from `QUERN_SESSION`, which it sends as `X-Quern-Session` on every request. Scripts that hold their own session can use `quern session hold NAME --background` instead.
 
 That's it. Your scripts run on your laptop (or a CI runner, or a cron job, or anywhere) and the simulators, proxy, and UI automation all happen on the test machine. Your laptop stays free for development.
 
@@ -232,12 +237,14 @@ That's it. Your scripts run on your laptop (or a CI runner, or a cron job, or an
 
 This is where it gets exciting. A typical UI automation test suite that takes 2 hours running serially can finish in **20 minutes** spread across 6 simulators running in parallel.
 
-Your test script boots multiple simulators, partitions the test cases across them, and runs them concurrently:
+Your test script takes the simulators it was given, partitions the test cases across them, and runs them concurrently:
 
 ```python
 import concurrent.futures
+import os
 
-devices = ensure_devices(count=6, type="simulator")
+# Reserved for this run by `quern session run --reserve 6` (see above).
+devices = os.environ["QUERN_DEVICES"].split(",")
 
 # Partition tests across devices
 test_groups = distribute_tests(all_tests, devices)

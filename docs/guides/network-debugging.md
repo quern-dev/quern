@@ -34,6 +34,8 @@ Your agent sets up the mock, and every matching request gets the fake response i
 ### What You Should Know
 
 - **Mocks persist until cleared.** If you set up a mock in one debugging session and forget about it, it's still active. Ask your agent to list or clear mocks if you're seeing unexpected behavior.
+- **Mocks can be edited in place.** Changing a mock's body keeps its status code and headers; only what you name changes.
+- **Mocks move with your agent.** If your agent switches to another Mac's quern server, the mocks it set go with it -- see [Using Remote Devices](remote-agents.md).
 - **Multiple mocks can coexist.** You can mock different endpoints simultaneously.
 - **Mocks take priority over intercepts.** If both match a request, the mock wins.
 
