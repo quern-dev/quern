@@ -199,11 +199,15 @@ test("a mock set up on one simulator of two is retried on the other only", async
   const r = await run("carry-partial");
   assert.deepEqual(r.first.mocks_recreated.map((m) => m.simulator_udid), ["SIM-R1"]);
   assert.equal(r.first.failed[0].simulator_udid, "SIM-R2");
-  assert.deepEqual(r.first.still_waiting, { mocks: 1, session_capture: 0 });
+  assert.deepEqual(r.first.still_waiting, { mocks: 1, session_capture: 1 });
   assert.deepEqual(r.second.mocks_recreated.map((m) => m.simulator_udid), ["SIM-R2"],
                    "SIM-R1 already has it: not a second rule there (review)");
   assert.equal(r.second.still_waiting, undefined);
   assert.equal(r.posts.filter((u) => u === "SIM-R1").length, 1);
+  // Capture: on SIM-R1, failed on SIM-R2, then removed from SIM-R1 by the
+  // agent -- the retry asks for it on SIM-R2 alone.
+  assert.deepEqual(r.capturePosts, ["SIM-R1", "SIM-R2", "SIM-R2"]);
+  assert.deepEqual(r.second.session_capture_restored.map((c) => c.simulator_udid), ["SIM-R2"]);
 });
 
 test("a mock set during a switch lands on the new server and is not moved again", async () => {

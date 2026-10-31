@@ -108,8 +108,11 @@ const plans = {
                    "DELETE /api/v1/sessions/agent-1/reservations": async () => [200, { freed: globalThis.freed ?? [] }],
                    "GET /api/v1/sessions/agent-1": json(200, { reservations: [] }) }],
   "carry-partial": [{ "POST /api/v1/proxy/mocks": mockIds("local") },
+                    // Capture fails on SIM-R2 the first time, as mocks do.
                     { "POST /api/v1/proxy/mocks": async (b) => globalThis.failR2 && b?.simulator_udid === "SIM-R2"
                         ? [503, { detail: "busy" }] : partialIds(b),
+                      "POST /api/v1/proxy/session-capture": async (b) => globalThis.failR2 && b?.simulator_udid === "SIM-R2"
+                        ? [503, { detail: "busy" }] : [200, {}],
                       "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
   // The old server is slow to give up its mock: the switch is still moving
   // it when the agent sets a new one.
@@ -272,12 +275,18 @@ if (scenario === "carry-race") {
   result.seconds = (Date.now() - t0) / 1000;
 } else if (scenario === "carry-partial") {
   await tools.set_mock({ pattern: "~u /p", simulator_udid: "SIM-L", status_code: 200, body: "P" });
+  await tools.add_session_capture({ simulator_udid: "SIM-L", processes: ["Metatext"] });
   await tools.use_remote({ name: "romulus" });
   globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }, { udid: "SIM-R2", device_type: "simulator" }];
   globalThis.failR2 = true;
   result.first = JSON.parse(text(await tools.reserve_devices({ count: 2 })).text).carried;
+  // Capture stood on SIM-R1 and is waiting for SIM-R2; the agent removes it
+  // from SIM-R1. The retry puts it on SIM-R2 only (CodeRabbit).
+  await tools.remove_session_capture({ simulator_udid: "SIM-R1" });
   globalThis.failR2 = false;
   result.second = JSON.parse(text(await tools.reserve_devices({ count: 2 })).text).carried;
+  result.capturePosts = romulus.bodies.filter((b) => b.path === "POST /api/v1/proxy/session-capture")
+    .map((b) => b.body.simulator_udid);
   result.posts = romulus.bodies.filter((b) => b.path === "POST /api/v1/proxy/mocks").map((b) => b.body.simulator_udid);
 } else if (scenario === "carry-hops") {
   // A client key's release ends its scoped mocks on the server: not carried.

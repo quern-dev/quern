@@ -46,6 +46,9 @@ interface Capture {
   /** Waiting: the simulators it was asked for on where it was set, so removing
    * it by one of those still cancels it (CodeRabbit). */
   from: Set<string>;
+  /** Simulators on the server now that the agent removed it from: a retry
+   * for the others must not put it back on them (CodeRabbit). */
+  removed: Set<string>;
   waiting: boolean;
 }
 
@@ -109,7 +112,7 @@ export function recordCapture(simulator: string, capture: {
     return;
   }
   captures.push({ ...capture, processes: [...capture.processes], on: new Set([simulator]),
-                  from: new Set(), waiting: false });
+                  from: new Set(), removed: new Set(), waiting: false });
 }
 
 function sameCapture(a: { processes: string[]; only?: boolean; allow_passthrough?: boolean },
@@ -137,11 +140,13 @@ export function forgetCapture(simulator?: string, processes?: string[]): void {
       const set = c.on.has(simulator) ? c.on : c.waiting && c.from.has(simulator) ? c.from : null;
       if (!set) continue;
       set.delete(simulator);
+      if (set === c.on) c.removed.add(simulator);
       const kept = named ? c.processes.filter((p) => !named.includes(p)) : [];
       if (kept.length) {
         split.push({ ...c, processes: kept,
                      on: set === c.on ? new Set([simulator]) : new Set(),
-                     from: set === c.from ? new Set([simulator]) : new Set() });
+                     from: set === c.from ? new Set([simulator]) : new Set(),
+                     removed: new Set(c.removed) });
       }
       if (c.waiting && !c.from.size && !c.on.size) c.waiting = false;
     }
@@ -202,6 +207,7 @@ export async function moveOut(old: Server): Promise<{
   for (const c of captures) {
     for (const udid of c.on) c.from.add(udid);
     c.on = new Set();
+    c.removed = new Set();        // a new server: its simulators are all new
     c.waiting = true;
   }
   return { ...pending(), ...(stillThere.length ? { still_on_old: stillThere } : {}) };
@@ -257,7 +263,7 @@ export async function applyOnReserve(reserved: Reserved[]): Promise<Record<strin
   for (const capture of movedCaptures) {
     let complete = simulators.length > 0;
     for (const udid of simulators) {
-      if (capture.on.has(udid)) continue;
+      if (capture.on.has(udid) || capture.removed.has(udid)) continue;
       try {
         await apiRequest("POST", "/api/v1/proxy/session-capture", undefined, {
           simulator_udid: udid, processes: capture.processes,
