@@ -100,12 +100,28 @@ async def add_session_capture(
         processes, added = with_capture_minimum(processes)
 
     manager = _manager(request)
+    # The asking session, and which opening of it: its claim on a device the
+    # key does not hold ends with it, and must not be committed after it ended
+    # (CodeRabbit). Reservations hold canonical ids; so do claims.
+    udid = device_access._canonical(body.simulator_udid)
+    registry = getattr(request.app.state, "sessions", None)
+    asking = registry.get(caller.session) if registry is not None and caller.session else None
+    opened = asking.opened_at if asking is not None else None
+
+    def still_current() -> bool:
+        if device_access.why_not(body.simulator_udid) is not None:
+            return False                   # the hold ended
+        if asking is None:
+            return True                    # no session to end with
+        now = registry.get(caller.session)
+        return now is not None and now.opened_at == opened
+
     try:
         result = await manager.claim(
             session=caller.session, principal=caller.principal,
-            udid=body.simulator_udid, names=processes,
+            udid=udid, names=processes,
             max_proxies=None if caller.is_owner else MAX_PROXIES_PER_CLIENT,
-            still_held=lambda: device_access.why_not(body.simulator_udid) is None)
+            still_held=still_current, opened=opened)
     except SessionCaptureLimit as e:
         raise HTTPException(status_code=429, detail={
             "message": str(e), "limit": MAX_PROXIES_PER_CLIENT,

@@ -94,8 +94,11 @@ class Claim:
     principal: str
     udid: str
     names: list[str] = field(default_factory=list)
-    #: The session that last asked, for status only.
+    #: The session that last asked, and which opening of it: a claim on a
+    #: device its key does not hold has no hold to last for, so it ends with
+    #: that session -- and a later session under the same id is not it.
     session: str = ""
+    opened: object = None
 
 
 @dataclass
@@ -167,7 +170,8 @@ class SessionProxies:
 
     async def claim(self, *, session: str, principal: str, udid: str,
                     names: list[str], max_proxies: int | None = None,
-                    still_held: Callable[[], bool] | None = None) -> dict:
+                    still_held: Callable[[], bool] | None = None,
+                    opened: object = None) -> dict:
         """Capture `names` for `session`'s work on `udid`.
 
         Returns which names the main proxy already captures, which an existing
@@ -220,7 +224,7 @@ class SessionProxies:
             if still_held is not None and not still_held():
                 await self._stop_unclaimed()
                 raise HoldEnded(f"{udid} was released while its capture was starting")
-            added = self._add_claim(Claim(principal, udid, [*shared, *new], session))
+            added = self._add_claim(Claim(principal, udid, [*shared, *new], session, opened))
             return {"main_proxy": by_main, "shared": shared, "started": new,
                     "confirmed": confirmed, "added": added}
 
@@ -269,6 +273,7 @@ class SessionProxies:
                 added = [n for n in claim.names if n not in existing.names]
                 existing.names = [*existing.names, *added]
                 existing.session = claim.session
+                existing.opened = claim.opened
                 return added
         if claim.names:
             self._claims.append(claim)
@@ -291,6 +296,22 @@ class SessionProxies:
                     n for n in claim.names if n not in names]
             self._claims = [c for c in self._claims if c.names]
             return await self._stop_unclaimed()
+
+    async def release_ended_session(self, *, principal: str, session: str, opened: object,
+                                    keep: Callable[[str], bool]) -> list[tuple[str, list[str]]]:
+        """Drop the claims `session` (that opening of it) last asked for, on
+        each device `keep` does not say to keep, and stop what no claim uses
+        any more. Chosen and dropped under one lock, so a claim another
+        session updates meanwhile is not taken with them (CodeRabbit).
+        Returns each device released with the names whose proxies stopped."""
+        async with self._lock:
+            ending = [c for c in self._claims if c.principal == principal
+                      and c.session == session and c.opened == opened and not keep(c.udid)]
+            for c in ending:
+                c.names = []
+            self._claims = [c for c in self._claims if c.names]
+            stopped = await self._stop_unclaimed() if ending else []
+            return [(c.udid, stopped if i == 0 else []) for i, c in enumerate(ending)]
 
     async def stop_all(self) -> list[str]:
         """Stop every session proxy and forget every claim: the main proxy is

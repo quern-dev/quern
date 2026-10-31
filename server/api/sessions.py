@@ -487,23 +487,29 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
     # owner may ask without holding, and a claim lasts for the key's hold, so
     # with none it lasted until someone later held and released that device --
     # past this session, and past a use_remote switch away from this server.
-    # It ends with the session that last asked for it.
+    # It ends with the session that last asked for it -- that opening of it --
+    # chosen and released under the claims' own lock (CodeRabbit).
     session_proxies = getattr(app.state, "session_proxies", None)
-    for claim in list(session_proxies.claims(session.principal)) if (
-            ended and session_proxies is not None) else []:
-        if claim.session != session.id or claim.udid in session.reservations:
-            continue                       # another session's, or ended above
-        held = registry.holder_of(claim.udid)
-        if held is not None and held.session.principal == session.principal:
-            continue                       # held by the key: it lasts for that hold
+    if ended and session_proxies is not None:
+        from server.device_access import _canonical
+
+        handled = {_canonical(u) for u in session.reservations}
+
+        def keep(udid: str) -> bool:
+            if _canonical(udid) in handled:
+                return True                # ended above, with the hold
+            held = registry.holder_of(_canonical(udid))
+            return held is not None and held.session.principal == session.principal
+
         try:
-            stopped = await session_proxies.release(principal=session.principal,
-                                                    udid=claim.udid)
-            actions.append({"udid": claim.udid, "action": "session_capture_released",
-                            "ok": True, "stopped": stopped})
+            for udid, stopped in await session_proxies.release_ended_session(
+                    principal=session.principal, session=session.id,
+                    opened=getattr(session, "opened_at", None), keep=keep):
+                actions.append({"udid": udid, "action": "session_capture_released",
+                                "ok": True, "stopped": stopped})
         except Exception as e:  # noqa: BLE001 -- reported, never raised
-            actions.append({"udid": claim.udid, "action": "session_capture_released",
-                            "ok": False, "error": str(e)})
+            actions.append({"action": "session_capture_released", "ok": False,
+                            "error": str(e)})
     return actions
 
 
