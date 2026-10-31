@@ -238,3 +238,11 @@ test("an old server that stops answering is asked once, not once per mock", asyn
   assert.ok(r.seconds < 12, `one 5s timeout, not three: took ${r.seconds}s`);
   assert.equal(r.switched.carried.mocks, 3, "they still move");
 });
+
+test("a retry adopts the rule a failed attempt made anyway, rather than making a second", async () => {
+  const r = await run("carry-ambiguous");
+  assert.match(r.first.failed[0].error, /HTTP 500/);
+  assert.deepEqual(r.second.mocks_recreated, [{ pattern: "~u /amb", rule_id: "mock_romulus1", simulator_udid: "SIM-R1" }]);
+  assert.equal(r.made, 1, "one rule on the server, not two (CodeRabbit)");
+  assert.equal(r.second.still_waiting, undefined);
+});

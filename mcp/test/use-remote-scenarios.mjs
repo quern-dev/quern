@@ -123,6 +123,17 @@ const plans = {
   // The old server stops answering on the first delete.
   "carry-dead-old": [{ "POST /api/v1/proxy/mocks": mockIds("local"),
                        "DELETE /api/v1/proxy/mocks/mock_local1": json(200, {}, 6000) }, {}],
+  // The server makes the rule and still answers with an error (as a timed-out
+  // request can have): a retry must adopt it, not make a second.
+  "carry-ambiguous": [{ "POST /api/v1/proxy/mocks": mockIds("local") },
+                      { "POST /api/v1/proxy/mocks": async (b) => {
+                          const id = `mock_romulus${globalThis.made.length + 1}`;
+                          globalThis.made.push({ rule_id: id, pattern: b.pattern, simulator_udid: b.simulator_udid ?? null,
+                                                 response: { status_code: 200, headers: { "content-type": "application/json" }, ...b.response } });
+                          return globalThis.made.length === 1 ? [500, { detail: "timed out" }] : [200, { rule_id: id }];
+                        },
+                        "GET /api/v1/proxy/mocks": async () => [200, { rules: globalThis.made, total: globalThis.made.length }],
+                        "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
   hint: [{ "POST /api/v1/sessions/agent-1/reservations": async () => [409, { detail: globalThis.detail }],
            "GET /api/v1/device/list": json(200, { devices: [], tools: {}, active_udid: null }) }, {}],
 };
@@ -247,7 +258,15 @@ if (scenario === "window") {
   result.romulusPosts = romulus.bodies.filter((b) => b.path === "POST /api/v1/proxy/mocks").length;
 }
 
-if (scenario === "carry-race") {
+if (scenario === "carry-ambiguous") {
+  globalThis.made = [];
+  await tools.set_mock({ pattern: "~u /amb", simulator_udid: "SIM-L", status_code: 200, body: "A" });
+  await tools.use_remote({ name: "romulus" });
+  globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }];
+  result.first = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1"] })).text).carried;
+  result.second = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1"] })).text).carried;
+  result.made = globalThis.made.length;
+} else if (scenario === "carry-race") {
   await tools.set_mock({ pattern: "~u /old", simulator_udid: "SIM-L", status_code: 200, body: "O" });
   await tools.add_session_capture({ simulator_udid: "SIM-L", processes: ["Metatext"] });
   await tools.add_session_capture({ simulator_udid: "SIM-L2", processes: ["Ivory", "Mona"] });

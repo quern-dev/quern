@@ -261,6 +261,14 @@ export async function moveOut(old: Server): Promise<{
 
 interface Reserved { udid?: string; device_type?: string }
 
+interface ServerMock { rule_id: string; pattern: string; response: unknown; simulator_udid?: string | null }
+
+/** A response as text, keys sorted, so two that say the same compare equal. */
+function canonical(value: unknown): string {
+  return JSON.stringify(value, (_k, v) => v && typeof v === "object" && !Array.isArray(v)
+    ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b))) : v);
+}
+
 /** Each request that sets something up again: it holds the switch queue. */
 const SETUP_TIMEOUT_MS = 15_000;
 
@@ -279,6 +287,25 @@ export async function applyOnReserve(reserved: Reserved[]): Promise<Record<strin
   const everyDevice = !isClientKey(discoverServer().apiKey);
   const created: { pattern: string; rule_id: string; simulator_udid: string | null }[] = [];
   const failed: { pattern?: string; processes?: string[]; simulator_udid: string | null; error: string }[] = [];
+  // A failed attempt may have made its rule anyway -- a timeout says nothing
+  // either way, and the server takes no idempotency key -- so a retry first
+  // looks for it, once per reservation, and adopts it (CodeRabbit).
+  let onServer: ServerMock[] | null | undefined;
+  const adoptable = async (mock: Mock, scope: string | null): Promise<string | undefined> => {
+    if (onServer === undefined) {
+      try {
+        onServer = ((await apiRequest("GET", "/api/v1/proxy/mocks", undefined, undefined,
+          SETUP_TIMEOUT_MS)) as { rules?: ServerMock[] } | null)?.rules ?? [];
+      } catch {
+        onServer = null;          // could not look: retried as before
+      }
+    }
+    if (!onServer) return undefined;
+    const taken = new Set(mocks.flatMap((m) => [...m.rules.values()]));
+    const want = canonical({ ...RESPONSE_DEFAULTS, ...mock.response });
+    return onServer.find((r) => !taken.has(r.rule_id) && r.pattern === mock.pattern &&
+      (r.simulator_udid ?? null) === scope && canonical(r.response) === want)?.rule_id;
+  };
   for (const mock of moved) {
     // Unscoped where it was, and this key may mock every device: unscoped.
     // Otherwise one rule per simulator just reserved.
@@ -286,6 +313,13 @@ export async function applyOnReserve(reserved: Reserved[]): Promise<Record<strin
     for (const scope of scopes) {
       // Set up there already, or removed there by the agent: left alone.
       if (mock.rules.has(scope) || mock.removed.has(scope)) continue;
+      const found = mock.failed.has(scope) ? await adoptable(mock, scope) : undefined;
+      if (found) {
+        mock.rules.set(scope, found);
+        mock.failed.delete(scope);
+        created.push({ pattern: mock.pattern, rule_id: found, simulator_udid: scope });
+        continue;
+      }
       try {
         const body: Record<string, unknown> = { pattern: mock.pattern, response: mock.response };
         if (scope !== null) body.simulator_udid = scope;
