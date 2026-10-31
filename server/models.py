@@ -1812,11 +1812,13 @@ class UpdateMockRequest(BaseModel):
             or self.headers is not None
             or self.body is not None
         ):
-            self.response = MockResponseSpec(
-                status_code=self.status_code if self.status_code is not None else 200,
-                headers=self.headers or {"content-type": "application/json"},
-                body=self.body or "",
-            )
+            # Only what was named, so the update leaves the rest of the
+            # rule's response as it is (#574): filling in the defaults here
+            # reset a 503 to 200 on a body-only update.
+            given = {name: value for name, value in (
+                ("status_code", self.status_code), ("headers", self.headers), ("body", self.body))
+                if value is not None}
+            self.response = MockResponseSpec(**given)
         self.status_code = None
         self.headers = None
         self.body = None

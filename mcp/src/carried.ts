@@ -97,9 +97,9 @@ export function recordMock(ruleId: string, mock: {
 }
 
 /** update_mock, as the server applies it: a pattern given replaces the
- * pattern, and a response given replaces the whole response -- fields left out
- * take the server's defaults, not their old values (review). It changed that
- * one rule, so a mock standing on several simulators splits off the copy. */
+ * pattern, and the response fields given replace those fields, the rest kept
+ * (#574). It changed that one rule, so a mock standing on several simulators
+ * splits off the copy. */
 export function updateMock(ruleId: string, change: {
   pattern?: string; response?: Record<string, unknown>; simulator_udid?: string | null;
 }): void {
@@ -113,7 +113,7 @@ export function updateMock(ruleId: string, change: {
     mocks.push(mock);
   }
   if (change.pattern !== undefined) mock.pattern = change.pattern;
-  if (change.response !== undefined) mock.response = { ...RESPONSE_DEFAULTS, ...change.response };
+  if (change.response !== undefined) mock.response = { ...mock.response, ...change.response };
   if (change.simulator_udid !== undefined) {
     mock.rules = new Map([[change.simulator_udid, ruleId]]);
     mock.scoped = change.simulator_udid !== null;
