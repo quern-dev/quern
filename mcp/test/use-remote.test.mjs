@@ -246,3 +246,31 @@ test("a retry adopts the rule a failed attempt made anyway, rather than making a
   assert.equal(r.made, 1, "one rule on the server, not two (CodeRabbit)");
   assert.equal(r.second.still_waiting, undefined);
 });
+
+test("rules a switch could not remove are removed when the agent comes back", async () => {
+  const r = await run("carry-stranded");
+  assert.deepEqual(r.away.carried.still_on_old, ["mock_local1", "mock_local2", "mock_local3"]);
+  assert.match(r.away.note, /Switching back there tries again to remove them/);
+  // Back on local: removed, or gone already (404), before anything is set up
+  // beside them; the one that refuses again is kept for the next return.
+  assert.deepEqual(r.back.left_here_earlier, { removed: ["mock_local1", "mock_local2"], still_there: ["mock_local3"] });
+  assert.match(r.back.note, /Could not remove mock_local3, left here earlier/);
+  assert.deepEqual(r.backAgain.left_here_earlier.still_there, ["mock_local3"], "tried again next time");
+  assert.equal(r.logs.local.filter((l) => l === "DELETE /api/v1/proxy/mocks/mock_local1").length, 2);
+  assert.equal(r.again.left_here_earlier, undefined, "nothing was left on romulus");
+  // The rule still standing for /3 on SIM-L is not shadowed by a new one.
+  assert.deepEqual(r.blocked.mocks_recreated.map((m) => m.pattern).sort(), ["~u /1", "~u /2"]);
+  assert.match(r.blocked.failed[0].error, /mock_local3, left here by an earlier switch, could not be removed/);
+  assert.deepEqual(r.blocked.still_waiting, { mocks: 1, session_capture: 0 });
+  // Once it can be removed, it is, and /3 is set up.
+  assert.deepEqual(r.unblocked.mocks_recreated.map((m) => m.pattern), ["~u /3"]);
+  assert.ok(r.logs.local.filter((l) => l === "DELETE /api/v1/proxy/mocks/mock_local3").length >= 4);
+});
+
+test("cleaning up on return stops asking once the server times out", async () => {
+  const r = await run("carry-stranded-stall");
+  assert.deepEqual(r.back.left_here_earlier, { removed: [], still_there: ["mock_local1", "mock_local2", "mock_local3"] });
+  // mock_local2 and 3: deleted once on the way out, not again after the timeout.
+  assert.equal(r.logs.local.filter((l) => l === "DELETE /api/v1/proxy/mocks/mock_local2").length, 1);
+  assert.ok(r.seconds < 12, `one timeout, not three: ${r.seconds}s`);
+});

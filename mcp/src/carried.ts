@@ -17,7 +17,7 @@
  * rule, is what keeps a mock from multiplying with every switch (review).
  */
 
-import { discoverServer } from "./config.js";
+import { LOCAL, currentRemote, discoverServer } from "./config.js";
 import { ServerTimeout, ServerUnreachable, apiRequest } from "./http.js";
 import { isClientKey } from "./remote-paths.js";
 
@@ -72,6 +72,16 @@ function captureWaiting(c: Capture): boolean {
 
 let mocks: Mock[] = [];
 let captures: Capture[] = [];
+/** Rules a switch could not remove from the server it left, by that server's
+ * name. A server that went on running unreached still answers with them; if
+ * the agent comes back, they are removed before its mocks are set up again
+ * beside them. */
+const stranded = new Map<string, Stranded[]>();
+
+/** A rule left on a server, with the mock and simulator it stood for there:
+ * that mock is not set up on that simulator again while the rule may still
+ * answer ahead of it (CodeRabbit). */
+interface Stranded { ruleId: string; mock: Mock; scope: string | null }
 
 function mockOf(ruleId: string): Mock | undefined {
   return mocks.find((m) => [...m.rules.values()].includes(ruleId));
@@ -222,17 +232,19 @@ export function pending(): { mocks: number; session_capture: number } {
 
 /** At a switch: take this agent's mocks off `old` and keep them, with its
  * session capture, for the next reservation on the new server. Never throws. */
-export async function moveOut(old: Server): Promise<{
+export async function moveOut(old: Server, oldName: string): Promise<{
   mocks: number; session_capture: number; still_on_old?: string[];
 }> {
   const stillThere: string[] = [];
   // A server that timed out or cannot be reached is not asked again for each
   // rule: that held every switch and reservation behind it (CodeRabbit).
   let gone = false;
+  const left: Stranded[] = [];
   for (const mock of mocks) {
-    for (const ruleId of mock.rules.values()) {
+    for (const [scope, ruleId] of mock.rules) {
       if (gone) {
         stillThere.push(ruleId);
+        left.push({ ruleId, mock, scope });
         continue;
       }
       try {
@@ -240,7 +252,10 @@ export async function moveOut(old: Server): Promise<{
           undefined, undefined, 5000, old);
       } catch (e) {
         // Gone already -- a client's scoped mock ends with its hold -- is moved.
-        if (!(e instanceof Error && e.message.startsWith("HTTP 404"))) stillThere.push(ruleId);
+        if (!(e instanceof Error && e.message.startsWith("HTTP 404"))) {
+          stillThere.push(ruleId);
+          left.push({ ruleId, mock, scope });
+        }
         if (e instanceof ServerTimeout || e instanceof ServerUnreachable) gone = true;
       }
     }
@@ -256,7 +271,48 @@ export async function moveOut(old: Server): Promise<{
     c.failed = new Set();
     c.waiting = true;
   }
+  if (left.length) stranded.set(oldName, [...(stranded.get(oldName) ?? []), ...left]);
   return { ...pending(), ...(stillThere.length ? { still_on_old: stillThere } : {}) };
+}
+
+/** After a switch to `name`: remove the rules an earlier switch left on it.
+ * Gone already (404) -- a restart forgets every mock -- counts as removed;
+ * any other failure keeps the rule for the next return. Never throws. */
+export async function cleanUpStranded(name: string): Promise<{
+  removed: string[]; still_there: string[];
+} | undefined> {
+  const entries = stranded.get(name);
+  if (!entries?.length) return undefined;
+  const removed: string[] = [];
+  const left: Stranded[] = [];
+  // Not asked again for each rule once it times out or cannot be reached: the
+  // rest wait for the next return (CodeRabbit).
+  let gone = false;
+  for (const entry of entries) {
+    const outcome = gone ? "unreachable" : await removeStranded(entry);
+    if (outcome === "gone") {
+      removed.push(entry.ruleId);
+    } else {
+      left.push(entry);
+      if (outcome === "unreachable") gone = true;
+    }
+  }
+  if (left.length) stranded.set(name, left); else stranded.delete(name);
+  return { removed, still_there: left.map((e) => e.ruleId) };
+}
+
+/** Delete a stranded rule on the server in use now: gone (deleted, or not
+ * there -- a 404, as after a restart), failed, or unreachable (timed out or
+ * could not connect, so the rest are not tried now). */
+async function removeStranded(entry: Stranded): Promise<"gone" | "failed" | "unreachable"> {
+  try {
+    await apiRequest("DELETE", `/api/v1/proxy/mocks/${encodeURIComponent(entry.ruleId)}`,
+      undefined, undefined, 5000);
+    return "gone";
+  } catch (e) {
+    if (e instanceof Error && e.message.startsWith("HTTP 404")) return "gone";
+    return e instanceof ServerTimeout || e instanceof ServerUnreachable ? "unreachable" : "failed";
+  }
 }
 
 interface Reserved { udid?: string; device_type?: string }
@@ -313,6 +369,22 @@ export async function applyOnReserve(reserved: Reserved[]): Promise<Record<strin
     for (const scope of scopes) {
       // Set up there already, or removed there by the agent: left alone.
       if (mock.rules.has(scope) || mock.removed.has(scope)) continue;
+      // A rule an earlier switch left here for this mock and simulator would
+      // answer ahead of a new one: removed first, or this one waits.
+      const here = currentRemote() ?? LOCAL;
+      const blocking = (stranded.get(here) ?? []).find((e) => e.mock === mock && e.scope === scope);
+      if (blocking) {
+        if (await removeStranded(blocking) === "gone") {
+          const rest = stranded.get(here)!.filter((e) => e !== blocking);
+          if (rest.length) stranded.set(here, rest); else stranded.delete(here);
+        } else {
+          mock.failed.add(scope);
+          failed.push({ pattern: mock.pattern, simulator_udid: scope,
+                        error: `${blocking.ruleId}, left here by an earlier switch, could not be ` +
+                          "removed and would answer ahead of this mock: not set up again until it is" });
+          continue;
+        }
+      }
       const found = mock.failed.has(scope) ? await adoptable(mock, scope) : undefined;
       if (found) {
         mock.rules.set(scope, found);
@@ -380,4 +452,5 @@ export async function applyOnReserve(reserved: Reserved[]): Promise<Record<strin
 export function resetCarried(): void {
   mocks = [];
   captures = [];
+  stranded.clear();
 }
