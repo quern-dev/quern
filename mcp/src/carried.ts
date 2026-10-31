@@ -33,8 +33,18 @@ interface Mock {
   scoped: boolean;
   /** The rules standing for it on the server now: simulator (null: every device) → rule id. */
   rules: Map<string | null, string>;
-  /** Moved here, and not yet set up on everything it should be. */
+  /** Where setting it up failed on this server: retried when that simulator is reserved. */
+  failed: Set<string | null>;
+  /** Where the agent removed it, or the server ended it, on this server: never put back. */
+  removed: Set<string | null>;
+  /** Still to be set up: failed somewhere, or moved here and set up nowhere yet. */
   waiting: boolean;
+}
+
+/** Waiting, from what stands, failed and was removed (review: a flag set once
+ * a reservation went through dropped failures that were never retried). */
+function mockWaiting(m: Mock): boolean {
+  return m.failed.size > 0 || (m.rules.size === 0 && m.removed.size === 0);
 }
 
 interface Capture {
@@ -49,7 +59,15 @@ interface Capture {
   /** Simulators on the server now that the agent removed it from: a retry
    * for the others must not put it back on them (CodeRabbit). */
   removed: Set<string>;
+  /** Simulators on the server now where asking for it failed: retried there. */
+  failed: Set<string>;
   waiting: boolean;
+}
+
+/** Waiting: failed somewhere here, or moved and asked for nowhere yet -- and
+ * not cancelled by every simulator it came from. */
+function captureWaiting(c: Capture): boolean {
+  return c.failed.size > 0 || (c.on.size === 0 && c.removed.size === 0 && c.from.size > 0);
 }
 
 let mocks: Mock[] = [];
@@ -64,7 +82,8 @@ export function recordMock(ruleId: string, mock: {
 }): void {
   mocks.push({ pattern: mock.pattern, response: { ...mock.response },
                scoped: mock.simulator_udid !== null,
-               rules: new Map([[mock.simulator_udid, ruleId]]), waiting: false });
+               rules: new Map([[mock.simulator_udid, ruleId]]),
+               failed: new Set(), removed: new Set(), waiting: false });
 }
 
 /** update_mock, as the server applies it: a pattern given replaces the
@@ -79,7 +98,8 @@ export function updateMock(ruleId: string, change: {
   const scope = [...mock.rules].find(([, id]) => id === ruleId)![0];
   if (mock.rules.size > 1) {
     mock.rules.delete(scope);
-    mock = { ...mock, response: { ...mock.response }, rules: new Map([[scope, ruleId]]) };
+    mock = { ...mock, response: { ...mock.response }, rules: new Map([[scope, ruleId]]),
+             failed: new Set(), removed: new Set(), waiting: false };
     mocks.push(mock);
   }
   if (change.pattern !== undefined) mock.pattern = change.pattern;
@@ -94,7 +114,12 @@ export function updateMock(ruleId: string, change: {
 export function forgetMock(ruleId: string): void {
   const mock = mockOf(ruleId);
   if (!mock) return;
-  for (const [scope, id] of mock.rules) if (id === ruleId) mock.rules.delete(scope);
+  for (const [scope, id] of mock.rules) {
+    if (id !== ruleId) continue;
+    mock.rules.delete(scope);
+    mock.removed.add(scope);
+  }
+  if (mock.waiting) mock.waiting = mockWaiting(mock);
   if (!mock.rules.size && !mock.waiting) mocks = mocks.filter((m) => m !== mock);
 }
 
@@ -112,7 +137,7 @@ export function recordCapture(simulator: string, capture: {
     return;
   }
   captures.push({ ...capture, processes: [...capture.processes], on: new Set([simulator]),
-                  from: new Set(), removed: new Set(), waiting: false });
+                  from: new Set(), removed: new Set(), failed: new Set(), waiting: false });
 }
 
 function sameCapture(a: { processes: string[]; only?: boolean; allow_passthrough?: boolean },
@@ -137,19 +162,30 @@ export function forgetCapture(simulator?: string, processes?: string[]): void {
     // switch is matched by the simulator it was asked for on (CodeRabbit).
     const split: Capture[] = [];
     for (const c of captures) {
-      const set = c.on.has(simulator) ? c.on : c.waiting && c.from.has(simulator) ? c.from : null;
-      if (!set) continue;
-      set.delete(simulator);
-      if (set === c.on) c.removed.add(simulator);
+      // Here: standing, or failed and waiting for a retry. From the old
+      // server: a waiting capture matched by the simulator it came from.
+      const standing = c.on.has(simulator);
+      const failedHere = c.failed.has(simulator);
+      const fromOld = !standing && !failedHere && c.waiting && c.from.has(simulator);
+      if (!standing && !failedHere && !fromOld) continue;
+      if (fromOld) {
+        c.from.delete(simulator);
+      } else {
+        c.on.delete(simulator);
+        c.failed.delete(simulator);
+        c.removed.add(simulator);
+      }
       const kept = named ? c.processes.filter((p) => !named.includes(p)) : [];
       if (kept.length) {
         split.push({ ...c, processes: kept,
-                     on: set === c.on ? new Set([simulator]) : new Set(),
-                     from: set === c.from ? new Set([simulator]) : new Set(),
-                     removed: new Set(c.removed) });
+                     on: standing ? new Set([simulator]) : new Set(),
+                     failed: failedHere ? new Set([simulator]) : new Set(),
+                     from: fromOld ? new Set([simulator]) : new Set(),
+                     removed: new Set() });
       }
-      if (c.waiting && !c.from.size && !c.on.size) c.waiting = false;
+      if (c.waiting) c.waiting = captureWaiting(c);
     }
+    for (const c of split) c.waiting = c.waiting && captureWaiting(c);
     captures.push(...split);
   }
   captures = captures.filter((c) => c.processes.length && (c.on.size || c.waiting));
@@ -163,11 +199,18 @@ export function forgetCapture(simulator?: string, processes?: string[]): void {
 export function released(udids: string[]): void {
   const client = isClientKey(discoverServer().apiKey);
   for (const udid of udids) {
-    if (client) {
-      for (const m of mocks) m.rules.delete(udid);
+    for (const m of mocks) {
+      // Released, a device is not retried; a client's rule on it is gone.
+      if (m.failed.delete(udid)) m.removed.add(udid);
+      if (client && m.rules.delete(udid)) m.removed.add(udid);
     }
-    for (const c of captures) c.on.delete(udid);
+    for (const c of captures) {
+      if (c.failed.delete(udid)) c.removed.add(udid);
+      if (c.on.delete(udid)) c.removed.add(udid);
+    }
   }
+  for (const m of mocks) if (m.waiting) m.waiting = mockWaiting(m);
+  for (const c of captures) if (c.waiting) c.waiting = captureWaiting(c);
   mocks = mocks.filter((m) => m.rules.size || m.waiting);
   captures = captures.filter((c) => c.on.size || c.waiting);
 }
@@ -202,12 +245,15 @@ export async function moveOut(old: Server): Promise<{
       }
     }
     mock.rules = new Map();
+    mock.failed = new Set();      // a new server: its simulators are all new
+    mock.removed = new Set();
     mock.waiting = true;
   }
   for (const c of captures) {
     for (const udid of c.on) c.from.add(udid);
     c.on = new Set();
     c.removed = new Set();        // a new server: its simulators are all new
+    c.failed = new Set();
     c.waiting = true;
   }
   return { ...pending(), ...(stillThere.length ? { still_on_old: stillThere } : {}) };
@@ -237,9 +283,9 @@ export async function applyOnReserve(reserved: Reserved[]): Promise<Record<strin
     // Unscoped where it was, and this key may mock every device: unscoped.
     // Otherwise one rule per simulator just reserved.
     const scopes: (string | null)[] = !mock.scoped && everyDevice ? [null] : simulators;
-    let complete = scopes.length > 0;
     for (const scope of scopes) {
-      if (mock.rules.has(scope)) continue;          // set up on this one already
+      // Set up there already, or removed there by the agent: left alone.
+      if (mock.rules.has(scope) || mock.removed.has(scope)) continue;
       try {
         const body: Record<string, unknown> = { pattern: mock.pattern, response: mock.response };
         if (scope !== null) body.simulator_udid = scope;
@@ -249,19 +295,19 @@ export async function applyOnReserve(reserved: Reserved[]): Promise<Record<strin
           { rule_id?: string } | null;
         if (!answer?.rule_id) throw new Error("no rule_id in the answer");
         mock.rules.set(scope, answer.rule_id);
+        mock.failed.delete(scope);
         created.push({ pattern: mock.pattern, rule_id: answer.rule_id, simulator_udid: scope });
       } catch (e) {
-        complete = false;
+        mock.failed.add(scope);
         failed.push({ pattern: mock.pattern, simulator_udid: scope,
                       error: e instanceof Error ? e.message : String(e) });
       }
     }
-    if (complete) mock.waiting = false;
+    mock.waiting = mockWaiting(mock);
   }
 
   const captured: { simulator_udid: string; processes: string[] }[] = [];
   for (const capture of movedCaptures) {
-    let complete = simulators.length > 0;
     for (const udid of simulators) {
       if (capture.on.has(udid) || capture.removed.has(udid)) continue;
       try {
@@ -271,14 +317,15 @@ export async function applyOnReserve(reserved: Reserved[]): Promise<Record<strin
           ...(capture.allow_passthrough ? { allow_passthrough: true } : {}),
         }, SETUP_TIMEOUT_MS);
         capture.on.add(udid);
+        capture.failed.delete(udid);
         captured.push({ simulator_udid: udid, processes: capture.processes });
       } catch (e) {
-        complete = false;
+        capture.failed.add(udid);
         failed.push({ processes: capture.processes, simulator_udid: udid,
                       error: e instanceof Error ? e.message : String(e) });
       }
     }
-    if (complete) capture.waiting = false;
+    capture.waiting = captureWaiting(capture);
   }
 
   const out: Record<string, unknown> = {};

@@ -204,6 +204,11 @@ test("a mock set up on one simulator of two is retried on the other only", async
                    "SIM-R1 already has it: not a second rule there (review)");
   assert.equal(r.second.still_waiting, undefined);
   assert.equal(r.posts.filter((u) => u === "SIM-R1").length, 1);
+  // Reserving SIM-R1 alone sets nothing up and finishes nothing: both still
+  // wait for SIM-R2 (review: the capture was marked done here).
+  assert.equal(r.aloneR1.mocks_recreated, undefined);
+  assert.equal(r.aloneR1.session_capture_restored, undefined);
+  assert.deepEqual(r.aloneR1.still_waiting, { mocks: 1, session_capture: 1 });
   // Capture: on SIM-R1, failed on SIM-R2, then removed from SIM-R1 by the
   // agent -- the retry asks for it on SIM-R2 alone.
   assert.deepEqual(r.capturePosts, ["SIM-R1", "SIM-R2", "SIM-R2"]);

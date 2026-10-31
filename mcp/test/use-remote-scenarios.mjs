@@ -277,14 +277,21 @@ if (scenario === "carry-race") {
   await tools.set_mock({ pattern: "~u /p", simulator_udid: "SIM-L", status_code: 200, body: "P" });
   await tools.add_session_capture({ simulator_udid: "SIM-L", processes: ["Metatext"] });
   await tools.use_remote({ name: "romulus" });
+  // Named simulators each time: a count asks the real server for others.
   globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }, { udid: "SIM-R2", device_type: "simulator" }];
   globalThis.failR2 = true;
-  result.first = JSON.parse(text(await tools.reserve_devices({ count: 2 })).text).carried;
+  result.first = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1", "SIM-R2"] })).text).carried;
   // Capture stood on SIM-R1 and is waiting for SIM-R2; the agent removes it
-  // from SIM-R1. The retry puts it on SIM-R2 only (CodeRabbit).
+  // from SIM-R1, then reserves SIM-R1 alone: nothing is put back there, and
+  // what failed on SIM-R2 still waits (CodeRabbit).
   await tools.remove_session_capture({ simulator_udid: "SIM-R1" });
+  // And clears the mock's rule on SIM-R1: not put back there either.
+  await tools.clear_mocks({ rule_id: result.first.mocks_recreated[0].rule_id });
   globalThis.failR2 = false;
-  result.second = JSON.parse(text(await tools.reserve_devices({ count: 2 })).text).carried;
+  globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }];
+  result.aloneR1 = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1"] })).text).carried;
+  globalThis.reserved = [{ udid: "SIM-R2", device_type: "simulator" }];
+  result.second = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R2"] })).text).carried;
   result.capturePosts = romulus.bodies.filter((b) => b.path === "POST /api/v1/proxy/session-capture")
     .map((b) => b.body.simulator_udid);
   result.posts = romulus.bodies.filter((b) => b.path === "POST /api/v1/proxy/mocks").map((b) => b.body.simulator_udid);
