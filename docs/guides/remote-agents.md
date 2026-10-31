@@ -12,6 +12,8 @@ You can still be explicit:
 
 > "What devices do my other Macs have free?"
 
+or:
+
 > "Switch to studio and boot an iPad running iOS 18.6."
 
 ## What your agent sees

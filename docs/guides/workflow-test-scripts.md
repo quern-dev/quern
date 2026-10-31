@@ -41,7 +41,10 @@ import time
 # else has it, and `quern restart` used to be enough to move it.
 BASE = f"{os.environ['QUERN_SERVER_URL']}/api/v1"
 API_KEY = os.environ["QUERN_API_KEY"]
-HEADERS = {"Authorization": f"Bearer {API_KEY}"}
+# Every request names the session it belongs to. Under `quern session run`
+# that's the session it opened for you (QUERN_SESSION); a reservation needs it.
+HEADERS = {"Authorization": f"Bearer {API_KEY}",
+           "X-Quern-Session": os.environ.get("QUERN_SESSION", "my-tests")}
 
 @pytest.fixture(autouse=True)
 def setup_device():
@@ -210,28 +213,18 @@ Your test scripts talk to Quern over HTTP. That server doesn't have to be on you
 
 ### The Setup
 
-Any Mac you can dedicate to this will do. RAM is what bounds how many simulators run at once, so it is the spec worth spending on. Install Quern on it, turn on its remote listener, and pair the machine that runs your scripts with it -- your laptop, a CI runner. [Setting Up a Remote Server](remote-setup.md) walks through it; in short:
+Any Mac you can dedicate to this will do. RAM is what bounds how many simulators run at once, so it is the spec worth spending on. Install Quern on it, and run your test scripts **on that machine** -- from a CI runner installed there (a GitHub Actions self-hosted runner, a Jenkins agent), from a cron job, or over `ssh`. The scripts then talk to its own quern exactly as they do on your laptop: `eval "$(quern env)"` gives them the URL and key.
+
+Run the suite under `quern session run`, which holds a session, reserves the devices, hands them to your script, and releases them when it exits:
 
 ```text
-# on the test machine: {"remote": {"enabled": true}} in ~/.quern/config.json, then
-quern restart
-quern pair ci-runner
-
-# on the machine that runs the scripts
-quern connect https://<test-machine>:9130 --code <code> --name farm
+eval "$(quern env)"
+quern session run --reserve 6 --device-type simulator -- python run_tests.py
 ```
 
-The test machine's main API listens only on 127.0.0.1, and its own API key is refused over the network, so scripts don't use either. Pairing gives the runner a client key and pins the test machine's certificate.
+Your script reads the reserved devices from `QUERN_DEVICES` and sends `QUERN_SESSION` as `X-Quern-Session` on every request (the sample above does). Your laptop stays free for development, and your agent can still watch the run from there: pair your laptop with the test machine ([Setting Up a Remote Server](remote-setup.md)) and ask it what's happening on that Mac.
 
-Then run your suite under `quern session run`, which holds a session on the test machine, reserves the devices, hands them to your script, and releases them when it exits:
-
-```text
-QUERN_REMOTE=farm quern session run --reserve 6 --device-type simulator -- python run_tests.py
-```
-
-Your script reads the reserved devices from `QUERN_DEVICES`, and its session from `QUERN_SESSION`, which it sends as `X-Quern-Session` on every request. Scripts that hold their own session can use `quern session hold NAME --background` instead.
-
-That's it. Your scripts run on your laptop (or a CI runner, or a cron job, or anywhere) and the simulators, proxy, and UI automation all happen on the test machine. Your laptop stays free for development.
+Why not run the scripts on your laptop against the test machine's quern? Over the network quern speaks only TLS with its own pinned certificate, and only the quern MCP and the `quern` command know how to pin it. A plain HTTP client like `requests` doesn't, so a script on another machine would have to turn certificate checking off -- don't.
 
 ### Parallel Test Execution
 

@@ -52,7 +52,7 @@ quern connect https://192.168.1.188:9130 --code ABCD-EFGH-JKMN-PQRS --name studi
 #   Paired with https://192.168.1.188:9130 as 'studio' (certificate SHA256:40:C0:...).
 ```
 
-The code works once, lasts five minutes, and never crosses the network: the two machines prove to each other that they know it. The name can be anything except `local`, which means your own Mac.
+The code works once and lasts five minutes. Its first four characters identify it to the server; the rest is a secret that never crosses the network -- the two machines prove to each other that they know it. The name can be anything except `local`, which means your own Mac.
 
 Your machine keeps the pairing in `~/.quern/remotes.json`. Check it any time:
 
