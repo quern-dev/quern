@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { LOCAL, currentRemote, discoverServer, selectServer, selectedServer } from "../config.js";
 import { switchHeldSession } from "../held-session.js";
-import { SESSION_ID, apiRequest, serverFetch } from "../http.js";
+import { SESSION_ID, ServerTimeout, ServerUnreachable, apiRequest, serverFetch } from "../http.js";
 import { loadRemote } from "../remote.js";
 import { cleanUpStranded, moveOut } from "../carried.js";
 
@@ -167,6 +167,10 @@ async function useRemote({ name, release }: { name: string; release?: boolean })
   const sessionPath = `/api/v1/sessions/${encodeURIComponent(SESSION_ID)}`;
   let held: string[] | null;
   let unknown = "";
+  // The server being left did not answer at all: nothing more is asked of
+  // it -- each request would wait out its own 5 s, three in a row (15 s) --
+  // and what could not be removed there is cleaned up if the agent returns.
+  let oldUnreachable = false;
   try {
     // Bounded: a current server that has hung is when a switch is most
     // needed, and switches queue behind this one (CodeRabbit).
@@ -180,6 +184,7 @@ async function useRemote({ name, release }: { name: string; release?: boolean })
     } else {
       held = null;
       unknown = message;
+      oldUnreachable = e instanceof ServerTimeout || e instanceof ServerUnreachable;
     }
   }
   if (!release && held === null) {
@@ -193,7 +198,10 @@ async function useRemote({ name, release }: { name: string; release?: boolean })
   }
   let released: string[] = [];
   let releaseNote = "";
-  if (release && (held === null || held.length)) {
+  if (release && oldUnreachable) {
+    releaseNote = `Could not reach ${from} to release anything held there: it is freed when ` +
+      "its connection closes or its grace period ends.";
+  } else if (release && (held === null || held.length)) {
     try {
       const freed = (await apiRequest("DELETE", `${sessionPath}/reservations`, undefined,
         undefined, 5000)) as
@@ -219,7 +227,7 @@ async function useRemote({ name, release }: { name: string; release?: boolean })
   }
   // What this agent set up follows it: its mocks leave the old server and,
   // with its session capture, are set up again at its next reservation here.
-  const carried = await moveOut(old, from);
+  const carried = await moveOut(old, from, { unreachable: oldUnreachable });
   // Rules an earlier switch left here, when it could not reach this server.
   const strandedHere = await cleanUpStranded(target);
   let knowledge: unknown;

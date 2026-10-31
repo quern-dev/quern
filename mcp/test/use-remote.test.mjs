@@ -274,3 +274,25 @@ test("cleaning up on return stops asking once the server times out", async () =>
   assert.equal(r.logs.local.filter((l) => l === "DELETE /api/v1/proxy/mocks/mock_local2").length, 1);
   assert.ok(r.seconds < 12, `one timeout, not three: ${r.seconds}s`);
 });
+
+test("leaving a server that does not answer asks it once, not three times", async () => {
+  const r = await run("leave-unreachable");
+  assert.equal(r.away.current, "romulus");
+  // The session check timed out; no release and no mock deletes were sent
+  // to wait out their own timeouts.
+  const asked = r.logs.local.filter((l) => /^(GET|DELETE) \/api\/v1\/(sessions\/agent-1|proxy\/mocks)/.test(l));
+  assert.deepEqual(asked.filter((l) => l.startsWith("DELETE")), []);
+  assert.ok(r.seconds < 9, `one 5 s timeout, not three: ${r.seconds}s`);
+  // The mocks still move, and are named as left there, for clean-up on return.
+  assert.equal(r.away.carried.mocks, 2);
+  assert.deepEqual(r.away.carried.still_on_old, ["mock_local1", "mock_local2"]);
+  assert.match(r.away.note, /Could not reach local to release/);
+});
+
+test("a server that answers with an error is still asked to release and remove", async () => {
+  const r = await run("leave-erroring");
+  assert.ok(r.logs.local.includes("DELETE /api/v1/sessions/agent-1/reservations"));
+  assert.ok(r.logs.local.includes("DELETE /api/v1/proxy/mocks/mock_local1"));
+  assert.ok(r.logs.local.includes("DELETE /api/v1/proxy/mocks/mock_local2"));
+  assert.equal(r.away.carried.still_on_old, undefined, "both removed: nothing left there");
+});

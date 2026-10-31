@@ -232,13 +232,14 @@ export function pending(): { mocks: number; session_capture: number } {
 
 /** At a switch: take this agent's mocks off `old` and keep them, with its
  * session capture, for the next reservation on the new server. Never throws. */
-export async function moveOut(old: Server, oldName: string): Promise<{
+export async function moveOut(old: Server, oldName: string, { unreachable = false } = {}): Promise<{
   mocks: number; session_capture: number; still_on_old?: string[];
 }> {
   const stillThere: string[] = [];
   // A server that timed out or cannot be reached is not asked again for each
-  // rule: that held every switch and reservation behind it (CodeRabbit).
-  let gone = false;
+  // rule: that held every switch and reservation behind it (CodeRabbit). One
+  // the switch already found unreachable is not asked at all.
+  let gone = unreachable;
   const left: Stranded[] = [];
   for (const mock of mocks) {
     for (const [scope, ruleId] of mock.rules) {

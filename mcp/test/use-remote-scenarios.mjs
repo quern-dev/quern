@@ -146,6 +146,13 @@ const plans = {
                              "DELETE /api/v1/proxy/mocks/mock_local1": async () => globalThis.back ? [200, {}, 6000] : [503, {}],
                              "DELETE /api/v1/proxy/mocks/mock_local2": json(503, {}),
                              "DELETE /api/v1/proxy/mocks/mock_local3": json(503, {}) }, {}],
+  // local stops answering once its mocks are set: the session check times out.
+  "leave-unreachable": [{ "POST /api/v1/proxy/mocks": mockIds("local"),
+                          "GET /api/v1/sessions/agent-1": async () => globalThis.hang ? [200, { reservations: [] }, 6000] : [200, { reservations: [] }] }, {}],
+  // local answers, but with an error: not unreachable, so it is still asked.
+  "leave-erroring": [{ "POST /api/v1/proxy/mocks": mockIds("local"),
+                       "GET /api/v1/sessions/agent-1": async () => globalThis.hang ? [503, { detail: "busy" }] : [200, { reservations: [] }],
+                       "DELETE /api/v1/proxy/mocks/mock_local1": json(200, {}) }, {}],
   hint: [{ "POST /api/v1/sessions/agent-1/reservations": async () => [409, { detail: globalThis.detail }],
            "GET /api/v1/device/list": json(200, { devices: [], tools: {}, active_udid: null }) }, {}],
 };
@@ -270,7 +277,15 @@ if (scenario === "window") {
   result.romulusPosts = romulus.bodies.filter((b) => b.path === "POST /api/v1/proxy/mocks").length;
 }
 
-if (scenario === "carry-stranded") {
+if (scenario === "leave-unreachable" || scenario === "leave-erroring") {
+  for (const p of ["/1", "/2"]) {
+    await tools.set_mock({ pattern: `~u ${p}`, simulator_udid: "SIM-L", status_code: 200, body: p });
+  }
+  globalThis.hang = true;
+  const t0 = Date.now();
+  result.away = JSON.parse(text(await tools.use_remote({ name: "romulus", release: true })).text);
+  result.seconds = (Date.now() - t0) / 1000;
+} else if (scenario === "carry-stranded") {
   for (const p of ["/1", "/2", "/3"]) {
     await tools.set_mock({ pattern: `~u ${p}`, simulator_udid: "SIM-L", status_code: 200, body: p });
   }
