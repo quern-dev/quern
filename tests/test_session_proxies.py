@@ -951,3 +951,74 @@ async def test_the_endpoint_answers_409_for_a_hold_ended_mid_start(tmp_path, as_
     with pytest.raises(HTTPException) as e:
         await _post(leader, m, processes=["Metatext"], only=True)
     assert e.value.status_code == 409 and m.claims() == []
+
+
+# ---------------------------------------------------------------------------
+# Capture on a device the key does not hold ends with the session that asked
+# ---------------------------------------------------------------------------
+
+
+def _ending(m, *, session_id="ci", reservations=(), holder=None, live=None):
+    from server.session_registry import OWNER
+
+    app = SimpleNamespace(state=SimpleNamespace(
+        session_proxies=m, proxy_adapter=None, recordings=None, mock_owners={}))
+    registry = SimpleNamespace(holder_of=lambda udid: holder, get=lambda sid: live)
+    session = SimpleNamespace(id=session_id, principal=OWNER, reservations=list(reservations),
+                              opened_at=1.0)
+    return app, registry, session
+
+
+async def test_owner_capture_on_an_unheld_simulator_ends_with_its_session(tmp_path):
+    # The owner may add capture without reserving; with no hold to last for,
+    # it outlived the session (and a use_remote switch away) until someone
+    # held and released the device.
+    from server.api import sessions as sessions_api
+    from server.session_registry import OWNER
+
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    await m.claim(session="ci", principal=OWNER, udid=ALPHA, names=["Metatext"])
+    app, registry, session = _ending(m)
+
+    actions = await sessions_api._end_client_work(app, registry, session)
+
+    assert {"udid": ALPHA, "action": "session_capture_released", "ok": True,
+            "stopped": ["Metatext"]} in actions
+    assert m.claims() == [] and not m.made[0].is_running
+
+
+async def test_capture_another_session_last_asked_for_is_left(tmp_path):
+    from server.api import sessions as sessions_api
+    from server.session_registry import OWNER
+
+    m = _manager(_leader(), tmp_path)
+    await m.claim(session="other", principal=OWNER, udid=ALPHA, names=["Metatext"])
+    app, registry, session = _ending(m)
+    assert await sessions_api._end_client_work(app, registry, session) == []
+    assert [c.names for c in m.claims()] == [["Metatext"]]
+
+
+async def test_capture_on_a_device_the_key_holds_lasts_for_that_hold(tmp_path):
+    from server.api import sessions as sessions_api
+    from server.session_registry import OWNER
+
+    m = _manager(_leader(), tmp_path)
+    await m.claim(session="ci", principal=OWNER, udid=ALPHA, names=["Metatext"])
+    still = SimpleNamespace(session=SimpleNamespace(principal=OWNER))
+    app, registry, session = _ending(m, holder=still)
+    await sessions_api._end_client_work(app, registry, session)
+    assert [c.names for c in m.claims()] == [["Metatext"]]
+
+
+async def test_a_partial_release_does_not_end_the_sessions_other_capture(tmp_path):
+    # release_devices for one device runs this for a session that goes on.
+    from server.api import sessions as sessions_api
+    from server.session_registry import OWNER
+
+    m = _manager(_leader(), tmp_path)
+    await m.claim(session="ci", principal=OWNER, udid=ALPHA, names=["Metatext"])
+    live = SimpleNamespace(opened_at=1.0)
+    app, registry, session = _ending(m, live=live)
+    await sessions_api._end_client_work(app, registry, session)
+    assert [c.names for c in m.claims()] == [["Metatext"]]

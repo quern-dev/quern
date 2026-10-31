@@ -483,6 +483,27 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
             except Exception as e:  # noqa: BLE001 -- reported, never raised
                 actions.append({"udid": udid, "action": "session_capture_released",
                                 "ok": False, "error": str(e)})
+    # Capture this session asked for on a device its key does not hold: the
+    # owner may ask without holding, and a claim lasts for the key's hold, so
+    # with none it lasted until someone later held and released that device --
+    # past this session, and past a use_remote switch away from this server.
+    # It ends with the session that last asked for it.
+    session_proxies = getattr(app.state, "session_proxies", None)
+    for claim in list(session_proxies.claims(session.principal)) if (
+            ended and session_proxies is not None) else []:
+        if claim.session != session.id or claim.udid in session.reservations:
+            continue                       # another session's, or ended above
+        held = registry.holder_of(claim.udid)
+        if held is not None and held.session.principal == session.principal:
+            continue                       # held by the key: it lasts for that hold
+        try:
+            stopped = await session_proxies.release(principal=session.principal,
+                                                    udid=claim.udid)
+            actions.append({"udid": claim.udid, "action": "session_capture_released",
+                            "ok": True, "stopped": stopped})
+        except Exception as e:  # noqa: BLE001 -- reported, never raised
+            actions.append({"udid": claim.udid, "action": "session_capture_released",
+                            "ok": False, "error": str(e)})
     return actions
 
 
