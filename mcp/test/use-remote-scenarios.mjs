@@ -68,6 +68,10 @@ function mockIds(name) {
   return async () => [200, { status: "accepted", rule_id: `mock_${name}${++n}` }];
 }
 
+// One counter each, made once: made per request, every rule was mock_romulus1.
+const retryIds = mockIds("romulus");
+const partialIds = mockIds("romulus");
+
 const plans = {
   window: [{ "GET /api/v1/proxy/status": json(200, { from: "local" }) },
            { "GET /health": json(503, {}, 1500) }],
@@ -92,7 +96,7 @@ const plans = {
             "POST /api/v1/sessions/agent-1/reservations": async (b) => [200, { reserved: globalThis.reserved }] }],
   "carry-retry": [{ "POST /api/v1/proxy/mocks": mockIds("local") },
                   { "POST /api/v1/proxy/mocks": async (b) => globalThis.mocksDown
-                      ? [503, { detail: "proxy is not running" }] : mockIds("romulus")(b),
+                      ? [503, { detail: "proxy is not running" }] : retryIds(b),
                     "GET /api/v1/proxy/status": json(200, { status: "stopped" }),
                     "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
   // Review findings on the carry record.
@@ -105,7 +109,7 @@ const plans = {
                    "GET /api/v1/sessions/agent-1": json(200, { reservations: [] }) }],
   "carry-partial": [{ "POST /api/v1/proxy/mocks": mockIds("local") },
                     { "POST /api/v1/proxy/mocks": async (b) => globalThis.failR2 && b?.simulator_udid === "SIM-R2"
-                        ? [503, { detail: "busy" }] : mockIds("romulus")(b),
+                        ? [503, { detail: "busy" }] : partialIds(b),
                       "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
   // The old server is slow to give up its mock: the switch is still moving
   // it when the agent sets a new one.
@@ -113,6 +117,9 @@ const plans = {
                    "DELETE /api/v1/proxy/mocks/mock_local1": json(200, {}, 1000) },
                  { "POST /api/v1/proxy/mocks": mockIds("romulus"),
                    "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
+  // The old server stops answering on the first delete.
+  "carry-dead-old": [{ "POST /api/v1/proxy/mocks": mockIds("local"),
+                       "DELETE /api/v1/proxy/mocks/mock_local1": json(200, {}, 6000) }, {}],
   hint: [{ "POST /api/v1/sessions/agent-1/reservations": async () => [409, { detail: globalThis.detail }],
            "GET /api/v1/device/list": json(200, { devices: [], tools: {}, active_udid: null }) }, {}],
 };
@@ -123,7 +130,11 @@ const romulus = await fake("romulus", true, { ...base("romulus"), ...romulusRout
 const deimos = await fake("deimos", true, base("deimos"));
 process.env.QUERN_SERVER_URL = `http://127.0.0.1:${local.port}`;
 writeFileSync(join(home, ".quern", "remotes.json"), JSON.stringify({ remotes: {
-  romulus: { url: `https://127.0.0.1:${romulus.port}`, key: scenario.startsWith("carry") ? "qc_rk" : "rk", fingerprint: FP },
+  romulus: { url: `https://127.0.0.1:${romulus.port}`,
+             // A client key, as a paired remote's is -- except where the scenario
+             // sets a mock on a device it does not hold, which only the owner may.
+             key: scenario.startsWith("carry") && scenario !== "carry-race" ? "qc_rk" : "rk",
+             fingerprint: FP },
   deimos: { url: `https://127.0.0.1:${deimos.port}`, key: "dk", fingerprint: FP },
 } }));
 
@@ -236,15 +247,29 @@ if (scenario === "window") {
 if (scenario === "carry-race") {
   await tools.set_mock({ pattern: "~u /old", simulator_udid: "SIM-L", status_code: 200, body: "O" });
   await tools.add_session_capture({ simulator_udid: "SIM-L", processes: ["Metatext"] });
+  await tools.add_session_capture({ simulator_udid: "SIM-L2", processes: ["Ivory", "Mona"] });
+  await tools.add_session_capture({ simulator_udid: "SIM-L3", processes: ["Tusker"] });
   const switching = tools.use_remote({ name: "romulus" });
   await sleep(500);                       // switched, still deleting on local
   const late = tools.set_mock({ pattern: "~u /new", simulator_udid: "SIM-R9", status_code: 200, body: "N" });
   result.switched = JSON.parse(text(await switching).text);
   result.late = JSON.parse(text(await late).text);
-  // Cancelled while waiting: not set up again.
-  await tools.remove_session_capture({});
+  // Removed while waiting, by the simulator it was asked for on, or by some
+  // of its processes there: not set up again (CodeRabbit).
+  await tools.remove_session_capture({ simulator_udid: "SIM-L" });
+  await tools.remove_session_capture({ simulator_udid: "SIM-L2", processes: ["Ivory"] });
   globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }];
   result.reserved = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1"] })).text);
+  // An empty list removes all, as on the server: none moves at the next switch.
+  await tools.remove_session_capture({ processes: [] });
+  result.back = JSON.parse(text(await tools.use_remote({ name: "local", release: true })).text);
+} else if (scenario === "carry-dead-old") {
+  for (const p of ["/a", "/b", "/c"]) {
+    await tools.set_mock({ pattern: `~u ${p}`, simulator_udid: "SIM-L", status_code: 200, body: p });
+  }
+  const t0 = Date.now();
+  result.switched = JSON.parse(text(await tools.use_remote({ name: "romulus" })).text);
+  result.seconds = (Date.now() - t0) / 1000;
 } else if (scenario === "carry-partial") {
   await tools.set_mock({ pattern: "~u /p", simulator_udid: "SIM-L", status_code: 200, body: "P" });
   await tools.use_remote({ name: "romulus" });

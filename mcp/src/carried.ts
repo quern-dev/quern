@@ -18,7 +18,7 @@
  */
 
 import { discoverServer } from "./config.js";
-import { apiRequest } from "./http.js";
+import { ServerTimeout, ServerUnreachable, apiRequest } from "./http.js";
 import { isClientKey } from "./remote-paths.js";
 
 type Server = ReturnType<typeof discoverServer>;
@@ -43,6 +43,9 @@ interface Capture {
   allow_passthrough?: boolean;
   /** Simulators it is asked for on, on the server now. */
   on: Set<string>;
+  /** Waiting: the simulators it was asked for on where it was set, so removing
+   * it by one of those still cancels it (CodeRabbit). */
+  from: Set<string>;
   waiting: boolean;
 }
 
@@ -106,7 +109,7 @@ export function recordCapture(simulator: string, capture: {
     return;
   }
   captures.push({ ...capture, processes: [...capture.processes], on: new Set([simulator]),
-                  waiting: false });
+                  from: new Set(), waiting: false });
 }
 
 function sameCapture(a: { processes: string[]; only?: boolean; allow_passthrough?: boolean },
@@ -117,13 +120,32 @@ function sameCapture(a: { processes: string[]; only?: boolean; allow_passthrough
 
 /** remove_session_capture: one simulator's, some processes, or all. */
 export function forgetCapture(simulator?: string, processes?: string[]): void {
-  if (!simulator && !processes) {
+  // An empty list is the server's "all of them", as an omitted one is (CodeRabbit).
+  const named = processes?.length ? processes : undefined;
+  if (!simulator && !named) {
     captures = [];          // all of it: here, and what waits to be set up (CodeRabbit)
     return;
   }
-  for (const c of captures) {
-    if (processes) c.processes = c.processes.filter((p) => !processes.includes(p));
-    if (simulator) c.on.delete(simulator); else if (!processes) c.on.clear();
+  if (!simulator) {
+    for (const c of captures) c.processes = c.processes.filter((p) => !named!.includes(p));
+  } else {
+    // That simulator's capture, or some of its processes there: what stays
+    // on it is split off, as the server keeps it. A capture waiting after a
+    // switch is matched by the simulator it was asked for on (CodeRabbit).
+    const split: Capture[] = [];
+    for (const c of captures) {
+      const set = c.on.has(simulator) ? c.on : c.waiting && c.from.has(simulator) ? c.from : null;
+      if (!set) continue;
+      set.delete(simulator);
+      const kept = named ? c.processes.filter((p) => !named.includes(p)) : [];
+      if (kept.length) {
+        split.push({ ...c, processes: kept,
+                     on: set === c.on ? new Set([simulator]) : new Set(),
+                     from: set === c.from ? new Set([simulator]) : new Set() });
+      }
+      if (c.waiting && !c.from.size && !c.on.size) c.waiting = false;
+    }
+    captures.push(...split);
   }
   captures = captures.filter((c) => c.processes.length && (c.on.size || c.waiting));
 }
@@ -156,20 +178,29 @@ export async function moveOut(old: Server): Promise<{
   mocks: number; session_capture: number; still_on_old?: string[];
 }> {
   const stillThere: string[] = [];
+  // A server that timed out or cannot be reached is not asked again for each
+  // rule: that held every switch and reservation behind it (CodeRabbit).
+  let gone = false;
   for (const mock of mocks) {
     for (const ruleId of mock.rules.values()) {
+      if (gone) {
+        stillThere.push(ruleId);
+        continue;
+      }
       try {
         await apiRequest("DELETE", `/api/v1/proxy/mocks/${encodeURIComponent(ruleId)}`,
           undefined, undefined, 5000, old);
       } catch (e) {
         // Gone already -- a client's scoped mock ends with its hold -- is moved.
         if (!(e instanceof Error && e.message.startsWith("HTTP 404"))) stillThere.push(ruleId);
+        if (e instanceof ServerTimeout || e instanceof ServerUnreachable) gone = true;
       }
     }
     mock.rules = new Map();
     mock.waiting = true;
   }
   for (const c of captures) {
+    for (const udid of c.on) c.from.add(udid);
     c.on = new Set();
     c.waiting = true;
   }
@@ -177,6 +208,9 @@ export async function moveOut(old: Server): Promise<{
 }
 
 interface Reserved { udid?: string; device_type?: string }
+
+/** Each request that sets something up again: it holds the switch queue. */
+const SETUP_TIMEOUT_MS = 15_000;
 
 /** After a reservation on the server switched to: set up what was moved on
  * the simulators just reserved. Each mock and capture is set up once per
@@ -203,7 +237,9 @@ export async function applyOnReserve(reserved: Reserved[]): Promise<Record<strin
       try {
         const body: Record<string, unknown> = { pattern: mock.pattern, response: mock.response };
         if (scope !== null) body.simulator_udid = scope;
-        const answer = (await apiRequest("POST", "/api/v1/proxy/mocks", undefined, body)) as
+        // Bounded: this runs in the switch queue, and what times out waits.
+        const answer = (await apiRequest("POST", "/api/v1/proxy/mocks", undefined, body,
+          SETUP_TIMEOUT_MS)) as
           { rule_id?: string } | null;
         if (!answer?.rule_id) throw new Error("no rule_id in the answer");
         mock.rules.set(scope, answer.rule_id);
@@ -227,7 +263,7 @@ export async function applyOnReserve(reserved: Reserved[]): Promise<Record<strin
           simulator_udid: udid, processes: capture.processes,
           ...(capture.only ? { only: true } : {}),
           ...(capture.allow_passthrough ? { allow_passthrough: true } : {}),
-        });
+        }, SETUP_TIMEOUT_MS);
         capture.on.add(udid);
         captured.push({ simulator_udid: udid, processes: capture.processes });
       } catch (e) {

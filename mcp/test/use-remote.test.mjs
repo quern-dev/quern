@@ -214,7 +214,18 @@ test("a mock set during a switch lands on the new server and is not moved again"
   // was moved and recreated as well).
   assert.deepEqual(r.reserved.carried.mocks_recreated.map((m) => m.simulator_udid), ["SIM-R1"]);
   assert.equal(r.reserved.carried.mocks_recreated[0].pattern, "~u /old");
-  assert.equal(r.reserved.carried.session_capture_restored, undefined,
-               "remove_session_capture() cancelled the capture that was waiting");
-  assert.ok(!r.logs.romulus.includes("POST /api/v1/proxy/session-capture"));
+  // Only what was not removed while waiting comes back: Mona (SIM-L2's
+  // other process) and Tusker; not Metatext (its simulator removed) or Ivory.
+  const restored = r.reserved.carried.session_capture_restored.map((c) => c.processes.join("+")).sort();
+  assert.deepEqual(restored, ["Mona", "Tusker"]);
+  // remove_session_capture({processes: []}) removed all of it.
+  assert.equal(r.back.carried.session_capture, 0);
+});
+
+test("an old server that stops answering is asked once, not once per mock", async () => {
+  const r = await run("carry-dead-old");
+  assert.deepEqual(r.switched.carried.still_on_old, ["mock_local1", "mock_local2", "mock_local3"]);
+  assert.equal(r.logs.local.filter((l) => l.startsWith("DELETE /api/v1/proxy/mocks/")).length, 1);
+  assert.ok(r.seconds < 12, `one 5s timeout, not three: took ${r.seconds}s`);
+  assert.equal(r.switched.carried.mocks, 3, "they still move");
 });
