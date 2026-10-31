@@ -1082,3 +1082,69 @@ async def test_a_claim_is_stored_under_the_canonical_id(tmp_path, as_client):
     await api.add_session_capture.__wrapped__(
         req, SessionCaptureRequest(simulator_udid=ALPHA.lower(), processes=["Metatext"], only=True))
     assert [(c.udid, c.opened) for c in m.claims()] == [(ALPHA, 1.0)]
+
+
+async def test_a_ca_refusal_hands_back_a_claim_made_with_a_lowercase_id(tmp_path, as_client,
+                                                                        monkeypatch):
+    # The claim is stored canonical; the rollback must name it so (CodeRabbit).
+    monkeypatch.setattr(api.sim_tls, "ensure_capturable", AsyncMock(
+        side_effect=sim_tls.CaptureNotReady({"message": "no CA"})))
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    with pytest.raises(HTTPException) as e:
+        await api.add_session_capture.__wrapped__(
+            _request(leader, m),
+            SessionCaptureRequest(simulator_udid=ALPHA.lower(), processes=["Metatext"], only=True))
+    assert e.value.status_code == 428
+    assert m.claims() == [] and leader.followers == []
+
+
+async def test_a_session_the_registry_does_not_hold_is_no_session(tmp_path, as_client):
+    # The CLI sends a session id without holding a session: its claim is not
+    # recorded under an id nothing will end (CodeRabbit).
+    as_client.is_owner = True
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    req = _request(leader, m)
+    req.app.state.sessions = SimpleNamespace(get=lambda sid: None)
+    await api.add_session_capture.__wrapped__(
+        req, SessionCaptureRequest(simulator_udid=ALPHA, processes=["Metatext"], only=True))
+    assert [(c.session, c.opened) for c in m.claims()] == [("", None)]
+
+
+async def test_a_failed_capture_clean_up_is_reported_per_device(tmp_path):
+    from server.api import sessions as sessions_api
+    from server.session_registry import OWNER
+
+    m = _manager(_leader(), tmp_path)
+    await m.claim(session="ci", principal=OWNER, udid=ALPHA, names=["Metatext"], opened=1.0)
+    app, registry, session = _ending(m)
+
+    def boom(udid):
+        raise RuntimeError("registry unavailable")
+
+    registry.holder_of = boom
+    actions = await sessions_api._end_client_work(app, registry, session)
+    assert actions == [{"udid": ALPHA, "action": "session_capture_released", "ok": False,
+                        "error": "registry unavailable"}]
+
+
+async def test_the_release_loop_survives_a_failure_with_no_udid(monkeypatch):
+    # Its finally read every failure's udid; one without raised there, and the
+    # drain and retry were skipped (CodeRabbit).
+    from server.api import sessions as sessions_api
+    from server.session_registry import SessionRegistry
+
+    registry = SessionRegistry()
+    s, token = registry.open("ci")
+    registry.attach(s.id, token)
+    registry.reserve("ci", [ALPHA])
+    registry.release("ci")
+
+    async def no_udid(app, reg, session):
+        return [{"action": "something", "ok": False, "error": "x"}]
+
+    monkeypatch.setattr(sessions_api, "_end_client_work", no_udid)
+    app = SimpleNamespace(state=SimpleNamespace(sessions=registry, device_controller=None))
+    await sessions_api.run_release_policies(app)        # does not raise
+    assert registry.holder_of(ALPHA) is None

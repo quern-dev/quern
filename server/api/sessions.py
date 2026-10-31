@@ -508,8 +508,15 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
                 actions.append({"udid": udid, "action": "session_capture_released",
                                 "ok": True, "stopped": stopped})
         except Exception as e:  # noqa: BLE001 -- reported, never raised
-            actions.append({"action": "session_capture_released", "ok": False,
-                            "error": str(e)})
+            # Per device, as every clean-up failure is: the release loop reads
+            # each failure's udid (CodeRabbit: one without it raised there).
+            # Not retried -- the retry re-queues reservations, and these
+            # devices were not held -- but said, so it is not read as done.
+            opening = getattr(session, "opened_at", None)
+            for claim in session_proxies.claims(session.principal):
+                if claim.session == session.id and claim.opened == opening:
+                    actions.append({"udid": claim.udid, "action": "session_capture_released",
+                                    "ok": False, "error": str(e)})
     return actions
 
 
@@ -546,7 +553,9 @@ async def run_release_policies(app) -> list[dict]:
                 if restored is not None:
                     keyboards.append(restored)
         finally:
-            failed = {a["udid"] for a in ended if not a.get("ok")}
+            # Tolerant of an action with no udid: this block must not raise, or
+            # the drain and the retry below are skipped (CodeRabbit).
+            failed = {a.get("udid") for a in ended if not a.get("ok")} - {None}
             # A device whose clean-up failed stays unavailable, and is tried
             # again at the next sweep: freed, another key could reserve it
             # while the previous client's rule still answered its traffic or
