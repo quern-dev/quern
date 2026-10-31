@@ -356,7 +356,8 @@ async def update_mock(request: Request, rule_id: str, body: UpdateMockRequest) -
         rule = await adapter.update_mock(
             rule_id=rule_id,
             pattern=body.pattern,
-            response=body.response.model_dump() if body.response else None,
+            # The fields named, not the spec's defaults for the rest (#574).
+            response=body.response.model_dump(exclude_unset=True) if body.response else None,
             simulator_udid=body.simulator_udid,
             scope_given=scope_given,
         )

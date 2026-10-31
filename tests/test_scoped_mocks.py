@@ -521,3 +521,56 @@ class TestThePidCacheSurvivesPidReuse:
              patch.object(addon_mod, "_proc_start_fast", return_value=None):
             assert addon_mod._resolve_simulator_udid(5000) == ALPHA
             assert addon_mod._pid_to_udid_cache == {}
+
+
+class TestAnUpdateChangesOnlyWhatItNames:
+    """#574: a body-only update reset the status code and headers to the
+    defaults, though update_mock says only the provided fields change."""
+
+    def _rule(self, client):
+        return client.post("/api/v1/proxy/mocks", headers=AUTH, json={
+            "pattern": "~d api.example.com",
+            "response": {"status_code": 503, "headers": {"retry-after": "5"}, "body": "A"},
+        }).json()["rule_id"]
+
+    @pytest.mark.parametrize("payload", [
+        {"response": {"body": "B"}},   # nested, as the MCP sends it
+        {"body": "B"},                 # flat
+    ])
+    def test_a_body_only_update_keeps_status_and_headers(self, client, adapter, payload):
+        rid = self._rule(client)
+        r = client.patch(f"/api/v1/proxy/mocks/{rid}", headers=AUTH, json=payload)
+        assert r.status_code == 200, r.text
+        assert r.json()["response"] == {"status_code": 503, "headers": {"retry-after": "5"},
+                                        "body": "B"}
+        sent = adapter.send_command.await_args.args[0]
+        assert sent["response"]["status_code"] == 503, "the addon gets the merged response too"
+
+    def test_named_headers_replace_all_headers(self, client):
+        rid = self._rule(client)
+        r = client.patch(f"/api/v1/proxy/mocks/{rid}", headers=AUTH,
+                         json={"response": {"headers": {"x-new": "1"}}})
+        assert r.json()["response"] == {"status_code": 503, "headers": {"x-new": "1"}, "body": "A"}
+
+    def test_a_new_status_keeps_the_body(self, client):
+        rid = self._rule(client)
+        r = client.patch(f"/api/v1/proxy/mocks/{rid}", headers=AUTH, json={"status_code": 200})
+        assert r.json()["response"]["status_code"] == 200
+        assert r.json()["response"]["body"] == "A"
+
+    def test_a_named_null_body_clears_it_and_keeps_the_rest(self, client):
+        # Naming overwrites, even with null (CodeRabbit): a flat body: null
+        # beside another field cleared the body before #574's fix and must
+        # still; the status it names changes, the headers stay.
+        rid = self._rule(client)
+        r = client.patch(f"/api/v1/proxy/mocks/{rid}", headers=AUTH,
+                         json={"status_code": 201, "body": None})
+        assert r.status_code == 200, r.text
+        assert r.json()["response"] == {"status_code": 201, "headers": {"retry-after": "5"},
+                                        "body": ""}
+
+    def test_a_named_null_alone_is_still_an_update(self, client):
+        rid = self._rule(client)
+        r = client.patch(f"/api/v1/proxy/mocks/{rid}", headers=AUTH, json={"body": None})
+        assert r.status_code == 200, r.text
+        assert r.json()["response"]["body"] == "" and r.json()["response"]["status_code"] == 503

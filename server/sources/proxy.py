@@ -891,7 +891,11 @@ class ProxyAdapter(BaseSourceAdapter):
         if rule is None:
             raise ValueError(f"Mock rule not found: {rule_id}")
         new_pattern = pattern if pattern is not None else rule["pattern"]
-        new_response = response if response is not None else rule["response"]
+        # Merged: what the update names replaces those fields, the rest stay
+        # (#574). Replacing the whole response reset a 503 to 200 when only
+        # the body was given.
+        new_response = ({**rule["response"], **response} if response is not None
+                        else rule["response"])
         new_scope = simulator_udid if scope_given else rule.get("simulator_udid")
         if pattern is not None:
             validate_filter_pattern(new_pattern)

@@ -186,10 +186,10 @@ test("the record follows the server: one entry per mock, replaced responses, gon
   assert.deepEqual(made.map((m) => m.simulator_udid).sort(), ["SIM-R1", "SIM-R2"]);
   // The next hop moves one mock, not one per copy (review: they multiplied).
   assert.equal(r.toDeimos.carried.mocks, 1);
-  // update_mock replaced the whole response, as the server does: the status and
-  // header set before it were reset to the server's defaults (review).
+  // update_mock changed only the body, as the server now does (#574): the
+  // status and header set before it are carried with it.
   assert.deepEqual(r.mockBodies[0].response,
-                   { status_code: 200, headers: { "content-type": "application/json" }, body: "B" });
+                   { status_code: 503, headers: { "retry-after": "5" }, body: "B" });
   // A client key's release_devices ends its scoped mocks on the server; they
   // do not come back at the next switch (review).
   assert.equal(r.afterRelease.carried, undefined);
