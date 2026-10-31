@@ -431,8 +431,14 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
     # session, they end with it.
     from server.knowledge.session_landmarks import SessionLandmarks
 
+    # Only when the session has ended: release_devices queues a record under
+    # the live session's own id and opening too, and dropping on it took the
+    # set from a session that went on.
     landmarks = getattr(app.state, "landmark_registry", None)
-    if isinstance(landmarks, SessionLandmarks):
+    get = getattr(registry, "get", None)
+    live = get(session.id) if callable(get) else None
+    ended = live is None or live.opened_at != session.opened_at
+    if ended and isinstance(landmarks, SessionLandmarks):
         if dropped := landmarks.drop(session.id, session.opened_at):
             actions.append({"action": "knowledge_dropped", "ok": True, "apps": dropped})
     owners = getattr(app.state, "mock_owners", {}) or {}
