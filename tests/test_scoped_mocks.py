@@ -557,3 +557,20 @@ class TestAnUpdateChangesOnlyWhatItNames:
         r = client.patch(f"/api/v1/proxy/mocks/{rid}", headers=AUTH, json={"status_code": 200})
         assert r.json()["response"]["status_code"] == 200
         assert r.json()["response"]["body"] == "A"
+
+    def test_a_named_null_body_clears_it_and_keeps_the_rest(self, client):
+        # Naming overwrites, even with null (CodeRabbit): a flat body: null
+        # beside another field cleared the body before #574's fix and must
+        # still; the status it names changes, the headers stay.
+        rid = self._rule(client)
+        r = client.patch(f"/api/v1/proxy/mocks/{rid}", headers=AUTH,
+                         json={"status_code": 201, "body": None})
+        assert r.status_code == 200, r.text
+        assert r.json()["response"] == {"status_code": 201, "headers": {"retry-after": "5"},
+                                        "body": ""}
+
+    def test_a_named_null_alone_is_still_an_update(self, client):
+        rid = self._rule(client)
+        r = client.patch(f"/api/v1/proxy/mocks/{rid}", headers=AUTH, json={"body": None})
+        assert r.status_code == 200, r.text
+        assert r.json()["response"]["body"] == "" and r.json()["response"]["status_code"] == 503

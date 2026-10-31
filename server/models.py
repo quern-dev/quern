@@ -1807,18 +1807,17 @@ class UpdateMockRequest(BaseModel):
 
     @model_validator(mode="after")
     def wrap_flat_fields(self) -> UpdateMockRequest:
-        if self.response is None and (
-            self.status_code is not None
-            or self.headers is not None
-            or self.body is not None
-        ):
-            # Only what was named, so the update leaves the rest of the
-            # rule's response as it is (#574): filling in the defaults here
-            # reset a 503 to 200 on a body-only update.
-            given = {name: value for name, value in (
-                ("status_code", self.status_code), ("headers", self.headers), ("body", self.body))
-                if value is not None}
-            self.response = MockResponseSpec(**given)
+        # Named, not merely non-null: omission preserves and naming overwrites,
+        # even with null, which clears the field to the spec's value for it
+        # (CodeRabbit). Only what was named, so the update leaves the rest of
+        # the rule's response as it is (#574): filling in the defaults here
+        # reset a 503 to 200 on a body-only update.
+        named = [f for f in ("status_code", "headers", "body") if f in self.model_fields_set]
+        if self.response is None and named:
+            cleared = MockResponseSpec()
+            self.response = MockResponseSpec(**{
+                f: getattr(self, f) if getattr(self, f) is not None else getattr(cleared, f)
+                for f in named})
         self.status_code = None
         self.headers = None
         self.body = None
