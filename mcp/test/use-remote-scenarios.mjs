@@ -134,6 +134,12 @@ const plans = {
                         },
                         "GET /api/v1/proxy/mocks": async () => [200, { rules: globalThis.made, total: globalThis.made.length }],
                         "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
+  // local stays up but refuses to give up its rules at the first switch; on the
+  // way back one is removed, one is gone already, one refuses again.
+  "carry-stranded": [{ "POST /api/v1/proxy/mocks": mockIds("local"),
+                       "DELETE /api/v1/proxy/mocks/mock_local1": async () => globalThis.back ? [200, {}] : [503, { detail: "busy" }],
+                       "DELETE /api/v1/proxy/mocks/mock_local2": async () => globalThis.back ? [404, { detail: "no such rule" }] : [503, { detail: "busy" }],
+                       "DELETE /api/v1/proxy/mocks/mock_local3": json(503, { detail: "busy" }) }, {}],
   hint: [{ "POST /api/v1/sessions/agent-1/reservations": async () => [409, { detail: globalThis.detail }],
            "GET /api/v1/device/list": json(200, { devices: [], tools: {}, active_udid: null }) }, {}],
 };
@@ -258,7 +264,16 @@ if (scenario === "window") {
   result.romulusPosts = romulus.bodies.filter((b) => b.path === "POST /api/v1/proxy/mocks").length;
 }
 
-if (scenario === "carry-ambiguous") {
+if (scenario === "carry-stranded") {
+  for (const p of ["/1", "/2", "/3"]) {
+    await tools.set_mock({ pattern: `~u ${p}`, simulator_udid: "SIM-L", status_code: 200, body: p });
+  }
+  result.away = JSON.parse(text(await tools.use_remote({ name: "romulus" })).text);
+  globalThis.back = true;
+  result.back = JSON.parse(text(await tools.use_remote({ name: "local" })).text);
+  result.again = JSON.parse(text(await tools.use_remote({ name: "romulus" })).text);
+  result.backAgain = JSON.parse(text(await tools.use_remote({ name: "local" })).text);
+} else if (scenario === "carry-ambiguous") {
   globalThis.made = [];
   await tools.set_mock({ pattern: "~u /amb", simulator_udid: "SIM-L", status_code: 200, body: "A" });
   await tools.use_remote({ name: "romulus" });

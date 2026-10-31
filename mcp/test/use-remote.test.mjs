@@ -246,3 +246,16 @@ test("a retry adopts the rule a failed attempt made anyway, rather than making a
   assert.equal(r.made, 1, "one rule on the server, not two (CodeRabbit)");
   assert.equal(r.second.still_waiting, undefined);
 });
+
+test("rules a switch could not remove are removed when the agent comes back", async () => {
+  const r = await run("carry-stranded");
+  assert.deepEqual(r.away.carried.still_on_old, ["mock_local1", "mock_local2", "mock_local3"]);
+  assert.match(r.away.note, /removed if you switch back/);
+  // Back on local: removed, or gone already (404), before anything is set up
+  // beside them; the one that refuses again is kept for the next return.
+  assert.deepEqual(r.back.left_here_earlier, { removed: ["mock_local1", "mock_local2"], still_there: ["mock_local3"] });
+  assert.match(r.back.note, /Could not remove mock_local3, left here earlier/);
+  assert.deepEqual(r.backAgain.left_here_earlier.still_there, ["mock_local3"], "tried again next time");
+  assert.equal(r.logs.local.filter((l) => l === "DELETE /api/v1/proxy/mocks/mock_local1").length, 2);
+  assert.equal(r.again.left_here_earlier, undefined, "nothing was left on romulus");
+});

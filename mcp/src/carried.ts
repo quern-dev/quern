@@ -72,6 +72,11 @@ function captureWaiting(c: Capture): boolean {
 
 let mocks: Mock[] = [];
 let captures: Capture[] = [];
+/** Rules a switch could not remove from the server it left, by that server's
+ * name. A server that went on running unreached still answers with them; if
+ * the agent comes back, they are removed before its mocks are set up again
+ * beside them. */
+const stranded = new Map<string, string[]>();
 
 function mockOf(ruleId: string): Mock | undefined {
   return mocks.find((m) => [...m.rules.values()].includes(ruleId));
@@ -222,7 +227,7 @@ export function pending(): { mocks: number; session_capture: number } {
 
 /** At a switch: take this agent's mocks off `old` and keep them, with its
  * session capture, for the next reservation on the new server. Never throws. */
-export async function moveOut(old: Server): Promise<{
+export async function moveOut(old: Server, oldName: string): Promise<{
   mocks: number; session_capture: number; still_on_old?: string[];
 }> {
   const stillThere: string[] = [];
@@ -256,7 +261,32 @@ export async function moveOut(old: Server): Promise<{
     c.failed = new Set();
     c.waiting = true;
   }
+  if (stillThere.length) stranded.set(oldName, [...(stranded.get(oldName) ?? []), ...stillThere]);
   return { ...pending(), ...(stillThere.length ? { still_on_old: stillThere } : {}) };
+}
+
+/** After a switch to `name`: remove the rules an earlier switch left on it.
+ * Gone already (404) -- a restart forgets every mock -- counts as removed;
+ * any other failure keeps the rule for the next return. Never throws. */
+export async function cleanUpStranded(name: string): Promise<{
+  removed: string[]; still_there: string[];
+} | undefined> {
+  const ids = stranded.get(name);
+  if (!ids?.length) return undefined;
+  const removed: string[] = [];
+  const left: string[] = [];
+  for (const ruleId of ids) {
+    try {
+      await apiRequest("DELETE", `/api/v1/proxy/mocks/${encodeURIComponent(ruleId)}`,
+        undefined, undefined, 5000);
+      removed.push(ruleId);
+    } catch (e) {
+      if (e instanceof Error && e.message.startsWith("HTTP 404")) removed.push(ruleId);
+      else left.push(ruleId);
+    }
+  }
+  if (left.length) stranded.set(name, left); else stranded.delete(name);
+  return { removed, still_there: left };
 }
 
 interface Reserved { udid?: string; device_type?: string }
@@ -380,4 +410,5 @@ export async function applyOnReserve(reserved: Reserved[]): Promise<Record<strin
 export function resetCarried(): void {
   mocks = [];
   captures = [];
+  stranded.clear();
 }

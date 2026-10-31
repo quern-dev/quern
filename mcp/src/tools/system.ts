@@ -4,7 +4,7 @@ import { LOCAL, currentRemote, discoverServer, selectServer, selectedServer } fr
 import { switchHeldSession } from "../held-session.js";
 import { SESSION_ID, apiRequest, serverFetch } from "../http.js";
 import { loadRemote } from "../remote.js";
-import { moveOut } from "../carried.js";
+import { cleanUpStranded, moveOut } from "../carried.js";
 
 /** Run after a switch is live: loads this project's knowledge base on the new
  * server, as at start (index.ts wires it in). Its answer goes into use_remote's. */
@@ -219,7 +219,9 @@ async function useRemote({ name, release }: { name: string; release?: boolean })
   }
   // What this agent set up follows it: its mocks leave the old server and,
   // with its session capture, are set up again at its next reservation here.
-  const carried = await moveOut(old);
+  const carried = await moveOut(old, from);
+  // Rules an earlier switch left here, when it could not reach this server.
+  const strandedHere = await cleanUpStranded(target);
   let knowledge: unknown;
   try {
     knowledge = afterSwitch ? await afterSwitch() : undefined;
@@ -231,6 +233,7 @@ async function useRemote({ name, release }: { name: string; release?: boolean })
   return reply({
     current: target, server_url: url, version, ...(released.length ? { released } : {}),
     ...(waiting || carried.still_on_old ? { carried } : {}),
+    ...(strandedHere ? { left_here_earlier: strandedHere } : {}),
     ...(knowledge !== undefined ? { knowledge } : {}),
     proxy: there,
     note: `Every tool call now goes to ${target}. Reserve a device there with reserve_devices.` +
@@ -238,7 +241,11 @@ async function useRemote({ name, release }: { name: string; release?: boolean })
         "capture(s) moved with you: they are set up on the simulators of your next " +
         "reservation here, and its answer lists their new rule ids." : "") +
       (carried.still_on_old ? ` Could not remove ${carried.still_on_old.join(", ")} from ` +
-        `${from}: they still answer traffic there.` : "") +
+        `${from}: they still answer traffic there, and are removed if you switch back.` : "") +
+      (strandedHere?.removed.length ? ` Removed ${strandedHere.removed.join(", ")}, left ` +
+        `here by an earlier switch that could not reach ${target}.` : "") +
+      (strandedHere?.still_there.length ? ` Could not remove ${strandedHere.still_there.join(", ")}, ` +
+        `left here earlier: they still answer traffic here.` : "") +
       (releaseNote ? ` ${releaseNote}` : "") +
       " Recordings, logging, previews and device settings stay with the old server and its devices.",
   });
