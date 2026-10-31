@@ -4,6 +4,14 @@ import { LOCAL, currentRemote, discoverServer, selectServer, selectedServer } fr
 import { switchHeldSession } from "../held-session.js";
 import { SESSION_ID, apiRequest, serverFetch } from "../http.js";
 import { loadRemote } from "../remote.js";
+import { moveOut } from "../carried.js";
+
+/** Run after a switch is live: loads this project's knowledge base on the new
+ * server, as at start (index.ts wires it in). Its answer goes into use_remote's. */
+let afterSwitch: (() => Promise<unknown>) | null = null;
+export function whenSwitched(fn: (() => Promise<unknown>) | null): void {
+  afterSwitch = fn;
+}
 import { errorText, strictParams } from "./helpers.js";
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
@@ -95,7 +103,9 @@ A server that could not be asked says why (not running, timed out, certificate c
   server.registerTool("use_remote", {
     description: `Switch this session to another quern server -- a paired remote from list_remotes, or "local" for this Mac's own -- so every later tool call (reserve_devices, take_screenshot, tap_element, ...) works on that machine and its devices. Use it when the device the user wants is on another server.
 
-One server at a time: devices you hold on the current server must be released first (release_devices), or pass release=true to release them as part of the switch -- also needed when the current server cannot say what you hold. The switch is made only once your session is live on the new server; if it cannot be, you stay where you were. Nothing else follows you -- mocks, proxy settings and loaded landmarks stay where they were set. The quern CLI in your shell is not switched; it still talks to this Mac's server.`,
+One server at a time: devices you hold on the current server must be released first (release_devices), or pass release=true to release them as part of the switch -- also needed when the current server cannot say what you hold. The switch is made only once your session is live on the new server; if it cannot be, you stay where you were.
+
+What you set up follows you: the mocks you set are removed from the old server and, with the session capture you asked for, set up again on the simulators of your next reservation on the new one (that answer's "carried" lists the new rule ids); this project's knowledge base is loaded there. The answer's "proxy" says whether the new server's proxy runs -- mocks and capture need it, and only its owner can start it. Machine-wide proxy settings (local capture, system proxy, intercept, bypass), recordings, logging and device settings stay where they were. The quern CLI in your shell is not switched; it still talks to this Mac's server.`,
     inputSchema: strictParams({
       name: z.string().describe(`A server's name from list_remotes, or "local" for this Mac's own`),
       release: z.boolean().optional().describe("Release the devices you hold on the current server as part of the switch (default false: refuse)"),
@@ -195,6 +205,7 @@ async function useRemote({ name, release }: { name: string; release?: boolean })
     }
   }
   const before = selectedServer();
+  const old = discoverServer();         // the server being left, for its mocks
   selectServer(target);
   if (!(await switchHeldSession())) {
     // Requests would go to a server where nothing can be reserved: go back,
@@ -206,11 +217,51 @@ async function useRemote({ name, release }: { name: string; release?: boolean })
       "yet either: session_status shows it.") + (released.length
       ? ` ${released.join(", ")} were released on ${from}.` : ""), true);
   }
+  // What this agent set up follows it: its mocks leave the old server and,
+  // with its session capture, are set up again at its next reservation here.
+  const carried = await moveOut(old);
+  let knowledge: unknown;
+  try {
+    knowledge = afterSwitch ? await afterSwitch() : undefined;
+  } catch (e) {
+    knowledge = { kind: "failed", reason: errorText(e) };
+  }
+  const there = await proxyThere();
+  const waiting = carried.mocks + carried.session_capture;
   return reply({
     current: target, server_url: url, version, ...(released.length ? { released } : {}),
+    ...(waiting || carried.still_on_old ? { carried } : {}),
+    ...(knowledge !== undefined ? { knowledge } : {}),
+    proxy: there,
     note: `Every tool call now goes to ${target}. Reserve a device there with reserve_devices.` +
-      (releaseNote ? ` ${releaseNote}` : ""),
+      (waiting ? ` Your ${carried.mocks} mock(s) and ${carried.session_capture} session ` +
+        "capture(s) moved with you: they are set up on the simulators of your next " +
+        "reservation here, and its answer lists their new rule ids." : "") +
+      (carried.still_on_old ? ` Could not remove ${carried.still_on_old.join(", ")} from ` +
+        `${from}: they still answer traffic there.` : "") +
+      (releaseNote ? ` ${releaseNote}` : "") +
+      " Recordings, logging, previews and device settings stay with the old server and its devices.",
   });
+}
+
+/** Whether mocks and capture can work on the server switched to: its proxy
+ * running, and what it captures. Says when it could not ask, never "stopped". */
+async function proxyThere(): Promise<Record<string, unknown>> {
+  try {
+    const s = (await apiRequest("GET", "/api/v1/proxy/status", undefined, undefined, 5000)) as
+      { status?: string; local_capture?: string[]; mock_rules_count?: number } | null;
+    if (typeof s?.status !== "string") {
+      return { status: "unknown", note: "its proxy status did not say whether it runs" };
+    }
+    return {
+      status: s.status, local_capture: s.local_capture ?? [],
+      ...(s.status === "running" ? {} : { note: `Its proxy is ${s.status}, so mocks and ` +
+        "capture cannot work there until it is started (start_proxy, which takes the " +
+        "server's owner key)." }),
+    };
+  } catch (e) {
+    return { status: "unknown", note: `could not ask (${errorText(e)})` };
+  }
 }
 
 export interface ReserveCriteria {

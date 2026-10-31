@@ -26,11 +26,14 @@ const base = (name) => ({
 function fake(name, secure, routes, { attach = true, dropFirstAfter = 0 } = {}) {
   let sockets = 0;
   const log = [];
+  const bodies = [];
   const handler = async (req, res) => {
-    for await (const _ of req) { /* drain */ }
+    let raw = "";
+    for await (const chunk of req) raw += chunk;
     log.push(`${req.method} ${req.url.split("?")[0]}`);
+    if (raw) bodies.push({ path: `${req.method} ${req.url.split("?")[0]}`, body: JSON.parse(raw) });
     const r = routes[`${req.method} ${req.url.split("?")[0]}`] ?? json(200, { from: name });
-    const [status, data, delay] = await r();
+    const [status, data, delay] = await r(raw ? JSON.parse(raw) : undefined);
     if (delay) await sleep(delay);
     res.writeHead(status, { "content-type": "application/json" });
     res.end(JSON.stringify(data));
@@ -50,7 +53,7 @@ function fake(name, secure, routes, { attach = true, dropFirstAfter = 0 } = {}) 
     sock.on("data", () => {});
     sock.on("error", () => {});
   });
-  return new Promise((ok) => srv.listen(0, "127.0.0.1", () => ok({ name, log, port: srv.address().port })));
+  return new Promise((ok) => srv.listen(0, "127.0.0.1", () => ok({ name, log, bodies, port: srv.address().port })));
 }
 
 const home = mkdtempSync(join(tmpdir(), "quern-ur-"));
@@ -59,6 +62,15 @@ process.env.HOME = home;
 process.env.QUERN_CLIENT_KEY = "k";
 process.env.QUERN_SESSION = "agent-1";
 delete process.env.QUERN_REMOTE;
+
+function mockIds(name) {
+  let n = 0;
+  return async () => [200, { status: "accepted", rule_id: `mock_${name}${++n}` }];
+}
+
+// One counter each, made once: made per request, every rule was mock_romulus1.
+const retryIds = mockIds("romulus");
+const partialIds = mockIds("romulus");
 
 const plans = {
   window: [{ "GET /api/v1/proxy/status": json(200, { from: "local" }) },
@@ -73,6 +85,55 @@ const plans = {
   // local's session opens slowly: the switch happens while it is in flight.
   "stale-start": [{ "POST /api/v1/sessions": json(200, { resume_token: "t-local", resumed: false }, 800) }, {}],
   "stale-early": [{ "POST /api/v1/sessions": json(200, { resume_token: "t-local", resumed: false }, 800) }, {}],
+  // What the agent set up follows it (carried.ts). Mock ids are handed out
+  // in order; romulus's proxy status, mock creation and capture vary by case.
+  carry: [{ "POST /api/v1/proxy/mocks": mockIds("local"),
+            "DELETE /api/v1/proxy/mocks/mock_local1": json(200, {}),
+            "DELETE /api/v1/proxy/mocks/mock_local2": json(404, { detail: "gone" }),
+            "DELETE /api/v1/proxy/mocks/mock_local3": json(500, { detail: "boom" }) },
+          { "POST /api/v1/proxy/mocks": mockIds("romulus"),
+            "GET /api/v1/proxy/status": json(200, { status: "running", local_capture: ["Metatext"] }),
+            "POST /api/v1/sessions/agent-1/reservations": async (b) => [200, { reserved: globalThis.reserved }] }],
+  "carry-retry": [{ "POST /api/v1/proxy/mocks": mockIds("local") },
+                  { "POST /api/v1/proxy/mocks": async (b) => globalThis.mocksDown
+                      ? [503, { detail: "proxy is not running" }] : retryIds(b),
+                    "GET /api/v1/proxy/status": json(200, { status: "stopped" }),
+                    "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
+  // Review findings on the carry record.
+  "carry-hops": [{ "POST /api/v1/proxy/mocks": mockIds("local"),
+                   "PATCH /api/v1/proxy/mocks/mock_local1": json(200, {}),
+                   "DELETE /api/v1/proxy/mocks/mock_local2": json(404, { detail: "no such rule" }) },
+                 { "POST /api/v1/proxy/mocks": mockIds("romulus"),
+                   "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }],
+                   "DELETE /api/v1/sessions/agent-1/reservations": async () => [200, { freed: globalThis.freed ?? [] }],
+                   "GET /api/v1/sessions/agent-1": json(200, { reservations: [] }) }],
+  "carry-partial": [{ "POST /api/v1/proxy/mocks": mockIds("local") },
+                    // Capture fails on SIM-R2 the first time, as mocks do.
+                    { "POST /api/v1/proxy/mocks": async (b) => globalThis.failR2 && b?.simulator_udid === "SIM-R2"
+                        ? [503, { detail: "busy" }] : partialIds(b),
+                      "POST /api/v1/proxy/session-capture": async (b) => globalThis.failR2 && b?.simulator_udid === "SIM-R2"
+                        ? [503, { detail: "busy" }] : [200, {}],
+                      "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
+  // The old server is slow to give up its mock: the switch is still moving
+  // it when the agent sets a new one.
+  "carry-race": [{ "POST /api/v1/proxy/mocks": mockIds("local"),
+                   "DELETE /api/v1/proxy/mocks/mock_local1": json(200, {}, 1000) },
+                 { "POST /api/v1/proxy/mocks": mockIds("romulus"),
+                   "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
+  // The old server stops answering on the first delete.
+  "carry-dead-old": [{ "POST /api/v1/proxy/mocks": mockIds("local"),
+                       "DELETE /api/v1/proxy/mocks/mock_local1": json(200, {}, 6000) }, {}],
+  // The server makes the rule and still answers with an error (as a timed-out
+  // request can have): a retry must adopt it, not make a second.
+  "carry-ambiguous": [{ "POST /api/v1/proxy/mocks": mockIds("local") },
+                      { "POST /api/v1/proxy/mocks": async (b) => {
+                          const id = `mock_romulus${globalThis.made.length + 1}`;
+                          globalThis.made.push({ rule_id: id, pattern: b.pattern, simulator_udid: b.simulator_udid ?? null,
+                                                 response: { status_code: 200, headers: { "content-type": "application/json" }, ...b.response } });
+                          return globalThis.made.length === 1 ? [500, { detail: "timed out" }] : [200, { rule_id: id }];
+                        },
+                        "GET /api/v1/proxy/mocks": async () => [200, { rules: globalThis.made, total: globalThis.made.length }],
+                        "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
   hint: [{ "POST /api/v1/sessions/agent-1/reservations": async () => [409, { detail: globalThis.detail }],
            "GET /api/v1/device/list": json(200, { devices: [], tools: {}, active_udid: null }) }, {}],
 };
@@ -83,7 +144,11 @@ const romulus = await fake("romulus", true, { ...base("romulus"), ...romulusRout
 const deimos = await fake("deimos", true, base("deimos"));
 process.env.QUERN_SERVER_URL = `http://127.0.0.1:${local.port}`;
 writeFileSync(join(home, ".quern", "remotes.json"), JSON.stringify({ remotes: {
-  romulus: { url: `https://127.0.0.1:${romulus.port}`, key: "rk", fingerprint: FP },
+  romulus: { url: `https://127.0.0.1:${romulus.port}`,
+             // A client key, as a paired remote's is -- except where the scenario
+             // sets a mock on a device it does not hold, which only the owner may.
+             key: scenario.startsWith("carry") && scenario !== "carry-race" ? "qc_rk" : "rk",
+             fingerprint: FP },
   deimos: { url: `https://127.0.0.1:${deimos.port}`, key: "dk", fingerprint: FP },
 } }));
 
@@ -91,6 +156,8 @@ const DIST = new URL("../dist/", import.meta.url).href;
 const sys = await import(`${DIST}tools/system.js`);
 const ses = await import(`${DIST}tools/sessions.js`);
 const dev = await import(`${DIST}tools/device.js`);
+const icp = await import(`${DIST}tools/intercept.js`);
+const prx = await import(`${DIST}tools/proxy.js`);
 const held = await import(`${DIST}held-session.js`);
 const cfg = await import(`${DIST}config.js`);
 const httpm = await import(`${DIST}http.js`);
@@ -99,6 +166,8 @@ const stub = { registerTool: (n, _d, h) => { tools[n] = h; } };
 sys.registerSystemTools(stub);
 ses.registerSessionTools(stub);
 dev.registerDeviceTools(stub);
+icp.registerInterceptTools(stub);
+prx.registerProxyTools(stub);
 const text = (r) => ({ error: !!r.isError, text: r.content[0].text });
 const current = () => cfg.currentRemote() ?? "local";
 const result = {};
@@ -144,6 +213,116 @@ if (scenario === "window") {
   // local's open answers at ~900ms; romulus drops the socket at ~1200ms and
   // the client reconnects with whatever token it then has.
   await sleep(2500);
+} else if (scenario === "carry") {
+  sys.whenSwitched(async () => ({ kind: "session_loaded", app: "com.example" }));
+  await tools.set_mock({ pattern: "~u /a", simulator_udid: "SIM-L", status_code: 200, body: "A" });
+  await tools.set_mock({ pattern: "~u /b", status_code: 500, body: "B" });
+  await tools.set_mock({ pattern: "~u /c", status_code: 200, body: "C" });
+  await tools.update_mock({ rule_id: "mock_local1", body: "A2" });
+  await tools.add_session_capture({ simulator_udid: "SIM-L", processes: ["Metatext"] });
+  result.switched = JSON.parse(text(await tools.use_remote({ name: "romulus" })).text);
+  globalThis.reserved = [{ udid: "PHONE-R", device_type: "device" }];
+  result.noSimulator = JSON.parse(text(await tools.reserve_devices({ udids: ["PHONE-R"] })).text);
+  globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }, { udid: "SIM-R2", device_type: "simulator" }];
+  result.reserved = JSON.parse(text(await tools.reserve_devices({ count: 2 })).text);
+  globalThis.reserved = [{ udid: "SIM-R3", device_type: "simulator" }];
+  result.again = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R3"] })).text);
+} else if (scenario === "carry-retry") {
+  await tools.set_mock({ pattern: "~u /a", status_code: 200, body: "A" });
+  result.switched = JSON.parse(text(await tools.use_remote({ name: "romulus" })).text);
+  globalThis.mocksDown = true;
+  globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }];
+  result.down = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1"] })).text);
+  globalThis.mocksDown = false;
+  result.up = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1"] })).text);
+  // Moved on again, the mock waits once more; clearing then drops it too.
+  result.toDeimos = JSON.parse(text(await tools.use_remote({ name: "deimos", release: true })).text);
+  await tools.clear_mocks({});
+  result.afterClear = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-D1"] })).text);
+} else if (scenario === "carry-hops") {
+  // A: set 503+header, then update only the body: the server resets the rest.
+  await tools.set_mock({ pattern: "~u /a", simulator_udid: "SIM-L", status_code: 503,
+                         headers: { "retry-after": "5" }, body: "A" });
+  await tools.update_mock({ rule_id: "mock_local1", body: "B" });
+  // B: one the server says is already gone: clearing it forgets it.
+  await tools.set_mock({ pattern: "~u /gone", simulator_udid: "SIM-L", status_code: 200, body: "G" });
+  result.clearGone = text(await tools.clear_mocks({ rule_id: "mock_local2" }));
+  await tools.use_remote({ name: "romulus" });
+  // Two reservations at once, each of two simulators: each simulator gets the
+  // mock once, not once per reservation.
+  globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }, { udid: "SIM-R2", device_type: "simulator" }];
+  const [one, two] = await Promise.all([tools.reserve_devices({ count: 2 }), tools.reserve_devices({ count: 2 })]);
+  result.parallel = [JSON.parse(text(one).text).carried, JSON.parse(text(two).text).carried];
+  // A second hop: one entry moves, not one per copy.
+  result.toDeimos = JSON.parse(text(await tools.use_remote({ name: "deimos", release: true })).text);
+  result.romulusPosts = romulus.bodies.filter((b) => b.path === "POST /api/v1/proxy/mocks").length;
+}
+
+if (scenario === "carry-ambiguous") {
+  globalThis.made = [];
+  await tools.set_mock({ pattern: "~u /amb", simulator_udid: "SIM-L", status_code: 200, body: "A" });
+  await tools.use_remote({ name: "romulus" });
+  globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }];
+  result.first = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1"] })).text).carried;
+  result.second = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1"] })).text).carried;
+  result.made = globalThis.made.length;
+} else if (scenario === "carry-race") {
+  await tools.set_mock({ pattern: "~u /old", simulator_udid: "SIM-L", status_code: 200, body: "O" });
+  await tools.add_session_capture({ simulator_udid: "SIM-L", processes: ["Metatext"] });
+  await tools.add_session_capture({ simulator_udid: "SIM-L2", processes: ["Ivory", "Mona"] });
+  await tools.add_session_capture({ simulator_udid: "SIM-L3", processes: ["Tusker"] });
+  const switching = tools.use_remote({ name: "romulus" });
+  await sleep(500);                       // switched, still deleting on local
+  const late = tools.set_mock({ pattern: "~u /new", simulator_udid: "SIM-R9", status_code: 200, body: "N" });
+  result.switched = JSON.parse(text(await switching).text);
+  result.late = JSON.parse(text(await late).text);
+  // Removed while waiting, by the simulator it was asked for on, or by some
+  // of its processes there: not set up again (CodeRabbit).
+  await tools.remove_session_capture({ simulator_udid: "SIM-L" });
+  await tools.remove_session_capture({ simulator_udid: "SIM-L2", processes: ["Ivory"] });
+  globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }];
+  result.reserved = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1"] })).text);
+  // An empty list removes all, as on the server: none moves at the next switch.
+  await tools.remove_session_capture({ processes: [] });
+  result.back = JSON.parse(text(await tools.use_remote({ name: "local", release: true })).text);
+} else if (scenario === "carry-dead-old") {
+  for (const p of ["/a", "/b", "/c"]) {
+    await tools.set_mock({ pattern: `~u ${p}`, simulator_udid: "SIM-L", status_code: 200, body: p });
+  }
+  const t0 = Date.now();
+  result.switched = JSON.parse(text(await tools.use_remote({ name: "romulus" })).text);
+  result.seconds = (Date.now() - t0) / 1000;
+} else if (scenario === "carry-partial") {
+  await tools.set_mock({ pattern: "~u /p", simulator_udid: "SIM-L", status_code: 200, body: "P" });
+  await tools.add_session_capture({ simulator_udid: "SIM-L", processes: ["Metatext"] });
+  await tools.use_remote({ name: "romulus" });
+  // Named simulators each time: a count asks the real server for others.
+  globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }, { udid: "SIM-R2", device_type: "simulator" }];
+  globalThis.failR2 = true;
+  result.first = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1", "SIM-R2"] })).text).carried;
+  // Capture stood on SIM-R1 and is waiting for SIM-R2; the agent removes it
+  // from SIM-R1, then reserves SIM-R1 alone: nothing is put back there, and
+  // what failed on SIM-R2 still waits (CodeRabbit).
+  await tools.remove_session_capture({ simulator_udid: "SIM-R1" });
+  // And clears the mock's rule on SIM-R1: not put back there either.
+  await tools.clear_mocks({ rule_id: result.first.mocks_recreated[0].rule_id });
+  globalThis.failR2 = false;
+  globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }];
+  result.aloneR1 = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1"] })).text).carried;
+  globalThis.reserved = [{ udid: "SIM-R2", device_type: "simulator" }];
+  result.second = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R2"] })).text).carried;
+  result.capturePosts = romulus.bodies.filter((b) => b.path === "POST /api/v1/proxy/session-capture")
+    .map((b) => b.body.simulator_udid);
+  result.posts = romulus.bodies.filter((b) => b.path === "POST /api/v1/proxy/mocks").map((b) => b.body.simulator_udid);
+} else if (scenario === "carry-hops") {
+  // A client key's release ends its scoped mocks on the server: not carried.
+  await tools.use_remote({ name: "romulus" });
+  globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }];
+  await tools.reserve_devices({ udids: ["SIM-R1"] });
+  globalThis.freed = ["SIM-R1"];
+  await tools.release_devices({});
+  result.afterRelease = JSON.parse(text(await tools.use_remote({ name: "local" })).text);
+  result.mockBodies = romulus.bodies.filter((b) => b.path === "POST /api/v1/proxy/mocks").map((b) => b.body);
 } else if (scenario === "hint") {
   writeFileSync(join(home, "quern"), `#!/bin/sh\ncat <<'J'\n${JSON.stringify({ remotes: [
     { name: "local", devices: [] },
@@ -167,6 +346,7 @@ if (scenario === "window") {
 result.current = current();
 result.heldState = held.heldSessionState().state;
 result.logs = { local: local.log, romulus: romulus.log, deimos: deimos.log };
+result.bodies = { local: local.bodies, romulus: romulus.bodies };
 console.log(JSON.stringify(result));
 held.stopHeldSession();
 setTimeout(() => process.exit(0), 100);

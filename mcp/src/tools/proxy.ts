@@ -2,6 +2,9 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { discoverServer } from "../config.js";
 import { apiRequest } from "../http.js";
+import { forgetCapture, recordCapture } from "../carried.js";
+// As mocks: never in the middle of a switch (CodeRabbit).
+import { betweenSwitches } from "./system.js";
 import { strictParams, errorText } from "./helpers.js";
 
 export function registerProxyTools(server: McpServer): void {
@@ -1207,17 +1210,19 @@ first when the server's auto_install_cert is on.`,
         .optional()
         .describe("Capture a simulator that does not trust the CA anyway; its HTTPS is passed through, not decrypted."),
     }),
-  }, async ({ simulator_udid, processes, only, allow_passthrough }) => {
+  }, ({ simulator_udid, processes, only, allow_passthrough }) => betweenSwitches(async () => {
     try {
       const body: Record<string, unknown> = { simulator_udid, processes };
       if (only) body.only = true;
       if (allow_passthrough) body.allow_passthrough = true;
       const data = await apiRequest("POST", "/api/v1/proxy/session-capture", undefined, body);
+      recordCapture(simulator_udid, { processes, ...(only ? { only } : {}),
+                                      ...(allow_passthrough ? { allow_passthrough } : {}) });
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text" as const, text: errorText(e) }], isError: true };
     }
-  });
+  }));
 
   server.registerTool("remove_session_capture", {
     description: `Hand back capture you asked for with add_session_capture: all of it, or
@@ -1227,15 +1232,16 @@ session's capture uses it. Releasing a simulator does this for you.`,
       simulator_udid: z.string().optional().describe("Only this simulator's capture."),
       processes: z.array(z.string()).optional().describe("Only these processes."),
     }),
-  }, async ({ simulator_udid, processes }) => {
+  }, ({ simulator_udid, processes }) => betweenSwitches(async () => {
     try {
       const body: Record<string, unknown> = {};
       if (simulator_udid) body.simulator_udid = simulator_udid;
       if (processes) body.processes = processes;
       const data = await apiRequest("DELETE", "/api/v1/proxy/session-capture", undefined, body);
+      forgetCapture(simulator_udid, processes);
       return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
     } catch (e) {
       return { content: [{ type: "text" as const, text: errorText(e) }], isError: true };
     }
-  });
+  }));
 }

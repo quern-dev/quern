@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **What an agent set up follows it to another server (`use_remote`).**
+  - **Mocks move.** The MCP keeps the mocks its agent set and still has (the server can't tell one owner-key agent's from another's), removes them from the server it leaves, and recreates them once on each simulator of its next reservation on the new one. The reservation's answer lists the new rule ids, what failed, and what's still waiting, for example for a proxy that isn't running.
+  - **Session capture moves with them.** The processes asked for with `add_session_capture` are asked for again on the newly reserved simulators.
+  - **The knowledge base is loaded on the new server**, uploaded for the session on a remote, and reloaded after a restart there, as at start.
+  - **Machine-wide settings stay.** Local capture, the system proxy, intercept and bypass belong to each Mac's owner. `use_remote` reports whether the new server's proxy runs instead.
 - **See what your paired remote quern servers could lend before choosing where to work.**
   - **`quern remote list`** used to print only what `quern connect` recorded. It now asks each remote, with its own key and pinned certificate: whether it answers, or why not (unreachable, timed out, certificate changed, key refused); its version, and whether it differs from this Mac's; and its devices, free, yours or held.
   - **Bounded.** Remotes are asked in parallel, 4 s per request and 10 s per remote. A remote that couldn't be asked is never shown as having no devices, and the command exits 1 when any couldn't be asked.

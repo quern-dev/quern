@@ -1,6 +1,10 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { apiRequest } from "../http.js";
+import { forgetAllMocks, forgetMock, recordMock, updateMock } from "../carried.js";
+// Mock changes wait for a switch under way: one made on the new server while
+// the switch was still moving the old one's was moved as well (CodeRabbit).
+import { betweenSwitches } from "./system.js";
 import { strictParams, errorText } from "./helpers.js";
 
 export function registerInterceptTools(server: McpServer): void {
@@ -249,7 +253,7 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
           .describe("Response body string"),
       }),
     },
-    async ({ pattern, simulator_udid, status_code, headers, body }) => {
+    ({ pattern, simulator_udid, status_code, headers, body }) => betweenSwitches(async () => {
       try {
         const response: Record<string, unknown> = {
           status_code,
@@ -267,6 +271,11 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
           undefined,
           payload
         );
+        // Kept as set, so a switch can move it (carried.ts).
+        const ruleId = (data as { rule_id?: unknown } | null)?.rule_id;
+        if (typeof ruleId === "string") {
+          recordMock(ruleId, { pattern, response, simulator_udid: simulator_udid ?? null });
+        }
 
         return {
           content: [
@@ -284,7 +293,7 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
           isError: true,
         };
       }
-    }
+    })
   );
 
   server.registerTool(
@@ -349,7 +358,7 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
           ),
       }),
     },
-    async ({ rule_id, pattern, status_code, headers, body, simulator_udid }) => {
+    ({ rule_id, pattern, status_code, headers, body, simulator_udid }) => betweenSwitches(async () => {
       try {
         const payload: Record<string, unknown> = {};
         if (pattern !== undefined) {
@@ -377,6 +386,7 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
           undefined,
           payload
         );
+        updateMock(rule_id, payload as Parameters<typeof updateMock>[1]);
 
         return {
           content: [
@@ -394,7 +404,7 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
           isError: true,
         };
       }
-    }
+    })
   );
 
   server.registerTool(
@@ -408,16 +418,25 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
           .describe("Specific mock rule ID to remove. Omit to clear all."),
       }),
     },
-    async ({ rule_id }) => {
+    ({ rule_id }) => betweenSwitches(async () => {
       try {
         let data;
         if (rule_id) {
-          data = await apiRequest(
-            "DELETE",
-            `/api/v1/proxy/mocks/${encodeURIComponent(rule_id)}`
-          );
+          try {
+            data = await apiRequest(
+              "DELETE",
+              `/api/v1/proxy/mocks/${encodeURIComponent(rule_id)}`
+            );
+          } catch (e) {
+            // Not there is not to be carried either: kept, it came back at
+            // the next switch (review). The 404 still reaches the caller.
+            if (e instanceof Error && e.message.startsWith("HTTP 404")) forgetMock(rule_id);
+            throw e;
+          }
+          forgetMock(rule_id);
         } else {
           data = await apiRequest("DELETE", "/api/v1/proxy/mocks");
+          forgetAllMocks();
         }
 
         return {
@@ -436,6 +455,6 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
           isError: true,
         };
       }
-    }
+    })
   );
 }

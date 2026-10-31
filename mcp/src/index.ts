@@ -39,7 +39,7 @@ import {
   type KnowledgeOutcome,
 } from "./project-knowledge.js";
 import { registerLandmarkTools } from "./tools/landmarks.js";
-import { registerSystemTools } from "./tools/system.js";
+import { registerSystemTools, whenSwitched } from "./tools/system.js";
 import { registerRecordingTools } from "./tools/recordings.js";
 import { discoverServer } from "./config.js";
 
@@ -320,6 +320,27 @@ async function main(): Promise<void> {
       });
     }
     knowledge = knowledgeInstructions(PROJECT_KNOWLEDGE, outcome);
+  }
+
+  // After a use_remote switch: the same load against the new server, and the
+  // same reload hook, which the switch cleared (held-session.ts).
+  if (PROJECT_KNOWLEDGE) {
+    const pk = PROJECT_KNOWLEDGE;
+    whenSwitched(async () => {
+      const unusable = await knowledgeSkip();
+      const outcome: KnowledgeOutcome = unusable
+        ? await uploadKnowledgeForSession(pk, true, async () => true,
+          (dir, app) => uploadKnowledge(discoverServer(), dir, app), apiRequest)
+        : await autoloadKnowledge(pk, apiRequest, true);
+      if (outcome.kind === "session_loaded") {
+        whenReopened(async () => {
+          await reloadForNewSession(
+            pk, (dir, app) => uploadKnowledge(discoverServer(), dir, app), apiRequest,
+            (text) => sessionNotices.push(text));
+        });
+      }
+      return outcome;
+    });
   }
 
   const server = buildServer([...BASE_INSTRUCTIONS, ...knowledge].join("\n"));
