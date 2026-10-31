@@ -483,6 +483,40 @@ async def _end_client_work(app: FastAPI, registry: SessionRegistry,
             except Exception as e:  # noqa: BLE001 -- reported, never raised
                 actions.append({"udid": udid, "action": "session_capture_released",
                                 "ok": False, "error": str(e)})
+    # Capture this session asked for on a device its key does not hold: the
+    # owner may ask without holding, and a claim lasts for the key's hold, so
+    # with none it lasted until someone later held and released that device --
+    # past this session, and past a use_remote switch away from this server.
+    # It ends with the session that last asked for it -- that opening of it --
+    # chosen and released under the claims' own lock (CodeRabbit).
+    session_proxies = getattr(app.state, "session_proxies", None)
+    if ended and session_proxies is not None:
+        from server.device_access import _canonical
+
+        handled = {_canonical(u) for u in session.reservations}
+
+        def keep(udid: str) -> bool:
+            if _canonical(udid) in handled:
+                return True                # ended above, with the hold
+            held = registry.holder_of(_canonical(udid))
+            return held is not None and held.session.principal == session.principal
+
+        try:
+            for udid, stopped in await session_proxies.release_ended_session(
+                    principal=session.principal, session=session.id,
+                    opened=getattr(session, "opened_at", None), keep=keep):
+                actions.append({"udid": udid, "action": "session_capture_released",
+                                "ok": True, "stopped": stopped})
+        except Exception as e:  # noqa: BLE001 -- reported, never raised
+            # Per device, as every clean-up failure is: the release loop reads
+            # each failure's udid (CodeRabbit: one without it raised there).
+            # Not retried -- the retry re-queues reservations, and these
+            # devices were not held -- but said, so it is not read as done.
+            opening = getattr(session, "opened_at", None)
+            for claim in session_proxies.claims(session.principal):
+                if claim.session == session.id and claim.opened == opening:
+                    actions.append({"udid": claim.udid, "action": "session_capture_released",
+                                    "ok": False, "error": str(e)})
     return actions
 
 
@@ -519,7 +553,9 @@ async def run_release_policies(app) -> list[dict]:
                 if restored is not None:
                     keyboards.append(restored)
         finally:
-            failed = {a["udid"] for a in ended if not a.get("ok")}
+            # Tolerant of an action with no udid: this block must not raise, or
+            # the drain and the retry below are skipped (CodeRabbit).
+            failed = {a.get("udid") for a in ended if not a.get("ok")} - {None}
             # A device whose clean-up failed stays unavailable, and is tried
             # again at the next sweep: freed, another key could reserve it
             # while the previous client's rule still answered its traffic or

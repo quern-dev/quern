@@ -951,3 +951,200 @@ async def test_the_endpoint_answers_409_for_a_hold_ended_mid_start(tmp_path, as_
     with pytest.raises(HTTPException) as e:
         await _post(leader, m, processes=["Metatext"], only=True)
     assert e.value.status_code == 409 and m.claims() == []
+
+
+# ---------------------------------------------------------------------------
+# Capture on a device the key does not hold ends with the session that asked
+# ---------------------------------------------------------------------------
+
+
+def _ending(m, *, session_id="ci", reservations=(), holder=None, live=None):
+    from server.session_registry import OWNER
+
+    app = SimpleNamespace(state=SimpleNamespace(
+        session_proxies=m, proxy_adapter=None, recordings=None, mock_owners={}))
+    registry = SimpleNamespace(holder_of=lambda udid: holder, get=lambda sid: live)
+    session = SimpleNamespace(id=session_id, principal=OWNER, reservations=list(reservations),
+                              opened_at=1.0)
+    return app, registry, session
+
+
+async def test_owner_capture_on_an_unheld_simulator_ends_with_its_session(tmp_path):
+    # The owner may add capture without reserving; with no hold to last for,
+    # it outlived the session (and a use_remote switch away) until someone
+    # held and released the device.
+    from server.api import sessions as sessions_api
+    from server.session_registry import OWNER
+
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    await m.claim(session="ci", principal=OWNER, udid=ALPHA, names=["Metatext"], opened=1.0)
+    app, registry, session = _ending(m)
+
+    actions = await sessions_api._end_client_work(app, registry, session)
+
+    assert {"udid": ALPHA, "action": "session_capture_released", "ok": True,
+            "stopped": ["Metatext"]} in actions
+    assert m.claims() == [] and not m.made[0].is_running
+
+
+async def test_capture_another_session_last_asked_for_is_left(tmp_path):
+    from server.api import sessions as sessions_api
+    from server.session_registry import OWNER
+
+    m = _manager(_leader(), tmp_path)
+    await m.claim(session="other", principal=OWNER, udid=ALPHA, names=["Metatext"], opened=1.0)
+    app, registry, session = _ending(m)
+    assert await sessions_api._end_client_work(app, registry, session) == []
+    assert [c.names for c in m.claims()] == [["Metatext"]]
+
+
+async def test_capture_on_a_device_the_key_holds_lasts_for_that_hold(tmp_path):
+    from server.api import sessions as sessions_api
+    from server.session_registry import OWNER
+
+    m = _manager(_leader(), tmp_path)
+    await m.claim(session="ci", principal=OWNER, udid=ALPHA, names=["Metatext"], opened=1.0)
+    still = SimpleNamespace(session=SimpleNamespace(principal=OWNER))
+    app, registry, session = _ending(m, holder=still)
+    await sessions_api._end_client_work(app, registry, session)
+    assert [c.names for c in m.claims()] == [["Metatext"]]
+
+
+async def test_a_partial_release_does_not_end_the_sessions_other_capture(tmp_path):
+    # release_devices for one device runs this for a session that goes on.
+    from server.api import sessions as sessions_api
+    from server.session_registry import OWNER
+
+    m = _manager(_leader(), tmp_path)
+    await m.claim(session="ci", principal=OWNER, udid=ALPHA, names=["Metatext"], opened=1.0)
+    live = SimpleNamespace(opened_at=1.0)
+    app, registry, session = _ending(m, live=live)
+    await sessions_api._end_client_work(app, registry, session)
+    assert [c.names for c in m.claims()] == [["Metatext"]]
+
+
+async def test_a_later_session_under_the_same_id_keeps_its_capture(tmp_path):
+    # The old opening's clean-up, drained after the id was opened again, must
+    # not take the new opening's capture (CodeRabbit).
+    from server.api import sessions as sessions_api
+    from server.session_registry import OWNER
+
+    m = _manager(_leader(), tmp_path)
+    await m.claim(session="ci", principal=OWNER, udid=ALPHA, names=["Metatext"], opened=2.0)
+    app, registry, session = _ending(m)          # the opening at 1.0 ending
+    assert await sessions_api._end_client_work(app, registry, session) == []
+    assert [c.names for c in m.claims()] == [["Metatext"]]
+
+
+async def test_a_claim_and_a_hold_spelled_differently_are_one_device(tmp_path):
+    # Reservations hold canonical (upper-case) ids; a claim made with a lower-
+    # case one must still read as held, and is stored canonical (CodeRabbit).
+    from server.api import sessions as sessions_api
+    from server.session_registry import OWNER
+
+    m = _manager(_leader(), tmp_path)
+    await m.claim(session="ci", principal=OWNER, udid=ALPHA.lower(), names=["Metatext"], opened=1.0)
+    seen = []
+    still = SimpleNamespace(session=SimpleNamespace(principal=OWNER))
+    app, registry, session = _ending(m)
+    registry.holder_of = lambda udid: (seen.append(udid), still if udid == ALPHA else None)[1]
+    await sessions_api._end_client_work(app, registry, session)
+    assert [c.names for c in m.claims()] == [["Metatext"]], "held under its canonical id"
+    assert seen == [ALPHA]
+
+
+async def test_a_claim_is_not_committed_after_its_session_ended(tmp_path, as_client):
+    # The owner may claim a device it does not hold, so the hold check passes
+    # at commit; the session ending while the proxy started must still stop it
+    # (CodeRabbit) -- else its clean-up has already run and the claim stays.
+    as_client.is_owner = True
+    live = SimpleNamespace(opened_at=1.0)
+    answers = iter([live, None])               # open when asked, ended at commit
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    req = _request(leader, m)
+    req.app.state.sessions = SimpleNamespace(get=lambda sid: next(answers))
+    with pytest.raises(HTTPException) as e:
+        await api.add_session_capture.__wrapped__(
+            req, SessionCaptureRequest(simulator_udid=ALPHA, processes=["Metatext"], only=True))
+    assert e.value.status_code == 409 and m.claims() == []
+    assert not m.made[0].is_running, "the proxy it started is stopped again"
+
+
+async def test_a_claim_is_stored_under_the_canonical_id(tmp_path, as_client):
+    as_client.is_owner = True
+    live = SimpleNamespace(opened_at=1.0)
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    req = _request(leader, m)
+    req.app.state.sessions = SimpleNamespace(get=lambda sid: live)
+    await api.add_session_capture.__wrapped__(
+        req, SessionCaptureRequest(simulator_udid=ALPHA.lower(), processes=["Metatext"], only=True))
+    assert [(c.udid, c.opened) for c in m.claims()] == [(ALPHA, 1.0)]
+
+
+async def test_a_ca_refusal_hands_back_a_claim_made_with_a_lowercase_id(tmp_path, as_client,
+                                                                        monkeypatch):
+    # The claim is stored canonical; the rollback must name it so (CodeRabbit).
+    monkeypatch.setattr(api.sim_tls, "ensure_capturable", AsyncMock(
+        side_effect=sim_tls.CaptureNotReady({"message": "no CA"})))
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    with pytest.raises(HTTPException) as e:
+        await api.add_session_capture.__wrapped__(
+            _request(leader, m),
+            SessionCaptureRequest(simulator_udid=ALPHA.lower(), processes=["Metatext"], only=True))
+    assert e.value.status_code == 428
+    assert m.claims() == [] and leader.followers == []
+
+
+async def test_a_session_the_registry_does_not_hold_is_no_session(tmp_path, as_client):
+    # The CLI sends a session id without holding a session: its claim is not
+    # recorded under an id nothing will end (CodeRabbit).
+    as_client.is_owner = True
+    leader = _leader()
+    m = _manager(leader, tmp_path)
+    req = _request(leader, m)
+    req.app.state.sessions = SimpleNamespace(get=lambda sid: None)
+    await api.add_session_capture.__wrapped__(
+        req, SessionCaptureRequest(simulator_udid=ALPHA, processes=["Metatext"], only=True))
+    assert [(c.session, c.opened) for c in m.claims()] == [("", None)]
+
+
+async def test_a_failed_capture_clean_up_is_reported_per_device(tmp_path):
+    from server.api import sessions as sessions_api
+    from server.session_registry import OWNER
+
+    m = _manager(_leader(), tmp_path)
+    await m.claim(session="ci", principal=OWNER, udid=ALPHA, names=["Metatext"], opened=1.0)
+    app, registry, session = _ending(m)
+
+    def boom(udid):
+        raise RuntimeError("registry unavailable")
+
+    registry.holder_of = boom
+    actions = await sessions_api._end_client_work(app, registry, session)
+    assert actions == [{"udid": ALPHA, "action": "session_capture_released", "ok": False,
+                        "error": "registry unavailable"}]
+
+
+async def test_the_release_loop_survives_a_failure_with_no_udid(monkeypatch):
+    # Its finally read every failure's udid; one without raised there, and the
+    # drain and retry were skipped (CodeRabbit).
+    from server.api import sessions as sessions_api
+    from server.session_registry import SessionRegistry
+
+    registry = SessionRegistry()
+    s, token = registry.open("ci")
+    registry.attach(s.id, token)
+    registry.reserve("ci", [ALPHA])
+    registry.release("ci")
+
+    async def no_udid(app, reg, session):
+        return [{"action": "something", "ok": False, "error": "x"}]
+
+    monkeypatch.setattr(sessions_api, "_end_client_work", no_udid)
+    app = SimpleNamespace(state=SimpleNamespace(sessions=registry, device_controller=None))
+    await sessions_api.run_release_policies(app)        # does not raise
+    assert registry.holder_of(ALPHA) is None

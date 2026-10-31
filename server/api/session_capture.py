@@ -100,12 +100,32 @@ async def add_session_capture(
         processes, added = with_capture_minimum(processes)
 
     manager = _manager(request)
+    # The asking session, and which opening of it: its claim on a device the
+    # key does not hold ends with it, and must not be committed after it ended
+    # (CodeRabbit). Reservations hold canonical ids; so do claims.
+    udid = device_access._canonical(body.simulator_udid)
+    registry = getattr(request.app.state, "sessions", None)
+    asking = registry.get(caller.session) if registry is not None and caller.session else None
+    opened = asking.opened_at if asking is not None else None
+    # A session id the registry does not hold -- the CLI and scripts send one
+    # without holding a session -- is no session to end with: recorded as
+    # none, as a caller without one is, not under an id nothing will end.
+    claim_session = caller.session if asking is not None else ""
+
+    def still_current() -> bool:
+        if device_access.why_not(body.simulator_udid) is not None:
+            return False                   # the hold ended
+        if asking is None:
+            return True                    # no session to end with
+        now = registry.get(caller.session)
+        return now is not None and now.opened_at == opened
+
     try:
         result = await manager.claim(
-            session=caller.session, principal=caller.principal,
-            udid=body.simulator_udid, names=processes,
+            session=claim_session, principal=caller.principal,
+            udid=udid, names=processes,
             max_proxies=None if caller.is_owner else MAX_PROXIES_PER_CLIENT,
-            still_held=lambda: device_access.why_not(body.simulator_udid) is None)
+            still_held=still_current, opened=opened)
     except SessionCaptureLimit as e:
         raise HTTPException(status_code=429, detail={
             "message": str(e), "limit": MAX_PROXIES_PER_CLIENT,
@@ -130,8 +150,9 @@ async def add_session_capture(
             request.app, body.simulator_udid, allow_passthrough=body.allow_passthrough)
     except sim_tls.CaptureNotReady as e:
         if result["added"]:
+            # The id the claim is stored under (CodeRabbit).
             await manager.release(principal=caller.principal,
-                                  udid=body.simulator_udid, names=result["added"])
+                                  udid=udid, names=result["added"])
         raise HTTPException(status_code=e.status_code, detail=e.detail) from e
 
     warnings = list(check.warnings)
