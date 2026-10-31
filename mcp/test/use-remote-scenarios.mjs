@@ -139,7 +139,13 @@ const plans = {
   "carry-stranded": [{ "POST /api/v1/proxy/mocks": mockIds("local"),
                        "DELETE /api/v1/proxy/mocks/mock_local1": async () => globalThis.back ? [200, {}] : [503, { detail: "busy" }],
                        "DELETE /api/v1/proxy/mocks/mock_local2": async () => globalThis.back ? [404, { detail: "no such rule" }] : [503, { detail: "busy" }],
-                       "DELETE /api/v1/proxy/mocks/mock_local3": json(503, { detail: "busy" }) }, {}],
+                       "DELETE /api/v1/proxy/mocks/mock_local3": async () => globalThis.local3ok ? [200, {}] : [503, { detail: "busy" }],
+                       "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }, {}],
+  // On the way back the first delete hangs: the rest are not tried then.
+  "carry-stranded-stall": [{ "POST /api/v1/proxy/mocks": mockIds("local"),
+                             "DELETE /api/v1/proxy/mocks/mock_local1": async () => globalThis.back ? [200, {}, 6000] : [503, {}],
+                             "DELETE /api/v1/proxy/mocks/mock_local2": json(503, {}),
+                             "DELETE /api/v1/proxy/mocks/mock_local3": json(503, {}) }, {}],
   hint: [{ "POST /api/v1/sessions/agent-1/reservations": async () => [409, { detail: globalThis.detail }],
            "GET /api/v1/device/list": json(200, { devices: [], tools: {}, active_udid: null }) }, {}],
 };
@@ -273,6 +279,21 @@ if (scenario === "carry-stranded") {
   result.back = JSON.parse(text(await tools.use_remote({ name: "local" })).text);
   result.again = JSON.parse(text(await tools.use_remote({ name: "romulus" })).text);
   result.backAgain = JSON.parse(text(await tools.use_remote({ name: "local" })).text);
+  // mock_local3 still stands for mock /3 on SIM-L: reserving SIM-L sets up /1
+  // and /2 there, but not /3 beneath it -- until it can be removed.
+  globalThis.reserved = [{ udid: "SIM-L", device_type: "simulator" }];
+  result.blocked = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-L"] })).text).carried;
+  globalThis.local3ok = true;
+  result.unblocked = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-L"] })).text).carried;
+} else if (scenario === "carry-stranded-stall") {
+  for (const p of ["/1", "/2", "/3"]) {
+    await tools.set_mock({ pattern: `~u ${p}`, simulator_udid: "SIM-L", status_code: 200, body: p });
+  }
+  await tools.use_remote({ name: "romulus" });
+  globalThis.back = true;
+  const t0 = Date.now();
+  result.back = JSON.parse(text(await tools.use_remote({ name: "local" })).text);
+  result.seconds = (Date.now() - t0) / 1000;
 } else if (scenario === "carry-ambiguous") {
   globalThis.made = [];
   await tools.set_mock({ pattern: "~u /amb", simulator_udid: "SIM-L", status_code: 200, body: "A" });

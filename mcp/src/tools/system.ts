@@ -105,7 +105,7 @@ A server that could not be asked says why (not running, timed out, certificate c
 
 One server at a time: devices you hold on the current server must be released first (release_devices), or pass release=true to release them as part of the switch -- also needed when the current server cannot say what you hold. The switch is made only once your session is live on the new server; if it cannot be, you stay where you were.
 
-What you set up follows you: the mocks you set are removed from the old server and, with the session capture you asked for, set up again on the simulators of your next reservation on the new one (that answer's "carried" lists the new rule ids); this project's knowledge base is loaded there. The answer's "proxy" says whether the new server's proxy runs -- mocks and capture need it, and only its owner can start it. Machine-wide proxy settings (local capture, system proxy, intercept, bypass), recordings, logging and device settings stay where they were. The quern CLI in your shell is not switched; it still talks to this Mac's server.`,
+What you set up follows you: the mocks you set are removed from the old server and, with the session capture you asked for, set up again on the simulators of your next reservation on the new one (that answer's "carried" lists the new rule ids); this project's knowledge base is loaded there. Mocks the old server could not remove are listed in "carried.still_on_old"; switching back to that server tries again, and "left_here_earlier" then says which went and which are still_there. The answer's "proxy" says whether the new server's proxy runs -- mocks and capture need it, and only its owner can start it. Machine-wide proxy settings (local capture, system proxy, intercept, bypass), recordings, logging and device settings stay where they were. The quern CLI in your shell is not switched; it still talks to this Mac's server.`,
     inputSchema: strictParams({
       name: z.string().describe(`A server's name from list_remotes, or "local" for this Mac's own`),
       release: z.boolean().optional().describe("Release the devices you hold on the current server as part of the switch (default false: refuse)"),
@@ -241,11 +241,13 @@ async function useRemote({ name, release }: { name: string; release?: boolean })
         "capture(s) moved with you: they are set up on the simulators of your next " +
         "reservation here, and its answer lists their new rule ids." : "") +
       (carried.still_on_old ? ` Could not remove ${carried.still_on_old.join(", ")} from ` +
-        `${from}: they still answer traffic there, and are removed if you switch back.` : "") +
+        `${from}: they still answer traffic there. Switching back there tries again to remove ` +
+        "them (see left_here_earlier then)." : "") +
       (strandedHere?.removed.length ? ` Removed ${strandedHere.removed.join(", ")}, left ` +
         `here by an earlier switch that could not reach ${target}.` : "") +
       (strandedHere?.still_there.length ? ` Could not remove ${strandedHere.still_there.join(", ")}, ` +
-        `left here earlier: they still answer traffic here.` : "") +
+        "left here earlier: they may still answer traffic here, and your mocks they would " +
+        "shadow are not set up again on their simulators until they are gone." : "") +
       (releaseNote ? ` ${releaseNote}` : "") +
       " Recordings, logging, previews and device settings stay with the old server and its devices.",
   });
