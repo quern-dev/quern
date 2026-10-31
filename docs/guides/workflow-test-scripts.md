@@ -49,8 +49,11 @@ HEADERS = {"Authorization": f"Bearer {API_KEY}",
 @pytest.fixture(autouse=True)
 def setup_device():
     """Boot simulator, install app, restore clean state."""
-    # Resolve a simulator
-    r = requests.post(f"{BASE}/devices/resolve", json={"device_type": "simulator"}, headers=HEADERS)
+    # Under `quern session run`, use a device it reserved for this run;
+    # run on its own, resolve any simulator.
+    reserved = os.environ.get("QUERN_DEVICES")
+    criteria = {"udid": reserved.split(",")[0]} if reserved else {"device_type": "simulator"}
+    r = requests.post(f"{BASE}/devices/resolve", json=criteria, headers=HEADERS)
     udid = r.json()["udid"]
 
     # Restore known-good state
