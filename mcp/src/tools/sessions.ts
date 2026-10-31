@@ -25,7 +25,9 @@ export function registerSessionTools(server: McpServer): void {
 
 Give exactly one of: udids; count (optionally with device_type/os_version/name/device_family -- free devices are picked, booted first, booting more if auto_boot); or group (a named set in ~/.quern/config.json's device_groups, optionally with count). All or nothing: if any device is held by someone else, nothing is reserved and the error names the holder. Reserving exactly one device also makes it your active device.
 
-Your reservation lasts as long as this MCP session: released when it ends, and kept for a grace period (default 3 minutes) if the connection to quern drops, so a network blip costs nothing. If quern restarts, reservations are lost and your next tool result will end with a 'quern session notice:' line saying so -- reserve again.`,
+Your reservation lasts as long as this MCP session: released when it ends, and kept for a grace period (default 3 minutes) if the connection to quern drops, so a network blip costs nothing. If quern restarts, reservations are lost and your next tool result will end with a 'quern session notice:' line saying so -- reserve again.
+
+After a use_remote switch, the first reservation that includes simulators also sets up the mocks and session capture you moved: its answer carries "carried" -- mocks_recreated (the new rule ids), session_capture_restored, failed, and still_waiting for what a later reservation will try again.`,
     inputSchema: strictParams({
       udids: z.array(z.string()).optional().describe("Exactly these devices"),
       count: z.number().int().min(1).max(64).optional().describe("How many devices to pick (default 1 with criteria)"),

@@ -107,6 +107,12 @@ const plans = {
                     { "POST /api/v1/proxy/mocks": async (b) => globalThis.failR2 && b?.simulator_udid === "SIM-R2"
                         ? [503, { detail: "busy" }] : mockIds("romulus")(b),
                       "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
+  // The old server is slow to give up its mock: the switch is still moving
+  // it when the agent sets a new one.
+  "carry-race": [{ "POST /api/v1/proxy/mocks": mockIds("local"),
+                   "DELETE /api/v1/proxy/mocks/mock_local1": json(200, {}, 1000) },
+                 { "POST /api/v1/proxy/mocks": mockIds("romulus"),
+                   "POST /api/v1/sessions/agent-1/reservations": async () => [200, { reserved: globalThis.reserved }] }],
   hint: [{ "POST /api/v1/sessions/agent-1/reservations": async () => [409, { detail: globalThis.detail }],
            "GET /api/v1/device/list": json(200, { devices: [], tools: {}, active_udid: null }) }, {}],
 };
@@ -227,7 +233,19 @@ if (scenario === "window") {
   result.romulusPosts = romulus.bodies.filter((b) => b.path === "POST /api/v1/proxy/mocks").length;
 }
 
-if (scenario === "carry-partial") {
+if (scenario === "carry-race") {
+  await tools.set_mock({ pattern: "~u /old", simulator_udid: "SIM-L", status_code: 200, body: "O" });
+  await tools.add_session_capture({ simulator_udid: "SIM-L", processes: ["Metatext"] });
+  const switching = tools.use_remote({ name: "romulus" });
+  await sleep(500);                       // switched, still deleting on local
+  const late = tools.set_mock({ pattern: "~u /new", simulator_udid: "SIM-R9", status_code: 200, body: "N" });
+  result.switched = JSON.parse(text(await switching).text);
+  result.late = JSON.parse(text(await late).text);
+  // Cancelled while waiting: not set up again.
+  await tools.remove_session_capture({});
+  globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }];
+  result.reserved = JSON.parse(text(await tools.reserve_devices({ udids: ["SIM-R1"] })).text);
+} else if (scenario === "carry-partial") {
   await tools.set_mock({ pattern: "~u /p", simulator_udid: "SIM-L", status_code: 200, body: "P" });
   await tools.use_remote({ name: "romulus" });
   globalThis.reserved = [{ udid: "SIM-R1", device_type: "simulator" }, { udid: "SIM-R2", device_type: "simulator" }];

@@ -117,6 +117,10 @@ function sameCapture(a: { processes: string[]; only?: boolean; allow_passthrough
 
 /** remove_session_capture: one simulator's, some processes, or all. */
 export function forgetCapture(simulator?: string, processes?: string[]): void {
+  if (!simulator && !processes) {
+    captures = [];          // all of it: here, and what waits to be set up (CodeRabbit)
+    return;
+  }
   for (const c of captures) {
     if (processes) c.processes = c.processes.filter((p) => !processes.includes(p));
     if (simulator) c.on.delete(simulator); else if (!processes) c.on.clear();

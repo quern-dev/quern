@@ -205,3 +205,16 @@ test("a mock set up on one simulator of two is retried on the other only", async
   assert.equal(r.second.still_waiting, undefined);
   assert.equal(r.posts.filter((u) => u === "SIM-R1").length, 1);
 });
+
+test("a mock set during a switch lands on the new server and is not moved again", async () => {
+  const r = await run("carry-race");
+  assert.equal(r.switched.carried.mocks, 1, "only the mock set before the switch moved");
+  assert.equal(r.late.rule_id, "mock_romulus1", "set on the new server, after the switch");
+  // Only the moved mock is recreated; the late one already stands (review: it
+  // was moved and recreated as well).
+  assert.deepEqual(r.reserved.carried.mocks_recreated.map((m) => m.simulator_udid), ["SIM-R1"]);
+  assert.equal(r.reserved.carried.mocks_recreated[0].pattern, "~u /old");
+  assert.equal(r.reserved.carried.session_capture_restored, undefined,
+               "remove_session_capture() cancelled the capture that was waiting");
+  assert.ok(!r.logs.romulus.includes("POST /api/v1/proxy/session-capture"));
+});

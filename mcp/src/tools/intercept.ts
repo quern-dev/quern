@@ -2,6 +2,9 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { apiRequest } from "../http.js";
 import { forgetAllMocks, forgetMock, recordMock, updateMock } from "../carried.js";
+// Mock changes wait for a switch under way: one made on the new server while
+// the switch was still moving the old one's was moved as well (CodeRabbit).
+import { betweenSwitches } from "./system.js";
 import { strictParams, errorText } from "./helpers.js";
 
 export function registerInterceptTools(server: McpServer): void {
@@ -250,7 +253,7 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
           .describe("Response body string"),
       }),
     },
-    async ({ pattern, simulator_udid, status_code, headers, body }) => {
+    ({ pattern, simulator_udid, status_code, headers, body }) => betweenSwitches(async () => {
       try {
         const response: Record<string, unknown> = {
           status_code,
@@ -290,7 +293,7 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
           isError: true,
         };
       }
-    }
+    })
   );
 
   server.registerTool(
@@ -355,7 +358,7 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
           ),
       }),
     },
-    async ({ rule_id, pattern, status_code, headers, body, simulator_udid }) => {
+    ({ rule_id, pattern, status_code, headers, body, simulator_udid }) => betweenSwitches(async () => {
       try {
         const payload: Record<string, unknown> = {};
         if (pattern !== undefined) {
@@ -401,7 +404,7 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
           isError: true,
         };
       }
-    }
+    })
   );
 
   server.registerTool(
@@ -415,7 +418,7 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
           .describe("Specific mock rule ID to remove. Omit to clear all."),
       }),
     },
-    async ({ rule_id }) => {
+    ({ rule_id }) => betweenSwitches(async () => {
       try {
         let data;
         if (rule_id) {
@@ -452,6 +455,6 @@ A mocked request is recorded once, like any other flow, with mock_rule_id set an
           isError: true,
         };
       }
-    }
+    })
   );
 }
