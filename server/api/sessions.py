@@ -253,8 +253,13 @@ async def reserve(request: Request, session_id: str, body: ReserveRequest) -> di
     started: list[str] = []
     try:
         for udid in to_boot:
-            await pool._boot_and_wait(udid)
-            started.append(udid)
+            booted_as = await pool._boot_and_wait(udid) or udid
+            started.append(booted_as)
+            # An AVD comes up under its adb serial: the hold moves with it, or
+            # it would cover an id the pool no longer lists (#582).
+            if booted_as != udid:
+                registry.rekey(session_id, udid, booted_as)
+                added = [booted_as if u == udid else u for u in added]
     except Exception as e:  # noqa: BLE001 -- any failed boot withdraws the claim
         # Only what this request added: devices the session held before stay
         # held, and no other session's queued release policy is touched.
@@ -371,8 +376,12 @@ async def _choose(request: Request, registry: SessionRegistry, session_id: str,
     # `count` is how many *more* devices: not ones another session holds, and
     # not ones this session already holds (CodeRabbit: they ranked first, so
     # count=2 with one held gave one new device).
+    # A running emulator whose AVD a session is booting counts as held: it
+    # appears under its serial before that session's hold moves to it (#582).
+    def taken(d: Any, ids: set[str]) -> bool:
+        return d.udid in ids or f"avd:{getattr(d, 'name', '')}" in ids
     devices = sorted((d for d in devices
-                      if d.udid not in held and d.udid not in mine and d.is_available),
+                      if not taken(d, held) and not taken(d, mine) and d.is_available),
                      key=pool._rank_candidate)
     booted = [d for d in devices if d.state == DeviceState.BOOTED]
     shutdown = [d for d in devices if d.state == DeviceState.SHUTDOWN]

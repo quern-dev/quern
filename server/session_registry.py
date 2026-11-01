@@ -299,6 +299,21 @@ class SessionRegistry:
                 udid, Reservation(udid=udid, on_release=on_release, booted_here=udid in booted))
         return [session.reservations[u] for u in udids]
 
+    def rekey(self, session_id: str, old: str, new: str) -> None:
+        """Move a reservation to the id its device came up as: an AVD reserved
+        as ``avd:<name>`` is ``emulator-5554`` once booted, and a hold on the
+        old id would cover nothing (#582). Refused, changing nothing, if
+        another session holds the new id."""
+        session = self._get(session_id)
+        if old == new or old not in session.reservations:
+            return
+        held = self.holder_of(new)
+        if held is not None and held.session.id != session_id:
+            raise SessionConflict(f"{new} is held by {held.session.id}")
+        reservation = session.reservations.pop(old)
+        reservation.udid = new
+        session.reservations[new] = reservation
+
     def withdraw(self, session_id: str, udids: Iterable[str]) -> None:
         """Take back reservations this request just made, as if never made:
         no release policies queued, nothing else touched. For a reservation

@@ -1109,3 +1109,60 @@ class TestSecondReviewRoutes:
             source = inspect.getsource(mod)
             assert "device_access.refusals_are_per_item()" in source, mod.__name__
             assert "device_access.why_not(" in source, mod.__name__
+
+
+class TestReservingAShutDownAvd:
+    """#582: a shut-down AVD, listed as avd:<name>, comes up as its adb serial.
+    Waiting for the avd: id never succeeded, so every reservation of one
+    failed after the boot and left the emulator running unreserved."""
+
+    @pytest.fixture
+    def pool(self, client):
+        from types import SimpleNamespace
+
+        from server.models import DeviceState
+
+        class AvdPool(FakePool):
+            async def _boot_and_wait(self, udid):
+                self.booted.append(udid)
+                serial = "emulator-5554"
+                self.devices.pop(udid, None)          # the avd: row is hidden once running
+                self.devices[serial] = SimpleNamespace(
+                    udid=serial, state=DeviceState.BOOTED, is_available=True,
+                    name="Pixel_8_API35")
+                return serial
+
+        pool = AvdPool({})
+        pool.devices["avd:Pixel_8_API35"] = SimpleNamespace(
+            udid="avd:Pixel_8_API35", state=DeviceState.SHUTDOWN, is_available=True,
+            name="Pixel_8_API35")
+        client.app.state.device_controller._pool = pool
+        return pool
+
+    def test_the_hold_moves_to_the_serial_it_booted_as(self, client, pool, registry):
+        a = Held(client, "claude-a")
+        r = _reserve(client, "claude-a", count=1)
+        assert r.status_code == 200, r.text
+        assert [x["udid"] for x in r.json()["reserved"]] == ["emulator-5554"]
+        assert r.json()["reserved"][0]["booted_here"] is True
+        assert registry.holder_of("emulator-5554").session.id == "claude-a"
+        assert registry.holder_of("avd:Pixel_8_API35") is None
+        a.close()
+
+    def test_a_running_emulator_whose_avd_is_held_is_not_picked(self, client, pool, registry):
+        # Another session is booting the AVD: its emulator appears under the
+        # serial before the hold moves; a count reservation must not take it.
+        from types import SimpleNamespace
+
+        from server.models import DeviceState
+
+        b = Held(client, "claude-b")
+        registry.reserve("claude-b", ["avd:Pixel_8_API35"])
+        pool.devices["emulator-5554"] = SimpleNamespace(
+            udid="emulator-5554", state=DeviceState.BOOTED, is_available=True,
+            name="Pixel_8_API35")
+        a = Held(client, "claude-a")
+        r = _reserve(client, "claude-a", count=1)
+        assert r.status_code == 409, r.text
+        a.close()
+        b.close()

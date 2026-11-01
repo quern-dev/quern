@@ -224,3 +224,25 @@ class TestReservations:
         reg.detach(a.id, a.generation, clean=False)
         clock.t += 181
         assert reg.reserve(b.id, ["SIM-1"])[0].udid == "SIM-1"
+
+
+def test_rekey_moves_a_reservation_to_the_id_its_device_booted_as():
+    # #582: an AVD reserved as avd:<name> is emulator-5554 once booted.
+    from server.session_registry import SessionConflict, SessionRegistry
+
+    reg = SessionRegistry()
+    a, ta = reg.open("a")
+    reg.attach(a.id, ta)
+    reg.reserve("a", ["avd:Pixel"], booted=["avd:Pixel"], on_release="shutdown_booted")
+    reg.rekey("a", "avd:Pixel", "emulator-5554")
+    held = reg.holder_of("emulator-5554")
+    assert held.session.id == "a" and reg.holder_of("avd:Pixel") is None
+    r = a.reservations["emulator-5554"]
+    assert (r.udid, r.booted_here, r.on_release) == ("emulator-5554", True, "shutdown_booted")
+
+    b, tb = reg.open("b")
+    reg.attach(b.id, tb)
+    reg.reserve("b", ["avd:Other"])
+    with pytest.raises(SessionConflict):
+        reg.rekey("b", "avd:Other", "emulator-5554")
+    assert "avd:Other" in b.reservations, "a refused rekey changes nothing"
