@@ -319,6 +319,20 @@ class TestTheSaveIsLeftAlone:
         assert not (profile.dir / "signals").exists()
         assert profile.stop_reason == "stopped"              # the first reason given
 
+    async def test_a_stopped_profile_reads_as_finalizing_at_once(self, state, monkeypatch):
+        """On an iPhone "Stopping recording..." came seconds before "Saving
+        output file"; in between it read as recording (measured)."""
+        monkeypatch.setenv("FAKE_XCTRACE_SAVE_S", "1.0")
+        m = _manager()
+        profile, _ = await _start(m, limit=300)
+        await m.request_stop(profile.id)
+        for _ in range(100):
+            if "Stopping recording" in profile.log_text():
+                break
+            await asyncio.sleep(0.02)
+        assert profile.view()["state"] == "finalizing"
+        await _finished(profile)
+
     async def test_request_stop_does_not_wait_for_the_summary(self, state, monkeypatch):
         monkeypatch.setenv("FAKE_XCTRACE_SAVE_S", "2.0")
         m = _manager()

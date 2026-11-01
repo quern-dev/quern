@@ -33,8 +33,10 @@ FAILURE_MARKERS = (
 
 #: xctrace has stopped recording and is writing the trace, then has written
 #: it. The bundle exists from the start of recording, so only this line says
-#: a trace is whole. Measured on Xcode 27.2, after a time limit and a ^C.
-SAVING_MARKERS = ("Reached specified time limit", "Saving output file")
+#: a trace is whole. Measured on Xcode 27.2: a time limit prints "Reached
+#: specified time limit", a ^C "Stopping recording..." -- seconds before
+#: "Saving output file" on an iPhone.
+SAVING_MARKERS = ("Reached specified time limit", "Stopping recording", "Saving output file")
 SAVED_MARKER = "Output file saved as"
 
 #: How a launch path tells an app's own code from the system's: an app's

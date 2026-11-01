@@ -62,7 +62,9 @@ def record():
         time.sleep(0.01)
         if "crash" in MODE and time.monotonic() - started > min(limit / 2, 0.1):
             os._exit(1)
-    if not stopped:
+    if stopped:
+        print("Stopping recording...", flush=True)
+    else:
         print("Reached specified time limit, ending recording...", flush=True)
     signals = out.parent / "signals"
     signal.signal(signal.SIGINT, lambda *_: signals.open("a").write("SIGINT while saving\n"))
