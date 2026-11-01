@@ -27,9 +27,15 @@ import re
 import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
-from server.models import DeviceError, FrameStats, PerformanceSnapshot
+from server.models import (
+    DeviceError,
+    FrameStats,
+    InvalidDeviceRequestError,
+    PerformanceSnapshot,
+)
 
 if TYPE_CHECKING:
     from server.device.android.adb import AdbBackend
@@ -136,8 +142,9 @@ def parse_proc_stat_ticks(line: str) -> int | None:
         return None
 
 
-def parse_android_cpu_sample(text: str, pid: int) -> tuple[float, int | None] | None:
-    """(cpu percent, threads) from the two-reading shell script below.
+def parse_android_cpu_sample(text: str, pid: int) -> tuple[float, int | None, float] | None:
+    """(cpu percent, threads, seconds measured over) from the two-reading
+    shell script below.
 
     The script prints `/proc/uptime`, `/proc/<pid>/stat` and the `Threads:`
     line, sleeps, then prints uptime and stat again. Elapsed time is read on
@@ -165,7 +172,7 @@ def parse_android_cpu_sample(text: str, pid: int) -> tuple[float, int | None] | 
     elapsed = uptimes[1] - uptimes[0]
     if elapsed <= 0:
         return None
-    return (ticks[1] - ticks[0]) / USER_HZ / elapsed * 100, threads
+    return (ticks[1] - ticks[0]) / USER_HZ / elapsed * 100, threads, elapsed
 
 
 def parse_meminfo_total_pss_kb(text: str) -> int | None:
@@ -179,8 +186,22 @@ def parse_meminfo_total_pss_kb(text: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def parse_gfxinfo(text: str) -> FrameStats | None:
-    """Frame stats from `dumpsys gfxinfo <package>`, or None if it has none."""
+def parse_gfxinfo(text: str, pid: int | None = None) -> FrameStats | None:
+    """Frame stats from `dumpsys gfxinfo <package>`, or None if it has none.
+
+    A package with several processes gets one `** Graphics info for pid N
+    [...] **` section each; with `pid`, only that process's is read, so the
+    frames belong to the process the CPU and memory came from.
+    """
+    if pid is not None:
+        headers = list(re.finditer(r"^\*\* Graphics info for pid (\d+)", text, re.MULTILINE))
+        if headers:
+            mine = [i for i, h in enumerate(headers) if int(h.group(1)) == pid]
+            if not mine:
+                return None
+            i = mine[0]
+            end = headers[i + 1].start() if i + 1 < len(headers) else len(text)
+            text = text[headers[i].start():end]
     m = re.search(r"^Total frames rendered:\s*(\d+)", text, re.MULTILINE)
     if not m:
         return None
@@ -202,39 +223,89 @@ def parse_gfxinfo(text: str) -> FrameStats | None:
 
 # -- iOS simulator -----------------------------------------------------------
 
-async def _run(*args: str, timeout: float) -> tuple[int, str]:
-    """Run a host command; (returncode, stdout). Raises DeviceError if it
-    cannot be run at all or does not finish."""
+async def _run(*args: str, timeout: float) -> tuple[int, str, str]:
+    """Run a host command; (returncode, stdout, stderr).
+
+    Raises DeviceError if it cannot be run at all or does not finish. The
+    process is killed on timeout *and* on cancellation, so a caller that gives
+    up never leaves a `footprint` behind.
+    """
     try:
         proc = await asyncio.create_subprocess_exec(
             *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     except OSError as e:
         raise DeviceError(f"{args[0]} could not be run: {e}", tool=args[0]) from e
     try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout)
-    except TimeoutError:
-        proc.kill()
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(proc.wait(), 1.0)
-        raise DeviceError(f"{args[0]} did not answer within {timeout:g}s", tool=args[0]) from None
-    return proc.returncode or 0, out.decode(errors="replace")
+        out, err = await asyncio.wait_for(proc.communicate(), timeout)
+    except BaseException as e:
+        if proc.returncode is None:
+            proc.kill()
+            with contextlib.suppress(Exception):
+                await asyncio.shield(proc.wait())
+        if isinstance(e, TimeoutError):
+            raise DeviceError(
+                f"{args[0]} did not answer within {timeout:g}s", tool=args[0]) from None
+        raise
+    return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
+
+
+def _failed(tool: str, rc: int, err: str) -> DeviceError:
+    return DeviceError(f"{tool} failed: {err.strip() or f'exit {rc}'}", tool=tool)
 
 
 async def _ps_cputime(pid: int) -> float | None:
-    rc, out = await _run("ps", "-o", "time=", "-p", str(pid), timeout=5)
-    return parse_ps_cputime(out) if rc == 0 else None
+    """CPU seconds so far, or None when the process is gone."""
+    rc, out, err = await _run("ps", "-o", "time=", "-p", str(pid), timeout=5)
+    if rc != 0:
+        # ps exits 1 and prints nothing for a pid that no longer exists.
+        if err.strip():
+            raise _failed("ps", rc, err)
+        return None
+    value = parse_ps_cputime(out)
+    if value is None:
+        raise DeviceError(f"ps printed a CPU time quern cannot read: {out.strip()!r}", tool="ps")
+    return value
 
 
-async def _footprint(pid: int) -> int | None:
+async def _footprint(pid: int) -> int:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "footprint.json"
-        rc, _ = await _run("footprint", "-p", str(pid), "-j", str(path), timeout=10)
-        if rc != 0 or not path.exists():
-            return None
-        return parse_footprint_json(path.read_text(errors="replace"), pid)
+        rc, _, err = await _run("footprint", "-p", str(pid), "-j", str(path), timeout=10)
+        if rc != 0:
+            raise _failed("footprint", rc, err)
+        text = path.read_text(errors="replace") if path.exists() else ""
+        value = parse_footprint_json(text, pid)
+        if value is None:
+            raise DeviceError(f"footprint reported nothing quern can read for pid {pid}",
+                              tool="footprint")
+        return value
+
+
+async def _ps_threads(pid: int) -> int | None:
+    rc, out, err = await _run("ps", "-M", "-p", str(pid), timeout=5)
+    if rc != 0:
+        if err.strip():
+            raise _failed("ps", rc, err)
+        return None
+    value = parse_ps_thread_count(out)
+    if value is None:
+        raise DeviceError("ps -M printed no thread list quern can read", tool="ps")
+    return value
 
 
 async def simulator_snapshot(
+    simctl: SimctlBackend, udid: str, bundle_id: str, seconds: float,
+) -> PerformanceSnapshot:
+    budget = seconds + _ANSWER_SLACK_S
+    try:
+        async with asyncio.timeout(budget):
+            return await _simulator_snapshot(simctl, udid, bundle_id, seconds)
+    except TimeoutError:
+        raise DeviceError(
+            f"simulator {udid[:8]} did not answer within {budget:g}s", tool="simctl") from None
+
+
+async def _simulator_snapshot(
     simctl: SimctlBackend, udid: str, bundle_id: str, seconds: float,
 ) -> PerformanceSnapshot:
     snap = PerformanceSnapshot(
@@ -251,15 +322,13 @@ async def simulator_snapshot(
         end, t1 = await _ps_cputime(pid), _clock()
         if start is None or end is None or t1 <= t0:
             return None
+        snap.sample_seconds = t1 - t0
         return (end - start) / (t1 - t0) * 100
 
-    async def threads() -> int | None:
-        rc, out = await _run("ps", "-M", "-p", str(pid), timeout=5)
-        return parse_ps_thread_count(out) if rc == 0 else None
-
-    results = await asyncio.gather(cpu(), _footprint(pid), threads(), return_exceptions=True)
+    results = await asyncio.gather(cpu(), _footprint(pid), _ps_threads(pid),
+                                   return_exceptions=True)
     for name, value in zip(("cpu_percent", "memory_bytes", "threads"), results, strict=True):
-        _store(snap, name, value, f"could not be read for pid {pid}; has the app exited?")
+        _store(snap, name, value, f"pid {pid} could not be read; has the app exited?")
     if snap.memory_bytes is not None:
         snap.memory_kind = "phys_footprint"
     return _finish(snap)
@@ -267,9 +336,17 @@ async def simulator_snapshot(
 
 # -- Android -----------------------------------------------------------------
 
+#: What Android and iOS accept as a package or bundle id. It reaches a device
+#: shell on Android (adb joins its arguments into one command line), so
+#: anything outside it is refused before it gets there.
+PACKAGE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
 async def android_snapshot(
     adb: AdbBackend, serial: str, package: str, seconds: float,
 ) -> PerformanceSnapshot:
+    if not PACKAGE_NAME.fullmatch(package):
+        raise InvalidDeviceRequestError(f"{package!r} is not a package name")
     snap = PerformanceSnapshot(
         udid=serial, bundle_id=package, platform="android", running=False,
         sample_seconds=seconds)
@@ -277,8 +354,9 @@ async def android_snapshot(
     pids = [int(p) for p in out.split() if p.isdigit()]
     if not pids:
         # pidof exits 1 with nothing printed when nothing matches. Anything
-        # else means it could not answer, which is not "not running".
-        if rc in (0, 1) and not err.strip():
+        # else means it could not answer, which is not "not running" -- and
+        # before Android 7 adb exits 0 with the shell's stderr on stdout.
+        if rc in (0, 1) and not err.strip() and not out.strip():
             return _not_running(snap)
         raise DeviceError(
             f"pidof {package} on {serial} failed: {(err or out).strip() or f'exit {rc}'}",
@@ -289,10 +367,15 @@ async def android_snapshot(
     script = (f"cat /proc/uptime /proc/{pid}/stat; grep '^Threads:' /proc/{pid}/status; "
               f"sleep {seconds:g}; cat /proc/uptime /proc/{pid}/stat")
 
-    async def cpu_and_threads() -> tuple[float, int | None] | None:
-        _, sample, _ = await adb._run_unjudged(
+    async def cpu_and_threads() -> tuple[float, int | None, float] | None:
+        rc, sample, err = await adb._run_unjudged(
             serial, "shell", script, timeout=seconds + _ANSWER_SLACK_S)
-        return parse_android_cpu_sample(sample, pid)
+        parsed = parse_android_cpu_sample(sample, pid)
+        if parsed is None and (rc != 0 or err.strip()):
+            # adb itself failed (device offline, unauthorized): not the app's doing.
+            raise DeviceError(f"adb could not read /proc/{pid}: "
+                              f"{(err or sample).strip() or f'exit {rc}'}", tool="adb")
+        return parsed
 
     async def memory() -> int | None:
         stdout, _ = await adb._run_adb_for_device(
@@ -303,13 +386,22 @@ async def android_snapshot(
     async def frames() -> FrameStats | None:
         stdout, _ = await adb._run_adb_for_device(
             serial, "shell", "dumpsys", "gfxinfo", package, timeout=_ANSWER_SLACK_S)
-        return parse_gfxinfo(stdout)
+        return parse_gfxinfo(stdout, pid)
 
     sampled, mem, fr = await asyncio.gather(
         cpu_and_threads(), memory(), frames(), return_exceptions=True)
     if isinstance(sampled, tuple):
-        snap.cpu_percent, snap.threads = sampled
-        if snap.threads is None:
+        cpu, threads, elapsed = sampled
+        if elapsed < seconds / 2:
+            # Before Android 6 toolbox `sleep` takes whole seconds and reads
+            # 0.5 as 0, so the two readings land a tick apart.
+            snap.unavailable["cpu_percent"] = (
+                f"the device's sleep returned after {elapsed:.2f}s of the {seconds:g}s "
+                "asked for; try a whole number of seconds")
+        else:
+            snap.cpu_percent, snap.sample_seconds = cpu, elapsed
+        snap.threads = threads
+        if threads is None:
             snap.unavailable["threads"] = f"/proc/{pid}/status had no Threads: line"
     else:
         reason = _reason(sampled, f"/proc/{pid} could not be read twice; has the app exited?")
@@ -317,7 +409,8 @@ async def android_snapshot(
     _store(snap, "memory_bytes", mem, f"dumpsys meminfo {pid} had no total PSS")
     if snap.memory_bytes is not None:
         snap.memory_kind = "pss"
-    _store(snap, "frames", fr, "gfxinfo reported no frames; the app may have no window")
+    _store(snap, "frames", fr, f"gfxinfo reported no frames for pid {pid}; "
+                               "the app may have no window")
     if len(pids) > 1:
         logger.debug("pidof %s returned %s; measured %s", package, pids, pid)
     return _finish(snap)
@@ -325,25 +418,53 @@ async def android_snapshot(
 
 # -- iOS device --------------------------------------------------------------
 
-async def device_snapshot(uuid: str, bundle_id: str, seconds: float) -> PerformanceSnapshot:
-    """Read a physical iPhone through pymobiledevice3's Instruments channel."""
+def _pmd3() -> SimpleNamespace:
+    """The pymobiledevice3 pieces the device path uses, in one place so the
+    path can be tested without a phone."""
     try:
+        from pymobiledevice3.remote.remote_service_discovery import (
+            RemoteServiceDiscoveryService,
+        )
         from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
         from pymobiledevice3.services.dvt.instruments.graphics import Graphics
         from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
         from pymobiledevice3.services.dvt.instruments.sysmontap import Sysmontap
-        from pymobiledevice3.tunneld.api import get_tunneld_device_by_udid
     except ImportError as e:
         raise DeviceError(
             f"get_performance on a physical device needs pymobiledevice3 11 or "
             f"later in quern's environment ({e})", tool="pymobiledevice3") from e
+    return SimpleNamespace(
+        RemoteServiceDiscoveryService=RemoteServiceDiscoveryService, DvtProvider=DvtProvider,
+        Graphics=Graphics, ProcessControl=ProcessControl, Sysmontap=Sysmontap)
 
+
+async def _tunnel_address(tunnel_udid: str) -> tuple[str, int] | None:
+    """The device's tunnel endpoint, read through quern's own tunneld client.
+
+    pymobiledevice3's `get_tunneld_device_by_udid` asks tunneld with a
+    blocking `requests.get` and no timeout, which would stall the whole server
+    on a wedged tunneld; it also connects *every* tunnel a device has and
+    returns one, leaking the rest.
+    """
+    from server.device.ios.tunneld import get_tunneld_devices
+
+    for entry in (await get_tunneld_devices()).get(tunnel_udid) or []:
+        address, port = entry.get("tunnel-address"), entry.get("tunnel-port")
+        if address and isinstance(port, int):
+            return address, port
+    return None
+
+
+async def device_snapshot(uuid: str, bundle_id: str, seconds: float) -> PerformanceSnapshot:
+    """Read a physical iPhone through pymobiledevice3's Instruments channel."""
+    lib = _pmd3()
     from server.device.ios.pmd3 import _no_tunnel_hint, _recover_tunneld_if_wedged
     from server.device.ios.tunneld import is_tunneld_running, resolve_tunnel_udid
 
     serving = await is_tunneld_running() or await _recover_tunneld_if_wedged()
     tunnel_udid = await resolve_tunnel_udid(uuid) if serving else None
-    if tunnel_udid is None:
+    address = await _tunnel_address(tunnel_udid) if tunnel_udid else None
+    if address is None:
         raise DeviceError(
             f"no tunnel to {uuid[:8]}{_no_tunnel_hint(None, serving)}",
             tool="pymobiledevice3")
@@ -351,31 +472,30 @@ async def device_snapshot(uuid: str, bundle_id: str, seconds: float) -> Performa
     snap = PerformanceSnapshot(
         udid=uuid, bundle_id=bundle_id, platform="ios_device", running=False,
         sample_seconds=seconds)
+    budget = seconds + _ANSWER_SLACK_S
+    rsd = lib.RemoteServiceDiscoveryService(address)
+    deadline = asyncio.timeout(budget)
     try:
-        async with asyncio.timeout(seconds + _ANSWER_SLACK_S):
-            rsd = await get_tunneld_device_by_udid(tunnel_udid)
-            if rsd is None:
-                raise DeviceError(
-                    f"tunneld has no tunnel for {uuid[:8]}{_no_tunnel_hint(None, True)}",
-                    tool="pymobiledevice3")
-            # Already connected: `async with rsd` would connect it a second
-            # time, so close it by hand.
+        async with deadline:
             try:
-                async with DvtProvider(rsd) as dvt:
-                    async with ProcessControl(dvt) as pc:
+                await rsd.connect()
+                async with lib.DvtProvider(rsd) as dvt:
+                    async with lib.ProcessControl(dvt) as pc:
                         pid = await pc.process_identifier_for_bundle_identifier(bundle_id)
                     if not pid:
                         return _not_running(snap)
                     snap.running, snap.pid = True, pid
-                    await _sysmon(Sysmontap, dvt, pid, seconds, snap)
-                    await _display_fps(Graphics, dvt, snap)
+                    await _sysmon(lib.Sysmontap, dvt, pid, seconds, snap)
+                    await _display_fps(lib.Graphics, dvt, snap)
             finally:
                 with contextlib.suppress(Exception):
                     await rsd.close()
-    except TimeoutError:
-        raise DeviceError(
-            f"{uuid[:8]} did not answer within {seconds + _ANSWER_SLACK_S:g}s",
-            tool="pymobiledevice3") from None
+    except TimeoutError as e:
+        if deadline.expired():
+            raise DeviceError(f"{uuid[:8]} did not answer within {budget:g}s",
+                              tool="pymobiledevice3") from None
+        raise DeviceError(f"Instruments channel to {uuid[:8]} timed out: {e!r}",
+                          tool="pymobiledevice3") from e
     except DeviceError:
         raise
     except Exception as e:  # pymobiledevice3 raises its own hierarchy
@@ -384,36 +504,59 @@ async def device_snapshot(uuid: str, bundle_id: str, seconds: float) -> Performa
     return _finish(snap)
 
 
-async def _sysmon(Sysmontap, dvt, pid: int, seconds: float, snap: PerformanceSnapshot) -> None:
-    """Sample until `seconds` have passed and CPU has a value.
+def cpu_between(first: dict, last: dict) -> tuple[float, float] | None:
+    """(percent of one core, window in seconds) between two sysmontap samples.
 
-    sysmontap's first sample carries a null cpuUsage (it has nothing to
-    difference against yet), so one sample is never enough.
+    `cpuTotalUser`, `cpuTotalSystem` and `procAge` are cumulative nanoseconds,
+    so the difference is an average over the whole window, timed on the
+    device. `cpuUsage` would cover only the last interval, and is null in the
+    first sample.
     """
-    latest: dict | None = None
-    t0 = _clock()
+    keys = ("cpuTotalUser", "cpuTotalSystem", "procAge")
+    if not all(isinstance(s.get(k), int) for s in (first, last) for k in keys):
+        return None
+    age = last["procAge"] - first["procAge"]
+    if age <= 0:
+        return None
+    busy = (last["cpuTotalUser"] + last["cpuTotalSystem"]
+            - first["cpuTotalUser"] - first["cpuTotalSystem"])
+    return busy / age * 100, age / 1e9
+
+
+async def _sysmon(Sysmontap, dvt, pid: int, seconds: float, snap: PerformanceSnapshot) -> None:
+    """Sample until `seconds` have passed since the app's first sample."""
+    first: dict | None = None
+    last: dict | None = None
+    t0 = 0.0
     async with await Sysmontap.create(dvt, interval=min(500, int(seconds * 1000))) as s:
         async for procs in s.iter_processes():
             mine = next((p for p in procs if p.get("pid") == pid), None)
             if mine is None:
                 break
-            latest = mine
-            if _clock() - t0 >= seconds and mine.get("cpuUsage") is not None:
+            if first is None:
+                first = last = mine
+                t0 = _clock()
+                continue
+            last = mine
+            if _clock() - t0 >= seconds:
                 break
-    if latest is None:
+    if first is None or last is None:
         for name in ("cpu_percent", "memory_bytes", "threads"):
             snap.unavailable[name] = f"pid {pid} was not in sysmontap's sample; has the app exited?"
         return
-    cpu = latest.get("cpuUsage")
-    mem = latest.get("physFootprint")
-    threads = latest.get("threadCount")
-    _store(snap, "cpu_percent", float(cpu) if cpu is not None else None,
-           "sysmontap gave no CPU reading within the sample")
+    measured = cpu_between(first, last) if last is not first else None
+    if measured is None:
+        snap.unavailable["cpu_percent"] = (
+            "sysmontap gave too few samples to measure CPU over; has the app exited?"
+            if last is first else "sysmontap's samples had no cumulative CPU time")
+    else:
+        snap.cpu_percent, snap.sample_seconds = measured
+    mem, threads = last.get("physFootprint"), last.get("threadCount")
     _store(snap, "memory_bytes", mem if isinstance(mem, int) and mem > 0 else None,
            "sysmontap gave no physFootprint")
     if snap.memory_bytes is not None:
         snap.memory_kind = "phys_footprint"
-    _store(snap, "threads", threads if isinstance(threads, int) else None,
+    _store(snap, "threads", threads if isinstance(threads, int) and threads > 0 else None,
            "sysmontap gave no threadCount")
 
 
@@ -455,9 +598,14 @@ def _finish(snap: PerformanceSnapshot) -> PerformanceSnapshot:
 
 
 def _reason(exc: BaseException | None, default: str) -> str:
+    """Why a reading is missing. A DeviceError already names its cause, and
+    putting the default ("has the app exited?") in front of it would blame
+    the app for adb or footprint failing."""
     if exc is None:
         return default
-    return f"{default} ({exc})"
+    if isinstance(exc, DeviceError):
+        return str(exc)
+    return f"{default} ({exc!r})"
 
 
 def _store(snap: PerformanceSnapshot, name: str, value: object, missing: str) -> None:

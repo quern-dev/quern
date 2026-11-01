@@ -440,11 +440,13 @@ NOTE: If you want to capture network traffic from this app:
 
 cpu_percent is percent of one core, so a busy multi-threaded app can read above 100. memory_bytes is what memory_kind says: phys_footprint on iOS (the number Xcode shows) or pss on Android (Android Studio's).
 
-Android also returns frames from gfxinfo: total frames, janky frames and frame-time percentiles, counted since the app started. Compare two calls to see what one interaction rendered. janky_method says which jank count it is: Android 12+ prints a deadline-based count and a legacy one, and the legacy one reads 90%+ janky on an emulator, so the deadline count is reported when it exists.
+Android also returns frames from gfxinfo: total frames, janky frames and frame-time percentiles, counted since the app started. Compare two calls to see what one interaction rendered. janky_method says which jank count it is: Android 12+ prints a deadline-based count and a legacy fixed-threshold one, which can read several times higher on an emulator, so the deadline count is reported when it exists.
 
 Physical iOS devices also return display_fps: Core Animation frames per second for the whole display, not just this app, read once just after the CPU sample. It is 0 when nothing on screen is moving.
 
-A metric that could not be read is null and named in unavailable with the reason. A null is never a zero. running: false means the app is not running, and every metric is null.`,
+sample_seconds in the answer is the window CPU was actually measured over, timed on the device where it can be.
+
+A metric that could not be read is null and named in unavailable with the reason. A null is never a zero. running: false means quern asked and the app is not running; when quern cannot ask, it returns an error instead.`,
     inputSchema: strictParams({
       bundle_id: z
         .string()
@@ -459,7 +461,7 @@ A metric that could not be read is null and named in unavailable with the reason
         .min(0.2)
         .max(5)
         .optional()
-        .describe("How long to measure CPU over (default 1)"),
+        .describe("How long to measure CPU over, in seconds (default 1)"),
     }),
   }, async ({ bundle_id, udid, sample_seconds }) => {
     try {

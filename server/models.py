@@ -1913,9 +1913,10 @@ class FrameStats(BaseModel):
     janky_frames: int | None = None
     janky_percent: float | None = None
     #: Which jank count `janky_frames` is. Android 12+ prints two: "deadline"
-    #: (a frame that missed its deadline) and "legacy" (a fixed threshold that
-    #: reads 94% janky on an emulator rendering at 60 fps). Before Android 12
-    #: there is only the legacy one.
+    #: (a frame that missed its deadline) and "legacy" (a fixed threshold). On
+    #: an API 34 emulator the legacy one read 21% and 94% janky in two runs
+    #: where the deadline one read 8% and 9%. Before Android 12 there is only
+    #: the legacy one.
     janky_method: Literal["deadline", "legacy"] | None = None
     p50_ms: int | None = None
     p90_ms: int | None = None
@@ -1931,7 +1932,9 @@ class PerformanceSnapshot(BaseModel):
     platform: Literal["ios_simulator", "ios_device", "android"]
     running: bool
     pid: int | None = None
-    #: How long CPU use was measured over, in seconds.
+    #: How long CPU use was actually measured over, in seconds: timed by the
+    #: device on Android and physical iOS, by the Mac for simulators. Close
+    #: to what was asked for, not equal to it.
     sample_seconds: float
     #: Percent of one core over the sample, so several busy threads read
     #: above 100.

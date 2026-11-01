@@ -33,6 +33,7 @@ from server.models import (
     DeviceState,
     DeviceType,
     EraseIncompleteError,
+    InvalidDeviceRequestError,
     PerformanceSnapshot,
     UIElement,
 )
@@ -1720,6 +1721,9 @@ class DeviceController(DeviceControllerUI):
     ) -> PerformanceSnapshot:
         """CPU, memory and threads of one app (#245). A read: the active
         device is not changed by asking about another one."""
+        if not performance.PACKAGE_NAME.fullmatch(bundle_id):
+            # Refused before any device is touched: on Android it would reach a shell.
+            raise InvalidDeviceRequestError(f"{bundle_id!r} is not a bundle id or package name")
         resolved = await self.resolve_udid(udid, set_active=False)
         if self._is_android(resolved):
             return await performance.android_snapshot(
