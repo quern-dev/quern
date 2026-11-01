@@ -402,7 +402,7 @@ async def _choose(request: Request, registry: SessionRegistry, session_id: str,
     held = registry.held_udids(except_session=session_id)
     mine = registry.held_udids() - held
     if body.group is not None:
-        devices = _group_members(body.group, devices, pool, registry)
+        devices = _group_members(body.group, devices, pool)
         # No count means "the whole group": only the members this session does
         # not hold yet -- holding them all already is success, not a 409 for a
         # shortage that does not exist (CodeRabbit). A count means that many more.
@@ -444,8 +444,7 @@ async def _choose(request: Request, registry: SessionRegistry, session_id: str,
     return [d.udid for d in picked], to_boot
 
 
-def _group_members(group: str, devices: list, pool,
-                   registry: SessionRegistry | None = None) -> list:
+def _group_members(group: str, devices: list, pool) -> list:
     """The devices a named group (`device_groups` in config.json) covers: each
     entry a udid, or criteria matched like the pool's."""
     from server.config import read_user_config
@@ -458,9 +457,12 @@ def _group_members(group: str, devices: list, pool,
     members: dict[str, object] = {}
     for entry in entries:
         if isinstance(entry, str):
-            # An `avd:` entry whose emulator is running is that serial (#582).
-            alias = registry.alias_of(entry) if registry is not None else None
-            members.update({d.udid: d for d in devices if d.udid in (entry, alias)})
+            # An `avd:` entry whose emulator is running is listed by its
+            # serial, and found by the AVD it reports (#582). From the
+            # device, not from whoever booted it: that hold may be gone.
+            avd = entry.removeprefix("avd:") if entry.startswith("avd:") else None
+            members.update({d.udid: d for d in devices if d.udid == entry
+                            or (avd and getattr(d, "avd_name", "") == avd)})
         elif isinstance(entry, dict):
             dtype = entry.get("device_type")
             for d in pool._find_candidates(

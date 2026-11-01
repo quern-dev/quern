@@ -99,6 +99,7 @@ class DevicePool:
                     entry.is_available = device_info.is_available
                     entry.device_family = device_info.device_family
                     entry.model = device_info.model
+                    entry.avd_name = device_info.avd_name
                 else:
                     # New device discovered
                     entry = DevicePoolEntry(
@@ -110,6 +111,7 @@ class DevicePool:
                         runtime=device_info.runtime,
                         device_family=device_info.device_family,
                         model=device_info.model,
+                        avd_name=device_info.avd_name,
                         last_used=now,
                         is_available=device_info.is_available,
                     )

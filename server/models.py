@@ -1885,6 +1885,10 @@ class DeviceInfo(BaseModel):
     #: marketing name, or its product type ("iPhone16,1") when that is all
     #: devicectl gives.
     model: str = ""
+    #: An Android emulator's AVD, running or not: a running one is listed by
+    #: its serial, so this is how `avd:<name>` still finds it (#582). "" when
+    #: unknown, and for every other kind of device.
+    avd_name: str = ""
     # True for simulators; physical devices: True when
     # reachable (tunnel not "unavailable")
     is_connected: bool = True
@@ -2843,6 +2847,7 @@ class DevicePoolEntry(BaseModel):
     runtime: str
     device_family: str = ""  # "iPhone", "iPad", "Apple Watch", "Apple TV", or ""
     model: str = ""  # as DeviceInfo.model: what the device is, whatever it is called
+    avd_name: str = ""  # as DeviceInfo.avd_name
 
     last_used: datetime
     is_available: bool

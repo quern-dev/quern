@@ -71,9 +71,6 @@ class Reservation:
     #: True when this session booted the device to reserve it, which is what
     #: `shutdown_booted` acts on: a device that was already running is left so.
     booted_here: bool = False
-    #: The ``avd:<name>`` this reservation was made as, when its device booted
-    #: as a serial (#582). Kept on the reservation so it ends with the hold.
-    booted_from: str | None = None
     since: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -326,7 +323,6 @@ class SessionRegistry:
             raise SessionConflict(f"{new} is held by {held.session.id}")
         reservation = session.reservations.pop(old)
         reservation.udid = new
-        reservation.booted_from = old
         session.reservations[new] = reservation
 
     def withdraw(self, session_id: str, udids: Iterable[str]) -> None:
@@ -375,17 +371,6 @@ class SessionRegistry:
 
     def end_avd_boot(self, avd: str) -> None:
         self._avd_boots.pop(avd, None)
-
-    def alias_of(self, avd: str) -> str | None:
-        """The serial a hold on `avd` moved to, while that hold lasts. A
-        serial is reused by whichever AVD boots next, so the link lives on
-        the reservation rather than in a table that would outlive it."""
-        self.expire_due()
-        for session in self._sessions.values():
-            for reservation in session.reservations.values():
-                if reservation.booted_from == avd:
-                    return reservation.udid
-        return None
 
     def held_udids(self, *, except_session: str = "") -> set[str]:
         """Every device some *other* session holds."""

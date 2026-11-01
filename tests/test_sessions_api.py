@@ -1129,7 +1129,7 @@ class TestReservingAShutDownAvd:
                 self.devices.pop(udid, None)          # the avd: row is hidden once running
                 self.devices[serial] = SimpleNamespace(
                     udid=serial, state=DeviceState.BOOTED, is_available=True,
-                    name="Pixel_8_API35")
+                    name="Pixel_8_API35", avd_name="Pixel_8_API35")
                 # Who holds the emulator the moment it appears, before the
                 # route moves the hold to it: the booting session (review).
                 held = registry.holder_of(serial)
@@ -1142,6 +1142,28 @@ class TestReservingAShutDownAvd:
             name="Pixel_8_API35")
         client.app.state.device_controller._pool = pool
         return pool
+
+    def test_a_group_naming_it_while_another_session_holds_it_is_short_not_empty(
+            self, client, pool, monkeypatch):
+        # Booted earlier by a session that has let go, the emulator runs on,
+        # and claude-b holds it. A group naming the AVD is short a device: an
+        # empty success read as "you have the whole group" (review).
+        from types import SimpleNamespace
+
+        from server.models import DeviceState
+
+        pool.devices.pop("avd:Pixel_8_API35")
+        pool.devices["emulator-5554"] = SimpleNamespace(
+            udid="emulator-5554", state=DeviceState.BOOTED, is_available=True,
+            name="Pixel_8_API35", avd_name="Pixel_8_API35")
+        monkeypatch.setattr("server.config.read_user_config",
+                            lambda **k: {"device_groups": {"pixels": ["avd:Pixel_8_API35"]}})
+        a, b = Held(client, "claude-a"), Held(client, "claude-b")
+        assert _reserve(client, "claude-b", udids=["emulator-5554"]).status_code == 200
+        r = _reserve(client, "claude-a", group="pixels")
+        assert r.status_code == 409, r.text
+        a.close()
+        b.close()
 
     def test_the_hold_moves_to_the_serial_it_booted_as(self, client, pool, registry):
         a = Held(client, "claude-a")
@@ -1226,20 +1248,20 @@ class TestReservingAShutDownAvd:
 
 
 def test_a_group_entry_naming_an_avd_finds_its_running_emulator(monkeypatch):
-    # Booted and held under its serial, an `avd:` group entry still names it
-    # (review: the group read as empty).
+    # A running AVD is listed by its serial; an `avd:` group entry finds it by
+    # the AVD the emulator reports, not by whoever booted it, whose hold may
+    # have ended (review). The serial alone says nothing: emulator-5556 runs
+    # a different AVD, and a model-named emulator reports no AVD at all.
     from types import SimpleNamespace
 
     from server.api import sessions as sessions_api
-    from server.session_registry import SessionRegistry
 
-    reg = SessionRegistry()
-    s, t = reg.open("a")
-    reg.attach(s.id, t)
-    reg.reserve("a", ["avd:Pixel_8_API35"])
-    reg.rekey("a", "avd:Pixel_8_API35", "emulator-5554")
     monkeypatch.setattr("server.config.read_user_config",
                         lambda: {"device_groups": {"pixels": ["avd:Pixel_8_API35"]}})
-    devices = [SimpleNamespace(udid="emulator-5554", name="Pixel_8_API35")]
-    members = sessions_api._group_members("pixels", devices, None, reg)
+    devices = [SimpleNamespace(udid="emulator-5554", name="Pixel_8_API35",
+                               avd_name="Pixel_8_API35"),
+               SimpleNamespace(udid="emulator-5556", name="Other", avd_name="Other"),
+               SimpleNamespace(udid="emulator-5558", name="Pixel_8_API35", avd_name="")]
+    members = sessions_api._group_members("pixels", devices, None)
     assert [d.udid for d in members] == ["emulator-5554"]
+

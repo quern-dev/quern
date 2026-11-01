@@ -93,6 +93,7 @@ class TestListDevices:
         assert emu.is_available is True
         assert emu.device_family == "Android"
         assert emu.name == "Pixel_7_API_34"
+        assert emu.avd_name == "Pixel_7_API_34"   # how `avd:` names find it (#582)
 
         # Physical device
         phys = devices[1]
@@ -101,6 +102,7 @@ class TestListDevices:
         assert phys.state == DeviceState.BOOTED
         assert phys.is_available is True
         assert phys.name == "SM G960F"  # model with underscores replaced
+        assert phys.avd_name == ""
 
         # Unauthorized
         unauth = devices[2]

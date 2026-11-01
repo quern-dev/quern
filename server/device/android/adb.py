@@ -534,6 +534,7 @@ class AdbBackend:
 
             # Get more details for online devices
             name = model or serial
+            avd = ""
             os_version = ""
             api_level = ""
 
@@ -542,12 +543,12 @@ class AdbBackend:
             if has_console:
                 avd_name = await self._get_emulator_name(serial)
                 if avd_name and avd_name != serial:
-                    name = avd_name
+                    name = avd = avd_name
                     self._serial_to_avd[serial] = avd_name
                     running_avd_names.add(avd_name)
                 elif serial in self._serial_to_avd:
                     # Offline/shutting down — use cached AVD name
-                    name = self._serial_to_avd[serial]
+                    name = avd = self._serial_to_avd[serial]
                     running_avd_names.add(name)
 
             if is_available:
@@ -579,6 +580,7 @@ class AdbBackend:
                 is_available=is_available,
                 connection_type=connection_type,
                 device_family="Android",
+                avd_name=avd,
             ))
 
         # Clean up cache for serials no longer in adb devices
@@ -601,6 +603,7 @@ class AdbBackend:
                     runtime=runtime,
                     is_available=True,
                     device_family="Android",
+                    avd_name=avd_name,
                 ))
 
         return devices
