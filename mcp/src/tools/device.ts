@@ -435,6 +435,58 @@ NOTE: If you want to capture network traffic from this app:
     }
   });
 
+  server.registerTool("get_performance", {
+    description: `CPU, memory and thread count of one running app, measured over a short sample. Works on iOS simulators, physical iOS devices and Android.
+
+cpu_percent is percent of one core, so a busy multi-threaded app can read above 100. memory_bytes is what memory_kind says: phys_footprint on iOS (the number Xcode shows) or pss on Android (Android Studio's).
+
+Android also returns frames from gfxinfo: total frames, janky frames and frame-time percentiles, counted since the app started. Compare two calls to see what one interaction rendered. janky_method says which jank count it is: Android 12+ prints a deadline-based count and a legacy one, and the legacy one reads 90%+ janky on an emulator, so the deadline count is reported when it exists.
+
+Physical iOS devices also return display_fps: Core Animation frames per second for the whole display, not just this app, read once just after the CPU sample. It is 0 when nothing on screen is moving.
+
+A metric that could not be read is null and named in unavailable with the reason. A null is never a zero. running: false means the app is not running, and every metric is null.`,
+    inputSchema: strictParams({
+      bundle_id: z
+        .string()
+        .min(1)
+        .describe("Bundle id (iOS) or package name (Android) of the app"),
+      udid: z
+        .string()
+        .optional()
+        .describe("Target device UDID (defaults to active device)"),
+      sample_seconds: z
+        .number()
+        .min(0.2)
+        .max(5)
+        .optional()
+        .describe("How long to measure CPU over (default 1)"),
+    }),
+  }, async ({ bundle_id, udid, sample_seconds }) => {
+    try {
+      const data = await apiRequest("GET", "/api/v1/device/app/performance", {
+        bundle_id,
+        udid,
+        sample_seconds,
+      });
+
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(data, null, 2) },
+        ],
+      };
+    } catch (e) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: errorText(e),
+          },
+        ],
+        isError: true,
+      };
+    }
+  });
+
   server.registerTool("take_screenshot", {
     description: `Capture a screenshot from a simulator or physical device. Returns the image as base64-encoded data, or saves to disk when save_path is provided.`,
     inputSchema: strictParams({

@@ -132,6 +132,7 @@ ROUTES: dict[tuple[str, str], Rule] = {
     # -- devices: reading -----------------------------------------------------
     ("GET", "/api/v1/device/list"): _VIEW,
     ("GET", "/api/v1/device/app/list"): _VIEW,
+    ("GET", "/api/v1/device/app/performance"): _VIEW,
     ("GET", "/api/v1/device/app/state/list"): _VIEW,
     ("GET", "/api/v1/device/app/state/plist"): _VIEW,
     ("GET", "/api/v1/device/app/state/plist/diff"): _VIEW,
@@ -327,6 +328,7 @@ ROUTES: dict[tuple[str, str], Rule] = {
 #:     shared    nothing about anyone: answered as for everyone
 BLIND: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/device/app/list"): "device",
+    ("GET", "/api/v1/device/app/performance"): "device",
     ("GET", "/api/v1/device/app/state/plist"): "device",
     ("GET", "/api/v1/device/app/state/plist/diff"): "device",
     ("GET", "/api/v1/device/hinge"): "device",

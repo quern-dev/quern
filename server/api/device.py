@@ -15,6 +15,7 @@ from starlette.responses import StreamingResponse
 from server import visibility
 from server.api.actions import action, logged_action
 from server.device import platform
+from server.device import performance
 from server.device.media import media_engine
 from server.device.media.preview import simulator_entries
 from server.device.pool import DevicePool
@@ -738,6 +739,26 @@ async def list_apps(request: Request, udid: str | None = Query(default=None)):
         }
     except DeviceError as e:
         raise _handle_device_error(e)
+
+
+@router.get("/app/performance")
+@logged_action("get_performance", category="device.read")
+async def get_performance(
+    request: Request,
+    bundle_id: str = Query(..., min_length=1),
+    udid: str | None = Query(default=None),
+    sample_seconds: float = Query(
+        default=performance.SAMPLE_SECONDS_DEFAULT,
+        ge=performance.SAMPLE_SECONDS_MIN, le=performance.SAMPLE_SECONDS_MAX),
+):
+    """CPU, memory and threads of one app, and frame stats where cheap (#245)."""
+    controller = _get_controller(request)
+    try:
+        snap = await controller.get_performance(
+            bundle_id, udid=udid, sample_seconds=sample_seconds)
+    except DeviceError as e:
+        raise _handle_device_error(e)
+    return snap.model_dump()
 
 
 # ---------------------------------------------------------------------------
