@@ -72,7 +72,7 @@ def _hardware_udid(udid: str) -> str:
 
 
 @router.post("")
-@logged_action("start_profile", category="device")
+@logged_action("start_profile", category="device.action")
 async def start_profile(request: Request, body: StartProfileRequest) -> dict:
     """Record an app with Instruments. xctrace launches the app."""
     controller = _get_controller(request)
@@ -120,7 +120,7 @@ async def start_profile(request: Request, body: StartProfileRequest) -> dict:
 
 
 @router.post("/{profile_id}/stop")
-@logged_action("stop_profile", category="device")
+@logged_action("stop_profile", category="device.action")
 async def stop_profile(request: Request, profile_id: str) -> dict:
     """Stop early, wait for xctrace to finish the trace, and summarise it."""
     profile = _own(request, profile_id)
