@@ -1483,6 +1483,9 @@ class IOSDebugAddon:
 
         def finish(serial: str | None) -> None:
             requester["emulator"] = serial
+            # Decided while the lookup was running, it has settled now: a
+            # simulator rule ahead of the emulator's is asked again (review).
+            requester.pop("simulator", None)
             try:
                 outcome = self._answer(flow, requester)
             except Exception:

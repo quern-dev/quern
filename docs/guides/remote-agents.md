@@ -54,4 +54,4 @@ The answer to `use_remote` also says whether the new server's proxy is running, 
 
 - **Leaving a server that has stopped answering** takes one timeout, about five seconds, not more. Anything that couldn't be cleaned up there is named.
 - **Your agent's devices are released if it disappears.** If its connection drops -- the laptop lid closes, the network goes -- the remote server keeps its devices for a grace period (three minutes by default) so it can reconnect, then frees them.
-- **Android emulators** on a remote server can be driven, but reservation, matching, mocks and capture for them are still being completed ([#582](https://github.com/quern-dev/quern/issues/582)). iOS simulators are fully supported.
+- **Android emulators and phones** on a remote server can be reserved, matched by platform, and mocked one device at a time; capture for them is still being completed ([#582](https://github.com/quern-dev/quern/issues/582)). iOS simulators are fully supported.

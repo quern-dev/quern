@@ -747,6 +747,33 @@ class TestAnAndroidScopedRule:
         assert not flow.intercepted and flow.response is None
 
 
+def test_a_simulator_rule_is_asked_again_once_the_lookup_settles():
+    """A simulator's rule set before an emulator's: while the connection's
+    lookup runs, the simulator reads as unknown and the emulator's rule holds
+    the request. Answered after the lookup, the simulator is asked again,
+    not taken from the stale first read (review)."""
+    from concurrent.futures import Future
+
+    a = IOSDebugAddon()
+    a._running = True
+    for rule_id, scope in (("only_alpha", ALPHA), ("only_emu", EMU)):
+        with patch("server.proxy.addon.flowfilter.parse", return_value=lambda f: True), Out():
+            a._handle_set_mock({"rule_id": rule_id, "pattern": "~d api.example.com",
+                                "response": {"status_code": 200, "body": rule_id},
+                                "simulator_udid": scope})
+    flow = _held(_flow("c-alpha"))
+    pending: Future = Future()
+    with patch.dict(addon_mod._client_process_info, {"c-alpha": {"future": pending}}), \
+         patch.object(addon_mod, "_simulator_instance_for_pid", return_value=(ALPHA, 50)), \
+         patch.object(addon_mod, "_proc_name_fast", return_value="MobileSafari"), \
+         patch("server.proxy.addon.http.Response.make", return_value=MagicMock()):
+        a.request(flow)
+        assert flow.intercepted
+        pending.set_result((4242, "MobileSafari"))
+        _until_resumed(flow)
+    assert _mocked_by(flow) == "only_alpha"
+
+
 class TestTheDeferredRequestOnARealEventLoop:
     """What mitmdump does: the hook runs on the event loop, and the proxy
     awaits the flow's resume. The other tests run the hook without a loop,

@@ -462,9 +462,12 @@ export async function applyOnReserve(reserved: Reserved[]): Promise<Record<strin
   const left = pending();
   if (left.mocks || left.session_capture) {
     out.still_waiting = left;
-    out.note = simulators.length
-      ? "Some could not be set up here (see failed): they are tried again at your next reservation."
-      : "Mocks and session capture attach to simulators: they wait for a reservation that includes one.";
+    out.note = simulators.length || androids.length
+      ? "Some could not be set up here (see failed), or wait for another kind of device: " +
+        "they are tried again at your next reservation."
+      : "Mocks attach to the kind of device they were scoped to -- simulators, or Android " +
+        "emulators and phones -- and session capture to simulators: they wait for a " +
+        "reservation that includes one.";
   }
   return out;
 }
