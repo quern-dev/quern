@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Reserving a shut-down Android emulator works (#582).** A shut-down AVD is listed as `avd:<name>`, and once booted it comes up as its adb serial (`emulator-5554`). Reservations by count or criteria, `resolve_device` and `ensure_devices` waited for the `avd:` id, which never appears, so each failed after the boot ("did not boot within 30s") and left the emulator running, unreserved. The reservation now holds the emulator under the serial it booted as, and `shutdown_booted` shuts down that serial.
+
 ## [0.25.0] - 2026-10-31
 
 The stable release of everything in 0.25.0-beta.1 through beta.6, below, plus the changes since beta.6 listed here. Its headline is working against other Macs: see what each paired quern server could lend (`quern remote list`, `list_remotes`), switch an agent to it mid-session (`use_remote`) with its mocks, session capture and knowledge base following, and hold, capture and load knowledge for a session from a remote client. Android emulators in this remote work are #582, for the next version.
