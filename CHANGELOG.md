@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Reserving a shut-down Android emulator works (#582).** A shut-down AVD is listed as `avd:<name>`, and once booted it comes up as its adb serial (`emulator-5554`). Reservations by count or criteria, `resolve_device` and `ensure_devices` waited for the `avd:` id, which never appears, so each failed after the boot ("did not boot within 30s") and left the emulator running, unreserved. The reservation now holds the emulator under the serial it booted as, and `shutdown_booted` shuts down that serial.
+- **`ensure_devices` asking for more devices than exist is a 404 or 409, not a 500.** "Need 3 devices ... but only 2 available" read to the caller like a server crash. None matching is a 404, as `resolve_device`; some matching but too few, or shut down with `auto_boot` off (which the answer now says), is a 409, as a reservation's shortage.
 - **A shut-down AVD newer than Android 16 reports its release (#582).** It reported its raw API level ("37") while the same image running reported its release ("17"), so a version request matched one and not the other.
 
 ## [0.25.0] - 2026-10-31

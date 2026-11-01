@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from server.api.actions import logged_action
 from server.device import platform
+from server.device.pool import NotEnoughDevices
 from server.models import DeviceError, DeviceType, EnsureDevicesRequest, ResolveDeviceRequest
 
 router = APIRouter(prefix="/api/v1/devices", tags=["device-pool"])
@@ -152,5 +153,10 @@ async def ensure_devices(request: Request, body: EnsureDevicesRequest):
         }
     except (platform.PlatformRefusal, platform.PlatformConflict) as e:
         raise _platform_error(e)
+    except NotEnoughDevices as e:
+        # None match: 404, as resolve's "no device matching". Some do, but
+        # too few or not usable (shut down with auto_boot off): 409, as a
+        # reservation's "asked for N, M free".
+        raise HTTPException(status_code=404 if e.matched == 0 else 409, detail=str(e))
     except DeviceError as e:
         raise _handle_pool_error(e)

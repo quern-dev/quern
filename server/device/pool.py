@@ -21,6 +21,17 @@ POOL_FILE = CONFIG_DIR / "device-pool.json"
 REFRESH_CACHE_TTL_SECONDS = 2  # Avoid redundant simctl calls
 
 
+class NotEnoughDevices(DeviceError):
+    """`ensure_devices` found fewer usable devices than asked for. A caller's
+    request, not a server fault: ``matched`` is how many match at all, so the
+    route can tell "none exist" from "some exist, too few or not usable". It
+    was answered as a 500, reading to the caller like a crash."""
+
+    def __init__(self, message: str, *, matched: int):
+        super().__init__(message, tool="pool")
+        self.matched = matched
+
+
 class DevicePool:
     """Manages the pool of available devices.
 
@@ -680,11 +691,13 @@ class DevicePool:
             if effective_family:
                 criteria_parts.append(f"device_family='{effective_family}'")
             criteria_str = ", ".join(criteria_parts) if criteria_parts else "any"
-            raise DeviceError(
+            raise NotEnoughDevices(
                 f"Need {count} devices matching {criteria_str} "
                 f"but only {total_available} available "
-                f"({len(booted_available)} booted, {len(shutdown_available)} shutdown).",
-                tool="pool",
+                f"({len(booted_available)} booted, {len(shutdown_available)} shutdown)."
+                + (" auto_boot is off, so the shut-down ones were not counted."
+                   if shutdown_available and not auto_boot else ""),
+                matched=len(booted_available) + len(shutdown_available),
             )
 
         # Select devices: booted first (ranked), then shutdown to boot (ranked)

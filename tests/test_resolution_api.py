@@ -209,17 +209,31 @@ class TestEnsureEndpoint:
         data = resp.json()
         assert len(data["devices"]) == 3
 
-    async def test_ensure_not_enough_returns_error(self, app, auth_headers, mock_device_pool):
-        """Ensure with impossible count returns error."""
+    async def _ensure(self, app, auth_headers, **body):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.post(
-                "/api/v1/devices/ensure",
-                headers=auth_headers,
-                json={"count": 10, "name": "iPhone 16 Pro"},
-            )
-        assert resp.status_code == 500 or resp.status_code == 404
-        assert "Need 10" in resp.json()["detail"] or "10" in resp.json()["detail"]
+            return await client.post("/api/v1/devices/ensure", headers=auth_headers, json=body)
+
+    async def test_ensure_more_than_exist_is_409(self, app, auth_headers, mock_device_pool):
+        """Some match but too few: the caller's request, not a server fault.
+        It was a 500 (#586 follow-up)."""
+        resp = await self._ensure(app, auth_headers, count=10, name="iPhone 16 Pro")
+        assert resp.status_code == 409
+        assert "Need 10" in resp.json()["detail"]
+
+    async def test_ensure_with_no_match_is_404(self, app, auth_headers, mock_device_pool):
+        resp = await self._ensure(app, auth_headers, count=1, name="No Such Phone")
+        assert resp.status_code == 404
+        assert "only 0 available (0 booted, 0 shutdown)" in resp.json()["detail"]
+
+    async def test_ensure_without_booting_says_why_shut_down_ones_did_not_count(
+            self, app, auth_headers, mock_device_pool):
+        # Three iPhone 16 Pros, one shut down: three wanted with auto_boot
+        # off is two available, and the answer says so.
+        resp = await self._ensure(app, auth_headers, count=3, name="iPhone 16 Pro",
+                                  auto_boot=False)
+        assert resp.status_code == 409
+        assert "auto_boot is off" in resp.json()["detail"]
 
     async def test_ensure_with_device_type(self, app, auth_headers, mock_device_pool):
         """Ensure with device_type='simulator' returns only simulators."""
