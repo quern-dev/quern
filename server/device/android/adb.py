@@ -216,11 +216,23 @@ class AdbBackend:
     _API_TO_VERSION: dict[int, str] = {
         21: "5.0", 22: "5.1", 23: "6.0", 24: "7.0", 25: "7.1",
         26: "8.0", 27: "8.1", 28: "9", 29: "10", 30: "11",
-        31: "12", 32: "12L", 33: "13", 34: "14", 35: "15", 36: "16",
+        31: "12", 32: "12L", 33: "13", 34: "14", 35: "15", 36: "16", 37: "17",
     }
 
-    def _read_avd_version(self, avd_name: str) -> tuple[str, str]:
-        """Read OS version from an AVD's config. Returns (os_version, runtime)."""
+    @classmethod
+    def _version_for_api(cls, api: int, raw: str) -> str:
+        """The release a shut-down AVD will report once running. Past the
+        table, API N has been release N - 20 every year since Android 11
+        (API 30), so a newer image reads as its release rather than as its
+        raw API number, which disagreed with the same image running (#582)."""
+        if api in cls._API_TO_VERSION:
+            return cls._API_TO_VERSION[api]
+        if api > max(cls._API_TO_VERSION):
+            return str(api - 20)
+        return raw
+
+    def _avd_config(self, avd_name: str) -> tuple[Path, Path]:
+        """An AVD's ``config.ini`` (which may not exist) and its ``.ini``."""
         avd_dir = Path.home() / ".android" / "avd"
 
         # The AVD directory may not match the AVD name (e.g. "Medium_Phone_API_36.1"
@@ -241,6 +253,29 @@ class AdbBackend:
 
         if config_path is None:
             config_path = avd_dir / f"{avd_name}.avd" / "config.ini"
+        return config_path, ini_path
+
+    def _read_avd_model(self, avd_name: str) -> str:
+        """The hardware profile an AVD emulates, as a model: ``hw.device.name
+        = pixel_7`` is "Pixel 7". "" when it does not say. A running
+        emulator's own ``ro.product.model`` is the image's ("sdk gphone64
+        arm64"), which says nothing about what it is (#582)."""
+        config_path, _ = self._avd_config(avd_name)
+        try:
+            for line in config_path.read_text().splitlines():
+                if line.startswith("hw.device.name="):
+                    profile = line.split("=", 1)[1].strip()
+                    # "pixel_9_pro_xl" is "Pixel 9 Pro XL".
+                    return " ".join(w.upper() if w.isalpha() and len(w) <= 2
+                                    else w[:1].upper() + w[1:]
+                                    for w in profile.split("_") if w)
+        except (OSError, UnicodeDecodeError):
+            pass
+        return ""
+
+    def _read_avd_version(self, avd_name: str) -> tuple[str, str]:
+        """Read OS version from an AVD's config. Returns (os_version, runtime)."""
+        config_path, ini_path = self._avd_config(avd_name)
 
         # Fall back to parsing target from .ini if no config.ini found
         if not config_path.exists():
@@ -283,7 +318,7 @@ class AdbBackend:
         tag_label = self._TAG_LABELS.get(tag_id, "")
         try:
             api = int(api_str)
-            version = self._API_TO_VERSION.get(api, api_str)
+            version = self._version_for_api(api, api_str)
             runtime = f"API {api}"
             if tag_label:
                 runtime = f"{runtime} · {tag_label}"
@@ -291,7 +326,7 @@ class AdbBackend:
         except ValueError:
             try:
                 api = int(api_str.split(".")[0])
-                version = self._API_TO_VERSION.get(api, api_str)
+                version = self._version_for_api(api, api_str)
                 runtime = f"API {api_str}"
                 if tag_label:
                     runtime = f"{runtime} · {tag_label}"
@@ -584,6 +619,9 @@ class AdbBackend:
                 connection_type=connection_type,
                 device_family="Android",
                 avd_name=avd,
+                # What it is (#582): the AVD's hardware profile for an
+                # emulator, the product model for a phone.
+                model=(self._read_avd_model(avd) if avd else "") if is_emulator else model,
             ))
 
         # Clean up cache for serials no longer in adb devices
@@ -607,6 +645,7 @@ class AdbBackend:
                     is_available=True,
                     device_family="Android",
                     avd_name=avd_name,
+                    model=self._read_avd_model(avd_name),
                 ))
 
         return devices
