@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Android devices carry `model`, and are found by it (#582).** An emulator's model is its AVD's hardware profile ("Pixel 7"), a phone's its product model. Names match with underscores as spaces, so "Pixel 7" finds the AVD `Pixel_7_API_34`. `list_devices` now matches models as well as names, as reservations do.
 - **`get_performance`: how hard one app is working (#245).** CPU (percent of one core, over a sample of 0.2–5 s), memory and thread count for a running app, on iOS simulators, physical iOS devices and Android.
   - **iOS simulators** are read from the Mac with `ps` and `footprint`.
-  - **Physical iOS devices** use the Instruments channel over tunneld, which needs pymobiledevice3 11 or later in quern's environment (what setup installs). They also return the whole display's frames per second.
+  - **Physical iOS devices** use the Instruments channel over tunneld, which needs pymobiledevice3 9.4.4 or later in quern's environment. The dependency floor is raised to 9.4.4 to match: below 9.0 the API is missing, and before 9.4.4 a call fails partway through. They also return the whole display's frames per second.
   - **Android** uses `/proc`, `dumpsys meminfo` and `dumpsys gfxinfo`, and also returns frame counts, janky frames and frame-time percentiles. On Android 12+ the deadline-based jank count is reported rather than the legacy one, which read several times higher on an emulator.
   - **A metric that can't be read is null, with the reason in `unavailable`**, never a zero. An app that isn't running answers `running: false`; when quern can't tell, it answers with an error instead. `sample_seconds` in the answer is the window actually measured.
 

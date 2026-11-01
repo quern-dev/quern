@@ -145,10 +145,11 @@ reviews:
 
     - path: "server/device/web/webinspector.py"
       instructions: |
-        `pymobiledevice3>=8.0` is a hard floor with a specific reason:
+        This file needs `pymobiledevice3>=8.0`, for a specific reason:
         `ServiceConnection.send_plist`/`recv_plist` are synchronous in 7.x and
-        became coroutines in 8.0.0, so the `await`s here fail against 7.x. Do not
-        soften the floor, and do not restate the rationale from memory — it was
+        became coroutines in 8.0.0, so the `await`s here fail against 7.x. (The
+        project floor in pyproject.toml is higher, 9.4.4, for get_performance's
+        DVT use; see the comment there.) Do not soften the floor, and do not restate the rationale from memory — it was
         written backwards once and the version boundary was wrong before it was
         checked empirically.
 

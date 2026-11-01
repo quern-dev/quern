@@ -431,7 +431,7 @@ def _pmd3() -> SimpleNamespace:
         from pymobiledevice3.services.dvt.instruments.sysmontap import Sysmontap
     except ImportError as e:
         raise DeviceError(
-            f"get_performance on a physical device needs pymobiledevice3 11 or "
+            f"get_performance on a physical device needs pymobiledevice3 9.4.4 or "
             f"later in quern's environment ({e})", tool="pymobiledevice3") from e
     return SimpleNamespace(
         RemoteServiceDiscoveryService=RemoteServiceDiscoveryService, DvtProvider=DvtProvider,
