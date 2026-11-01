@@ -37,7 +37,7 @@ A switch is made only once the agent's session is live on the new server. If tha
 
 ## What follows your agent to the new server
 
-- **Its mocks.** The mock responses your agent set are removed from the server it leaves and set up again on the simulators of its first reservation on the new one. That reservation's answer lists the new rule ids, and anything that couldn't be set up yet -- for example because the new server's proxy isn't running -- waits for a later reservation.
+- **Its mocks.** The mock responses your agent set are removed from the server it leaves and set up again on the devices of its first reservation on the new one -- a mock scoped to a simulator on its simulators, one scoped to an Android device on its Android devices. That reservation's answer lists the new rule ids, and anything that couldn't be set up yet -- for example because the new server's proxy isn't running -- waits for a later reservation.
 - **Its session capture.** Apps it asked to capture with `add_session_capture` are captured again on the newly reserved simulators.
 - **Your project's knowledge base.** If your project has one (`.quern/knowledge`), it's loaded on the new server for your agent's session, so screen identification keeps working.
 
@@ -54,4 +54,4 @@ The answer to `use_remote` also says whether the new server's proxy is running, 
 
 - **Leaving a server that has stopped answering** takes one timeout, about five seconds, not more. Anything that couldn't be cleaned up there is named.
 - **Your agent's devices are released if it disappears.** If its connection drops -- the laptop lid closes, the network goes -- the remote server keeps its devices for a grace period (three minutes by default) so it can reconnect, then frees them.
-- **Android emulators** on a remote server can be driven, but reservation, matching, mocks and capture for them are still being completed ([#582](https://github.com/quern-dev/quern/issues/582)). iOS simulators are fully supported.
+- **Android emulators and phones** on a remote server can be reserved, matched by platform, and mocked one device at a time; capture for them is still being completed ([#582](https://github.com/quern-dev/quern/issues/582)). iOS simulators are fully supported.

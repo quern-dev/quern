@@ -319,7 +319,14 @@ def _is_emulator_process(pid: int) -> bool:
     return "qemu" in command.lower() and "-avd" in command
 
 
-def _emulator_serial_for_pid(pid: int) -> str | None:
+#: Which emulator a process is, for mock scopes (#582), by (pid, start time):
+#: a reused pid is a different key, so nothing a later process gets can be
+#: decided from what an earlier one was -- the rule the simulator path keeps,
+#: now that this decides which requests are mocked, not only attribution.
+_scope_serials: OrderedDict[tuple[int, tuple[int, int]], str] = OrderedDict()
+
+
+def _emulator_serial_for_pid(pid: int, *, use_cache: bool = True) -> str | None:
     """`emulator-5554` for the QEMU process serving that emulator.
 
     An emulator's serial *is* its console port, and the process listens on it,
@@ -332,7 +339,7 @@ def _emulator_serial_for_pid(pid: int) -> str | None:
     """
     now = time.monotonic()
     with _cache_lock:
-        hit = _emulator_serial_cache.get(pid)
+        hit = _emulator_serial_cache.get(pid) if use_cache else None
         if hit is not None and now - hit[1] < _SERIAL_CACHE_TTL:
             return hit[0]
     try:
@@ -455,6 +462,112 @@ def _mock_marker(flow: Any) -> dict | None:
         return None
     mark = meta.get(_MOCK_METADATA_KEY)
     return mark if isinstance(mark, dict) and mark.get("rule_id") else None
+
+
+#: An Android-scoped rule's device could not be told without waiting (#582).
+_UNDECIDED = object()
+
+#: Where a request held for its Android device is resolved: off the event
+#: loop, and off the socket-lookup pool whose work it waits for.
+_SCOPE_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="quern-scope")
+
+#: How long a held request waits for its connection's process lookup before
+#: it is let through unmocked -- "could not tell" fails closed, as for
+#: simulators. lsof was measured at ~40ms; this is the outlier bound.
+_SCOPE_WAIT_S = 2.0
+
+_UUID_SCOPE_RE = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$")
+
+
+def _flow_client_ip(flow: Any) -> str | None:
+    peer = getattr(getattr(flow, "client_conn", None), "peername", None)
+    return peer[0] if isinstance(peer, (tuple, list)) and peer else None
+
+
+def _scope_matches(rule: dict, flow: Any, requester: dict) -> Any:
+    """Whether a scoped rule's device made this request: True, False, or
+    `_UNDECIDED` when an emulator's process cannot be told without waiting.
+
+    - A simulator (a UUID scope): its process tree, as before.
+    - A physical Android phone (the rule carries ``client_ip``): its Wi-Fi
+      address, which reaches the proxy as the connection's peer (#582).
+    - An emulator (an ``emulator-NNNN`` scope): the QEMU process that opened
+      the connection, the attribution its flows already carry (#582).
+
+    ``requester`` caches what was resolved for the flow, so several scoped
+    rules ask once. Every "cannot tell" is False -- the rule fails closed.
+    """
+    scope = rule["simulator_udid"]
+    if rule.get("client_ip"):
+        return _flow_client_ip(flow) == rule["client_ip"]
+    if _UUID_SCOPE_RE.match(scope):
+        if "simulator" not in requester:
+            requester["simulator"] = _flow_simulator_udid(flow)
+        sim = requester["simulator"]
+        return sim is not None and sim.upper() == scope
+    if "emulator" not in requester:
+        requester["emulator"] = _flow_emulator_serial_now(flow)
+    serial = requester["emulator"]
+    return serial if serial is _UNDECIDED else serial == scope
+
+
+def _flow_emulator_serial_now(flow: Any) -> Any:
+    """The emulator serial a request came from, if it can be told without
+    waiting; None when it is not an emulator's; `_UNDECIDED` while the
+    connection's lookup runs, or when the serial needs an lsof not yet run
+    for this process.
+
+    A process that libproc names, and not as QEMU, is decided here: no
+    simulator or Mac process is held, or pays an lsof, for an emulator's
+    rule (review). Remote peers -- phones -- never reach the lookup at all,
+    so they settle as no process, and so not an emulator."""
+    try:
+        client = getattr(flow, "client_conn", None)
+        client_id = getattr(client, "id", None) if client else None
+        if _lookup_in_progress(client_id) is not None:
+            return _UNDECIDED
+        info = _settled_process_info(client_id)
+        pid = info.get("pid") if info else None
+        if pid is None:
+            return None
+        name = _proc_name_fast(pid)
+        if name is not None and "qemu" not in name.lower():
+            return None
+        start = _proc_start_fast(pid)
+        if start is not None:
+            with _cache_lock:
+                serial = _scope_serials.get((pid, start))
+            if serial is not None:
+                return serial
+        return _UNDECIDED
+    except Exception:
+        return None
+
+
+def _flow_emulator_serial_waiting(flow: Any) -> str | None:
+    """The emulator serial a request came from, waiting for the lookup.
+    Worker threads only. Looked up fresh -- not from the pid-only cache --
+    and remembered by (pid, start time) for this process's later requests."""
+    try:
+        client = getattr(flow, "client_conn", None)
+        pid, _name = _peek_process_info(getattr(client, "id", None) if client else None,
+                                        wait=_SCOPE_WAIT_S)
+        if pid is None:
+            return None
+        name = _proc_name_fast(pid)
+        if name is not None and "qemu" not in name.lower():
+            return None
+        start = _proc_start_fast(pid)
+        serial = _emulator_serial_for_pid(pid, use_cache=False)
+        if serial is not None and start is not None:
+            with _cache_lock:
+                _scope_serials[(pid, start)] = serial
+                while len(_scope_serials) > _SERIAL_CACHE_MAX:
+                    _scope_serials.popitem(last=False)
+        return serial
+    except Exception:
+        return None
 
 
 def _settled_process_info(client_id: str | None) -> dict | None:
@@ -1293,29 +1406,36 @@ class IOSDebugAddon:
         if self._is_bypassed(flow.request.pretty_host):
             return
 
+        # A held request is in flight too (#364); a mocked or deferred one is
+        # reported by its response, or once its device is known.
+        if self._answer(flow, {}) in ("passed", "held"):
+            self._report_start(flow)
+
+    def _answer(self, flow: http.HTTPFlow, requester: dict) -> str:
+        """Mock or hold the request if a rule says so: "mocked", "held", or
+        "deferred" (resolving its Android device off the loop, #582), else
+        "passed" -- on through to the upstream server."""
         # 1. Check mock rules first (mock takes priority over intercept)
         with self._mock_lock:
-            # Rules scoped to a simulator first, then unscoped ones, each in
+            # Rules scoped to a device first, then unscoped ones, each in
             # the order they were set. A scoped rule is the more specific: if
-            # a catch-all set earlier came first, the simulator it was written
+            # a catch-all set earlier came first, the device it was written
             # for would never see it, with nothing to say why.
             rules = sorted(self._mock_rules, key=lambda r: r.get("simulator_udid") is None)
-        # Resolved at most once per request, and only when a scoped rule's
-        # pattern has already matched: most requests meet no scoped rule.
-        unresolved = object()
-        requester: Any = unresolved
         for rule in rules:
             compiled = rule["compiled"]
             if not (compiled and compiled(flow)):
                 continue
             scope = rule.get("simulator_udid")
             if scope is not None:
-                if requester is unresolved:
-                    requester = _flow_simulator_udid(flow)
-                # Fails closed: a request whose simulator cannot be told
-                # matches no scoped rule. "Only simulator A" must never land
-                # on simulator B because the lookup came back empty.
-                if requester is None or requester.upper() != scope:
+                matched = _scope_matches(rule, flow, requester)
+                if matched is _UNDECIDED:
+                    self._defer(flow, requester)
+                    return "deferred"
+                # Fails closed: a request whose device cannot be told
+                # matches no scoped rule. "Only device A" must never land
+                # on device B because the lookup came back empty.
+                if not matched:
                     continue
             resp = rule["response"]
             flow.response = http.Response.make(
@@ -1329,7 +1449,7 @@ class IOSDebugAddon:
             # stored every mocked request twice, the copy from here with no
             # simulator, process or address, and neither saying it was a mock.
             _mark_mocked(flow, rule["rule_id"], scope)
-            return
+            return "mocked"
 
         # 2. Check intercept pattern
         with self._held_lock:
@@ -1343,7 +1463,58 @@ class IOSDebugAddon:
                     "timestamp": time.time(),
                     "request": _serialize_request(flow.request),
                 })
+                return "held"
+        return "passed"
 
+    def _defer(self, flow: http.HTTPFlow, requester: dict) -> None:
+        """Hold a request whose emulator cannot be told yet, resolve it on a
+        worker, and answer it on the event loop once known (#582). The hook
+        must not wait -- that stalls every connection -- and an emulator's
+        connection is identified by an lsof that the first request on it
+        often beats. Anything that goes wrong lets the request through
+        unmocked, as an unattributable request always is."""
+        import asyncio  # here, not at the top: see `_pid_from_local_socket`
+
+        flow.intercept()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        def finish(serial: str | None) -> None:
+            requester["emulator"] = serial
+            # Decided while the lookup was running, it has settled now: a
+            # simulator rule ahead of the emulator's is asked again (review).
+            requester.pop("simulator", None)
+            try:
+                outcome = self._answer(flow, requester)
+            except Exception:
+                # Through unmocked, as promised: not with a response half-set.
+                outcome = "passed"
+                flow.response = None
+                if isinstance(getattr(flow, "metadata", None), dict):
+                    flow.metadata.pop(_MOCK_METADATA_KEY, None)
+            if outcome in ("passed", "held"):
+                with contextlib.suppress(Exception):
+                    self._report_start(flow)
+            # A held flow stays held, for release_flow; the rest go on.
+            if outcome in ("passed", "mocked"):
+                flow.resume()
+
+        def resolve() -> None:
+            serial = _flow_emulator_serial_waiting(flow)
+            if loop is not None:
+                loop.call_soon_threadsafe(finish, serial)
+            else:
+                finish(serial)
+
+        try:
+            _SCOPE_POOL.submit(resolve)
+        except RuntimeError:          # the pool is shut down: mitmdump is exiting
+            flow.resume()
+
+    def _report_start(self, flow: http.HTTPFlow) -> None:
+        """Report a request that is in flight -- passed on, or held -- as started."""
         # 3. Say it started (#364). A flow is otherwise reported only when its
         # response arrives or it errors, so a request the server never
         # answers is invisible while it hangs -- the one a run most needs.
@@ -1698,10 +1869,15 @@ class IOSDebugAddon:
         rule_id = cmd.get("rule_id", f"mock_{uuid.uuid4().hex[:8]}")
         pattern = cmd.get("pattern", "")
         response = cmd.get("response", {})
-        # Upper-cased once here, so the comparison per request is a plain
-        # equality against what `_resolve_simulator_udid` returns.
+        # A simulator's UDID upper-cased once here, so the comparison per
+        # request is a plain equality against what `_resolve_simulator_udid`
+        # returns. An Android serial is kept as adb spells it (#582).
         raw_scope = cmd.get("simulator_udid")
-        scope = raw_scope.upper() if isinstance(raw_scope, str) and raw_scope else None
+        scope = raw_scope if isinstance(raw_scope, str) and raw_scope else None
+        if scope and _UUID_SCOPE_RE.match(scope):
+            scope = scope.upper()
+        # A physical Android phone is told by its Wi-Fi address (#582).
+        client_ip = cmd.get("client_ip") if scope else None
 
         try:
             compiled = flowfilter.parse(pattern)
@@ -1723,6 +1899,7 @@ class IOSDebugAddon:
             "compiled": compiled,
             "response": response,
             "simulator_udid": scope,
+            "client_ip": client_ip if isinstance(client_ip, str) and client_ip else None,
         }
         with self._mock_lock:
             # Replaced where it stands, so an update does not move a rule

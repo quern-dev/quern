@@ -549,6 +549,7 @@ class ProxyAdapter(BaseSourceAdapter):
                     "pattern": rule["pattern"],
                     "response": rule["response"],
                     "simulator_udid": rule.get("simulator_udid"),
+                    "client_ip": rule.get("client_ip"),
                 })
             if rules._bypass_patterns:
                 await self.send_command({
@@ -846,11 +847,14 @@ class ProxyAdapter(BaseSourceAdapter):
         self, pattern: str, response: dict,
         rule_id: str | None = None,
         simulator_udid: str | None = None,
+        client_ip: str | None = None,
     ) -> str:
         """Add a mock response rule. Returns the rule_id.
 
-        `simulator_udid` scopes the rule to one simulator's requests; the
-        addon fails closed on any request it cannot attribute.
+        `simulator_udid` scopes the rule to one device's requests -- a
+        simulator, or an Android device by its serial (#582); `client_ip` is
+        how a physical Android phone's are told. The addon fails closed on
+        any request it cannot attribute.
 
         Raises ValueError if pattern is invalid.
         """
@@ -860,6 +864,7 @@ class ProxyAdapter(BaseSourceAdapter):
         self._mock_rules.append({
             "rule_id": rule_id, "pattern": pattern,
             "response": response, "simulator_udid": simulator_udid,
+            "client_ip": client_ip,
         })
         await self.broadcast({
             "action": "set_mock",
@@ -867,6 +872,7 @@ class ProxyAdapter(BaseSourceAdapter):
             "pattern": pattern,
             "response": response,
             "simulator_udid": simulator_udid,
+            "client_ip": client_ip,
         })
         return rule_id
 
@@ -877,6 +883,7 @@ class ProxyAdapter(BaseSourceAdapter):
         simulator_udid: str | None = None,
         *,
         scope_given: bool = False,
+        client_ip: str | None = None,
     ) -> dict:
         """Update an existing mock rule. Returns the updated rule.
 
@@ -897,11 +904,14 @@ class ProxyAdapter(BaseSourceAdapter):
         new_response = ({**rule["response"], **response} if response is not None
                         else rule["response"])
         new_scope = simulator_udid if scope_given else rule.get("simulator_udid")
+        # A phone's address goes with its scope: a new scope brings its own.
+        new_client_ip = client_ip if scope_given else rule.get("client_ip")
         if pattern is not None:
             validate_filter_pattern(new_pattern)
         updated = {
             "rule_id": rule_id, "pattern": new_pattern,
             "response": new_response, "simulator_udid": new_scope,
+            "client_ip": new_client_ip,
         }
         # Replaced in place, here and in the addon, which replaces a rule_id
         # it already holds. Clearing and re-adding moved the rule to the end,
@@ -914,6 +924,7 @@ class ProxyAdapter(BaseSourceAdapter):
             "pattern": new_pattern,
             "response": new_response,
             "simulator_udid": new_scope,
+            "client_ip": new_client_ip,
         })
         return updated
 

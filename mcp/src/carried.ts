@@ -29,8 +29,11 @@ const RESPONSE_DEFAULTS = { status_code: 200, headers: { "content-type": "applic
 interface Mock {
   pattern: string;
   response: Record<string, unknown>;
-  /** Scoped to one simulator where it was set, or mocking every device. */
+  /** Scoped to one device where it was set, or mocking every device. */
   scoped: boolean;
+  /** The kind of device it was scoped to (#582): its copies go to the same
+   * kind on the next server. Unset for an unscoped mock. */
+  platform?: "ios" | "android";
   /** The rules standing for it on the server now: simulator (null: every device) → rule id. */
   rules: Map<string | null, string>;
   /** Where setting it up failed on this server: retried when that simulator is reserved. */
@@ -87,11 +90,20 @@ function mockOf(ruleId: string): Mock | undefined {
   return mocks.find((m) => [...m.rules.values()].includes(ruleId));
 }
 
+/** The platform a scope is on, as the server's answer says (#582). A server
+ * that does not say only accepted simulators, so a scope with none is iOS. */
+function scopePlatform(scope: string | null, said?: unknown): "ios" | "android" | undefined {
+  if (scope === null) return undefined;
+  return said === "android" ? "android" : "ios";
+}
+
 export function recordMock(ruleId: string, mock: {
   pattern: string; response: Record<string, unknown>; simulator_udid: string | null;
+  platform?: unknown;
 }): void {
   mocks.push({ pattern: mock.pattern, response: { ...mock.response },
                scoped: mock.simulator_udid !== null,
+               platform: scopePlatform(mock.simulator_udid, mock.platform),
                rules: new Map([[mock.simulator_udid, ruleId]]),
                failed: new Set(), removed: new Set(), waiting: false });
 }
@@ -102,6 +114,7 @@ export function recordMock(ruleId: string, mock: {
  * splits off the copy. */
 export function updateMock(ruleId: string, change: {
   pattern?: string; response?: Record<string, unknown>; simulator_udid?: string | null;
+  platform?: unknown;
 }): void {
   let mock = mockOf(ruleId);
   if (!mock) return;
@@ -117,6 +130,7 @@ export function updateMock(ruleId: string, change: {
   if (change.simulator_udid !== undefined) {
     mock.rules = new Map([[change.simulator_udid, ruleId]]);
     mock.scoped = change.simulator_udid !== null;
+    mock.platform = scopePlatform(change.simulator_udid, change.platform);
   }
 }
 
@@ -330,8 +344,9 @@ function canonical(value: unknown): string {
 const SETUP_TIMEOUT_MS = 15_000;
 
 /** After a reservation on the server switched to: set up what was moved on
- * the simulators just reserved. Each mock and capture is set up once per
- * simulator; what fails stays waiting for that simulator alone, so a retry
+ * the devices just reserved -- a mock on the kind it was scoped to there
+ * (simulators, or Android emulators and phones, #582), a capture on
+ * simulators. Each mock and capture is set up once per device; what fails stays waiting for that simulator alone, so a retry
  * never doubles what already stands (review). Call it inside betweenSwitches,
  * so two reservations, or a reservation and a switch, never apply it at once.
  * Undefined when nothing was waiting. */
@@ -341,6 +356,8 @@ export async function applyOnReserve(reserved: Reserved[]): Promise<Record<strin
   if (!moved.length && !movedCaptures.length) return undefined;
   const simulators = reserved.filter((d) => d.device_type === "simulator" && d.udid)
     .map((d) => String(d.udid));
+  const androids = reserved.filter((d) => (d.device_type === "android_emulator" ||
+    d.device_type === "android_device") && d.udid).map((d) => String(d.udid));
   const everyDevice = !isClientKey(discoverServer().apiKey);
   const created: { pattern: string; rule_id: string; simulator_udid: string | null }[] = [];
   const failed: { pattern?: string; processes?: string[]; simulator_udid: string | null; error: string }[] = [];
@@ -363,10 +380,19 @@ export async function applyOnReserve(reserved: Reserved[]): Promise<Record<strin
     return onServer.find((r) => !taken.has(r.rule_id) && r.pattern === mock.pattern &&
       (r.simulator_udid ?? null) === scope && canonical(r.response) === want)?.rule_id;
   };
-  for (const mock of moved) {
+  // Scoped mocks first. For a key that may not mock every device, an
+  // unscoped mock becomes one scoped rule per device, and the proxy answers
+  // with the first rule set for that device -- so one recreated ahead of a
+  // device's own mock would shadow it (CodeRabbit).
+  const ordered = everyDevice ? moved
+    : [...moved.filter((m) => m.scoped), ...moved.filter((m) => !m.scoped)];
+  for (const mock of ordered) {
     // Unscoped where it was, and this key may mock every device: unscoped.
-    // Otherwise one rule per simulator just reserved.
-    const scopes: (string | null)[] = !mock.scoped && everyDevice ? [null] : simulators;
+    // Unscoped, for a key that may not: one rule per device just reserved.
+    // Scoped: one per device of the kind it was scoped to.
+    const scopes: (string | null)[] = !mock.scoped
+      ? (everyDevice ? [null] : [...simulators, ...androids])
+      : (mock.platform === "android" ? androids : simulators);
     for (const scope of scopes) {
       // Set up there already, or removed there by the agent: left alone.
       if (mock.rules.has(scope) || mock.removed.has(scope)) continue;
@@ -442,9 +468,12 @@ export async function applyOnReserve(reserved: Reserved[]): Promise<Record<strin
   const left = pending();
   if (left.mocks || left.session_capture) {
     out.still_waiting = left;
-    out.note = simulators.length
-      ? "Some could not be set up here (see failed): they are tried again at your next reservation."
-      : "Mocks and session capture attach to simulators: they wait for a reservation that includes one.";
+    out.note = simulators.length || androids.length
+      ? "Some could not be set up here (see failed), or wait for another kind of device: " +
+        "they are tried again at your next reservation."
+      : "Mocks attach to the kind of device they were scoped to -- simulators, or Android " +
+        "emulators and phones -- and session capture to simulators: they wait for a " +
+        "reservation that includes one.";
   }
   return out;
 }

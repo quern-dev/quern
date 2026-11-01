@@ -705,14 +705,14 @@ class FakeMockAdapter:
     def __init__(self):
         self._mock_rules = []
 
-    async def set_mock(self, pattern, response, simulator_udid=None):
+    async def set_mock(self, pattern, response, simulator_udid=None, client_ip=None):
         rid = f"r{len(self._mock_rules) + 1}"
         self._mock_rules.append({"rule_id": rid, "pattern": pattern, "response": response,
                                  "simulator_udid": simulator_udid})
         return rid
 
     async def update_mock(self, rule_id, pattern=None, response=None, simulator_udid=None,
-                          scope_given=False):
+                          scope_given=False, client_ip=None):
         rule = next(r for r in self._mock_rules if r["rule_id"] == rule_id)
         if scope_given:
             rule["simulator_udid"] = simulator_udid
@@ -745,6 +745,42 @@ class TestReviewFindings:
         assert r.status_code == 403 and "client_ip" in r.json()["detail"]
         ok = c.post("/api/v1/proxy/capture/start", headers=_h(alice), json={"simulator_udid": SIM})
         assert ok.status_code == 200, ok.text
+
+    def test_a_client_can_mock_the_android_device_it_holds_and_only_that(self, registry,
+                                                                         keys):
+        """#582: a client could not mock Android at all -- an Android scope was
+        a 422 and an unscoped rule is owner-only."""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from server.api.proxy_intercept import router as intercept_router
+        from server.models import DeviceType
+
+        alice = keys.add("alice")
+        app = FastAPI()
+        app.state.sessions, app.state.clients = registry, keys
+        app.state.proxy_adapter = FakeMockAdapter()
+        app.state.proxy_adapter.listen_port = 9101
+        app.state.device_controller = SimpleNamespace(
+            _active_udid=None, list_devices=AsyncMock(return_value=[]),
+            _device_type=lambda s: DeviceType.ANDROID_EMULATOR if s.startswith("emulator-")
+            else None,
+            adb=SimpleNamespace(is_console_serial=lambda s: s.startswith("emulator-"),
+                                get_http_proxy=AsyncMock(return_value="10.0.0.2:9101")))
+        app.include_router(intercept_router)
+        app.add_middleware(AccessMiddleware)
+        app.add_middleware(ScopeMiddleware)
+        app.add_middleware(APIKeyMiddleware, api_key=KEY, clients=keys)
+        app.add_middleware(SessionMiddleware)
+        _hold(registry, "alice:s1", "client:alice", "emulator-5554")
+        with TestClient(app) as c:
+            r = c.post("/api/v1/proxy/mocks", headers=_h(alice), json={
+                "pattern": "~d x.test", "status_code": 500, "simulator_udid": "emulator-5554"})
+            assert r.status_code == 200, r.text
+            r = c.post("/api/v1/proxy/mocks", headers=_h(alice), json={
+                "pattern": "~d x.test", "status_code": 500, "simulator_udid": "emulator-5556"})
+            assert r.status_code in (403, 423), r.text
+            registry.release("alice:s1")
 
     def test_a_client_cannot_unscope_its_own_mock_rule(self, registry, keys):
         from types import SimpleNamespace

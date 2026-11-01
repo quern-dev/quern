@@ -1148,3 +1148,30 @@ async def test_the_release_loop_survives_a_failure_with_no_udid(monkeypatch):
     app = SimpleNamespace(state=SimpleNamespace(sessions=registry, device_controller=None))
     await sessions_api.run_release_policies(app)        # does not raise
     assert registry.holder_of(ALPHA) is None
+
+
+async def test_a_clients_mock_on_its_emulator_ends_with_its_hold():
+    """#582: a mock scoped to an Android serial is a client's, and goes when
+    its hold does, as a simulator-scoped one always has."""
+    from server.api import sessions as sessions_api
+
+    removed = []
+
+    async def clear_mock(rule_id):
+        removed.append(rule_id)
+        return 1
+
+    adapter = SimpleNamespace(clear_mock=clear_mock, _mock_rules=[
+        {"rule_id": "r-emu", "simulator_udid": "emulator-5554"},
+        {"rule_id": "r-other", "simulator_udid": "emulator-5556"}])
+    app = SimpleNamespace(state=SimpleNamespace(
+        session_proxies=None, proxy_adapter=adapter, recordings=None,
+        mock_owners={"r-emu": "client:a", "r-other": "client:a"}))
+    registry = SimpleNamespace(holder_of=lambda udid: None)
+    session = SimpleNamespace(id="client:a/s1", principal="client:a",
+                              reservations=["emulator-5554"])
+
+    actions = await sessions_api._end_client_work(app, registry, session)
+    assert removed == ["r-emu"]
+    assert {"udid": "emulator-5554", "action": "mock_removed", "ok": True,
+            "rule_id": "r-emu"} in actions

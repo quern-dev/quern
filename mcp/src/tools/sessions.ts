@@ -28,7 +28,7 @@ Give exactly one of: udids; count (optionally with device_type/os_version/name/d
 
 Your reservation lasts as long as this MCP session: released when it ends, and kept for a grace period (default 3 minutes) if the connection to quern drops, so a network blip costs nothing. If quern restarts, reservations are lost and your next tool result will end with a 'quern session notice:' line saying so -- reserve again.
 
-After a use_remote switch, the first reservation that includes simulators also sets up the mocks and session capture you moved: its answer carries "carried" -- mocks_recreated (the new rule ids), session_capture_restored, failed, and still_waiting for what a later reservation will try again.`,
+After a use_remote switch, the first reservation that includes the right devices also sets up the mocks and session capture you moved -- a mock on the kind of device it was scoped to (simulators, or Android emulators and phones), session capture on simulators: its answer carries "carried" -- mocks_recreated (the new rule ids), session_capture_restored, failed, and still_waiting for what a later reservation will try again.`,
     inputSchema: strictParams({
       udids: z.array(z.string()).optional().describe("Exactly these devices"),
       count: z.number().int().min(1).max(64).optional().describe("How many devices to pick (default 1 with criteria)"),
