@@ -237,8 +237,9 @@ class TestRun:
 
         monkeypatch.setattr(performance.asyncio, "create_subprocess_exec", spy)
         task = asyncio.create_task(performance._run(*_sleeper(30), timeout=60))
-        while not spawned:
-            await asyncio.sleep(0.01)
+        async with asyncio.timeout(5):  # a _run that dies before spawning fails, not hangs
+            while not spawned:
+                await asyncio.sleep(0.01)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -328,7 +329,8 @@ class TestSimulator:
 
         simctl.running_pid = hang
         with pytest.raises(DeviceError, match="did not answer"):
-            await performance.simulator_snapshot(simctl, "SIM", "com.x", 0.2)
+            async with asyncio.timeout(5):  # outlasts the guard under test; fails if it is gone
+                await performance.simulator_snapshot(simctl, "SIM", "com.x", 0.2)
 
     async def test_a_failed_footprint_says_why(self, monkeypatch, no_sleep, clock):
         host = FakeHost(footprint=(1, "", "footprint: task_for_pid failed (os/kern) failure"))
@@ -710,12 +712,15 @@ class TestDevice:
         phone.connect_error = None
         monkeypatch.setattr(FakeRsd, "connect", lambda self: hang())
         with pytest.raises(DeviceError, match="did not answer within 0.2s"):
-            await performance.device_snapshot("B34C4EE9-0000", "com.x", 0.2)
+            async with asyncio.timeout(5):  # outlasts the guard under test; fails if it is gone
+                await performance.device_snapshot("B34C4EE9-0000", "com.x", 0.2)
         assert FakeRsd.instances[0].closed
 
     async def test_no_tunnel_is_an_error_naming_the_fix(self, monkeypatch):
         from server.device.ios import pmd3, tunneld
 
+        # Whatever pymobiledevice3 is installed, this is about the tunnel check.
+        monkeypatch.setattr(performance, "_pmd3", lambda: SimpleNamespace())
         monkeypatch.setattr(tunneld, "is_tunneld_running", AsyncMock(return_value=False))
         monkeypatch.setattr(pmd3, "_recover_tunneld_if_wedged", AsyncMock(return_value=False))
         with pytest.raises(DeviceError, match="tunneld is not serving"):
