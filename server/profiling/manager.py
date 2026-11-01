@@ -60,6 +60,10 @@ FINALIZE_TIMEOUT_S = 180.0
 EXPORT_TIMEOUT_S = 120.0
 #: Exports a summary can run: the table of contents and four tables.
 EXPORTS_MAX = 5
+#: How long stop() waits for the summary before answering 504 ("ask again
+#: with get_profile"). Below the ~300 s a client's request waits for headers,
+#: so the caller gets that answer instead of a dropped connection.
+STOP_WAIT_S = 240.0
 #: Hangs and hitches listed in a summary; the count says how many there were.
 LIST_LIMIT = 50
 
@@ -187,7 +191,9 @@ def _tail(path: Path, lines: int = 6) -> str:
 
 
 def _command_of(pid: int) -> str | None:
-    """`ps`'s command line for `pid`, or None if it has none (gone, or ps failed).
+    """`ps`'s command line for `pid`: "" when there is no such process, and
+    None when ps could not be asked -- not the same answer, so not the same
+    value.
 
     `-ww`, for the whole line: procps cuts it to 80 columns when its output is
     not a terminal, which drops the --output path the match depends on (the
@@ -197,7 +203,10 @@ def _command_of(pid: int) -> str | None:
                            capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
         return None
-    return r.stdout.strip() or None if r.returncode == 0 else None
+    if r.returncode == 0:
+        return r.stdout.strip()
+    # ps exits 1, printing nothing, for a pid that is not running.
+    return "" if r.returncode == 1 and not r.stdout.strip() and not r.stderr.strip() else None
 
 
 def _records_into(command: str | None, trace: Path) -> bool:
@@ -330,8 +339,14 @@ class ProfileManager:
         if profile.state == "recording" and profile.stop_reason is None \
                 and not profile.saving():
             # Once, and never into a save: the reason is the first one given.
-            profile.stop_reason = reason
-            await self._signal(profile, signal.SIGINT)
+            sent = await self._signal(profile, signal.SIGINT)
+            if sent == "sent":
+                profile.stop_reason = reason
+            elif sent == "unknown":
+                raise ProfileError(
+                    f"could not tell whether xctrace for {profile_id} is still running "
+                    "(ps did not answer); ask again", 503)
+            # "gone": it has ended by itself, and the watch is finishing it.
         return profile
 
     async def stop(self, profile_id: str, reason: str = "stopped") -> Profile:
@@ -339,22 +354,34 @@ class ProfileManager:
         profile = await self.request_stop(profile_id, reason)
         if profile.state in ACTIVE:
             try:
-                await asyncio.wait_for(asyncio.shield(profile.done.wait()),
-                                       FINALIZE_TIMEOUT_S + EXPORTS_MAX * EXPORT_TIMEOUT_S)
+                await asyncio.wait_for(asyncio.shield(profile.done.wait()), STOP_WAIT_S)
             except TimeoutError:
                 raise ProfileError(
                     f"{profile_id} has not finished; it is {profile.state}. Ask again later.",
                     504) from None
         return profile
 
-    async def _signal(self, profile: Profile, sig: int) -> None:
-        if profile.proc is not None and profile.proc.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
+    async def _signal(self, profile: Profile, sig: int) -> str:
+        """Signal this profile's xctrace. "sent"; "gone" when it is no longer
+        running (or the pid is now another process's); "unknown" when ps
+        could not say, so nothing was sent."""
+        try:
+            if profile.proc is not None:
+                if profile.proc.returncode is not None:
+                    return "gone"
                 profile.proc.send_signal(sig)
-        elif profile.pid and _records_into(
-                await asyncio.to_thread(_command_of, profile.pid), profile.trace):
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(profile.pid, sig)
+                return "sent"
+            if not profile.pid:
+                return "gone"
+            command = await asyncio.to_thread(_command_of, profile.pid)
+            if command is None:
+                return "unknown"
+            if not _records_into(command, profile.trace):
+                return "gone"
+            os.kill(profile.pid, sig)
+            return "sent"
+        except ProcessLookupError:
+            return "gone"
 
     async def _watch(self, profile: Profile) -> None:
         """Wait for xctrace to finish, however that happens, then summarise."""
@@ -394,8 +421,11 @@ class ProfileManager:
     async def _alive(self, profile: Profile) -> bool:
         if profile.proc is not None:
             return profile.proc.returncode is None
-        return bool(profile.pid) and _records_into(
-            await asyncio.to_thread(_command_of, profile.pid), profile.trace)
+        if not profile.pid:
+            return False
+        command = await asyncio.to_thread(_command_of, profile.pid)
+        # Could not ask is not gone: keep waiting, inside the overrun budget.
+        return command is None or _records_into(command, profile.trace)
 
     async def _finalize(self, profile: Profile) -> None:
         text = profile.log_text()

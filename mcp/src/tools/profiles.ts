@@ -56,7 +56,7 @@ One profile per device at a time; the device must be reserved by this session wh
   });
 
   server.registerTool("stop_profile", {
-    description: `Stop a profile early, wait for xctrace to finish the trace, and return its summary. This can take a minute or more: xctrace finalises the trace (13 s measured for 30 s of recording), then quern reads its tables.
+    description: `Stop a profile early, wait for xctrace to finish the trace, and return its summary. This can take a minute or more: xctrace finalises the trace (13 s measured for 30 s of recording; 102 s for an iPhone hitches profile), then quern reads its tables. If it is not done within 4 minutes the answer is a 504, and the profile carries on finishing: read it later with get_profile. A 503 means quern could not tell whether xctrace was still running; ask again.
 
 summary.hangs lists main-thread hangs: start_s (seconds into the recording), duration_ms, kind (Severe Hang, Hang, Microhang). A hang in the first few seconds can be the app's own cold launch. summary.hitches lists late frames with Instruments' explanation. summary.time_profile has top_functions (where CPU time was spent) and top_app_functions (the app's own code nearest that time). With the launch preset, summary.launch has the launch phases with Instruments' explanation of each, and first_frame_ms, when the first frame was drawn; a physical device records these, a simulator none. A section the template did not record, or that could not be read, is null with its reason in summary.unavailable: no hangs found ([]) and hangs not read (null) are different answers.`,
     inputSchema: strictParams({

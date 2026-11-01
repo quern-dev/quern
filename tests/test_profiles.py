@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import signal
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -164,7 +165,8 @@ class TestLifeCycle:
         with pytest.raises(ProfileError) as e:
             await _start(m)
         assert e.value.status == 409 and first.id in str(e.value)
-        await m.stop(first.id)
+        async with asyncio.timeout(20):
+            await m.stop(first.id)
         again, _ = await _start(m, limit=10)                # free once finished
         await _finished(again)
 
@@ -256,13 +258,14 @@ class TestLifeCycle:
 
     async def test_xctrace_that_ignores_sigint_is_not_waited_on_forever(self, state, monkeypatch):
         monkeypatch.setenv("FAKE_XCTRACE_MODE", "stubborn")
-        monkeypatch.setattr(manager_mod, "FINALIZE_TIMEOUT_S", 0.5)
-        monkeypatch.setattr(manager_mod, "EXPORT_TIMEOUT_S", 0.5)
+        monkeypatch.setattr(manager_mod, "STOP_WAIT_S", 0.5)
         m = _manager()
         profile, _ = await _start(m, limit=300)
         with pytest.raises(ProfileError) as e:
-            await m.stop(profile.id)
+            async with asyncio.timeout(20):
+                await m.stop(profile.id)
         assert e.value.status == 504                        # said, not hung
+        assert "get_profile" in str(e.value) or "Ask again" in str(e.value)
         profile.proc.kill()
         await _finished(profile)
 
@@ -300,8 +303,10 @@ class TestTheSaveIsLeftAlone:
                 break
             await asyncio.sleep(0.02)
         assert profile.saving() and profile.view()["state"] == "finalizing"
-        await m.stop(profile.id)
-        await m.stop(profile.id)
+        async with asyncio.timeout(20):
+            await m.stop(profile.id)
+        async with asyncio.timeout(20):
+            await m.stop(profile.id)
         assert not (profile.dir / "signals").exists()        # no SIGINT into the save
         assert (profile.state, profile.stop_reason) == ("finished", "time_limit")
 
@@ -314,8 +319,10 @@ class TestTheSaveIsLeftAlone:
             if profile.saving():
                 break
             await asyncio.sleep(0.02)
-        await m.stop(profile.id, reason="session_ended")
-        await first
+        async with asyncio.timeout(20):
+            await m.stop(profile.id, reason="session_ended")
+        async with asyncio.timeout(20):
+            await first
         assert not (profile.dir / "signals").exists()
         assert profile.stop_reason == "stopped"              # the first reason given
 
@@ -393,7 +400,8 @@ class TestStartsThatDoNotHappen:
             await _start(m, udid="OTHER-SIM")
         assert e.value.status == 507
         assert old.dir.exists() and old.id in m._profiles
-        await m.stop(busy.id)
+        async with asyncio.timeout(20):
+            await m.stop(busy.id)
 
 
 class TestUnreadableIsNotEmpty:
@@ -478,6 +486,68 @@ def _skip_at_start(m):
             return {"evicted": [], "used_bytes": 0, "budget_bytes": 0}
         return await real(self, keep=keep)
     return make_room
+
+
+def _exited_pid() -> int:
+    """A pid that was valid a moment ago and is not running now. (999999999
+    is no use: ps calls it "too large", an error, not "no such process".)"""
+    proc = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
+                          capture_output=True, text=True, check=True)
+    return int(proc.stdout)
+
+
+def _adopted(pid=None):
+    """A profile as the next server sees it: a pid, no process object."""
+    pid = _exited_pid() if pid is None else pid
+    return Profile(id="prof_00000000c0de", udid="U", device="U", platform="simulator",
+                   bundle_id="com.x", preset="hangs", time_limit_s=30,
+                   started_at="2026-01-01", pid=pid)
+
+
+class TestGoneIsNotUnknown:
+    """CodeRabbit: a stop that sent nothing must not read as sent. Whether
+    xctrace is gone and whether ps could say are different answers."""
+
+    def test_ps_says_no_such_process_with_an_empty_line(self):
+        assert manager_mod._command_of(_exited_pid()) == ""
+
+    def test_ps_that_complains_is_could_not_ask(self, monkeypatch):
+        # macOS ps says "process id too large: 999999999" and exits 1: an
+        # error, not "no such process". Faked, as procps words it otherwise.
+        monkeypatch.setattr(manager_mod.subprocess, "run", lambda *a, **k:
+                            subprocess.CompletedProcess(a[0], 1, "", "ps: process id too large"))
+        assert manager_mod._command_of(1) is None
+
+    def test_ps_that_cannot_be_asked_is_none(self, monkeypatch):
+        def broken(*a, **k):
+            raise OSError("ps: not found")
+        monkeypatch.setattr(manager_mod.subprocess, "run", broken)
+        assert manager_mod._command_of(1) is None
+
+    async def test_a_stop_ps_cannot_answer_is_refused_and_records_nothing(self, state,
+                                                                        monkeypatch):
+        m = _manager()
+        profile = _adopted()
+        m._profiles[profile.id] = profile
+        monkeypatch.setattr(manager_mod, "_command_of", lambda pid: None)
+        with pytest.raises(ProfileError) as e:
+            await m.request_stop(profile.id)
+        assert e.value.status == 503 and profile.stop_reason is None
+
+    async def test_a_stop_of_an_xctrace_already_gone_records_nothing(self, state):
+        m = _manager()
+        profile = _adopted()                                 # no such pid
+        m._profiles[profile.id] = profile
+        await m.request_stop(profile.id)
+        assert profile.stop_reason is None                   # the watch says how it ended
+
+    async def test_could_not_ask_is_not_gone_to_the_watch(self, state, monkeypatch):
+        monkeypatch.setattr(manager_mod, "_command_of", lambda pid: None)
+        assert await _manager()._alive(_adopted()) is True
+
+    def test_the_stop_wait_ends_before_a_client_gives_up(self):
+        # Node's fetch waits about 300 s for headers; a 504 must come first.
+        assert manager_mod.STOP_WAIT_S < 300
 
 
 class TestTheRecordsSurvive:
@@ -566,7 +636,8 @@ class TestDisk:
         with pytest.raises(ProfileError) as e:
             await _start(m, udid="OTHER-SIM")
         assert e.value.status == 507 and busy.dir.exists()
-        await m.stop(busy.id)
+        async with asyncio.timeout(20):
+            await m.stop(busy.id)
 
     async def test_a_finished_profile_trims_the_others_but_not_itself(self, state, monkeypatch):
         monkeypatch.setenv("FAKE_XCTRACE_BYTES", str(3 * 2**20))
@@ -583,7 +654,8 @@ class TestRestart:
         await m.shutdown()
         assert profile.proc.returncode is None              # still recording
         profile.proc.send_signal(signal.SIGINT)
-        await profile.proc.wait()
+        async with asyncio.timeout(20):
+            await profile.proc.wait()
 
     async def test_the_next_server_adopts_a_recording_xctrace(self, state):
         first = _manager()
@@ -604,7 +676,8 @@ class TestRestart:
         first = _manager()
         profile, _ = await _start(first, limit=10)
         await first.shutdown()                              # stop watching at once
-        await profile.proc.wait()                           # xctrace finishes alone
+        async with asyncio.timeout(20):
+            await profile.proc.wait()                           # xctrace finishes alone
         second = _manager()
         await second.resume()
         done = await _finished(second.get(profile.id))
@@ -614,7 +687,8 @@ class TestRestart:
         first = _manager()
         profile, _ = await _start(first, limit=10)
         await first.shutdown()
-        await profile.proc.wait()
+        async with asyncio.timeout(20):
+            await profile.proc.wait()
         stranger = await asyncio.create_subprocess_exec(sys.executable, "-c",
                                                         "import time; time.sleep(30)")
         record = json.loads((state / "profiles" / "profiles.json").read_text())
@@ -659,7 +733,8 @@ class TestFiles:
         m = _manager()
         profile, _ = await _start(m, limit=300)
         assert "profile.trace.zip" not in profile.view()["files"]
-        await m.stop(profile.id)
+        async with asyncio.timeout(20):
+            await m.stop(profile.id)
 
 
 # -- routes ------------------------------------------------------------------
