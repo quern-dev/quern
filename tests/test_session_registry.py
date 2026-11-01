@@ -246,3 +246,26 @@ def test_rekey_moves_a_reservation_to_the_id_its_device_booted_as():
     with pytest.raises(SessionConflict):
         reg.rekey("b", "avd:Other", "emulator-5554")
     assert "avd:Other" in b.reservations, "a refused rekey changes nothing"
+
+
+def test_an_avd_alias_ends_with_the_hold_it_came_from():
+    # CodeRabbit on #585: emulator serials are reused, so once the hold that
+    # booted avd:Pixel as emulator-5554 ends, a later AVD booting as the same
+    # serial must not be found by a group entry naming avd:Pixel.
+    from server.session_registry import SessionRegistry
+
+    reg = SessionRegistry()
+    a, ta = reg.open("a")
+    reg.attach(a.id, ta)
+    reg.reserve("a", ["avd:Pixel"])
+    reg.rekey("a", "avd:Pixel", "emulator-5554")
+    assert reg.alias_of("avd:Pixel") == "emulator-5554"
+
+    reg.unreserve("a", ["emulator-5554"])
+    reg.drained(["emulator-5554"])
+    b, tb = reg.open("b")
+    reg.attach(b.id, tb)
+    reg.reserve("b", ["avd:Other"])
+    reg.rekey("b", "avd:Other", "emulator-5554")
+    assert reg.alias_of("avd:Pixel") is None
+    assert reg.alias_of("avd:Other") == "emulator-5554"

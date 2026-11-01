@@ -71,6 +71,9 @@ class Reservation:
     #: True when this session booted the device to reserve it, which is what
     #: `shutdown_booted` acts on: a device that was already running is left so.
     booted_here: bool = False
+    #: The ``avd:<name>`` this reservation was made as, when its device booted
+    #: as a serial (#582). Kept on the reservation so it ends with the hold.
+    booted_from: str | None = None
     since: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -152,9 +155,6 @@ class SessionRegistry:
         #: serial is that session's -- by when it appeared, not by its name,
         #: which a failed console query can leave as the model (review).
         self._avd_boots: dict[str, tuple[str, frozenset[str]]] = {}
-        #: `avd:<name>` -> the serial a session's hold moved to, so a group
-        #: entry naming the AVD still finds its running emulator.
-        self._aliases: dict[str, str] = {}
         #: Devices a client key released whose clean-up -- its mock rules,
         #: its recordings -- has not run yet, by the releasing principal. Not
         #: reservable by anyone else until it has: in the gap the previous
@@ -326,8 +326,8 @@ class SessionRegistry:
             raise SessionConflict(f"{new} is held by {held.session.id}")
         reservation = session.reservations.pop(old)
         reservation.udid = new
+        reservation.booted_from = old
         session.reservations[new] = reservation
-        self._aliases[old] = new
 
     def withdraw(self, session_id: str, udids: Iterable[str]) -> None:
         """Take back reservations this request just made, as if never made:
@@ -377,9 +377,15 @@ class SessionRegistry:
         self._avd_boots.pop(avd, None)
 
     def alias_of(self, avd: str) -> str | None:
-        """The serial a hold on `avd` moved to, while that serial is held."""
-        serial = self._aliases.get(avd)
-        return serial if serial is not None and self.holder_of(serial) is not None else None
+        """The serial a hold on `avd` moved to, while that hold lasts. A
+        serial is reused by whichever AVD boots next, so the link lives on
+        the reservation rather than in a table that would outlive it."""
+        self.expire_due()
+        for session in self._sessions.values():
+            for reservation in session.reservations.values():
+                if reservation.booted_from == avd:
+                    return reservation.udid
+        return None
 
     def held_udids(self, *, except_session: str = "") -> set[str]:
         """Every device some *other* session holds."""
