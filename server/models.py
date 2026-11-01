@@ -1905,6 +1905,54 @@ class AppInfo(BaseModel):
     process_state: str = ""
 
 
+class FrameStats(BaseModel):
+    """Android frame timings from `dumpsys gfxinfo`, since the app started or
+    since its stats were last reset."""
+
+    total_frames: int
+    janky_frames: int | None = None
+    janky_percent: float | None = None
+    #: Which jank count `janky_frames` is. Android 12+ prints two: "deadline"
+    #: (a frame that missed its deadline) and "legacy" (a fixed threshold). On
+    #: an API 34 emulator the legacy one read 21% and 94% janky in two runs
+    #: where the deadline one read 8% and 9%. Before Android 12 there is only
+    #: the legacy one.
+    janky_method: Literal["deadline", "legacy"] | None = None
+    p50_ms: int | None = None
+    p90_ms: int | None = None
+    p95_ms: int | None = None
+    p99_ms: int | None = None
+
+
+class PerformanceSnapshot(BaseModel):
+    """One app's CPU, memory and threads at one moment (#245)."""
+
+    udid: str
+    bundle_id: str
+    platform: Literal["ios_simulator", "ios_device", "android"]
+    running: bool
+    pid: int | None = None
+    #: How long CPU use was actually measured over, in seconds: timed by the
+    #: device on Android and physical iOS, by the Mac for simulators. Close
+    #: to what was asked for, not equal to it.
+    sample_seconds: float
+    #: Percent of one core over the sample, so several busy threads read
+    #: above 100.
+    cpu_percent: float | None = None
+    memory_bytes: int | None = None
+    #: What `memory_bytes` measures: `phys_footprint` on iOS (the number Xcode
+    #: and Activity Monitor show) or `pss` on Android (Android Studio's).
+    memory_kind: Literal["phys_footprint", "pss"] | None = None
+    threads: int | None = None
+    #: Android only.
+    frames: FrameStats | None = None
+    #: iOS physical devices only: Core Animation frames per second for the
+    #: whole display, not this app, read once just after the CPU sample.
+    display_fps: float | None = None
+    #: Every metric that is null, with why. A null is never a zero.
+    unavailable: dict[str, str] = Field(default_factory=dict)
+
+
 class DeviceError(Exception):
     """Raised when a device operation fails."""
 

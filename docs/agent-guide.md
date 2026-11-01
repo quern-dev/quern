@@ -445,6 +445,7 @@ Open real-time video windows to see what's happening on USB-connected physical d
 - Terminate app: `terminate_app`
 - Uninstall app: `uninstall_app`
 - List installed apps: `list_apps`
+- How hard an app is working: `get_performance` (CPU, memory, threads; Android frames; null with a reason when something can't be read)
 - Screenshot: `take_screenshot`
 - Location: `set_location` (simulators only)
 - Permissions: `grant_permission` (simulators only)

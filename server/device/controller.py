@@ -8,6 +8,7 @@ import math
 import time
 
 from server import logging_ext
+from server.device import performance
 from server.device.android.adb import AdbBackend
 from server.device.android.u2_client import U2Backend
 from server.device.controller_ui import DeviceControllerUI
@@ -32,6 +33,8 @@ from server.models import (
     DeviceState,
     DeviceType,
     EraseIncompleteError,
+    InvalidDeviceRequestError,
+    PerformanceSnapshot,
     UIElement,
 )
 from server.session import current_session, parse_session
@@ -1711,6 +1714,28 @@ class DeviceController(DeviceControllerUI):
         else:
             apps = await self.simctl.list_apps(resolved)
         return apps, resolved
+
+    async def get_performance(
+        self, bundle_id: str, udid: str | None = None,
+        sample_seconds: float = performance.SAMPLE_SECONDS_DEFAULT,
+    ) -> PerformanceSnapshot:
+        """CPU, memory and threads of one app (#245). A read: the active
+        device is not changed by asking about another one."""
+        if not performance.PACKAGE_NAME.fullmatch(bundle_id):
+            # Refused before any device is touched: on Android it would reach a shell.
+            raise InvalidDeviceRequestError(f"{bundle_id!r} is not a bundle id or package name")
+        resolved = await self.resolve_udid(udid, set_active=False)
+        if self._is_android(resolved):
+            return await performance.android_snapshot(
+                self.adb, resolved, bundle_id, sample_seconds)
+        if self._is_physical(resolved):
+            return await performance.device_snapshot(resolved, bundle_id, sample_seconds)
+        if self._device_type(resolved) == DeviceType.SIMULATOR:
+            return await performance.simulator_snapshot(
+                self.simctl, resolved, bundle_id, sample_seconds)
+        raise DeviceError(
+            f"get_performance could not tell what kind of device {resolved} is",
+            tool="quern")
 
     async def _ensure_android_screen_on(self, udid: str) -> None:
         """Wake an Android device screen if it's off."""

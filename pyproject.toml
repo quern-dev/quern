@@ -41,7 +41,15 @@ dependencies = [
     # message does not mention the version -- hence the floor. Verified at 7.7.1,
     # 8.0.0, 9.15.1 and 11.3.0. Note this is a library import; server/device/ios/pmd3.py
     # separately shells out to a pipx-installed CLI, a different install.
-    "pymobiledevice3>=8.0",
+    #
+    # verified. Raised to 9.4.4 for get_performance on physical devices (#245),
+    # which uses the async DVT API in process. Below 9.0 there is no
+    # services/dvt/instruments/dvt_provider.py, so the import fails. From 9.0
+    # to 9.4.3, `Sysmontap.create(dvt)` takes no `interval`, and the call
+    # raises TypeError mid-request. Found by checking every release's wheel
+    # (the first with all the APIs used is 9.4.4), then verified at 9.4.4 and
+    # 11.49.1: the full suite, plus a live snapshot of an iPhone 11 on iOS 26.7.
+    "pymobiledevice3>=9.4.4",
     "pydantic>=2.0",                    # inherited; v1 genuinely breaks, but 2.0 exactly is untested
     "sse-starlette>=2.0",               # inherited
     "mitmproxy>=10.0",                  # inherited
