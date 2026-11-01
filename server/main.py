@@ -323,7 +323,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Resolved on first use, not at startup: `quern setup` normally built
         # it already (#285), but sources newer than the binary -- a pull --
         # rebuild here, and a recording without video never needs it.
-        video=VideoRecorder(binary=build_media_engine))
+        video=VideoRecorder(binary=build_media_engine),
+        # Looked up per stream, not now: the controller is the app's, and a
+        # sampler that finds none says so in its recording (#245).
+        gauges=lambda udid, app_id, interval: app.state.device_controller.gauge_stream(
+            udid, app_id, interval))
     try:
         resumed = await app.state.recordings.resume_all()
     except Exception:  # noqa: BLE001 -- a recording must never stop the server starting

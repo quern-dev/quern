@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Per-action CPU, memory and frames in `get_trace`, from a recording's gauges (#245).** `start_recording(gauges=<bundle id or package>)` samples that app every `gauge_interval_s` (default 1 s) for the whole recording, and the trace gives each action the peaks over it: CPU peak and mean, memory peak with its first and last reading, peak threads, frames drawn and janky on Android, and display FPS on a physical iPhone.
+  - **Live and afterwards.** While the recording runs, `get_trace` reads its recent samples; `get_trace(recording=...)` reads every one from the file, and `get_recording(kinds=["gauges"])` pages through them.
+  - **How coarse it is, said.** A sample is a window -- CPU is a difference of two readings -- so each summary carries `sample_seconds`, and a 100 ms tap inside a one-second sample is given that second's figures.
+  - **Could not tell is not zero.** An app not running, a metric the platform does not measure, a device that could not be asked and an action no sample covers are each a null with the reason, never a 0.
+  - **A physical iPhone holds one Instruments connection** for the recording rather than opening one a second. A device that goes away is said in the file and asked again after a pause.
 - **Profile an iOS app with Instruments: `start_profile`, `stop_profile`, `get_profile`, `download_profile` (#245).** xctrace records the app on a simulator or a physical device; the summary lists main-thread hangs, late frames with Instruments' explanation of each, and the functions taking CPU time, and the trace is kept for download and opening in Instruments.
   - **Presets:** `hangs` (the default), `cpu`, `hitches` (physical devices only: simulators refuse Animation Hitches) and `launch`, which on a physical device gives each launch phase with Instruments' explanation and the time to the first frame.
   - **It relaunches the app.** xctrace launches the app it records and ends it when recording stops, and the answer says so. Attaching to an app already running was measured broken on a physical iPhone.

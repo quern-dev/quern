@@ -26,7 +26,9 @@ export function registerRecordingTools(server: McpServer): void {
 
 Writes <output_dir>/events.jsonl as things arrive (flushed every second) and <output_dir>/manifest.json. No time limit, and it survives a quern restart: the file gets a gap line for the time quern was down rather than ending. The file says what it does not hold: a "dropped" line where the writer fell behind, a gap line for a restart, and stop_recording's "complete" is true only with neither -- and, with video, only when every movie was finished with a summary to join by.
 
-By default only work positively identified as this device's is recorded; include_unattributed adds flows and lines quern cannot tie to any device, as get_trace does live. Read it back with get_trace(recording=<id or directory>) over any window.`,
+By default only work positively identified as this device's is recorded; include_unattributed adds flows and lines quern cannot tie to any device, as get_trace does live. Read it back with get_trace(recording=<id or directory>) over any window.
+
+gauges=<bundle id or package> also samples that app's CPU, memory and threads -- frames on Android, display FPS on a physical iPhone -- every gauge_interval_s, so get_trace gives each action its peaks: live while the recording runs, and from the file afterwards. One recording with gauges per device.`,
     inputSchema: strictParams({
       udid: z.string().describe("The device to record: simulator UDID, Android serial, or physical device UDID"),
       output_dir: z.string().optional().describe("Absolute directory to write into (created if missing; refused if it holds a recording). Default ~/.quern/recordings/<id>"),
@@ -41,6 +43,8 @@ By default only work positively identified as this device's is recorded; include
       max_body_bytes: z.number().int().min(0).optional().describe("Keep at most this many bytes of each body; body_size still gives the full size"),
       exclude_content_types: z.array(z.string()).optional().describe("Drop bodies whose Content-Type starts with any of these, e.g. image/, text/html; the flows are kept"),
       video: z.boolean().optional().describe("Simulators only: also record the screen to <output_dir>/video-<n>.mp4 (one movie per quern run), with keyframes at actions and requests (see keyframes); get_trace(recording=...) then gives each action and flow its {path, offset_s} in the movie. Refused, before anything is written, if the simulator is not booted or is already being filmed by another recording"),
+      gauges: z.string().regex(/^[A-Za-z0-9_.-]+$/).optional().describe("Bundle id or package of an app to sample CPU, memory and threads of (plus frames on Android, display FPS on a physical iPhone) for the whole recording: get_trace then gives each action the peaks over it, with a null and its reason for anything not read. An app not running is sampled as not running until it starts"),
+      gauge_interval_s: z.number().min(0.5).max(10).optional().describe("Seconds per gauge sample (default 1). Each sample's CPU is an average over the interval, so a shorter one resolves short actions better and asks more of the device"),
       viewer: z.boolean().optional().describe("With video: also return viewer_url, a link that plays the simulator live in a browser on another machine on the LAN, e.g. for a CI job to post. View-only, for this recording, and expires 10 minutes after it stops. Needs viewer.enabled in ~/.quern/config.json; when it is off the recording still starts, with viewer_url null and the reason in warnings. A client key may ask for one for its own recording while the server's remote.client_viewer_links is unset or true; any other value, or a config.json the server cannot read, refuses the call with 403"),
     }),
   }, async (args) => {
@@ -85,7 +89,7 @@ By default only work positively identified as this device's is recorded; include
 detail="summary" (the default here) gives one line per event: a flow's method, URL, status, error and time; an action's name, outcome and duration; a log's level, process and message. Read one flow in full with flow_id. Pages: pass next_cursor back as cursor until it is null. Markers come with every page: "dropped" where the writer fell behind, "paused"/"resumed" around a quern restart; "holes" lists what the recording says it does not hold in this window.`,
     inputSchema: strictParams({
       recording: z.string().describe("The recording's id, or the directory it wrote"),
-      kinds: z.array(z.enum(["actions", "flows", "logs"])).optional().describe("Which to read (default all)"),
+      kinds: z.array(z.enum(["actions", "flows", "logs", "gauges"])).optional().describe("Which to read (default actions, flows and logs; gauges, a sample per interval, when named)"),
       since: z.string().optional().describe("Start (ISO 8601)"),
       until: z.string().optional().describe("End (ISO 8601)"),
       detail: z.enum(["summary", "full"]).optional().describe("summary (default) or full records with headers and bodies"),

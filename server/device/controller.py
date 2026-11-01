@@ -1752,6 +1752,40 @@ class DeviceController(DeviceControllerUI):
             f"get_performance could not tell what kind of device {resolved} is",
             tool="quern")
 
+    async def gauge_stream(self, udid: str, app: str, interval: float):
+        """One app's samples, one per `interval`, for as long as the caller
+        iterates: a recording's gauges (#245, phase 2).
+
+        A simulator or an Android device is sampled back to back, each sample
+        its own `interval` long, so they tile the time. A physical iPhone holds
+        one Instruments connection (`performance.device_stream`) rather than
+        opening one a second. Whatever cannot be read is raised, for the
+        recording to say and retry."""
+        if not performance.PACKAGE_NAME.fullmatch(app):
+            raise InvalidDeviceRequestError(f"{app!r} is not a bundle id or package name")
+        resolved = await self.resolve_udid(udid, set_active=False)
+        if self._is_android(resolved):
+            def sample():
+                return performance.android_snapshot(self.adb, resolved, app, interval)
+        elif self._is_physical(resolved):
+            async for snap in performance.device_stream(resolved, app, interval):
+                yield snap
+            return
+        elif self._device_type(resolved) == DeviceType.SIMULATOR:
+            def sample():
+                return performance.simulator_snapshot(self.simctl, resolved, app, interval)
+        else:
+            raise DeviceError(f"gauges could not tell what kind of device {resolved} is",
+                              tool="quern")
+        while True:
+            snap = await sample()
+            yield snap
+            if not snap.running:
+                # Answered at once, with nothing measured: wait out the
+                # interval, or an app not yet launched is asked about in a
+                # tight loop.
+                await asyncio.sleep(interval)
+
     async def _ensure_android_screen_on(self, udid: str) -> None:
         """Wake an Android device screen if it's off."""
         await self.adb.wake_screen(udid)

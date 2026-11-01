@@ -455,9 +455,9 @@ async def _tunnel_address(tunnel_udid: str) -> tuple[str, int] | None:
     return None
 
 
-async def device_snapshot(uuid: str, bundle_id: str, seconds: float) -> PerformanceSnapshot:
-    """Read a physical iPhone through pymobiledevice3's Instruments channel."""
-    lib = _pmd3()
+async def _device_address(uuid: str) -> tuple[str, int]:
+    """The tunnel endpoint for a physical iPhone, or a DeviceError naming why
+    there is none."""
     from server.device.ios.pmd3 import _no_tunnel_hint, _recover_tunneld_if_wedged
     from server.device.ios.tunneld import is_tunneld_running, resolve_tunnel_udid
 
@@ -468,6 +468,13 @@ async def device_snapshot(uuid: str, bundle_id: str, seconds: float) -> Performa
         raise DeviceError(
             f"no tunnel to {uuid[:8]}{_no_tunnel_hint(None, serving)}",
             tool="pymobiledevice3")
+    return address
+
+
+async def device_snapshot(uuid: str, bundle_id: str, seconds: float) -> PerformanceSnapshot:
+    """Read a physical iPhone through pymobiledevice3's Instruments channel."""
+    lib = _pmd3()
+    address = await _device_address(uuid)
 
     snap = PerformanceSnapshot(
         udid=uuid, bundle_id=bundle_id, platform="ios_device", running=False,
@@ -502,6 +509,119 @@ async def device_snapshot(uuid: str, bundle_id: str, seconds: float) -> Performa
         raise DeviceError(f"Instruments channel to {uuid[:8]} failed: {e!r}",
                           tool="pymobiledevice3") from e
     return _finish(snap)
+
+
+#: How long a gauge stream waits between looking for an app that is not
+#: running, so a recording of an app not yet launched costs one lookup a
+#: second, not a busy loop.
+_NOT_RUNNING_POLL_S = 1.0
+
+
+async def device_stream(uuid: str, bundle_id: str, interval: float):
+    """Samples of one app on a physical iPhone, one per `interval`, for as
+    long as the caller iterates (#245, phase 2).
+
+    One Instruments connection, held: a snapshot per sample would connect the
+    tunnel, open the DVT channel and wait out a Graphics reading every
+    second. sysmontap streams on its own channel, and Core Animation's FPS on
+    another beside it -- the connection reads every message and hands each
+    channel its own, so the two do not take each other's.
+
+    An app that is not running yields a not-running sample each poll and is
+    looked for again, so one launched after the recording began is picked up;
+    one that exits mid-stream is looked for again the same way. Whatever
+    breaks the connection is raised, and the caller decides whether to retry.
+    """
+    lib = _pmd3()
+    address = await _device_address(uuid)
+    rsd = lib.RemoteServiceDiscoveryService(address)
+    try:
+        try:
+            async with asyncio.timeout(_ANSWER_SLACK_S):
+                await rsd.connect()
+        except TimeoutError:
+            raise DeviceError(f"{uuid[:8]} did not answer within {_ANSWER_SLACK_S:g}s",
+                              tool="pymobiledevice3") from None
+        async with lib.DvtProvider(rsd) as dvt:
+            fps: dict = {"value": None, "why": "no FPS reading yet"}
+            feed = asyncio.create_task(_fps_feed(lib.Graphics, dvt, fps))
+            try:
+                while True:
+                    async with asyncio.timeout(_ANSWER_SLACK_S), lib.ProcessControl(dvt) as pc:
+                        pid = await pc.process_identifier_for_bundle_identifier(bundle_id)
+                    if not pid:
+                        yield _not_running(PerformanceSnapshot(
+                            udid=uuid, bundle_id=bundle_id, platform="ios_device",
+                            running=False, sample_seconds=_NOT_RUNNING_POLL_S))
+                        await asyncio.sleep(_NOT_RUNNING_POLL_S)
+                        continue
+                    async for snap in _sysmon_stream(lib.Sysmontap, dvt, uuid, bundle_id,
+                                                     pid, interval, fps):
+                        yield snap
+            finally:
+                feed.cancel()
+                with contextlib.suppress(BaseException):
+                    await feed
+    except (DeviceError, asyncio.CancelledError, GeneratorExit):
+        raise
+    except Exception as e:  # pymobiledevice3 raises its own hierarchy
+        raise DeviceError(f"Instruments channel to {uuid[:8]} failed: {e!r}",
+                          tool="pymobiledevice3") from e
+    finally:
+        with contextlib.suppress(Exception):
+            await rsd.close()
+
+
+async def _sysmon_stream(Sysmontap, dvt, uuid: str, bundle_id: str, pid: int,
+                         interval: float, fps: dict):
+    """One sample per sysmontap tick for `pid`, until it leaves the list."""
+    previous: dict | None = None
+    async with await Sysmontap.create(dvt, interval=max(100, int(interval * 1000))) as s:
+        async for procs in s.iter_processes():
+            mine = next((p for p in procs if p.get("pid") == pid), None)
+            if mine is None:
+                return                      # it exited; the caller looks again
+            if previous is None:
+                previous = mine
+                continue
+            snap = PerformanceSnapshot(udid=uuid, bundle_id=bundle_id, platform="ios_device",
+                                       running=True, pid=pid, sample_seconds=interval)
+            measured = cpu_between(previous, mine)
+            if measured is None:
+                snap.unavailable["cpu_percent"] = "sysmontap's samples had no cumulative CPU time"
+            else:
+                snap.cpu_percent, snap.sample_seconds = measured
+            mem, threads = mine.get("physFootprint"), mine.get("threadCount")
+            _store(snap, "memory_bytes", mem if isinstance(mem, int) and mem > 0 else None,
+                   "sysmontap gave no physFootprint")
+            if snap.memory_bytes is not None:
+                snap.memory_kind = "phys_footprint"
+            _store(snap, "threads", threads if isinstance(threads, int) and threads > 0
+                   else None, "sysmontap gave no threadCount")
+            if fps["value"] is None:
+                snap.unavailable["display_fps"] = fps["why"]
+            else:
+                snap.display_fps = fps["value"]
+            previous = mine
+            yield _finish(snap)
+
+
+async def _fps_feed(Graphics, dvt, fps: dict) -> None:
+    """Keep `fps` holding the latest Core Animation reading, skipping the
+    first (taken before any interval has elapsed). FPS is a bonus: a feed
+    that fails says why in `fps`, and the samples carry on without it."""
+    try:
+        async with Graphics(dvt) as g:
+            n = 0
+            async for ev in g:
+                n += 1
+                if n >= 2 and isinstance(ev, dict) and "CoreAnimationFramesPerSecond" in ev:
+                    fps["value"] = float(ev["CoreAnimationFramesPerSecond"])
+        fps["value"], fps["why"] = None, "the graphics service stopped sending FPS"
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001 -- said in every sample, never fatal
+        fps["value"], fps["why"] = None, f"graphics service did not answer: {e!r}"
 
 
 def cpu_between(first: dict, last: dict) -> tuple[float, float] | None:
