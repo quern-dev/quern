@@ -34,7 +34,8 @@ export function platformFields(
 export const PLATFORM_DESCRIPTION =
   "'ios' or 'android'. Default: this project's platform -- .quern/config.json's \"platform\", " +
   "else read from the project (an Xcode or Android project) -- which a request may still cross " +
-  "when exactly one device on the other platform matches it. With neither, a bare os_version " +
+  "when no more devices on the other platform match it than it needs (one, or count; a listing " +
+  "shows them all). With neither, a bare os_version " +
   "both platforms have ('16') is refused with the matches on each side. 'Android 16' or " +
   "'iOS 16' in os_version names the platform too. The answer says which platform was used " +
   "(platform, platform_source).";

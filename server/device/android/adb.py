@@ -231,6 +231,14 @@ class AdbBackend:
             return str(api - 20)
         return raw
 
+    @staticmethod
+    def _ini_value(line: str, key: str) -> str | None:
+        """``key``'s value if ``line`` sets it, whether written ``key=value``
+        or ``key = value`` -- the AVD config generator writes the spaced form
+        (review)."""
+        name, sep, value = line.partition("=")
+        return value.strip() if sep and name.strip() == key else None
+
     def _avd_config(self, avd_name: str) -> tuple[Path, Path]:
         """An AVD's ``config.ini`` (which may not exist) and its ``.ini``."""
         avd_dir = Path.home() / ".android" / "avd"
@@ -242,8 +250,8 @@ class AdbBackend:
         if ini_path.exists():
             try:
                 for line in ini_path.read_text().splitlines():
-                    if line.startswith("path="):
-                        real_dir = Path(line.split("=", 1)[1])
+                    if (path_value := self._ini_value(line, "path")) is not None:
+                        real_dir = Path(path_value)
                         candidate = real_dir / "config.ini"
                         if candidate.exists():
                             config_path = candidate
@@ -263,8 +271,7 @@ class AdbBackend:
         config_path, _ = self._avd_config(avd_name)
         try:
             for line in config_path.read_text().splitlines():
-                if line.startswith("hw.device.name="):
-                    profile = line.split("=", 1)[1].strip()
+                if (profile := self._ini_value(line, "hw.device.name")) is not None:
                     # "pixel_9_pro_xl" is "Pixel 9 Pro XL".
                     return " ".join(w.upper() if w.isalpha() and len(w) <= 2
                                     else w[:1].upper() + w[1:]
@@ -282,8 +289,9 @@ class AdbBackend:
             if ini_path.exists():
                 try:
                     for line in ini_path.read_text().splitlines():
-                        if line.startswith("target=android-"):
-                            api_str = line.split("android-", 1)[1]
+                        target = self._ini_value(line, "target") or ""
+                        if target.startswith("android-"):
+                            api_str = target.removeprefix("android-")
                             return self._parse_api_string(api_str, "")
                 except Exception:
                     pass
@@ -293,12 +301,12 @@ class AdbBackend:
         tag_id = ""
         try:
             for line in config_path.read_text().splitlines():
-                if line.startswith("image.sysdir.1="):
-                    for part in line.split("/"):
+                if (sysdir := self._ini_value(line, "image.sysdir.1")) is not None:
+                    for part in sysdir.split("/"):
                         if part.startswith("android-"):
                             api_str = part.removeprefix("android-")
-                elif line.startswith("tag.id="):
-                    tag_id = line.split("=", 1)[1].strip()
+                elif (tag := self._ini_value(line, "tag.id")) is not None:
+                    tag_id = tag
         except Exception:
             pass
 

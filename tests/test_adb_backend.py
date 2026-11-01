@@ -648,6 +648,17 @@ class TestAndroidModelAndVersion:
         backend._avd_config = lambda name: (config, tmp_path / "missing.ini")
         assert backend._read_avd_model("Any_AVD") == model
 
+    def test_spaced_config_lines_are_read(self, tmp_path):
+        # The AVD config generator writes `key = value` (review).
+        backend = AdbBackend()
+        config = tmp_path / "config.ini"
+        config.write_text("hw.device.name = pixel_7\n"
+                          "image.sysdir.1 = system-images/android-34/google_apis/arm64-v8a/\n"
+                          "tag.id = google_apis\n")
+        backend._avd_config = lambda name: (config, tmp_path / "x.ini")
+        assert backend._read_avd_model("Any_AVD") == "Pixel 7"
+        assert backend._read_avd_version("Any_AVD") == ("14", "API 34 · Google APIs")
+
     def test_no_profile_is_no_model(self, tmp_path):
         backend = AdbBackend()
         backend._avd_config = lambda name: (tmp_path / "absent.ini", tmp_path / "x.ini")

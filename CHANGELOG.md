@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Device requests pick on one platform (#582).** iOS 16 and Android 16 both exist, and a bare `os_version="16"` matched both, so asking for an Android 16 emulator could hand back an iOS 16 simulator.
-  - **The project decides by default.** The MCP sends the agent's project's platform: `.quern/config.json`'s new `"platform"`, else what the project is (an Xcode project, an Android app module). An iOS project never gets an Android device it didn't ask for, except ones named that are exactly as many as it asked for ("Pixel 8").
+  - **The project decides by default.** The MCP sends the agent's project's platform: `.quern/config.json`'s new `"platform"`, else what the project is (an Xcode project, an Android app module). An iOS project never gets an Android device it didn't ask for, except ones named that are no more than it asked for ("Pixel 8").
   - **"A device" is a virtual one on both platforms.** `resolve_device` and `ensure_devices` default to a simulator on iOS and an emulator on Android; a physical phone needs `device_type`.
   - **The request can say.** `platform="ios"`/`"android"`, a `device_type`, or a prefixed version ("Android 16") restricts the pick.
   - **Otherwise, ambiguity is refused.** A bare version both platforms have is a 409 `ambiguous_platform` listing each side and the `platform` that would choose. `list_devices` lists both.
